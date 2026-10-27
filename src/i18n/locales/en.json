@@ -4956,6 +4956,8 @@
     "keyMissingHint": "Your first message creates a dedicated Ofox API key for the assistant.",
     "usageTokens": "Input {{input}} · Output {{output}} tokens",
     "usageCost": "Estimated cost {{cost}}",
+    "usageCostWithSearches_one": "Estimated cost {{cost}} incl. {{count}} search",
+    "usageCostWithSearches_other": "Estimated cost {{cost}} incl. {{count}} searches",
     "costUnavailable": "Cost unavailable",
     "rename": "Rename conversation",
     "renameDescription": "Give this conversation a name you can find easily.",

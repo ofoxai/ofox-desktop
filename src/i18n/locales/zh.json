@@ -4956,6 +4956,8 @@
     "keyMissingHint": "发送第一条消息时，会为助手创建一个专用的 Ofox API Key。",
     "usageTokens": "输入 {{input}} · 输出 {{output}} Token",
     "usageCost": "预估成本 {{cost}}",
+    "usageCostWithSearches_one": "预估成本 {{cost}}（含 {{count}} 次搜索）",
+    "usageCostWithSearches_other": "预估成本 {{cost}}（含 {{count}} 次搜索）",
     "costUnavailable": "成本无法确定",
     "rename": "重命名对话",
     "renameDescription": "给这个对话起一个方便查找的名字。",

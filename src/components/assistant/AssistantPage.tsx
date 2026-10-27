@@ -40,7 +40,7 @@ const STARTERS = ["summary", "writing", "explain"] as const;
 /**
  * A conversation's tokens and cost. The cost is shown only once its runs are
  * saved, and as unavailable whenever a request's cost is unknown: never as
- * $0 or as a partial sum.
+ * $0 or as a partial sum. A cost that includes web searches says how many.
  */
 function usageSummary(
   usage: AssistantUsage | undefined,
@@ -62,12 +62,15 @@ function usageSummary(
   if (settled) {
     if (usage.usageCoverage === "incomplete")
       parts.push(t("assistant.costUnavailable"));
-    else if (typeof usage.estimatedCostUsd === "string")
+    else if (typeof usage.estimatedCostUsd === "string") {
+      const cost = fmtCost(Number(usage.estimatedCostUsd));
+      const searches = usage.searchCount ?? 0;
       parts.push(
-        t("assistant.usageCost", {
-          cost: fmtCost(Number(usage.estimatedCostUsd)),
-        }),
+        searches > 0
+          ? t("assistant.usageCostWithSearches", { cost, count: searches })
+          : t("assistant.usageCost", { cost }),
       );
+    }
     // Requests were made but a model had no price.
     else if (counted || (usage.modelRequests ?? 0) > 0)
       parts.push(t("assistant.costUnavailable"));

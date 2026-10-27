@@ -464,6 +464,11 @@ describe("errors", () => {
       "en",
       "This model isn't available right now. Choose another model.",
     ],
+    [
+      "assistant_search_outcome_unknown",
+      "zh",
+      "无法确认网页搜索是否已执行，回复已停止。这次搜索可能已经计费，因此不会自动重试。如仍需要回答，请重新发送消息。",
+    ],
   ])(
     "explains the run failure %s in %s by its code, never with the provider's text",
     async (code, language, expected) => {
@@ -1843,6 +1848,52 @@ describe("conversation cost", () => {
     await openConversation();
     expect(usageLine()).toHaveTextContent("Cost unavailable");
     expect(usageLine()).not.toHaveTextContent("$");
+  });
+
+  it.each([
+    [2, "en", "Estimated cost ≈$0.040 incl. 2 searches"],
+    [1, "en", "Estimated cost ≈$0.040 incl. 1 search"],
+    [2, "ja", "推定コスト ≈$0.040（検索 2 回を含む）"],
+    [2, "zh", "预估成本 ≈$0.040（含 2 次搜索）"],
+  ])(
+    "says the saved cost includes %i web searches in %s",
+    async (searchCount, language, expected) => {
+      current.usage = {
+        inputTokens: 1234,
+        outputTokens: 340,
+        estimatedCostUsd: "0.0402",
+        searchCount,
+        searchCostUsd: "0.028",
+        modelRequests: 2,
+      };
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      i18n.addResourceBundle("ja", "translation", ja, true, true);
+      await i18n.changeLanguage(language);
+      render(page());
+      await userEvent.click(
+        await screen.findByRole("button", { name: /My conversation/ }),
+      );
+      // After the tokens, on the same line.
+      const line = await screen.findByText(expected, { exact: false });
+      expect(line.textContent?.endsWith(` · ${expected}`)).toBe(true);
+    },
+  );
+
+  it("says only that the cost is unavailable when a search's outcome is unknown", async () => {
+    current.usage = {
+      inputTokens: 900,
+      outputTokens: 20,
+      estimatedCostUsd: null,
+      searchCount: 1,
+      searchCostUsd: null,
+      usageCoverage: "incomplete",
+      modelRequests: 1,
+    };
+    await openConversation();
+    expect(usageLine()).toHaveTextContent(
+      "Input 900 · Output 20 tokens · Cost unavailable",
+    );
+    expect(usageLine()).not.toHaveTextContent(/search|\$/);
   });
 
   it("says nothing about cost before the first request", async () => {

@@ -4956,6 +4956,8 @@
     "keyMissingHint": "最初のメッセージを送ると、アシスタント専用の Ofox API キーが作成されます。",
     "usageTokens": "入力 {{input}} · 出力 {{output}} トークン",
     "usageCost": "推定コスト {{cost}}",
+    "usageCostWithSearches_one": "推定コスト {{cost}}（検索 {{count}} 回を含む）",
+    "usageCostWithSearches_other": "推定コスト {{cost}}（検索 {{count}} 回を含む）",
     "costUnavailable": "コストを確定できません",
     "rename": "会話の名前を変更",
     "renameDescription": "見つけやすい名前を付けてください。",
