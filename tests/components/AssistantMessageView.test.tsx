@@ -377,3 +377,40 @@ describe("a reply's sources", () => {
     ).toBeVisible();
   });
 });
+
+describe("what a streaming reply is doing", () => {
+  const streaming = (
+    content: string,
+    activity: "searching" | "readingPage" | "readingFile" | null,
+    status: AssistantMessage["status"] = "streaming",
+  ) => (
+    <AssistantMessageView
+      message={{ id: "m", role: "assistant", content, createdAt: 1, status }}
+      activity={activity}
+      disabled
+      onEdit={async () => false}
+      onRegenerate={() => undefined}
+    />
+  );
+
+  it.each([
+    ["searching", "Searching the web…"],
+    ["readingPage", "Reading a page…"],
+    ["readingFile", "Reading a file…"],
+  ] as const)("says %s instead of thinking", (activity, text) => {
+    render(streaming("", activity));
+    expect(screen.getByRole("status")).toHaveTextContent(text);
+    expect(screen.queryByText("Thinking…")).toBeNull();
+  });
+
+  it("says it below the words already written", () => {
+    render(streaming("Let me check.", "searching"));
+    expect(screen.getByText("Let me check.")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("Searching the web…");
+  });
+
+  it("says nothing once the reply is finished", () => {
+    render(streaming("Answer", "searching", "completed"));
+    expect(screen.queryByText("Searching the web…")).toBeNull();
+  });
+});

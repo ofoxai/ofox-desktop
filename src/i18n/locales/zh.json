@@ -4938,6 +4938,11 @@
     "loading": "加载中…",
     "running": "回复中…",
     "typing": "正在思考…",
+    "activity": {
+      "searching": "正在搜索网页…",
+      "readingPage": "正在阅读网页…",
+      "readingFile": "正在读取文件…"
+    },
     "welcome": "有什么可以帮你？",
     "description": "提问、写作、翻译和分析文字。",
     "startHint": "新建对话，或直接在下方输入问题。",

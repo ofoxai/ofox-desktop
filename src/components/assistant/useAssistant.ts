@@ -20,6 +20,21 @@ const IDENTITY_CHANGED = "assistant_identity_changed";
 /** A backend or renderer error code; the page turns it into a localized message. */
 export type AssistantError = string;
 
+/** What a running reply is doing, as the user is told; never a tool's name. */
+export type AssistantActivity = "searching" | "readingPage" | "readingFile";
+
+const TOOL_ACTIVITY = new Map<string, AssistantActivity>([
+  ["web_search", "searching"],
+  ["web_fetch", "readingPage"],
+  ["read_attachment", "readingFile"],
+]);
+
+/** A tool call of the followed run that has not ended, by its call id. */
+interface RunningTool {
+  id: string;
+  activity: AssistantActivity;
+}
+
 /** A conversation's draft as last saved; `files` unknown until read or written. */
 interface SavedDraft {
   text: string;
@@ -61,6 +76,7 @@ export function useAssistant(enabled: boolean) {
   );
   const [stream, setStream] = useState<AssistantMessage | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
+  const [tools, setTools] = useState<RunningTool[]>([]);
   const [compacting, setCompacting] = useState(false);
   const [error, setError] = useState<AssistantError | null>(null);
   const [loading, setLoading] = useState(false);
@@ -101,6 +117,8 @@ export function useAssistant(enabled: boolean) {
   }, []);
 
   const setRun = useCallback((value: AssistantRunRef | null) => {
+    // Another run, or none: the tools the last one started are not followed.
+    if (value?.runId !== runRef.current?.runId) setTools([]);
     runRef.current = value;
     setRunState(value);
   }, []);
@@ -549,6 +567,24 @@ export function useAssistant(enabled: boolean) {
                     ),
                   }
                 : old,
+            );
+            return;
+          }
+          case "tool_start": {
+            const { name, toolCallId } = event.data;
+            const activity =
+              typeof name === "string" ? TOOL_ACTIVITY.get(name) : undefined;
+            if (!activity || typeof toolCallId !== "string") return;
+            setTools((running) => [
+              ...running.filter((tool) => tool.id !== toolCallId),
+              { id: toolCallId, activity },
+            ]);
+            return;
+          }
+          case "tool_end": {
+            const { toolCallId } = event.data;
+            setTools((running) =>
+              running.filter((tool) => tool.id !== toolCallId),
             );
             return;
           }
@@ -1008,6 +1044,8 @@ export function useAssistant(enabled: boolean) {
     }
   }, [showError]);
 
+  // The latest tool still running says what the reply is doing.
+  const activity = tools[tools.length - 1]?.activity ?? null;
   // The open conversation's setting; off while it loads.
   const webSearch = selectedId
     ? detail?.session.id === selectedId && detail.session.webSearch
@@ -1031,6 +1069,7 @@ export function useAssistant(enabled: boolean) {
     pickAttachments,
     removeAttachment,
     stream,
+    activity,
     run,
     compacting,
     error,

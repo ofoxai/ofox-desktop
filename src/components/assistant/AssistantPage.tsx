@@ -492,6 +492,7 @@ function AssistantWorkspace() {
                 {assistant.stream?.role === "assistant" && (
                   <AssistantMessageView
                     message={assistant.stream}
+                    activity={assistant.activity}
                     disabled
                     onEdit={async () => false}
                     onRegenerate={() => undefined}

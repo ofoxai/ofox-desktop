@@ -2086,6 +2086,102 @@ describe("web search", () => {
     ).toBeVisible();
   });
 
+  it("says what the reply is doing while a tool runs, never naming the tool", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    await userEvent.type(composer(), "Compare these pages");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    // The progress lines on screen (each message's copy button has a
+    // status of its own).
+    const status = () =>
+      [
+        "Thinking…",
+        "Searching the web…",
+        "Reading a page…",
+        "Reading a file…",
+      ].filter((text) => screen.queryByText(text));
+    const tool = (name: string, toolCallId: string) => ({
+      messageId: "reply",
+      name,
+      toolCallId,
+    });
+    const start = (name: string, id: string, args = {}) =>
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "tool_start",
+          data: { ...tool(name, id), args },
+        }),
+      );
+    const end = (name: string, id: string, code: string | null = null) =>
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "tool_end",
+          data: { ...tool(name, id), success: code === null, code },
+        }),
+      );
+    start("web_search", "c1", { query: "pi release" });
+    expect(status()).toEqual(["Searching the web…"]);
+    end("web_search", "c1", "search_failed");
+    expect(status()).toEqual(["Thinking…"]);
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "text_delta",
+        data: { delta: "Let me read them.", messageId: "reply" },
+      }),
+    );
+    start("web_fetch", "c2", { url: "https://pi.dev/" });
+    expect(status()).toEqual(["Reading a page…"]);
+    start("read_attachment", "c3", { id: "file-1" });
+    expect(status()).toEqual(["Reading a file…"]);
+    end("read_attachment", "c3");
+    expect(status()).toEqual(["Reading a page…"]);
+    end("web_fetch", "c2");
+    expect(status()).toEqual([]);
+    // A tool this build doesn't know shows nothing.
+    start("shell_exec", "c4");
+    expect(status()).toEqual([]);
+    for (const internal of [
+      "web_search",
+      "web_fetch",
+      "read_attachment",
+      "shell_exec",
+      "search_failed",
+    ])
+      expect(document.body).not.toHaveTextContent(internal);
+    // A run that ends while a tool still runs leaves no progress behind.
+    start("web_search", "c5");
+    expect(status()).toEqual(["Searching the web…"]);
+    current = {
+      ...current,
+      messages: [
+        { id: "q", role: "user", content: "Compare these pages", createdAt: 1 },
+        {
+          id: "reply",
+          role: "assistant",
+          content: "Let me read them.",
+          status: "stopped",
+          createdAt: 2,
+        },
+      ],
+    };
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "run_end",
+        data: { stopped: true, status: "stopped" },
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
+    );
+    expect(status()).toEqual([]);
+  });
+
   it("can't be turned on, and says why, when search is unavailable", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,

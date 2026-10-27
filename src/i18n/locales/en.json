@@ -4938,6 +4938,11 @@
     "loading": "Loading…",
     "running": "Replying…",
     "typing": "Thinking…",
+    "activity": {
+      "searching": "Searching the web…",
+      "readingPage": "Reading a page…",
+      "readingFile": "Reading a file…"
+    },
     "welcome": "How can I help?",
     "description": "Ask questions, write, translate and analyze text.",
     "startHint": "Start a new conversation, or type your question below.",
