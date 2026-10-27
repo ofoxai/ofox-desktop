@@ -2264,6 +2264,88 @@ describe("web search", () => {
     expect(document.body).not.toHaveTextContent("per search");
   });
 
+  it.each([
+    [
+      "is unavailable",
+      { available: false, unitPriceUsd: null, model: "openai/gpt-5-nano" },
+    ],
+    ["is unknown to the backend", undefined],
+  ])(
+    "can still be turned off, never on, while search %s",
+    async (_, search) => {
+      mocks.bootstrap.mockResolvedValue({ ...capabilities, search });
+      current.session.webSearch = true;
+      await openConversation();
+      expect(toggle()).toHaveAttribute("aria-pressed", "true");
+      expect(toggle()).toBeEnabled();
+      await userEvent.click(toggle());
+      await waitFor(() =>
+        expect(toggle()).toHaveAttribute("aria-pressed", "false"),
+      );
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({ sessionId: "session-a", webSearch: false }),
+      );
+      expect(toggle()).toBeDisabled();
+    },
+  );
+
+  it("can be turned off before the first message while search is unavailable", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    function Refresh() {
+      const shell = useShell();
+      return (
+        <>
+          <button onClick={() => shell.setActive("assistant")}>
+            Open assistant
+          </button>
+          <button onClick={() => void shell.refresh()}>
+            Refresh assistant
+          </button>
+        </>
+      );
+    }
+    render(
+      <ShellProvider openSettings={() => undefined}>
+        <Refresh />
+        <AssistantPage />
+      </ShellProvider>,
+    );
+    await waitFor(() => expect(toggle()).toBeEnabled());
+    await userEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      search: {
+        available: false,
+        unitPriceUsd: null,
+        model: "openai/gpt-5-nano",
+      },
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open assistant" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Refresh assistant" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/Web search is unavailable/)).toBeVisible(),
+    );
+    await userEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    expect(toggle()).toBeDisabled();
+  });
+
+  it("can't be changed for a conversation that hasn't loaded", async () => {
+    mocks.getSession.mockRejectedValue("assistant_storage_unavailable");
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await screen.findByRole("alert");
+    expect(toggle()).toBeDisabled();
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+  });
+
   it("takes a backend that says nothing about search as search unavailable", async () => {
     const { search: _, ...older } = capabilities;
     mocks.bootstrap.mockResolvedValue(older);

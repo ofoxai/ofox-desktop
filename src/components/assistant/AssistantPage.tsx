@@ -154,6 +154,16 @@ function AssistantWorkspace() {
   // The price while search is on; why it can't be turned on while it can't.
   const showSearchNote =
     available && (searchPrice === null || assistant.webSearch);
+  // Search can be turned on only while it is offered, and always off, so a
+  // conversation never keeps it on when it can't be seen to work. A
+  // conversation still loading (or whose load failed) has no setting to
+  // change yet.
+  const searchLocked =
+    !available ||
+    busy ||
+    assistant.loading ||
+    Boolean(assistant.selectedId && session?.id !== assistant.selectedId) ||
+    (!assistant.webSearch && searchPrice === null);
   // Tool, system and other internal records stay out of the transcript.
   const messages = (detail?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
@@ -567,12 +577,7 @@ function AssistantWorkspace() {
                     variant="ghost"
                     aria-pressed={assistant.webSearch}
                     title={searchNote ?? undefined}
-                    disabled={
-                      !available ||
-                      searchPrice === null ||
-                      busy ||
-                      assistant.loading
-                    }
+                    disabled={searchLocked}
                     onClick={() => assistant.setWebSearch(!assistant.webSearch)}
                     className={cn(
                       "shrink-0 px-2",
