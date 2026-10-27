@@ -25,23 +25,66 @@ function usageCoverage(usage) {
     : "incomplete";
 }
 
-// The gateway refused the request (4xx), or it never got an answer or was
-// never sent: nothing was generated, so its cost is a known zero.
+// The gateway refused the request (4xx), or it never left this machine:
+// nothing was generated, so its cost is a known zero. A request that was sent
+// but got no answer (reset, closed, timed out) may have been billed.
 function unbilled(message) {
   return (
     message.stopReason === "error" &&
     ((message.errorStatus >= 400 && message.errorStatus < 500) ||
-      message.errorKind === "network" ||
       message.errorKind === "not_sent")
   );
 }
 
-// Why one model request failed: its HTTP status, or no response at all.
+// Why one model request failed: its HTTP status, or no answer at all —
+// `not_sent` when the connection never opened, else `network`.
 function markFailure(message, outcome) {
   if (message.stopReason !== "error") return message;
   if (outcome.status) message.errorStatus = outcome.status;
-  else if (outcome.network) message.errorKind = "network";
+  else if (outcome.network) {
+    message.errorKind = outcome.network.sent ? "network" : "not_sent";
+    if (outcome.network.code) message.errorCode = outcome.network.code;
+  }
   return message;
+}
+
+// The coded errors along a fetch error's causes; an AggregateError holds one
+// per address that was tried.
+function codedCauses(error, seen = new Set()) {
+  if (!error || typeof error !== "object" || seen.has(error)) return [];
+  seen.add(error);
+  return [
+    ...(typeof error.code === "string" ? [error] : []),
+    ...[
+      error.cause,
+      ...(Array.isArray(error.errors) ? error.errors : []),
+    ].flatMap((cause) => codedCauses(cause, seen)),
+  ];
+}
+
+// Failures that happen before a connection exists: DNS, refusal, routing at
+// connect, connect timeout, and TLS certificate checks.
+function beforeConnecting({ code, syscall }) {
+  return (
+    [
+      "ECONNREFUSED",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "UND_ERR_CONNECT_TIMEOUT",
+    ].includes(code) ||
+    (["ENETUNREACH", "EHOSTUNREACH"].includes(code) &&
+      ["connect", "getaddrinfo"].includes(syscall)) ||
+    code.includes("CERT") ||
+    code === "HOSTNAME_MISMATCH"
+  );
+}
+
+function networkFailure(error) {
+  const causes = codedCauses(error);
+  return {
+    sent: !(causes.length > 0 && causes.every(beforeConnecting)),
+    code: causes[0]?.code,
+  };
 }
 
 function knownPrice(value) {
@@ -192,6 +235,7 @@ function projection(manager, secrets = []) {
           errorMessage: message.errorMessage,
           errorStatus: message.errorStatus,
           errorKind: message.errorKind,
+          errorCode: message.errorCode,
           runId: marker?.runId,
           operationId: marker?.operationId,
           pricingKnown:
@@ -580,7 +624,8 @@ export class AssistantRuntime {
             redirect: "error",
           });
         } catch (error) {
-          if (!context.abort.signal.aborted) outcome.network = true;
+          if (!context.abort.signal.aborted)
+            outcome.network = networkFailure(error);
           throw error;
         }
         if (response.status >= 400) outcome.status = response.status;
@@ -817,6 +862,7 @@ export class AssistantRuntime {
           "Assistant operation failed";
         result.errorStatus = last?.errorStatus;
         result.errorKind = last?.errorKind;
+        result.errorCode = last?.errorCode;
       }
       this.notify(context, "run_end", { status: result.status });
       return result;

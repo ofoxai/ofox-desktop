@@ -425,7 +425,14 @@ test("provider errors never retry paid requests and stay scrubbed in native hist
   await runtime.close();
 });
 
-test("a refused or unanswered model request reports why and costs a known zero", async (t) => {
+function networkError(cause) {
+  return new TypeError("fetch failed", { cause });
+}
+function systemError(code, syscall) {
+  return Object.assign(new Error(`${syscall} ${code}`), { code, syscall });
+}
+
+test("a request refused with a 4xx or never sent reports why and costs a known zero", async (t) => {
   for (const [name, reply, expected] of [
     [
       "balance",
@@ -452,22 +459,68 @@ test("a refused or unanswered model request reports why and costs a known zero",
       { errorStatus: 404 },
     ],
     [
-      "offline",
+      "connection refused on every address",
       () => {
-        throw new TypeError("fetch failed");
+        throw networkError(
+          new AggregateError([
+            systemError("ECONNREFUSED", "connect"),
+            systemError("ECONNREFUSED", "connect"),
+          ]),
+        );
       },
-      { errorKind: "network" },
+      { errorKind: "not_sent", errorCode: "ECONNREFUSED" },
+    ],
+    [
+      "unknown host",
+      () => {
+        throw networkError(systemError("ENOTFOUND", "getaddrinfo"));
+      },
+      { errorKind: "not_sent", errorCode: "ENOTFOUND" },
+    ],
+    [
+      "unreachable network",
+      () => {
+        throw networkError(systemError("ENETUNREACH", "connect"));
+      },
+      { errorKind: "not_sent", errorCode: "ENETUNREACH" },
+    ],
+    [
+      "connect timeout",
+      () => {
+        throw networkError(
+          Object.assign(new Error("Connect Timeout Error"), {
+            code: "UND_ERR_CONNECT_TIMEOUT",
+          }),
+        );
+      },
+      { errorKind: "not_sent", errorCode: "UND_ERR_CONNECT_TIMEOUT" },
+    ],
+    [
+      "untrusted certificate",
+      () => {
+        throw networkError(
+          Object.assign(new Error("certificate has expired"), {
+            code: "CERT_HAS_EXPIRED",
+          }),
+        );
+      },
+      { errorKind: "not_sent", errorCode: "CERT_HAS_EXPIRED" },
     ],
   ]) {
     const params = await sandbox(t);
     const runtime = new AssistantRuntime({ fetch: async () => reply() });
     const result = await runtime.run(params);
     assert.equal(result.status, "error", name);
-    assert.equal(result.errorStatus, expected.errorStatus, name);
-    assert.equal(result.errorKind, expected.errorKind, name);
     const failed = result.entries.at(-1);
-    assert.equal(failed.errorStatus, expected.errorStatus, name);
-    assert.equal(failed.errorKind, expected.errorKind, name);
+    for (const [key, value] of Object.entries({
+      errorStatus: undefined,
+      errorKind: undefined,
+      errorCode: undefined,
+      ...expected,
+    })) {
+      assert.equal(result[key], value, `${name}: result ${key}`);
+      assert.equal(failed[key], value, `${name}: entry ${key}`);
+    }
     assert.equal(failed.usageCoverage, "complete", name);
     assert.equal(result.usageCoverage, "complete", name);
     // The reason survives a reload of the native history.
@@ -476,6 +529,50 @@ test("a refused or unanswered model request reports why and costs a known zero",
       result.entries,
       name,
     );
+    await runtime.close();
+  }
+});
+
+test("a sent request that got no answer may have been billed, so its cost stays unknown", async (t) => {
+  for (const [name, error, errorCode] of [
+    [
+      "closed after the request",
+      networkError(
+        Object.assign(new Error("other side closed"), {
+          code: "UND_ERR_SOCKET",
+        }),
+      ),
+      "UND_ERR_SOCKET",
+    ],
+    [
+      "reset after the write",
+      networkError(systemError("ECONNRESET", "read")),
+      "ECONNRESET",
+    ],
+    [
+      "unreachable while reading",
+      networkError(systemError("EHOSTUNREACH", "read")),
+      "EHOSTUNREACH",
+    ],
+    [
+      "timed out before the headers",
+      Object.assign(new Error("The operation was aborted due to timeout"), {
+        name: "TimeoutError",
+      }),
+      undefined,
+    ],
+  ]) {
+    const params = await sandbox(t);
+    const runtime = new AssistantRuntime({
+      fetch: async () => {
+        throw error;
+      },
+    });
+    const result = await runtime.run(params);
+    assert.equal(result.status, "error", name);
+    assert.equal(result.errorKind, "network", name);
+    assert.equal(result.errorCode, errorCode, name);
+    assert.equal(result.entries.at(-1).usageCoverage, "incomplete", name);
     await runtime.close();
   }
 });
