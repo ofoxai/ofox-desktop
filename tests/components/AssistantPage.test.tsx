@@ -2968,4 +2968,39 @@ describe("sign-in changes", () => {
       expect.objectContaining({ draft: "Private draft" }),
     );
   });
+
+  it("drops the composer's files when sign-in expires, and shows only the saved ones once restored", async () => {
+    const file: AssistantAttachment = {
+      id: "file-1",
+      name: "private.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      reason: null,
+      previewUrl: null,
+      details: null,
+    };
+    const files = () =>
+      within(composer().closest("footer") as HTMLElement).queryByRole("list", {
+        name: "Attached files",
+      });
+    await openConversation();
+    mocks.pickAttachments.mockResolvedValueOnce([file]);
+    await userEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await waitFor(() => expect(files()).toHaveTextContent("private.pdf"));
+    // The account's saved draft names no file.
+    mocks.getSession.mockResolvedValue({
+      ...current,
+      session: { ...current.session, draftAttachmentIds: [] },
+      attachments: [file],
+    });
+    act(() => mocks.auth?.("expired"));
+    expect(files()).toBeNull();
+    act(() => mocks.auth?.("restored"));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() => expect(composer()).toBeEnabled());
+    expect(files()).toBeNull();
+  });
 });
