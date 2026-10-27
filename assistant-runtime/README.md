@@ -37,8 +37,9 @@ Tauri's dev and build hooks run `assistant:prepare`, and the resource map ships
 `resources/` as `assistant-runtime/` in the application: the host starts
 `assistant-runtime/node/node` (`node.exe` on Windows) with
 `assistant-runtime/runtime/src/main.mjs`. Generated files are ignored by Git;
-the npm lockfile and the pinned archive hashes are committed. Packaged targets
-are macOS (Apple Silicon and Intel) and Windows x64; Linux x64 is used for CI.
+the npm lockfile and the pinned archive hashes are committed. Release packages
+are macOS Apple Silicon and Windows x64; macOS Intel is pinned for local builds
+and Linux x64 for CI.
 
 The protocol tests spawn `resources/node/node`. Without it they fail at once
 and ask you to run `pnpm assistant:prepare`. Their mock gateway listens on an
