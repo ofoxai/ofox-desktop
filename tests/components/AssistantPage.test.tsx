@@ -992,10 +992,15 @@ describe("attachments", () => {
     expect(composerFiles()).toHaveTextContent(
       "This PDF is password-protected. Remove the password, then attach it again.",
     );
-    expect(
-      screen.getByText("Remove the files that can't be read, then send."),
-    ).toBeVisible();
+    const hint = screen.getByText(
+      "Remove the files that can't be read, then send.",
+    );
+    expect(hint).toBeVisible();
+    expect(hint.closest("[aria-live]")).toHaveAttribute("aria-live", "polite");
     expect(sendButton()).toBeDisabled();
+    expect(sendButton()).toHaveAccessibleDescription(
+      "Remove the files that can't be read, then send.",
+    );
     fireEvent.keyDown(composer(), { key: "Enter" });
     expect(mocks.send).not.toHaveBeenCalled();
     await userEvent.click(
@@ -1103,6 +1108,24 @@ describe("attachments", () => {
       await pick([photo]);
       expect(screen.getByText(warning)).toBeVisible();
     });
+  });
+
+  it("returns focus to the message after the file dialog, and after the last file is removed", async () => {
+    await openConversation();
+    await pick([pdf]);
+    await waitFor(() => expect(composer()).toHaveFocus());
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove report.pdf" }),
+    );
+    expect(composer()).toHaveFocus();
+  });
+
+  it("describes Send by the warning about images a model can't read", async () => {
+    await openConversation();
+    await pick([photo]);
+    expect(sendButton()).toHaveAccessibleDescription(
+      "This model can't read images. Choose a model that can, or remove the image.",
+    );
   });
 
   it("changes nothing when the file dialog is cancelled", async () => {

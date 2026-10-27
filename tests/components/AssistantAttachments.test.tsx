@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -282,6 +283,43 @@ describe("attachment chips", () => {
     const keys = Object.keys(en.assistant.attachmentOutcome).sort();
     expect(Object.keys(ja.assistant.attachmentOutcome).sort()).toEqual(keys);
     expect(Object.keys(zh.assistant.attachmentOutcome).sort()).toEqual(keys);
+  });
+
+  it("keeps its list role however it is styled, and gives remove a 24 px target", () => {
+    render(<AttachmentList files={[file()]} onRemove={() => undefined} />);
+    expect(list()).toHaveAttribute("role", "list");
+    expect(
+      screen.getByRole("button", { name: "Remove report.pdf" }),
+    ).toHaveClass("h-6", "w-6");
+  });
+
+  it("moves focus to the next file's remove button, and past the last one when none is left", async () => {
+    const emptied = vi.fn();
+    function Draft() {
+      const [files, setFiles] = useState([
+        file(),
+        file({ id: "f2", name: "notes.txt", mimeType: "text/plain" }),
+      ]);
+      return (
+        <AttachmentList
+          files={files}
+          onRemove={(id) =>
+            setFiles((old) => old.filter((item) => item.id !== id))
+          }
+          onAllRemoved={emptied}
+        />
+      );
+    }
+    render(<Draft />);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove report.pdf" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Remove notes.txt" }),
+    ).toHaveFocus();
+    expect(emptied).not.toHaveBeenCalled();
+    await userEvent.keyboard("{Enter}");
+    expect(emptied).toHaveBeenCalledOnce();
   });
 
   it("removes a file by name when the list allows it", async () => {

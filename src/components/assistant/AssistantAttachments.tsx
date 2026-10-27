@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { FileImage, FileText, X } from "lucide-react";
@@ -159,7 +160,8 @@ function AttachmentChip({
         {onRemove && (
           <Button
             variant="icon"
-            className="-mr-1 h-5 w-5"
+            data-remove-file
+            className="-my-1 -mr-1.5 h-6 w-6"
             aria-label={t("assistant.removeAttachment", { name: file.name })}
             title={t("assistant.removeAttachment", { name: file.name })}
             disabled={removeDisabled}
@@ -185,22 +187,51 @@ function AttachmentChip({
 
 /**
  * Files in the composer, on a sent question or in an edit: name, type, size
- * and, once a run has read them, what that read means. No previews.
+ * and, once a run has read them, what that read means. No previews. Removing
+ * a file moves focus to the next file's remove button (or the one before);
+ * `onAllRemoved` takes it once no file is left.
  */
 export function AttachmentList({
   files,
   onRemove,
+  onAllRemoved,
   removeDisabled,
   className,
 }: {
   files: AssistantAttachment[];
   onRemove?: (id: string) => void;
+  onAllRemoved?: () => void;
   removeDisabled?: boolean;
   className?: string;
 }) {
   const { t } = useTranslation();
+  const list = useRef<HTMLUListElement>(null);
+  // Where the removed file was, until the list without it is on screen.
+  const removedAt = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    const index = removedAt.current;
+    if (index === null) return;
+    removedAt.current = null;
+    const buttons =
+      list.current?.querySelectorAll<HTMLButtonElement>(
+        "button[data-remove-file]",
+      ) ?? [];
+    const next = buttons[Math.min(index, buttons.length - 1)];
+    if (next) next.focus();
+    else onAllRemoved?.();
+  }, [files, onAllRemoved]);
+  const remove = onRemove
+    ? (id: string) => {
+        removedAt.current = files.findIndex((file) => file.id === id);
+        onRemove(id);
+      }
+    : undefined;
+  if (!files.length) return null;
   return (
+    // role="list": a list without bullets keeps its role in WebKit.
     <ul
+      ref={list}
+      role="list"
       aria-label={t("assistant.attachedFiles")}
       className={cn("flex flex-wrap items-start gap-2", className)}
     >
@@ -208,7 +239,7 @@ export function AttachmentList({
         <AttachmentChip
           key={file.id}
           file={file}
-          onRemove={onRemove}
+          onRemove={remove}
           removeDisabled={removeDisabled}
         />
       ))}

@@ -1,4 +1,11 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
@@ -138,6 +145,8 @@ function AssistantWorkspace() {
   const assistant = useAssistant(true);
   const { detail, bootstrap, run, busy } = assistant;
   const [rename, setRename] = useState<string | null>(null);
+  const blockedHint = useId();
+  const visionHint = useId();
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -213,6 +222,12 @@ function AssistantWorkspace() {
   const imagesNeedVision =
     composerModel?.supportsImages === false &&
     files.some((file) => file.mimeType.startsWith("image/"));
+  // What Send's state is about: the composer's warnings.
+  const sendHints =
+    [blockedFiles && blockedHint, imagesNeedVision && visionHint]
+      .filter(Boolean)
+      .join(" ") || undefined;
+  const focusComposer = useCallback(() => composer.current?.focus(), []);
 
   useShellRefresh("assistant", async () => {
     await assistant.loadBootstrap();
@@ -551,25 +566,35 @@ function AssistantWorkspace() {
         <footer className="shrink-0 bg-card px-4 pb-3 pt-2">
           <div className="mx-auto w-full max-w-[760px]">
             <div className="rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
-              {files.length > 0 && (
-                <div className="max-h-36 overflow-y-auto px-3 pt-3">
-                  <AttachmentList
-                    files={files}
-                    onRemove={assistant.removeAttachment}
-                    removeDisabled={busy || Boolean(run)}
-                  />
+              {/* Kept mounted: its live region announces the warnings, and
+                  the list hands focus back once its last file is removed. */}
+              <div
+                className={cn(
+                  files.length > 0 && "max-h-36 overflow-y-auto px-3 pt-3",
+                )}
+              >
+                <AttachmentList
+                  files={files}
+                  onRemove={assistant.removeAttachment}
+                  onAllRemoved={focusComposer}
+                  removeDisabled={busy || Boolean(run)}
+                />
+                <div aria-live="polite">
                   {blockedFiles && (
-                    <p className="mt-1.5 text-note text-danger">
+                    <p
+                      id={blockedHint}
+                      className="mt-1.5 text-note text-danger"
+                    >
                       {t("assistant.attachmentsBlocked")}
                     </p>
                   )}
                   {imagesNeedVision && (
-                    <p className="mt-1.5 text-note text-warn">
+                    <p id={visionHint} className="mt-1.5 text-note text-warn">
                       {t("assistant.imagesNeedVision")}
                     </p>
                   )}
                 </div>
-              )}
+              </div>
               <Textarea
                 ref={composer}
                 rows={3}
@@ -601,7 +626,11 @@ function AssistantWorkspace() {
                     aria-label={t("assistant.attach")}
                     title={t("assistant.attach")}
                     disabled={!writable}
-                    onClick={() => void assistant.pickAttachments()}
+                    onClick={() =>
+                      // The dialog leaves focus on a button disabled while
+                      // it was open: the message takes it back.
+                      void assistant.pickAttachments().then(focusComposer)
+                    }
                   >
                     <Paperclip aria-hidden className="h-3.5 w-3.5" />
                   </Button>
@@ -632,6 +661,7 @@ function AssistantWorkspace() {
                 ) : (
                   <Button
                     aria-label={t("assistant.send")}
+                    aria-describedby={sendHints}
                     disabled={
                       !writable ||
                       blockedFiles ||
