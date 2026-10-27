@@ -2,7 +2,7 @@
 //! totals, the runtime's native history bound to the session's messages, and
 //! the state a run leaves when it ends or its process died.
 use super::{
-    host::{scrub_text, scrub_value, RunControl, PROTOCOL},
+    host::{scrub_secrets, scrub_secrets_in, RunControl, PROTOCOL},
     store::{AssistantStore, SessionRecord},
     types::*,
 };
@@ -128,7 +128,7 @@ impl Default for ProjectionBuffer {
 
 impl ProjectionBuffer {
     pub(super) fn push(&mut self, run: &RunControl, kind: &str, data: &mut Value) {
-        scrub_value(data, &run.secrets());
+        scrub_secrets_in(data, &run.secrets());
         data["messageId"] = json!(run.message_id);
         if let Some(delta) = data["delta"].as_str() {
             if kind == "text_delta" {
@@ -172,12 +172,13 @@ pub(super) fn save_projection(
             .iter_mut()
             .find(|m| m.id == mid)
             .ok_or("assistant_message_not_found")?;
+        // The whole text again: a key split across two batches is whole now.
         message.content.push_str(&pending.text);
-        message.content = scrub_text(&message.content, secrets);
+        message.content = scrub_secrets(&message.content, secrets);
         if !pending.thinking.is_empty() {
             let reasoning = message.reasoning.get_or_insert_default();
             reasoning.push_str(&pending.thinking);
-            *reasoning = scrub_text(reasoning, secrets);
+            *reasoning = scrub_secrets(reasoning, secrets);
         }
         record.session.updated_at = now();
         Ok(())
@@ -247,11 +248,11 @@ pub(super) fn merge_native(
                 })
                 .flatten()
         });
-        let content = scrub_text(entry["content"].as_str().unwrap_or(""), secrets);
+        let content = scrub_secrets(entry["content"].as_str().unwrap_or(""), secrets);
         let thinking = entry["thinking"]
             .as_str()
             .filter(|t| !t.is_empty())
-            .map(|t| scrub_text(t, secrets));
+            .map(|t| scrub_secrets(t, secrets));
         let status = if entry["stopReason"] == "error" {
             "error"
         } else if entry["stopReason"] == "aborted" {

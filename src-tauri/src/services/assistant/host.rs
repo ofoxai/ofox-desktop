@@ -159,6 +159,9 @@ pub struct AssistantHost {
     /// The live run of each session, by session id.
     runs: Mutex<HashMap<String, Arc<RunControl>>>,
     models: Mutex<HashMap<String, (std::time::Instant, Vec<catalog::Model>)>>,
+    /// Every assistant key this process handed to a run: a draft or a title
+    /// loses exactly these.
+    keys: Mutex<Vec<String>>,
 }
 
 fn session_key(owner: &str, sid: &str) -> String {
@@ -174,48 +177,42 @@ pub(super) async fn blocking<T: Send + 'static>(
         .map_err(|_| STATE.to_string())?
 }
 
-/// `text` without any of `secrets` and without anything that looks like a
-/// credential.
-pub fn scrub_text(text: &str, secrets: &[String]) -> String {
+/// `text` without any of `secrets`, the exact keys runs were given.
+/// Conversation content (prompts, replies, drafts, titles, events) is
+/// otherwise kept byte for byte: code, config samples and "password:"
+/// prompts are the user's own words.
+pub fn scrub_secrets(text: &str, secrets: &[String]) -> String {
     let mut text = text.to_owned();
     for secret in secrets.iter().filter(|s| s.len() >= 8) {
-        text = text.replace(secret.as_str(), crate::redact::REDACTED);
+        if text.contains(secret.as_str()) {
+            text = text.replace(secret.as_str(), crate::redact::REDACTED);
+        }
     }
-    crate::redact::scrub(&text).into_owned()
+    text
 }
 
-/// Scrub a value before it reaches an event, a file or a log: every string
-/// loses `secrets` and credential-looking text, and credential-named fields
-/// lose their value.
-pub fn scrub_value(value: &mut Value, secrets: &[String]) {
+/// [`scrub_secrets`] on every string of `value`.
+pub fn scrub_secrets_in(value: &mut Value, secrets: &[String]) {
     match value {
-        Value::String(text) => *text = scrub_text(text, secrets),
+        Value::String(text) => *text = scrub_secrets(text, secrets),
         Value::Array(items) => {
             for item in items {
-                scrub_value(item, secrets);
+                scrub_secrets_in(item, secrets);
             }
         }
         Value::Object(map) => {
-            for (name, item) in map {
-                let name = name.to_ascii_lowercase().replace(['_', '-'], "");
-                if [
-                    "apikey",
-                    "accesstoken",
-                    "refreshtoken",
-                    "authorization",
-                    "password",
-                    "clientsecret",
-                ]
-                .contains(&name.as_str())
-                {
-                    *item = Value::String(crate::redact::REDACTED.into());
-                } else {
-                    scrub_value(item, secrets);
-                }
+            for item in map.values_mut() {
+                scrub_secrets_in(item, secrets);
             }
         }
         _ => {}
     }
+}
+
+/// Provider or runtime error text, a diagnostic: the keys, then anything that
+/// looks like a credential. Never conversation content.
+pub fn scrub_detail(text: &str, secrets: &[String]) -> String {
+    crate::redact::scrub(&scrub_secrets(text, secrets)).into_owned()
 }
 
 /// The runtime may talk to a plain `http://localhost:<port>` gateway (the
@@ -427,7 +424,24 @@ impl AssistantHost {
             recovered: Mutex::default(),
             runs: Mutex::default(),
             models: Mutex::default(),
+            keys: Mutex::default(),
         })
+    }
+
+    /// Remember a key handed to a run, so drafts and titles lose it too.
+    pub(super) fn remember_key(&self, key: &str) {
+        let mut keys = self.keys.lock().unwrap_or_else(PoisonError::into_inner);
+        if !keys.iter().any(|known| known == key) {
+            keys.push(key.to_owned());
+        }
+    }
+
+    /// Every key this process handed to a run.
+    pub(super) fn known_keys(&self) -> Vec<String> {
+        self.keys
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub fn generation(&self) -> u64 {
@@ -827,7 +841,7 @@ impl AssistantHost {
     }
 
     fn emit(&self, run: &RunControl, kind: &str, mut data: Value) {
-        scrub_value(&mut data, &run.secrets());
+        scrub_secrets_in(&mut data, &run.secrets());
         self.env.emit(Event {
             session_id: run.session_id.clone(),
             run_id: run.run_id.clone(),
@@ -888,6 +902,9 @@ impl AssistantHost {
                 if let Err(code) = blocking(move || restore(&native, before)).await {
                     return keep_refused(code).await;
                 }
+                self.remember_key(&key);
+                // The retry's runtime replaces the refused key as well.
+                params["knownSecrets"] = json!(control.secrets());
                 control.add_secret(&key);
                 params["apiKey"] = json!(key);
                 self.run_once(control, &params, false).await
@@ -1080,7 +1097,7 @@ impl AssistantHost {
         let secrets = control.secrets();
         if let Some(error) = value.get("error") {
             return Err(Failure {
-                detail: error["message"].as_str().map(|m| scrub_text(m, &secrets)),
+                detail: error["message"].as_str().map(|m| scrub_detail(m, &secrets)),
                 ..Failure::from("assistant_runtime_failed")
             });
         }
@@ -1096,7 +1113,7 @@ impl AssistantHost {
                 })
             }
             _ => {
-                let detail = scrub_text(
+                let detail = scrub_detail(
                     result["errorMessage"].as_str().unwrap_or("Request failed"),
                     &secrets,
                 );
@@ -1181,7 +1198,7 @@ impl AssistantHost {
     }
 
     async fn save_usage(&self, control: &RunControl, mut data: Value) -> Result<Value, String> {
-        scrub_value(&mut data, &control.secrets());
+        scrub_secrets_in(&mut data, &control.secrets());
         let store = self.store(&control.identity.owner)?;
         let sid = control.session_id.clone();
         blocking(move || {
@@ -1676,23 +1693,37 @@ mod tests {
     }
 
     #[test]
-    fn scrubbing_removes_run_keys_credentials_and_credential_fields() {
+    fn conversation_loses_only_the_run_keys_and_diagnostics_lose_lookalikes_too() {
         let secrets = vec!["opaque-run-key-0123".to_string(), "short".to_string()];
+        let lookalikes = concat!(
+            "OpenAI(api_key=os.environ[\"OPENAI_API_KEY\"]) ",
+            "password = input(\"Password: \") ",
+            "Authorization: Bearer YOUR_TOKEN max_tokens: 4096 sk-of-abcdefghijklmnop",
+        );
         let mut value = json!({
-            "delta": "the key opaque-run-key-0123 and Bearer abc.def.ghi",
-            "nested": [{"apiKey": "anything", "access_token": "t", "note": "sk-of-abcdefghijklmnop"}],
-            "Authorization": "Basic x",
+            "delta": format!("{lookalikes} opaque-run-key-0123"),
+            "nested": [{"apiKey": "anything", "password": lookalikes}],
             "word": "short stays",
         });
-        scrub_value(&mut value, &secrets);
-        let text = value.to_string();
-        assert!(!text.contains("opaque-run-key-0123"), "{text}");
-        assert!(!text.contains("abc.def.ghi") && !text.contains("sk-of-abcdefghijklmnop"));
-        assert_eq!(value["nested"][0]["apiKey"], crate::redact::REDACTED);
-        assert_eq!(value["nested"][0]["access_token"], crate::redact::REDACTED);
-        assert_eq!(value["Authorization"], crate::redact::REDACTED);
-        // A secret too short to be a key is not used to mangle text.
-        assert_eq!(value["word"], "short stays");
+        scrub_secrets_in(&mut value, &secrets);
+        assert_eq!(
+            value,
+            json!({
+                "delta": format!("{lookalikes} {}", crate::redact::REDACTED),
+                "nested": [{"apiKey": "anything", "password": lookalikes}],
+                // A secret too short to be a key is not used to mangle text.
+                "word": "short stays",
+            })
+        );
+        let detail = scrub_detail(&format!("{lookalikes} opaque-run-key-0123"), &secrets);
+        for gone in [
+            "opaque-run-key-0123",
+            "YOUR_TOKEN",
+            "abcdefghijklmnop",
+            "4096",
+        ] {
+            assert!(!detail.contains(gone), "{gone} in {detail}");
+        }
     }
 
     #[test]

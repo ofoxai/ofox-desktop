@@ -628,6 +628,120 @@ fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
     assert_no_secret_in_events(&env, &[KEY]);
 }
 
+/// Everyday code and configuration that looks like credentials.
+const LOOKALIKES: &str = concat!(
+    "OpenAI(api_key=os.environ[\"OPENAI_API_KEY\"])\n",
+    "password = input(\"Password: \")\n",
+    "interface User { password: string; secret: boolean }\n",
+    "Authorization: Bearer YOUR_TOKEN\n",
+    "max_tokens: 4096\n",
+    "sk-proj-EXAMPLEexample0123456789",
+);
+
+/// The text of a message's content: a string or text parts.
+fn text_of(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        parts => parts
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|part| part["type"] == "text")
+            .filter_map(|part| part["text"].as_str())
+            .collect(),
+    }
+}
+
+/// The user and assistant texts of a native JSONL history.
+fn native_texts(native: &str) -> Vec<String> {
+    native
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| {
+            entry["type"] == "message"
+                && (entry["message"]["role"] == "user" || entry["message"]["role"] == "assistant")
+        })
+        .map(|entry| text_of(&entry["message"]["content"]))
+        .collect()
+}
+
+#[test]
+fn conversation_text_passes_byte_for_byte_and_only_the_key_is_scrubbed() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream(format!("{LOOKALIKES}\necho {KEY}")));
+        let question = format!("{LOOKALIKES}\nmy key {KEY}");
+        let (run, end) = turn(&host, &env, request(&sid, &question, json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let asked =
+            |text: &str| text.starts_with(&format!("{LOOKALIKES}\nmy key ")) && !text.contains(KEY);
+        let answered =
+            |text: &str| text.starts_with(&format!("{LOOKALIKES}\necho ")) && !text.contains(KEY);
+
+        let sent = text_of(
+            &gateway.requests()[0].body["messages"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["content"],
+        );
+        assert!(asked(&sent), "the model got {sent:?}");
+
+        let events = env.events(&run);
+        let streamed: String = events
+            .iter()
+            .filter(|e| e.r#type == "text_delta")
+            .map(|e| e.data["delta"].as_str().unwrap())
+            .collect();
+        assert!(answered(&streamed), "streamed {streamed:?}");
+        let message = events.iter().find(|e| e.r#type == "message").unwrap();
+        assert!(answered(
+            message.data["message"]["content"].as_str().unwrap()
+        ));
+        let session = events.iter().find(|e| e.r#type == "session").unwrap();
+        assert_eq!(
+            session.data["session"]["title"],
+            LOOKALIKES.chars().take(48).collect::<String>()
+        );
+
+        let saved = saved(config.path(), &sid);
+        assert!(asked(saved["messages"][0]["content"].as_str().unwrap()));
+        assert!(answered(saved["messages"][1]["content"].as_str().unwrap()));
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        let texts = native_texts(&native);
+        assert_eq!(texts.len(), 2, "{texts:?}");
+        assert!(asked(&texts[0]) && answered(&texts[1]), "{texts:?}");
+
+        // A draft and a title are the user's own words as well.
+        let update: types::UpdateRequest = serde_json::from_value(json!({
+            "sessionId": sid,
+            "draft": format!("{LOOKALIKES} {KEY}"),
+            "title": "max_tokens: 4096 password: hunter2",
+        }))
+        .unwrap();
+        host.update_session(update).await.unwrap();
+        let detail = host.get_session(&sid).await.unwrap();
+        assert!(
+            detail.session.draft.starts_with(&format!("{LOOKALIKES} "))
+                && !detail.session.draft.contains(KEY),
+            "{:?}",
+            detail.session.draft
+        );
+        assert_eq!(detail.session.title, "max_tokens: 4096 password: hunter2");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
 #[test]
 fn stopping_mid_stream_keeps_the_partial_reply_and_the_stopped_operation() {
     let Some(runtime_dir) = runtime_dir() else {
@@ -950,20 +1064,34 @@ fn a_refused_key_is_replaced_once_and_the_turn_is_kept_once() {
     runtime().block_on(async {
         let sid = create(&host).await;
         gateway.reply(Reply::Error(401, invalid_key()));
-        gateway.reply(Reply::Stream("Answer with the new key".into()));
-        let (_, end) = turn(&host, &env, request(&sid, "Unique question", json!({}))).await;
+        // The retry's reply echoes both keys of the run: neither may show.
+        gateway.reply(Reply::Stream(format!(
+            "Answer with the new key {NEW_KEY} and the old {KEY}"
+        )));
+        let (run, end) = turn(&host, &env, request(&sid, "Unique question", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
         let requests = gateway.requests();
         assert_eq!(requests[0].authorization, format!("Bearer {KEY}"));
         assert_eq!(requests[1].authorization, format!("Bearer {NEW_KEY}"));
         assert_eq!(env.state.lock().unwrap().rejected, [KEY]);
+        let streamed: String = env
+            .events(&run)
+            .iter()
+            .filter(|e| e.r#type == "text_delta")
+            .map(|e| e.data["delta"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(
+            streamed.starts_with("Answer with the new key "),
+            "{streamed}"
+        );
         let detail = host.get_session(&sid).await.unwrap();
-        assert_eq!(
-            active(&detail),
-            [
-                ("user".into(), "Unique question".into()),
-                ("assistant".into(), "Answer with the new key".into())
-            ]
+        let shown = active(&detail);
+        assert_eq!(shown.len(), 2);
+        assert_eq!(shown[0], ("user".into(), "Unique question".into()));
+        assert!(
+            shown[1].1.starts_with("Answer with the new key ")
+                && shown[1].1.contains(" and the old "),
+            "{shown:?}"
         );
         assert!(superseded(&detail).is_empty());
         let native =

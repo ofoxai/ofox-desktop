@@ -360,7 +360,7 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
         if title.len() > MAX_TITLE_BYTES {
             return Err("assistant_title_too_long".into());
         }
-        record.session.title = crate::redact::scrub(title).into_owned();
+        record.session.title = title.clone();
     }
     if let Some(model) = &request.model_id {
         record.session.model_id = model.clone();
@@ -375,7 +375,7 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
         if draft.len() > MAX_DRAFT_BYTES {
             return Err("assistant_message_too_large".into());
         }
-        record.session.draft = crate::redact::scrub(draft).into_owned();
+        record.session.draft = draft.clone();
     }
     if let Some(ids) = &request.draft_attachment_ids {
         let ready = |id: &String| {
@@ -1364,16 +1364,18 @@ mod tests {
     }
 
     #[test]
-    fn update_scrubs_secrets_from_title_and_draft() {
+    fn update_keeps_title_and_draft_byte_for_byte() {
         let (_config, store) = fixture();
         let sid = store.create("test/model", false).unwrap().session.id;
         let mut change = request(&sid);
-        change.title = Some("key sk-of-abcdefghijklmnop".into());
-        change.draft = Some("token: sk-ant-abcdefghijklmnop".into());
+        change.title = Some("max_tokens: 4096 password: hunter2".into());
+        change.draft = Some("OpenAI(api_key=os.environ[\"OPENAI_API_KEY\"])".into());
         let session = store.update(&change, no_precondition).unwrap();
-        let saved = serde_json::to_string(&store.load_detail(&sid).unwrap()).unwrap();
-        assert!(!saved.contains("abcdefghijklmnop"));
-        assert!(session.title.contains(crate::redact::REDACTED));
+        assert_eq!(session.title, "max_tokens: 4096 password: hunter2");
+        assert_eq!(
+            store.load_detail(&sid).unwrap().session.draft,
+            "OpenAI(api_key=os.environ[\"OPENAI_API_KEY\"])"
+        );
     }
 
     #[test]

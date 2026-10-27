@@ -56,14 +56,19 @@ Requests are `{id,method,params}`; replies are `{id,result}` or
 takes a trusted absolute `sessionFile`. `run` and `compact` take:
 
 ```text
-sessionId, runId, operationId, sessionFile, model, apiKey,
+sessionId, runId, operationId, sessionFile, model, apiKey, knownSecrets?,
 apex (ofox.ai|ofox.io), baseUrl?, allowLocalGateway?, prompt,
 editEntryId?, regenerateEntryId?, thinkingLevel?, instructions? (compact)
 ```
 
 `apiKey` is the assistant's own Ofox API key. It is sent only in the
-Authorization header, never in a URL, and is scrubbed from history, events,
-results and diagnostics. Provider requests go only to `https://api.{apex}`;
+Authorization header, never in a URL. `knownSecrets` lists the run's earlier
+keys (one the gateway refused before a retry). Conversation content (the
+prompt, the transcript sent to the model, deltas, native history, projections
+and stdout frames) passes byte for byte except for these exact keys, which
+become `[REDACTED]`: code and config such as `api_key=os.environ[...]` or
+`max_tokens: 4096` are the user's words. Diagnostics (stderr, `errorMessage`,
+error frames) are also scrubbed of anything that looks like a credential. Provider requests go only to `https://api.{apex}`;
 `baseUrl` may differ only when the host sets `allowLocalGateway` for its debug
 gateway, which must be `http://localhost:<port>`.
 
@@ -96,7 +101,8 @@ explicitly.
 Events are `{method:"event",params:{sessionId,runId,operationId,type,data}}`.
 Types include run_start/text_delta/thinking_delta/message_end/usage/
 compaction_start/compaction_end/error/run_end (tool_start/tool_end once tools
-exist). Streamed text holds back a tail long enough to scrub a split credential.
+exist). Streamed text holds back a tail long enough to replace a key split
+across deltas.
 The host must persist the final RPC projection **before** publishing its UI
 run_end. message_end is a runtime summary, not the application's message object.
 

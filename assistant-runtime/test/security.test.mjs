@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
-import { modelForOfox, redact } from "../src/security.mjs";
+import {
+  errorMessage,
+  modelForOfox,
+  redact,
+  scrubSecrets,
+} from "../src/security.mjs";
 
 test("models only use the selected Ofox apex and an advertised protocol", () => {
   const model = modelForOfox(
@@ -76,6 +81,25 @@ test("credential values are redacted before any protocol error or tool output", 
   );
   assert.equal(JSON.stringify(value).includes(secret), false);
   assert.match(value.error, /REDACTED/);
+});
+
+test("conversation content loses only the exact known secrets", () => {
+  const secret = "private-test-token-that-must-not-escape";
+  const text = [
+    'OpenAI(api_key=os.environ["OPENAI_API_KEY"])',
+    'password = input("Password: ")',
+    "Authorization: Bearer YOUR_TOKEN",
+    "sk-proj-EXAMPLEexample0123456789",
+  ].join("\n");
+  const value = { content: `${text} ${secret}`, nested: [{ password: text }] };
+  assert.deepEqual(scrubSecrets(value, [secret, "short"]), {
+    content: `${text} [REDACTED]`,
+    nested: [{ password: text }],
+  });
+  const untouched = { content: text };
+  assert.equal(scrubSecrets(untouched, [secret]), untouched);
+  // Diagnostics keep the pattern scrub.
+  assert.doesNotMatch(errorMessage(new Error(text), [secret]), /YOUR_TOKEN/);
 });
 
 test("only a trusted explicit debug flag can route a host-resolved gateway locally", () => {

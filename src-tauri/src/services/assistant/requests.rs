@@ -125,7 +125,7 @@ impl AssistantHost {
     /// trashing the session stops its run, once the change is saved.
     pub async fn update_session(
         self: &Arc<Self>,
-        request: UpdateRequest,
+        mut request: UpdateRequest,
     ) -> Result<Session, String> {
         validate_id(&request.session_id)?;
         let identity = self.identity().await?;
@@ -142,6 +142,14 @@ impl AssistantHost {
         }
         if let Some(model) = &request.model_id {
             self.model(&identity.apex, model).await?;
+        }
+        // The user's own words: only a key this process handed out goes.
+        let keys = self.known_keys();
+        for text in [&mut request.title, &mut request.draft]
+            .into_iter()
+            .flatten()
+        {
+            *text = super::host::scrub_secrets(text, &keys);
         }
         let stops_run = request.model_id.is_some() || request.deleted == Some(true);
         let sid = request.session_id.clone();
@@ -219,8 +227,9 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
+        self.remember_key(&key);
         let control = Arc::new(RunControl::new(identity.clone(), &request, key.clone()));
-        let text = super::host::scrub_text(&request.text, std::slice::from_ref(&key));
+        let text = super::host::scrub_secrets(&request.text, std::slice::from_ref(&key));
         blocking({
             let host = self.clone();
             let store = self.store(&identity.owner)?;

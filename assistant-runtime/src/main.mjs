@@ -1,12 +1,14 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { AssistantRuntime } from "./runtime.mjs";
-import { errorMessage, redact } from "./security.mjs";
+import { errorMessage, redact, scrubSecrets } from "./security.mjs";
 
 const pending = new Map();
+// Frames carry conversation content: only the exact run credentials go.
+// Error text in them was already scrubbed as a diagnostic.
 const write = (value) =>
   process.stdout.write(
-    JSON.stringify(redact(value, [...runtime.secrets])) + "\n",
+    JSON.stringify(scrubSecrets(value, [...runtime.secrets])) + "\n",
   );
 const runtime = new AssistantRuntime({
   emit: (event) => write({ method: "event", params: event }),

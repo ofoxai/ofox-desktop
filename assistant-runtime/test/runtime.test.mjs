@@ -323,7 +323,8 @@ test("real Pi SDK streams and reloads native history without persisting credenti
   assert.equal(JSON.stringify(events).includes(token), false);
   const native = await readFile(params.sessionFile, "utf8");
   assert.equal(native.includes(token), false);
-  assert.equal(native.includes("fakeSecretKey"), false);
+  // A key-shaped string the run was not given is the conversation's own text.
+  assert.equal(native.includes("sk-ant-fakeSecretKey123456789"), true);
   assert.equal(result.entries.filter((item) => item.active).length, 2);
   assert.deepEqual(
     result.entries.map((item) => item.runId),
@@ -340,6 +341,137 @@ test("real Pi SDK streams and reloads native history without persisting credenti
   const loaded = await new AssistantRuntime().load(params);
   assert.deepEqual(loaded.entries, result.entries);
   await runtime.close();
+});
+
+// Everyday code and configuration that looks like credentials.
+const lookalikes = [
+  'OpenAI(api_key=os.environ["OPENAI_API_KEY"])',
+  'password = input("Password: ")',
+  "interface User { password: string; secret: boolean }",
+  "Authorization: Bearer YOUR_TOKEN",
+  "max_tokens: 4096",
+  "sk-proj-EXAMPLEexample0123456789",
+].join("\n");
+
+function nativeTexts(native) {
+  return native
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter(
+      (entry) =>
+        entry.type === "message" &&
+        ["user", "assistant"].includes(entry.message.role),
+    )
+    .map((entry) =>
+      typeof entry.message.content === "string"
+        ? entry.message.content
+        : entry.message.content
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+    );
+}
+
+test("conversation text passes byte for byte; only the run's own key is replaced", async (t) => {
+  const params = {
+    ...(await sandbox(t)),
+    prompt: `${lookalikes}\nmy key ${token}`,
+  };
+  const events = [];
+  const bodies = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_input, init) => {
+      bodies.push(JSON.parse(init.body));
+      return stream(`${lookalikes}\necho ${token}`);
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  const question = `${lookalikes}\nmy key [REDACTED]`;
+  const answer = `${lookalikes}\necho [REDACTED]`;
+  const sent = bodies[0].messages.at(-1).content;
+  assert.equal(
+    typeof sent === "string" ? sent : sent.map((part) => part.text).join(""),
+    question,
+  );
+  assert.equal(
+    events
+      .filter((event) => event.type === "text_delta")
+      .map((event) => event.data.delta)
+      .join(""),
+    answer,
+  );
+  assert.equal(
+    events.find((event) => event.type === "message_end").data.content,
+    answer,
+  );
+  assert.deepEqual(
+    result.entries
+      .filter((entry) => entry.role !== "usage")
+      .map((entry) => entry.content),
+    [question, answer],
+  );
+  const native = await readFile(params.sessionFile, "utf8");
+  assert.deepEqual(nativeTexts(native), [question, answer]);
+  assert.equal(native.includes(token), false);
+  assert.equal(JSON.stringify(events).includes(token), false);
+  assert.deepEqual(
+    (await new AssistantRuntime().load(params)).entries,
+    result.entries,
+  );
+});
+
+test("a key split across streamed deltas never reaches an event", async (t) => {
+  const params = await sandbox(t);
+  const events = [];
+  const half = Math.floor(token.length / 2);
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () =>
+      new Response(
+        [`before ${token.slice(0, half)}`, `${token.slice(half)} after`]
+          .map(
+            (content) =>
+              `data: ${JSON.stringify({ id: "split", choices: [{ index: 0, delta: { content }, finish_reason: null }] })}\n\n`,
+          )
+          .join("") +
+          `data: ${JSON.stringify({ id: "split", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`,
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  const deltas = events
+    .filter((event) => event.type === "text_delta")
+    .map((event) => event.data.delta);
+  assert.equal(deltas.join(""), "before [REDACTED] after");
+  assert.equal(
+    deltas.some((delta) => delta.includes(token.slice(0, half))),
+    false,
+  );
+});
+
+test("an earlier key of the run handed over as knownSecrets is replaced too", async (t) => {
+  const refused = "refused-credential-of-this-run-0123456789";
+  const params = { ...(await sandbox(t)), knownSecrets: [refused] };
+  const events = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () => stream(`old ${refused} new ${token}`),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.entries.at(-1).content, "old [REDACTED] new [REDACTED]");
+  const text = JSON.stringify(events);
+  assert.equal(text.includes(refused) || text.includes(token), false);
+  assert.equal(
+    (await readFile(params.sessionFile, "utf8")).includes(refused),
+    false,
+  );
 });
 
 test("native editing and regeneration keep superseded branches and resume after restart", async (t) => {

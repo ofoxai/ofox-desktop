@@ -2,6 +2,43 @@ const SECRET_FIELD =
   /(?:api.?key|access.?token|refresh.?token|authorization|password|secret|credential)/i;
 const REDACTED = "[REDACTED]";
 
+function replaceExact(value, secrets) {
+  if (typeof value === "string") {
+    let result = value;
+    for (const secret of secrets)
+      if (result.includes(secret)) result = result.split(secret).join(REDACTED);
+    return result;
+  }
+  if (Array.isArray(value)) {
+    const items = value.map((item) => replaceExact(item, secrets));
+    return items.some((item, index) => item !== value[index]) ? items : value;
+  }
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    const scrubbed = entries.map(([key, item]) => [
+      key,
+      replaceExact(item, secrets),
+    ]);
+    return scrubbed.some(([, item], index) => item !== entries[index][1])
+      ? Object.fromEntries(scrubbed)
+      : value;
+  }
+  return value;
+}
+
+// Conversation content (prompts, replies, native history, events) passes byte
+// for byte: code, config samples and "password:" prompts are the user's words.
+// Only the exact credentials this process was given are replaced; a value
+// without one is returned as it is.
+export function scrubSecrets(value, secrets = []) {
+  const known = [...secrets].filter(
+    (secret) => typeof secret === "string" && secret.length >= 8,
+  );
+  return known.length ? replaceExact(value, known) : value;
+}
+
+// Diagnostics only (stderr, error text): the known credentials and anything
+// that looks like one. Never applied to conversation content.
 export function redact(value, secrets = []) {
   if (typeof value === "string") {
     let result = value;

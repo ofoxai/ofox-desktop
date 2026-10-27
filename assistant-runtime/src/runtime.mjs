@@ -1,6 +1,6 @@
 import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
-import { errorMessage, modelForOfox, redact } from "./security.mjs";
+import { errorMessage, modelForOfox, scrubSecrets } from "./security.mjs";
 
 // Side-effect-free tools that may still run after another operation's outcome
 // became unknown. The chat-only runtime registers no tools yet.
@@ -85,6 +85,14 @@ function networkFailure(error) {
     sent: !(causes.length > 0 && causes.every(beforeConnecting)),
     code: causes[0]?.code,
   };
+}
+
+// A model message is conversation content; its failure text is a diagnostic.
+function safeMessage(message, secrets) {
+  const safe = scrubSecrets(message, secrets);
+  return typeof safe?.errorMessage === "string"
+    ? { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) }
+    : safe;
 }
 
 function knownPrice(value) {
@@ -189,7 +197,7 @@ function projection(manager, secrets = []) {
                 usageCoverage: usageCoverage(entry.usage),
                 pricingKnown: false,
               };
-        return redact(
+        return scrubSecrets(
           {
             id: entry.id,
             parentId: entry.parentId,
@@ -210,7 +218,7 @@ function projection(manager, secrets = []) {
       }
       const message = entry.message;
       const marker = markerFor(entry);
-      const projected = redact(
+      const projected = scrubSecrets(
         {
           id: entry.id,
           parentId: entry.parentId,
@@ -232,7 +240,10 @@ function projection(manager, secrets = []) {
           active: active.has(entry.id),
           timestamp: message.timestamp ?? Date.parse(entry.timestamp),
           stopReason: message.stopReason,
-          errorMessage: message.errorMessage,
+          errorMessage:
+            message.errorMessage === undefined
+              ? undefined
+              : errorMessage(message.errorMessage, secrets),
           errorStatus: message.errorStatus,
           errorKind: message.errorKind,
           errorCode: message.errorCode,
@@ -298,7 +309,7 @@ export class AssistantRuntime {
       runId: context.params.runId,
       operationId: context.params.operationId,
       type,
-      data: redact(data, [...this.secrets]),
+      data: scrubSecrets(data, [...this.secrets]),
     });
   }
 
@@ -394,11 +405,11 @@ export class AssistantRuntime {
           this.notify(context, "tool_start", { name, toolCallId, args });
           try {
             const result = await execute(
-              redact(args, [...this.secrets]),
+              scrubSecrets(args, [...this.secrets]),
               signal,
               toolCallId,
             );
-            const safe = redact(result, [...this.secrets]);
+            const safe = scrubSecrets(result, [...this.secrets]);
             this.notify(context, "tool_end", {
               name,
               toolCallId,
@@ -469,7 +480,13 @@ export class AssistantRuntime {
       allowLocalGateway: params.allowLocalGateway,
     });
     const apiKey = params.apiKey;
-    this.secrets.add(apiKey);
+    // Every credential of this run: its key, and a key the gateway refused
+    // earlier in the same run. Conversation content loses exactly these.
+    const secrets = [
+      apiKey,
+      ...(Array.isArray(params.knownSecrets) ? params.knownSecrets : []),
+    ].filter((secret) => typeof secret === "string" && secret.length > 0);
+    for (const secret of secrets) this.secrets.add(secret);
     const context = {
       params,
       abort: new AbortController(),
@@ -520,11 +537,11 @@ export class AssistantRuntime {
       }
       context.rejectedInput = {
         manager,
-        original: redact(
+        original: scrubSecrets(
           params.regenerateEntryId
             ? contentText(branchUser.content)
             : (params.prompt ?? ""),
-          [apiKey],
+          secrets,
         ),
       };
       const settings = SettingsManager.inMemory({
@@ -569,7 +586,7 @@ export class AssistantRuntime {
         const coverage = usageCoverage(usage);
         manager.appendCustomEntry(
           "ofox-desktop-usage",
-          redact(
+          scrubSecrets(
             {
               runId: params.runId,
               operationId: params.operationId,
@@ -590,7 +607,7 @@ export class AssistantRuntime {
                 pricingKnown: params.model.pricingKnown === true,
               },
             },
-            [apiKey],
+            secrets,
           ),
         );
       };
@@ -634,27 +651,34 @@ export class AssistantRuntime {
       modelRuntime.streamSimple = (target, transcript, options) => {
         const summaryRequest = options?.sessionId !== manager.getSessionId();
         const outcome = {};
-        const source = originalStream(target, redact(transcript, [apiKey]), {
-          ...options,
-          maxRetries: 0,
-          timeoutMs: 900000,
-          fetch: (input, init) => safeFetch(input, init, outcome),
-          env: {},
-          headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
-          identity: { attribution: { name: "Ofox Desktop" } },
-        });
+        const source = originalStream(
+          target,
+          scrubSecrets(transcript, secrets),
+          {
+            ...options,
+            maxRetries: 0,
+            timeoutMs: 900000,
+            fetch: (input, init) => safeFetch(input, init, outcome),
+            env: {},
+            headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
+            identity: { attribution: { name: "Ofox Desktop" } },
+          },
+        );
         const filtered = new AssistantMessageEventStream();
         (async () => {
           try {
             for await (const event of source) {
-              const safe = redact(event, [apiKey]);
+              let safe = scrubSecrets(event, secrets);
               // Pi keeps the failed message of the error event.
               if (safe.type === "error" && safe.error)
-                markFailure(safe.error, outcome);
+                safe = {
+                  ...safe,
+                  error: markFailure(safeMessage(safe.error, secrets), outcome),
+                };
               filtered.push(safe);
             }
             const result = markFailure(
-              redact(await source.result(), [apiKey]),
+              safeMessage(await source.result(), secrets),
               outcome,
             );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
@@ -669,7 +693,7 @@ export class AssistantRuntime {
               content: [],
               timestamp: Date.now(),
               stopReason: "error",
-              errorMessage: errorMessage(error, [apiKey]),
+              errorMessage: errorMessage(error, secrets),
               usage: {
                 input: 0,
                 output: 0,
@@ -694,13 +718,13 @@ export class AssistantRuntime {
       };
       const originalComplete = modelRuntime.completeSimple.bind(modelRuntime);
       modelRuntime.completeSimple = async (target, transcript, options) =>
-        redact(
-          await originalComplete(target, redact(transcript, [apiKey]), {
+        safeMessage(
+          await originalComplete(target, scrubSecrets(transcript, secrets), {
             ...options,
             maxRetries: 0,
             fetch: safeFetch,
           }),
-          [apiKey],
+          secrets,
         );
       const customTools = this.tools(context, model);
       const roleText = systemPrompt(customTools);
@@ -719,14 +743,14 @@ export class AssistantRuntime {
         extensionFactories: [
           (pi) => {
             pi.on("message_end", (event) => ({
-              message: redact(event.message, [apiKey]),
+              message: safeMessage(event.message, secrets),
             }));
             pi.on("context_with_system", (event) => ({
-              messages: redact(event.messages, [apiKey]),
+              messages: scrubSecrets(event.messages, secrets),
             }));
             pi.on("tool_result", (event) => ({
-              content: redact(event.content, [apiKey]),
-              details: redact(event.details, [apiKey]),
+              content: scrubSecrets(event.content, secrets),
+              details: scrubSecrets(event.details, secrets),
             }));
             pi.on("tool_call", () =>
               context.unknownOutcome || context.abort.signal.aborted
@@ -760,15 +784,20 @@ export class AssistantRuntime {
       session.agent.toolExecution = "sequential";
       await session.bindExtensions({
         onError: (event) => {
-          throw new Error(errorMessage(event.error, [apiKey]));
+          throw new Error(errorMessage(event.error, secrets));
         },
       });
       let pendingText = "";
       let pendingThinking = "";
-      const retain = Math.max(apiKey.length - 1, 64);
+      // Hold back a tail long enough to hold any credential split across
+      // deltas until the rest of it arrives and it can be replaced whole.
+      const retain = Math.max(
+        64,
+        ...secrets.map((secret) => secret.length - 1),
+      );
       const flush = (type, final = false) => {
         const source = type === "text_delta" ? pendingText : pendingThinking;
-        const safe = redact(source, [apiKey]);
+        const safe = scrubSecrets(source, secrets);
         const length = final ? safe.length : Math.max(0, safe.length - retain);
         if (length)
           this.notify(context, type, { delta: safe.slice(0, length) });
@@ -816,19 +845,19 @@ export class AssistantRuntime {
       context.abort.signal.throwIfAborted();
       if (compactOnly)
         await session.compact(
-          redact(
+          scrubSecrets(
             params.instructions ??
               "Preserve the user's requirements, decisions and unfinished work.",
-            [apiKey],
+            secrets,
           ),
         );
       else {
         // Regenerate resends the native user turn, including its images.
-        const prompt = redact(
+        const prompt = scrubSecrets(
           params.regenerateEntryId
             ? contentText(branchUser.content)
             : (params.prompt ?? ""),
-          [apiKey],
+          secrets,
         );
         const images =
           params.regenerateEntryId && Array.isArray(branchUser.content)
@@ -845,7 +874,7 @@ export class AssistantRuntime {
         await session.prompt(prompt, { images, expandPromptTemplates: false });
       }
       await session.waitForIdle();
-      const result = projection(manager, [apiKey]);
+      const result = projection(manager, secrets);
       const last = result.entries
         .filter((entry) => entry.active && entry.role === "assistant")
         .at(-1);
@@ -867,7 +896,7 @@ export class AssistantRuntime {
       this.notify(context, "run_end", { status: result.status });
       return result;
     } catch (error) {
-      const message = errorMessage(error, [apiKey]);
+      const message = errorMessage(error, secrets);
       if (!compactOnly && context.rejectedInput && !context.turnStarted) {
         // Preserve failed input in native history before any paid request.
         const { manager, original } = context.rejectedInput;
@@ -902,7 +931,7 @@ export class AssistantRuntime {
           timestamp: Date.now(),
         });
         const rejected = {
-          ...projection(manager, [apiKey]),
+          ...projection(manager, secrets),
           status: context.abort.signal.aborted ? "stopped" : "error",
           errorMessage: message,
           errorKind: "not_sent",

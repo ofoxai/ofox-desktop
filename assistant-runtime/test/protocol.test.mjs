@@ -180,6 +180,47 @@ test(
 );
 
 test(
+  "private stdio frames carry conversation text byte for byte without the key",
+  { timeout: 20000 },
+  async (t) => {
+    const token = "synthetic-stdio-lookalike-credential";
+    const lookalikes =
+      'OpenAI(api_key=os.environ["OPENAI_API_KEY"]) password = input("Password: ") Authorization: Bearer YOUR_TOKEN';
+    const fixture = await createStdioAcceptance(t, (_request, response) =>
+      writeModelStream(response, `${lookalikes} ${token}`),
+    );
+    const wire = fixture.spawnSidecar();
+    const params = fixture.params("lookalike", token, {
+      prompt: `${lookalikes} ${token}`,
+    });
+    const result = await wire.start("run", params);
+    assert.equal(result.status, "completed");
+    assert.deepEqual(
+      result.entries.map((entry) => entry.content),
+      [`${lookalikes} [REDACTED]`, `${lookalikes} [REDACTED]`],
+    );
+    assert.equal(
+      wire.messages
+        .filter(
+          (message) =>
+            message.method === "event" && message.params.type === "text_delta",
+        )
+        .map((message) => message.params.data.delta)
+        .join(""),
+      `${lookalikes} [REDACTED]`,
+    );
+    assert.equal(
+      JSON.stringify(fixture.requests[0].body.messages).includes(
+        JSON.stringify(`${lookalikes} [REDACTED]`).slice(1, -1),
+      ),
+      true,
+    );
+    await wire.close();
+    await fixture.assertClean([token]);
+  },
+);
+
+test(
   "private stdio stop checks the operation and preserves a reloadable partial turn",
   { timeout: 20000 },
   async (t) => {
