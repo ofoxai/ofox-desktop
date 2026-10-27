@@ -92,7 +92,8 @@
     "switched": "{{tools}} now use {{account}}'s credits.",
     "switchedToCurrent": "{{tools}} now use this account's credits.",
     "switchFailed": "{{tool}} still uses the previous account's API key: {{message}}",
-    "listSeparator": ", "
+    "listSeparator": ", ",
+    "assistantNotRevoked": "The assistant's API key could not be stopped on the server (you may be offline). It will be deleted automatically later."
   },
   "connectivity": {
     "insufficientCreditsTitle": "Out of credits",
@@ -276,7 +277,8 @@
       "tools": "Tools",
       "sessions": "Sessions",
       "usage": "Usage",
-      "library": "Library"
+      "library": "Library",
+      "assistant": "Assistant"
     },
     "refresh": "Refresh",
     "settings": "Settings",
@@ -4867,5 +4869,94 @@
     "unavailable": "This backend does not provide the grouped request dashboard yet.",
     "keyboardChart": "Use the arrow keys to inspect time points, Enter to select a day, and Escape to close the tooltip.",
     "totalTokens": "Total tokens"
+  },
+  "assistant": {
+    "errors": {
+      "generic": "The assistant ran into a problem. Please try again.",
+      "signInRequired": "Sign in to Ofox to use the assistant.",
+      "keyUnavailable": "The assistant's API key couldn't be prepared. Check your connection and try again.",
+      "signingOut": "Signing out. New assistant tasks are no longer accepted.",
+      "shuttingDown": "The app is closing. New assistant tasks are no longer accepted.",
+      "identityChanged": "The account or region changed. Please try again.",
+      "unknownApex": "The selected Ofox region isn't recognized. Choose a region in Settings and try again.",
+      "sessionLoading": "The conversation is still loading. Please try again shortly.",
+      "sessionBusy": "This conversation is still replying. Wait for it to finish or stop it first.",
+      "sessionMissing": "This conversation no longer exists. Refresh the list and try again.",
+      "sessionUnreadable": "This conversation's saved file is damaged and can't be opened.",
+      "messageMissing": "That message can no longer be edited or regenerated. Refresh the conversation.",
+      "invalidMessage": "This message can't be sent. Check it and try again.",
+      "messageTooLarge": "This message is too long. Shorten it and try again.",
+      "titleTooLong": "The title is too long. Use a shorter one.",
+      "modelRequired": "Choose a model first.",
+      "modelUnavailable": "This model isn't available right now. Choose another model.",
+      "catalogUnavailable": "The model list couldn't be loaded. Check your connection and try again.",
+      "visionModelRequired": "This content requires image understanding. Switch to a model that supports images and retry. Your message is kept.",
+      "modelRequestFailed": "The model service couldn't complete the reply. Please try again.",
+      "runTimeout": "The reply took too long and was stopped. Please try again.",
+      "stopped": "The reply was stopped.",
+      "runtime": "The assistant runtime stopped unexpectedly. Please try again.",
+      "storage": "Local assistant data couldn't be read or saved. Check disk space and permissions.",
+      "historyMissing": "Part of this conversation's local history is missing. Start a new conversation; existing messages are kept."
+    },
+    "title": "Ofox Assistant",
+    "loginRequired": "Sign in to Ofox to use the built-in assistant.",
+    "conversations": "Conversations",
+    "newConversation": "New conversation",
+    "search": "Search conversations",
+    "noConversations": "No conversations yet",
+    "noMatches": "No matching conversations",
+    "untitled": "New conversation",
+    "unreadable": "Can't be read",
+    "boundary": "Replies come from the model you choose. The assistant can't open files, browse the web or change your settings.",
+    "chat": "Assistant conversation",
+    "model": "Choose model",
+    "searchModels": "Search models",
+    "contextWindow": "Context {{count}} tokens",
+    "modelPrice": "Input ${{input}} / output ${{output}} per million tokens",
+    "modelUnavailable": "Models are unavailable right now. You can still read your conversations.",
+    "runtimeUnavailable": "Assistant runtime unavailable",
+    "runtimeUnavailableHint": "Check that the app is installed correctly, then retry.",
+    "loading": "Loading…",
+    "running": "Replying…",
+    "typing": "Thinking…",
+    "welcome": "How can I help?",
+    "description": "Ask questions, write, translate and analyze text.",
+    "startHint": "Start a new conversation, or type your question below.",
+    "message": "Message",
+    "composerPlaceholder": "Type a message…",
+    "send": "Send",
+    "sendHint": "Enter to send · Shift+Enter for a new line",
+    "stop": "Stop",
+    "stopped": "Stopped",
+    "failed": "Failed",
+    "keyMissingHint": "Your first message creates a dedicated Ofox API key for the assistant.",
+    "rename": "Rename conversation",
+    "renameDescription": "Give this conversation a name you can find easily.",
+    "conversationTitle": "Conversation title",
+    "editMessage": "Edit and resend",
+    "editPreservesOriginal": "Resending keeps the original message and reply as a previous version.",
+    "resend": "Resend",
+    "regenerate": "Regenerate",
+    "previousVersion": "View previous version",
+    "reasoning": "Reasoning",
+    "compacting": "Organizing conversation context…",
+    "roles": {
+      "user": "You",
+      "assistant": "Assistant"
+    },
+    "starters": {
+      "summary": {
+        "label": "Summarize content",
+        "prompt": "Please summarize the following content, highlight the key points, and list any action items:\n\n"
+      },
+      "writing": {
+        "label": "Polish writing",
+        "prompt": "Please polish the following text to make it clearer and more natural:\n\n"
+      },
+      "explain": {
+        "label": "Explain a question",
+        "prompt": "Please explain the following question in plain language and give an example:\n\n"
+      }
+    }
   }
 }

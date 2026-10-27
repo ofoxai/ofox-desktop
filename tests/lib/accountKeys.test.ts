@@ -18,7 +18,14 @@ const t = i18n.t.bind(i18n);
 describe("logging out", () => {
   it("says the bound tools are paused until the next sign-in", () => {
     toast.success.mockClear();
-    announceLogout({ stopped: ["claude", "codex"], notRevoked: [] }, t);
+    announceLogout(
+      {
+        stopped: ["claude", "codex"],
+        notRevoked: [],
+        assistantNotRevoked: false,
+      },
+      t,
+    );
     expect(toast.success).toHaveBeenCalledWith(
       "已退出登录。已绑定的工具暂停使用，重新登录后自动恢复。",
     );
@@ -26,7 +33,14 @@ describe("logging out", () => {
 
   it("says a key not stopped on the server is deleted at the next sign-in", () => {
     toast.warning.mockClear();
-    announceLogout({ stopped: ["claude", "codex"], notRevoked: ["codex"] }, t);
+    announceLogout(
+      {
+        stopped: ["claude", "codex"],
+        notRevoked: ["codex"],
+        assistantNotRevoked: false,
+      },
+      t,
+    );
     expect(toast.warning).toHaveBeenCalledWith(
       "Codex 的 API Key 没能在服务器上停用（可能没联网），暂时还会用这个账号的额度。下次用这个账号在本机登录时会自动删除，也可以现在去 Ofox 控制台删除。",
       expect.anything(),
@@ -35,8 +49,32 @@ describe("logging out", () => {
 
   it("keeps the plain message when nothing was bound", () => {
     toast.success.mockClear();
-    announceLogout({ stopped: [], notRevoked: [] }, t);
+    announceLogout(
+      { stopped: [], notRevoked: [], assistantNotRevoked: false },
+      t,
+    );
     expect(toast.success).toHaveBeenCalledWith("已退出登录");
+  });
+
+  it("says the assistant's key could not be stopped and is removed later", () => {
+    toast.warning.mockClear();
+    announceLogout(
+      { stopped: [], notRevoked: [], assistantNotRevoked: true },
+      t,
+    );
+    expect(toast.warning).toHaveBeenCalledWith(
+      "助手的 API Key 没能在服务器上停用（可能没联网），之后会自动删除。",
+      expect.anything(),
+    );
+  });
+
+  it("says nothing about the assistant's key when it was stopped", () => {
+    toast.warning.mockClear();
+    announceLogout(
+      { stopped: ["claude"], notRevoked: [], assistantNotRevoked: false },
+      t,
+    );
+    expect(toast.warning).not.toHaveBeenCalled();
   });
 });
 

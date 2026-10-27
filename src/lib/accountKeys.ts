@@ -24,6 +24,9 @@ export function announceLogout(report: LogoutReport, t: TFunction) {
       { duration: 15_000 },
     );
   }
+  if (report.assistantNotRevoked) {
+    toast.warning(t("accountKeys.assistantNotRevoked"), { duration: 15_000 });
+  }
 }
 
 /** 登录后说明哪些工具改用了当前账号的额度、哪些没能自动换。 */

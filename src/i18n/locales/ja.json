@@ -92,7 +92,8 @@
     "switched": "{{tools}} は {{account}} の残高を使うように切り替えました。",
     "switchedToCurrent": "{{tools}} は現在のアカウントの残高を使うように切り替えました。",
     "switchFailed": "{{tool}} はまだ以前のアカウントの API キーを使っています：{{message}}",
-    "listSeparator": "、"
+    "listSeparator": "、",
+    "assistantNotRevoked": "アシスタントの API キーをサーバーで停止できませんでした（オフラインの可能性があります）。後で自動的に削除されます。"
   },
   "connectivity": {
     "insufficientCreditsTitle": "残高不足",
@@ -276,7 +277,8 @@
       "tools": "ツール",
       "sessions": "セッション",
       "usage": "使用量",
-      "library": "リソース"
+      "library": "リソース",
+      "assistant": "アシスタント"
     },
     "refresh": "再読み込み",
     "settings": "設定",
@@ -4867,5 +4869,94 @@
     "unavailable": "このバックエンドはリクエストのグループ別パネルに未対応です。",
     "keyboardChart": "左右キーで時刻を確認し、Enter で日付を選択、Escape でヒントを閉じます。",
     "totalTokens": "合計 Token"
+  },
+  "assistant": {
+    "errors": {
+      "generic": "アシスタントで問題が発生しました。もう一度お試しください。",
+      "signInRequired": "アシスタントを使うには Ofox にログインしてください。",
+      "keyUnavailable": "アシスタントの API キーを準備できませんでした。接続を確認してもう一度お試しください。",
+      "signingOut": "ログアウト中です。新しいアシスタントタスクの受付を停止しました。",
+      "shuttingDown": "アプリを終了中です。新しいアシスタントタスクの受付を停止しました。",
+      "identityChanged": "アカウントまたはリージョンが変わりました。もう一度お試しください。",
+      "unknownApex": "選択中の Ofox リージョンを認識できません。設定でリージョンを選んでからもう一度お試しください。",
+      "sessionLoading": "会話を読み込み中です。少し待ってからもう一度お試しください。",
+      "sessionBusy": "この会話はまだ返信中です。完了を待つか、先に停止してください。",
+      "sessionMissing": "この会話はもう存在しません。一覧を更新してからもう一度お試しください。",
+      "sessionUnreadable": "この会話の保存ファイルが破損しているため開けません。",
+      "messageMissing": "このメッセージはもう編集や再生成ができません。会話を更新してください。",
+      "invalidMessage": "このメッセージは送信できません。内容を確認してもう一度お試しください。",
+      "messageTooLarge": "メッセージが長すぎます。短くしてもう一度お試しください。",
+      "titleTooLong": "タイトルが長すぎます。短くしてください。",
+      "modelRequired": "先にモデルを選んでください。",
+      "modelUnavailable": "このモデルは現在利用できません。別のモデルを選んでください。",
+      "catalogUnavailable": "モデル一覧を読み込めませんでした。接続を確認してもう一度お試しください。",
+      "visionModelRequired": "この内容には画像理解が必要です。画像対応モデルに切り替えて再試行してください。メッセージは保持されます。",
+      "modelRequestFailed": "モデルサービスが返信を完了できませんでした。もう一度お試しください。",
+      "runTimeout": "返信に時間がかかりすぎたため停止しました。もう一度お試しください。",
+      "stopped": "返信を停止しました。",
+      "runtime": "アシスタントの実行環境が予期せず停止しました。もう一度お試しください。",
+      "storage": "ローカルのアシスタントデータを読み書きできません。ディスクの空き容量と権限を確認してください。",
+      "historyMissing": "この会話のローカル履歴の一部が見つかりません。新しい会話を始めてください。既存のメッセージは保持されます。"
+    },
+    "title": "Ofox アシスタント",
+    "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
+    "conversations": "会話",
+    "newConversation": "新しい会話",
+    "search": "会話を検索",
+    "noConversations": "まだ会話がありません",
+    "noMatches": "一致する会話はありません",
+    "untitled": "新しい会話",
+    "unreadable": "読み取れません",
+    "boundary": "返信は選んだモデルが生成します。アシスタントはファイルを開いたり、Web を検索したり、設定を変更したりできません。",
+    "chat": "アシスタントとの会話",
+    "model": "モデルを選択",
+    "searchModels": "モデルを検索",
+    "contextWindow": "コンテキスト {{count}} トークン",
+    "modelPrice": "100 万トークンあたり 入力 ${{input}} / 出力 ${{output}}",
+    "modelUnavailable": "モデルは現在利用できません。既存の会話は引き続き閲覧できます。",
+    "runtimeUnavailable": "アシスタントの実行環境を利用できません",
+    "runtimeUnavailableHint": "アプリが正しくインストールされているか確認してから、再試行してください。",
+    "loading": "読み込み中…",
+    "running": "返信中…",
+    "typing": "考え中…",
+    "welcome": "何をお手伝いしましょうか？",
+    "description": "質問、文章作成、翻訳、テキストの分析ができます。",
+    "startHint": "新しい会話を始めるか、下に質問を入力してください。",
+    "message": "メッセージ",
+    "composerPlaceholder": "メッセージを入力…",
+    "send": "送信",
+    "sendHint": "Enter で送信 · Shift+Enter で改行",
+    "stop": "停止",
+    "stopped": "停止済み",
+    "failed": "失敗",
+    "keyMissingHint": "最初のメッセージを送ると、アシスタント専用の Ofox API キーが作成されます。",
+    "rename": "会話の名前を変更",
+    "renameDescription": "見つけやすい名前を付けてください。",
+    "conversationTitle": "会話のタイトル",
+    "editMessage": "編集して再送信",
+    "editPreservesOriginal": "再送信しても、元のメッセージと返信は以前のバージョンとして残ります。",
+    "resend": "再送信",
+    "regenerate": "再生成",
+    "previousVersion": "以前のバージョンを表示",
+    "reasoning": "思考過程",
+    "compacting": "会話のコンテキストを整理中…",
+    "roles": {
+      "user": "あなた",
+      "assistant": "アシスタント"
+    },
+    "starters": {
+      "summary": {
+        "label": "内容を要約",
+        "prompt": "以下の内容を要約し、要点を示して、対応が必要な事項を挙げてください：\n\n"
+      },
+      "writing": {
+        "label": "文章を推敲",
+        "prompt": "以下の文章を、より分かりやすく自然になるよう推敲してください：\n\n"
+      },
+      "explain": {
+        "label": "質問を解説",
+        "prompt": "以下の質問を分かりやすい言葉で説明し、例を挙げてください：\n\n"
+      }
+    }
   }
 }
