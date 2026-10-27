@@ -18,6 +18,8 @@ const HOST_ONLY = new Set([
   "assistant_retry_with_new_key",
   // The host's reply to a runtime tool call.
   "assistant_unknown_tool",
+  // The prefix a blocked turn's runtime code is matched by, not a code.
+  "assistant_attachment_",
 ]);
 
 /** Codes the renderer raises itself. */

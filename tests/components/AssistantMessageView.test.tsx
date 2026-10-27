@@ -1,10 +1,13 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantMessageView } from "@/components/assistant/AssistantMessageView";
-import type { AssistantMessage } from "@/lib/api/assistant";
+import type {
+  AssistantAttachment,
+  AssistantMessage,
+} from "@/lib/api/assistant";
 
 const markdown = vi.hoisted(() => vi.fn());
 vi.mock("@/components/sessions/SessionMarkdown", () => ({
@@ -46,6 +49,36 @@ function view(
     />
   );
 }
+
+const file = (
+  over: Partial<AssistantAttachment> = {},
+): AssistantAttachment => ({
+  id: "f1",
+  name: "notes.txt",
+  mimeType: "text/plain",
+  sizeBytes: 1200,
+  status: "ready",
+  reason: null,
+  previewUrl: null,
+  details: null,
+  ...over,
+});
+const scanned = file({
+  id: "f2",
+  name: "scan.pdf",
+  mimeType: "application/pdf",
+  status: "partial",
+  reason: "assistant_attachment_partial",
+  details: { format: "pdf", pageCount: 3, pagesWithoutText: [3] },
+});
+const locked = file({
+  id: "f3",
+  name: "locked.pdf",
+  mimeType: "application/pdf",
+  status: "unreadable",
+  reason: "assistant_attachment_unreadable",
+  details: { format: "pdf", reason: "password_protected" },
+});
 
 function transcript(partial: string) {
   return (
@@ -168,5 +201,90 @@ describe("assistant transcript rendering", () => {
     expect(screen.getByText("Stopped")).toBeVisible();
     rendered.rerender(view({ content: "", status: "error" }));
     expect(screen.getByText("Failed")).toBeVisible();
+  });
+});
+
+describe("files sent with a question", () => {
+  it("shows the files a question was sent with, and that turn's outcome", () => {
+    render(
+      view({
+        role: "user",
+        content: "Compare these",
+        attachments: [file(), scanned],
+      }),
+    );
+    const files = screen.getByRole("list", { name: "Attached files" });
+    const [notes, scan] = within(files).getAllByRole("listitem");
+    expect(notes).toHaveTextContent("notes.txt");
+    expect(scan).toHaveTextContent(
+      "Page 3 has no text and wasn't read. Choose a model that can read images to read it.",
+    );
+    expect(document.body).not.toHaveTextContent("assistant_");
+  });
+
+  it("shows a question sent with files alone without an empty bubble", () => {
+    render(view({ role: "user", content: "", attachments: [file()] }));
+    expect(screen.getByRole("list", { name: "Attached files" })).toBeVisible();
+    expect(markdown).not.toHaveBeenCalled();
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+  });
+
+  it("keeps the files of an edited question and says so", async () => {
+    const onEdit = vi.fn(async () => true);
+    render(
+      view(
+        { role: "user", content: "Read it", attachments: [file()] },
+        { onEdit },
+      ),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    const files = screen.getByRole("list", { name: "Attached files" });
+    expect(files).toHaveTextContent("notes.txt");
+    expect(
+      screen.getByText("These files are sent again with your edit."),
+    ).toBeVisible();
+    await userEvent.clear(
+      screen.getByRole("textbox", { name: "Edit and resend" }),
+    );
+    // The files alone can be sent again.
+    await userEvent.click(screen.getByRole("button", { name: "Resend" }));
+    expect(onEdit).toHaveBeenCalledWith("");
+  });
+
+  it("says an edit leaves out the files that can't be read", async () => {
+    render(
+      view({
+        role: "user",
+        content: "Read both",
+        attachments: [file(), locked],
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    expect(
+      screen.getByText(
+        "These files are sent again with your edit. Files that can't be read are left out.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("list", { name: "Attached files" }),
+    ).toHaveTextContent("This PDF is password-protected.");
+    expect(screen.getByRole("button", { name: "Resend" })).toBeEnabled();
+  });
+
+  it("cannot resend an edit when none of its files can be read", async () => {
+    render(view({ role: "user", content: "Read it", attachments: [locked] }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    expect(
+      screen.getByText(
+        "None of this message's files can be read, so it can't be resent. Send a new message instead.",
+      ),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
   });
 });

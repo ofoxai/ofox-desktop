@@ -56,6 +56,25 @@ describe("assistant commands", () => {
     });
   });
 
+  it("opens the file picker for one conversation and returns the files it imported", async () => {
+    const file = {
+      id: "f1",
+      name: "notes.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      reason: null,
+      previewUrl: null,
+      details: null,
+    };
+    invoke.mockResolvedValue([file]);
+    const files = await assistantApi.pickAttachments("s");
+    expect(invoke).toHaveBeenCalledWith("assistant_pick_attachments", {
+      sessionId: "s",
+    });
+    expect(files).toEqual([file]);
+  });
+
   it("stops one run by session, run and operation", async () => {
     invoke.mockResolvedValue(undefined);
     await assistantApi.stop("s", "r", "o");
@@ -122,6 +141,32 @@ describe("assistant error messages", () => {
       { code: "assistant_model_request_failed" },
       "assistant.errors.modelRequestFailed",
     ],
+    ["assistant_attachment_too_many", "assistant.errors.attachmentTooMany"],
+    ["assistant_attachment_too_large", "assistant.errors.attachmentTooLarge"],
+    [
+      "assistant_attachment_total_too_large",
+      "assistant.errors.attachmentTotalTooLarge",
+    ],
+    [
+      "assistant_attachment_unsupported",
+      "assistant.errors.attachmentUnsupported",
+    ],
+    [
+      { code: "assistant_attachment_unreadable" },
+      "assistant.errors.attachmentUnreadable",
+    ],
+    [
+      "assistant_attachment_write_failed",
+      "assistant.errors.attachmentWriteFailed",
+    ],
+    [
+      "assistant_attachment_dialog_failed",
+      "assistant.errors.attachmentDialogFailed",
+    ],
+    [
+      { code: "assistant_vision_model_required" },
+      "assistant.errors.visionModelRequired",
+    ],
   ])("maps %o to its own message", (error, key) => {
     expect(assistantErrorKey(error)).toBe(key);
   });
@@ -163,6 +208,12 @@ describe("assistant error messages", () => {
     ["rateLimited", /wait/i],
     ["networkError", /connection/i],
     ["keyRejected", /sign (out|in)/i],
+    ["attachmentTooMany", /up to 10 at a time/i],
+    ["attachmentTooLarge", /up to 25 MB/i],
+    ["attachmentTotalTooLarge", /new conversation/i],
+    ["attachmentUnsupported", /images.*PDFs.*text files/i],
+    ["attachmentUnreadable", /attach it again/i],
+    ["visionModelRequired", /choose a model that can read images/i],
   ])("tells the user what to do about %s", (message, action) => {
     expect(
       en.assistant.errors[message as keyof typeof en.assistant.errors],
