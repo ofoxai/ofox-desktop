@@ -632,7 +632,8 @@ fn key_name_on_this_host(label: &str) -> String {
 // [`Slot::AssistantKey`]，记录在 settings.json `ofoxAssistantKey`。第一次发消息时
 // 才签发，退出登录时吊销，换账号后丢掉；切换区域不动（同一把 key 两个区域都能用）。
 
-/// 签发助手 key 时串行：两次并发的首次发送只签一把。
+/// 签发、吊销、对账助手 key 时串行：两次并发的首次发送只签一把，退出登录也会
+/// 等正在签的那把落盘后再吊销它。
 static ASSISTANT_KEY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 助手 key 在本机的状态（不访问网络，也不读钥匙串）。
@@ -723,6 +724,105 @@ pub fn assistant_key_status(current: Option<&KeyOwner>) -> AssistantKeyStatus {
     match settings::get_assistant_key_meta() {
         Some(meta) if meta.usable_by(current) => AssistantKeyStatus::Ready,
         _ => AssistantKeyStatus::Missing,
+    }
+}
+
+/// 退出登录前调用（这时登录还有效）：在服务器上吊销助手 key，本地清掉原文、记录
+/// 标为停用。吊销不了（例如没联网）就排队，等这个账号下次在这台电脑上登录时删。
+/// 返回服务器上是否已吊销；没有要吊销的 key 也算。
+pub async fn stop_assistant_key_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> bool {
+    let _serial = ASSISTANT_KEY_LOCK.lock().await;
+    let (bearer, current) = {
+        let manager = manager.read().await;
+        (
+            manager.get_valid_access_token().await.ok(),
+            manager.current_key_owner().await,
+        )
+    };
+    stop_assistant_key_with(&default_store(), current.as_ref(), |key_id| async move {
+        match bearer {
+            Some(bearer) => delete_remote(&key_id, &bearer).await,
+            None => Err(ApiKeyError::Unauthorized("signed out".into())),
+        }
+    })
+    .await
+}
+
+/// [`stop_assistant_key_for_logout`] 的主体；删 key 的请求由调用方传入，测试不走网络。
+async fn stop_assistant_key_with<F, Fut>(
+    store: &Arc<dyn SecretStore>,
+    current: Option<&KeyOwner>,
+    delete: F,
+) -> bool
+where
+    F: FnOnce(String) -> Fut,
+    Fut: Future<Output = Result<(), ApiKeyError>>,
+{
+    let Some(meta) = settings::get_assistant_key_meta().filter(|meta| !meta.revoked) else {
+        return true;
+    };
+    let revoked = match delete(meta.key_id.clone()).await {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!(
+                "[ofox_api_keys] could not delete the assistant key {}: {e:?}",
+                meta.key_id
+            );
+            queue_deletion(KeyToDelete {
+                key_id: meta.key_id.clone(),
+                owner: meta.owner.clone().or_else(|| current.cloned()),
+            });
+            false
+        }
+    };
+    if let Err(e) = store.clear(Slot::AssistantKey) {
+        log::warn!("[ofox_api_keys] clear the assistant key failed: {e}");
+    }
+    if let Err(e) = settings::set_assistant_key_meta(Some(AssistantKeyMeta {
+        revoked: true,
+        ..meta
+    })) {
+        log::warn!("[ofox_api_keys] mark the assistant key stopped failed: {e:?}");
+    }
+    revoked
+}
+
+/// 登录后、启动时调用：助手 key 不是当前账号能用的（别的账号的，或退出登录时已
+/// 停用）就丢掉，下次发送时再签；别的账号还能用的那把排队等它的账号删。切换区域
+/// 只退出登录、不停 key，同一账号登录回来照旧用。没记账号的记为当前账号，同
+/// [`adopt_unowned_keys`]。
+pub async fn reconcile_assistant_key(owner: &KeyOwner) {
+    let _serial = ASSISTANT_KEY_LOCK.lock().await;
+    reconcile_assistant_key_with(&default_store(), owner);
+}
+
+fn reconcile_assistant_key_with(store: &Arc<dyn SecretStore>, owner: &KeyOwner) {
+    let Some(meta) = settings::get_assistant_key_meta() else {
+        return;
+    };
+    if meta.usable_by(Some(owner)) {
+        if meta.owner.is_none() {
+            let adopted = AssistantKeyMeta {
+                owner: Some(owner.clone()),
+                ..meta
+            };
+            if let Err(e) = settings::set_assistant_key_meta(Some(adopted)) {
+                log::warn!("[ofox_api_keys] record owner of the assistant key failed: {e:?}");
+            }
+        }
+        return;
+    }
+    if let Err(e) = store.clear(Slot::AssistantKey) {
+        log::warn!("[ofox_api_keys] clear the assistant key failed: {e}");
+    }
+    if !meta.revoked {
+        queue_deletion(KeyToDelete {
+            key_id: meta.key_id,
+            owner: meta.owner,
+        });
+    }
+    if let Err(e) = settings::set_assistant_key_meta(None) {
+        log::warn!("[ofox_api_keys] forget the assistant key failed: {e:?}");
     }
 }
 
@@ -1379,6 +1479,148 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(assistant_key_status(Some(&a)), AssistantKeyStatus::Missing);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn logging_out_revokes_the_assistant_key_and_forgets_its_secret() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        keep_assistant_key(
+            &store,
+            "sk-of-A",
+            assistant_record("assistant-a", Some(a.clone())),
+        );
+        let attempted = std::sync::Mutex::new(Vec::new());
+
+        let revoked = stop_assistant_key_with(&store, Some(&a), |key_id| {
+            attempted.lock().unwrap().push(key_id.clone());
+            deleted(key_id)
+        })
+        .await;
+
+        assert!(revoked);
+        assert_eq!(*attempted.lock().unwrap(), ["assistant-a"]);
+        assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
+        assert!(settings::get_assistant_key_meta().unwrap().revoked);
+        assert!(settings::list_keys_to_delete().is_empty());
+        assert_eq!(assistant_key_status(Some(&a)), AssistantKeyStatus::Missing);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_assistant_key_not_revoked_at_logout_waits_for_its_account() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        keep_assistant_key(
+            &store,
+            "sk-of-A",
+            assistant_record("assistant-a", Some(a.clone())),
+        );
+
+        let revoked = stop_assistant_key_with(&store, Some(&a), offline).await;
+
+        assert!(!revoked);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("assistant-a", Some(a))]
+        );
+        assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
+        assert!(settings::get_assistant_key_meta().unwrap().revoked);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn logging_out_without_a_live_assistant_key_sends_nothing() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        assert!(stop_assistant_key_with(&store, Some(&a), offline).await);
+
+        settings::set_assistant_key_meta(Some(AssistantKeyMeta {
+            revoked: true,
+            ..assistant_record("assistant-a", Some(a.clone()))
+        }))
+        .unwrap();
+        assert!(stop_assistant_key_with(&store, Some(&a), offline).await);
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn signing_in_as_another_account_drops_the_assistant_key_and_leaves_it_for_its_owner() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let b = owner_of("org_b");
+        keep_assistant_key(
+            &store,
+            "sk-of-B",
+            assistant_record("assistant-b", Some(b.clone())),
+        );
+
+        reconcile_assistant_key_with(&store, &owner_of("org_a"));
+
+        assert_eq!(settings::get_assistant_key_meta(), None);
+        assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("assistant-b", Some(b))]
+        );
+    }
+
+    /// 切换区域只退出登录、不停 key：同一账号登录回来照旧用这把。
+    #[tokio::test]
+    #[serial]
+    async fn signing_in_again_as_the_same_account_keeps_the_assistant_key() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        let record = assistant_record("assistant-a", Some(a.clone()));
+        keep_assistant_key(&store, "sk-of-A", record.clone());
+
+        reconcile_assistant_key_with(&store, &a);
+
+        assert_eq!(settings::get_assistant_key_meta(), Some(record));
+        assert_eq!(
+            store.load(Slot::AssistantKey).unwrap().as_deref(),
+            Some("sk-of-A")
+        );
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn signing_in_after_logout_forgets_the_stopped_assistant_key() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        settings::set_assistant_key_meta(Some(AssistantKeyMeta {
+            revoked: true,
+            ..assistant_record("assistant-a", Some(a.clone()))
+        }))
+        .unwrap();
+
+        reconcile_assistant_key_with(&store, &a);
+
+        assert_eq!(settings::get_assistant_key_meta(), None);
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn an_assistant_key_without_an_owner_is_recorded_for_the_account_signing_in() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(&store, "sk-of-A", assistant_record("assistant-a", None));
+
+        reconcile_assistant_key_with(&store, &owner_of("org_a"));
+
+        assert_eq!(
+            settings::get_assistant_key_meta().unwrap().owner,
+            Some(owner_of("org_a"))
+        );
     }
 
     #[test]
