@@ -1217,12 +1217,11 @@ test("a portable native history can continue, edit and regenerate", async (t) =>
   await runtime.close();
 });
 
-test("legacy configuration and search parameters cannot add tools or replace the general role", async (t) => {
+test("legacy configuration parameters cannot add tools or replace the general role", async (t) => {
   const params = {
     ...(await sandbox(t)),
     kind: "configuration",
     permissionMode: "fullAccess",
-    webSearch: true,
     memory: "Saved memory must not reach the model",
   };
   let body;

@@ -8,11 +8,13 @@ prompt replaces Pi's coding-assistant role with a general chat assistant.
 
 The model receives a tool only when the run enables it: `read_attachment`
 exists only when the conversation has attachments (see
-[Attachments](#attachments)). `tools()` in `src/runtime.mjs` is the extension
-point; tools are built with `wrapTool()` so they share the per-run call limit
-and the unknown-outcome gate. The system prompt describes only what the run
-enables: a tool adds its own sentences through Pi's `promptGuidelines`, so a
-run without attachments mentions no tools, attachments or search.
+[Attachments](#attachments)), `web_search` and `web_fetch` only when the run
+sets `webSearch` (see [Web search](#web-search)). `tools()` in
+`src/runtime.mjs` is the extension point; tools are built with `wrapTool()` so
+they share the per-run call limit and the unknown-outcome gate. The system
+prompt describes only what the run enables: a tool adds its own sentences
+through Pi's `promptGuidelines`, so a run without attachments or web search
+mentions no tools, attachments or search.
 
 ## Prepare and test
 
@@ -74,7 +76,8 @@ takes a trusted absolute `sessionFile`. `run` and `compact` take:
 sessionId, runId, operationId, sessionFile, model, apiKey, knownSecrets?,
 apex (ofox.ai|ofox.io), baseUrl?, allowLocalGateway?, proxy?, prompt,
 attachmentRoot?, attachments?[], selectedAttachmentIds?[], originalPrompt?,
-editEntryId?, regenerateEntryId?, thinkingLevel?, instructions? (compact)
+webSearch?, allowedWebUrls?[], editEntryId?, regenerateEntryId?,
+thinkingLevel?, instructions? (compact)
 ```
 
 `apiKey` is the assistant's own Ofox API key. It is sent only in the
@@ -96,7 +99,8 @@ sidecar gets no proxy environment variables. Requests then use undici
 tunnel through the `http`, `https` or `socks5` proxy unless the target matches
 `noProxy` (`NO_PROXY` syntax). The origin check above applies unchanged. The
 URL may carry the proxy's credentials; it is never logged or echoed, and
-diagnostics drop any `user:password@` part of a URL.
+diagnostics drop any `user:password@` part of a URL. The search server gets
+the same proxy (see [Web search](#web-search)).
 
 `model` contains id, advertised supportedEndpoints, contextWindow,
 maxOutputTokens, inputModalities/supportsImages, reasoning, cost (USD per million
@@ -133,7 +137,8 @@ attachment selection, and can be retried explicitly.
 
 Events are `{method:"event",params:{sessionId,runId,operationId,type,data}}`.
 Types include run_start/attachment/text_delta/thinking_delta/tool_start/
-tool_end/message_end/usage/compaction_start/compaction_end/error/run_end.
+tool_end/message_end/usage/compaction_start/compaction_end/error/run_end
+(`tool_start`/`tool_end` of the web tools: see [Web search](#web-search)).
 Streamed text holds back a tail long enough to replace a key split across
 deltas.
 The host must persist the final RPC projection **before** publishing its UI
@@ -255,5 +260,79 @@ code units) of extracted text per attachment, 20,000 characters per
 pages are at most 2000 pixels per side, 4 megapixels and 5 MiB (PNG, else
 JPEG); no OCR text is invented. PDF.js does not decode an embedded image over
 40 megapixels (a 600-dpi A4 scan has about 35), so a page holding one is not
-rendered rather than sent blank: inline it stays for `read_attachment`, which
-reports `too_large` with `pdf_image` for it. Extracted text is cached per run in a 32 Mi-character LRU.
+rendered rather than sent blank, unless PDF.js stops at another error earlier
+on the same page: inline it stays for `read_attachment`, which reports
+`too_large` with `pdf_image` for it. Extracted text is cached per run in a 32 Mi-character LRU.
+
+## Web search
+
+With `webSearch: true` the run registers `web_search {query}` (1-2000
+characters) and `web_fetch {url}` (`src/search.mjs`). Both are tools of the
+bundled search MCP server ([`search-mcp/`](search-mcp/README.md), shipped as
+`search-mcp/ofox-search-mcp.mjs` next to `runtime/`). The runtime starts it on
+the first call with pi-mcp's `McpClient` + `StdioTransport` (`node`, the bundle
+path as the only argument, `inheritEnv: false`) and stops it when the run
+ends. Its whole environment is `OFOX_ASSISTANT_KEY` (the run's `apiKey`, never
+on the command line), `OFOX_BASE_URL` (`baseUrl`, else `https://api.{apex}`),
+`OFOX_ALLOW_LOCAL_GATEWAY=1` with `allowLocalGateway`, `OFOX_PROXY_URL` and
+`OFOX_NO_PROXY` from `proxy`, and `SystemRoot`, `TEMP`, `TMP` and `PATH` when
+the sidecar has them. The server's own stderr (already redacted) is forwarded
+to the sidecar's stderr.
+
+### Contract for the search host
+
+Run parameters:
+
+- `webSearch` (default off): registers both tools and their prompt guidelines
+  (search only for current or outside information, one paid search per call,
+  cite the sources used as Markdown links). Compaction runs register them too
+  but never call them.
+- `allowedWebUrls` (default none): the HTTPS pages `web_fetch` may read,
+  usually the URLs in the user's messages and the sources of earlier answers.
+  At most 500 strings of at most 2048 characters; anything else rejects the
+  request before a turn starts. Every source a `web_search` of the run returns
+  is added. URLs compare as the server reads them: without the fragment, with
+  a lower-case host and no default port. Other URLs fail with
+  `fetch_not_allowed` without a request.
+- `proxy`: the one model requests use. The server tunnels both tools through
+  it; `web_fetch` checks DNS locally first and verifies the certificate for
+  the host name (see the search-mcp README).
+
+Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
+`{url}`. `tool_end` is `{name, toolCallId, success:true, details}` or
+`{name, toolCallId, success:false, message, details}`:
+
+| Tool         | Success `details`                                                                             | Failure `details` |
+| ------------ | --------------------------------------------------------------------------------------------- | ----------------- |
+| `web_search` | `{usage: {searchCalls, inputTokens, outputTokens, model}, sources: [{title, url, snippet?}]}` | `{code, status?}` |
+| `web_fetch`  | `{url, truncated}`, `url` after redirects                                                     | `{code, status?}` |
+
+`message` is `<code>: <message>`, the text the model reads. The codes are the
+server's (see the search-mcp README) and the runtime's own:
+`search_unavailable` (the server could not start, or stopped; nothing was
+sent), `search_rejected`/`fetch_rejected` (the server rejected the
+arguments), `fetch_not_allowed` (also: the URL is not allowed in this run).
+Source URLs are passed on as the server returns them; `inputTokens` and
+`outputTokens` are `null` when the gateway did not report them.
+
+Billing: every `web_search` success is `usage.searchCalls` paid searches at
+the web_search price of `usage.model`, plus its tokens. Nothing is retried.
+The same query again in one run (case and spacing ignored) is answered from
+the first result with `deduplicated: true` and zero usage. A failure other
+than `search_outcome_unknown` cost nothing.
+
+Unknown outcome: `search_outcome_unknown` comes from the server, or from the
+runtime when the server did not answer within 70 s, the run was stopped
+during the search or the server exited during it. Like a host
+`unknown_outcome` it ends the run without another tool or model request:
+`status:"error"` with `errorMessage` `search_outcome_unknown: ...`, or
+`stopped` when the user stopped it.
+
+Native history and projection: every tool entry (`role:"tool"`) has
+`toolName`, `toolCallId` and `isError`. A web tool entry keeps `details`: the
+success details above, `{code:"unknown_outcome", error:{code:
+"search_outcome_unknown"}}` for an unknown outcome, `{}` for other failures. A
+`web_search` entry has `usageCoverage`: `incomplete` for an unknown outcome or
+missing token counts, else `complete`; the projection's `usageCoverage`
+includes it. The host prices searches itself, so search usage is reported
+only here and in `tool_end`, never in `usage` events or entries.
