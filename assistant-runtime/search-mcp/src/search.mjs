@@ -4,9 +4,12 @@ import { scrubSecrets } from "./redact.mjs";
 // One paid web search through the Ofox Responses API.
 //
 // The gateway bills every `web_search_call` output item (`open_page` included)
-// at the model's web_search price. `max_tool_calls: 1` limits a request to one
-// billed search, while `include` still returns the 15-20 source URLs that
-// search saw. Nothing here retries: a repeated request is a repeated charge.
+// at the model's web_search price. `max_tool_calls: 1` limits those items but
+// does not guarantee one: a request has come back with a `search` and an
+// `open_page`, both billed. `usage.searchCalls` counts the items a response
+// actually has, so the host's cost stays exact. `include` still returns the
+// 15-20 source URLs that search saw. Nothing here retries: a repeated request
+// is a repeated charge.
 
 export const SEARCH_TIMEOUT_MS = 60_000;
 export const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -86,7 +89,8 @@ function neverSent(error) {
   return false;
 }
 
-async function readBounded(response, limit) {
+/** A fetch Response body of at most `limit` bytes, else null. */
+export async function readBounded(response, limit) {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => {});

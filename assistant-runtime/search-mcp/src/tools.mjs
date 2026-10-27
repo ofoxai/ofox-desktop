@@ -118,11 +118,13 @@ export function createSearchServer(
         secrets,
       ).slice(0, 300)}`,
     );
-  // One set of proxy connections per server, when the app has a proxy.
+  // One set of proxy connections per server, when the app has a proxy. A
+  // fake-IP host's DNS-over-HTTPS check takes the same route as a search.
   const fetchImpl = config.proxy ? proxiedFetch(config.proxy) : undefined;
   const fetchProxy = config.proxy
     ? { noProxy: config.proxy.noProxy, request: tunneledRequest(config.proxy) }
     : null;
+  const doh = { fetchImpl };
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION });
 
   server.registerTool(
@@ -177,6 +179,7 @@ export function createSearchServer(
           signal: extra.signal,
           secrets,
           proxy: fetchProxy,
+          doh,
         });
         return fetchToolResult(scrubSecrets(page, secrets));
       } catch (error) {
