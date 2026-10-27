@@ -4,7 +4,7 @@
 //! Uses Device Authorization Grant (RFC 8628).
 
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Manager, State};
 use tokio::sync::RwLock;
 
 use crate::services::balance_history::{self, BalanceTrend};
@@ -29,13 +29,22 @@ pub async fn ofox_start_login(
 ///
 /// Returns Some(user) if approved, None if still pending.
 /// Errors: "slow_down", "access_denied", "expired_token"
+///
+/// 登录完成也重新放行助手的新运行（退出登录时关闭了）。
 #[tauri::command(rename_all = "camelCase")]
 pub async fn ofox_poll_for_token(
+    app: tauri::AppHandle,
     device_code: String,
     state: State<'_, OfoxAuthState>,
 ) -> Result<Option<crate::ofox_auth::OfoxUserInfo>, String> {
     let manager = state.0.read().await;
-    manager.poll_for_token(&device_code).await
+    let user = manager.poll_for_token(&device_code).await?;
+    if user.is_some() {
+        if let Some(host) = app.try_state::<Arc<crate::services::assistant::AssistantHost>>() {
+            host.sign_in_completed();
+        }
+    }
+    Ok(user)
 }
 
 /// Get Ofox user info (if authenticated).
@@ -149,8 +158,14 @@ pub async fn ofox_logout(
     app_handle: tauri::AppHandle,
     state: State<'_, OfoxAuthState>,
 ) -> Result<crate::services::account_keys::LogoutReport, String> {
+    // 吊销 key 之前先取消助手的运行并停止放行新运行，直到下次登录。
+    let assistant = app_handle.try_state::<Arc<crate::services::assistant::AssistantHost>>();
+    let receipt = assistant.as_ref().map(|host| host.begin_logout());
     let report = crate::services::account_keys::stop_for_logout(&state.0).await;
     state.0.write().await.logout();
+    if let (Some(host), Some(receipt)) = (assistant.as_ref(), receipt) {
+        host.finish_logout(receipt);
+    }
     crate::commands::model_selection::notify(&app_handle, report.stopped.clone());
     Ok(report)
 }

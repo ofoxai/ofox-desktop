@@ -191,7 +191,6 @@ pub fn gateway_base() -> String {
 
 /// 同 [`gateway_base`]，但用调用方给定的 apex；未知 apex 返回 `None`
 /// （见 [`auth_api_base_for`]）。
-#[allow(dead_code)] // The assistant host passes it to the runtime (S1 Task 4, next commit).
 pub(crate) fn gateway_base_for(apex: &str) -> Option<String> {
     known_apex(apex).map(gateway_base_at)
 }

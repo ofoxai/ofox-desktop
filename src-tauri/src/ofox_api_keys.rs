@@ -650,7 +650,6 @@ pub enum AssistantKeyStatus {
 /// 当前账号能用的记录和原文就直接返回；`ForceRefresh` 跳过缓存重签。换掉的旧 key
 /// 没停用的话排队，等它的账号登录时在服务器上删掉。没登录时一律
 /// `Unauthorized`：不签发，也不交出上一个账号的 key。
-#[allow(dead_code)] // The assistant host calls it on the first send (S1 Task 4, next commit).
 pub async fn fetch_or_create_assistant_key(
     mode: FetchMode,
     apex: &str,
@@ -663,7 +662,6 @@ pub async fn fetch_or_create_assistant_key(
 /// 网关拒绝了 `rejected`（401）后调用：缓存里还是这把就重签（同
 /// `ForceRefresh`）；已经换过了（另一次运行先遇到 401）就直接用换好的那把，
 /// 不再签第三把，也不把正在用的新 key 排进删除队列。
-#[allow(dead_code)] // The assistant host retries a rejected run with it (S1 Task 4, next commit).
 pub async fn refresh_rejected_assistant_key(
     rejected: &str,
     apex: &str,
@@ -769,7 +767,6 @@ fn save_assistant_key(
 
 /// 助手 key 的状态，`current` 是当前登录的账号。只看 settings.json 里的记录：
 /// 不访问网络，也不读钥匙串（不会因此弹系统授权框）。
-#[allow(dead_code)] // The assistant bootstrap command reports it (S1 Task 4).
 pub fn assistant_key_status(current: Option<&KeyOwner>) -> AssistantKeyStatus {
     match settings::get_assistant_key_meta() {
         Some(meta) if meta.usable_by(current) => AssistantKeyStatus::Ready,
