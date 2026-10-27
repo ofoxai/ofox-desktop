@@ -311,25 +311,82 @@ describe("a reply's sources", () => {
     source("s1", "Pi release notes", "https://pi.dev/releases"),
     source("s2", "Ofox docs", "https://docs.example.com/ofox"),
   ];
+  /** An answer that links to each of `urls`, as a model cites a source. */
+  const citing = (...urls: string[]) =>
+    `Answer ${urls.map((url, index) => `([${index + 1}](${url}))`).join(" ")}`;
+  const titles = (list: HTMLElement) =>
+    within(list)
+      .getAllByRole("button")
+      .map((link) => link.textContent);
 
-  it("lists the pages its searches found, numbered with their site, under the reply", () => {
-    render(view({ content: "Answer", status: "completed", sources: found }));
+  it("lists the pages the answer cites, numbered with their site, under the reply", () => {
+    render(
+      view({
+        content: citing(...found.map((item) => item.url)),
+        status: "completed",
+        sources: found,
+      }),
+    );
     const list = screen.getByRole("list", { name: "Sources" });
     // A styled list keeps its list role for screen readers.
     expect(list).toHaveAttribute("role", "list");
-    expect(
-      within(list)
-        .getAllByRole("button")
-        .map((link) => link.textContent),
-    ).toEqual(["1. Pi release notes pi.dev", "2. Ofox docs docs.example.com"]);
+    expect(titles(list)).toEqual([
+      "1. Pi release notes pi.dev",
+      "2. Ofox docs docs.example.com",
+    ]);
     expect(
       within(list).getByRole("button", { name: "1. Pi release notes pi.dev" }),
     ).toHaveAttribute("title", "https://pi.dev/releases");
+    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
+  });
+
+  it("shows the cited sources first and keeps the rest behind a disclosure", async () => {
+    const other = source("s3", "Other page", "https://other.example/x");
+    render(
+      view({
+        // Cited with tracking and a fragment, as a model may link a source.
+        content:
+          "See [docs](https://docs.example.com/ofox?utm_source=openai#a).",
+        sources: [...found, other],
+      }),
+    );
+    expect(titles(screen.getByRole("list", { name: "Sources" }))).toEqual([
+      "1. Ofox docs docs.example.com",
+    ]);
+    const more = screen.getByRole("button", { name: "2 more sources" });
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("list", { name: "2 more sources" })).toBeNull();
+    expect(screen.queryByText(/Pi release notes/)).toBeNull();
+    await userEvent.click(more);
+    expect(more).toHaveAttribute("aria-expanded", "true");
+    const rest = screen.getByRole("list", { name: "2 more sources" });
+    expect(more).toHaveAttribute("aria-controls", rest.id);
+    expect(titles(rest)).toEqual([
+      "2. Pi release notes pi.dev",
+      "3. Other page other.example",
+    ]);
+    await userEvent.click(more);
+    expect(more).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/Pi release notes/)).toBeNull();
+  });
+
+  it("offers every source behind the disclosure when the answer cites none, by keyboard too", async () => {
+    render(view({ content: "Answer", sources: found }));
+    expect(screen.queryByRole("list", { name: "Sources" })).toBeNull();
+    const show = screen.getByRole("button", { name: "Show 2 sources" });
+    show.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(show).toHaveAttribute("aria-expanded", "true");
+    expect(
+      titles(screen.getByRole("list", { name: "Show 2 sources" })),
+    ).toEqual(["1. Pi release notes pi.dev", "2. Ofox docs docs.example.com"]);
   });
 
   it("names a site without its www, and wraps a long title inside the reply", () => {
     const long = "https://www.example.org/" + "a".repeat(300);
-    render(view({ content: "Answer", sources: [source("s1", long, long)] }));
+    render(
+      view({ content: citing(long), sources: [source("s1", long, long)] }),
+    );
     const link = screen.getByRole("button", { name: `1. ${long} example.org` });
     expect(within(link).getByText(`1. ${long}`)).toHaveClass(
       "min-w-0",
@@ -338,9 +395,14 @@ describe("a reply's sources", () => {
   });
 
   it("opens a source in the browser", async () => {
-    render(view({ content: "Answer", sources: found }));
+    render(
+      view({
+        content: citing("https://docs.example.com/ofox"),
+        sources: found,
+      }),
+    );
     await userEvent.click(
-      screen.getByRole("button", { name: "2. Ofox docs docs.example.com" }),
+      screen.getByRole("button", { name: "1. Ofox docs docs.example.com" }),
     );
     expect(external.openExternal).toHaveBeenCalledWith(
       "https://docs.example.com/ofox",
@@ -349,7 +411,9 @@ describe("a reply's sources", () => {
 
   it("says so when a source can't be opened", async () => {
     external.openExternal.mockRejectedValueOnce(new Error("denied"));
-    render(view({ content: "Answer", sources: found }));
+    render(
+      view({ content: citing("https://pi.dev/releases"), sources: found }),
+    );
     await userEvent.click(
       screen.getByRole("button", { name: "1. Pi release notes pi.dev" }),
     );
@@ -361,21 +425,25 @@ describe("a reply's sources", () => {
   });
 
   it("shows only HTTPS pages", () => {
+    const urls = [
+      "http://plain.example.com/",
+      "javascript:alert(1)",
+      "https://secure.example.com/",
+    ];
     render(
       view({
-        content: "Answer",
+        content: citing(...urls),
         sources: [
-          source("s1", "Plain", "http://plain.example.com/"),
-          source("s2", "Script", "javascript:alert(1)"),
-          source("s3", "Secure", "https://secure.example.com/"),
+          source("s1", "Plain", urls[0]),
+          source("s2", "Script", urls[1]),
+          source("s3", "Secure", urls[2]),
         ],
       }),
     );
-    expect(
-      within(screen.getByRole("list", { name: "Sources" }))
-        .getAllByRole("button")
-        .map((link) => link.textContent),
-    ).toEqual(["1. Secure secure.example.com"]);
+    expect(titles(screen.getByRole("list", { name: "Sources" }))).toEqual([
+      "1. Secure secure.example.com",
+    ]);
+    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
   });
 
   it("shows nothing for a reply without sources", () => {
@@ -383,11 +451,11 @@ describe("a reply's sources", () => {
     expect(screen.queryByText("Sources")).toBeNull();
   });
 
-  it("shows the sources found so far while the reply streams", () => {
+  it("offers the sources found so far while the reply streams", () => {
     render(view({ status: "streaming", sources: found }));
     expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
     expect(
-      screen.getByRole("button", { name: "1. Pi release notes pi.dev" }),
+      screen.getByRole("button", { name: "Show 2 sources" }),
     ).toBeVisible();
   });
 });

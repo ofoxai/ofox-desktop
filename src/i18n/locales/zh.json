@@ -5007,6 +5007,10 @@
     },
     "reasoning": "思考过程",
     "sources": "来源",
+    "sourcesMore_one": "另外 {{count}} 个来源",
+    "sourcesMore_other": "另外 {{count}} 个来源",
+    "sourcesShow_one": "显示 {{count}} 个来源",
+    "sourcesShow_other": "显示 {{count}} 个来源",
     "compacting": "正在整理对话上下文…",
     "roles": {
       "user": "你",

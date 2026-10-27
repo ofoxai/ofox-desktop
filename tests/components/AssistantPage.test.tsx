@@ -2623,15 +2623,22 @@ describe("web search", () => {
         data: { messageId: "reply", sources: [notes] },
       });
     });
-    expect(
-      screen.getByRole("button", { name: "1. Pi release notes pi.dev" }),
-    ).toBeVisible();
+    // Nothing written yet cites them: they are offered behind a disclosure.
+    expect(screen.getByRole("button", { name: "Show 1 source" })).toBeVisible();
     // Each event holds all of the reply's sources so far.
     act(() => {
       mocks.listener?.({
         ...sent,
         type: "sources",
         data: { messageId: "reply", sources: [notes, changelog] },
+      });
+      mocks.listener?.({
+        ...sent,
+        type: "text_delta",
+        data: {
+          messageId: "reply",
+          delta: "Pi 2 is out ([notes](https://pi.dev/releases)).",
+        },
       });
       mocks.listener?.({
         ...sent,
@@ -2643,7 +2650,8 @@ describe("web search", () => {
       within(screen.getByRole("list", { name: "Sources" }))
         .getAllByRole("button")
         .map((link) => link.textContent),
-    ).toEqual(["1. Pi release notes pi.dev", "2. Pi changelog pi.dev"]);
+    ).toEqual(["1. Pi release notes pi.dev"]);
+    expect(screen.getByRole("button", { name: "1 more source" })).toBeVisible();
     current = {
       ...current,
       messages: [
@@ -2651,7 +2659,8 @@ describe("web search", () => {
         {
           id: "reply",
           role: "assistant",
-          content: "Pi 2 is out.",
+          content:
+            "Pi 2 is out ([notes](https://pi.dev/releases), [log](https://pi.dev/changelog)).",
           status: "completed",
           createdAt: 2,
           sources: [notes, changelog],
@@ -2665,11 +2674,14 @@ describe("web search", () => {
         data: { stopped: false, status: "completed" },
       }),
     );
-    expect(await screen.findByText("Pi 2 is out.")).toBeVisible();
     await waitFor(() =>
       expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
     );
+    await waitFor(() =>
+      expect(screen.getByRole("link", { name: "log" })).toBeVisible(),
+    );
     expect(screen.getAllByRole("list", { name: "Sources" })).toHaveLength(1);
+    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
     expect(
       screen.getByRole("button", { name: "2. Pi changelog pi.dev" }),
     ).toBeVisible();
@@ -2822,6 +2834,7 @@ describe("web search", () => {
     });
     expect(screen.queryByText("Searching the web…")).toBeNull();
     expect(screen.queryByRole("list", { name: "Sources" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /source/ })).toBeNull();
     expect(screen.queryByText(/Web search was unavailable/)).toBeNull();
     expect(screen.getByText("Thinking…")).toBeVisible();
   });

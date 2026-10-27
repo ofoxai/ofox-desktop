@@ -2,6 +2,7 @@ import { memo, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
+  ChevronDown,
   ExternalLink,
   MessageSquare,
   Pencil,
@@ -22,19 +23,140 @@ import type { AssistantActivity } from "./useAssistant";
 
 const MessageMarkdown = memo(SessionMarkdown);
 
+type ShownSource = AssistantSource & { site: string };
+
 /**
  * A source as offered: its site (without `www.`) when it is an HTTPS page,
  * the only kind the backend keeps; anything else is never offered.
  */
-function shownSource(source: AssistantSource) {
+function shownSource(source: AssistantSource): ShownSource[] {
   try {
     const url = new URL(source.url);
     return url.protocol === "https:"
-      ? { ...source, site: url.hostname.replace(/^www\./, "") }
+      ? [{ ...source, site: url.hostname.replace(/^www\./, "") }]
       : [];
   } catch {
     return [];
   }
+}
+
+/**
+ * A page URL as citations are compared: without its fragment, `utm_`
+ * tracking or a trailing slash. Null for anything but an HTTPS URL.
+ */
+function citationKey(value: string) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return null;
+    url.hash = "";
+    for (const name of [...url.searchParams.keys()])
+      if (name.startsWith("utm_")) url.searchParams.delete(name);
+    return url.href.replace(/\/(?=$|\?)/, "");
+  } catch {
+    return null;
+  }
+}
+
+/** The sources the answer links to, then the others, each in their order. */
+function splitCited(sources: ShownSource[], content: string) {
+  const linked = new Set(
+    [...content.matchAll(/https:\/\/[^\s<>"'`()[\]]+/g)].flatMap(
+      ([url]) => citationKey(url.replace(/[.,;:!?]+$/, "")) ?? [],
+    ),
+  );
+  const isCited = (source: ShownSource) =>
+    content.includes(source.url) || linked.has(citationKey(source.url) ?? "");
+  return {
+    cited: sources.filter(isCited),
+    rest: sources.filter((source) => !isCited(source)),
+  };
+}
+
+/**
+ * A reply's sources: those its answer cites, then the rest behind a
+ * disclosure, numbered in that order.
+ */
+function SourceList({
+  sources,
+  content,
+}: {
+  sources: ShownSource[];
+  content: string;
+}) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const label = useId();
+  const toggle = useId();
+  const restList = useId();
+  const { cited, rest } = splitCited(sources, content);
+  const item = (source: ShownSource, number: number) => (
+    <li key={source.id}>
+      <Button
+        variant="link"
+        title={source.url}
+        className="h-auto max-w-full justify-start whitespace-normal px-0 text-left"
+        onClick={() =>
+          void settingsApi
+            .openExternal(source.url)
+            .catch(() => toast.error(t("shell.openFailed")))
+        }
+      >
+        <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
+        <span className="min-w-0 break-words">
+          {number}. {source.title}
+        </span>{" "}
+        <span className="shrink-0 text-note text-ink-muted">{source.site}</span>
+      </Button>
+    </li>
+  );
+  return (
+    <div className="mt-3 border-t border-line pt-2">
+      <p id={label} className="mb-1 text-note text-ink-muted">
+        {t("assistant.sources")}
+      </p>
+      {/* role="list": a list without bullets keeps its role in WebKit. */}
+      {cited.length > 0 && (
+        <ul role="list" className="space-y-1" aria-labelledby={label}>
+          {cited.map((source, index) => item(source, index + 1))}
+        </ul>
+      )}
+      {rest.length > 0 && (
+        <>
+          <Button
+            id={toggle}
+            variant="link"
+            aria-expanded={expanded}
+            aria-controls={restList}
+            className="h-auto px-0 text-note text-ink-muted"
+            onClick={() => setExpanded((open) => !open)}
+          >
+            <ChevronDown
+              aria-hidden
+              className={cn(
+                "h-3 w-3 shrink-0 transition-transform motion-reduce:transition-none",
+                expanded && "rotate-180",
+              )}
+            />
+            {cited.length > 0
+              ? t("assistant.sourcesMore", { count: rest.length })
+              : t("assistant.sourcesShow", { count: rest.length })}
+          </Button>
+          <ul
+            id={restList}
+            role="list"
+            hidden={!expanded}
+            className="space-y-1"
+            aria-labelledby={toggle}
+          >
+            {expanded &&
+              rest.map((source, index) =>
+                item(source, cited.length + index + 1),
+              )}
+          </ul>
+        </>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -70,7 +192,6 @@ export function AssistantMessageView({
   const streaming = message.status === "streaming";
   const files = message.attachments ?? [];
   const sources = (message.sources ?? []).flatMap(shownSource);
-  const sourcesLabel = useId();
   const progress =
     streaming && activity ? t(`assistant.activity.${activity}`) : null;
   const statusLine = (text: string, className?: string) => (
@@ -224,36 +345,7 @@ export function AssistantMessageView({
         </p>
       )}
       {sources.length > 0 && (
-        <div className="mt-3 border-t border-line pt-2">
-          <p id={sourcesLabel} className="mb-1 text-note text-ink-muted">
-            {t("assistant.sources")}
-          </p>
-          {/* role="list": a list without bullets keeps its role in WebKit. */}
-          <ul role="list" className="space-y-1" aria-labelledby={sourcesLabel}>
-            {sources.map((source, index) => (
-              <li key={source.id}>
-                <Button
-                  variant="link"
-                  title={source.url}
-                  className="h-auto max-w-full justify-start whitespace-normal px-0 text-left"
-                  onClick={() =>
-                    void settingsApi
-                      .openExternal(source.url)
-                      .catch(() => toast.error(t("shell.openFailed")))
-                  }
-                >
-                  <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
-                  <span className="min-w-0 break-words">
-                    {index + 1}. {source.title}
-                  </span>{" "}
-                  <span className="shrink-0 text-note text-ink-muted">
-                    {source.site}
-                  </span>
-                </Button>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <SourceList sources={sources} content={message.content} />
       )}
       {!editing && !streaming && (
         <div className="mt-2 flex items-center gap-1">

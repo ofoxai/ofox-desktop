@@ -5007,6 +5007,10 @@
     },
     "reasoning": "Reasoning",
     "sources": "Sources",
+    "sourcesMore_one": "{{count}} more source",
+    "sourcesMore_other": "{{count}} more sources",
+    "sourcesShow_one": "Show {{count}} source",
+    "sourcesShow_other": "Show {{count}} sources",
     "compacting": "Organizing conversation context…",
     "roles": {
       "user": "You",

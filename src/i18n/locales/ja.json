@@ -5007,6 +5007,10 @@
     },
     "reasoning": "思考過程",
     "sources": "出典",
+    "sourcesMore_one": "ほかの出典 {{count}} 件",
+    "sourcesMore_other": "ほかの出典 {{count}} 件",
+    "sourcesShow_one": "出典 {{count}} 件を表示",
+    "sourcesShow_other": "出典 {{count}} 件を表示",
     "compacting": "会話のコンテキストを整理中…",
     "roles": {
       "user": "あなた",
