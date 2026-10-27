@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -60,6 +60,7 @@ export function AssistantMessageView({
   const streaming = message.status === "streaming";
   const files = message.attachments ?? [];
   const sources = (message.sources ?? []).filter(isHttps);
+  const sourcesLabel = useId();
   const progress =
     streaming && activity ? t(`assistant.activity.${activity}`) : null;
   const statusLine = (text: string, className?: string) => (
@@ -209,10 +210,10 @@ export function AssistantMessageView({
       )}
       {sources.length > 0 && (
         <div className="mt-3 border-t border-line pt-2">
-          <p className="mb-1 text-note text-ink-muted">
+          <p id={sourcesLabel} className="mb-1 text-note text-ink-muted">
             {t("assistant.sources")}
           </p>
-          <ul className="space-y-1" aria-label={t("assistant.sources")}>
+          <ul className="space-y-1" aria-labelledby={sourcesLabel}>
             {sources.map((source, index) => (
               <li key={source.id}>
                 <Button
