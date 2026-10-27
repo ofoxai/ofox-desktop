@@ -84,6 +84,11 @@ const capabilities: AssistantBootstrap = {
   defaultModelId: "balanced",
   modelUnavailableReason: null,
   key: { status: "ready" },
+  search: {
+    available: true,
+    unitPriceUsd: "0.014",
+    model: "openai/gpt-5-nano",
+  },
 };
 let current: AssistantSessionDetail;
 const listOf = (
@@ -1896,6 +1901,127 @@ describe("conversation cost", () => {
         "Input 300 · Output 50 tokens · Cost unavailable",
       ),
     );
+  });
+});
+
+describe("web search", () => {
+  const toggle = () => screen.getByRole("button", { name: "Web search" });
+
+  it("turns web search on and off for the open conversation", async () => {
+    await openConversation();
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(toggle());
+    await waitFor(() =>
+      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(mocks.updateSession).toHaveBeenLastCalledWith({
+      sessionId: "session-a",
+      webSearch: true,
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    });
+    await userEvent.click(toggle());
+    await waitFor(() =>
+      expect(toggle()).toHaveAttribute("aria-pressed", "false"),
+    );
+    expect(mocks.updateSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionId: "session-a", webSearch: false }),
+    );
+  });
+
+  it("shows a conversation's saved setting", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("says what a search costs, like other costs, and shows it while search is on", async () => {
+    const price = "≈$0.014 per search, plus a little for its tokens";
+    await openConversation();
+    expect(toggle()).toHaveAccessibleDescription(price);
+    expect(screen.queryByText(price)).toBeNull();
+    await userEvent.click(toggle());
+    expect(await screen.findByText(price)).toBeVisible();
+  });
+
+  it("starts the first conversation with web search when it was turned on before the first message", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await waitFor(() => expect(toggle()).toBeEnabled());
+    await userEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+    mocks.createSession.mockImplementation(async (request) => ({
+      ...session,
+      ...request,
+    }));
+    await userEvent.type(composer(), "What's new today?");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        modelId: "balanced",
+        webSearch: true,
+      }),
+    );
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("leaves web search off in a conversation started from another one", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    mocks.createSession.mockImplementation(async (request) => ({
+      ...session,
+      id: "session-b",
+      ...request,
+    }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "New conversation" }),
+    );
+    await waitFor(() =>
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        modelId: "balanced",
+        webSearch: false,
+      }),
+    );
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("can be changed while a reply runs, which goes on", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    expect(toggle()).toBeEnabled();
+    await userEvent.click(toggle());
+    await waitFor(() =>
+      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(mocks.stop).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  });
+
+  it("can't be turned on, and says why, when search is unavailable", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      search: {
+        available: false,
+        unitPriceUsd: null,
+        model: "openai/gpt-5-nano",
+      },
+    });
+    await openConversation();
+    expect(toggle()).toBeDisabled();
+    expect(toggle()).toHaveAccessibleDescription(
+      "Web search is unavailable right now. Replies use the model's own knowledge.",
+    );
+    expect(
+      screen.getByText(
+        "Web search is unavailable right now. Replies use the model's own knowledge.",
+      ),
+    ).toBeVisible();
+    expect(document.body).not.toHaveTextContent("per search");
   });
 });
 

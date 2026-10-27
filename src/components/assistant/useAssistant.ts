@@ -44,6 +44,10 @@ export function useAssistant(enabled: boolean) {
   const [bootstrap, setBootstrap] = useState<AssistantBootstrap | null>(null);
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const newModelId = chosenModel ?? bootstrap?.defaultModelId ?? "";
+  // Web search for the conversation the first message creates; each new
+  // conversation starts with it off.
+  const [newWebSearch, setNewWebSearchState] = useState(false);
+  const newWebSearchRef = useRef(newWebSearch);
   const [search, setSearch] = useState("");
   const [sessions, setSessions] = useState<AssistantSession[]>([]);
   const [unreadable, setUnreadable] = useState<AssistantUnreadableSession[]>(
@@ -90,6 +94,11 @@ export function useAssistant(enabled: boolean) {
   const reloadAuthority = useRef<() => void>(() => undefined);
   selectedRef.current = selectedId;
   draftRef.current = draft;
+
+  const setNewWebSearch = useCallback((value: boolean) => {
+    newWebSearchRef.current = value;
+    setNewWebSearchState(value);
+  }, []);
 
   const setRun = useCallback((value: AssistantRunRef | null) => {
     runRef.current = value;
@@ -344,6 +353,7 @@ export function useAssistant(enabled: boolean) {
       setBootstrap(null);
       bootstrapRef.current = null;
       setChosenModel(null);
+      setNewWebSearch(false);
       setError(null);
     };
     if (!enabled) {
@@ -367,7 +377,15 @@ export function useAssistant(enabled: boolean) {
       epoch.current += 1;
       cleanup.forEach((off) => off());
     };
-  }, [enabled, loadBootstrap, setAttachments, setDraft, setRun, showError]); // List refresh uses its current request fencing separately.
+  }, [
+    enabled,
+    loadBootstrap,
+    setAttachments,
+    setDraft,
+    setNewWebSearch,
+    setRun,
+    showError,
+  ]); // List refresh uses its current request fencing separately.
 
   useEffect(() => {
     if (!enabled) return;
@@ -605,6 +623,7 @@ export function useAssistant(enabled: boolean) {
       selectionSequence.current += 1;
       updateSequence.current += 1;
       createdSession.current = null;
+      setNewWebSearch(false);
       detailSequence.current += 1;
       setBusy(false);
       setSelectedId(id);
@@ -621,7 +640,15 @@ export function useAssistant(enabled: boolean) {
       setAttachmentsState(attachmentsRef.current);
       setError(null);
     },
-    [loading, detail, loadSelected, setRun, persistDraft, showError],
+    [
+      loading,
+      detail,
+      loadSelected,
+      setRun,
+      setNewWebSearch,
+      persistDraft,
+      showError,
+    ],
   );
 
   const ensureSession = useCallback(async () => {
@@ -633,7 +660,7 @@ export function useAssistant(enabled: boolean) {
     const selection = selectionSequence.current;
     const value = await assistantApi.createSession({
       modelId: newModelId || undefined,
-      webSearch: false,
+      webSearch: newWebSearchRef.current,
     });
     if (
       !mounted.current ||
@@ -643,13 +670,14 @@ export function useAssistant(enabled: boolean) {
       throw new Error("assistant_request_expired");
     selectedRef.current = value.id;
     createdSession.current = value.id;
+    setNewWebSearch(false);
     drafts.current.set(value.id, draftRef.current);
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessions();
     return value;
-  }, [detail, newModelId, refreshSessions]);
+  }, [detail, newModelId, refreshSessions, setNewWebSearch]);
 
   const create = useCallback(async () => {
     if (busy) return;
@@ -707,6 +735,18 @@ export function useAssistant(enabled: boolean) {
       }
     },
     [refreshSessions, showError],
+  );
+
+  /**
+   * Web search for the open conversation, or for the one the first message
+   * creates. A running reply goes on as it started; the next send uses it.
+   */
+  const setWebSearch = useCallback(
+    (on: boolean) => {
+      if (selectedRef.current) void update({ webSearch: on });
+      else setNewWebSearch(on);
+    },
+    [update, setNewWebSearch],
   );
 
   /**
@@ -958,10 +998,17 @@ export function useAssistant(enabled: boolean) {
     }
   }, [showError]);
 
+  // The open conversation's setting; off while it loads.
+  const webSearch = selectedId
+    ? detail?.session.id === selectedId && detail.session.webSearch
+    : newWebSearch;
+
   return {
     bootstrap,
     newModelId,
     chooseNewModel: setChosenModel,
+    webSearch,
+    setWebSearch,
     search,
     setSearch,
     sessions,

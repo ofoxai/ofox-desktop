@@ -42,6 +42,28 @@ export interface AssistantBootstrap {
   modelUnavailableReason: string | null;
   /** The dedicated assistant key is created on the first send, never here. */
   key: { status: "ready" | "missing" };
+  search: AssistantSearchStatus;
+}
+
+/**
+ * Whether runs can search the web: only while the catalog prices the search
+ * model. A conversation with `webSearch` on runs without web tools otherwise.
+ */
+export interface AssistantSearchStatus {
+  available: boolean;
+  /** USD per search as a decimal string; its tokens come on top. Null when unavailable. */
+  unitPriceUsd: string | null;
+  model: string;
+}
+
+/** A page a reply's web searches found: always an HTTPS URL. */
+export interface AssistantSource {
+  id: string;
+  /** The page's title, or its URL when it had none. */
+  title: string;
+  url: string;
+  /** May be empty. */
+  excerpt: string;
 }
 
 export interface AssistantRunRef {
@@ -124,7 +146,8 @@ export interface AssistantMessage {
   reasoning?: string | null;
   status?: "completed" | "streaming" | "stopped" | "error";
   attachments?: AssistantAttachment[];
-  sources?: unknown[];
+  /** The pages the reply's web searches found; `[]` on every other message. */
+  sources?: AssistantSource[];
   /** Old branches remain readable when editing or regenerating. */
   superseded?: boolean;
   revisionOf?: string | null;
@@ -147,6 +170,10 @@ export interface AssistantUsage {
   estimatedCostUsd?: string | null;
   billedCostUsd?: null;
   modelRequests?: number;
+  /** Paid web searches in the conversation; counted again once a run is saved. */
+  searchCount?: number;
+  /** What those searches cost; already part of `estimatedCostUsd`. */
+  searchCostUsd?: string | null;
   usageCoverage?: "incomplete";
 }
 
@@ -211,6 +238,38 @@ export type AssistantRunEvent =
     }
   /** The conversation's running totals, not this run's. */
   | { type: "usage"; data: { usage: AssistantUsage } }
+  /**
+   * A tool call of the run's reply. `args` holds only what may be shown:
+   * `query` (web_search), `url` (web_fetch) or `id` (read_attachment).
+   */
+  | {
+      type: "tool_start";
+      data: {
+        messageId: string;
+        name: string;
+        toolCallId: string;
+        args: Record<string, string>;
+      };
+    }
+  /** `code` names a failure the model saw and continued from; null on success. */
+  | {
+      type: "tool_end";
+      data: {
+        messageId: string;
+        name: string;
+        toolCallId: string;
+        success: boolean;
+        code: string | null;
+      };
+    }
+  /**
+   * All the reply's sources so far, already saved: replaces the list. Sent
+   * between a web search's `tool_start` and `tool_end`.
+   */
+  | {
+      type: "sources";
+      data: { messageId: string; sources: AssistantSource[] };
+    }
   | { type: "compaction_start"; data: Record<string, never> }
   | { type: "compaction_end"; data: { success: boolean } }
   /** The run's saved assistant message. */
