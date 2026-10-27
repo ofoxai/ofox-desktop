@@ -36,11 +36,13 @@ function isHttps(source: AssistantSource) {
  * it: it can only be sent again, as a new turn. A question shows the files it
  * was sent with and that turn's outcome; an edit sends them again, leaving
  * out those that can't be read. `activity` says what a streaming reply is
- * doing while one of its tools runs.
+ * doing while one of its tools runs. `searchUnavailable` marks a reply whose
+ * run went without the web search its conversation asked for.
  */
 export function AssistantMessageView({
   message,
   activity = null,
+  searchUnavailable = false,
   disabled,
   onEdit,
   onRegenerate,
@@ -48,6 +50,7 @@ export function AssistantMessageView({
 }: {
   message: AssistantMessage;
   activity?: AssistantActivity | null;
+  searchUnavailable?: boolean;
   disabled: boolean;
   onEdit: (text: string) => Promise<boolean>;
   onRegenerate: () => void;
@@ -207,6 +210,11 @@ export function AssistantMessageView({
           )}
           {progress && statusLine(progress, "mt-2")}
         </>
+      )}
+      {searchUnavailable && !isUser && (
+        <p className="mt-2 text-note text-ink-muted">
+          {t("assistant.searchSkipped")}
+        </p>
       )}
       {sources.length > 0 && (
         <div className="mt-3 border-t border-line pt-2">

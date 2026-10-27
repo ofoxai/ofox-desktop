@@ -480,6 +480,7 @@ function AssistantWorkspace() {
                   <AssistantMessageView
                     key={message.id}
                     message={message}
+                    searchUnavailable={assistant.searchSkipped.has(message.id)}
                     disabled={!writable}
                     onEdit={(text) =>
                       assistant.send({ text, editMessageId: message.id })
@@ -507,6 +508,9 @@ function AssistantWorkspace() {
                   <AssistantMessageView
                     message={assistant.stream}
                     activity={assistant.activity}
+                    searchUnavailable={assistant.searchSkipped.has(
+                      assistant.stream.id,
+                    )}
                     disabled
                     onEdit={async () => false}
                     onRegenerate={() => undefined}
@@ -613,10 +617,16 @@ function AssistantWorkspace() {
                 )}
               </div>
             </div>
-            {(keyMissing || usage || showSearchNote) && (
+            {(keyMissing ||
+              usage ||
+              showSearchNote ||
+              assistant.webSearchWaits) && (
               <div className="mt-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1 text-note text-ink-muted">
                 {keyMissing && <p>{t("assistant.keyMissingHint")}</p>}
                 {showSearchNote && <p>{searchNote}</p>}
+                {assistant.webSearchWaits && (
+                  <p role="status">{t("assistant.webSearchNextMessage")}</p>
+                )}
                 {usage && <p className="ml-auto text-right">{usage}</p>}
               </div>
             )}

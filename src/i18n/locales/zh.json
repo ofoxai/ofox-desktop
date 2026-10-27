@@ -4975,6 +4975,8 @@
     "webSearch": "联网搜索",
     "webSearchPrice": "每次搜索 {{price}}，另加少量 Token 费用",
     "webSearchUnavailable": "联网搜索暂不可用，回复将基于模型自身的知识。",
+    "webSearchNextMessage": "联网搜索的更改将从你的下一条消息开始生效。",
+    "searchSkipped": "此回复无法使用联网搜索，因此基于模型自身的知识作答。",
     "editKeepsFiles": "这些文件会随编辑后的消息重新发送。",
     "editDropsFiles": "无法读取的文件不会发送。",
     "editNoReadableFiles": "这条消息的文件都无法读取，因此无法重新发送。请改为发送一条新消息。",

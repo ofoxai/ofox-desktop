@@ -35,6 +35,16 @@ interface RunningTool {
   activity: AssistantActivity;
 }
 
+/**
+ * Web search for a run this window sent: whether its conversation asked for
+ * it, and whether the run got it (from its `run_start`; null until then).
+ */
+interface RunSearch {
+  runId: string;
+  requested: boolean;
+  got: boolean | null;
+}
+
 /** A conversation's draft as last saved; `files` unknown until read or written. */
 interface SavedDraft {
   text: string;
@@ -77,6 +87,13 @@ export function useAssistant(enabled: boolean) {
   const [stream, setStream] = useState<AssistantMessage | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
   const [tools, setTools] = useState<RunningTool[]>([]);
+  const [runSearch, setRunSearchState] = useState<RunSearch | null>(null);
+  const runSearchRef = useRef(runSearch);
+  // Replies whose run went without the web search their conversation asked
+  // for (it was unavailable when they were sent), by message id.
+  const [searchSkipped, setSearchSkipped] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [compacting, setCompacting] = useState(false);
   const [error, setError] = useState<AssistantError | null>(null);
   const [loading, setLoading] = useState(false);
@@ -114,6 +131,11 @@ export function useAssistant(enabled: boolean) {
   const setNewWebSearch = useCallback((value: boolean) => {
     newWebSearchRef.current = value;
     setNewWebSearchState(value);
+  }, []);
+
+  const setRunSearch = useCallback((value: RunSearch | null) => {
+    runSearchRef.current = value;
+    setRunSearchState(value);
   }, []);
 
   const setRun = useCallback((value: AssistantRunRef | null) => {
@@ -372,6 +394,8 @@ export function useAssistant(enabled: boolean) {
       bootstrapRef.current = null;
       setChosenModel(null);
       setNewWebSearch(false);
+      setRunSearch(null);
+      setSearchSkipped(new Set());
       setError(null);
     };
     if (!enabled) {
@@ -402,6 +426,7 @@ export function useAssistant(enabled: boolean) {
     setDraft,
     setNewWebSearch,
     setRun,
+    setRunSearch,
     showError,
   ]); // List refresh uses its current request fencing separately.
 
@@ -514,10 +539,26 @@ export function useAssistant(enabled: boolean) {
             void refreshSessionsRef.current(generation);
           return;
         }
-        // run_start, session and event types this build does not know change
-        // nothing on screen: the transcript and session are read again at
-        // run_end.
+        // session and event types this build does not know change nothing
+        // on screen: the transcript and session are read again at run_end.
         switch (event.type) {
+          case "run_start": {
+            // The reply this run writes, and whether it got web search.
+            const { messageId, webSearch } = event.data;
+            if (typeof messageId !== "string" || typeof webSearch !== "boolean")
+              return;
+            const sent = runSearchRef.current;
+            const requested =
+              sent?.runId === event.runId ? sent.requested : webSearch;
+            setRunSearch({ runId: event.runId, requested, got: webSearch });
+            if (requested && !webSearch)
+              setSearchSkipped((old) => new Set(old).add(messageId));
+            setStream((previous) => ({
+              ...(previous ?? blank(event.runId)),
+              id: messageId,
+            }));
+            return;
+          }
           case "text_delta":
           case "thinking_delta": {
             const { delta } = event.data;
@@ -644,7 +685,7 @@ export function useAssistant(enabled: boolean) {
       off?.();
       setConnected(false);
     };
-  }, [enabled, refreshDetail, setRun, showError]);
+  }, [enabled, refreshDetail, setRun, setRunSearch, showError]);
 
   const select = useCallback(
     (id: string | null) => {
@@ -852,6 +893,11 @@ export function useAssistant(enabled: boolean) {
         pendingSends.current.set(reference.runId, preparation);
         detailSequence.current += 1;
         setRun(reference);
+        setRunSearch({
+          runId: reference.runId,
+          requested: session.webSearch,
+          got: null,
+        });
         setStream({
           id: `stream-${reference.runId}`,
           role: "assistant",
@@ -967,6 +1013,7 @@ export function useAssistant(enabled: boolean) {
       setAttachments,
       setDraft,
       setRun,
+      setRunSearch,
       showError,
       persistDraft,
     ],
@@ -1050,6 +1097,15 @@ export function useAssistant(enabled: boolean) {
   const webSearch = selectedId
     ? detail?.session.id === selectedId && detail.session.webSearch
     : newWebSearch;
+  // The switch now differs from what the followed run asked for and from
+  // what it got: the change waits for the next message.
+  const followedSearch =
+    runSearch && runSearch.runId === run?.runId ? runSearch : null;
+  const webSearchWaits = Boolean(
+    followedSearch &&
+      webSearch !== followedSearch.requested &&
+      webSearch !== (followedSearch.got ?? followedSearch.requested),
+  );
 
   return {
     bootstrap,
@@ -1057,6 +1113,8 @@ export function useAssistant(enabled: boolean) {
     chooseNewModel: setChosenModel,
     webSearch,
     setWebSearch,
+    webSearchWaits,
+    searchSkipped,
     search,
     setSearch,
     sessions,

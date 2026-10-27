@@ -4975,6 +4975,8 @@
     "webSearch": "Web search",
     "webSearchPrice": "{{price}} per search, plus a little for its tokens",
     "webSearchUnavailable": "Web search is unavailable right now. Replies use the model's own knowledge.",
+    "webSearchNextMessage": "Your web search change applies to your next message.",
+    "searchSkipped": "Web search was unavailable for this reply, so it uses the model's own knowledge.",
     "editKeepsFiles": "These files are sent again with your edit.",
     "editDropsFiles": "Files that can't be read are left out.",
     "editNoReadableFiles": "None of this message's files can be read, so it can't be resent. Send a new message instead.",

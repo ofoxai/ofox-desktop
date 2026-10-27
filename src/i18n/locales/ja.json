@@ -4975,6 +4975,8 @@
     "webSearch": "Web 検索",
     "webSearchPrice": "検索 1 回あたり {{price}}（別途わずかなトークン料金）",
     "webSearchUnavailable": "現在 Web 検索は利用できません。返信はモデル自身の知識で作成されます。",
+    "webSearchNextMessage": "Web 検索の変更は次のメッセージから適用されます。",
+    "searchSkipped": "この返信では Web 検索を利用できなかったため、モデル自身の知識で作成されています。",
     "editKeepsFiles": "これらのファイルは編集内容と一緒にもう一度送信されます。",
     "editDropsFiles": "読み取れないファイルは除外されます。",
     "editNoReadableFiles": "このメッセージのファイルはどれも読み取れないため、再送信できません。代わりに新しいメッセージを送信してください。",

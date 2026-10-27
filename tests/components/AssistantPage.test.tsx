@@ -2053,6 +2053,141 @@ describe("web search", () => {
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
   });
 
+  describe("for the reply being written", () => {
+    const skipped =
+      "Web search was unavailable for this reply, so it uses the model's own knowledge.";
+    const nextMessage = "Your web search change applies to your next message.";
+    async function sendWithSearch(on: boolean, got: boolean) {
+      current.session.webSearch = on;
+      await openConversation();
+      await userEvent.type(composer(), "What's new?");
+      await userEvent.click(screen.getByRole("button", { name: "Send" }));
+      await screen.findByRole("button", { name: "Stop" });
+      const sent = mocks.send.mock.calls[0][0];
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "run_start",
+          data: { messageId: "reply", webSearch: got },
+        }),
+      );
+      return sent;
+    }
+    const end = (sent: AssistantRunRef & { sessionId: string }) => {
+      current = {
+        ...current,
+        messages: [
+          { id: "q", role: "user", content: "What's new?", createdAt: 1 },
+          {
+            id: "reply",
+            role: "assistant",
+            content: "Nothing yet.",
+            status: "completed",
+            createdAt: 2,
+            runId: sent.runId,
+          },
+        ],
+      };
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "run_end",
+          data: { stopped: false, status: "completed" },
+        }),
+      );
+    };
+
+    it("says it ran without web search when search was unavailable", async () => {
+      const sent = await sendWithSearch(true, false);
+      expect(screen.getByText(skipped)).toBeVisible();
+      expect(screen.queryByText(nextMessage)).toBeNull();
+      end(sent);
+      expect(await screen.findByText("Nothing yet.")).toBeVisible();
+      await waitFor(() =>
+        expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
+      );
+      expect(
+        within(screen.getByRole("article", { name: "Assistant" })).getByText(
+          skipped,
+        ),
+      ).toBeVisible();
+    });
+
+    it.each([
+      [true, true],
+      [false, false],
+    ])(
+      "says nothing more when the reply got what was asked (search on: %s)",
+      async (on, got) => {
+        const sent = await sendWithSearch(on, got);
+        act(() =>
+          mocks.listener?.({
+            ...sent,
+            type: "text_delta",
+            data: { delta: "Working on it", messageId: "reply" },
+          }),
+        );
+        expect(screen.getByText("Working on it")).toBeVisible();
+        expect(screen.queryByText(skipped)).toBeNull();
+        expect(screen.queryByText(nextMessage)).toBeNull();
+      },
+    );
+
+    it.each([
+      ["on", false, false],
+      ["off", true, true],
+    ])(
+      "says turning search %s while it runs applies to the next message",
+      async (_, on, got) => {
+        const sent = await sendWithSearch(on, got);
+        await userEvent.click(toggle());
+        expect(await screen.findByText(nextMessage)).toBeVisible();
+        await userEvent.click(toggle());
+        await waitFor(() => expect(screen.queryByText(nextMessage)).toBeNull());
+        await userEvent.click(toggle());
+        expect(await screen.findByText(nextMessage)).toBeVisible();
+        end(sent);
+        await waitFor(() =>
+          expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
+        );
+        expect(screen.queryByText(nextMessage)).toBeNull();
+      },
+    );
+
+    it("needs no next-message note for turning off search the reply never got", async () => {
+      await sendWithSearch(true, false);
+      await userEvent.click(toggle());
+      await waitFor(() =>
+        expect(toggle()).toHaveAttribute("aria-pressed", "false"),
+      );
+      expect(screen.queryByText(nextMessage)).toBeNull();
+    });
+
+    it("still says so after another conversation was open", async () => {
+      const other = {
+        ...session,
+        id: "session-b",
+        title: "Other conversation",
+      };
+      mocks.listSessions.mockResolvedValue(listOf([current.session, other]));
+      const sent = await sendWithSearch(true, false);
+      end(sent);
+      await screen.findByText("Nothing yet.");
+      const saved = current;
+      mocks.getSession.mockImplementation(async (id: string) =>
+        id === other.id ? { ...saved, session: other, messages: [] } : saved,
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: /Other conversation/ }),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: /My conversation/ }),
+      );
+      expect(await screen.findByText("Nothing yet.")).toBeVisible();
+      expect(screen.getByText(skipped)).toBeVisible();
+    });
+  });
+
   it("shows a search's sources as they arrive, and the saved ones once the reply ends", async () => {
     current.session.webSearch = true;
     await openConversation();
