@@ -195,8 +195,22 @@ function projection(manager, secrets = []) {
   };
 }
 
-const SYSTEM_PROMPT =
-  "You are Ofox Assistant, a general conversation assistant for questions, writing, translation and analysis. Respond in the user's language. Use only the provided tools. Read only attachments the user imported into this conversation. For current facts use web search when available and cite the returned source URLs. Do not claim to have read images or files you could not access. You have no local configuration or terminal access.\nBe clear, useful and concise. Preserve the user's requirements through long conversations.";
+// Describe only what this run can do. Chat registers no tools; a later tool
+// enables its capability by carrying its own Pi-style promptGuidelines.
+function systemPrompt(tools) {
+  const capabilities = tools.length
+    ? [
+        "Use only the provided tools.",
+        ...tools.flatMap((tool) => tool.promptGuidelines ?? []),
+      ]
+    : [];
+  const role = [
+    "You are Ofox Assistant, a general conversation assistant for questions, writing, translation and analysis. Respond in the user's language.",
+    ...capabilities,
+    "Do not claim to have read images or files you could not access. You have no local configuration or terminal access.",
+  ].join(" ");
+  return `${role}\nBe clear, useful and concise. Preserve the user's requirements through long conversations.`;
+}
 
 export class AssistantRuntime {
   constructor({ hostCall, emit, fetch: providerFetch } = {}) {
@@ -603,6 +617,7 @@ export class AssistantRuntime {
           [apiKey],
         );
       const customTools = this.tools(context, model);
+      const roleText = systemPrompt(customTools);
       const loader = new DefaultResourceLoader({
         cwd: workspace,
         agentDir,
@@ -613,7 +628,7 @@ export class AssistantRuntime {
         noThemes: true,
         noContextFiles: true,
         disabledBuiltinExtensions: ["mcp", "codemode", "tool_search"],
-        systemPromptOverride: () => SYSTEM_PROMPT,
+        systemPromptOverride: () => roleText,
         appendSystemPromptOverride: () => [],
         extensionFactories: [
           (pi) => {
@@ -738,9 +753,7 @@ export class AssistantRuntime {
             "assistant_vision_model_required: This model cannot read images; choose a vision model",
           );
         if (images.length > 10)
-          throw new Error(
-            "A message supports at most 10 images or rendered PDF pages",
-          );
+          throw new Error("A message supports at most 10 images");
         context.abort.signal.throwIfAborted();
         context.turnStarted = true;
         await session.prompt(prompt, { images, expandPromptTemplates: false });

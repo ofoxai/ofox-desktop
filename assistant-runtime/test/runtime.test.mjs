@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AssistantRuntime } from "../src/runtime.mjs";
-import { probeToolName, probeTools } from "./fixtures/probe-tool.mjs";
+import {
+  probeGuideline,
+  probeToolName,
+  probeTools,
+} from "./fixtures/probe-tool.mjs";
 
 const model = {
   id: "test/chat",
@@ -869,4 +873,30 @@ test("legacy configuration and search parameters cannot add tools or replace the
   assert.match(body.messages[0].content, /Ofox Assistant, a general/);
   assert.doesNotMatch(body.messages[0].content, /configuration assistant/);
   assert.doesNotMatch(JSON.stringify(body.messages), /Saved memory/);
+});
+
+test("the system prompt describes only the capabilities enabled for the run", async (t) => {
+  const prompts = [];
+  for (const Runtime of [AssistantRuntime, ProbeRuntime]) {
+    const params = await sandbox(t);
+    const runtime = new Runtime({
+      fetch: async (_url, options) => {
+        // Pi appends a <cwd> section after the preamble this runtime owns.
+        prompts.push(
+          JSON.parse(options.body).messages[0].content.split("\n<cwd>")[0],
+        );
+        return stream("described");
+      },
+    });
+    t.after(() => runtime.close());
+    assert.equal((await runtime.run(params)).status, "completed");
+  }
+  const [chat, withTool] = prompts;
+  assert.match(chat, /^You are Ofox Assistant/);
+  assert.doesNotMatch(
+    chat,
+    /tool|attachment|import|search|web|cite|URL|PDF|page/i,
+  );
+  assert.match(withTool, /Use only the provided tools\./);
+  assert.ok(withTool.includes(probeGuideline));
 });

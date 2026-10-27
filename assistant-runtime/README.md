@@ -9,6 +9,9 @@ prompt replaces Pi's coding-assistant role with a general chat assistant.
 This version is chat only: the model receives no tools. `tools()` in
 `src/runtime.mjs` is the extension point for later tools; they are built with
 `wrapTool()` so they share the per-run call limit and the unknown-outcome gate.
+The system prompt describes only what the run enables: a tool adds its own
+sentences through Pi's `promptGuidelines`, so chat mentions no tools,
+attachments or search.
 
 ## Prepare and test
 
