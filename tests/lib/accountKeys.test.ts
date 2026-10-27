@@ -56,14 +56,14 @@ describe("logging out", () => {
     expect(toast.success).toHaveBeenCalledWith("已退出登录");
   });
 
-  it("says the assistant's key could not be stopped and is removed later", () => {
+  it("says the assistant's key could not be stopped and when it is removed", () => {
     toast.warning.mockClear();
     announceLogout(
       { stopped: [], notRevoked: [], assistantNotRevoked: true },
       t,
     );
     expect(toast.warning).toHaveBeenCalledWith(
-      "助手的 API Key 没能在服务器上停用（可能没联网），之后会自动删除。",
+      "助手的 API Key 没能在服务器上停用（可能没联网），暂时还会用这个账号的额度。下次用这个账号在本机登录时会自动删除，也可以现在去 Ofox 控制台删除。",
       expect.anything(),
     );
   });

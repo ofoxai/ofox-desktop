@@ -93,7 +93,7 @@
     "switchedToCurrent": "{{tools}} は現在のアカウントの残高を使うように切り替えました。",
     "switchFailed": "{{tool}} はまだ以前のアカウントの API キーを使っています：{{message}}",
     "listSeparator": "、",
-    "assistantNotRevoked": "アシスタントの API キーをサーバーで停止できませんでした（オフラインの可能性があります）。後で自動的に削除されます。"
+    "assistantNotRevoked": "アシスタントの API キーをサーバーで停止できませんでした（オフラインの可能性があります）。引き続きこのアカウントの残高が使われる可能性があります。次回このパソコンでこのアカウントにログインすると自動で削除されます。今すぐ止めるには Ofox コンソールで削除してください。"
   },
   "connectivity": {
     "insufficientCreditsTitle": "残高不足",

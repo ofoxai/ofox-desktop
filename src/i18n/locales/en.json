@@ -93,7 +93,7 @@
     "switchedToCurrent": "{{tools}} now use this account's credits.",
     "switchFailed": "{{tool}} still uses the previous account's API key: {{message}}",
     "listSeparator": ", ",
-    "assistantNotRevoked": "The assistant's API key could not be stopped on the server (you may be offline). It will be deleted automatically later."
+    "assistantNotRevoked": "The assistant's API key could not be stopped on the server (you may be offline), so it can still use this account's credits. It is deleted automatically the next time this account signs in on this computer, or you can delete it in the Ofox console now."
   },
   "connectivity": {
     "insufficientCreditsTitle": "Out of credits",
