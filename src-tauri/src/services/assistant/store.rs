@@ -238,7 +238,8 @@ impl AssistantStore {
     /// Apply the fields an [`UpdateRequest`] carries. `precondition` runs under
     /// the session's write lock before anything changes; the host
     /// re-checks its authority generation there, so an update raced by a logout
-    /// or account switch fails instead of landing. The request's owner and
+    /// or account switch fails instead of landing. `precondition` runs under
+    /// the lock and must not call back into the store. The request's owner and
     /// generation fields are the host's to compare, not the store's.
     ///
     /// Blocking file IO: async callers run it in `spawn_blocking`.
@@ -496,25 +497,50 @@ fn read_record(root: &Path, sid: &str) -> Result<SessionRecord, String> {
     decode(&bytes, sid)
 }
 
-/// A session folder found by listing: its record, `None` for an empty folder
-/// (a creation that never wrote its file, or one removed meanwhile), or an
-/// error. A folder with content but no `session.json` (say, native history
-/// alone) is an error, so a conversation is never hidden silently.
+/// A session folder found by listing: its record, `None` for a folder without
+/// content (a creation that never wrote its file, or one removed meanwhile),
+/// or an error. A folder with content but no `session.json` (say, native
+/// history alone) is an error, so a conversation is never hidden silently.
 fn read_listed(root: &Path, sid: &str) -> Result<Option<SessionRecord>, String> {
     match read_record(root, sid) {
-        Ok(record) => Ok(Some(record)),
-        Err(error) if error == NOT_FOUND => match fs::read_dir(root.join(sid)) {
-            Ok(mut entries) => {
-                if entries.next().is_none() {
-                    return Ok(None);
+        Ok(record) => return Ok(Some(record)),
+        Err(error) if error == NOT_FOUND => {}
+        Err(error) => return Err(error),
+    }
+    // `create` may be between its temp file and the rename: wait for its lock,
+    // then look again.
+    let lock = file_lock(&root.join(sid).join(SESSION_FILE));
+    let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+    match read_record(root, sid) {
+        Ok(record) => return Ok(Some(record)),
+        Err(error) if error == NOT_FOUND => {}
+        Err(error) => return Err(error),
+    }
+    if !has_content(&root.join(sid))? {
+        return Ok(None);
+    }
+    log::warn!("assistant session {sid} has files but no {SESSION_FILE}");
+    Err(INVALID_SESSION.into())
+}
+
+/// Whether a session folder holds anything but the temp file of a
+/// `session.json` write that never finished (`config::atomic_write_with`
+/// names it `.session.json.ofox-tmp-…`).
+fn has_content(dir: &Path) -> Result<bool, String> {
+    let unfinished = format!(".{SESSION_FILE}.ofox-tmp-");
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|_| UNAVAILABLE)?;
+                let name = entry.file_name();
+                if !name.to_str().is_some_and(|n| n.starts_with(&unfinished)) {
+                    return Ok(true);
                 }
-                log::warn!("assistant session {sid} has files but no {SESSION_FILE}");
-                Err(INVALID_SESSION.into())
             }
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-            Err(_) => Err(UNAVAILABLE.into()),
-        },
-        Err(error) => Err(error),
+            Ok(false)
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
+        Err(_) => Err(UNAVAILABLE.into()),
     }
 }
 
@@ -1190,6 +1216,93 @@ mod tests {
             store.usage_summary().unwrap()["usageCoverage"],
             "incomplete"
         );
+    }
+
+    /// What `config::atomic_write_with` leaves next to `session.json` while it
+    /// writes, or after a crash mid-write.
+    fn unfinished_write(dir: &Path) -> PathBuf {
+        dir.join(format!(".session.json.ofox-tmp-{}-1", std::process::id()))
+    }
+
+    fn record_for(sid: &str) -> SessionRecord {
+        SessionRecord {
+            session: Session {
+                id: sid.into(),
+                title: String::new(),
+                model_id: "test/model".into(),
+                web_search: false,
+                created_at: 1,
+                updated_at: 1,
+                deleted_at: None,
+                active_run: None,
+                draft: String::new(),
+                draft_attachment_ids: vec![],
+            },
+            messages: vec![],
+            attachments: vec![],
+            usage: json!({}),
+            operations: vec![],
+        }
+    }
+
+    #[test]
+    fn a_folder_holding_only_an_unfinished_write_is_not_reported() {
+        let (config, store) = fixture();
+        let kept = store.create("test/model", false).unwrap().session.id;
+        let root = session_file(config.path(), &store, &kept)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let interrupted = root.join(id());
+        fs::create_dir(&interrupted).unwrap();
+        fs::write(unfinished_write(&interrupted), "{").unwrap();
+
+        let list = store.list(false, "").unwrap();
+        assert_eq!(
+            list.sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+            [&kept]
+        );
+        assert!(list.unreadable.is_empty(), "{:?}", list.unreadable);
+    }
+
+    /// `create` holds the file lock from its temp file to the rename. A listing
+    /// that finds the folder in between waits for it instead of calling the
+    /// new conversation unreadable.
+    #[test]
+    fn a_listing_during_a_creation_waits_for_its_session_file() {
+        let (config, store) = fixture();
+        let kept = store.create("test/model", false).unwrap().session.id;
+        let root = session_file(config.path(), &store, &kept)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let sid = id();
+        let path = root.join(&sid).join(SESSION_FILE);
+        let lock = file_lock(&path);
+        let guard = lock.lock().unwrap();
+        fs::create_dir(root.join(&sid)).unwrap();
+        fs::write(unfinished_write(&root.join(&sid)), "{").unwrap();
+
+        let listing = std::thread::spawn({
+            let config = config.path().to_path_buf();
+            move || store_for(&config, "user", "org").list(false, "").unwrap()
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        write_record(&path, &record_for(&sid)).unwrap();
+        fs::remove_file(unfinished_write(&root.join(&sid))).unwrap();
+        drop(guard);
+
+        let list = listing.join().unwrap();
+        assert!(list.unreadable.is_empty(), "{:?}", list.unreadable);
+        let mut ids: Vec<_> = list.sessions.iter().map(|s| s.id.clone()).collect();
+        ids.sort();
+        let mut expected = vec![kept, sid];
+        expected.sort();
+        assert_eq!(ids, expected);
     }
 
     #[test]
