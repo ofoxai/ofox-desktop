@@ -256,6 +256,10 @@ pub(super) fn merge_native(
             .as_str()
             .filter(|t| !t.is_empty())
             .map(|t| scrub_secrets(t, secrets));
+        // A step of the run that only called tools has nothing to show.
+        if target.is_none() && !final_message && content.trim().is_empty() && thinking.is_none() {
+            continue;
+        }
         let status = if entry["stopReason"] == "error" {
             "error"
         } else if entry["stopReason"] == "aborted" {
@@ -807,6 +811,55 @@ mod tests {
         );
         assert_eq!(saved.messages[3].content, "new answer");
         assert!(saved.messages.iter().all(|m| m.status == "completed"));
+    }
+
+    #[test]
+    fn a_step_that_only_called_tools_is_not_a_message() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages = vec![
+            message("u1", "user", "run1", 1),
+            message("a1", "assistant", "run1", 1),
+        ];
+        let step = |id: &str, content: &str, thinking: &str, at: i64| {
+            json!({"id": id, "role": "assistant", "runId": "run1", "content": content,
+                   "thinking": thinking, "active": true, "final": false, "timestamp": at,
+                   "stopReason": "toolUse"})
+        };
+        merge_native(
+            &mut record,
+            &json!([
+                {"id":"n-u1","role":"user","runId":"run1","content":"q","active":true,"timestamp":10},
+                step("n-call", "", "", 11),
+                {"id":"n-tool","role":"tool","runId":"run1","toolName":"web_search","content":"found","timestamp":12},
+                step("n-said", "Let me check another page.", "", 13),
+                step("n-thought", "", "Which page next?", 14),
+                {"id":"n-a1","role":"assistant","runId":"run1","content":"answer","active":true,"final":true,"timestamp":15},
+            ]),
+            &[],
+        )
+        .unwrap();
+        let kept: Vec<(&str, Option<&str>, &str)> = record
+            .messages
+            .iter()
+            .map(|m| {
+                (
+                    m.role.as_str(),
+                    m.native_entry_id.as_deref(),
+                    m.content.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                ("user", Some("n-u1"), "partial"),
+                ("assistant", Some("n-said"), "Let me check another page."),
+                ("assistant", Some("n-thought"), ""),
+                ("assistant", Some("n-a1"), "answer"),
+            ]
+        );
     }
 
     #[test]

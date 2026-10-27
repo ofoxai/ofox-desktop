@@ -2162,6 +2162,14 @@ fn a_search_keeps_its_sources_on_the_reply_and_adds_its_cost() {
             reply.content,
             "Pi builds agents [Pi SDK](https://pi.dev/sdk)."
         );
+        // The step that only called the tool is not a message of its own.
+        assert_eq!(
+            active(&detail),
+            [
+                ("user".to_string(), "What is the Pi SDK?".to_string()),
+                ("assistant".to_string(), reply.content.clone()),
+            ]
+        );
         assert_eq!(json!(reply.sources), published["sources"]);
         assert_eq!(reply.sources[0]["title"], "Pi SDK");
         assert_eq!(reply.sources[0]["excerpt"], "Pi builds agents");
