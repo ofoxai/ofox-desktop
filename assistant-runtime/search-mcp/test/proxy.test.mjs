@@ -228,8 +228,10 @@ test("web_fetch checks DNS locally, then tunnels by host name with a verified ce
   assert.deepEqual(site.requests, [{ host: "example.com", url: "/news" }]);
 });
 
-test("a fake-IP host is checked with DNS-over-HTTPS through the proxy, then tunnelled by name", async (t) => {
+test("a fake-IP host is checked with DNS-over-HTTPS through the proxy, then tunnelled to the checked address", async (t) => {
   const site = await exampleSite(t);
+  // What the proxy's own resolver would pick for the name: never used.
+  const elsewhere = await exampleSite(t, "<h1>Elsewhere</h1>");
   const queries = [];
   const doh = createServer((request, response) => {
     const url = new URL(request.url, "http://localhost");
@@ -249,12 +251,14 @@ test("a fake-IP host is checked with DNS-over-HTTPS through the proxy, then tunn
     );
   });
   const dohPort = await listen(t, doh);
-  const proxy = await connectProxy(t, (target) =>
-    target === `localhost:${dohPort}`
-      ? dohPort
-      : target === "example.com:443"
-        ? site.port
-        : undefined,
+  const proxy = await connectProxy(
+    t,
+    (target) =>
+      ({
+        [`localhost:${dohPort}`]: dohPort,
+        [`${PUBLIC[0].address}:443`]: site.port,
+        "example.com:443": elsewhere.port,
+      })[target],
   );
   const proxied = proxiedFetch({ url: proxy.url, noProxy: "" });
   const page = await readWebPage("https://example.com/news", {
@@ -272,8 +276,103 @@ test("a fake-IP host is checked with DNS-over-HTTPS through the proxy, then tunn
   assert.deepEqual(queries.toSorted(), ["A example.com", "AAAA example.com"]);
   const targets = proxy.tunnels.map((tunnel) => tunnel.target);
   assert.ok(targets.includes(`localhost:${dohPort}`), String(targets));
-  assert.equal(targets.at(-1), "example.com:443");
+  // The tunnel goes to the address public DNS gave, not to the name.
+  assert.equal(targets.at(-1), `${PUBLIC[0].address}:443`);
+  assert.equal(targets.includes("example.com:443"), false);
+  // TLS and Host still carry the name; the certificate is verified for it.
+  assert.deepEqual(site.servernames, ["example.com"]);
   assert.deepEqual(site.requests, [{ host: "example.com", url: "/news" }]);
+  assert.deepEqual(elsewhere.requests, []);
+});
+
+test("a tunnel to a checked address still verifies the certificate for the name", async (t) => {
+  const site = await exampleSite(t);
+  const proxy = await connectProxy(t, () => site.port);
+  const error = await rejection(
+    readWebPage("https://www.example.org/", {
+      lookup: async () => [{ address: "198.18.0.90", family: 4 }],
+      doh: {
+        fetchImpl: async (url) =>
+          Response.json({
+            Status: 0,
+            Answer:
+              new URL(url).searchParams.get("type") === "A"
+                ? [{ type: 1, data: PUBLIC[0].address }]
+                : [],
+          }),
+      },
+      proxy: {
+        noProxy: "",
+        request: tunneledRequest(
+          { url: proxy.url },
+          { requestTls: { ca: tls.cert } },
+        ),
+      },
+    }),
+    FetchError,
+  );
+  assert.equal(error.code, "fetch_failed");
+  assert.match(error.message, /CERT/);
+  assert.deepEqual(
+    proxy.tunnels.map((tunnel) => tunnel.target),
+    [`${PUBLIC[0].address}:443`],
+  );
+  assert.equal(site.requests.length, 0);
+});
+
+test("a tunnelled read leaves no Host behind for the next request", async (t) => {
+  const site = await exampleSite(t);
+  const proxy = await connectProxy(t, () => site.port);
+  await readWebPage("https://example.com/first", {
+    lookup: async () => PUBLIC,
+    proxy: {
+      noProxy: "",
+      request: tunneledRequest(
+        { url: proxy.url },
+        { requestTls: { ca: tls.cert } },
+      ),
+    },
+  });
+  // undici adds the Host of a tunnelled request to the headers object it is
+  // given; a shared one would carry it to every later request.
+  const response = await pinnedRequest({ requestTls: { ca: tls.cert } })(
+    new URL(`https://example.com:${site.port}/second`),
+    { address: site.address, family: isIP(site.address) },
+    AbortSignal.timeout(5000),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(site.requests, [
+    { host: "example.com", url: "/first" },
+    { host: `example.com:${site.port}`, url: "/second" },
+  ]);
+});
+
+test("a pinned connection goes to the given address with SNI and Host set to the name", async (t) => {
+  const site = await exampleSite(t, "<p>pinned</p>");
+  const pinned = { address: site.address, family: isIP(site.address) };
+  const request = pinnedRequest({ requestTls: { ca: tls.cert } });
+  // The name does not resolve to this address; only the pin leads there.
+  const response = await request(
+    new URL(`https://example.com:${site.port}/doc`),
+    pinned,
+    AbortSignal.timeout(5000),
+  );
+  assert.equal(response.status, 200);
+  assert.equal(response.body.toString(), "<p>pinned</p>");
+  assert.deepEqual(site.servernames, ["example.com"]);
+  assert.deepEqual(site.requests, [
+    { host: `example.com:${site.port}`, url: "/doc" },
+  ]);
+
+  await assert.rejects(
+    request(
+      new URL(`https://www.example.org:${site.port}/`),
+      pinned,
+      AbortSignal.timeout(5000),
+    ),
+    (error) => error.code === "ERR_TLS_CERT_ALTNAME_INVALID",
+  );
+  assert.equal(site.requests.length, 1);
 });
 
 test("web_fetch through the proxy never opens a tunnel to a private address", async (t) => {
@@ -379,31 +478,4 @@ test("a tunnelled page over 2 MiB is refused while it streams", async (t) => {
     FetchError,
   );
   assert.equal(error.code, "fetch_too_large");
-});
-
-test("a tunnelled read leaves no Host behind for the next request", async (t) => {
-  const site = await exampleSite(t);
-  const proxy = await connectProxy(t, () => site.port);
-  await readWebPage("https://example.com/first", {
-    lookup: async () => PUBLIC,
-    proxy: {
-      noProxy: "",
-      request: tunneledRequest(
-        { url: proxy.url },
-        { requestTls: { ca: tls.cert } },
-      ),
-    },
-  });
-  // undici adds the Host of a tunnelled request to the headers object it is
-  // given; a shared one would carry it to every later request.
-  const response = await pinnedRequest({ requestTls: { ca: tls.cert } })(
-    new URL(`https://example.com:${site.port}/second`),
-    { address: site.address, family: isIP(site.address) },
-    AbortSignal.timeout(5000),
-  );
-  assert.equal(response.status, 200);
-  assert.deepEqual(site.requests, [
-    { host: "example.com", url: "/first" },
-    { host: `example.com:${site.port}`, url: "/second" },
-  ]);
 });

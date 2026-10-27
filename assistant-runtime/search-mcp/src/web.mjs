@@ -9,8 +9,11 @@
 // Fake-IP DNS: a Clash/Surge-style TUN answers every name with an address in
 // 198.18.0.0/15 and resolves the real host itself. When every local answer is
 // such an address, the host is checked with public DNS over HTTPS instead
-// (every answer must be public), and the page is read through the local
-// fake-IP address, still pinned, by host name with the certificate verified.
+// (every answer must be public), and the page is read from the first checked
+// public address, pinned, with SNI and Host the name and the certificate
+// verified for it; through the app's proxy the tunnel goes to that address,
+// not to the name. Never to the fake-IP: the TUN would resolve the name again
+// itself, and a host can answer its resolver with a private address.
 //
 // The "only URLs from the user or this conversation's search" allowlist is
 // not here: the client wrapper that exposes this tool to the model owns it.
@@ -203,51 +206,82 @@ export function pinnedRequest({ requestTls } = {}) {
     directRequest(url, pinned, signal, requestTls);
 }
 
+async function tunneled(target, { dispatcher, signal, headers }) {
+  let response;
+  try {
+    response = await undiciRequest(target, {
+      method: "GET",
+      dispatcher,
+      signal,
+      headers,
+    });
+  } catch (error) {
+    if (proxyRefused(error))
+      throw new FetchError(
+        "fetch_failed",
+        "The proxy refused or failed the connection to the web page",
+      );
+    throw error;
+  }
+  const chunks = [];
+  let length = 0;
+  for await (const chunk of response.body) {
+    length += chunk.length;
+    if (length > MAX_PAGE_BYTES) {
+      response.body.destroy();
+      throw tooLarge();
+    }
+    chunks.push(chunk);
+  }
+  return {
+    status: response.statusCode,
+    headers: response.headers,
+    body: Buffer.concat(chunks),
+  };
+}
+
 /**
  * A request through the app's proxy: a CONNECT (or SOCKS5) tunnel to the
  * host name, TLS verified for that name. The caller checked its DNS answers.
- * `requestTls` adds TLS options for the page connection (tests trust a local
- * certificate with it).
+ * With `toAddress` (fake-IP DNS) the tunnel goes to `pinned`, the checked
+ * address, instead, so the proxy cannot resolve the name to another one; SNI
+ * and Host stay the name. `requestTls` adds TLS options for the page
+ * connection (tests trust a local certificate with it).
  */
 export function tunneledRequest(proxy, { requestTls } = {}) {
-  const dispatcher = new ProxyAgent({
+  const options = {
     uri: proxy.url,
     proxyTunnel: true,
     maxHeaderSize: 16 * 1024,
+  };
+  const dispatcher = new ProxyAgent({
+    ...options,
     ...(requestTls ? { requestTls } : {}),
   });
-  return async (url, _pinned, signal) => {
-    let response;
-    try {
-      response = await undiciRequest(url, {
-        method: "GET",
+  return async (url, pinned, signal, { toAddress = false } = {}) => {
+    if (!toAddress)
+      return await tunneled(url, {
         dispatcher,
         signal,
         headers: { ...REQUEST_HEADERS },
       });
-    } catch (error) {
-      if (proxyRefused(error))
-        throw new FetchError(
-          "fetch_failed",
-          "The proxy refused or failed the connection to the web page",
-        );
-      throw error;
+    const target = new URL(url);
+    target.hostname =
+      pinned.family === 6 ? `[${pinned.address}]` : pinned.address;
+    // The TLS name is per agent: one for this request only.
+    const byAddress = new ProxyAgent({
+      ...options,
+      requestTls: { ...requestTls, servername: url.hostname },
+    });
+    try {
+      return await tunneled(target, {
+        dispatcher: byAddress,
+        signal,
+        headers: { ...REQUEST_HEADERS, host: url.host },
+      });
+    } finally {
+      byAddress.destroy().catch(() => {});
     }
-    const chunks = [];
-    let length = 0;
-    for await (const chunk of response.body) {
-      length += chunk.length;
-      if (length > MAX_PAGE_BYTES) {
-        response.body.destroy();
-        throw tooLarge();
-      }
-      chunks.push(chunk);
-    }
-    return {
-      status: response.statusCode,
-      headers: response.headers,
-      body: Buffer.concat(chunks),
-    };
   };
 }
 
@@ -348,13 +382,13 @@ export async function dohLookup(
   return answers.flat();
 }
 
-// Every answer must be public. Only when all are fake-IP addresses does public
-// DNS decide instead; the page is still read through the local fake-IP.
-async function checkAddresses(host, addresses, { doh, signal }) {
+// The checked addresses a hop may connect to: the local answers when all are
+// public; when all are fake-IP addresses, public DNS's answers instead.
+async function checkedAddresses(host, local, { doh, signal }) {
   if (
     !isIP(host) &&
-    addresses.length &&
-    addresses.every((item) => isFakeIpAddress(item.address))
+    local.length &&
+    local.every((item) => isFakeIpAddress(item.address))
   ) {
     const resolved = await dohLookup(host, { ...doh, signal });
     if (!resolved.length)
@@ -365,13 +399,11 @@ async function checkAddresses(host, addresses, { doh, signal }) {
       throw notAllowed(
         `${FAKE_IP_DNS} DNS-over-HTTPS contains a non-public address`,
       );
-    return;
+    return { addresses: resolved, fakeIp: true };
   }
-  if (
-    !addresses.length ||
-    addresses.some((item) => !isPublicAddress(item.address))
-  )
+  if (!local.length || local.some((item) => !isPublicAddress(item.address)))
     throw notAllowed("Web DNS contains a non-public address");
+  return { addresses: local, fakeIp: false };
 }
 
 async function follow(start, { signal, secrets, lookup, request, proxy, doh }) {
@@ -379,13 +411,18 @@ async function follow(start, { signal, secrets, lookup, request, proxy, doh }) {
   for (let redirects = 0; ; redirects++) {
     signal.throwIfAborted();
     const host = url.hostname.replace(/^\[|\]$/g, "");
-    const addresses = isIP(host)
+    const local = isIP(host)
       ? [{ address: host, family: isIP(host) }]
       : await lookup(host, { all: true, verbatim: true });
-    await checkAddresses(host, addresses, { doh, signal });
-    const send =
-      proxy && !bypassesProxy(url, proxy.noProxy) ? proxy.request : request;
-    const response = await send(url, addresses[0], signal);
+    const { addresses, fakeIp } = await checkedAddresses(host, local, {
+      doh,
+      signal,
+    });
+    // One attempt at the first checked address; a failure is final.
+    const response =
+      proxy && !bypassesProxy(url, proxy.noProxy)
+        ? await proxy.request(url, addresses[0], signal, { toAddress: fakeIp })
+        : await request(url, addresses[0], signal);
     if ([301, 302, 303, 307, 308].includes(response.status)) {
       if (redirects === MAX_REDIRECTS)
         throw new FetchError("fetch_failed", "Web redirect limit exceeded");

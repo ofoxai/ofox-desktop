@@ -353,8 +353,16 @@ function dohAnswer(type, ...addresses) {
 const publicDoh = (_name, type) =>
   type === "A" ? dohAnswer("A", "20.27.177.113") : dohAnswer("AAAA");
 
-test("fake-IP answers are checked with DNS-over-HTTPS, then read through the pinned fake-IP", async (t) => {
-  const doh = await dohServer(t, publicDoh);
+// Each host its own public answers, so a test can tell which one was used.
+const PUBLIC_DOH = {
+  "example.com": ["20.27.177.113", "20.27.177.114"],
+  "docs.example.org": ["151.101.1.1"],
+};
+const byNameDoh = (name, type) =>
+  type === "A" ? dohAnswer("A", ...PUBLIC_DOH[name]) : dohAnswer("AAAA");
+
+test("fake-IP answers are checked with DNS-over-HTTPS, then read from a pinned public answer", async (t) => {
+  const doh = await dohServer(t, byNameDoh);
   const connections = [];
   const result = await readWebPage("https://example.com/a", {
     lookup: async () => [...FAKE, { address: "198.19.255.254", family: 4 }],
@@ -370,15 +378,16 @@ test("fake-IP answers are checked with DNS-over-HTTPS, then read through the pin
         : {
             status: 200,
             headers: { "content-type": "text/plain" },
-            body: Buffer.from("through the fake IP"),
+            body: Buffer.from("from the checked address"),
           };
     },
   });
-  assert.equal(result.text, "through the fake IP");
-  // By host name (SNI and Host stay the name), at the local fake-IP address.
+  assert.equal(result.text, "from the checked address");
+  // By host name (SNI and Host stay the name), at an address public DNS gave
+  // for that host, never at the fake-IP the TUN would resolve again itself.
   assert.deepEqual(connections, [
-    ["https://example.com/a", "198.18.0.90"],
-    ["https://docs.example.org/b", "198.18.0.90"],
+    ["https://example.com/a", "20.27.177.113"],
+    ["https://docs.example.org/b", "151.101.1.1"],
   ]);
   // Both record types, for every hop.
   assert.deepEqual(doh.queries.toSorted(), [
@@ -387,6 +396,26 @@ test("fake-IP answers are checked with DNS-over-HTTPS, then read through the pin
     "AAAA docs.example.org",
     "AAAA example.com",
   ]);
+});
+
+test("a pinned public answer that cannot be reached fails without falling back", async (t) => {
+  const doh = await dohServer(t, byNameDoh);
+  const attempts = [];
+  const error = await fetchError(
+    readWebPage("https://example.com/", {
+      lookup: async () => FAKE,
+      doh: { url: doh.url },
+      request: async (_url, pinned) => {
+        attempts.push(pinned.address);
+        throw Object.assign(new Error("connect ECONNREFUSED"), {
+          code: "ECONNREFUSED",
+        });
+      },
+    }),
+  );
+  assert.equal(error.code, "fetch_failed");
+  // One attempt: neither the fake-IP nor another address is tried.
+  assert.deepEqual(attempts, ["20.27.177.113"]);
 });
 
 test("fake-IP answers are refused when public DNS has a non-public address or none", async (t) => {

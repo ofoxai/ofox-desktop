@@ -57,7 +57,9 @@ and diagnostics drop any `user:password@` part of a URL. `socks5h` means
   that `OFOX_NO_PROXY` matches (same rules as undici's) keeps the pinned
   direct connection. A refused tunnel is `fetch_failed`. The DNS-over-HTTPS
   check takes the route `web_search` takes (the proxy unless `OFOX_NO_PROXY`
-  matches `dns.alidns.com`).
+  matches `dns.alidns.com`). For a fake-IP host the tunnel goes to the
+  checked public **address** instead of the name (`CONNECT <ip>:443`, SNI and
+  `Host` the name), so the proxy cannot resolve the name to another address.
 
 ## Tools
 
@@ -118,13 +120,23 @@ server asks public DNS instead:
 (Alibaba's DNS JSON API, a fixed infrastructure URL, not an Ofox one), 5 s
 and 64 KiB at most. The host is allowed only when both queries
 succeed, they give at least one address, and every address is public by the
-rules above; the page is then read through the local fake-IP address, still
-pinned, with SNI and `Host` set to the host name and the certificate verified
-as usual. A failed or malformed DNS-over-HTTPS answer, no address (NXDOMAIN
-included) or any non-public address is `fetch_not_allowed`. Mixed answers
-(some fake-IP, some not) and every other reserved range follow the normal
-rules; a `198.18.0.0/15` address in the URL itself is still refused. The check
-covers every redirect hop.
+rules above. The page is then read from the first checked public address
+(A answers first), pinned like any direct read: TCP to that address, SNI and
+`Host` the host name, the certificate verified for it. It is never read
+through the fake-IP address: the TUN would resolve the name again itself,
+and a host can answer DNS-over-HTTPS with a public address and the TUN's
+resolver with a private one. A failed connection is `fetch_failed`, with no
+second attempt at the fake-IP or another address. A failed or malformed
+DNS-over-HTTPS answer, no address (NXDOMAIN included) or any non-public
+address is `fetch_not_allowed`. Mixed answers (some fake-IP, some not) and
+every other reserved range follow the normal rules; a `198.18.0.0/15` address
+in the URL itself is still refused. Every redirect hop is checked and pinned
+the same way.
+
+The trade-off: the TUN (or the app's proxy) sees a connection to an IP
+address, not a name, so its domain rules do not apply unless it reads the
+name from the TLS SNI (for example a Clash/mihomo sniffer). A site reachable
+only through a domain rule may then fail to load under fake-IP DNS.
 
 **The allowlist is not here.** `web_fetch` reads any URL that passes the
 rules above. The runtime only lets the model fetch URLs that the host allows

@@ -323,8 +323,10 @@ Run parameters:
   fake-IP address (`198.18.0.0/15`, Clash/Surge TUN), `web_fetch` checks the
   host with DNS-over-HTTPS at `https://dns.alidns.com/resolve` (a fixed
   infrastructure URL, not an Ofox one) through the same route as
-  `web_search`, and refuses it with `fetch_not_allowed` unless every answer
-  there is public.
+  `web_search`, refuses it with `fetch_not_allowed` unless every answer there
+  is public, and connects to a checked public address (through the proxy:
+  tunnels to it), never to the fake-IP. Sites that only a TUN or proxy domain
+  rule can reach may then fail unless it reads the name from the TLS SNI.
 
 Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
 `{url}`. `tool_end` is `{name, toolCallId, success:true, details}` or
