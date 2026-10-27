@@ -131,7 +131,10 @@ proxy: tunnelled by name, see [Proxy](#proxy)), every redirect (at most 4) is
 checked again, 15 s timeout, 2 MiB body limit, static
 HTML or plain text only, at most 20,000 characters of text, no cookies. The
 result is `{ url, text, truncated }`, where `url` is the final URL after
-redirects.
+redirects. The text is decoded in the page's own charset: a byte order mark,
+else the `Content-Type` charset, else (HTML) a `<meta charset>` or
+`<meta http-equiv="Content-Type">` in the first 1024 bytes; no charset, or
+one Node's `TextDecoder` does not know, is UTF-8.
 
 **Fake-IP DNS.** Clash/Surge-style TUN modes ("fake-ip") answer every name
 locally with an address in `198.18.0.0/15` and resolve the real host

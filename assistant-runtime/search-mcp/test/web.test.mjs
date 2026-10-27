@@ -259,6 +259,79 @@ test("HTML text extraction drops markup and decodes entities", () => {
   );
 });
 
+// "你好，世界" in GBK, and "日本" in Shift_JIS.
+const GBK = Buffer.from([
+  0xc4, 0xe3, 0xba, 0xc3, 0xa3, 0xac, 0xca, 0xc0, 0xbd, 0xe7,
+]);
+const SHIFT_JIS = Buffer.from([0x93, 0xfa, 0x96, 0x7b]);
+const html = (...parts) =>
+  Buffer.concat(
+    parts.map((part) => (Buffer.isBuffer(part) ? part : Buffer.from(part))),
+  );
+
+test("a page is decoded in the charset its Content-Type or meta tag names", async () => {
+  const read = async (body, contentType) =>
+    (
+      await readWebPage("https://example.com/", {
+        lookup: publicLookup,
+        request: page(body, contentType),
+      })
+    ).text;
+  assert.equal(
+    await read(html("<p>", GBK, "</p>"), "text/html; charset=GBK"),
+    "你好，世界",
+  );
+  assert.equal(
+    await read(html('<meta charset="gbk"><p>', GBK, "</p>"), "text/html"),
+    "你好，世界",
+  );
+  assert.equal(
+    await read(
+      html(
+        '<head><meta http-equiv="Content-Type" content="text/html; charset=gb2312"></head><p>',
+        GBK,
+        "</p>",
+      ),
+      "text/html",
+    ),
+    "你好，世界",
+  );
+  assert.equal(
+    await read(SHIFT_JIS, 'text/plain; charset="Shift_JIS"'),
+    "日本",
+  );
+  // A byte order mark wins over the header; a meta tag read as ASCII that
+  // names UTF-16 means UTF-8.
+  assert.equal(
+    await read(
+      html(Buffer.from([0xff, 0xfe]), Buffer.from("日本", "utf16le")),
+      "text/plain; charset=iso-8859-1",
+    ),
+    "日本",
+  );
+  assert.equal(
+    await read(html('<meta charset="utf-16"><p>', "你好", "</p>"), "text/html"),
+    "你好",
+  );
+  // The header wins over a meta tag; an unknown label, or none, is UTF-8.
+  assert.equal(
+    await read(
+      html('<meta charset="gbk"><p>', "你好", "</p>"),
+      "text/html; charset=utf-8",
+    ),
+    "你好",
+  );
+  assert.equal(
+    await read(html("<p>", "你好", "</p>"), "text/html; charset=no-such-thing"),
+    "你好",
+  );
+  assert.equal(
+    await read(html('<meta charset="bogus"><p>', "你好", "</p>"), "text/html"),
+    "你好",
+  );
+  assert.equal(await read(html("你好"), "text/plain"), "你好");
+});
+
 test("the key is scrubbed from page text before it is cut to 20,000 characters", async () => {
   const key = "sk-of+web/key=0123456789abcdef";
   const encoded = encodeURIComponent(key);

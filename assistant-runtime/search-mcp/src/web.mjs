@@ -285,6 +285,41 @@ export function tunneledRequest(proxy, { requestTls } = {}) {
   };
 }
 
+// Where browsers look for an HTML page's <meta> charset.
+const META_SCAN_BYTES = 1024;
+
+function charsetLabel(body, contentType, html) {
+  if (body[0] === 0xef && body[1] === 0xbb && body[2] === 0xbf) return "utf-8";
+  if (body[0] === 0xfe && body[1] === 0xff) return "utf-16be";
+  if (body[0] === 0xff && body[1] === 0xfe) return "utf-16le";
+  const header = /;\s*charset\s*=\s*["']?([^"';\s]+)/i.exec(contentType);
+  if (header) return header[1];
+  if (!html) return undefined;
+  // `<meta charset=…>` and `<meta http-equiv="Content-Type" content="…;
+  // charset=…">` alike. A page that names UTF-16 here was read as ASCII, so
+  // it is not UTF-16.
+  const meta = /<meta\b[^>]*?\bcharset\s*=\s*["']?\s*([^\s"'/>;]+)/i.exec(
+    body.subarray(0, META_SCAN_BYTES).toString("latin1"),
+  )?.[1];
+  return meta && /^utf-?16/i.test(meta) ? "utf-8" : meta;
+}
+
+/**
+ * A page's text in its own encoding: a byte order mark, else the
+ * Content-Type charset, else (HTML) a meta charset in the first 1024 bytes.
+ * No label, or one TextDecoder does not know, is UTF-8.
+ */
+function decodePage(body, contentType, html) {
+  const label = charsetLabel(body, contentType, html) ?? "utf-8";
+  let decoder;
+  try {
+    decoder = new TextDecoder(label);
+  } catch {
+    decoder = new TextDecoder();
+  }
+  return decoder.decode(body);
+}
+
 export function htmlText(html) {
   return html
     .replace(
@@ -447,7 +482,11 @@ async function follow(start, { signal, secrets, lookup, request, proxy, doh }) {
         "fetch_unsupported_content",
         "Web page must be static HTML or plain text",
       );
-    const decoded = new TextDecoder().decode(response.body);
+    const decoded = decodePage(
+      response.body,
+      String(response.headers["content-type"] ?? ""),
+      mime !== "text/plain",
+    );
     // Mask the key before the text is cut, so no fragment of it survives.
     const text = scrubSecrets(
       mime === "text/plain" ? decoded.trim() : htmlText(decoded),
