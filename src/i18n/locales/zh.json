@@ -4867,5 +4867,34 @@
     "unavailable": "当前后端尚未提供分组请求面板。",
     "keyboardChart": "使用左右方向键查看时间点，Enter 选择当天，Escape 关闭提示。",
     "totalTokens": "总 Token"
+  },
+  "assistant": {
+    "errors": {
+      "generic": "助手遇到了问题，请重试。",
+      "signInRequired": "请先登录 Ofox 再使用助手。",
+      "keyUnavailable": "没能准备助手的 API Key，请检查网络后重试。",
+      "signingOut": "正在退出账号，已停止接受新的助手任务。",
+      "shuttingDown": "应用正在退出，已停止接受新的助手任务。",
+      "identityChanged": "账号或区域已变化，请重试。",
+      "unknownApex": "无法识别当前的 Ofox 区域，请在设置中选择区域后重试。",
+      "sessionLoading": "对话还在加载，请稍后再试。",
+      "sessionBusy": "这个对话还在回复中，请等它完成或先停止。",
+      "sessionMissing": "这个对话已不存在，请刷新列表后重试。",
+      "sessionUnreadable": "这个对话的保存文件已损坏，无法打开。",
+      "messageMissing": "这条消息已无法编辑或重新生成，请刷新对话。",
+      "invalidMessage": "这条消息无法发送，请检查后重试。",
+      "messageTooLarge": "消息太长了，请缩短后重试。",
+      "titleTooLong": "标题太长了，请换一个短一些的。",
+      "modelRequired": "请先选择模型。",
+      "modelUnavailable": "这个模型暂时不可用，请换一个模型。",
+      "catalogUnavailable": "没能加载模型列表，请检查网络后重试。",
+      "visionModelRequired": "当前内容需要图片理解能力，请切换到支持图片的模型后重试。原消息会保留。",
+      "modelRequestFailed": "模型服务没能完成这次回复，请重试。",
+      "runTimeout": "回复超时，已停止。请重试。",
+      "stopped": "回复已停止。",
+      "runtime": "助手运行环境意外中断，请重试。",
+      "storage": "无法读取或保存本机的助手数据，请检查磁盘空间和权限。",
+      "historyMissing": "这个对话的部分本地历史已缺失。请新建对话；现有消息会保留。"
+    }
   }
 }
