@@ -5,6 +5,7 @@ import {
   AlertTriangle,
   ArrowUp,
   ArrowUpRight,
+  Globe,
   Loader2,
   MessageSquare,
   Paperclip,
@@ -39,7 +40,7 @@ const STARTERS = ["summary", "writing", "explain"] as const;
 /**
  * A conversation's tokens and cost. The cost is shown only once its runs are
  * saved, and as unavailable whenever a request's cost is unknown: never as
- * $0 or as a partial sum.
+ * $0 or as a partial sum. A cost that includes web searches says how many.
  */
 function usageSummary(
   usage: AssistantUsage | undefined,
@@ -61,12 +62,15 @@ function usageSummary(
   if (settled) {
     if (usage.usageCoverage === "incomplete")
       parts.push(t("assistant.costUnavailable"));
-    else if (typeof usage.estimatedCostUsd === "string")
+    else if (typeof usage.estimatedCostUsd === "string") {
+      const cost = fmtCost(Number(usage.estimatedCostUsd));
+      const searches = usage.searchCount ?? 0;
       parts.push(
-        t("assistant.usageCost", {
-          cost: fmtCost(Number(usage.estimatedCostUsd)),
-        }),
+        searches > 0
+          ? t("assistant.usageCostWithSearches", { cost, count: searches })
+          : t("assistant.usageCost", { cost }),
       );
+    }
     // Requests were made but a model had no price.
     else if (counted || (usage.modelRequests ?? 0) > 0)
       parts.push(t("assistant.costUnavailable"));
@@ -137,6 +141,18 @@ function AssistantWorkspace() {
     t,
   );
   const keyMissing = bootstrap?.key.status === "missing";
+  // Runs can search only while the catalog prices a search.
+  const searchPrice = bootstrap?.search.available
+    ? bootstrap.search.unitPriceUsd
+    : null;
+  const searchNote = !bootstrap
+    ? null
+    : searchPrice !== null
+      ? t("assistant.webSearchPrice", { price: fmtCost(Number(searchPrice)) })
+      : t("assistant.webSearchUnavailable");
+  // The price while search is on; why it can't be turned on while it can't.
+  const showSearchNote =
+    available && (searchPrice === null || assistant.webSearch);
   // Tool, system and other internal records stay out of the transcript.
   const messages = (detail?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
@@ -479,6 +495,7 @@ function AssistantWorkspace() {
                 {assistant.stream?.role === "assistant" && (
                   <AssistantMessageView
                     message={assistant.stream}
+                    activity={assistant.activity}
                     disabled
                     onEdit={async () => false}
                     onRegenerate={() => undefined}
@@ -545,6 +562,26 @@ function AssistantWorkspace() {
                   >
                     <Paperclip aria-hidden className="h-3.5 w-3.5" />
                   </Button>
+                  <Button
+                    variant="ghost"
+                    aria-pressed={assistant.webSearch}
+                    title={searchNote ?? undefined}
+                    disabled={
+                      !available ||
+                      searchPrice === null ||
+                      busy ||
+                      assistant.loading
+                    }
+                    onClick={() => assistant.setWebSearch(!assistant.webSearch)}
+                    className={cn(
+                      "shrink-0 px-2",
+                      assistant.webSearch &&
+                        "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
+                    )}
+                  >
+                    <Globe aria-hidden className="h-3.5 w-3.5" />
+                    {t("assistant.webSearch")}
+                  </Button>
                   <span className="min-w-0 truncate text-note text-ink-faint">
                     {run ? t("assistant.running") : t("assistant.sendHint")}
                   </span>
@@ -570,9 +607,10 @@ function AssistantWorkspace() {
                 )}
               </div>
             </div>
-            {(keyMissing || usage) && (
+            {(keyMissing || usage || showSearchNote) && (
               <div className="mt-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1 text-note text-ink-muted">
                 {keyMissing && <p>{t("assistant.keyMissingHint")}</p>}
+                {showSearchNote && <p>{searchNote}</p>}
                 {usage && <p className="ml-auto text-right">{usage}</p>}
               </div>
             )}

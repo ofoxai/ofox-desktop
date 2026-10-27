@@ -20,6 +20,21 @@ const IDENTITY_CHANGED = "assistant_identity_changed";
 /** A backend or renderer error code; the page turns it into a localized message. */
 export type AssistantError = string;
 
+/** What a running reply is doing, as the user is told; never a tool's name. */
+export type AssistantActivity = "searching" | "readingPage" | "readingFile";
+
+const TOOL_ACTIVITY = new Map<string, AssistantActivity>([
+  ["web_search", "searching"],
+  ["web_fetch", "readingPage"],
+  ["read_attachment", "readingFile"],
+]);
+
+/** A tool call of the followed run that has not ended, by its call id. */
+interface RunningTool {
+  id: string;
+  activity: AssistantActivity;
+}
+
 /** A conversation's draft as last saved; `files` unknown until read or written. */
 interface SavedDraft {
   text: string;
@@ -44,6 +59,10 @@ export function useAssistant(enabled: boolean) {
   const [bootstrap, setBootstrap] = useState<AssistantBootstrap | null>(null);
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const newModelId = chosenModel ?? bootstrap?.defaultModelId ?? "";
+  // Web search for the conversation the first message creates; each new
+  // conversation starts with it off.
+  const [newWebSearch, setNewWebSearchState] = useState(false);
+  const newWebSearchRef = useRef(newWebSearch);
   const [search, setSearch] = useState("");
   const [sessions, setSessions] = useState<AssistantSession[]>([]);
   const [unreadable, setUnreadable] = useState<AssistantUnreadableSession[]>(
@@ -57,6 +76,7 @@ export function useAssistant(enabled: boolean) {
   );
   const [stream, setStream] = useState<AssistantMessage | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
+  const [tools, setTools] = useState<RunningTool[]>([]);
   const [compacting, setCompacting] = useState(false);
   const [error, setError] = useState<AssistantError | null>(null);
   const [loading, setLoading] = useState(false);
@@ -91,7 +111,14 @@ export function useAssistant(enabled: boolean) {
   selectedRef.current = selectedId;
   draftRef.current = draft;
 
+  const setNewWebSearch = useCallback((value: boolean) => {
+    newWebSearchRef.current = value;
+    setNewWebSearchState(value);
+  }, []);
+
   const setRun = useCallback((value: AssistantRunRef | null) => {
+    // Another run, or none: the tools the last one started are not followed.
+    if (value?.runId !== runRef.current?.runId) setTools([]);
     runRef.current = value;
     setRunState(value);
   }, []);
@@ -344,6 +371,7 @@ export function useAssistant(enabled: boolean) {
       setBootstrap(null);
       bootstrapRef.current = null;
       setChosenModel(null);
+      setNewWebSearch(false);
       setError(null);
     };
     if (!enabled) {
@@ -367,7 +395,15 @@ export function useAssistant(enabled: boolean) {
       epoch.current += 1;
       cleanup.forEach((off) => off());
     };
-  }, [enabled, loadBootstrap, setAttachments, setDraft, setRun, showError]); // List refresh uses its current request fencing separately.
+  }, [
+    enabled,
+    loadBootstrap,
+    setAttachments,
+    setDraft,
+    setNewWebSearch,
+    setRun,
+    showError,
+  ]); // List refresh uses its current request fencing separately.
 
   useEffect(() => {
     if (!enabled) return;
@@ -534,6 +570,34 @@ export function useAssistant(enabled: boolean) {
             );
             return;
           }
+          case "tool_start": {
+            const { name, toolCallId } = event.data;
+            const activity =
+              typeof name === "string" ? TOOL_ACTIVITY.get(name) : undefined;
+            if (!activity || typeof toolCallId !== "string") return;
+            setTools((running) => [
+              ...running.filter((tool) => tool.id !== toolCallId),
+              { id: toolCallId, activity },
+            ]);
+            return;
+          }
+          case "tool_end": {
+            const { toolCallId } = event.data;
+            setTools((running) =>
+              running.filter((tool) => tool.id !== toolCallId),
+            );
+            return;
+          }
+          case "sources": {
+            // All of the reply's sources so far, already saved.
+            const { sources } = event.data;
+            if (!Array.isArray(sources)) return;
+            setStream((previous) => ({
+              ...(previous ?? blank(event.runId)),
+              sources,
+            }));
+            return;
+          }
           case "compaction_start":
             setCompacting(true);
             return;
@@ -605,6 +669,7 @@ export function useAssistant(enabled: boolean) {
       selectionSequence.current += 1;
       updateSequence.current += 1;
       createdSession.current = null;
+      setNewWebSearch(false);
       detailSequence.current += 1;
       setBusy(false);
       setSelectedId(id);
@@ -621,7 +686,15 @@ export function useAssistant(enabled: boolean) {
       setAttachmentsState(attachmentsRef.current);
       setError(null);
     },
-    [loading, detail, loadSelected, setRun, persistDraft, showError],
+    [
+      loading,
+      detail,
+      loadSelected,
+      setRun,
+      setNewWebSearch,
+      persistDraft,
+      showError,
+    ],
   );
 
   const ensureSession = useCallback(async () => {
@@ -633,7 +706,7 @@ export function useAssistant(enabled: boolean) {
     const selection = selectionSequence.current;
     const value = await assistantApi.createSession({
       modelId: newModelId || undefined,
-      webSearch: false,
+      webSearch: newWebSearchRef.current,
     });
     if (
       !mounted.current ||
@@ -643,13 +716,14 @@ export function useAssistant(enabled: boolean) {
       throw new Error("assistant_request_expired");
     selectedRef.current = value.id;
     createdSession.current = value.id;
+    setNewWebSearch(false);
     drafts.current.set(value.id, draftRef.current);
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessions();
     return value;
-  }, [detail, newModelId, refreshSessions]);
+  }, [detail, newModelId, refreshSessions, setNewWebSearch]);
 
   const create = useCallback(async () => {
     if (busy) return;
@@ -707,6 +781,18 @@ export function useAssistant(enabled: boolean) {
       }
     },
     [refreshSessions, showError],
+  );
+
+  /**
+   * Web search for the open conversation, or for the one the first message
+   * creates. A running reply goes on as it started; the next send uses it.
+   */
+  const setWebSearch = useCallback(
+    (on: boolean) => {
+      if (selectedRef.current) void update({ webSearch: on });
+      else setNewWebSearch(on);
+    },
+    [update, setNewWebSearch],
   );
 
   /**
@@ -958,10 +1044,19 @@ export function useAssistant(enabled: boolean) {
     }
   }, [showError]);
 
+  // The latest tool still running says what the reply is doing.
+  const activity = tools[tools.length - 1]?.activity ?? null;
+  // The open conversation's setting; off while it loads.
+  const webSearch = selectedId
+    ? detail?.session.id === selectedId && detail.session.webSearch
+    : newWebSearch;
+
   return {
     bootstrap,
     newModelId,
     chooseNewModel: setChosenModel,
+    webSearch,
+    setWebSearch,
     search,
     setSearch,
     sessions,
@@ -974,6 +1069,7 @@ export function useAssistant(enabled: boolean) {
     pickAttachments,
     removeAttachment,
     stream,
+    activity,
     run,
     compacting,
     error,

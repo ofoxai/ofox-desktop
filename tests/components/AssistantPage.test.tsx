@@ -84,6 +84,11 @@ const capabilities: AssistantBootstrap = {
   defaultModelId: "balanced",
   modelUnavailableReason: null,
   key: { status: "ready" },
+  search: {
+    available: true,
+    unitPriceUsd: "0.014",
+    model: "openai/gpt-5-nano",
+  },
 };
 let current: AssistantSessionDetail;
 const listOf = (
@@ -458,6 +463,11 @@ describe("errors", () => {
       "assistant_model_unavailable",
       "en",
       "This model isn't available right now. Choose another model.",
+    ],
+    [
+      "assistant_search_outcome_unknown",
+      "zh",
+      "无法确认网页搜索是否已执行，回复已停止。这次搜索可能已经计费，因此不会自动重试。如仍需要回答，请重新发送消息。",
     ],
   ])(
     "explains the run failure %s in %s by its code, never with the provider's text",
@@ -1840,6 +1850,52 @@ describe("conversation cost", () => {
     expect(usageLine()).not.toHaveTextContent("$");
   });
 
+  it.each([
+    [2, "en", "Estimated cost ≈$0.040 incl. 2 searches"],
+    [1, "en", "Estimated cost ≈$0.040 incl. 1 search"],
+    [2, "ja", "推定コスト ≈$0.040（検索 2 回を含む）"],
+    [2, "zh", "预估成本 ≈$0.040（含 2 次搜索）"],
+  ])(
+    "says the saved cost includes %i web searches in %s",
+    async (searchCount, language, expected) => {
+      current.usage = {
+        inputTokens: 1234,
+        outputTokens: 340,
+        estimatedCostUsd: "0.0402",
+        searchCount,
+        searchCostUsd: "0.028",
+        modelRequests: 2,
+      };
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      i18n.addResourceBundle("ja", "translation", ja, true, true);
+      await i18n.changeLanguage(language);
+      render(page());
+      await userEvent.click(
+        await screen.findByRole("button", { name: /My conversation/ }),
+      );
+      // After the tokens, on the same line.
+      const line = await screen.findByText(expected, { exact: false });
+      expect(line.textContent?.endsWith(` · ${expected}`)).toBe(true);
+    },
+  );
+
+  it("says only that the cost is unavailable when a search's outcome is unknown", async () => {
+    current.usage = {
+      inputTokens: 900,
+      outputTokens: 20,
+      estimatedCostUsd: null,
+      searchCount: 1,
+      searchCostUsd: null,
+      usageCoverage: "incomplete",
+      modelRequests: 1,
+    };
+    await openConversation();
+    expect(usageLine()).toHaveTextContent(
+      "Input 900 · Output 20 tokens · Cost unavailable",
+    );
+    expect(usageLine()).not.toHaveTextContent(/search|\$/);
+  });
+
   it("says nothing about cost before the first request", async () => {
     await openConversation();
     expect(usageLine()).toBeNull();
@@ -1896,6 +1952,316 @@ describe("conversation cost", () => {
         "Input 300 · Output 50 tokens · Cost unavailable",
       ),
     );
+  });
+});
+
+describe("web search", () => {
+  const toggle = () => screen.getByRole("button", { name: "Web search" });
+
+  it("turns web search on and off for the open conversation", async () => {
+    await openConversation();
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    await userEvent.click(toggle());
+    await waitFor(() =>
+      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(mocks.updateSession).toHaveBeenLastCalledWith({
+      sessionId: "session-a",
+      webSearch: true,
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    });
+    await userEvent.click(toggle());
+    await waitFor(() =>
+      expect(toggle()).toHaveAttribute("aria-pressed", "false"),
+    );
+    expect(mocks.updateSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sessionId: "session-a", webSearch: false }),
+    );
+  });
+
+  it("shows a conversation's saved setting", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("says what a search costs, like other costs, and shows it while search is on", async () => {
+    const price = "≈$0.014 per search, plus a little for its tokens";
+    await openConversation();
+    expect(toggle()).toHaveAccessibleDescription(price);
+    expect(screen.queryByText(price)).toBeNull();
+    await userEvent.click(toggle());
+    expect(await screen.findByText(price)).toBeVisible();
+  });
+
+  it("starts the first conversation with web search when it was turned on before the first message", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await waitFor(() => expect(toggle()).toBeEnabled());
+    await userEvent.click(toggle());
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+    mocks.createSession.mockImplementation(async (request) => ({
+      ...session,
+      ...request,
+    }));
+    await userEvent.type(composer(), "What's new today?");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        modelId: "balanced",
+        webSearch: true,
+      }),
+    );
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("leaves web search off in a conversation started from another one", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    mocks.createSession.mockImplementation(async (request) => ({
+      ...session,
+      id: "session-b",
+      ...request,
+    }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "New conversation" }),
+    );
+    await waitFor(() =>
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        modelId: "balanced",
+        webSearch: false,
+      }),
+    );
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("can be changed while a reply runs, which goes on", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    expect(toggle()).toBeEnabled();
+    await userEvent.click(toggle());
+    await waitFor(() =>
+      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
+    );
+    expect(mocks.stop).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+  });
+
+  it("shows a search's sources as they arrive, and the saved ones once the reply ends", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    await userEvent.type(composer(), "What's new in Pi?");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    const notes = {
+      id: "s1",
+      title: "Pi release notes",
+      url: "https://pi.dev/releases",
+      excerpt: "Pi 2 is out.",
+    };
+    const changelog = {
+      id: "s2",
+      title: "Pi changelog",
+      url: "https://pi.dev/changelog",
+      excerpt: "",
+    };
+    const search = { messageId: "reply", name: "web_search", toolCallId: "c1" };
+    act(() => {
+      mocks.listener?.({
+        ...sent,
+        type: "tool_start",
+        data: { ...search, args: { query: "pi release" } },
+      });
+      mocks.listener?.({
+        ...sent,
+        type: "sources",
+        data: { messageId: "reply", sources: [notes] },
+      });
+    });
+    expect(
+      screen.getByRole("button", { name: "1. Pi release notes" }),
+    ).toBeVisible();
+    // Each event holds all of the reply's sources so far.
+    act(() => {
+      mocks.listener?.({
+        ...sent,
+        type: "sources",
+        data: { messageId: "reply", sources: [notes, changelog] },
+      });
+      mocks.listener?.({
+        ...sent,
+        type: "tool_end",
+        data: { ...search, success: true, code: null },
+      });
+    });
+    expect(
+      within(screen.getByRole("list", { name: "Sources" }))
+        .getAllByRole("button")
+        .map((link) => link.textContent),
+    ).toEqual(["1. Pi release notes", "2. Pi changelog"]);
+    current = {
+      ...current,
+      messages: [
+        { id: "q", role: "user", content: "What's new in Pi?", createdAt: 1 },
+        {
+          id: "reply",
+          role: "assistant",
+          content: "Pi 2 is out.",
+          status: "completed",
+          createdAt: 2,
+          sources: [notes, changelog],
+        },
+      ],
+    };
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
+    expect(await screen.findByText("Pi 2 is out.")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
+    );
+    expect(screen.getAllByRole("list", { name: "Sources" })).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: "2. Pi changelog" }),
+    ).toBeVisible();
+  });
+
+  it("says what the reply is doing while a tool runs, never naming the tool", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    await userEvent.type(composer(), "Compare these pages");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    // The progress lines on screen (each message's copy button has a
+    // status of its own).
+    const status = () =>
+      [
+        "Thinking…",
+        "Searching the web…",
+        "Reading a page…",
+        "Reading a file…",
+      ].filter((text) => screen.queryByText(text));
+    const tool = (name: string, toolCallId: string) => ({
+      messageId: "reply",
+      name,
+      toolCallId,
+    });
+    const start = (name: string, id: string, args = {}) =>
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "tool_start",
+          data: { ...tool(name, id), args },
+        }),
+      );
+    const end = (name: string, id: string, code: string | null = null) =>
+      act(() =>
+        mocks.listener?.({
+          ...sent,
+          type: "tool_end",
+          data: { ...tool(name, id), success: code === null, code },
+        }),
+      );
+    start("web_search", "c1", { query: "pi release" });
+    expect(status()).toEqual(["Searching the web…"]);
+    end("web_search", "c1", "search_failed");
+    expect(status()).toEqual(["Thinking…"]);
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "text_delta",
+        data: { delta: "Let me read them.", messageId: "reply" },
+      }),
+    );
+    start("web_fetch", "c2", { url: "https://pi.dev/" });
+    expect(status()).toEqual(["Reading a page…"]);
+    start("read_attachment", "c3", { id: "file-1" });
+    expect(status()).toEqual(["Reading a file…"]);
+    end("read_attachment", "c3");
+    expect(status()).toEqual(["Reading a page…"]);
+    end("web_fetch", "c2");
+    expect(status()).toEqual([]);
+    // A tool this build doesn't know shows nothing.
+    start("shell_exec", "c4");
+    expect(status()).toEqual([]);
+    for (const internal of [
+      "web_search",
+      "web_fetch",
+      "read_attachment",
+      "shell_exec",
+      "search_failed",
+    ])
+      expect(document.body).not.toHaveTextContent(internal);
+    // A run that ends while a tool still runs leaves no progress behind.
+    start("web_search", "c5");
+    expect(status()).toEqual(["Searching the web…"]);
+    current = {
+      ...current,
+      messages: [
+        { id: "q", role: "user", content: "Compare these pages", createdAt: 1 },
+        {
+          id: "reply",
+          role: "assistant",
+          content: "Let me read them.",
+          status: "stopped",
+          createdAt: 2,
+        },
+      ],
+    };
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "run_end",
+        data: { stopped: true, status: "stopped" },
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
+    );
+    expect(status()).toEqual([]);
+  });
+
+  it("tells the user the assistant searches the web only when asked to", async () => {
+    await openConversation();
+    expect(
+      screen.getByText(
+        "Replies come from the model you choose. The assistant reads only the files you attach and searches the web only when you turn on web search. It can't change your settings.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("can't be turned on, and says why, when search is unavailable", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      search: {
+        available: false,
+        unitPriceUsd: null,
+        model: "openai/gpt-5-nano",
+      },
+    });
+    await openConversation();
+    expect(toggle()).toBeDisabled();
+    expect(toggle()).toHaveAccessibleDescription(
+      "Web search is unavailable right now. Replies use the model's own knowledge.",
+    );
+    expect(
+      screen.getByText(
+        "Web search is unavailable right now. Replies use the model's own knowledge.",
+      ),
+    ).toBeVisible();
+    expect(document.body).not.toHaveTextContent("per search");
   });
 });
 

@@ -456,6 +456,7 @@ describe("Console assistant", () => {
           models: [{ id: "m", name: "Model" }],
           defaultModelId: "m",
           key: { status: "ready" },
+          search: { available: false, unitPriceUsd: null, model: "search" },
         };
       if (command === "assistant_list_sessions")
         return { sessions: [], unreadable: [] };
