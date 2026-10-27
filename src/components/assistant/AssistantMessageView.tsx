@@ -1,13 +1,16 @@
 import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { toast } from "sonner";
 import {
+  ExternalLink,
   MessageSquare,
   Pencil,
   RotateCcw,
   RotateCw,
   UserRound,
 } from "lucide-react";
-import type { AssistantMessage } from "@/lib/api/assistant";
+import type { AssistantMessage, AssistantSource } from "@/lib/api/assistant";
+import { settingsApi } from "@/lib/api/settings";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -16,6 +19,15 @@ import { cn } from "@/lib/utils";
 import { AttachmentList, isSendable } from "./AssistantAttachments";
 
 const MessageMarkdown = memo(SessionMarkdown);
+
+/** The backend keeps only HTTPS sources; anything else is never offered. */
+function isHttps(source: AssistantSource) {
+  try {
+    return new URL(source.url).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 /**
  * One user question or assistant reply. Only those two roles reach this view.
@@ -43,6 +55,7 @@ export function AssistantMessageView({
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
   const files = message.attachments ?? [];
+  const sources = (message.sources ?? []).filter(isHttps);
   const resendable = files.filter(isSendable);
   // An edit with no files of its own keeps all of the original's, so one
   // whose files all fail to read could only fail the same way again.
@@ -180,6 +193,32 @@ export function AssistantMessageView({
             />
           )}
         </>
+      )}
+      {sources.length > 0 && (
+        <div className="mt-3 border-t border-line pt-2">
+          <p className="mb-1 text-note text-ink-muted">
+            {t("assistant.sources")}
+          </p>
+          <ul className="space-y-1" aria-label={t("assistant.sources")}>
+            {sources.map((source, index) => (
+              <li key={source.id}>
+                <Button
+                  variant="link"
+                  title={source.url}
+                  className="h-auto max-w-full justify-start whitespace-normal px-0 text-left"
+                  onClick={() =>
+                    void settingsApi
+                      .openExternal(source.url)
+                      .catch(() => toast.error(t("shell.openFailed")))
+                  }
+                >
+                  <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
+                  {index + 1}. {source.title}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {!editing && !streaming && (
         <div className="mt-2 flex items-center gap-1">

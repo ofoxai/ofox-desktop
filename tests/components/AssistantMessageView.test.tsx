@@ -7,9 +7,18 @@ import { AssistantMessageView } from "@/components/assistant/AssistantMessageVie
 import type {
   AssistantAttachment,
   AssistantMessage,
+  AssistantSource,
 } from "@/lib/api/assistant";
 
 const markdown = vi.hoisted(() => vi.fn());
+const external = vi.hoisted(() => ({
+  openExternal: vi.fn(),
+  toastError: vi.fn(),
+}));
+vi.mock("@/lib/api/settings", () => ({
+  settingsApi: { openExternal: external.openExternal },
+}));
+vi.mock("sonner", () => ({ toast: { error: external.toastError } }));
 vi.mock("@/components/sessions/SessionMarkdown", () => ({
   SessionMarkdown: ({ content }: { content: string }) => {
     markdown(content);
@@ -20,6 +29,8 @@ vi.mock("@/components/sessions/SessionMarkdown", () => ({
 beforeEach(async () => {
   i18n.addResourceBundle("en", "translation", en, true, true);
   await i18n.changeLanguage("en");
+  external.openExternal.mockReset().mockResolvedValue(undefined);
+  external.toastError.mockReset();
 });
 
 function view(
@@ -286,5 +297,83 @@ describe("files sent with a question", () => {
       ),
     ).toBeVisible();
     expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
+  });
+});
+
+describe("a reply's sources", () => {
+  const source = (id: string, title: string, url: string): AssistantSource => ({
+    id,
+    title,
+    url,
+    excerpt: "",
+  });
+  const found = [
+    source("s1", "Pi release notes", "https://pi.dev/releases"),
+    source("s2", "Ofox docs", "https://docs.example.com/ofox"),
+  ];
+
+  it("lists the pages its searches found, numbered, under the reply", () => {
+    render(view({ content: "Answer", status: "completed", sources: found }));
+    const list = screen.getByRole("list", { name: "Sources" });
+    expect(
+      within(list)
+        .getAllByRole("button")
+        .map((link) => link.textContent),
+    ).toEqual(["1. Pi release notes", "2. Ofox docs"]);
+    expect(
+      within(list).getByRole("button", { name: "1. Pi release notes" }),
+    ).toHaveAttribute("title", "https://pi.dev/releases");
+  });
+
+  it("opens a source in the browser", async () => {
+    render(view({ content: "Answer", sources: found }));
+    await userEvent.click(screen.getByRole("button", { name: "2. Ofox docs" }));
+    expect(external.openExternal).toHaveBeenCalledWith(
+      "https://docs.example.com/ofox",
+    );
+  });
+
+  it("says so when a source can't be opened", async () => {
+    external.openExternal.mockRejectedValueOnce(new Error("denied"));
+    render(view({ content: "Answer", sources: found }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "1. Pi release notes" }),
+    );
+    await vi.waitFor(() =>
+      expect(external.toastError).toHaveBeenCalledWith(
+        "Couldn't open the link",
+      ),
+    );
+  });
+
+  it("shows only HTTPS pages", () => {
+    render(
+      view({
+        content: "Answer",
+        sources: [
+          source("s1", "Plain", "http://plain.example.com/"),
+          source("s2", "Script", "javascript:alert(1)"),
+          source("s3", "Secure", "https://secure.example.com/"),
+        ],
+      }),
+    );
+    expect(
+      within(screen.getByRole("list", { name: "Sources" }))
+        .getAllByRole("button")
+        .map((link) => link.textContent),
+    ).toEqual(["1. Secure"]);
+  });
+
+  it("shows nothing for a reply without sources", () => {
+    render(view({ content: "Answer", sources: [] }));
+    expect(screen.queryByText("Sources")).toBeNull();
+  });
+
+  it("shows the sources found so far while the reply streams", () => {
+    render(view({ status: "streaming", sources: found }));
+    expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+    expect(
+      screen.getByRole("button", { name: "1. Pi release notes" }),
+    ).toBeVisible();
   });
 });

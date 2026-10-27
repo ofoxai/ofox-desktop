@@ -4996,6 +4996,7 @@
       "unavailable": "此文件无法发送。请移除后重新附加。"
     },
     "reasoning": "思考过程",
+    "sources": "来源",
     "compacting": "正在整理对话上下文…",
     "roles": {
       "user": "你",

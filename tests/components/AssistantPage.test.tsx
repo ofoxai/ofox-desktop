@@ -2002,6 +2002,90 @@ describe("web search", () => {
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
   });
 
+  it("shows a search's sources as they arrive, and the saved ones once the reply ends", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    await userEvent.type(composer(), "What's new in Pi?");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    const notes = {
+      id: "s1",
+      title: "Pi release notes",
+      url: "https://pi.dev/releases",
+      excerpt: "Pi 2 is out.",
+    };
+    const changelog = {
+      id: "s2",
+      title: "Pi changelog",
+      url: "https://pi.dev/changelog",
+      excerpt: "",
+    };
+    const search = { messageId: "reply", name: "web_search", toolCallId: "c1" };
+    act(() => {
+      mocks.listener?.({
+        ...sent,
+        type: "tool_start",
+        data: { ...search, args: { query: "pi release" } },
+      });
+      mocks.listener?.({
+        ...sent,
+        type: "sources",
+        data: { messageId: "reply", sources: [notes] },
+      });
+    });
+    expect(
+      screen.getByRole("button", { name: "1. Pi release notes" }),
+    ).toBeVisible();
+    // Each event holds all of the reply's sources so far.
+    act(() => {
+      mocks.listener?.({
+        ...sent,
+        type: "sources",
+        data: { messageId: "reply", sources: [notes, changelog] },
+      });
+      mocks.listener?.({
+        ...sent,
+        type: "tool_end",
+        data: { ...search, success: true, code: null },
+      });
+    });
+    expect(
+      within(screen.getByRole("list", { name: "Sources" }))
+        .getAllByRole("button")
+        .map((link) => link.textContent),
+    ).toEqual(["1. Pi release notes", "2. Pi changelog"]);
+    current = {
+      ...current,
+      messages: [
+        { id: "q", role: "user", content: "What's new in Pi?", createdAt: 1 },
+        {
+          id: "reply",
+          role: "assistant",
+          content: "Pi 2 is out.",
+          status: "completed",
+          createdAt: 2,
+          sources: [notes, changelog],
+        },
+      ],
+    };
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
+    expect(await screen.findByText("Pi 2 is out.")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "Stop" })).toBeNull(),
+    );
+    expect(screen.getAllByRole("list", { name: "Sources" })).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: "2. Pi changelog" }),
+    ).toBeVisible();
+  });
+
   it("can't be turned on, and says why, when search is unavailable", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,

@@ -552,6 +552,16 @@ export function useAssistant(enabled: boolean) {
             );
             return;
           }
+          case "sources": {
+            // All of the reply's sources so far, already saved.
+            const { sources } = event.data;
+            if (!Array.isArray(sources)) return;
+            setStream((previous) => ({
+              ...(previous ?? blank(event.runId)),
+              sources,
+            }));
+            return;
+          }
           case "compaction_start":
             setCompacting(true);
             return;

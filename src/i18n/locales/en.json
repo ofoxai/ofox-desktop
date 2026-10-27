@@ -4996,6 +4996,7 @@
       "unavailable": "This file can't be sent. Remove it and attach it again."
     },
     "reasoning": "Reasoning",
+    "sources": "Sources",
     "compacting": "Organizing conversation context…",
     "roles": {
       "user": "You",
