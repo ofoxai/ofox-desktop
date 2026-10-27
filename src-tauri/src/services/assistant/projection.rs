@@ -2,10 +2,12 @@
 //! totals, the runtime's native history bound to the session's messages, and
 //! the state a run leaves when it ends or its process died.
 use super::{
+    catalog::SearchPrice,
     host::{scrub_secrets, scrub_secrets_in, RunControl, PROTOCOL},
     store::{AssistantStore, SessionRecord},
     types::*,
 };
+use rust_decimal::Decimal;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::time::Duration;
@@ -202,6 +204,7 @@ pub(super) fn add_usage(totals: &mut Value, usage: &Value) {
     }
     totals["estimatedCostUsd"] = Value::Null;
     totals["billedCostUsd"] = Value::Null;
+    totals["searchCostUsd"] = Value::Null;
 }
 
 /// Bind the runtime's native entries to the session's messages. Native
@@ -311,8 +314,17 @@ pub(super) fn merge_native(
         }
     }
     record.messages.sort_by_key(|m| m.created_at);
-    project_usage(&mut record.usage, entries);
+    let prices = search_prices(&record.operations);
+    project_usage(&mut record.usage, entries, &prices);
     Ok(())
+}
+
+/// The search price each run was given, by run id.
+fn search_prices(operations: &[Operation]) -> HashMap<&str, &SearchPrice> {
+    operations
+        .iter()
+        .filter_map(|op| Some((op.run_id.as_str(), op.search_price.as_ref()?)))
+        .collect()
 }
 
 /// One attachment's outcome as a run read it (assistant-runtime README,
@@ -412,13 +424,50 @@ pub(super) fn record_attachment_outcome(
 }
 
 /// Recount the session's usage from the native history. One unpriced or
-/// incomplete request leaves the cost unknown for good.
-pub(super) fn project_usage(totals: &mut Value, entries: &[Value]) {
+/// incomplete request or search leaves the cost unknown for good. Searches
+/// (the runtime's `web_search` tool entries) are priced with the price their
+/// run was given (`search_prices`, by run id): `searchCount` paid searches
+/// cost `searchCostUsd`, which `estimatedCostUsd` includes.
+pub(super) fn project_usage(
+    totals: &mut Value,
+    entries: &[Value],
+    search_prices: &HashMap<&str, &SearchPrice>,
+) {
     ensure_object(totals);
     let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
     let mut estimate = 0.0;
     let mut priced = totals["usageCoverage"] != "incomplete";
     let mut count = 0u64;
+    let (mut searches, mut search_cost) = (0u64, Some(Decimal::ZERO));
+    for entry in entries
+        .iter()
+        .filter(|e| e["role"] == "tool" && e["toolName"] == "web_search")
+    {
+        // An unknown outcome, or a search whose tokens went unreported.
+        if entry["usageCoverage"] == "incomplete" {
+            priced = false;
+            totals["usageCoverage"] = json!("incomplete");
+        }
+        let usage = &entry["details"]["usage"];
+        let count_of = |key: &str| usage[key].as_u64().unwrap_or(0);
+        let (calls, tokens_in, tokens_out) = (
+            count_of("searchCalls"),
+            count_of("inputTokens"),
+            count_of("outputTokens"),
+        );
+        searches = searches.saturating_add(calls);
+        // A failed or repeated search cost nothing.
+        if calls == 0 && tokens_in == 0 && tokens_out == 0 {
+            continue;
+        }
+        let cost = entry["runId"]
+            .as_str()
+            .and_then(|run| search_prices.get(run))
+            .and_then(|price| price.cost(calls, tokens_in, tokens_out));
+        search_cost = search_cost
+            .zip(cost)
+            .and_then(|(sum, cost)| sum.checked_add(cost));
+    }
     for entry in entries
         .iter()
         .filter(|e| e["role"] == "assistant" || e["role"] == "usage")
@@ -446,13 +495,20 @@ pub(super) fn project_usage(totals: &mut Value, entries: &[Value]) {
     totals["outputTokens"] = json!(output);
     totals["cacheReadTokens"] = json!(cache_read);
     totals["cacheWriteTokens"] = json!(cache_write);
-    totals["estimatedCostUsd"] = if priced && count > 0 {
-        json!(estimate.to_string())
-    } else {
-        Value::Null
-    };
+    let search_cost = search_cost.filter(|_| priced && count > 0);
+    let total = search_cost.and_then(|search| {
+        if search.is_zero() {
+            return Some(estimate.to_string());
+        }
+        // Rust prints an f64 in plain decimal notation, never as 1e-7.
+        let tokens = estimate.to_string().parse::<Decimal>().ok()?;
+        Some(tokens.checked_add(search)?.normalize().to_string())
+    });
+    totals["estimatedCostUsd"] = json!(total);
     totals["billedCostUsd"] = Value::Null;
     totals["modelRequests"] = json!(count);
+    totals["searchCount"] = json!(searches);
+    totals["searchCostUsd"] = json!(search_cost.map(|cost| cost.normalize().to_string()));
 }
 
 #[cfg(test)]
@@ -558,7 +614,8 @@ mod tests {
             json!({"role":"assistant","pricingKnown":true,"usage":{"input":10,"output":5,"cost":{"total":0}}}),
             json!({"role":"usage","pricingKnown":true,"usageCoverage":"complete","usage":{"input":20,"output":3,"cost":{"total":0.1}}}),
         ];
-        project_usage(&mut usage, &entries);
+        let prices = HashMap::new();
+        project_usage(&mut usage, &entries, &prices);
         assert_eq!(usage["inputTokens"], 30);
         assert_eq!(usage["outputTokens"], 8);
         assert_eq!(usage["estimatedCostUsd"], "0.1");
@@ -566,13 +623,145 @@ mod tests {
         project_usage(
             &mut usage,
             &[json!({"role":"usage","usage":null,"usageCoverage":"incomplete"})],
+            &prices,
         );
         assert!(usage["estimatedCostUsd"].is_null());
-        project_usage(&mut usage, &entries);
+        project_usage(&mut usage, &entries, &prices);
         assert!(
             usage["estimatedCostUsd"].is_null(),
             "a later complete response cannot erase an unaccounted interrupted request"
         );
+    }
+
+    fn search_price() -> SearchPrice {
+        serde_json::from_value(json!({
+            "perSearch": "0.014", "perInputToken": "0.00000005", "perOutputToken": "0.0000004",
+        }))
+        .unwrap()
+    }
+
+    /// A `web_search` tool entry of `run` as the runtime projects it.
+    fn search_entry(run: &str, details: Value, coverage: &str, is_error: bool) -> Value {
+        json!({
+            "role": "tool", "toolName": "web_search", "toolCallId": id(), "runId": run,
+            "isError": is_error, "details": details, "usageCoverage": coverage,
+        })
+    }
+
+    fn searched(calls: u64, input: u64, output: u64) -> Value {
+        json!({
+            "usage": {"searchCalls": calls, "inputTokens": input, "outputTokens": output,
+                      "model": "openai/gpt-5-nano"},
+            "sources": [{"title": "Pi", "url": "https://pi.dev/"}],
+        })
+    }
+
+    fn model_entry(run: &str) -> Value {
+        json!({"role": "assistant", "runId": run, "pricingKnown": true,
+               "usage": {"input": 10, "output": 5, "cost": {"total": 0.1}}})
+    }
+
+    #[test]
+    fn searches_are_counted_and_priced_at_their_runs_price_on_top_of_the_model_cost() {
+        let price = search_price();
+        let prices = HashMap::from([("run1", &price)]);
+        let mut repeated = searched(0, 0, 0);
+        repeated["deduplicated"] = json!(true);
+        let entries = vec![
+            model_entry("run1"),
+            search_entry("run1", searched(1, 1000, 500), "complete", false),
+            // The same query again: answered from the first, at no cost.
+            search_entry("run1", repeated, "complete", false),
+            // A refused search cost nothing.
+            search_entry("run1", json!({}), "complete", true),
+            search_entry("run1", searched(1, 2000, 100), "complete", false),
+        ];
+        let mut usage = json!({});
+        project_usage(&mut usage, &entries, &prices);
+        assert_eq!(usage["searchCount"], 2);
+        // 2 × 0.014 + 3000 × 0.00000005 + 600 × 0.0000004
+        assert_eq!(usage["searchCostUsd"], "0.02839");
+        assert_eq!(usage["estimatedCostUsd"], "0.12839");
+        assert_eq!(usage["modelRequests"], 1);
+        assert_eq!(
+            usage["inputTokens"], 10,
+            "search tokens are not model tokens"
+        );
+        assert!(usage.get("usageCoverage").is_none());
+
+        // No search: the model cost as before, and a known zero for searches.
+        let mut plain = json!({});
+        project_usage(&mut plain, &[model_entry("run1")], &prices);
+        assert_eq!(plain["estimatedCostUsd"], "0.1");
+        assert_eq!(plain["searchCount"], 0);
+        assert_eq!(plain["searchCostUsd"], "0");
+    }
+
+    #[test]
+    fn a_search_with_an_unknown_outcome_leaves_the_cost_unknown_for_good() {
+        let price = search_price();
+        let prices = HashMap::from([("run1", &price)]);
+        let unknown = search_entry(
+            "run1",
+            json!({"code": "unknown_outcome", "error": {"code": "search_outcome_unknown"}}),
+            "incomplete",
+            false,
+        );
+        let mut usage = json!({});
+        project_usage(&mut usage, &[model_entry("run1"), unknown], &prices);
+        assert_eq!(usage["usageCoverage"], "incomplete");
+        assert!(usage["estimatedCostUsd"].is_null());
+        assert!(usage["searchCostUsd"].is_null());
+        assert_eq!(usage["searchCount"], 0);
+        project_usage(&mut usage, &[model_entry("run1")], &prices);
+        assert!(usage["estimatedCostUsd"].is_null(), "still unknown");
+        assert!(usage["searchCostUsd"].is_null());
+    }
+
+    #[test]
+    fn a_search_without_a_price_for_its_run_has_no_known_cost() {
+        let entries = [
+            model_entry("run1"),
+            search_entry("run1", searched(1, 10, 10), "complete", false),
+        ];
+        let mut usage = json!({});
+        project_usage(&mut usage, &entries, &HashMap::new());
+        assert_eq!(usage["searchCount"], 1);
+        assert!(usage["estimatedCostUsd"].is_null());
+        assert!(usage["searchCostUsd"].is_null());
+        // Its tokens and calls are known; only the price is not.
+        assert!(usage.get("usageCoverage").is_none());
+    }
+
+    #[test]
+    fn each_run_prices_its_searches_with_the_price_it_was_given() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        let mut dearer = search_price();
+        dearer.per_search = "0.02".parse().unwrap();
+        record.messages = vec![
+            message("u1", "user", "run1", 1),
+            message("u2", "user", "run2", 2),
+        ];
+        for (run, price) in [("run1", Some(search_price())), ("run2", Some(dearer))] {
+            record.operations.push(Operation {
+                id: id(),
+                run_id: run.into(),
+                status: OperationStatus::Completed,
+                search_price: price,
+            });
+        }
+        let entries = json!([
+            search_entry("run1", searched(1, 0, 0), "complete", false),
+            search_entry("run2", searched(1, 0, 0), "complete", false),
+            model_entry("run2"),
+        ]);
+        merge_native(&mut record, &entries, &[]).unwrap();
+        assert_eq!(record.usage["searchCount"], 2);
+        assert_eq!(record.usage["searchCostUsd"], "0.034");
+        // Tool entries are not messages.
+        assert_eq!(record.messages.len(), 2);
     }
 
     #[test]

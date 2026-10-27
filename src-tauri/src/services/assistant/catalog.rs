@@ -1,5 +1,6 @@
 //! The Ofox model catalog as the assistant sees it: chat-capable models only,
 //! with the capacity and prices the runtime needs.
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -32,6 +33,51 @@ pub const PREFERRED_MODEL_IDS: &[&str] = &[
 
 /// Protocols the runtime can drive, as catalog paths without `/v1/`.
 const CHAT_ENDPOINTS: &[&str] = &["chat/completions", "responses", "messages"];
+
+/// The model the bundled search server searches with (search-mcp's
+/// `DEFAULT_SEARCH_MODEL`). The host prices every search at its catalog row.
+pub const SEARCH_MODEL: &str = "openai/gpt-5-nano";
+
+/// What web searches cost, from the catalog row of [`SEARCH_MODEL`]: USD per
+/// search (`pricing.web_search`) and per input and output token. A run keeps
+/// the price it started with.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPrice {
+    pub per_search: Decimal,
+    pub per_input_token: Decimal,
+    pub per_output_token: Decimal,
+}
+
+impl SearchPrice {
+    /// `searches` paid searches that used these tokens; `None` on overflow.
+    pub fn cost(&self, searches: u64, input: u64, output: u64) -> Option<Decimal> {
+        let part = |price: Decimal, count: u64| price.checked_mul(Decimal::from(count));
+        part(self.per_search, searches)?
+            .checked_add(part(self.per_input_token, input)?)?
+            .checked_add(part(self.per_output_token, output)?)
+    }
+}
+
+/// A catalog price: a non-negative decimal string.
+fn price(value: &Value) -> Option<Decimal> {
+    value
+        .as_str()?
+        .parse::<Decimal>()
+        .ok()
+        .filter(|price| !price.is_sign_negative())
+}
+
+/// The search price `models` gives, or `None` when the catalog lacks the
+/// search model or any of its three prices: search is then unavailable.
+pub fn search_price(models: &[Model]) -> Option<SearchPrice> {
+    let pricing = &models.iter().find(|m| m.id == SEARCH_MODEL)?.pricing;
+    Some(SearchPrice {
+        per_search: price(&pricing["web_search"])?,
+        per_input_token: price(&pricing["prompt"])?,
+        per_output_token: price(&pricing["completion"])?,
+    })
+}
 
 fn million(value: &Value) -> Option<String> {
     let value = value.as_str()?.parse::<rust_decimal::Decimal>().ok()?;
@@ -400,6 +446,65 @@ mod tests {
             fetch_models("evil.example").await.unwrap_err(),
             "assistant_unknown_apex"
         );
+    }
+
+    /// The live row of the search model (prices as `/v1/models` gave them).
+    fn search_row(pricing: Value) -> Value {
+        json!({
+            "id": SEARCH_MODEL,
+            "context_length": 128000,
+            "top_provider": {"max_completion_tokens": 16384},
+            "supported_endpoints": ["/v1/chat/completions", "/v1/responses"],
+            "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+            "pricing": pricing,
+        })
+    }
+
+    fn priced(pricing: Value) -> Option<SearchPrice> {
+        search_price(&parse_models(
+            json!({"data": [entry("chat/model", &["/v1/chat/completions"], &["text"], &["text"]), search_row(pricing)]}),
+        ))
+    }
+
+    #[test]
+    fn a_search_costs_its_web_search_price_plus_the_search_models_tokens() {
+        let price = priced(json!({
+            "prompt": "0.00000005", "completion": "0.0000004",
+            "input_cache_read": "0.00000001", "web_search": "0.014",
+        }))
+        .unwrap();
+        assert_eq!(price.per_search.to_string(), "0.014");
+        // Two searches, 1000 tokens in and 500 out.
+        assert_eq!(
+            price.cost(2, 1000, 500).unwrap().normalize().to_string(),
+            "0.02825"
+        );
+        assert_eq!(price.cost(0, 0, 0).unwrap().normalize().to_string(), "0");
+        // Saved with a run as decimal strings, read back the same.
+        let saved = serde_json::to_value(&price).unwrap();
+        assert_eq!(
+            saved,
+            json!({"perSearch": "0.014", "perInputToken": "0.00000005", "perOutputToken": "0.0000004"})
+        );
+        assert_eq!(serde_json::from_value::<SearchPrice>(saved).unwrap(), price);
+    }
+
+    #[test]
+    fn search_is_unpriced_without_the_search_model_or_any_of_its_prices() {
+        let full =
+            json!({"prompt": "0.00000005", "completion": "0.0000004", "web_search": "0.014"});
+        assert!(priced(full.clone()).is_some());
+        for missing in ["web_search", "prompt", "completion"] {
+            let mut pricing = full.clone();
+            pricing.as_object_mut().unwrap().remove(missing);
+            assert!(priced(pricing).is_none(), "{missing}");
+        }
+        for bad in [json!("-0.014"), json!("free"), json!(0.014), Value::Null] {
+            let mut pricing = full.clone();
+            pricing["web_search"] = bad.clone();
+            assert!(priced(pricing).is_none(), "{bad}");
+        }
+        assert!(search_price(&catalog(&["chat/model"])).is_none());
     }
 
     #[test]

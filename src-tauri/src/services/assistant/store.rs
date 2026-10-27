@@ -477,7 +477,8 @@ impl UsageTotals {
             None if requests > 0 => self.priced = false,
             None => {}
         }
-        if let Some(value) = decimal(&usage["searchEstimatedCostUsd"]) {
+        // Already part of the session's estimate; kept apart for display.
+        if let Some(value) = decimal(&usage["searchCostUsd"]) {
             self.search_estimate += value;
         }
     }
@@ -496,7 +497,7 @@ impl UsageTotals {
             "billedCostUsd": null,
             "searchCount": self.searches,
             "usageCoverage": if priced { "complete" } else { "incomplete" },
-            "searchEstimatedCostUsd": price(self.search_estimate),
+            "searchCostUsd": price(self.search_estimate),
         })
     }
 }
@@ -840,6 +841,7 @@ mod tests {
             id: id(),
             run_id: id(),
             status: OperationStatus::Running,
+            search_price: None,
         };
         store
             .mutate(&sid, |record| {
@@ -1463,11 +1465,13 @@ mod tests {
             id: running.clone(),
             run_id: id(),
             status: OperationStatus::Running,
+            search_price: None,
         });
         record.operations.push(Operation {
             id: stopped.clone(),
             run_id: id(),
             status: OperationStatus::Cancelled,
+            search_price: None,
         });
         assert_eq!(
             ensure_new_operation(&record, &running).unwrap_err(),
@@ -1604,11 +1608,16 @@ mod tests {
     #[test]
     fn usage_summary_adds_up_every_session_of_the_owner() {
         let (_config, store) = fixture();
-        for (input, cost) in [(10, "0.5"), (5, "0.25")] {
+        // A session's cost includes its searches; `searchCostUsd` is that part.
+        for (input, cost, searches, search_cost) in [(10, "0.5", 2, "0.028"), (5, "0.25", 0, "0")] {
             let sid = store.create("test/model", false).unwrap().session.id;
             store
                 .mutate(&sid, |record| {
-                    record.usage = json!({"modelRequests": 1, "inputTokens": input, "outputTokens": 2, "estimatedCostUsd": cost});
+                    record.usage = json!({
+                        "modelRequests": 1, "inputTokens": input, "outputTokens": 2,
+                        "estimatedCostUsd": cost, "searchCount": searches,
+                        "searchCostUsd": search_cost,
+                    });
                     Ok(())
                 })
                 .unwrap();
@@ -1619,6 +1628,8 @@ mod tests {
         assert_eq!(summary["inputTokens"], 15);
         assert_eq!(summary["outputTokens"], 4);
         assert_eq!(summary["estimatedCostUsd"], "0.75");
+        assert_eq!(summary["searchCount"], 2);
+        assert_eq!(summary["searchCostUsd"], "0.028");
         assert_eq!(summary["usageCoverage"], "complete");
     }
 
@@ -1642,6 +1653,7 @@ mod tests {
                     id: id(),
                     run_id: id(),
                     status: OperationStatus::Running,
+                    search_price: None,
                 });
                 Ok(())
             })

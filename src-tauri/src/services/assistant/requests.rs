@@ -549,6 +549,7 @@ fn publish_turn(
         id: request.operation_id.clone(),
         run_id: request.run_id.clone(),
         status: OperationStatus::Running,
+        search_price: None,
     });
     Ok(())
 }

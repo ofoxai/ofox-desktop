@@ -730,6 +730,7 @@ impl AssistantHost {
                     id: op.into(),
                     run_id: rid.into(),
                     status: OperationStatus::Cancelled,
+                    search_price: None,
                 });
             }
             Ok(())
@@ -1605,6 +1606,7 @@ mod tests {
                             id: run.operation_id.clone(),
                             run_id: run.run_id.clone(),
                             status: OperationStatus::Running,
+                            search_price: None,
                         });
                         Ok(())
                     })
@@ -1784,6 +1786,7 @@ mod tests {
                 id: op.clone(),
                 run_id: rid.clone(),
                 status: OperationStatus::Cancelled,
+                search_price: None,
             }]
         );
         assert!(record.messages.is_empty());

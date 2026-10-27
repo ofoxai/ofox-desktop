@@ -1,5 +1,6 @@
 //! Data model shared by the assistant store, host and commands. Field names are
 //! the renderer's camelCase contract.
+use super::catalog::SearchPrice;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -116,6 +117,10 @@ pub struct Operation {
     pub id: String,
     pub run_id: String,
     pub status: OperationStatus,
+    /// The search price the run was given, when it could search: its
+    /// searches are priced with it for good, whatever the catalog says later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_price: Option<SearchPrice>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
