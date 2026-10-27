@@ -105,7 +105,8 @@ a page despite its instruction; the query itself always reaches the gateway
 and its search provider.
 
 The result has a short summary, up to 25 results (citations first, then the
-search's sources, deduplicated by URL) and usage:
+search's sources and the HTTPS pages it opened (`open_page` items' `url`), in
+response order, deduplicated by URL) and usage:
 
 ```json
 {

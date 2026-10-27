@@ -184,6 +184,59 @@ test("every web_search_call item counts as a billed search call", async () => {
   assert.match(parsed.summary, /Tauri 2\.12\.5/);
 });
 
+test("a page the search model opened is a source too: HTTPS only, deduped", () => {
+  const opened = (url) => ({
+    type: "web_search_call",
+    action: { type: "open_page", url },
+  });
+  const parsed = parseSearchResponse(
+    {
+      model: MODEL,
+      output: [
+        {
+          type: "web_search_call",
+          action: {
+            type: "search",
+            sources: [{ type: "url", url: "https://b.example/" }],
+          },
+        },
+        opened("https://opened.example/page"),
+        opened("https://b.example/#top"),
+        opened("http://plain.example/"),
+        opened("javascript:alert(1)"),
+        opened(`https://long.example/${"a".repeat(2048)}`),
+        opened(42),
+        { type: "web_search_call", action: { type: "open_page" } },
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: "A fact. ([a](https://a.example/))",
+              annotations: [
+                {
+                  type: "url_citation",
+                  url: "https://a.example/",
+                  title: "Page A",
+                  start_index: 8,
+                  end_index: 33,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    MODEL,
+  );
+  assert.equal(parsed.usage.searchCalls, 8);
+  assert.deepEqual(parsed.results, [
+    { title: "Page A", url: "https://a.example/", snippet: "A fact." },
+    { title: "b.example", url: "https://b.example/" },
+    { title: "opened.example", url: "https://opened.example/page" },
+  ]);
+});
+
 test("URL dedupe ignores fragments and utm tracking, keeping the first spelling", () => {
   const parsed = parseSearchResponse(
     {

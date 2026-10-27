@@ -241,6 +241,11 @@ export function parseSearchResponse(body, requestedModel, secrets = []) {
   for (const item of body.output) {
     if (item?.type === "web_search_call") {
       searchCalls++;
+      // A page the search model opened (billed like a search) is a source
+      // of its answer; only an HTTPS one, as the host keeps no other.
+      const opened = item.action?.type === "open_page" && item.action.url;
+      if (typeof opened === "string" && opened.startsWith("https://"))
+        sourced.push({ url: clean(opened) });
       const sources = item.action?.sources;
       if (sources === undefined || sources === null) continue;
       if (!Array.isArray(sources))
