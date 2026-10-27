@@ -2342,6 +2342,24 @@ describe("web search", () => {
       },
     );
 
+    it("does not take a refused change as the last choice", async () => {
+      await openConversation();
+      mocks.updateSession.mockRejectedValueOnce(
+        "assistant_storage_unavailable",
+      );
+      await userEvent.click(toggle());
+      await screen.findByRole("alert");
+      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      await newConversation();
+      await waitFor(() =>
+        expect(mocks.createSession).toHaveBeenCalledWith({
+          modelId: "balanced",
+          webSearch: false,
+        }),
+      );
+      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    });
+
     it("starts with search off again once the account changed", async () => {
       await openConversation();
       await userEvent.click(toggle());

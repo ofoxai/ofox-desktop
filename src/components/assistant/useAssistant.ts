@@ -843,12 +843,19 @@ export function useAssistant(enabled: boolean) {
   /**
    * Web search for the open conversation, or for the one the first message
    * creates. A running reply goes on as it started; the next send uses it.
+   * A change the open conversation refused is not the last choice a new
+   * conversation starts from.
    */
   const setWebSearch = useCallback(
     (on: boolean) => {
-      lastWebSearch.current = on;
-      if (selectedRef.current) void update({ webSearch: on });
-      else setNewWebSearch(on);
+      if (!selectedRef.current) {
+        lastWebSearch.current = on;
+        setNewWebSearch(on);
+        return;
+      }
+      void update({ webSearch: on }).then((saved) => {
+        if (saved) lastWebSearch.current = saved.webSearch;
+      });
     },
     [update, setNewWebSearch],
   );
