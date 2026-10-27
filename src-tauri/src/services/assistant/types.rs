@@ -43,6 +43,10 @@ pub struct Session {
     pub draft_attachment_ids: Vec<String>,
 }
 
+/// A file imported into a conversation, as saved in its folder. On the
+/// session it carries the last outcome the runtime reported for it, on a user
+/// message the outcome of that turn: `status` (see [`ATTACHMENT_STATUSES`]),
+/// `reason` (the outcome's `assistant_*` code, if any) and `details`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
@@ -55,6 +59,31 @@ pub struct Attachment {
     pub reason: Option<String>,
     #[serde(default)]
     pub preview_url: Option<String>,
+    /// The runtime's outcome details (format, pages, limits); `None` until a
+    /// run has read the file.
+    #[serde(default)]
+    pub details: Option<Value>,
+}
+
+/// `ready` once imported; afterwards the runtime's outcome of the last run
+/// that read the file.
+pub const ATTACHMENT_STATUSES: [&str; 6] = [
+    "ready",
+    "partial",
+    "unreadable",
+    "unsupported",
+    "too_large",
+    "model_unsupported",
+];
+
+impl Attachment {
+    /// Whether a draft or a send may select it. An outcome belongs to one run
+    /// (its model, the other files of the turn), so a failed one does not rule
+    /// the file out: the runtime reads it again and reports again, and a
+    /// blocked turn costs nothing.
+    pub fn selectable(&self) -> bool {
+        ATTACHMENT_STATUSES.contains(&self.status.as_str())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -204,6 +233,44 @@ mod tests {
             serde_json::to_value(session).unwrap()["draftAttachmentIds"],
             json!(["attachment-id"])
         );
+    }
+
+    #[test]
+    fn an_attachment_saved_before_outcomes_reads_without_details() {
+        let saved = json!({
+            "id": id(), "name": "a.txt", "mimeType": "text/plain", "sizeBytes": 1, "status": "ready"
+        });
+        let attachment: Attachment = serde_json::from_value(saved).unwrap();
+        assert!(attachment.details.is_none());
+        let mut value = serde_json::to_value(attachment).unwrap();
+        value["details"] = json!({"format": "pdf", "pageCount": 3});
+        let attachment: Attachment = serde_json::from_value(value).unwrap();
+        assert_eq!(attachment.details.unwrap()["pageCount"], 3);
+    }
+
+    #[test]
+    fn an_attachment_stays_selectable_whatever_its_last_outcome() {
+        let with = |status: &str| -> Attachment {
+            serde_json::from_value(json!({
+                "id": id(), "name": "a.png", "mimeType": "image/png", "sizeBytes": 1,
+                "status": status,
+            }))
+            .unwrap()
+        };
+        // An outcome belongs to one run: another model or selection may read it.
+        for status in [
+            "ready",
+            "partial",
+            "unreadable",
+            "unsupported",
+            "too_large",
+            "model_unsupported",
+        ] {
+            assert!(with(status).selectable(), "{status}");
+        }
+        for status in ["processing", "", "READY"] {
+            assert!(!with(status).selectable(), "{status}");
+        }
     }
 
     #[test]

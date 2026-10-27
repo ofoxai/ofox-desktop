@@ -116,7 +116,7 @@ fn deeplink_error_view(url_str: &str, _error: &crate::AppError) -> serde_json::V
 
 #[cfg(test)]
 mod assistant_wiring_tests {
-    /// S1 is chat only: no approval, memory, attachment picker, export,
+    /// Chat and its attachment picker (S2) only: no approval, memory, export,
     /// purge, backup or usage command reaches the renderer.
     #[test]
     fn only_the_chat_assistant_commands_are_registered() {
@@ -143,6 +143,7 @@ mod assistant_wiring_tests {
                 "assistant_create_session",
                 "assistant_get_session",
                 "assistant_list_sessions",
+                "assistant_pick_attachments",
                 "assistant_send",
                 "assistant_stop",
                 "assistant_update_session",
@@ -1834,6 +1835,7 @@ pub fn run() {
             commands::assistant_update_session,
             commands::assistant_send,
             commands::assistant_stop,
+            commands::assistant_pick_attachments,
         ]);
 
     let app = builder

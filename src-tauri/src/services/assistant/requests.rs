@@ -1,12 +1,13 @@
 //! What each `assistant_*` command does. The commands only find the host and
 //! call these, so tests drive exactly what the renderer drives.
 use super::{
-    catalog,
+    attachments, catalog,
     host::{blocking, local_gateway_allowed, AssistantHost, Identity, RunControl},
     store::{self, SessionList, SessionRecord},
     types::*,
 };
 use serde_json::{json, Value};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 const MAX_MESSAGE_BYTES: usize = 128_000;
@@ -275,6 +276,50 @@ impl AssistantHost {
             run_id: request.run_id,
             operation_id: request.operation_id,
         })
+    }
+
+    /// Let the user pick files and import them into a conversation. `pick`
+    /// shows the file dialog and returns the chosen paths (none when it was
+    /// cancelled); it blocks, so it runs off the async workers. The account,
+    /// the authority and the session are checked before the dialog opens and
+    /// again before anything is saved.
+    pub async fn pick_attachments(
+        self: &Arc<Self>,
+        sid: &str,
+        pick: impl FnOnce() -> Result<Vec<PathBuf>, String> + Send + 'static,
+    ) -> Result<Vec<Attachment>, String> {
+        validate_id(sid)?;
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        let record = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = sid.to_owned();
+            move || store.load_record(&sid)
+        })
+        .await?;
+        if record.session.deleted_at.is_some() {
+            return Err("assistant_session_deleted".into());
+        }
+        self.ensure_current(&identity, generation).await?;
+        let sources = tokio::task::spawn_blocking(pick)
+            .await
+            .map_err(|_| attachments::DIALOG_FAILED.to_string())??;
+        if sources.is_empty() {
+            return Ok(vec![]);
+        }
+        self.ensure_current(&identity, generation).await?;
+        let store = self.store(&identity.owner)?;
+        let host = self.clone();
+        let sid = sid.to_owned();
+        blocking(move || {
+            attachments::import(&store, &sid, &sources, || {
+                if host.generation() != generation {
+                    return Err(super::host::IDENTITY_CHANGED.into());
+                }
+                Ok(())
+            })
+        })
+        .await
     }
 
     pub async fn stop(self: &Arc<Self>, sid: &str, rid: &str, op: &str) -> Result<(), String> {

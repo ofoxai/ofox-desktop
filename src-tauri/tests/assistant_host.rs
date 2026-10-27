@@ -1397,3 +1397,142 @@ fn a_logout_while_the_first_send_waits_for_its_key_mints_nothing() {
         assert!(gateway.requests().is_empty());
     });
 }
+
+// ── attachments ──────────────────────────────────────────────────────────
+
+/// A host whose runtime is never started: picking files needs none.
+fn picking_host(config: &Path) -> (Gateway, Arc<TestEnv>, Arc<AssistantHost>) {
+    let gateway = Gateway::start();
+    let runtime = config.join("no-runtime");
+    let env = TestEnv::new(config, &runtime, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    (gateway, env, host)
+}
+
+/// `name` with `bytes` in a folder the user picks from.
+fn picked(config: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+    let dir = config.join("picked");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    path
+}
+
+/// A dialog that must not open.
+fn no_dialog() -> Result<Vec<PathBuf>, String> {
+    panic!("the dialog opened")
+}
+
+#[test]
+fn picked_files_are_copied_into_the_conversation() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let sources = vec![
+            picked(config.path(), "notes.md", b"# Notes"),
+            picked(config.path(), "chart.png", b"\x89PNG"),
+        ];
+        let imported = host
+            .pick_attachments(&sid, move || Ok(sources))
+            .await
+            .unwrap();
+        let names: Vec<_> = imported
+            .iter()
+            .map(|a| (a.name.as_str(), a.mime_type.as_str(), a.status.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("notes.md", "text/markdown", "ready"),
+                ("chart.png", "image/png", "ready")
+            ]
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            detail
+                .attachments
+                .iter()
+                .map(|a| a.id.clone())
+                .collect::<Vec<_>>(),
+            imported.iter().map(|a| a.id.clone()).collect::<Vec<_>>()
+        );
+        let copy = session_dir(config.path(), &sid)
+            .join("attachments")
+            .join(&imported[0].id);
+        assert_eq!(std::fs::read(copy).unwrap(), b"# Notes");
+
+        // A cancelled dialog imports nothing.
+        assert!(host
+            .pick_attachments(&sid, || Ok(vec![]))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(host.get_session(&sid).await.unwrap().attachments.len(), 2);
+    });
+}
+
+#[test]
+fn a_pick_lands_only_for_the_account_and_authority_that_opened_the_dialog() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let attachments = session_dir(config.path(), &sid).join("attachments");
+        let copies = || std::fs::read_dir(&attachments).map_or(0, |dir| dir.count());
+
+        // The region changed while the dialog was open.
+        let source = picked(config.path(), "a.txt", b"x");
+        let pick = {
+            let (env, source) = (env.clone(), source.clone());
+            move || {
+                env.signed_in("ofox.io");
+                Ok(vec![source])
+            }
+        };
+        assert_eq!(
+            host.pick_attachments(&sid, pick).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        env.signed_in("ofox.ai");
+
+        // A logout or account switch revoked the authority meanwhile.
+        let pick = {
+            let (host, source) = (host.clone(), source.clone());
+            move || {
+                host.cancel_all();
+                Ok(vec![source])
+            }
+        };
+        assert_eq!(
+            host.pick_attachments(&sid, pick).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert_eq!(copies(), 0);
+        assert!(host.get_session(&sid).await.unwrap().attachments.is_empty());
+
+        // Signed out, a trashed or an unknown session: no dialog at all.
+        assert_eq!(
+            host.pick_attachments(&types::id(), no_dialog)
+                .await
+                .unwrap_err(),
+            "assistant_session_not_found"
+        );
+        assert_eq!(
+            host.pick_attachments("../x", no_dialog).await.unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+        let trash: types::UpdateRequest =
+            serde_json::from_value(json!({"sessionId": sid, "deleted": true})).unwrap();
+        host.update_session(trash).await.unwrap();
+        assert_eq!(
+            host.pick_attachments(&sid, no_dialog).await.unwrap_err(),
+            "assistant_session_deleted"
+        );
+        env.set_identity(Err("assistant_sign_in_required".into()));
+        assert_eq!(
+            host.pick_attachments(&sid, no_dialog).await.unwrap_err(),
+            "assistant_sign_in_required"
+        );
+    });
+}

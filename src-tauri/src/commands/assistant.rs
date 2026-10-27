@@ -1,14 +1,17 @@
-//! Built-in assistant commands (S1: chat). Each one finds the host and calls
+//! Built-in assistant commands (chat, S2 attachments). Each one finds the host and calls
 //! its request of the same name (`services::assistant::requests`), so tests
 //! drive the same code. [`AssistantEnvironment`] lends the host the app's
 //! sign-in, the assistant key, the model catalog, files and event channel.
 use crate::ofox_api_keys::{self, ApiKeyError, AssistantKeyStatus, FetchMode};
 use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
-    catalog,
+    attachments, catalog,
     host::{Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
     store::{self, SessionList},
-    types::{CreateRequest, Detail, Event, RunProxy, RunRef, SendRequest, Session, UpdateRequest},
+    types::{
+        Attachment, CreateRequest, Detail, Event, RunProxy, RunRef, SendRequest, Session,
+        UpdateRequest,
+    },
     AssistantHost,
 };
 use crate::settings::KeyOwner;
@@ -71,6 +74,35 @@ pub async fn assistant_stop(
     operation_id: String,
 ) -> Result<(), String> {
     host.stop(&session_id, &run_id, &operation_id).await
+}
+
+/// Pick files with the native dialog and import them into the conversation.
+/// A cancelled dialog returns no attachments.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_pick_attachments(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    session_id: String,
+) -> Result<Vec<Attachment>, String> {
+    host.pick_attachments(&session_id, move || pick_files(&app))
+        .await
+}
+
+/// The native file dialog, offering only the formats the runtime reads.
+/// Blocking: it waits for the user.
+fn pick_files(app: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    app.dialog()
+        .file()
+        .add_filter(attachments::FILTER_NAME, attachments::EXTENSIONS)
+        .blocking_pick_files()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|file| {
+            file.into_path()
+                .map_err(|_| attachments::UNREADABLE.to_string())
+        })
+        .collect()
 }
 
 /// The host's view of the running app.

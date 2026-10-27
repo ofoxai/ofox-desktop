@@ -6,6 +6,7 @@
 //! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…}
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.json   SessionRecord + "version"
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.jsonl  native runtime history
+//! <app_config_dir>/assistant/<owner>/<session_id>/attachments/<attachment_id>  imported files
 //! ```
 //!
 //! Every write replaces the whole file atomically (temp file + rename), and
@@ -27,6 +28,7 @@ const ASSISTANT_DIR: &str = "assistant";
 const SESSION_FILE: &str = "session.json";
 const NATIVE_HISTORY_FILE: &str = "session.jsonl";
 const PREFS_FILE: &str = "prefs.json";
+const ATTACHMENTS_DIR: &str = "attachments";
 
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_DRAFT_BYTES: usize = 128_000;
@@ -313,6 +315,25 @@ impl AssistantStore {
         Ok(path)
     }
 
+    /// `<sid>/attachments`, where imported files are kept as `<attachment id>`:
+    /// the runtime's `attachmentRoot`. Only names the folder.
+    pub fn attachment_root(&self, sid: &str) -> Result<PathBuf, String> {
+        validate_id(sid)?;
+        Ok(self.root.join(sid).join(ATTACHMENTS_DIR))
+    }
+
+    /// [`Self::attachment_root`] of a session that exists, created private
+    /// (0o700) if needed; a link anywhere on the way is refused.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn attachment_dir(&self, sid: &str) -> Result<PathBuf, String> {
+        validate_id(sid)?;
+        if !real_dir(&self.root)? || !real_dir(&self.root.join(sid))? {
+            return Err(NOT_FOUND.into());
+        }
+        private_subdir(&self.root.join(sid), ATTACHMENTS_DIR)
+    }
+
     fn ensure_root(&self) -> Result<PathBuf, String> {
         private_subdir(
             &private_subdir(&self.config_dir, ASSISTANT_DIR)?,
@@ -378,13 +399,13 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
         record.session.draft = draft.clone();
     }
     if let Some(ids) = &request.draft_attachment_ids {
-        let ready = |id: &String| {
+        let selectable = |id: &String| {
             record
                 .attachments
                 .iter()
-                .any(|a| &a.id == id && a.status == "ready")
+                .any(|a| &a.id == id && a.selectable())
         };
-        if ids.len() > MAX_DRAFT_ATTACHMENTS || !ids.iter().all(ready) {
+        if ids.len() > MAX_DRAFT_ATTACHMENTS || !ids.iter().all(selectable) {
             return Err("assistant_attachment_not_found".into());
         }
         record.session.draft_attachment_ids = ids.clone();
@@ -1384,9 +1405,11 @@ mod tests {
         let sid = store.create("test/model", false).unwrap().session.id;
         let ready = attachment("ready");
         let pending = attachment("processing");
+        // Read in part by an earlier run: still a file the user can send.
+        let partial = attachment("partial");
         store
             .mutate(&sid, |record| {
-                record.attachments = vec![ready.clone(), pending.clone()];
+                record.attachments = vec![ready.clone(), pending.clone(), partial.clone()];
                 Ok(())
             })
             .unwrap();
@@ -1416,13 +1439,13 @@ mod tests {
             );
         }
         let mut drafted = request(&sid);
-        drafted.draft_attachment_ids = Some(vec![ready.id.clone()]);
+        drafted.draft_attachment_ids = Some(vec![ready.id.clone(), partial.id.clone()]);
         assert_eq!(
             store
                 .update(&drafted, no_precondition)
                 .unwrap()
                 .draft_attachment_ids,
-            [ready.id]
+            [ready.id, partial.id]
         );
     }
 
@@ -1491,6 +1514,48 @@ mod tests {
     }
 
     // ── preferences ──────────────────────────────────────────────────────
+
+    #[test]
+    fn attachments_live_in_a_private_folder_of_their_session() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let root = store.attachment_root(&sid).unwrap();
+        assert_eq!(
+            root,
+            session_file(config.path(), &store, &sid).with_file_name("attachments")
+        );
+        assert!(!root.exists(), "naming the folder creates nothing");
+        assert_eq!(store.attachment_dir(&sid).unwrap(), root);
+        assert!(root.is_dir());
+        #[cfg(unix)]
+        assert_eq!(crate::config::file_mode(&root), Some(0o700));
+
+        // Never a folder for a session that does not exist.
+        let unknown = id();
+        assert_eq!(
+            store.attachment_dir(&unknown).unwrap_err(),
+            "assistant_session_not_found"
+        );
+        assert!(!root.parent().unwrap().with_file_name(&unknown).exists());
+        assert_eq!(
+            store.attachment_root("../x").unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_attachments_folder_is_refused() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let elsewhere = config.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, store.attachment_root(&sid).unwrap()).unwrap();
+        assert_eq!(
+            store.attachment_dir(&sid).unwrap_err(),
+            "assistant_invalid_storage_path"
+        );
+    }
 
     #[test]
     fn the_remembered_model_is_kept_in_prefs_json() {
