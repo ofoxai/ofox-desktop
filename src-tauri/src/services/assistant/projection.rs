@@ -337,7 +337,7 @@ impl AttachmentOutcome {
             .filter(|status| ATTACHMENT_STATUSES.contains(status));
         let code = match &data["code"] {
             Value::Null => None,
-            Value::String(code) => Some(code.clone()),
+            Value::String(code) if is_assistant_code(code) => Some(code.clone()),
             _ => return Err(PROTOCOL.into()),
         };
         let details = match &data["details"] {
@@ -364,13 +364,35 @@ impl AttachmentOutcome {
     }
 }
 
+/// An `assistant_*` code: lowercase letters, digits and underscores.
+fn is_assistant_code(code: &str) -> bool {
+    code.len() <= 100
+        && code.strip_prefix("assistant_").is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
 /// Keep a run's outcome for one file: on the conversation's file (its last
-/// outcome) and on that file of the run's user message (this turn's).
+/// outcome) and on that file of the run's user message (this turn's). Only a
+/// file the run's user message sent takes it; for any other nothing changes
+/// and `false` is returned.
 pub(super) fn record_attachment_outcome(
     record: &mut SessionRecord,
     run_id: &str,
     outcome: &AttachmentOutcome,
-) {
+) -> bool {
+    let sent = record
+        .messages
+        .iter()
+        .filter(|m| m.role == "user" && m.run_id.as_deref() == Some(run_id))
+        .flat_map(|m| m.attachments.iter())
+        .any(|file| file.id == outcome.id);
+    if !sent {
+        return false;
+    }
     let turn = record
         .messages
         .iter_mut()
@@ -386,6 +408,7 @@ pub(super) fn record_attachment_outcome(
         file.reason = outcome.code.clone();
         file.details = outcome.details.clone();
     }
+    true
 }
 
 /// Recount the session's usage from the native history. One unpriced or
@@ -694,8 +717,34 @@ mod tests {
             "id": pdf, "status": "ready", "code": null, "details": null,
         }))
         .unwrap();
-        record_attachment_outcome(&mut record, &now_run, &ready);
+        assert!(record_attachment_outcome(&mut record, &now_run, &ready));
         assert_eq!(read(&record.attachments[0]), ("ready".into(), None, None));
+    }
+
+    #[test]
+    fn an_outcome_for_a_file_this_turn_did_not_send_changes_nothing() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let (earlier, now_run) = (id(), id());
+        let (sent_before, sent_now) = (id(), id());
+        let mut asked_before = message(&id(), "user", &earlier, 1);
+        asked_before.attachments = vec![file(&sent_before)];
+        let mut asked = message(&id(), "user", &now_run, 2);
+        asked.attachments = vec![file(&sent_now)];
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages = vec![asked_before, asked];
+        record.attachments = vec![file(&sent_before), file(&sent_now)];
+
+        // The file is the conversation's, but another turn sent it.
+        let foreign = AttachmentOutcome::parse(&json!({
+            "id": sent_before, "status": "unreadable",
+            "code": "assistant_attachment_unreadable", "details": {"reason": "missing"},
+        }))
+        .unwrap();
+        assert!(!record_attachment_outcome(&mut record, &now_run, &foreign));
+        assert_eq!(record.attachments[0].status, "ready");
+        assert!(record.attachments[0].reason.is_none());
+        assert_eq!(record.messages[0].attachments[0].status, "ready");
     }
 
     #[test]
@@ -707,6 +756,12 @@ mod tests {
             json!({"id": id, "status": "processing"}),
             json!({"id": id, "status": "ready", "code": 1}),
             json!({"id": id, "status": "ready", "details": "text"}),
+            // Codes are `assistant_*` identifiers, never free text.
+            json!({"id": id, "status": "partial", "code": "attachment_partial"}),
+            json!({"id": id, "status": "partial", "code": "assistant_"}),
+            json!({"id": id, "status": "partial", "code": "assistant_Partial"}),
+            json!({"id": id, "status": "partial", "code": "assistant_partial: cut"}),
+            json!({"id": id, "status": "partial", "code": crate::redact::REDACTED}),
         ] {
             assert_eq!(
                 AttachmentOutcome::parse(&data).unwrap_err(),

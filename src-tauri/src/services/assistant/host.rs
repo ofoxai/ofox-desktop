@@ -290,20 +290,29 @@ fn is_network_error(message: &str) -> bool {
     .any(|marker| lower.contains(marker))
 }
 
-/// The code a turn's attachments stopped it with before its request: the
-/// runtime's `<code>: <message>` for `assistant_vision_model_required` or an
-/// `assistant_attachment_*` code (README "Outcome events").
-fn blocked_input_code(detail: &str) -> Option<&str> {
+/// The codes that stop a turn before its request (assistant-runtime README,
+/// "Outcome events": every outcome whose run does not continue).
+const BLOCKING_INPUT_CODES: [&str; 5] = [
+    "assistant_attachment_unreadable",
+    "assistant_attachment_not_found",
+    "assistant_attachment_unsupported",
+    "assistant_attachment_too_large",
+    "assistant_vision_model_required",
+];
+
+/// The code at the head of `detail`, the runtime's `<code>: <message>`, when
+/// it is one of `codes`.
+fn leading_code<'a>(detail: &'a str, codes: &[&str]) -> Option<&'a str> {
     let end = detail
         .find(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
         .unwrap_or(detail.len());
     let (code, rest) = detail.split_at(end);
-    let attachment = code
-        .strip_prefix("assistant_attachment_")
-        .is_some_and(|name| !name.is_empty());
-    ((rest.is_empty() || rest.starts_with(':'))
-        && (attachment || code == "assistant_vision_model_required"))
-        .then_some(code)
+    ((rest.is_empty() || rest.starts_with(':')) && codes.contains(&code)).then_some(code)
+}
+
+/// The code a turn's attachments stopped it with before its request.
+fn blocked_input_code(detail: &str) -> Option<&str> {
+    leading_code(detail, &BLOCKING_INPUT_CODES)
 }
 
 /// A failed model request as a stable code. The runtime reports the HTTP
@@ -1111,12 +1120,14 @@ impl AssistantHost {
             }
             "compaction_start" | "compaction_end" => self.emit(control, kind, data),
             "attachment" => {
-                let mut outcome = AttachmentOutcome::parse(&data)?;
-                if let Some(details) = &mut outcome.details {
-                    scrub_secrets_in(details, &control.secrets());
+                // The whole outcome loses the run's keys before it is read.
+                scrub_secrets_in(&mut data, &control.secrets());
+                let outcome = AttachmentOutcome::parse(&data)?;
+                if self.save_attachment_outcome(control, &outcome).await? {
+                    self.emit(control, "attachment", outcome.to_event());
+                } else {
+                    log::warn!("[Assistant] ignored an outcome for a file this turn did not send");
                 }
-                self.save_attachment_outcome(control, &outcome).await?;
-                self.emit(control, "attachment", outcome.to_event());
             }
             // run_start, message_end, error and run_end: the host publishes its
             // own once the turn is saved.
@@ -1250,11 +1261,12 @@ impl AssistantHost {
     }
 
     /// Saved before it is published, so a reload shows what the user saw.
+    /// `false`: the file is not one this turn sent, and nothing was saved.
     async fn save_attachment_outcome(
         &self,
         control: &RunControl,
         outcome: &AttachmentOutcome,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let store = self.store(&control.identity.owner)?;
         let (sid, run_id, outcome) = (
             control.session_id.clone(),
@@ -1263,8 +1275,7 @@ impl AssistantHost {
         );
         blocking(move || {
             store.mutate(&sid, |record| {
-                record_attachment_outcome(record, &run_id, &outcome);
-                Ok(())
+                Ok(record_attachment_outcome(record, &run_id, &outcome))
             })
         })
         .await
@@ -1917,9 +1928,15 @@ mod tests {
                 "assistant_attachment_not_found: Unknown attachment",
                 "assistant_attachment_not_found",
             ),
-            // Not an attachment code: the generic failure.
+            (
+                "assistant_attachment_unsupported: Not a readable format",
+                "assistant_attachment_unsupported",
+            ),
+            // Not a blocking attachment code: the generic failure.
             ("assistant_attachment_: x", MODEL_REQUEST_FAILED),
-            ("assistant_attachment_unreadable2x: x", "assistant_attachment_unreadable2x"),
+            ("assistant_attachment_unreadable2x: x", MODEL_REQUEST_FAILED),
+            ("assistant_attachment_partial: x", MODEL_REQUEST_FAILED),
+            ("assistant_attachment_write_failed: x", MODEL_REQUEST_FAILED),
             ("assistant_attachment_unreadable x", MODEL_REQUEST_FAILED),
             ("assistant_vision_model_required_soon: x", MODEL_REQUEST_FAILED),
             ("A message supports at most 10 images", MODEL_REQUEST_FAILED),
@@ -2156,6 +2173,88 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(refused.code, PROTOCOL);
+    }
+
+    /// The whole outcome loses the run's key before it is read, and only a
+    /// file this turn sent takes it.
+    #[tokio::test]
+    async fn an_attachment_outcome_is_scrubbed_whole_and_kept_only_for_this_turns_files() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        // A key that would pass for an outcome code.
+        const KEY: &str = "assistant_run_key_0123456789";
+        let request: SendRequest = serde_json::from_value(json!({
+            "sessionId": sid, "runId": id(), "operationId": id(), "text": "hi",
+        }))
+        .unwrap();
+        let run = Arc::new(RunControl::new(identity(), &request, KEY.into()));
+        let (sent, other) = (id(), id());
+        let attachment = |file: &str| {
+            json!({
+                "id": file, "name": "a.txt", "mimeType": "text/plain", "sizeBytes": 2,
+                "status": "ready",
+            })
+        };
+        store
+            .mutate(&sid, |record| {
+                for file in [&sent, &other] {
+                    record
+                        .attachments
+                        .push(serde_json::from_value(attachment(file)).unwrap());
+                }
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id": id(), "role": "user", "content": "Read it", "createdAt": 1,
+                        "status": "completed", "runId": run.run_id,
+                        "attachments": [attachment(&sent)],
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        let event = |data: Value| {
+            json!({
+                "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+                "type": "attachment", "data": data,
+            })
+        };
+        let before = std::fs::read(
+            store
+                .native_history_path(&sid)
+                .unwrap()
+                .with_file_name("session.json"),
+        )
+        .unwrap();
+
+        let keyed = event(json!({"id": sent, "status": "partial", "code": KEY, "details": null}));
+        let refused = host
+            .on_event(&run, &keyed, &mut Attempt::default())
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, PROTOCOL);
+
+        // Another turn's file: neither saved nor published.
+        let foreign = event(json!({
+            "id": other, "status": "unreadable", "code": "assistant_attachment_unreadable",
+            "details": null,
+        }));
+        host.on_event(&run, &foreign, &mut Attempt::default())
+            .await
+            .unwrap();
+        let after = std::fs::read(
+            store
+                .native_history_path(&sid)
+                .unwrap()
+                .with_file_name("session.json"),
+        )
+        .unwrap();
+        assert_eq!(before, after, "nothing was saved");
+        assert!(
+            env.events.lock().unwrap().is_empty(),
+            "nothing was published"
+        );
     }
 
     #[test]
