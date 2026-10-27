@@ -1633,6 +1633,26 @@ mod tests {
         assert!(host.ensure_accepting_runs().is_ok());
     }
 
+    #[tokio::test]
+    async fn a_message_or_an_edit_over_the_limit_is_too_large() {
+        let (_config, host) = fixture();
+        for branch in [json!({}), json!({"editMessageId": id()})] {
+            let mut value = json!({
+                "sessionId": id(), "runId": id(), "operationId": id(),
+                "text": "x".repeat(128_001),
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(branch.as_object().unwrap().clone());
+            let request: SendRequest = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                host.send(request).await.unwrap_err(),
+                "assistant_message_too_large"
+            );
+        }
+    }
+
     #[test]
     fn ordinary_identity_cancellation_keeps_new_authority_admissible() {
         let (_config, host) = fixture();

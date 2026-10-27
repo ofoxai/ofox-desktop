@@ -188,8 +188,10 @@ impl AssistantHost {
         validate_id(&request.session_id)?;
         validate_id(&request.run_id)?;
         validate_id(&request.operation_id)?;
-        if request.text.len() > MAX_MESSAGE_BYTES
-            || (request.text.trim().is_empty() && request.regenerate_message_id.is_none())
+        if request.text.len() > MAX_MESSAGE_BYTES {
+            return Err("assistant_message_too_large".into());
+        }
+        if (request.text.trim().is_empty() && request.regenerate_message_id.is_none())
             || (request.edit_message_id.is_some() && request.regenerate_message_id.is_some())
         {
             return Err("assistant_invalid_message".into());
