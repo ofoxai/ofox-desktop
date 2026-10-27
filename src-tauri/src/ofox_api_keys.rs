@@ -646,16 +646,36 @@ pub enum AssistantKeyStatus {
     Missing,
 }
 
-/// 取或签发助手 key。`CachedOk` 时有当前账号能用的记录和原文就直接返回；
-/// `ForceRefresh`（网关 401 后）跳过缓存重签。换掉的旧 key 没停用的话排队，等它的
-/// 账号登录时在服务器上删掉。
-#[allow(dead_code)] // The assistant host calls it on the first send (S1 Task 4).
+/// 取或签发助手 key，在 `apex` 地区签发（一次运行冻结的地区）。`CachedOk` 时有
+/// 当前账号能用的记录和原文就直接返回；`ForceRefresh` 跳过缓存重签。换掉的旧 key
+/// 没停用的话排队，等它的账号登录时在服务器上删掉。没登录时一律
+/// `Unauthorized`：不签发，也不交出上一个账号的 key。
+#[allow(dead_code)] // The assistant host calls it on the first send (S1 Task 4, next commit).
 pub async fn fetch_or_create_assistant_key(
     mode: FetchMode,
+    apex: &str,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<String, ApiKeyError> {
-    let url = crate::ofox_apex::openapi_api_keys_url();
+    let url = assistant_keys_url(apex)?;
     fetch_or_create_assistant_key_at(mode, &default_store(), manager, &url).await
+}
+
+/// 网关拒绝了 `rejected`（401）后调用：缓存里还是这把就重签（同
+/// `ForceRefresh`）；已经换过了（另一次运行先遇到 401）就直接用换好的那把，
+/// 不再签第三把，也不把正在用的新 key 排进删除队列。
+#[allow(dead_code)] // The assistant host retries a rejected run with it (S1 Task 4, next commit).
+pub async fn refresh_rejected_assistant_key(
+    rejected: &str,
+    apex: &str,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+) -> Result<String, ApiKeyError> {
+    let url = assistant_keys_url(apex)?;
+    refresh_rejected_assistant_key_at(rejected, &default_store(), manager, &url).await
+}
+
+fn assistant_keys_url(apex: &str) -> Result<String, ApiKeyError> {
+    crate::ofox_apex::openapi_api_keys_url_for(apex)
+        .ok_or_else(|| ApiKeyError::RemoteRejected("unknown Ofox region".into()))
 }
 
 /// [`fetch_or_create_assistant_key`] 的主体；store 和签发 URL 由调用方传入。
@@ -665,17 +685,47 @@ async fn fetch_or_create_assistant_key_at(
     manager: &Arc<RwLock<OfoxAuthManager>>,
     create_url: &str,
 ) -> Result<String, ApiKeyError> {
+    assistant_key_at(mode, None, store, manager, create_url).await
+}
+
+/// [`refresh_rejected_assistant_key`] 的主体。
+async fn refresh_rejected_assistant_key_at(
+    rejected: &str,
+    store: &Arc<dyn SecretStore>,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+    create_url: &str,
+) -> Result<String, ApiKeyError> {
+    assistant_key_at(
+        FetchMode::ForceRefresh,
+        Some(rejected),
+        store,
+        manager,
+        create_url,
+    )
+    .await
+}
+
+async fn assistant_key_at(
+    mode: FetchMode,
+    rejected: Option<&str>,
+    store: &Arc<dyn SecretStore>,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+    create_url: &str,
+) -> Result<String, ApiKeyError> {
     let _serial = ASSISTANT_KEY_LOCK.lock().await;
-    let owner = manager.read().await.current_key_owner().await;
+    let Some(owner) = manager.read().await.current_key_owner().await else {
+        return Err(ApiKeyError::Unauthorized("signed out".into()));
+    };
     let previous = settings::get_assistant_key_meta();
-    let cached_usable = previous
-        .as_ref()
-        .is_some_and(|meta| meta.usable_by(owner.as_ref()));
-    if matches!(mode, FetchMode::CachedOk) && cached_usable {
-        if let Some(key) = store
+    let cached = match &previous {
+        Some(meta) if meta.usable_by(Some(&owner)) => store
             .load(Slot::AssistantKey)
-            .map_err(ApiKeyError::Storage)?
-        {
+            .map_err(ApiKeyError::Storage)?,
+        _ => None,
+    };
+    if let Some(key) = cached {
+        let replaced_already = rejected.is_some_and(|rejected| rejected != key);
+        if matches!(mode, FetchMode::CachedOk) || replaced_already {
             return Ok(key);
         }
     }
@@ -683,7 +733,7 @@ async fn fetch_or_create_assistant_key_at(
     let created = create_key_at(create_url, &assistant_key_name(), manager).await?;
     let meta = AssistantKeyMeta {
         key_id: created.key_id,
-        owner,
+        owner: Some(owner),
         created_at: chrono::Utc::now().timestamp(),
         revoked: false,
     };
@@ -1457,6 +1507,98 @@ mod tests {
 
         server.verify().await;
         assert_eq!(key, "sk-of-assistant-new");
+    }
+
+    /// 两次运行同时被网关 401：只换一次 key，两边拿到同一把新 key，旧 key 只排队一次，
+    /// 新 key 不会被当成"被拒的"再换掉、排进删除队列。
+    #[tokio::test]
+    #[serial]
+    async fn two_runs_rejected_at_once_replace_the_key_once() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-rejected",
+            assistant_record("assistant-old", Some(owner_of("org_a"))),
+        );
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(1).await;
+
+        let (first, second) = tokio::join!(
+            refresh_rejected_assistant_key_at("sk-of-rejected", &store, &manager, &url),
+            refresh_rejected_assistant_key_at("sk-of-rejected", &store, &manager, &url),
+        );
+
+        server.verify().await;
+        assert_eq!(first.unwrap(), "sk-of-assistant-new");
+        assert_eq!(second.unwrap(), "sk-of-assistant-new");
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("assistant-old", Some(owner_of("org_a")))]
+        );
+        assert_eq!(
+            settings::get_assistant_key_meta().unwrap().key_id,
+            "assistant-new"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn a_rejected_key_that_was_already_replaced_is_not_replaced_again() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-current",
+            assistant_record("assistant-current", Some(owner_of("org_a"))),
+        );
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(0).await;
+
+        let key = refresh_rejected_assistant_key_at("sk-of-rejected", &store, &manager, &url)
+            .await
+            .unwrap();
+
+        server.verify().await;
+        assert_eq!(key, "sk-of-current");
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    /// 没登录时既不签发、也不把上一个账号留下的 key 交出去。
+    #[tokio::test]
+    #[serial]
+    async fn no_assistant_key_is_minted_or_handed_out_while_signed_out() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-previous",
+            assistant_record("assistant-previous", Some(owner_of("org_a"))),
+        );
+        let signed_out = Arc::new(RwLock::new(OfoxAuthManager::new_with_secret_store(
+            crate::config::get_app_config_dir(),
+            Arc::new(InMemoryStore::new()),
+        )));
+        signed_out
+            .read()
+            .await
+            .set_access_token_for_test("fake-bearer")
+            .await;
+        let (server, url) = mint_endpoint(0).await;
+
+        for result in [
+            fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &signed_out, &url).await,
+            fetch_or_create_assistant_key_at(FetchMode::ForceRefresh, &store, &signed_out, &url)
+                .await,
+            refresh_rejected_assistant_key_at("sk-of-previous", &store, &signed_out, &url).await,
+        ] {
+            assert!(
+                matches!(result, Err(ApiKeyError::Unauthorized(_))),
+                "{result:?}"
+            );
+        }
+        server.verify().await;
+        assert_eq!(assistant_key_status(None), AssistantKeyStatus::Missing);
     }
 
     #[tokio::test]

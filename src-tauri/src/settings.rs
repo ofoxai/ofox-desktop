@@ -258,9 +258,10 @@ pub struct AssistantKeyMeta {
 }
 
 impl AssistantKeyMeta {
-    /// 同 [`ApiKeyMeta::usable_by`]。
+    /// 同 [`ApiKeyMeta::usable_by`]，但不知道当前账号（没登录）时一律不能用：
+    /// 助手 key 不交给登出状态，也不交给说不清是谁的账号。
     pub fn usable_by(&self, current: Option<&KeyOwner>) -> bool {
-        key_usable_by(self.revoked, self.owner.as_ref(), current)
+        current.is_some() && key_usable_by(self.revoked, self.owner.as_ref(), current)
     }
 }
 
@@ -1435,6 +1436,16 @@ mod api_key_meta_tests {
             ..key
         };
         assert!(!revoked.usable_by(Some(&alice)));
+    }
+
+    /// 没登录（或不知道是谁）时，没有哪把助手 key 算能用，没记账号的那把也不算。
+    #[test]
+    fn no_assistant_key_is_usable_without_a_known_account() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        assert!(!assistant_key(Some(alice.clone())).usable_by(None));
+        assert!(!assistant_key(None).usable_by(None));
+        // 登录后照旧认领没记账号的那把（见 reconcile_assistant_key）。
+        assert!(assistant_key(None).usable_by(Some(&alice)));
     }
 
     #[test]

@@ -162,7 +162,6 @@ pub fn auth_api_base() -> String {
 /// 同 [`auth_api_base`]，但用调用方给定的 apex——助手一次运行开始时冻结 apex，
 /// 中途切地区不会把这次运行的请求改打到另一个 host。apex 不在
 /// [`KNOWN_APEXES`] 里时返回 `None`：调用方传来的字符串绝不拼成 host。
-#[allow(dead_code)] // The assistant host builds its frozen-apex URLs with it (S1 Task 4).
 pub(crate) fn auth_api_base_for(apex: &str) -> Option<String> {
     known_apex(apex).map(auth_api_base_at)
 }
@@ -192,7 +191,7 @@ pub fn gateway_base() -> String {
 
 /// 同 [`gateway_base`]，但用调用方给定的 apex；未知 apex 返回 `None`
 /// （见 [`auth_api_base_for`]）。
-#[allow(dead_code)] // The assistant host builds its frozen-apex URLs with it (S1 Task 4).
+#[allow(dead_code)] // The assistant host passes it to the runtime (S1 Task 4, next commit).
 pub(crate) fn gateway_base_for(apex: &str) -> Option<String> {
     known_apex(apex).map(gateway_base_at)
 }
@@ -286,6 +285,12 @@ pub fn spending_limits_url() -> String {
 #[allow(dead_code)]
 pub fn openapi_api_keys_url() -> String {
     format!("{}{}", auth_api_base(), OPENAPI_API_KEYS_PATH)
+}
+
+/// 同 [`openapi_api_keys_url`]，但用调用方给定的 apex：助手一次运行冻结的 apex
+/// 也决定在哪个地区签发它的 key。未知 apex 返回 `None`。
+pub(crate) fn openapi_api_keys_url_for(apex: &str) -> Option<String> {
+    auth_api_base_for(apex).map(|base| format!("{base}{OPENAPI_API_KEYS_PATH}"))
 }
 
 /// 单把 key 的资源 URL（`GET` / `PATCH` / `DELETE`）。`id` 来自创建时的响应。
@@ -717,7 +722,22 @@ mod tests {
             assert_eq!(auth_api_base_for(apex), None, "{apex}");
             assert_eq!(gateway_base_for(apex), None, "{apex}");
             assert_eq!(models_catalog_base_for(apex), None, "{apex}");
+            assert_eq!(openapi_api_keys_url_for(apex), None, "{apex}");
         }
+    }
+
+    #[test]
+    fn the_key_endpoint_of_a_frozen_apex_is_on_that_apex() {
+        for apex in KNOWN_APEXES {
+            assert_eq!(
+                openapi_api_keys_url_for(apex),
+                auth_api_base_for(apex).map(|base| format!("{base}/openapi/api-keys"))
+            );
+        }
+        assert_eq!(
+            openapi_api_keys_url_for(current_apex()),
+            Some(openapi_api_keys_url())
+        );
     }
 
     #[test]
