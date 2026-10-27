@@ -123,7 +123,9 @@ pub struct UnreadableSession {
     pub error: String,
 }
 
-/// One owner's conversations. Cheap to build; holds no open files.
+/// One owner's conversations. Cheap to build; holds no open files. Every
+/// method does synchronous file IO, and the writers wait on a per-file lock, so
+/// async code calls them inside `tauri::async_runtime::spawn_blocking`.
 pub struct AssistantStore {
     config_dir: PathBuf,
     owner: String,
@@ -139,6 +141,7 @@ impl AssistantStore {
         })
     }
 
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
     pub fn create(&self, model_id: &str, web_search: bool) -> Result<Detail, String> {
         let at = now();
         let record = SessionRecord {
@@ -168,7 +171,11 @@ impl AssistantStore {
     }
 
     /// Sessions in the trash (`deleted`) or out of it, most recently updated
-    /// first. `search` matches the title or any message, ignoring case.
+    /// first (ties by id). `search` matches the title or any message, ignoring
+    /// case.
+    ///
+    /// Blocking file IO (reads every session): async callers run it in
+    /// `spawn_blocking`.
     pub fn list(&self, deleted: bool, search: &str) -> Result<SessionList, String> {
         let mut list = SessionList::default();
         if !real_dir(&self.root)? {
@@ -176,21 +183,23 @@ impl AssistantStore {
         }
         let search = search.to_lowercase();
         for sid in self.session_ids()? {
-            match read_record(&self.root, &sid) {
-                Ok(record) => {
+            match read_listed(&self.root, &sid) {
+                Ok(Some(record)) => {
                     if record.session.deleted_at.is_some() == deleted
                         && matches_search(&record, &search)
                     {
                         list.sessions.push(record.session);
                     }
                 }
-                // A folder without session.json holds no conversation.
-                Err(error) if error == NOT_FOUND => {}
+                Ok(None) => {}
                 Err(error) => list.unreadable.push(UnreadableSession { id: sid, error }),
             }
         }
-        list.sessions
-            .sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+        list.sessions.sort_by(|a, b| {
+            b.updated_at
+                .cmp(&a.updated_at)
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(list)
     }
 
@@ -206,6 +215,9 @@ impl AssistantStore {
 
     /// Read, change and save one session while holding its write lock. Nothing
     /// is saved when `change` fails. `change` must not call back into the store.
+    ///
+    /// Blocking file IO under a blocking lock: async callers run it in
+    /// `spawn_blocking`, never directly on a runtime worker.
     pub fn mutate<T>(
         &self,
         sid: &str,
@@ -223,15 +235,26 @@ impl AssistantStore {
         Ok(result)
     }
 
-    /// Apply the fields an [`UpdateRequest`] carries. The owner and generation
-    /// it names are the host's to check before calling.
-    pub fn update(&self, request: &UpdateRequest) -> Result<Session, String> {
+    /// Apply the fields an [`UpdateRequest`] carries. `precondition` runs under
+    /// the session's write lock before anything changes; the host
+    /// re-checks its authority generation there, so an update raced by a logout
+    /// or account switch fails instead of landing. The request's owner and
+    /// generation fields are the host's to compare, not the store's.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn update(
+        &self,
+        request: &UpdateRequest,
+        precondition: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Session, String> {
         self.mutate(&request.session_id, |record| {
+            precondition()?;
             apply_update(record, request)?;
             Ok(record.session.clone())
         })
     }
 
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
     pub fn remember_model(&self, model_id: &str) -> Result<(), String> {
         let path = self.ensure_root()?.join(PREFS_FILE);
         let lock = file_lock(&path);
@@ -266,9 +289,9 @@ impl AssistantStore {
         let mut totals = UsageTotals::new();
         if real_dir(&self.root)? {
             for sid in self.session_ids()? {
-                match read_record(&self.root, &sid) {
-                    Ok(record) => totals.add(&record),
-                    Err(error) if error == NOT_FOUND => {}
+                match read_listed(&self.root, &sid) {
+                    Ok(Some(record)) => totals.add(&record),
+                    Ok(None) => {}
                     Err(_) => totals.priced = false,
                 }
             }
@@ -277,7 +300,8 @@ impl AssistantStore {
     }
 
     /// Where the runtime keeps this session's native history: next to
-    /// `session.json`, in the folder the runtime also uses as its workspace.
+    /// `session.json`. The runtime derives its own `<sid>/workspace` and
+    /// `<sid>/runtime-settings` folders from this path.
     pub fn native_history_path(&self, sid: &str) -> Result<PathBuf, String> {
         validate_id(sid)?;
         if !real_dir(&self.root)? || !real_dir(&self.root.join(sid))? {
@@ -472,6 +496,28 @@ fn read_record(root: &Path, sid: &str) -> Result<SessionRecord, String> {
     decode(&bytes, sid)
 }
 
+/// A session folder found by listing: its record, `None` for an empty folder
+/// (a creation that never wrote its file, or one removed meanwhile), or an
+/// error. A folder with content but no `session.json` (say, native history
+/// alone) is an error, so a conversation is never hidden silently.
+fn read_listed(root: &Path, sid: &str) -> Result<Option<SessionRecord>, String> {
+    match read_record(root, sid) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) if error == NOT_FOUND => match fs::read_dir(root.join(sid)) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    return Ok(None);
+                }
+                log::warn!("assistant session {sid} has files but no {SESSION_FILE}");
+                Err(INVALID_SESSION.into())
+            }
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(UNAVAILABLE.into()),
+        },
+        Err(error) => Err(error),
+    }
+}
+
 fn decode(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
     let file: SessionFileIn = serde_json::from_slice(bytes).map_err(|error| {
         // Line and column only: the message can quote conversation text.
@@ -623,6 +669,10 @@ mod tests {
             "id": id(), "name": "a.txt", "mimeType": "text/plain", "sizeBytes": 1, "status": status
         }))
         .unwrap()
+    }
+
+    fn no_precondition() -> Result<(), String> {
+        Ok(())
     }
 
     fn request(sid: &str) -> UpdateRequest {
@@ -898,7 +948,7 @@ mod tests {
                     Ok(())
                 })
                 .is_err());
-            assert!(store.update(&request(&sid)).is_err());
+            assert!(store.update(&request(&sid), no_precondition).is_err());
             assert_eq!(fs::read(&path).unwrap(), damaged);
         }
     }
@@ -1012,7 +1062,7 @@ mod tests {
             "assistant_session_not_found"
         );
         assert!(two.mutate(&sid, |_| Ok(())).is_err());
-        assert!(two.update(&request(&sid)).is_err());
+        assert!(two.update(&request(&sid), no_precondition).is_err());
         assert!(two.native_history_path(&sid).is_err());
         assert!(two.list(false, "").unwrap().sessions.is_empty());
         assert_eq!(two.remembered_model().unwrap(), None);
@@ -1030,13 +1080,13 @@ mod tests {
             let sid = store.create("test/model", false).unwrap().session.id;
             let mut update = request(&sid);
             update.title = Some(title.into());
-            store.update(&update).unwrap();
+            store.update(&update, no_precondition).unwrap();
             ids.push(sid);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let mut trash = request(&ids[1]);
         trash.deleted = Some(true);
-        store.update(&trash).unwrap();
+        store.update(&trash, no_precondition).unwrap();
 
         let titles = |deleted| -> Vec<String> {
             store
@@ -1052,7 +1102,7 @@ mod tests {
 
         let mut restore = request(&ids[1]);
         restore.deleted = Some(false);
-        store.update(&restore).unwrap();
+        store.update(&restore, no_precondition).unwrap();
         assert_eq!(titles(false), ["middle", "new", "old"]);
     }
 
@@ -1062,7 +1112,7 @@ mod tests {
         let titled = store.create("test/model", false).unwrap().session.id;
         let mut update = request(&titled);
         update.title = Some("Trip to Kyoto".into());
-        store.update(&update).unwrap();
+        store.update(&update, no_precondition).unwrap();
         let talked = store.create("test/model", false).unwrap().session.id;
         store
             .mutate(&talked, |record| {
@@ -1088,6 +1138,61 @@ mod tests {
     }
 
     #[test]
+    fn equal_update_times_are_listed_in_id_order() {
+        let (_config, store) = fixture();
+        let mut ids = vec![];
+        for _ in 0..6 {
+            let sid = store.create("test/model", false).unwrap().session.id;
+            store
+                .mutate(&sid, |record| {
+                    record.session.updated_at = 1;
+                    Ok(())
+                })
+                .unwrap();
+            ids.push(sid);
+        }
+        ids.sort();
+        let listed: Vec<_> = store
+            .list(false, "")
+            .unwrap()
+            .sessions
+            .into_iter()
+            .map(|s| s.id)
+            .collect();
+        assert_eq!(listed, ids);
+    }
+
+    #[test]
+    fn a_session_folder_with_history_but_no_session_file_is_reported() {
+        let (config, store) = fixture();
+        let kept = store.create("test/model", false).unwrap().session.id;
+        let root = session_file(config.path(), &store, &kept)
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let orphan = id();
+        fs::create_dir(root.join(&orphan)).unwrap();
+        fs::write(root.join(&orphan).join("session.jsonl"), "{}\n").unwrap();
+        // An empty folder is a creation that never wrote its file: nothing to show.
+        fs::create_dir(root.join(id())).unwrap();
+
+        let list = store.list(false, "").unwrap();
+        assert_eq!(
+            list.sessions.iter().map(|s| &s.id).collect::<Vec<_>>(),
+            [&kept]
+        );
+        assert_eq!(list.unreadable.len(), 1);
+        assert_eq!(list.unreadable[0].id, orphan);
+        assert_eq!(list.unreadable[0].error, "assistant_invalid_session");
+        assert_eq!(
+            store.usage_summary().unwrap()["usageCoverage"],
+            "incomplete"
+        );
+    }
+
+    #[test]
     fn a_missing_store_lists_nothing_and_creates_nothing() {
         let (config, store) = fixture();
         let list = store.list(false, "").unwrap();
@@ -1099,6 +1204,25 @@ mod tests {
     // ── update ───────────────────────────────────────────────────────────
 
     #[test]
+    fn an_update_whose_precondition_fails_changes_nothing() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let path = session_file(config.path(), &store, &sid);
+        let before = fs::read(&path).unwrap();
+        let mut change = request(&sid);
+        change.title = Some("Renamed".into());
+        change.deleted = Some(true);
+        let mut checked = false;
+        let result = store.update(&change, || {
+            checked = true;
+            Err("assistant_identity_changed".into())
+        });
+        assert_eq!(result.unwrap_err(), "assistant_identity_changed");
+        assert!(checked);
+        assert_eq!(fs::read(&path).unwrap(), before);
+    }
+
+    #[test]
     fn update_applies_only_the_fields_it_carries() {
         let (_config, store) = fixture();
         let created = store.create("test/model", false).unwrap().session;
@@ -1107,7 +1231,7 @@ mod tests {
         change.model_id = Some("other/model".into());
         change.web_search = Some(true);
         change.draft = Some("unsent".into());
-        let session = store.update(&change).unwrap();
+        let session = store.update(&change, no_precondition).unwrap();
         assert_eq!(session.title, "Renamed");
         assert_eq!(session.model_id, "other/model");
         assert!(session.web_search);
@@ -1115,7 +1239,9 @@ mod tests {
         assert!(session.deleted_at.is_none());
         assert!(session.updated_at >= created.updated_at);
 
-        let untouched = store.update(&request(&created.id)).unwrap();
+        let untouched = store
+            .update(&request(&created.id), no_precondition)
+            .unwrap();
         assert_eq!(untouched.title, "Renamed");
         assert_eq!(untouched.model_id, "other/model");
         assert_eq!(
@@ -1131,7 +1257,7 @@ mod tests {
         let mut change = request(&sid);
         change.title = Some("key sk-of-abcdefghijklmnop".into());
         change.draft = Some("token: sk-ant-abcdefghijklmnop".into());
-        let session = store.update(&change).unwrap();
+        let session = store.update(&change, no_precondition).unwrap();
         let saved = serde_json::to_string(&store.load_detail(&sid).unwrap()).unwrap();
         assert!(!saved.contains("abcdefghijklmnop"));
         assert!(session.title.contains(crate::redact::REDACTED));
@@ -1153,13 +1279,13 @@ mod tests {
         let mut long_title = request(&sid);
         long_title.title = Some("t".repeat(513));
         assert_eq!(
-            store.update(&long_title).unwrap_err(),
+            store.update(&long_title, no_precondition).unwrap_err(),
             "assistant_title_too_long"
         );
         let mut long_draft = request(&sid);
         long_draft.draft = Some("d".repeat(128_001));
         assert_eq!(
-            store.update(&long_draft).unwrap_err(),
+            store.update(&long_draft, no_precondition).unwrap_err(),
             "assistant_message_too_large"
         );
         for ids in [
@@ -1170,14 +1296,17 @@ mod tests {
             let mut drafted = request(&sid);
             drafted.draft_attachment_ids = Some(ids);
             assert_eq!(
-                store.update(&drafted).unwrap_err(),
+                store.update(&drafted, no_precondition).unwrap_err(),
                 "assistant_attachment_not_found"
             );
         }
         let mut drafted = request(&sid);
         drafted.draft_attachment_ids = Some(vec![ready.id.clone()]);
         assert_eq!(
-            store.update(&drafted).unwrap().draft_attachment_ids,
+            store
+                .update(&drafted, no_precondition)
+                .unwrap()
+                .draft_attachment_ids,
             [ready.id]
         );
     }
