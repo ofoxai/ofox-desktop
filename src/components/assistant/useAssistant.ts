@@ -1056,42 +1056,106 @@ export function useAssistant(enabled: boolean) {
    * Open the file dialog and add the files it imports to the draft, creating
    * the conversation first when there is none. Cancelling changes nothing.
    */
+  /**
+   * Leave a conversation this window just created for a pick that imported
+   * nothing: back to no conversation, with the unsent words, and the empty
+   * conversation goes to the trash.
+   */
+  const discardCreated = useCallback(
+    async (sessionId: string) => {
+      const text = draftRef.current;
+      // Nothing of it is saved on the way out: it is about to be trashed.
+      drafts.current.delete(sessionId);
+      attachmentDrafts.current.delete(sessionId);
+      select(null);
+      setDraft(text);
+      await assistantApi.updateSession({
+        sessionId,
+        deleted: true,
+        ...expectedIdentity(bootstrapRef.current),
+      });
+      void refreshSessions();
+    },
+    [select, setDraft, refreshSessions],
+  );
+
+  /**
+   * Open the file dialog and add the files it imports to the draft, saved at
+   * once. With no conversation open one is created first, and trashed again
+   * when the pick imports nothing.
+   */
   const pickAttachments = useCallback(async () => {
     if (busy || loading || runRef.current) return;
     setBusy(true);
     setError(null);
     const generation = epoch.current;
     const selection = selectionSequence.current;
+    const creates = !selectedRef.current;
+    let sessionId: string | undefined;
+    // Still showing the conversation this pick was for.
+    const current = () =>
+      mounted.current &&
+      generation === epoch.current &&
+      selection === selectionSequence.current &&
+      selectedRef.current === sessionId;
     try {
-      const session = await ensureSession();
-      const added = await assistantApi.pickAttachments(session.id);
-      if (
-        !added.length ||
-        !mounted.current ||
-        generation !== epoch.current ||
-        selectedRef.current !== session.id
-      )
+      const id = (await ensureSession()).id;
+      sessionId = id;
+      const added = await assistantApi.pickAttachments(id);
+      if (!current()) return;
+      if (!added.length) {
+        if (creates) await discardCreated(id).catch(showError);
         return;
+      }
       const fresh = (list: AssistantAttachment[]) =>
         added.filter((file) => !list.some((item) => item.id === file.id));
       setDetail((old) =>
-        old?.session.id === session.id
+        old?.session.id === id
           ? {
               ...old,
               attachments: [...old.attachments, ...fresh(old.attachments)],
             }
           : old,
       );
-      setAttachments([
+      const files = [
         ...attachmentsRef.current,
         ...fresh(attachmentsRef.current),
-      ]);
+      ];
+      setAttachments(files);
+      // Saved now, not after the draft's pause: imported files that no saved
+      // draft names would be lost to a quick leave.
+      const text = draftRef.current;
+      const ids = files.map((file) => file.id);
+      void persistDraft(id, text, ids)
+        .then(() => {
+          if (generation === epoch.current && selectedRef.current === id)
+            setDetail((old) =>
+              old?.session.id === id
+                ? {
+                    ...old,
+                    session: {
+                      ...old.session,
+                      draft: text,
+                      draftAttachmentIds: ids,
+                    },
+                  }
+                : old,
+            );
+        })
+        .catch((reason) => {
+          if (generation === epoch.current) showError(reason);
+        });
     } catch (reason) {
       if (
-        generation === epoch.current &&
-        selection === selectionSequence.current
+        generation !== epoch.current ||
+        selection !== selectionSequence.current
       )
-        showError(reason);
+        return;
+      const created = creates && sessionId && current() ? sessionId : null;
+      // Leaving the conversation clears the page's error: say why after.
+      const discarding = created ? discardCreated(created) : null;
+      showError(reason);
+      await discarding?.catch(showError);
     } finally {
       if (
         mounted.current &&
@@ -1100,7 +1164,15 @@ export function useAssistant(enabled: boolean) {
       )
         setBusy(false);
     }
-  }, [busy, loading, ensureSession, setAttachments, showError]);
+  }, [
+    busy,
+    loading,
+    ensureSession,
+    discardCreated,
+    persistDraft,
+    setAttachments,
+    showError,
+  ]);
 
   /** Take a file out of the draft; it stays in the conversation's files. */
   const removeAttachment = useCallback(

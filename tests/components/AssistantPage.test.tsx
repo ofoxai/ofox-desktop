@@ -1153,6 +1153,94 @@ describe("attachments", () => {
     );
   });
 
+  describe("a pick that started a conversation and imported nothing", () => {
+    beforeEach(() => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+      mocks.createSession.mockImplementation(async (request) => ({
+        ...session,
+        title: "",
+        ...request,
+      }));
+    });
+    const trashed = () =>
+      expect(mocks.updateSession).toHaveBeenCalledWith({
+        sessionId: "session-a",
+        deleted: true,
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
+      });
+
+    it("leaves no empty conversation behind when the dialog is cancelled", async () => {
+      render(page());
+      await waitFor(() => expect(attach()).toBeEnabled());
+      await userEvent.click(screen.getByRole("button", { name: "Web search" }));
+      await userEvent.type(composer(), "Compare these");
+      await userEvent.click(attach());
+      await waitFor(trashed);
+      await waitFor(() => expect(attach()).toBeEnabled());
+      // Back to no conversation, with the unsent words and search choice.
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        "Assistant",
+      );
+      expect(composer()).toHaveValue("Compare these");
+      expect(
+        screen.getByRole("button", { name: "Web search" }),
+      ).toHaveAttribute("aria-pressed", "true");
+      expect(screen.queryByRole("alert")).toBeNull();
+      expect(mocks.listSessions.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it("leaves no empty conversation behind when the pick is refused, and says why", async () => {
+      mocks.pickAttachments.mockRejectedValueOnce(
+        "assistant_attachment_too_many",
+      );
+      render(page());
+      await waitFor(() => expect(attach()).toBeEnabled());
+      await userEvent.click(attach());
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "Too many files.",
+      );
+      await waitFor(trashed);
+      expect(screen.getByRole("alert")).toHaveTextContent("Too many files.");
+      expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
+        "Assistant",
+      );
+    });
+
+    it("keeps a conversation that was open before the pick", async () => {
+      mocks.listSessions.mockResolvedValue(listOf([current.session]));
+      await openConversation();
+      await userEvent.click(attach());
+      await waitFor(() => expect(mocks.pickAttachments).toHaveBeenCalled());
+      await waitFor(() => expect(attach()).toBeEnabled());
+      expect(mocks.updateSession).not.toHaveBeenCalledWith(
+        expect.objectContaining({ deleted: true }),
+      );
+    });
+  });
+
+  it("saves picked files at once, so a page closed right away keeps them", async () => {
+    const view = render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() => expect(attach()).toBeEnabled());
+    mocks.pickAttachments.mockResolvedValueOnce([pdf]);
+    await userEvent.click(attach());
+    // Well before the draft's usual 600 ms pause.
+    await waitFor(
+      () =>
+        expect(mocks.updateSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: "session-a",
+            draftAttachmentIds: ["file-pdf"],
+          }),
+        ),
+      { timeout: 300 },
+    );
+    view.unmount();
+  });
+
   it("keeps each conversation's files with its own draft", async () => {
     const other = { ...session, id: "session-b", title: "Other conversation" };
     mocks.listSessions.mockResolvedValue(listOf([session, other]));
