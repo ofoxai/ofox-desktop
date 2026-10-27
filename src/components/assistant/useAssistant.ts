@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import {
   assistantApi,
+  assistantErrorText,
   type AssistantBootstrap,
   type AssistantEvent,
   type AssistantMessage,
@@ -16,17 +16,6 @@ const freshId = () => crypto.randomUUID();
 
 /** Raw failure text or code; the page turns it into a localized message. */
 export type AssistantError = string;
-
-function failure(value: unknown): AssistantError {
-  if (value instanceof Error) return value.message;
-  if (value && typeof value === "object") {
-    const { code, message } = value as { code?: unknown; message?: unknown };
-    return [code, message]
-      .filter((part): part is string => typeof part === "string")
-      .join(" ");
-  }
-  return String(value);
-}
 
 /** The owner check the backend applies to writes that outlive a sign-in. */
 function expectedIdentity(identity: AssistantBootstrap | null) {
@@ -91,7 +80,7 @@ export function useAssistant(enabled: boolean) {
   }, []);
 
   const showError = useCallback((value: unknown) => {
-    if (mounted.current) setError(failure(value));
+    if (mounted.current) setError(assistantErrorText(value));
   }, []);
 
   const persistDraft = useCallback((sessionId: string, text: string) => {
@@ -166,6 +155,15 @@ export function useAssistant(enabled: boolean) {
           sequence !== detailSequence.current
         )
           return false;
+        // While this window is still preparing a send (the first send may be
+        // minting the key) the backend has no run yet: keep the local run and
+        // the optimistic question, or later events would be dropped.
+        const local = runRef.current;
+        const preparing = Boolean(
+          local &&
+            pendingSends.current.has(local.runId) &&
+            !value.session.activeRun,
+        );
         // A reply still running (also after a restart) keeps streaming into
         // the same bubble instead of showing a saved copy next to it.
         const resumed = value.session.activeRun
@@ -176,18 +174,28 @@ export function useAssistant(enabled: boolean) {
           : undefined;
         savedDrafts.current.set(sessionId, value.session.draft ?? "");
         const alreadyFollowing = Boolean(runRef.current);
-        setDetail(
-          resumed
+        setDetail((old) => {
+          if (preparing)
+            return {
+              ...value,
+              messages: [
+                ...value.messages,
+                ...(old?.messages ?? []).filter((item) =>
+                  item.id.startsWith("pending-"),
+                ),
+              ],
+            };
+          return resumed
             ? {
                 ...value,
                 messages: value.messages.filter(
                   (message) => message.id !== resumed.id,
                 ),
               }
-            : value,
-        );
+            : value;
+        });
         if (resumed && !alreadyFollowing) setStream(resumed);
-        setRun(value.session.activeRun ?? null);
+        if (!preparing) setRun(value.session.activeRun ?? null);
         if (!drafts.current.has(sessionId)) setDraft(value.session.draft ?? "");
         return true;
       } catch (reason) {
@@ -247,18 +255,16 @@ export function useAssistant(enabled: boolean) {
       return;
     }
     void loadBootstrap();
-    // The backend's auth state events: either one ends the current identity.
-    for (const name of ["ofox-auth-expired", "ofox-auth-restored"]) {
-      void listen(name, () => {
+    void assistantApi
+      .onAuthChange((state) => {
         reset();
-        if (name === "ofox-auth-restored") {
+        if (state === "restored") {
           void loadBootstrap();
           void refreshSessionsRef.current();
         }
       })
-        .then((off) => (disposed ? off() : cleanup.push(off)))
-        .catch(showError);
-    }
+      .then((off) => (disposed ? off() : cleanup.push(off)))
+      .catch(showError);
     return () => {
       disposed = true;
       epoch.current += 1;
@@ -333,8 +339,13 @@ export function useAssistant(enabled: boolean) {
           event.sessionId !== selectedRef.current ||
           event.runId !== current.runId ||
           event.operationId !== current.operationId
-        )
+        ) {
+          // A run this view no longer follows (another conversation, or one
+          // left behind) still changes the history's "Replying…" marks.
+          if (["run_end", "done", "error"].includes(event.type))
+            void refreshSessionsRef.current();
           return;
+        }
         const data = event.data ?? {};
         // Tool, operation and other internal events are never shown.
         if (event.type === "text_delta" || event.type === "thinking_delta") {
@@ -350,17 +361,19 @@ export function useAssistant(enabled: boolean) {
           setCompacting(true);
         } else if (event.type === "compaction_end") {
           setCompacting(false);
-        } else if (
-          event.type === "message_end" &&
-          typeof data.message === "object" &&
-          data.message &&
-          typeof data.message.id === "string" &&
-          typeof data.message.content === "string"
-        ) {
-          setStream(data.message);
+        } else if (event.type === "message") {
+          // The final reply; anything but an assistant message is internal.
+          const message = data.message;
+          if (
+            typeof message === "object" &&
+            message?.role === "assistant" &&
+            typeof message.id === "string" &&
+            typeof message.content === "string"
+          )
+            setStream(message);
         } else if (event.type === "error") {
           // The user's own stop is not a failure.
-          if (data.code !== "stopped") setError(failure(data));
+          if (data.code !== "stopped") setError(assistantErrorText(data));
         } else if (event.type === "run_end" || event.type === "done") {
           setRun(null);
           setCompacting(false);
@@ -390,6 +403,9 @@ export function useAssistant(enabled: boolean) {
   const select = useCallback(
     (id: string | null) => {
       const previous = selectedRef.current;
+      // Already showing it: reloading here would leave the pane on "Loading…",
+      // and leaving "no conversation" for itself would drop the unsent draft.
+      if (id === previous) return;
       if (previous && drafts.current.has(previous))
         void persistDraft(previous, draftRef.current).catch(showError);
       selectedRef.current = id;
@@ -439,7 +455,9 @@ export function useAssistant(enabled: boolean) {
 
   const create = useCallback(async () => {
     if (busy) return;
+    // From "no conversation" this keeps the unsent draft; ensureSession carries it over.
     select(null);
+    setError(null);
     if (!newModelId) return;
     setBusy(true);
     const selection = selectionSequence.current;

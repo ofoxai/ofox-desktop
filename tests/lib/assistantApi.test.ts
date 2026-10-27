@@ -10,6 +10,16 @@ import {
 
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
+const events = vi.hoisted(() => ({
+  handlers: new Map<string, () => void>(),
+  off: vi.fn(),
+}));
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (name: string, handler: () => void) => {
+    events.handlers.set(name, handler);
+    return events.off;
+  }),
+}));
 
 const locales = { en, ja, zh } as Record<
   string,
@@ -62,6 +72,18 @@ describe("assistant commands", () => {
       runId: "r",
       operationId: "o",
     });
+  });
+});
+
+describe("sign-in changes", () => {
+  it("reports both auth events and stops listening to both", async () => {
+    const seen: string[] = [];
+    const off = await assistantApi.onAuthChange((state) => seen.push(state));
+    events.handlers.get("ofox-auth-expired")?.();
+    events.handlers.get("ofox-auth-restored")?.();
+    expect(seen).toEqual(["expired", "restored"]);
+    off();
+    expect(events.off).toHaveBeenCalledTimes(2);
   });
 });
 

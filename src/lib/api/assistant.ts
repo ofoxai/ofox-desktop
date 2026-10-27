@@ -134,7 +134,7 @@ export interface AssistantEvent {
   sessionId: string;
   runId: string;
   operationId: string;
-  /** text_delta, thinking_delta, sources, usage, error, run_end, … */
+  /** text_delta, thinking_delta, message (the final reply), error, run_end, … */
   type: string;
   data: {
     delta?: string;
@@ -187,6 +187,20 @@ export const assistantApi = {
     invoke<void>("assistant_stop", { sessionId, runId, operationId }),
   subscribe: (callback: (event: AssistantEvent) => void): Promise<UnlistenFn> =>
     listen<AssistantEvent>(ASSISTANT_EVENT, ({ payload }) => callback(payload)),
+  /**
+   * The backend's sign-in state events; either one ends the identity the
+   * workspace was showing. Names are literal (as in useModelSelection) so a
+   * test that mocks the auth API module cannot turn them into `undefined`.
+   */
+  onAuthChange: async (
+    callback: (state: "expired" | "restored") => void,
+  ): Promise<UnlistenFn> => {
+    const offs = await Promise.all([
+      listen("ofox-auth-expired", () => callback("expired")),
+      listen("ofox-auth-restored", () => callback("restored")),
+    ]);
+    return () => offs.forEach((off) => off());
+  },
 };
 
 /**
@@ -259,7 +273,8 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
 /** A wrapper names the stage that failed; a code inside it says why. */
 const WRAPPER_CODES = new Set(["assistant_model_request_failed"]);
 
-function errorText(error: unknown): string {
+/** The text of a command rejection, a thrown Error or an `error` event's data. */
+export function assistantErrorText(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
   if (error && typeof error === "object") {
@@ -278,7 +293,7 @@ function errorText(error: unknown): string {
  */
 export function assistantErrorKey(error: unknown): string {
   const known = (
-    errorText(error).match(/[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g) ?? []
+    assistantErrorText(error).match(/[a-z][a-z0-9]*(?:_[a-z0-9]+)+/g) ?? []
   ).filter((code) =>
     Object.prototype.hasOwnProperty.call(ASSISTANT_ERROR_MESSAGES, code),
   );

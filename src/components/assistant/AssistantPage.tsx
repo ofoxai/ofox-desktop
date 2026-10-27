@@ -72,7 +72,7 @@ export function AssistantPage({
 }
 
 function AssistantWorkspace() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
   const { detail, bootstrap, run, busy } = assistant;
   const [rename, setRename] = useState<string | null>(null);
@@ -176,7 +176,9 @@ function AssistantWorkspace() {
                   <span className="mt-0.5 block truncate text-note text-ink-muted">
                     {item.activeRun
                       ? t("assistant.running")
-                      : new Date(item.updatedAt).toLocaleDateString()}
+                      : new Date(item.updatedAt).toLocaleDateString(
+                          i18n.language,
+                        )}
                   </span>
                 </button>
               </li>
@@ -191,7 +193,7 @@ function AssistantWorkspace() {
                   {t("assistant.unreadable")}
                 </span>
                 <span className="mt-0.5 block text-note">
-                  {t("assistant.errors.sessionUnreadable")}
+                  {t(assistantErrorKey(item.code))}
                 </span>
               </li>
             ))}
@@ -278,7 +280,7 @@ function AssistantWorkspace() {
         )}
         {bootstrap && !bootstrap.runtime.available && (
           <div
-            role="status"
+            role="alert"
             className="border-b border-line bg-danger-soft px-4 py-3 text-ctl text-danger"
           >
             <p className="font-medium">{t("assistant.runtimeUnavailable")}</p>
@@ -292,7 +294,7 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
-        {assistant.error && (
+        {assistant.error !== null && (
           <div
             role="alert"
             className="flex items-start justify-between gap-3 border-b border-line bg-danger-soft px-4 py-2 text-ctl text-danger"
@@ -388,7 +390,7 @@ function AssistantWorkspace() {
                     }
                   />
                 ))}
-                {assistant.stream && (
+                {assistant.stream?.role === "assistant" && (
                   <AssistantMessageView
                     message={assistant.stream}
                     disabled
@@ -419,10 +421,13 @@ function AssistantWorkspace() {
                 readOnly={busy}
                 onChange={(event) => assistant.setDraft(event.target.value)}
                 onKeyDown={(event) => {
+                  // WKWebView reports the Enter that confirms an IME candidate
+                  // with isComposing false but keyCode 229.
                   if (
                     event.key === "Enter" &&
                     !event.shiftKey &&
-                    !event.nativeEvent.isComposing
+                    !event.nativeEvent.isComposing &&
+                    event.keyCode !== 229
                   ) {
                     event.preventDefault();
                     if (writable) send();

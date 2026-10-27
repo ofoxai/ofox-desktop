@@ -33,14 +33,13 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(),
   stop: vi.fn(),
   subscribe: vi.fn(),
+  onAuthChange: vi.fn(),
   listener: undefined as ((event: AssistantEvent) => void) | undefined,
+  auth: undefined as ((state: "expired" | "restored") => void) | undefined,
 }));
 vi.mock("@/lib/api/assistant", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/assistant")>()),
   assistantApi: mocks,
-}));
-vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn().mockResolvedValue(() => undefined),
 }));
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
@@ -106,6 +105,10 @@ beforeEach(async () => {
   mocks.stop.mockResolvedValue(undefined);
   mocks.subscribe.mockImplementation(async (listener) => {
     mocks.listener = listener;
+    return () => undefined;
+  });
+  mocks.onAuthChange.mockImplementation(async (callback) => {
+    mocks.auth = callback;
     return () => undefined;
   });
 });
@@ -445,9 +448,9 @@ describe("errors", () => {
       runtime: { available: false, reason: "/private/path/node is missing" },
     });
     render(page());
-    expect(
-      await screen.findByText("Assistant runtime unavailable"),
-    ).toBeVisible();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Assistant runtime unavailable",
+    );
     expect(screen.queryByText(/private\/path/)).not.toBeInTheDocument();
     expect(composer()).toBeDisabled();
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
@@ -954,5 +957,240 @@ describe("drafts and fencing", () => {
       await screen.findByRole("button", { name: /Other account/ }),
     );
     expect(composer()).toHaveValue("");
+  });
+});
+
+describe("selection and history edges", () => {
+  it("keeps an open conversation on screen when its row is clicked again", async () => {
+    current.messages = [
+      { id: "q", role: "user", content: "Question", createdAt: 1 },
+    ];
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: /My conversation/ }),
+    );
+    expect(screen.queryByText("Loading…")).toBeNull();
+    expect(screen.getByText("Question")).toBeVisible();
+    expect(mocks.getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries a draft typed before any conversation into the new one", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    const create = await screen.findByRole("button", {
+      name: "New conversation",
+    });
+    await waitFor(() => expect(create).toBeEnabled());
+    await userEvent.type(composer(), "Unsent idea");
+    await userEvent.click(create);
+    await waitFor(() => expect(mocks.createSession).toHaveBeenCalled());
+    expect(composer()).toHaveValue("Unsent idea");
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionId: "session-a",
+          draft: "Unsent idea",
+        }),
+      ),
+    );
+  });
+
+  it.each(["run_end", "error"])(
+    "refreshes a background conversation's Replying… mark on its %s",
+    async (type) => {
+      const other = { ...session, id: "session-b", title: "Other" };
+      mocks.listSessions.mockResolvedValue(
+        listOf([
+          { ...session, activeRun: { runId: "bg-run", operationId: "bg-op" } },
+          other,
+        ]),
+      );
+      render(page());
+      const list = await screen.findByRole("list", { name: "Conversations" });
+      await within(list).findByText("Replying…");
+      mocks.listSessions.mockResolvedValue(listOf([session, other]));
+      act(() =>
+        mocks.listener?.({
+          sessionId: "session-a",
+          runId: "bg-run",
+          operationId: "bg-op",
+          type,
+          data: {},
+        }),
+      );
+      await waitFor(() =>
+        expect(within(list).queryByText("Replying…")).toBeNull(),
+      );
+    },
+  );
+
+  it("describes a row the backend could not list by its own code", async () => {
+    mocks.listSessions.mockResolvedValue(
+      listOf([], [{ id: "x", code: "assistant_storage_unavailable" }]),
+    );
+    render(page());
+    const list = await screen.findByRole("list", { name: "Conversations" });
+    await within(list).findByText("Can't be read");
+    expect(list).toHaveTextContent(
+      "Local assistant data couldn't be read or saved.",
+    );
+    expect(list).not.toHaveTextContent("damaged");
+  });
+
+  it("dates the history in the app's language, not the system's", async () => {
+    const stamp = Date.UTC(2026, 9, 15, 12);
+    mocks.listSessions.mockResolvedValue(
+      listOf([{ ...session, updatedAt: stamp }]),
+    );
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    await i18n.changeLanguage("zh");
+    render(page());
+    expect(await screen.findByText("2026/10/15")).toBeVisible();
+  });
+});
+
+describe("run edges", () => {
+  it("keeps a question being prepared when the conversation is refreshed before the backend registers its run", async () => {
+    let accept!: (value: { runId: string; operationId: string }) => void;
+    mocks.send.mockReturnValue(
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+    );
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("Question"));
+    let submission!: Promise<boolean>;
+    act(() => {
+      submission = hook.result.current.send();
+    });
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    const run = hook.result.current.run!;
+    expect(run).not.toBeNull();
+    await act(async () => {
+      await hook.result.current.refreshDetail(session.id);
+    });
+    expect(hook.result.current.run).toEqual(run);
+    expect(
+      hook.result.current.detail?.messages.map((message) => message.content),
+    ).toContain("Question");
+    await act(async () => {
+      accept(run);
+      await submission;
+    });
+    act(() =>
+      mocks.listener?.({
+        sessionId: session.id,
+        ...run,
+        type: "text_delta",
+        data: { delta: "Answer" },
+      }),
+    );
+    expect(hook.result.current.stream?.content).toBe("Answer");
+  });
+
+  it("does not send the Enter that confirms an input-method candidate", async () => {
+    await openConversation();
+    fireEvent.change(composer(), { target: { value: "にほんご" } });
+    fireEvent.keyDown(composer(), { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(composer(), { key: "Enter", isComposing: true });
+    await act(async () => undefined);
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(composer()).toHaveValue("にほんご");
+    fireEvent.keyDown(composer(), { key: "Enter", keyCode: 13 });
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({ text: "にほんご" }),
+      ),
+    );
+  });
+
+  it("shows only an assistant reply from the final message event", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "message",
+        data: {
+          message: {
+            id: "internal",
+            role: "tool",
+            content: "assistant_request",
+            createdAt: 1,
+          },
+        },
+      }),
+    );
+    expect(document.body).not.toHaveTextContent("assistant_request");
+    expect(screen.getByText("Thinking…")).toBeVisible();
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "message",
+        data: {
+          message: {
+            id: "reply",
+            role: "assistant",
+            content: "Final answer",
+            status: "completed",
+            createdAt: 2,
+          },
+        },
+      }),
+    );
+    expect(await screen.findByText("Final answer")).toBeVisible();
+  });
+
+  it("keeps the run stoppable when an error arrives without its run end", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "error",
+        data: { code: "assistant_run_timeout" },
+      }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The reply took too long and was stopped. Please try again.",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Stop" }));
+    expect(mocks.stop).toHaveBeenCalledWith(
+      "session-a",
+      sent.runId,
+      sent.operationId,
+    );
+  });
+});
+
+describe("sign-in changes", () => {
+  it("drops the conversation and draft when sign-in expires, and reloads when it is restored", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Private draft");
+    expect(mocks.bootstrap).toHaveBeenCalledTimes(1);
+    act(() => mocks.auth?.("expired"));
+    expect(composer()).toHaveValue("");
+    expect(composer()).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: /My conversation/ }),
+    ).not.toBeInTheDocument();
+    act(() => mocks.auth?.("restored"));
+    await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    ).toBeVisible();
+    expect(composer()).toHaveValue("");
+    expect(mocks.updateSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ draft: "Private draft" }),
+    );
   });
 });
