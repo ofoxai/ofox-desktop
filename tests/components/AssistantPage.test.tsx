@@ -1250,7 +1250,12 @@ describe("attachments", () => {
     await waitFor(() => expect(attach()).toBeEnabled());
     mocks.pickAttachments.mockResolvedValueOnce([pdf]);
     await userEvent.click(attach());
-    // Well before the draft's usual 600 ms pause.
+    await waitFor(() =>
+      expect(composerFiles()).toHaveTextContent("report.pdf"),
+    );
+    // Closed well before the draft's usual 600 ms pause, which unmounting
+    // cancels: only a save made at once can still arrive.
+    view.unmount();
     await waitFor(
       () =>
         expect(mocks.updateSession).toHaveBeenCalledWith(
@@ -1259,9 +1264,8 @@ describe("attachments", () => {
             draftAttachmentIds: ["file-pdf"],
           }),
         ),
-      { timeout: 300 },
+      { timeout: 2000 },
     );
-    view.unmount();
   });
 
   it("keeps each conversation's files with its own draft", async () => {
