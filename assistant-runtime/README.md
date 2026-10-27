@@ -25,7 +25,7 @@ pnpm assistant:install  # test dependencies in assistant-runtime/node_modules
 pnpm assistant:test     # runtime tests on the pinned Node, mock providers only
 pnpm assistant:prepare  # production resources for the current OS/architecture
 pnpm assistant:smoke    # run the copied production tree: Pi SDK, native canvas,
-                        # PDF text and rendering, native JSONL
+                        # PDF text and rendering, native JSONL, search server
 ```
 
 `assistant:prepare` downloads the Node archive named in `node-downloads.json`
@@ -43,23 +43,37 @@ which the runtime never sets). The PDF.js `legacy/build/` and the `cmaps/`,
 lockfile and `package.json` hashes, a hash of `scripts/assistant-prepare.mjs`
 and `scripts/assistant-prune.mjs`, Node version and platform of that install;
 while they are unchanged the next prepare skips `npm ci` and only copies `src/`
-and `notices/` again, so a changed prune rule installs and prunes afresh. `notices/` is copied to `resources/notices/`: third-party
-notices for `@napi-rs/canvas` (including the libraries compiled into its native
-addon) and `pdfjs-dist`. `resources/manifest.json`
-records the protocol, SDK and Node versions and `minimumMacOS`, read from
-`src-tauri/tauri.conf.json` (`bundle.macOS.minimumSystemVersion`, 12.0). Node
-22 supports macOS 11 and later, and the `@napi-rs/canvas` 1.0.13 addon macOS
-11.0. With `APPLE_SIGNING_IDENTITY` set on macOS, every Mach-O file, the canvas
-addon included, is signed (hardened runtime, a secure timestamp and the JIT
-entitlement for Node, except for ad-hoc `-` signing).
+and `notices/` again. A changed install or prune rule changes that hash, so
+the next prepare installs and prunes afresh.
+
+Prepare then builds the search MCP server (`search-mcp/`, see
+[Web search](#web-search)): `npm ci --ignore-scripts` with its
+devDependencies (esbuild) and `node build.mjs` on the bundled Node, and copies
+the single file `dist/ofox-search-mcp.mjs` to `resources/search-mcp/`.
+`resources/search-mcp-build.json` records its lockfile, `package.json`, build
+script, sources and this script; while they are unchanged the build is
+skipped.
+
+`notices/` is copied to `resources/notices/`: third-party notices for
+`@napi-rs/canvas` (including the libraries compiled into its native addon),
+`pdfjs-dist` and the packages compiled into the search server
+(`ofox-search-mcp.txt`; the search server's tests fail when the bundle gains a
+package it does not name). `resources/manifest.json` records the protocol, SDK
+and Node versions, the entry and search server paths and `minimumMacOS`, read
+from `src-tauri/tauri.conf.json` (`bundle.macOS.minimumSystemVersion`, 12.0).
+Node 22 supports macOS 11 and later, and the `@napi-rs/canvas` 1.0.13 addon
+macOS 11.0. With `APPLE_SIGNING_IDENTITY` set on macOS, every Mach-O file, the
+canvas addon included, is signed (hardened runtime, a secure timestamp and the
+JIT entitlement for Node, except for ad-hoc `-` signing).
 
 Tauri's dev and build hooks run `assistant:prepare`, and the resource map ships
 `resources/` as `assistant-runtime/` in the application: the host starts
 `assistant-runtime/node/node` (`node.exe` on Windows) with
-`assistant-runtime/runtime/src/main.mjs`. Generated files are ignored by Git;
-the npm lockfile and the pinned archive hashes are committed. Release packages
-are macOS Apple Silicon and Windows x64; macOS Intel is pinned for local builds
-and Linux x64 for CI.
+`assistant-runtime/runtime/src/main.mjs`, and the sidecar starts
+`assistant-runtime/search-mcp/ofox-search-mcp.mjs` with the same Node.
+Generated files are ignored by Git; the npm lockfiles and the pinned archive
+hashes are committed. Release packages are macOS Apple Silicon and Windows
+x64; macOS Intel is pinned for local builds and Linux x64 for CI.
 
 The protocol tests spawn `resources/node/node`. Without it they fail at once
 and ask you to run `pnpm assistant:prepare`. Their mock gateway listens on an
@@ -262,7 +276,8 @@ JPEG); no OCR text is invented. PDF.js does not decode an embedded image over
 40 megapixels (a 600-dpi A4 scan has about 35), so a page holding one is not
 rendered rather than sent blank, unless PDF.js stops at another error earlier
 on the same page: inline it stays for `read_attachment`, which reports
-`too_large` with `pdf_image` for it. Extracted text is cached per run in a 32 Mi-character LRU.
+`too_large` with `pdf_image` for it. Extracted text is cached per run in a
+32 Mi-character LRU.
 
 ## Web search
 

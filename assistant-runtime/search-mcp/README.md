@@ -8,9 +8,14 @@ through the Ofox Responses API) and `web_fetch` (read one public web page).
 `node_modules`. Only the stdio transport is bundled; the build fails if the
 SDK's Express/Hono HTTP transports end up in it.
 
-It is not wired into the assistant yet. The later client wrapper starts it
-with pi-mcp's `McpClient` + `StdioTransport` and `inheritEnv: false`, and
-exposes the tools to the model as Pi tools.
+`pnpm assistant:prepare` builds it and ships the bundle as
+`resources/search-mcp/ofox-search-mcp.mjs`. When a run enables web search, the
+assistant runtime (`../src/search.mjs`) starts it with pi-mcp's `McpClient` +
+`StdioTransport` and `inheritEnv: false`, and exposes the tools to the model
+as Pi tools (see "Web search" in `../README.md`). Third-party code compiled
+into the bundle is listed in `dist/bundled-packages.json` at build time; its
+notices are `../notices/ofox-search-mcp.txt`, and `test/notices.test.mjs`
+fails when the bundle gains a package the notice does not name.
 
 ## Environment
 
@@ -104,8 +109,9 @@ result is `{ url, text, truncated }`, where `url` is the final URL after
 redirects.
 
 **The allowlist is not here.** `web_fetch` reads any URL that passes the
-rules above. The client wrapper must only let the model fetch URLs that the
-user wrote or that a `web_search` in the same conversation returned.
+rules above. The runtime only lets the model fetch URLs that the host allows
+(`allowedWebUrls`: the user's links and earlier sources) or that a
+`web_search` of the same run returned.
 
 ## Billing
 

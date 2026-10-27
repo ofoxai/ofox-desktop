@@ -160,14 +160,14 @@ async function npmCli() {
   );
 }
 
-async function install(directory) {
+async function install(directory, { omitDev = true } = {}) {
   execFileSync(
     node,
     [
       await npmCli(),
       "ci",
       "--ignore-scripts",
-      "--omit=dev",
+      ...(omitDev ? ["--omit=dev"] : []),
       "--no-audit",
       "--no-fund",
     ],
@@ -223,6 +223,53 @@ async function signMacFiles(directory) {
   }
 }
 
+// The web search MCP server ships as the single file its build bundles
+// (search-mcp/README.md). It is built with its devDependencies (esbuild) on
+// the bundled Node, and skipped while its lockfile, package.json, build
+// script, sources and this script are unchanged.
+async function prepareSearchServer() {
+  const source = path.join(runtime, "search-mcp");
+  const shipped = path.join(resources, "search-mcp");
+  const stampFile = path.join(resources, "search-mcp-build.json");
+  const sources = (
+    await readdir(path.join(source, "src"), {
+      recursive: true,
+      withFileTypes: true,
+    })
+  )
+    .filter((entry) => entry.isFile())
+    .map((entry) => path.join(entry.parentPath, entry.name))
+    .sort();
+  const wanted = await installStamp({
+    runtime: source,
+    scripts: [
+      fileURLToPath(import.meta.url),
+      path.join(source, "build.mjs"),
+      ...sources,
+    ],
+    nodeVersion: manifest.version,
+    platform: target,
+  });
+  if (
+    await installIsCurrent(shipped, stampFile, wanted, "ofox-search-mcp.mjs")
+  ) {
+    process.stdout.write(
+      "Assistant search server is current; skipping build\n",
+    );
+    return;
+  }
+  await clearInstallStamp(stampFile);
+  await install(source, { omitDev: false });
+  execFileSync(node, ["build.mjs"], { cwd: source, stdio: "inherit" });
+  await rm(shipped, { recursive: true, force: true });
+  await mkdir(shipped, { recursive: true });
+  await copyFile(
+    path.join(source, "dist", "ofox-search-mcp.mjs"),
+    path.join(shipped, "ofox-search-mcp.mjs"),
+  );
+  await writeInstallStamp(stampFile, wanted);
+}
+
 await prepareNode();
 if (process.argv.includes("--node-only")) {
   process.stdout.write(`${node}\n`);
@@ -269,6 +316,7 @@ if (process.argv.includes("--node-only")) {
   const notices = path.join(resources, "notices");
   await rm(notices, { recursive: true, force: true });
   await cp(path.join(runtime, "notices"), notices, { recursive: true });
+  await prepareSearchServer();
   await signMacFiles(resources);
   const stamp = path.join(nodeDirectory, "source.json");
   const source = JSON.parse(await readFile(stamp, "utf8"));
@@ -290,6 +338,7 @@ if (process.argv.includes("--node-only")) {
         platform: target,
         node: `node/${path.basename(node)}`,
         entry: "runtime/src/main.mjs",
+        searchServer: "search-mcp/ofox-search-mcp.mjs",
         minimumMacOS: await applicationMinimumMacOS(),
       },
       null,

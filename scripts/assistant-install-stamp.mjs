@@ -6,13 +6,14 @@ import path from "node:path";
 // and downloads it again. Tauri's dev and build hooks prepare the runtime on
 // every run, so the install is skipped while what it was made from (the
 // lockfile, package.json, the scripts that install and prune it, Node version
-// and platform) is unchanged.
+// and platform) is unchanged. The search server's bundle is skipped the same
+// way, with its build script and sources as the `scripts`.
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 /**
  * What an install of `runtime`'s production dependencies is made from;
- * `scripts` are the files that install and prune it.
+ * `scripts` are the files that install, prune or build it.
  */
 export async function installStamp({
   runtime,
@@ -32,10 +33,18 @@ export async function installStamp({
   };
 }
 
-/** Whether `production` holds an install made from `wanted`. */
-export async function installIsCurrent(production, stampFile, wanted) {
+/**
+ * Whether `production` holds an install made from `wanted`; `required` is
+ * the path inside it that the install produced.
+ */
+export async function installIsCurrent(
+  production,
+  stampFile,
+  wanted,
+  required = "node_modules",
+) {
   try {
-    await access(path.join(production, "node_modules"));
+    await access(path.join(production, required));
     const installed = JSON.parse(await readFile(stampFile, "utf8"));
     return Object.entries(wanted).every(
       ([field, value]) => installed[field] === value,
