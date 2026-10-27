@@ -204,7 +204,8 @@ fn every_platform_maps_the_assistant_runtime_to_its_exact_bundle_root() {
             "{config} must ship the actual platform's fixed Node at its host-resolved path"
         );
         // Pi's demo extensions (one is a GPL-licensed doom.wasm) and source maps
-        // are pruned by the prepare script and must never reach the bundle.
+        // are pruned by the prepare script and must never reach the bundle; a
+        // doom.wasm is rejected wherever a dependency might carry one.
         let examples = root
             .join("../assistant-runtime/resources/runtime/node_modules/@earendil-works/pi-coding-agent")
             .canonicalize()
@@ -214,10 +215,11 @@ fn every_platform_maps_the_assistant_runtime_to_its_exact_bundle_root() {
             entries
                 .iter()
                 .all(|(source, _)| !source.starts_with(&examples)
+                    && source.file_name().is_none_or(|name| name != "doom.wasm")
                     && source
                         .extension()
                         .is_none_or(|extension| extension != "map")),
-            "{config} must not ship Pi examples or source maps"
+            "{config} must not ship Pi examples, doom.wasm or source maps"
         );
     }
 }

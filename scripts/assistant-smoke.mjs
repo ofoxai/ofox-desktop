@@ -1,4 +1,6 @@
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -100,6 +102,15 @@ async function productionSmoke() {
     await rm(directory, { recursive: true, force: true });
   }
 }
+
+// The prepared runtime must not claim a different macOS floor than the app.
+const readJson = (file) => JSON.parse(readFileSync(file, "utf8"));
+assert.equal(
+  readJson(path.join(resources, "manifest.json")).minimumMacOS,
+  readJson(path.join(root, "src-tauri", "tauri.conf.json")).bundle?.macOS
+    ?.minimumSystemVersion,
+  "resources/manifest.json minimumMacOS must equal tauri.conf.json bundle.macOS.minimumSystemVersion; run pnpm assistant:prepare",
+);
 
 const result = spawnSync(
   node,
