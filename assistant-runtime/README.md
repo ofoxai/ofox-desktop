@@ -242,8 +242,8 @@ event.)
 - `unsupported`: `extension` and the declared `mimeType`; an image type other
   than PNG, JPEG, WebP or GIF has `format:"image"` and `mimeType`.
 - `too_large`: `limit` is `file_size` or `image_size` (`maxBytes`),
-  `pdf_pages` (`maxPages`, `pageCount`), `message_images` (`maxImages`) or
-  `rendered_page` (`maxBytes`, `page`).
+  `pdf_pages` (`maxPages`, `pageCount`), `message_images` (`maxImages`),
+  `rendered_page` (`maxBytes`, `page`) or `pdf_image` (`maxPixels`, `page`).
 - `model_unsupported`: an image has `mimeType`; a PDF (no extractable text on
   any page) has `pageCount` and `pagesWithoutText`.
 
@@ -253,5 +253,7 @@ event.)
 code units) of extracted text per attachment, 20,000 characters per
 `read_attachment` call, 10 images or rendered pages per message. Rendered
 pages are at most 2000 pixels per side, 4 megapixels and 5 MiB (PNG, else
-JPEG); no OCR text is invented. PDF.js skips embedded images over 100
-megapixels (a 600-dpi A3 scan has about 70). Extracted text is cached per run in a 32 Mi-character LRU.
+JPEG); no OCR text is invented. PDF.js does not decode an embedded image over
+40 megapixels (a 600-dpi A4 scan has about 35), so a page holding one is not
+rendered rather than sent blank: inline it stays for `read_attachment`, which
+reports `too_large` with `pdf_image` for it. Extracted text is cached per run in a 32 Mi-character LRU.

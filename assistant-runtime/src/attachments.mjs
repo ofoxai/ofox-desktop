@@ -10,10 +10,11 @@ const MAX_RENDERED_PAGE = 5 * 1024 * 1024;
 const MAX_TEXT = 16 * 1024 * 1024;
 const MAX_CACHED_TEXT = MAX_TEXT * 2;
 const MAX_PDF_PAGES = 100;
-// Embedded images above this many pixels are skipped by PDF.js (it guards
-// against decompression bombs). A 600-dpi A3 scan has about 70 MP; the
+// Embedded images above this many pixels are not decoded (PDF.js guards
+// against decompression bombs with it) and their page is not rendered. A
+// 600-dpi A4 or 300-dpi A3 scan stays below it (about 35 and 17 MP); the
 // rendered output is bounded separately.
-const MAX_PDF_IMAGE_PIXELS = 100 * 1000 * 1000;
+const MAX_PDF_IMAGE_PIXELS = 40 * 1000 * 1000;
 const MAX_READ = 20000;
 const INLINE_TEXT = 8000;
 // Pages without text attached to the user turn; the model renders the rest.
@@ -89,6 +90,24 @@ const pdfjsRoot = path
   .split(path.sep)
   .join("/");
 
+// With stopAtErrors PDF.js stops evaluating a page at its first error, yet
+// the render still succeeds with what came before it: the error reaches only
+// the document's worker port, as a stream error (PDF.js 6.4). Collects their
+// messages; this one is an image over maxImageSize.
+const STREAM_ERROR = 5;
+const IMAGE_OVER_LIMIT = "Image exceeded maximum allowed size and was removed.";
+function evaluationErrors(worker) {
+  const errors = [];
+  worker.port.addEventListener("message", ({ data }) => {
+    if (
+      data?.stream === STREAM_ERROR &&
+      typeof data.reason?.message === "string"
+    )
+      errors.push(data.reason.message);
+  });
+  return errors;
+}
+
 // PDF.js parses in one long chain of microtasks. Yielding between pages lets a
 // stop request from the host arrive and abort the work.
 const yieldToHost = () => new Promise((resolve) => setImmediate(resolve));
@@ -103,29 +122,40 @@ const pageLimit = (document) => {
     });
 };
 
-// Opens a PDF for read() and maps PDF.js failures to outcomes; our own errors
-// pass through. Aborting the signal destroys the loading task, which is also
+// Opens a PDF for read(document, errors) and maps PDF.js failures to
+// outcomes; our own errors pass through. With stopAtErrors, errors fills with
+// the messages of the evaluation errors PDF.js stopped at; otherwise it is
+// null. Aborting the signal destroys the loading task, which is also
 // destroyed when opening fails.
-async function withPdf(bytes, read, signal) {
+async function withPdf(bytes, read, signal, { stopAtErrors = false } = {}) {
   signal?.throwIfAborted();
-  const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const task = getDocument({
-    data: new Uint8Array(bytes),
-    isEvalSupported: false,
-    useSystemFonts: false,
-    disableFontFace: true,
-    maxImageSize: MAX_PDF_IMAGE_PIXELS,
-    canvasMaxAreaInBytes: 16 * 1024 * 1024,
-    cMapUrl: `${pdfjsRoot}/cmaps/`,
-    cMapPacked: true,
-    iccUrl: `${pdfjsRoot}/iccs/`,
-    wasmUrl: `${pdfjsRoot}/wasm/`,
-    verbosity: 0,
-  });
-  const stop = () => void task.destroy();
+  const { getDocument, PDFWorker } = await import(
+    "pdfjs-dist/legacy/build/pdf.mjs"
+  );
+  const worker = new PDFWorker({ verbosity: 0 });
+  let task;
+  const stop = () => void task?.destroy();
   signal?.addEventListener("abort", stop, { once: true });
   try {
-    return await read(await task.promise);
+    await worker.promise;
+    const errors = stopAtErrors ? evaluationErrors(worker) : null;
+    task = getDocument({
+      data: new Uint8Array(bytes),
+      worker,
+      stopAtErrors,
+      isEvalSupported: false,
+      useSystemFonts: false,
+      disableFontFace: true,
+      maxImageSize: MAX_PDF_IMAGE_PIXELS,
+      canvasMaxAreaInBytes: 16 * 1024 * 1024,
+      cMapUrl: `${pdfjsRoot}/cmaps/`,
+      cMapPacked: true,
+      iccUrl: `${pdfjsRoot}/iccs/`,
+      wasmUrl: `${pdfjsRoot}/wasm/`,
+      verbosity: 0,
+    });
+    signal?.throwIfAborted();
+    return await read(await task.promise, errors);
   } catch (error) {
     if (signal?.aborted) throw signal.reason;
     if (error instanceof AttachmentError || error?.invalidPage) throw error;
@@ -138,7 +168,8 @@ async function withPdf(bytes, read, signal) {
     });
   } finally {
     signal?.removeEventListener("abort", stop);
-    await task.destroy();
+    await task?.destroy();
+    worker.destroy();
   }
 }
 
@@ -509,57 +540,93 @@ export class AttachmentStore {
   }
 
   /**
-   * Renders PDF pages from one parse of the document. Each entry has the
-   * page's image, or the AttachmentError that kept it from rendering.
+   * Renders PDF pages, normally from one parse of the document. Each entry
+   * has the page's image, or the AttachmentError that kept it from rendering.
+   * PDF.js leaves out an image over maxImageSize and draws the rest of the
+   * page, which for a scan is blank. So pages first render stopping at
+   * errors: one stopped at such an image is not rendered, and one stopped for
+   * another reason renders again from a second parse, skipping what PDF.js
+   * cannot draw as it does by default.
    */
   async renderPages(id, pageNumbers, { signal } = {}) {
     const { bytes } = await this.file(id);
     // Loaded outside withPdf: a missing native addon is not a damaged PDF.
     const { createCanvas } = await import("@napi-rs/canvas");
-    return await withPdf(
-      bytes,
-      async (document) => {
-        pageLimit(document);
-        for (const number of pageNumbers)
-          if (
-            !Number.isSafeInteger(number) ||
-            number < 1 ||
-            number > document.numPages
-          )
-            throw Object.assign(
-              new Error(
-                `Invalid PDF page; this PDF has ${document.numPages} page(s)`,
-              ),
-              { invalidPage: true },
-            );
-        const rendered = [];
-        for (const number of pageNumbers) {
-          await yieldToHost();
-          signal?.throwIfAborted();
-          try {
-            rendered.push({
-              page: number,
-              image: await this.#renderPage(document, number, createCanvas),
-            });
-          } catch (error) {
-            if (signal?.aborted) throw signal.reason;
-            rendered.push({
-              page: number,
-              error:
-                error instanceof AttachmentError
-                  ? error
-                  : unreadable(
-                      "invalid_pdf",
-                      "The PDF page could not be rendered",
-                      { format: "pdf", page: number },
-                    ),
-            });
-          }
-        }
-        return rendered;
-      },
-      signal,
+    const render = (numbers, stopAtErrors) =>
+      withPdf(
+        bytes,
+        (document, errors) =>
+          this.#renderPages(document, numbers, createCanvas, errors, signal),
+        signal,
+        { stopAtErrors },
+      );
+    const rendered = await render(pageNumbers, true);
+    const stopped = rendered
+      .filter((page) => page.stopped)
+      .map(({ page }) => page);
+    if (stopped.length === 0) return rendered;
+    const again = await render(stopped, false);
+    return rendered.map(
+      (page) => again.find((other) => other.page === page.page) ?? page,
     );
+  }
+
+  // Each entry has the page's image or error; with errors (stopAtErrors), a
+  // page PDF.js stopped at for a reason other than an over-limit image is
+  // `stopped` instead.
+  async #renderPages(document, pageNumbers, createCanvas, errors, signal) {
+    pageLimit(document);
+    for (const number of pageNumbers)
+      if (
+        !Number.isSafeInteger(number) ||
+        number < 1 ||
+        number > document.numPages
+      )
+        throw Object.assign(
+          new Error(
+            `Invalid PDF page; this PDF has ${document.numPages} page(s)`,
+          ),
+          { invalidPage: true },
+        );
+    const rendered = [];
+    for (const number of pageNumbers) {
+      await yieldToHost();
+      signal?.throwIfAborted();
+      const before = errors?.length;
+      try {
+        const image = await this.#renderPage(document, number, createCanvas);
+        const stops = errors?.slice(before) ?? [];
+        if (stops.includes(IMAGE_OVER_LIMIT))
+          rendered.push({
+            page: number,
+            error: tooLarge(
+              "A PDF page holds an image over the 40-megapixel limit",
+              {
+                format: "pdf",
+                limit: "pdf_image",
+                maxPixels: MAX_PDF_IMAGE_PIXELS,
+                page: number,
+              },
+            ),
+          });
+        else if (stops.length) rendered.push({ page: number, stopped: true });
+        else rendered.push({ page: number, image });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        rendered.push({
+          page: number,
+          error:
+            error instanceof AttachmentError
+              ? error
+              : unreadable(
+                  "invalid_pdf",
+                  "The PDF page could not be rendered",
+                  { format: "pdf", page: number },
+                ),
+        });
+      }
+    }
+    return rendered;
   }
 
   // PNG keeps text sharp; a page too large as PNG, such as a photo, is sent

@@ -75,17 +75,17 @@ export function chinesePdf(text) {
 
 /**
  * One page filled by a single RGB image (width x height pixels, 3 bytes
- * each), Flate-compressed and hex-encoded so the file stays ASCII.
+ * each), Flate-compressed and hex-encoded so the file stays ASCII. `before`
+ * is content drawn ahead of the image.
  */
 export function imagePdf(
   width,
   height,
   pixels,
-  pageWidth = 300,
-  pageHeight = 200,
+  { pageWidth = 300, pageHeight = 200, before = "" } = {},
 ) {
   const data = `${deflateSync(pixels).toString("hex")}>`;
-  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im1 Do Q`;
+  const content = `${before}q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im1 Do Q`;
   return pdfDocument([
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",

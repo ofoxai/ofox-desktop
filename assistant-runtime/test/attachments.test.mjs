@@ -585,6 +585,57 @@ test("a scanned page whose image is over 4 megapixels renders its content", asyn
   );
 });
 
+test("a page whose image is over 40 megapixels is left unattached, not sent blank", async (t) => {
+  // PDF.js checks an image's declared size before decoding it, so a few
+  // bytes of image data are enough. 42 and 110 megapixels.
+  for (const [width, height] of [
+    [7000, 6000],
+    [11000, 10000],
+  ]) {
+    const name = `${width}x${height}`;
+    const store = await storeWith(t, [
+      ["poster.pdf", imagePdf(width, height, Buffer.alloc(3))],
+    ]);
+    await assert.rejects(
+      () => store.image("poster.pdf", 1),
+      (error) =>
+        error.code === "assistant_attachment_too_large" &&
+        error.details.limit === "pdf_image" &&
+        error.details.maxPixels === 40000000 &&
+        error.details.page === 1,
+      name,
+    );
+    const result = await prepareAttachments(store, ["poster.pdf"], {
+      vision: true,
+    });
+    assert.equal(result.blocked, null, name);
+    assert.equal(result.outcomes[0].status, "partial", name);
+    assert.deepEqual(
+      result.outcomes[0].details.pagesAttachedAsImages,
+      [],
+      name,
+    );
+    assert.deepEqual(result.images, [], name);
+    assert.match(
+      result.text,
+      /Remaining pages without extractable text: 1/,
+      name,
+    );
+  }
+});
+
+test("a page with content PDF.js cannot draw still renders the rest", async (t) => {
+  const red = Buffer.alloc(300 * 200 * 3);
+  for (let index = 0; index < red.length; index += 3) red[index] = 255;
+  const store = await storeWith(t, [
+    ["odd.pdf", imagePdf(300, 200, red, { before: "/Missing Do " })],
+  ]);
+  assert.deepEqual(
+    await centerPixel(await store.image("odd.pdf", 1)),
+    [255, 0, 0, 255],
+  );
+});
+
 test("a rendered page too large as PNG is sent as JPEG, or else left unattached", async (t) => {
   const root = await folder(t);
   await writeFile(
