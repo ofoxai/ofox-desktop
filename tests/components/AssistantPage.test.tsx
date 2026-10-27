@@ -2688,6 +2688,61 @@ describe("web search", () => {
     expect(status()).toEqual([]);
   });
 
+  it("says why a change was refused and keeps the saved setting", async () => {
+    await openConversation();
+    mocks.updateSession.mockRejectedValueOnce("assistant_storage_unavailable");
+    await userEvent.click(toggle());
+    expect(await screen.findByRole("alert")).not.toHaveTextContent(
+      "assistant_",
+    );
+    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("ignores the progress, sources and search flag of a run this view does not follow", async () => {
+    current.session.webSearch = true;
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const other = { ...mocks.send.mock.calls[0][0], runId: "another-run" };
+    act(() => {
+      mocks.listener?.({
+        ...other,
+        type: "run_start",
+        data: { messageId: "reply", webSearch: false },
+      });
+      mocks.listener?.({
+        ...other,
+        type: "tool_start",
+        data: {
+          messageId: "reply",
+          name: "web_search",
+          toolCallId: "c1",
+          args: { query: "x" },
+        },
+      });
+      mocks.listener?.({
+        ...other,
+        type: "sources",
+        data: {
+          messageId: "reply",
+          sources: [
+            {
+              id: "s1",
+              title: "Elsewhere",
+              url: "https://a.example/",
+              excerpt: "",
+            },
+          ],
+        },
+      });
+    });
+    expect(screen.queryByText("Searching the web…")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Sources" })).toBeNull();
+    expect(screen.queryByText(/Web search was unavailable/)).toBeNull();
+    expect(screen.getByText("Thinking…")).toBeVisible();
+  });
+
   it("tells the user the assistant searches the web only when asked to", async () => {
     await openConversation();
     expect(
