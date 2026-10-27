@@ -4896,6 +4896,66 @@
       "runtime": "The assistant runtime stopped unexpectedly. Please try again.",
       "storage": "Local assistant data couldn't be read or saved. Check disk space and permissions.",
       "historyMissing": "Part of this conversation's local history is missing. Start a new conversation; existing messages are kept."
+    },
+    "title": "Ofox Assistant",
+    "loginRequired": "Sign in to Ofox to use the built-in assistant.",
+    "conversations": "Conversations",
+    "newConversation": "New conversation",
+    "search": "Search conversations",
+    "noConversations": "No conversations yet",
+    "noMatches": "No matching conversations",
+    "untitled": "New conversation",
+    "unreadable": "Can't be read",
+    "boundary": "Replies come from the model you choose. The assistant can't open files, browse the web or change your settings.",
+    "chat": "Assistant conversation",
+    "model": "Choose model",
+    "searchModels": "Search models",
+    "contextWindow": "Context {{count}} tokens",
+    "modelPrice": "Input ${{input}} / output ${{output}} per million tokens",
+    "modelUnavailable": "Models are unavailable right now. You can still read your conversations.",
+    "runtimeUnavailable": "Assistant runtime unavailable",
+    "runtimeUnavailableHint": "Check that the app is installed correctly, then retry.",
+    "loading": "Loading…",
+    "running": "Replying…",
+    "typing": "Thinking…",
+    "welcome": "How can I help?",
+    "description": "Ask questions, write, translate and analyze text.",
+    "startHint": "Start a new conversation, or type your question below.",
+    "message": "Message",
+    "composerPlaceholder": "Type a message…",
+    "send": "Send",
+    "sendHint": "Enter to send · Shift+Enter for a new line",
+    "stop": "Stop",
+    "stopped": "Stopped",
+    "failed": "Failed",
+    "keyMissingHint": "Your first message creates a dedicated Ofox API key for the assistant.",
+    "rename": "Rename conversation",
+    "renameDescription": "Give this conversation a name you can find easily.",
+    "conversationTitle": "Conversation title",
+    "editMessage": "Edit and resend",
+    "editPreservesOriginal": "Resending keeps the original message and reply as a previous version.",
+    "resend": "Resend",
+    "regenerate": "Regenerate",
+    "previousVersion": "View previous version",
+    "reasoning": "Reasoning",
+    "compacting": "Organizing conversation context…",
+    "roles": {
+      "user": "You",
+      "assistant": "Assistant"
+    },
+    "starters": {
+      "summary": {
+        "label": "Summarize content",
+        "prompt": "Please summarize the following content, highlight the key points, and list any action items:\n\n"
+      },
+      "writing": {
+        "label": "Polish writing",
+        "prompt": "Please polish the following text to make it clearer and more natural:\n\n"
+      },
+      "explain": {
+        "label": "Explain a question",
+        "prompt": "Please explain the following question in plain language and give an example:\n\n"
+      }
     }
   }
 }

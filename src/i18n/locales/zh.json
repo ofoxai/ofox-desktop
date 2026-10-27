@@ -4896,6 +4896,66 @@
       "runtime": "助手运行环境意外中断，请重试。",
       "storage": "无法读取或保存本机的助手数据，请检查磁盘空间和权限。",
       "historyMissing": "这个对话的部分本地历史已缺失。请新建对话；现有消息会保留。"
+    },
+    "title": "Ofox 助手",
+    "loginRequired": "登录 Ofox 后即可使用内置助手。",
+    "conversations": "对话",
+    "newConversation": "新对话",
+    "search": "搜索对话",
+    "noConversations": "还没有对话",
+    "noMatches": "没有匹配的对话",
+    "untitled": "新对话",
+    "unreadable": "无法读取",
+    "boundary": "回复来自你选择的模型。助手无法打开文件、上网搜索或修改你的设置。",
+    "chat": "助手对话",
+    "model": "选择模型",
+    "searchModels": "搜索模型",
+    "contextWindow": "上下文 {{count}} tokens",
+    "modelPrice": "每百万 tokens：输入 ${{input}} / 输出 ${{output}}",
+    "modelUnavailable": "模型暂时不可用，仍可查看已有对话。",
+    "runtimeUnavailable": "助手运行环境不可用",
+    "runtimeUnavailableHint": "请确认应用安装完整，然后重试。",
+    "loading": "加载中…",
+    "running": "回复中…",
+    "typing": "正在思考…",
+    "welcome": "有什么可以帮你？",
+    "description": "提问、写作、翻译和分析文字。",
+    "startHint": "新建对话，或直接在下方输入问题。",
+    "message": "消息",
+    "composerPlaceholder": "输入消息…",
+    "send": "发送",
+    "sendHint": "Enter 发送 · Shift+Enter 换行",
+    "stop": "停止",
+    "stopped": "已停止",
+    "failed": "失败",
+    "keyMissingHint": "发送第一条消息时，会为助手创建一个专用的 Ofox API Key。",
+    "rename": "重命名对话",
+    "renameDescription": "给这个对话起一个方便查找的名字。",
+    "conversationTitle": "对话标题",
+    "editMessage": "编辑后重新发送",
+    "editPreservesOriginal": "重新发送后，原消息和回复会保留为之前的版本。",
+    "resend": "重新发送",
+    "regenerate": "重新生成",
+    "previousVersion": "查看之前的版本",
+    "reasoning": "思考过程",
+    "compacting": "正在整理对话上下文…",
+    "roles": {
+      "user": "你",
+      "assistant": "助手"
+    },
+    "starters": {
+      "summary": {
+        "label": "总结内容",
+        "prompt": "请总结以下内容，标出要点，并列出需要跟进的事项：\n\n"
+      },
+      "writing": {
+        "label": "润色文字",
+        "prompt": "请润色以下文字，让它更清晰、更自然：\n\n"
+      },
+      "explain": {
+        "label": "解释问题",
+        "prompt": "请用通俗的语言解释以下问题，并举一个例子：\n\n"
+      }
     }
   }
 }
