@@ -214,24 +214,41 @@ fn source_type(source: &Path) -> Result<&'static str, String> {
         .ok_or_else(|| UNSUPPORTED.into())
 }
 
-/// The size of a regular file. A link to one is followed: the user picked it.
-fn source_size(source: &Path) -> Result<u64, String> {
-    let meta = fs::metadata(source).map_err(|_| UNREADABLE)?;
+/// `source` opened for reading, with its size, if it is a regular file within
+/// [`MAX_FILE_BYTES`]. A link to one is followed: the user picked it. The
+/// checks are made on the open file, so a path swapped meanwhile cannot slip
+/// past them; on Unix it is opened without blocking, so a pipe or device put
+/// there is refused instead of waiting.
+fn open_source(source: &Path) -> Result<(fs::File, u64), String> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(source).map_err(|_| UNREADABLE)?;
+    let meta = file.metadata().map_err(|_| UNREADABLE)?;
     if !meta.is_file() {
         return Err(UNREADABLE.into());
     }
     if meta.len() > MAX_FILE_BYTES {
         return Err(TOO_LARGE.into());
     }
-    Ok(meta.len())
+    Ok((file, meta.len()))
+}
+
+/// The size of a regular file, see [`open_source`].
+fn source_size(source: &Path) -> Result<u64, String> {
+    open_source(source).map(|(_, size)| size)
 }
 
 /// The bytes of `source`, read no further than one past [`MAX_FILE_BYTES`]:
 /// a file that grew past the limit since its size was checked is too large.
 fn read_source(source: &Path) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
-    fs::File::open(source)
-        .map_err(|_| UNREADABLE)?
+    open_source(source)?
+        .0
         .take(MAX_FILE_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| UNREADABLE)?;
@@ -456,6 +473,41 @@ mod tests {
         }
         assert!(copies(&store, &sid).is_empty());
         assert!(store.load_record(&sid).unwrap().attachments.is_empty());
+    }
+
+    /// A file swapped for a pipe after its size was checked: reading it is
+    /// refused at once instead of waiting for a writer that never comes.
+    #[cfg(unix)]
+    #[test]
+    fn a_source_swapped_for_a_pipe_is_refused_without_waiting() {
+        let (config, _store, _sid) = fixture();
+        let pipe = config.path().join("notes.txt");
+        let name = std::ffi::CString::new(pipe.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(read_source(&pipe));
+        });
+        let read = result
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading a pipe must not wait for a writer");
+        assert_eq!(read.unwrap_err(), UNREADABLE);
+    }
+
+    /// The size is the open file's, so a file that grew past the limit after
+    /// it was picked is too large.
+    #[test]
+    fn the_size_is_checked_on_the_opened_file() {
+        let (config, _store, _sid) = fixture();
+        let big = file(config.path(), "big.txt", b"x");
+        fs::File::options()
+            .write(true)
+            .open(&big)
+            .unwrap()
+            .set_len(MAX_FILE_BYTES + 1)
+            .unwrap();
+        assert_eq!(read_source(&big).unwrap_err(), TOO_LARGE);
+        assert_eq!(source_size(&big).unwrap_err(), TOO_LARGE);
     }
 
     /// A file that fails while it is copied takes the files already copied
