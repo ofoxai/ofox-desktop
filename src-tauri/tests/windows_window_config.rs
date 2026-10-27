@@ -221,6 +221,20 @@ fn every_platform_maps_the_assistant_runtime_to_its_exact_bundle_root() {
                         .is_none_or(|extension| extension != "map")),
             "{config} must not ship Pi examples, doom.wasm or source maps"
         );
+        // Only the legacy PDF.js build runs on the bundled Node, and the
+        // runtime never loads PDF.js standard fonts.
+        let pdfjs = root
+            .join("../assistant-runtime/resources/runtime/node_modules/pdfjs-dist")
+            .canonicalize()
+            .expect("PDF.js prepared before Cargo");
+        assert!(
+            entries
+                .iter()
+                .all(|(source, _)| ["build", "web", "standard_fonts"]
+                    .iter()
+                    .all(|unused| !source.starts_with(pdfjs.join(unused)))),
+            "{config} must not ship the modern PDF.js build, viewer or standard fonts"
+        );
     }
 }
 
@@ -235,11 +249,27 @@ fn every_platform_bundles_the_assistant_runtime_licenses() {
         .join("../assistant-runtime/PI_LICENSE")
         .canonicalize()
         .unwrap();
+    // Notices for the native canvas addon and PDF.js, copied by the prepare
+    // script into the runtime resources.
+    let notices = root.join("../assistant-runtime/resources/notices");
+    let canvas_notice = notices
+        .join("napi-rs-canvas.txt")
+        .canonicalize()
+        .expect("canvas notice prepared before Cargo");
+    let pdfjs_notice = notices
+        .join("pdfjs-dist.txt")
+        .canonicalize()
+        .expect("PDF.js notice prepared before Cargo");
     for config in ["tauri.conf.json", "tauri.windows.conf.json"] {
         let entries = expanded_resource_entries(&resource_config(config));
         for (license, target) in [
             (&node_license, "assistant-runtime/node/LICENSE"),
             (&pi_license, "assistant-runtime/PI_LICENSE"),
+            (
+                &canvas_notice,
+                "assistant-runtime/notices/napi-rs-canvas.txt",
+            ),
+            (&pdfjs_notice, "assistant-runtime/notices/pdfjs-dist.txt"),
         ] {
             assert!(
                 entries
