@@ -164,7 +164,7 @@ export function createSearchServer(
     },
     async ({ url }, extra) => {
       try {
-        const page = await fetchPage(url, { signal: extra.signal });
+        const page = await fetchPage(url, { signal: extra.signal, secrets });
         return fetchToolResult(scrubSecrets(page, secrets));
       } catch (error) {
         if (!(error instanceof FetchError)) unexpected("web_fetch", error);

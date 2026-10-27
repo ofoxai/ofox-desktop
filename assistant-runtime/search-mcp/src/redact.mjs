@@ -14,14 +14,30 @@ export function redact(text, secrets = []) {
     );
 }
 
-// Exact secrets only, in every string of a JSON-like value: upstream data
-// (search results, page text) is passed on unchanged except for the key.
-export function scrubSecrets(value, secrets) {
+// The secret as written and percent-encoded (upper- and lower-case hex), the
+// ways a key can come back inside page text or a URL.
+function secretForms(secret) {
+  const encoded = encodeURIComponent(secret);
+  const lower = encoded.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase());
+  return [...new Set([secret, encoded, lower])];
+}
+
+// Same length as the text it replaces, so offsets into the text (citation
+// indices) stay valid after scrubbing.
+function mask(length) {
+  return `${REDACTED}${"*".repeat(length)}`.slice(0, length);
+}
+
+// The secrets (in the forms above) only, in every string of a JSON-like
+// value: upstream data (search results, page text) is passed on unchanged
+// except for the key.
+export function scrubSecrets(value, secrets = []) {
   if (typeof value === "string") {
     let result = value;
     for (const secret of secrets)
       if (typeof secret === "string" && secret.length > 0)
-        result = result.split(secret).join(REDACTED);
+        for (const form of secretForms(secret))
+          result = result.split(form).join(mask(form.length));
     return result;
   }
   if (Array.isArray(value))

@@ -2,7 +2,9 @@ export const DEFAULT_SEARCH_MODEL = "openai/gpt-5-nano";
 
 const OFOX_GATEWAYS = new Set(["https://api.ofox.ai", "https://api.ofox.io"]);
 // Printable ASCII without spaces: anything else cannot be sent in a header.
-const KEY_PATTERN = /^[\x21-\x7e]{1,512}$/;
+// At least 16 characters, so masking the key in results cannot hit ordinary
+// words.
+const KEY_PATTERN = /^[\x21-\x7e]{16,512}$/;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/;
 
 export class ConfigError extends Error {
@@ -26,7 +28,7 @@ export function loadConfig(env = process.env) {
   const apiKey = env.OFOX_ASSISTANT_KEY;
   if (typeof apiKey !== "string" || !KEY_PATTERN.test(apiKey))
     throw new ConfigError(
-      "OFOX_ASSISTANT_KEY is missing or is not a single printable token",
+      "OFOX_ASSISTANT_KEY is missing or is not one printable token of 16-512 characters",
     );
   const baseUrl = env.OFOX_BASE_URL;
   if (

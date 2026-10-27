@@ -256,3 +256,25 @@ test("HTML text extraction drops markup and decodes entities", () => {
     "a & b AB\n\nc",
   );
 });
+
+test("the key is scrubbed from page text before it is cut to 20,000 characters", async () => {
+  const key = "sk-of+web/key=0123456789abcdef";
+  const encoded = encodeURIComponent(key);
+  const result = await readWebPage("https://example.com/", {
+    secrets: [key],
+    lookup: publicLookup,
+    request: page(`${"a".repeat(19995)}${key} tail ${encoded}`, "text/plain"),
+  });
+  assert.equal(result.text.length, 20000);
+  assert.equal(result.truncated, true);
+  assert.equal(result.text.endsWith("a[REDA"), true);
+  assert.equal(result.text.includes(key.slice(0, 5)), false);
+
+  const echoed = await readWebPage("https://example.com/", {
+    secrets: [key],
+    lookup: publicLookup,
+    request: page(`<p>${encoded}</p>`),
+  });
+  assert.equal(echoed.text.includes(encoded), false);
+  assert.match(echoed.text, /^\[REDACTED\]/);
+});

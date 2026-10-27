@@ -1,3 +1,5 @@
+import { scrubSecrets } from "./redact.mjs";
+
 // One paid web search through the Ofox Responses API.
 //
 // The gateway bills every `web_search_call` output item (`open_page` included)
@@ -19,17 +21,17 @@ const INSTRUCTION =
   "summary (under 150 words) of the most relevant and current findings and " +
   "cite the pages you used. Do not ask follow-up questions.\n\nQuery: ";
 
-// Connection errors raised before a request byte can have left the machine.
+// Errors of connect() or the DNS lookup: no request byte can have left the
+// machine. The same codes on an open socket (syscall read/write) can follow a
+// sent request, so the syscall must match too.
 const NOT_SENT_CODES = new Set([
   "ECONNREFUSED",
   "ENOTFOUND",
   "EAI_AGAIN",
   "ENETUNREACH",
   "EHOSTUNREACH",
-  "UND_ERR_CONNECT_TIMEOUT",
 ]);
-const BALANCE_PATTERN =
-  /insufficient[\s_-]*(?:credits?|balance|quota|funds?)|balance[\s_-]*(?:insufficient|too[\s_-]*low|not[\s_-]*enough)|余额不足/i;
+const NOT_SENT_SYSCALLS = new Set(["connect", "getaddrinfo"]);
 
 export class SearchError extends Error {
   constructor(code, message, status) {
@@ -61,15 +63,24 @@ export function searchRequestBody(query, model) {
   };
 }
 
-function errorCodes(error) {
-  const codes = [];
-  for (let cause = error, depth = 0; cause && depth < 5; depth++) {
-    if (typeof cause.code === "string") codes.push(cause.code);
-    for (const inner of cause.errors ?? [])
-      if (typeof inner?.code === "string") codes.push(inner.code);
-    cause = cause.cause;
+// undici wraps the socket error as `cause`; happy eyeballs adds an
+// AggregateError with one error per address.
+function neverSent(error) {
+  const pending = [error];
+  for (let seen = 0; pending.length > 0 && seen < 20; seen++) {
+    const item = pending.shift();
+    if (!item || typeof item !== "object") continue;
+    if (
+      item.code === "UND_ERR_CONNECT_TIMEOUT" ||
+      (NOT_SENT_CODES.has(item.code) && NOT_SENT_SYSCALLS.has(item.syscall))
+    )
+      return true;
+    pending.push(
+      item.cause,
+      ...(Array.isArray(item.errors) ? item.errors : []),
+    );
   }
-  return codes;
+  return false;
 }
 
 async function readBounded(response, limit) {
@@ -95,43 +106,38 @@ async function readBounded(response, limit) {
   return Buffer.concat(chunks);
 }
 
+// Only Ofox's own out-of-credits error counts: `{ error: { type:
+// "insufficient_credits", code: 402 } }`. An upstream provider's quota error
+// (OpenAI `insufficient_quota`) says nothing about the user's balance.
 // Classification only: the body is never echoed into an error message.
-async function isBalanceError(response) {
-  let text;
+async function isOfoxBalanceError(response) {
   try {
-    text = (await readBounded(response, MAX_ERROR_BODY_BYTES))?.toString(
-      "utf8",
+    const bytes = await readBounded(response, MAX_ERROR_BODY_BYTES);
+    const error = bytes && JSON.parse(bytes.toString("utf8"))?.error;
+    return (
+      error?.type === "insufficient_credits" ||
+      error?.code === 402 ||
+      error?.code === "402"
     );
   } catch {
     return false;
   }
-  if (!text) return false;
-  let fields = [text];
-  try {
-    const body = JSON.parse(text);
-    const error =
-      body?.error && typeof body.error === "object" ? body.error : {};
-    fields = [
-      error.type,
-      error.code,
-      error.message,
-      body?.type,
-      body?.code,
-      body?.message,
-    ];
-  } catch {
-    // Not JSON: classify the raw text.
-  }
-  return fields.some(
-    (value) => typeof value === "string" && BALANCE_PATTERN.test(value),
-  );
 }
 
 async function httpError(response) {
   const { status } = response;
+  if (status === 429) {
+    await response.body?.cancel().catch(() => {});
+    return new SearchError(
+      "search_failed",
+      "The web search was rate-limited and did not run (HTTP 429). Try " +
+        "again later.",
+      status,
+    );
+  }
   if (status >= 400 && status < 500) {
     // Always consume the (bounded) body so the connection is released.
-    if ((await isBalanceError(response)) || status === 402)
+    if ((await isOfoxBalanceError(response)) || status === 402)
       return new SearchError(
         "search_insufficient_balance",
         `The Ofox balance is too low for a web search (HTTP ${status}).`,
@@ -191,7 +197,11 @@ function snippetBefore(text, start) {
   return snippet ? snippet.slice(0, MAX_SNIPPET_CHARS) : undefined;
 }
 
-export function parseSearchResponse(body, requestedModel) {
+// `secrets` are masked in every upstream string before any field is cut, so
+// no fragment of the key survives a length limit. The mask keeps the length,
+// so citation indices still point into the scrubbed text.
+export function parseSearchResponse(body, requestedModel, secrets = []) {
+  const clean = (value) => scrubSecrets(value, secrets);
   if (!body || typeof body !== "object" || !Array.isArray(body.output))
     throw outcomeUnknown("the response had no output");
   if (body.status === "failed")
@@ -211,24 +221,25 @@ export function parseSearchResponse(body, requestedModel) {
         if (source?.type !== "url") continue;
         if (typeof source.url !== "string")
           throw outcomeUnknown("the response had a malformed source URL");
-        sourced.push({ url: source.url });
+        sourced.push({ url: clean(source.url) });
       }
     } else if (item?.type === "message" && Array.isArray(item.content)) {
       for (const part of item.content) {
         if (part?.type !== "output_text" || typeof part.text !== "string")
           continue;
-        texts.push(part.text);
+        const text = clean(part.text);
+        texts.push(text);
         for (const annotation of part.annotations ?? []) {
           if (annotation?.type !== "url_citation") continue;
           if (typeof annotation.url !== "string")
             throw outcomeUnknown("the response had a malformed citation URL");
           cited.push({
-            url: annotation.url,
+            url: clean(annotation.url),
             title:
               typeof annotation.title === "string"
-                ? annotation.title.trim()
+                ? clean(annotation.title).trim()
                 : "",
-            snippet: snippetBefore(part.text, annotation.start_index),
+            snippet: snippetBefore(text, annotation.start_index),
           });
         }
       }
@@ -292,13 +303,20 @@ export async function webSearch(
       signal: combined,
     });
   } catch (error) {
+    // Check the deadline and cancellation first: once either fired, even a
+    // connect-looking error (EHOSTUNREACH/ENETUNREACH can also come from a
+    // connected socket) leaves the outcome unknown.
     if (combined.aborted) throw stopped();
-    if (errorCodes(error).some((code) => NOT_SENT_CODES.has(code)))
+    if (neverSent(error))
       throw new SearchError(
         "search_failed",
         "Could not connect to the Ofox gateway; no search was made.",
       );
-    throw outcomeUnknown("the connection failed after the request was sent");
+    // TLS failures happen before any byte is sent, but they stay unknown
+    // for safety; the wording does not claim the request was sent.
+    throw outcomeUnknown(
+      "the connection failed and the request may have been sent",
+    );
   }
   try {
     if (response.status < 200 || response.status >= 300)
@@ -312,7 +330,7 @@ export async function webSearch(
     } catch {
       throw outcomeUnknown("the response was not valid JSON");
     }
-    return parseSearchResponse(body, model);
+    return parseSearchResponse(body, model, [apiKey]);
   } catch (error) {
     if (error instanceof SearchError) throw error;
     if (combined.aborted) throw stopped();

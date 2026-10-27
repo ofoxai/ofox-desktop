@@ -190,7 +190,7 @@ test("tool calls pass the query, config and a cancel signal through", async (t) 
       };
     },
     fetchPage: async (url, options) => {
-      calls.push({ url, signal: options.signal });
+      calls.push({ url, signal: options.signal, secrets: options.secrets });
       return { url, text: "T", truncated: false };
     },
   });
@@ -210,6 +210,7 @@ test("tool calls pass the query, config and a cancel signal through", async (t) 
   assert.ok(calls[0].signal instanceof AbortSignal);
   assert.equal(calls[1].url, "https://example.com/");
   assert.ok(calls[1].signal instanceof AbortSignal);
+  assert.deepEqual(calls[1].secrets, [KEY]);
 });
 
 test("invalid arguments are rejected before any search is made", async (t) => {

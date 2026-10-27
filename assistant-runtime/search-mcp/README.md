@@ -18,12 +18,12 @@ Configuration comes from the environment only. Invalid configuration makes
 the server exit with code 2 and a one-line message on stderr that never
 contains the key.
 
-| Variable                   | Required | Value                                                              |
-| -------------------------- | -------- | ------------------------------------------------------------------ |
-| `OFOX_ASSISTANT_KEY`       | yes      | The assistant's own Ofox API key (one printable token).            |
-| `OFOX_BASE_URL`            | yes      | Exactly `https://api.ofox.ai` or `https://api.ofox.io`.            |
-| `OFOX_SEARCH_MODEL`        | no       | Search model id; default `openai/gpt-5-nano`.                      |
-| `OFOX_ALLOW_LOCAL_GATEWAY` | no       | `1` also allows `http://localhost:<port>` as the base URL (tests). |
+| Variable                   | Required | Value                                                                |
+| -------------------------- | -------- | -------------------------------------------------------------------- |
+| `OFOX_ASSISTANT_KEY`       | yes      | The assistant's own Ofox API key: one printable token, 16-512 chars. |
+| `OFOX_BASE_URL`            | yes      | Exactly `https://api.ofox.ai` or `https://api.ofox.io`.              |
+| `OFOX_SEARCH_MODEL`        | no       | Search model id; default `openai/gpt-5-nano`.                        |
+| `OFOX_ALLOW_LOCAL_GATEWAY` | no       | `1` also allows `http://localhost:<port>` as the base URL (tests).   |
 
 The host derives `OFOX_BASE_URL` from the selected `ofoxApex`; the server
 never picks a region itself.
@@ -105,19 +105,20 @@ summary is shortened before the source list.
 Errors are tool results with `isError: true`, text `"<code>: <message>"` and
 `structuredContent: { "error": { "code", "message", "status"? } }`. Messages
 are fixed strings: they never contain the key or a response body. Successful
-results pass upstream data on as is, except that any exact occurrence of the
-key becomes `[REDACTED]`.
+results pass upstream data on as is, except that the key, written or
+percent-encoded, is masked as `[REDACTED]***` (same length) before any field is
+cut to its limit.
 
-| Code                          | Meaning                                                                                                                                                                                             |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `search_outcome_unknown`      | The search may have run and been billed: timeout, cancellation, connection lost after sending, HTTP 5xx or 3xx, a body over 1 MiB, unreadable or malformed success. Do not repeat it automatically. |
-| `search_unauthorized`         | HTTP 401/403: the key was rejected.                                                                                                                                                                 |
-| `search_insufficient_balance` | HTTP 402, or a 4xx whose error says the credits/balance are insufficient.                                                                                                                           |
-| `search_failed`               | Another 4xx (with `status`), or the gateway could not be reached at all (no `status`; nothing was sent).                                                                                            |
-| `fetch_not_allowed`           | The URL, a DNS answer or a redirect target broke the `web_fetch` rules.                                                                                                                             |
-| `fetch_too_large`             | The page body is over 2 MiB.                                                                                                                                                                        |
-| `fetch_unsupported_content`   | The page is not HTML or plain text.                                                                                                                                                                 |
-| `fetch_failed`                | HTTP error (with `status`), network or DNS failure, timeout, or too many redirects.                                                                                                                 |
+| Code                          | Meaning                                                                                                                                                                                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `search_outcome_unknown`      | The search may have run and been billed: timeout, cancellation, any network error other than a connect()/DNS failure (TLS errors included), HTTP 5xx or 3xx, a body over 1 MiB, unreadable or malformed success. Do not repeat it automatically. |
+| `search_unauthorized`         | HTTP 401/403: the key was rejected.                                                                                                                                                                                                              |
+| `search_insufficient_balance` | HTTP 402, or a 4xx (never 429) with Ofox's own error shape `error.type: "insufficient_credits"` or `error.code: 402`. An upstream `insufficient_quota` is not the user's balance.                                                                |
+| `search_failed`               | Another 4xx (with `status`; 429 means rate-limited, try later), or connect()/DNS failed (no `status`; nothing was sent). There is no separate rate-limit code: use `status` 429.                                                                 |
+| `fetch_not_allowed`           | The URL, a DNS answer or a redirect target broke the `web_fetch` rules.                                                                                                                                                                          |
+| `fetch_too_large`             | The page body is over 2 MiB.                                                                                                                                                                                                                     |
+| `fetch_unsupported_content`   | The page is not HTML or plain text.                                                                                                                                                                                                              |
+| `fetch_failed`                | HTTP error (with `status`), network or DNS failure, timeout, or too many redirects.                                                                                                                                                              |
 
 Invalid arguments (an empty or too long query, extra fields) are rejected by
 the SDK before the handler runs, as an `isError` result without

@@ -308,14 +308,19 @@ test("HTTP failures map to codes once, without retries or response bodies", asyn
       },
       "search_insufficient_balance",
     ],
-    [
-      403,
-      { error: { type: "insufficient_balance" } },
-      "search_insufficient_balance",
-    ],
+    [403, { error: { code: 402 } }, "search_insufficient_balance"],
     [400, { error: { message: "bad tools" } }, "search_failed"],
     [404, {}, "search_failed"],
     [429, {}, "search_failed"],
+    // An upstream provider's quota is not the user's Ofox balance.
+    [
+      429,
+      { error: { type: "insufficient_quota", message: "insufficient quota" } },
+      "search_failed",
+    ],
+    [403, { error: { type: "insufficient_quota" } }, "search_unauthorized"],
+    [400, { error: { code: "insufficient_quota" } }, "search_failed"],
+    [429, { error: { type: "insufficient_credits" } }, "search_failed"],
     [500, {}, "search_outcome_unknown"],
     [502, {}, "search_outcome_unknown"],
     [503, {}, "search_outcome_unknown"],
@@ -429,11 +434,139 @@ test("a refused connection never reached the gateway, so it is a plain failure",
   assert.equal(error.status, undefined);
 });
 
-test("search results never contain the key", async (t) => {
-  const response = await fixture("responses-max-tool-calls-1.json");
+test("a rate limit says so and was not a search", async (t) => {
   const { config } = await withGateway(t, (_req, res) =>
-    replyJson(res, 200, response),
+    replyJson(res, 429, { error: { type: "insufficient_quota" } }),
   );
-  const result = await webSearch("q", config);
-  assert.equal(JSON.stringify(result).includes(KEY), false);
+  const error = await searchError(webSearch("q", config));
+  assert.equal(error.code, "search_failed");
+  assert.equal(error.status, 429);
+  assert.match(error.message, /rate-limited/);
+  assert.doesNotMatch(error.message, /balance/i);
+});
+
+test("only connect and DNS failures count as never sent", async () => {
+  const config = { apiKey: KEY, baseUrl: "https://api.ofox.ai", model: MODEL };
+  const failWith = (cause) => async () => {
+    throw new TypeError("fetch failed", { cause });
+  };
+  for (const [cause, code] of [
+    [{ code: "EHOSTUNREACH", syscall: "connect" }, "search_failed"],
+    [{ code: "ENOTFOUND", syscall: "getaddrinfo" }, "search_failed"],
+    [{ code: "UND_ERR_CONNECT_TIMEOUT" }, "search_failed"],
+    [
+      Object.assign(
+        new AggregateError([
+          Object.assign(new Error("a"), {
+            code: "ECONNREFUSED",
+            syscall: "connect",
+          }),
+        ]),
+        { code: "ECONNREFUSED" },
+      ),
+      "search_failed",
+    ],
+    // The same codes on an open socket may follow a sent request.
+    [{ code: "EHOSTUNREACH", syscall: "write" }, "search_outcome_unknown"],
+    [{ code: "ENETUNREACH" }, "search_outcome_unknown"],
+    [{ code: "ECONNRESET", syscall: "read" }, "search_outcome_unknown"],
+    [{ code: "CERT_HAS_EXPIRED" }, "search_outcome_unknown"],
+  ]) {
+    const error = await searchError(
+      webSearch("q", config, { fetchImpl: failWith(cause) }),
+    );
+    assert.equal(error.code, code, JSON.stringify(cause));
+    if (code === "search_outcome_unknown")
+      assert.match(error.message, /may have been sent/);
+  }
+});
+
+test("search results never contain the key, even when the gateway echoes it", async (t) => {
+  // Characters that percent-encoding changes, to cover the encoded echo too.
+  const key = "sk-of+search/key=0123456789abcdef";
+  const encoded = encodeURIComponent(key);
+  const lower = encoded.replace(/%[0-9A-F]{2}/g, (hex) => hex.toLowerCase());
+  assert.notEqual(encoded, key);
+  const { config } = await withGateway(t, (_req, res) =>
+    replyJson(res, 200, {
+      model: MODEL,
+      output: [
+        {
+          type: "web_search_call",
+          action: {
+            type: "search",
+            sources: [
+              { type: "url", url: `https://a.example/?k=${encoded}` },
+              { type: "url", url: `https://b.example/?k=${lower}` },
+            ],
+          },
+        },
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: `Echo ${key} and ${encoded}. (link)`,
+              annotations: [
+                {
+                  type: "url_citation",
+                  url: `https://c.example/${key}`,
+                  title: `Title ${key}`,
+                  start_index: 5 + key.length + 5 + encoded.length + 2,
+                  end_index: 5 + key.length + 5 + encoded.length + 8,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  const result = await webSearch("q", { ...config, apiKey: key });
+  const text = JSON.stringify(result);
+  for (const form of [key, encoded, lower])
+    assert.equal(text.includes(form), false, form);
+  assert.match(result.summary, /^Echo \[REDACTED\]/);
+  assert.equal(result.results.length, 3);
+  assert.match(result.results[0].snippet, /^Echo \[REDACTED\]/);
+});
+
+test("the key is scrubbed before any field is truncated", () => {
+  const prefix = KEY.slice(0, 5);
+  // Each field puts the key across its own length limit.
+  const parsed = parseSearchResponse(
+    {
+      output: [
+        {
+          type: "message",
+          content: [
+            {
+              type: "output_text",
+              text: `${"s".repeat(295)}${KEY} ${"z".repeat(7660)}${KEY}`,
+              annotations: [
+                {
+                  type: "url_citation",
+                  url: "https://a.example/",
+                  title: `${"t".repeat(195)}${KEY}`,
+                  start_index: 295 + KEY.length + 1,
+                  end_index: 295 + KEY.length + 2,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+    MODEL,
+    [KEY],
+  );
+  assert.equal(parsed.summary.length, 8000);
+  assert.equal(parsed.results[0].title.length, 200);
+  assert.equal(parsed.results[0].snippet.length, 300);
+  for (const value of [
+    parsed.summary,
+    parsed.results[0].title,
+    parsed.results[0].snippet,
+  ])
+    assert.equal(value.includes(prefix), false, value.slice(-40));
 });

@@ -9,6 +9,7 @@
 import { lookup as dnsLookup } from "node:dns/promises";
 import https from "node:https";
 import { isIP } from "node:net";
+import { scrubSecrets } from "./redact.mjs";
 
 export const FETCH_TIMEOUT_MS = 15_000;
 export const MAX_PAGE_BYTES = 2 * 1024 * 1024;
@@ -190,7 +191,7 @@ export function htmlText(html) {
     .trim();
 }
 
-async function follow(start, signal, lookup, request) {
+async function follow(start, { signal, secrets, lookup, request }) {
   let url = start;
   for (let redirects = 0; ; redirects++) {
     signal.throwIfAborted();
@@ -229,7 +230,11 @@ async function follow(start, signal, lookup, request) {
         "Web page must be static HTML or plain text",
       );
     const decoded = new TextDecoder().decode(response.body);
-    const text = mime === "text/plain" ? decoded.trim() : htmlText(decoded);
+    // Mask the key before the text is cut, so no fragment of it survives.
+    const text = scrubSecrets(
+      mime === "text/plain" ? decoded.trim() : htmlText(decoded),
+      secrets,
+    );
     return {
       url: url.href,
       text: text.slice(0, MAX_PAGE_CHARS),
@@ -242,6 +247,7 @@ export async function readWebPage(
   value,
   {
     signal,
+    secrets = [],
     timeoutMs = FETCH_TIMEOUT_MS,
     lookup = dnsLookup,
     request = pinnedRequest,
@@ -262,7 +268,7 @@ export async function readWebPage(
   try {
     return await Promise.race([
       aborted,
-      follow(url, combined, lookup, request),
+      follow(url, { signal: combined, secrets, lookup, request }),
     ]);
   } catch (error) {
     if (error instanceof FetchError) throw error;

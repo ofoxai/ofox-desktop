@@ -5,7 +5,6 @@ import {
   DEFAULT_SEARCH_MODEL,
   loadConfig,
 } from "../src/config.mjs";
-import { redact } from "../src/redact.mjs";
 
 const KEY = "sk-of-config-test-0123456789abcdef";
 
@@ -46,7 +45,21 @@ test("the search model can be overridden but must look like a model id", () => {
 });
 
 test("the key is required and must be a single header-safe token", () => {
-  for (const key of [undefined, "", "  ", "two words", "line\nbreak", "é"])
+  assert.equal(
+    loadConfig(env({ OFOX_ASSISTANT_KEY: "k".repeat(16) })).apiKey,
+    "k".repeat(16),
+  );
+  // A short key would also mask common text when results are scrubbed.
+  for (const key of [
+    undefined,
+    "",
+    "  ",
+    "two words",
+    "line\nbreak",
+    "é",
+    "k".repeat(15),
+    "k".repeat(513),
+  ])
     assert.throws(
       () => loadConfig(env({ OFOX_ASSISTANT_KEY: key })),
       (error) =>
@@ -126,13 +139,4 @@ test("config errors never echo the key, even when it leaks into another variable
       assert.equal(error.message.includes("sk-of-"), false, error.message);
     }
   }
-});
-
-test("redact removes the key and bearer tokens from any text", () => {
-  const text = `failed: Authorization: Bearer ${KEY}; key=${KEY}; other`;
-  const result = redact(text, [KEY]);
-  assert.equal(result.includes(KEY), false);
-  assert.match(result, /\[REDACTED\]/);
-  assert.match(result, /other$/);
-  assert.equal(redact("plain", [""]), "plain");
 });
