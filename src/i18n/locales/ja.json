@@ -4950,6 +4950,7 @@
     "editPreservesOriginal": "再送信しても、元のメッセージと返信は以前のバージョンとして残ります。",
     "resend": "再送信",
     "regenerate": "再生成",
+    "retryMessage": "もう一度送信",
     "previousVersion": "以前のバージョンを表示",
     "reasoning": "思考過程",
     "compacting": "会話のコンテキストを整理中…",

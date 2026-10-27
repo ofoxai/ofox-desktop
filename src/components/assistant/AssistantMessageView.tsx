@@ -1,6 +1,12 @@
 import { memo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { MessageSquare, Pencil, RotateCcw, UserRound } from "lucide-react";
+import {
+  MessageSquare,
+  Pencil,
+  RotateCcw,
+  RotateCw,
+  UserRound,
+} from "lucide-react";
 import type { AssistantMessage } from "@/lib/api/assistant";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 import { Button } from "@/components/ui/button";
@@ -10,17 +16,23 @@ import { cn } from "@/lib/utils";
 
 const MessageMarkdown = memo(SessionMarkdown);
 
-/** One user question or assistant reply. Only those two roles reach this view. */
+/**
+ * One user question or assistant reply. Only those two roles reach this view.
+ * `onRetry` is given for a question whose turn failed before the model kept
+ * it: it can only be sent again, as a new turn.
+ */
 export function AssistantMessageView({
   message,
   disabled,
   onEdit,
   onRegenerate,
+  onRetry,
 }: {
   message: AssistantMessage;
   disabled: boolean;
   onEdit: (text: string) => Promise<boolean>;
   onRegenerate: () => void;
+  onRetry?: () => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -153,6 +165,12 @@ export function AssistantMessageView({
               onClick={onRegenerate}
             >
               <RotateCcw className="h-3.5 w-3.5" />
+            </Button>
+          )}
+          {isUser && onRetry && !message.superseded && (
+            <Button variant="ghost" disabled={disabled} onClick={onRetry}>
+              <RotateCw aria-hidden className="h-3.5 w-3.5" />
+              {t("assistant.retryMessage")}
             </Button>
           )}
         </div>

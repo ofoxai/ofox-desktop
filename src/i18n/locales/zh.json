@@ -4950,6 +4950,7 @@
     "editPreservesOriginal": "重新发送后，原消息和回复会保留为之前的版本。",
     "resend": "重新发送",
     "regenerate": "重新生成",
+    "retryMessage": "再发一次",
     "previousVersion": "查看之前的版本",
     "reasoning": "思考过程",
     "compacting": "正在整理对话上下文…",

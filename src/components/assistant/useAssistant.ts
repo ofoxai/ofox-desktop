@@ -597,6 +597,10 @@ export function useAssistant(enabled: boolean) {
     [refreshSessions, showError],
   );
 
+  /**
+   * Send the composer's draft, edit or regenerate an earlier turn, or (`text`
+   * alone) send a stored question again as a new turn, leaving the draft.
+   */
   const send = useCallback(
     async (options?: {
       editMessageId?: string;
@@ -604,6 +608,7 @@ export function useAssistant(enabled: boolean) {
       text?: string;
     }) => {
       const text = options?.text ?? draftRef.current;
+      const fromComposer = options?.text === undefined;
       const revision = Boolean(
         options?.editMessageId || options?.regenerateMessageId,
       );
@@ -645,7 +650,7 @@ export function useAssistant(enabled: boolean) {
           createdAt: Date.now(),
           status: "streaming",
         });
-        if (!revision) setDraft("");
+        if (fromComposer) setDraft("");
         if (!options?.regenerateMessageId)
           setDetail((old) =>
             old
@@ -664,7 +669,7 @@ export function useAssistant(enabled: boolean) {
                 }
               : old,
           );
-        if (!revision) await persistDraft(sessionId, originalDraft);
+        if (fromComposer) await persistDraft(sessionId, originalDraft);
         if (generation !== epoch.current)
           throw new Error("assistant_request_expired");
         if (preparation.cancelled) throw new Error("assistant_cancelled");
@@ -716,7 +721,7 @@ export function useAssistant(enabled: boolean) {
                 }
               : old,
           );
-          if (!revision && !draftRef.current) setDraft(originalDraft);
+          if (fromComposer && !draftRef.current) setDraft(originalDraft);
           if (!preparation?.cancelled) showError(reason);
         }
         return false;

@@ -139,6 +139,23 @@ function AssistantWorkspace() {
   const messages = (detail?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
   );
+  // Runs whose reply failed or stopped. Their question can be sent again
+  // when the model never kept it (nothing to edit or regenerate from).
+  const unfinishedRuns = new Set(
+    messages
+      .filter(
+        (message) =>
+          message.role === "assistant" &&
+          (message.status === "error" || message.status === "stopped"),
+      )
+      .map((message) => message.runId),
+  );
+  const retryable = (message: (typeof messages)[number]) =>
+    message.role === "user" &&
+    !message.superseded &&
+    !message.nativeEntryId &&
+    Boolean(message.runId) &&
+    unfinishedRuns.has(message.runId);
 
   useShellRefresh("assistant", async () => {
     await assistant.loadBootstrap();
@@ -438,6 +455,14 @@ function AssistantWorkspace() {
                         text: "",
                         regenerateMessageId: message.id,
                       })
+                    }
+                    onRetry={
+                      retryable(message)
+                        ? () => {
+                            follow.current = true;
+                            void assistant.send({ text: message.content });
+                          }
+                        : undefined
                     }
                   />
                 ))}

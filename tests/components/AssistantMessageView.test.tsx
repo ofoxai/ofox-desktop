@@ -24,7 +24,9 @@ function view(
   handlers: {
     onEdit?: (text: string) => Promise<boolean>;
     onRegenerate?: () => void;
+    onRetry?: () => void;
   } = {},
+  disabled = false,
 ) {
   return (
     <AssistantMessageView
@@ -37,9 +39,10 @@ function view(
         runId: "run",
         ...message,
       }}
-      disabled={false}
+      disabled={disabled}
       onEdit={handlers.onEdit ?? (async () => false)}
       onRegenerate={handlers.onRegenerate ?? (() => undefined)}
+      onRetry={handlers.onRetry}
     />
   );
 }
@@ -143,6 +146,22 @@ describe("assistant transcript rendering", () => {
       ).toBeNull();
     },
   );
+
+  it("offers to send a failed question again when the page allows it", async () => {
+    const onRetry = vi.fn();
+    const failed: Partial<AssistantMessage> = {
+      role: "user",
+      content: "Lost",
+      nativeEntryId: null,
+    };
+    const rendered = render(view(failed, { onRetry }, true));
+    expect(screen.getByRole("button", { name: "Send again" })).toBeDisabled();
+    rendered.rerender(view(failed, { onRetry }));
+    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
+    expect(onRetry).toHaveBeenCalledOnce();
+    rendered.rerender(view(failed));
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
+  });
 
   it("marks a stopped or failed reply", () => {
     const rendered = render(view({ content: "Part", status: "stopped" }));

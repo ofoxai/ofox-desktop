@@ -806,6 +806,63 @@ describe("running a reply", () => {
   );
 });
 
+describe("a turn that failed before the model kept it", () => {
+  const failedTurn = (status: "error" | "stopped" = "error") => {
+    current = {
+      ...current,
+      messages: [
+        {
+          id: "lost-question",
+          role: "user",
+          content: "The lost question",
+          createdAt: 1,
+          status: "completed",
+          nativeEntryId: null,
+          runId: "lost-run",
+        },
+        {
+          id: "lost-reply",
+          role: "assistant",
+          content: "",
+          createdAt: 2,
+          status,
+          nativeEntryId: null,
+          runId: "lost-run",
+        },
+      ],
+    };
+  };
+
+  it("sends the stored question again as a new turn, keeping the draft", async () => {
+    failedTurn();
+    await openConversation();
+    await userEvent.type(composer(), "Unsent draft");
+    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    const request = mocks.send.mock.calls[0][0];
+    expect(request).toMatchObject({
+      sessionId: "session-a",
+      text: "The lost question",
+      attachmentIds: [],
+    });
+    expect(request.editMessageId).toBeUndefined();
+    expect(request.regenerateMessageId).toBeUndefined();
+    expect(request.runId).not.toBe("lost-run");
+    expect(composer()).toHaveValue("Unsent draft");
+    await waitFor(() => expect(current.session.draft).toBe("Unsent draft"));
+  });
+
+  it("is never offered for a turn the model has, or while a reply runs", async () => {
+    failedTurn("stopped");
+    current.messages[0].nativeEntryId = "native-question";
+    await openConversation();
+    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    ).toBeVisible();
+  });
+});
+
 describe("drafts and fencing", () => {
   it("stops a pending send before a delayed draft write can dispatch a paid request", async () => {
     let release!: () => void;

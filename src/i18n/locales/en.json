@@ -4950,6 +4950,7 @@
     "editPreservesOriginal": "Resending keeps the original message and reply as a previous version.",
     "resend": "Resend",
     "regenerate": "Regenerate",
+    "retryMessage": "Send again",
     "previousVersion": "View previous version",
     "reasoning": "Reasoning",
     "compacting": "Organizing conversation context…",
