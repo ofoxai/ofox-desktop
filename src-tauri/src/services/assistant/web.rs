@@ -16,12 +16,55 @@ const MAX_EXCERPT_CHARS: usize = 300;
 /// the same pages).
 const MAX_SOURCES: usize = 200;
 
-/// `value` as `web_fetch` compares pages: an HTTPS URL without credentials,
-/// without its fragment and at most [`MAX_WEB_URL_CHARS`] long.
+/// Names that never lead to a public page (the search server refuses them
+/// too), as the last label or the whole name.
+const LOCAL_NAMES: [&str; 5] = ["localhost", "local", "internal", "invalid", "test"];
+
+/// A public IPv4 address, as the search server reads it (`isPublicAddress`).
+fn is_public_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(a == 0
+        || a == 10
+        || a == 127
+        || a >= 224
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 169 && b == 254)
+        || (a == 172 && (16..=31).contains(&b))
+        || (a == 192 && (b == 168 || b == 0 || (b == 88 && c == 99)))
+        || (a == 198 && (b == 18 || b == 19 || (b == 51 && c == 100)))
+        || (a == 203 && b == 0 && c == 113))
+}
+
+/// A global unicast IPv6 address outside the transition and documentation
+/// ranges, as the search server reads it.
+fn is_public_v6(ip: std::net::Ipv6Addr) -> bool {
+    let [first, second, ..] = ip.segments();
+    (0x2000..0x4000).contains(&first)
+        && !(first == 0x2001 && (second < 0x200 || second == 0xdb8))
+        && ![0x2002, 0x3ffe, 0x3fff].contains(&first)
+}
+
+/// A host a public page can be on: a dotted name that is not local or
+/// reserved, or a public address.
+fn is_public_host(host: url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(name) => {
+            let name = name.trim_end_matches('.');
+            let last = name.rsplit('.').next().unwrap_or(name);
+            name.contains('.') && !LOCAL_NAMES.contains(&last)
+        }
+        url::Host::Ipv4(ip) => is_public_v4(ip),
+        url::Host::Ipv6(ip) => is_public_v6(ip),
+    }
+}
+
+/// `value` as `web_fetch` compares pages: an HTTPS URL of a public host (see
+/// [`is_public_host`]), without credentials, without its fragment and at
+/// most [`MAX_WEB_URL_CHARS`] long. Scheme and host come out lowercase.
 pub(super) fn web_url(value: &str) -> Option<String> {
     let mut url = url::Url::parse(value).ok()?;
     if url.scheme() != "https"
-        || url.host_str().is_none_or(str::is_empty)
+        || !url.host().is_some_and(is_public_host)
         || !url.username().is_empty()
         || url.password().is_some()
     {
@@ -65,14 +108,16 @@ fn ends_link(c: char) -> bool {
         )
 }
 
-/// The HTTPS links written in `text` (see [`web_url`]), in order. Sentence
-/// punctuation after a link, and a closing parenthesis it did not open (a
-/// Markdown link's), are not part of it.
+/// The HTTPS links written in `text` (see [`web_url`]), in order, whatever
+/// the case of their scheme. Sentence punctuation after a link, and a closing
+/// parenthesis it did not open (a Markdown link's), are not part of it.
 pub(super) fn https_links(text: &str) -> Vec<String> {
     let mut links = vec![];
-    let mut rest = text;
-    while let Some(start) = rest.find("https://") {
-        let tail = &rest[start..];
+    // Same byte offsets as `text`: only ASCII letters change.
+    let lower = text.to_ascii_lowercase();
+    let mut from = 0;
+    while let Some(found) = lower[from..].find("https://") {
+        let tail = &text[from + found..];
         let end = tail.find(ends_link).unwrap_or(tail.len());
         let mut link = &tail[..end];
         loop {
@@ -87,7 +132,7 @@ pub(super) fn https_links(text: &str) -> Vec<String> {
             link = trimmed;
         }
         links.extend(web_url(link));
-        rest = &tail[end..];
+        from += found + end;
     }
     links
 }
@@ -267,6 +312,50 @@ mod tests {
         let long = format!("https://example.com/{}", "a".repeat(2048));
         assert!(https_links(&long).is_empty());
         assert!(https_links("https://").is_empty());
+        // Any case of the scheme, normalized.
+        assert_eq!(
+            https_links("HTTPS://Example.COM/Path and Https://pi.dev"),
+            ["https://example.com/Path", "https://pi.dev/"]
+        );
+    }
+
+    #[test]
+    fn local_and_reserved_hosts_are_never_pages_a_run_may_read() {
+        for refused in [
+            "https://localhost/",
+            "https://LOCALHOST./x",
+            "https://api.localhost/",
+            "https://printer.local/",
+            "https://metadata.internal/",
+            "https://page.example.invalid/",
+            "https://site.test/",
+            "https://intranet/",
+            "https://127.0.0.1/",
+            "https://10.1.2.3/",
+            "https://172.20.0.1/",
+            "https://192.168.1.1/",
+            "https://169.254.169.254/latest",
+            "https://100.64.0.1/",
+            "https://198.18.0.1/",
+            "https://0.0.0.0/",
+            "https://224.0.0.1/",
+            "https://[::1]/",
+            "https://[fe80::1]/",
+            "https://[fc00::1]/",
+            "https://[::ffff:127.0.0.1]/",
+            "https://[2001:db8::1]/",
+        ] {
+            assert_eq!(web_url(refused), None, "{refused}");
+        }
+        for allowed in [
+            "https://8.8.8.8/",
+            "https://[2606:4700::1111]/",
+            "https://example.com:8443/doc",
+            "https://local.example.com/",
+            "https://testing.example.org/",
+        ] {
+            assert!(web_url(allowed).is_some(), "{allowed}");
+        }
     }
 
     #[test]

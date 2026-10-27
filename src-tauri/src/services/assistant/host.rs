@@ -905,8 +905,14 @@ impl AssistantHost {
         });
     }
 
-    pub(super) fn emit_start(&self, run: &RunControl) {
-        self.emit(run, "run_start", json!({"messageId": run.message_id}));
+    /// `web_search`: whether the run was given web search (the session's
+    /// switch may be on while the catalog cannot price it).
+    pub(super) fn emit_start(&self, run: &RunControl, web_search: bool) {
+        self.emit(
+            run,
+            "run_start",
+            json!({"messageId": run.message_id, "webSearch": web_search}),
+        );
     }
 
     async fn run(self: Arc<Self>, control: Arc<RunControl>, params: Value) {
@@ -1138,12 +1144,15 @@ impl AssistantHost {
                 // The model's tool call has been answered with tokens, and the
                 // tool may cost something: never repeat this attempt.
                 attempt.progressed = true;
+                // As for text: the query is the model's, the keys are not.
+                scrub_secrets_in(&mut data, &control.secrets());
                 let mut shown = web::tool_start_event(&data)?;
                 shown["messageId"] = json!(control.message_id);
                 self.emit(control, kind, shown);
             }
             "tool_end" => {
                 attempt.progressed = true;
+                scrub_secrets_in(&mut data, &control.secrets());
                 let mut shown = web::tool_end_event(&data)?;
                 shown["messageId"] = json!(control.message_id);
                 if data["name"] == "web_search" && data["success"] == true {
@@ -2451,6 +2460,19 @@ mod tests {
                 .unwrap_err()
                 .code,
             PROTOCOL
+        );
+
+        // A query never shows the run's key.
+        let keyed = event(
+            "tool_start",
+            json!({"name": "web_search", "toolCallId": "call-4",
+                   "args": {"query": "about test-opaque-run-key"}}),
+        );
+        host.on_event(&run, &keyed, &mut attempt).await.unwrap();
+        let shown = env.events.lock().unwrap().last().unwrap().data.clone();
+        assert_eq!(
+            shown["args"]["query"],
+            format!("about {}", crate::redact::REDACTED)
         );
     }
 

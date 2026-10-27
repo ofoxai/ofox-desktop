@@ -40,10 +40,13 @@ pub const SEARCH_MODEL: &str = "openai/gpt-5-nano";
 
 /// What web searches cost, from the catalog row of [`SEARCH_MODEL`]: USD per
 /// search (`pricing.web_search`) and per input and output token. A run keeps
-/// the price it started with.
+/// the price it started with; it prices only searches made with `model`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchPrice {
+    /// The model the price is for. Absent: no search matches it.
+    #[serde(default)]
+    pub model: String,
     pub per_search: Decimal,
     pub per_input_token: Decimal,
     pub per_output_token: Decimal,
@@ -73,6 +76,7 @@ fn price(value: &Value) -> Option<Decimal> {
 pub fn search_price(models: &[Model]) -> Option<SearchPrice> {
     let pricing = &models.iter().find(|m| m.id == SEARCH_MODEL)?.pricing;
     Some(SearchPrice {
+        model: SEARCH_MODEL.into(),
         per_search: price(&pricing["web_search"])?,
         per_input_token: price(&pricing["prompt"])?,
         per_output_token: price(&pricing["completion"])?,
@@ -484,7 +488,8 @@ mod tests {
         let saved = serde_json::to_value(&price).unwrap();
         assert_eq!(
             saved,
-            json!({"perSearch": "0.014", "perInputToken": "0.00000005", "perOutputToken": "0.0000004"})
+            json!({"model": SEARCH_MODEL, "perSearch": "0.014",
+                   "perInputToken": "0.00000005", "perOutputToken": "0.0000004"})
         );
         assert_eq!(serde_json::from_value::<SearchPrice>(saved).unwrap(), price);
     }

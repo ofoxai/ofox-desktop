@@ -296,7 +296,7 @@ impl AssistantHost {
             let prompt = branch.resent_text.as_deref().unwrap_or(&text);
             params.extend(web_params(&record, &branch, prompt, search_price.as_ref()));
         }
-        self.emit_start(&control);
+        self.emit_start(&control, search_price.is_some());
         self.spawn_run(control, params);
         Ok(RunRef {
             run_id: request.run_id,
@@ -803,7 +803,8 @@ mod tests {
 
     fn price() -> catalog::SearchPrice {
         serde_json::from_value(json!({
-            "perSearch": "0.014", "perInputToken": "0", "perOutputToken": "0",
+            "model": catalog::SEARCH_MODEL, "perSearch": "0.014",
+            "perInputToken": "0", "perOutputToken": "0",
         }))
         .unwrap()
     }

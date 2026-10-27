@@ -2038,9 +2038,11 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let on = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
         host.update_session(on).await.unwrap();
         gateway.reply(Reply::Stream("No search here".into()));
-        let (_, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
+        let (run, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
         assert!(tool_names(&gateway.requests()[0]).is_empty());
+        // The run says it could not search, although the switch is on.
+        assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // Priced: offered, and a conversation with search off still gets no tools.
         env.catalog.lock().unwrap().push(search_model());
@@ -2055,16 +2057,18 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let off = host.create_session(request_off).await.unwrap();
         assert!(!off.web_search);
         gateway.reply(Reply::Stream("Still no search".into()));
-        turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
+        let (run, _) = turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
         assert!(tool_names(&gateway.requests()[1]).is_empty());
+        assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // The conversation with search on now gets both tools.
         gateway.reply(Reply::Stream("Could search".into()));
-        turn(&host, &env, request(&sid, "And now?", json!({}))).await;
+        let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[2]),
             ["web_search", "web_fetch"]
         );
+        assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], true);
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(detail.usage["searchCount"], 0);
         assert_eq!(detail.usage["searchCostUsd"], "0");
@@ -2248,12 +2252,13 @@ fn a_run_may_read_the_pages_of_the_conversation_and_no_others() {
     let Some(runtime_dir) = runtime_dir() else {
         return;
     };
-    // `.invalid` pages are refused by the search server itself, so no page is
-    // ever requested; what the model reads tells which side refused.
-    const LINKED: &str = "https://linked.example.invalid/doc";
-    const SOURCE: &str = "https://source.example.invalid/x";
-    const OTHER: &str = "https://other.example.invalid/";
-    const SERVER_REFUSED: &str = "Web host is not allowed";
+    // Pages on port 8443 pass the host's checks but the search server
+    // refuses them itself, so no page is ever requested; what the model reads
+    // tells which side refused.
+    const LINKED: &str = "https://linked.example.com:8443/doc";
+    const SOURCE: &str = "https://source.example.com:8443/x";
+    const OTHER: &str = "https://other.example.com:8443/";
+    const SERVER_REFUSED: &str = "Web URL port must be 443";
     const NOT_ALLOWED: &str = "Only pages the user linked";
     let config = tempfile::tempdir().unwrap();
     let gateway = Gateway::start();
@@ -2345,6 +2350,101 @@ fn stopping_a_run_during_its_search_leaves_the_cost_unknown() {
         assert!(detail.usage["estimatedCostUsd"].is_null());
         assert!(detail.usage["searchCostUsd"].is_null());
         assert_eq!(gateway.requests().len(), 2, "no request after the stop");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn a_search_then_a_stop_or_a_billed_failure_leaves_both_costs_unknown() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let assert_unknown = |usage: &Value| {
+            assert_eq!(usage["usageCoverage"], "incomplete", "{usage}");
+            assert!(usage["estimatedCostUsd"].is_null(), "{usage}");
+            assert!(usage["searchCostUsd"].is_null(), "{usage}");
+        };
+        // The search succeeds, then the user stops while the answer streams.
+        let stopped = searching(&host, &env).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "pi"}),
+        )]));
+        gateway.reply(Reply::Json(200, search_answer(&["https://pi.dev/docs"])));
+        gateway.reply(Reply::Hang("Partial answer ".repeat(20)));
+        let run = host
+            .send(request(&stopped, "Tell me about Pi", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+        assert_eq!(of_type(&env, &run.run_id, "sources").len(), 1);
+        host.stop(&stopped, &run.run_id, &run.operation_id)
+            .await
+            .unwrap();
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["status"], "stopped");
+        let detail = host.get_session(&stopped).await.unwrap();
+        assert_unknown(&detail.usage);
+        assert_eq!(detail.usage["searchCount"], 1);
+
+        // The search succeeds, then the answer fails after it may have been billed.
+        let failed = create(&host).await;
+        let on = serde_json::from_value(json!({"sessionId": failed, "webSearch": true})).unwrap();
+        host.update_session(on).await.unwrap();
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "pi"}),
+        )]));
+        gateway.reply(Reply::Json(200, search_answer(&["https://pi.dev/docs"])));
+        gateway.reply(Reply::Error(
+            500,
+            json!({"error": {"message": "upstream failed"}}),
+        ));
+        let (run, end) = turn(&host, &env, request(&failed, "Tell me again", json!({}))).await;
+        assert_eq!(end.data["status"], "error");
+        assert_eq!(
+            wait_for(&env, &run, "error").await.data["code"],
+            "assistant_model_request_failed"
+        );
+        let detail = host.get_session(&failed).await.unwrap();
+        assert_unknown(&detail.usage);
+        assert_eq!(detail.usage["searchCount"], 1);
+
+        // A priced search, then a later answer cut off by a region change
+        // before any usage was counted: nothing re-projects the history.
+        let cut = create(&host).await;
+        let on = serde_json::from_value(json!({"sessionId": cut, "webSearch": true})).unwrap();
+        host.update_session(on).await.unwrap();
+        gateway.reply(Reply::ToolCalls(vec![(
+            "web_search",
+            json!({"query": "pi"}),
+        )]));
+        gateway.reply(Reply::Json(200, search_answer(&["https://pi.dev/docs"])));
+        gateway.reply(Reply::Stream("Pi builds agents.".into()));
+        turn(&host, &env, request(&cut, "Tell me about Pi", json!({}))).await;
+        let priced = host.get_session(&cut).await.unwrap().usage;
+        assert_eq!(priced["searchCostUsd"], "0.01425", "{priced}");
+        gateway.reply(Reply::Hang("Partial answer ".repeat(20)));
+        let run = host
+            .send(request(&cut, "And more?", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+        env.signed_in("ofox.io");
+        wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(
+            wait_for(&env, &run.run_id, "error").await.data["code"],
+            "assistant_identity_changed"
+        );
+        env.signed_in("ofox.ai");
+        let detail = host.get_session(&cut).await.unwrap();
+        assert_unknown(&detail.usage);
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
