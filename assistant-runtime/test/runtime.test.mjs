@@ -1229,37 +1229,154 @@ test("a vision model receives mixed PDF text and the actual image-only page numb
   );
 });
 
-test("a text-only model cannot silently summarize a mixed PDF as completely read", async (t) => {
+test("a text-only model gets a mixed PDF's text with a partial outcome", async (t) => {
   const params = {
     ...(await withAttachments(await sandbox(t), [
       ["mixed.pdf", pdfPages(["Cover only", null])],
     ])),
     selectedAttachmentIds: ["mixed.pdf"],
   };
-  let requests = 0;
+  const events = [];
+  let body;
   const runtime = new AssistantRuntime({
-    fetch: async () => {
-      requests++;
-      return stream("Cover is not the whole document");
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return stream("The cover says Cover only; page 2 was not read");
     },
   });
   t.after(() => runtime.close());
   const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  const [outcome] = attachmentEvents(events);
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.code, "assistant_attachment_partial");
+  assert.deepEqual(outcome.details.pagesWithoutText, [2]);
+  const text = lastUserText(body);
+  assert.match(text, /Cover only/);
+  assert.match(text, /PDF pages 2 have no extractable text/);
+  assert.doesNotMatch(JSON.stringify(body.messages), /image_url/);
+});
+
+test("a PDF without text blocks a text-only model, and retries read the kept selection again", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["scan.pdf", pdfPages([null])],
+    ])),
+    prompt: "What does the scan say?",
+    selectedAttachmentIds: ["scan.pdf"],
+  };
+  const events = [];
+  let requests = 0;
+  let body;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      requests++;
+      body = JSON.parse(init.body);
+      return stream("A red square");
+    },
+  });
+  t.after(() => runtime.close());
+  const failedAssistant = (result) =>
+    result.entries.findLast(
+      (entry) => entry.active && entry.role === "assistant",
+    );
+  const blocked = await runtime.run(params);
   assert.equal(requests, 0);
-  assert.equal(result.status, "error");
-  assert.match(result.errorMessage, /pages 2.*vision model/i);
-  const failed = result.entries.find((entry) => entry.role === "assistant");
-  assert.deepEqual((await runtime.load(params)).entries, result.entries);
+  assert.equal(blocked.status, "error");
+  assert.match(blocked.errorMessage, /no extractable text.*vision model/);
+  assert.match(
+    await readFile(params.sessionFile, "utf8"),
+    /"customType":"ofox-desktop-attachments"/,
+  );
+  // A plain retry (no originalPrompt or selection) reads the attachment
+  // again instead of dropping it, and fails the same explicit way.
+  events.length = 0;
+  const again = await runtime.run({
+    ...params,
+    runId: "retry-text-only",
+    operationId: "retry-text-only",
+    selectedAttachmentIds: undefined,
+    regenerateEntryId: failedAssistant(blocked).id,
+  });
+  assert.equal(requests, 0);
+  assert.equal(again.status, "error");
+  assert.deepEqual(
+    attachmentEvents(events).map(({ id, code }) => [id, code]),
+    [["scan.pdf", "assistant_vision_model_required"]],
+  );
+  events.length = 0;
   const retried = await runtime.run({
     ...params,
-    runId: "mixed-vision-retry",
-    operationId: "mixed-vision-operation",
+    runId: "retry-vision",
+    operationId: "retry-vision",
     model: { ...model, supportsImages: true },
-    regenerateEntryId: failed.id,
-    originalPrompt: params.prompt,
+    selectedAttachmentIds: undefined,
+    regenerateEntryId: failedAssistant(again).id,
   });
   assert.equal(retried.status, "completed");
   assert.equal(requests, 1);
+  assert.deepEqual(
+    attachmentEvents(events).map(({ status }) => status),
+    ["ready"],
+  );
+  assert.match(
+    lastUserText(body),
+    /^What does the scan say\?\n\n\[User attachment/,
+  );
+  assert.match(JSON.stringify(body.messages), /image_url/);
+  // Once sent, the turn replays as stored: nothing is inlined twice.
+  events.length = 0;
+  const replayed = await runtime.run({
+    ...params,
+    runId: "replay-sent",
+    operationId: "replay-sent",
+    model: { ...model, supportsImages: true },
+    selectedAttachmentIds: undefined,
+    regenerateEntryId: failedAssistant(retried).id,
+  });
+  assert.equal(replayed.status, "completed");
+  assert.deepEqual(attachmentEvents(events), []);
+  assert.equal(lastUserText(body).split("[User attachment").length - 1, 1);
+});
+
+test("stop interrupts a long PDF during preparation without a request", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      [
+        "long.pdf",
+        pdfPages(Array.from({ length: 100 }, (_, index) => `Page ${index}`)),
+      ],
+    ])),
+    selectedAttachmentIds: ["long.pdf"],
+  };
+  const events = [];
+  let requests = 0;
+  let runtime;
+  runtime = new AssistantRuntime({
+    emit: (event) => {
+      events.push(event);
+      if (event.type !== "run_start") return;
+      // Stop after some turns of the event loop: only reachable while the
+      // PDF is being read because extraction yields between pages.
+      let turns = 0;
+      const turn = () => {
+        if (++turns === 20) void runtime.stop(params);
+        else setImmediate(turn);
+      };
+      setImmediate(turn);
+    },
+    fetch: async () => {
+      requests++;
+      return stream("must not send");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "stopped");
+  assert.equal(requests, 0);
+  assert.deepEqual(attachmentEvents(events), []);
 });
 
 test("reading a mixed PDF through a tool discloses text coverage and missing pages", async (t) => {

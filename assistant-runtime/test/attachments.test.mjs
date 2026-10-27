@@ -11,8 +11,17 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { loadImage } from "@napi-rs/canvas";
 import { AttachmentStore, prepareAttachments } from "../src/attachments.mjs";
-import { chinesePdf, passwordPdf, pdfPages } from "./fixtures/pdf.mjs";
+import {
+  chinesePdf,
+  imagePdf,
+  noisePixels,
+  passwordPdf,
+  pdfPages,
+} from "./fixtures/pdf.mjs";
+
+const unsafePath = (error) => error.details?.reason === "unsafe_path";
 
 const onePixelPng = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
@@ -60,12 +69,19 @@ test("attachments are bounded, paged and confined to their imported root", async
       { id: "bad", path: "../escape", name: "x.txt" },
     ]);
     await assert.rejects(() => traversal.read("bad"), /root|path/i);
+    await assert.rejects(() => traversal.read("bad"), unsafePath);
+    const directory = new AttachmentStore(root, [
+      { id: "folder", path: "files", name: "folder.txt" },
+    ]);
+    await assert.rejects(() => directory.read("folder"), /regular file/);
+    await assert.rejects(() => directory.read("folder"), unsafePath);
     if (process.platform !== "win32") {
       await symlink(path.dirname(root), path.join(root, "outside"));
       const link = new AttachmentStore(root, [
         { id: "link", path: "outside/missing", name: "x.txt" },
       ]);
-      await assert.rejects(() => link.read("link"));
+      await assert.rejects(() => link.read("link"), /symlink/);
+      await assert.rejects(() => link.read("link"), unsafePath);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -104,6 +120,7 @@ test(
         { id: "outside", path: requested, name: "outside.txt" },
       ]);
       await assert.rejects(() => store.read("outside"), /root|symlink/i);
+      await assert.rejects(() => store.read("outside"), unsafePath);
     }
   },
 );
@@ -455,14 +472,37 @@ test("a PDF whose pages without text all fit as images is ready", async (t) => {
   assert.equal(result.images.length, 1);
 });
 
-test("a text-only model cannot take a PDF with pages without text", async (t) => {
+test("a text-only model reads a PDF's text and reports its pages without text as partial", async (t) => {
   const result = await prepared(t, [
     ["mixed.pdf", pdfPages(["Cover only", null])],
   ]);
-  assert.equal(result.outcomes[0].status, "model_unsupported");
-  assert.equal(result.outcomes[0].code, "assistant_vision_model_required");
-  assert.deepEqual(result.outcomes[0].details.pagesWithoutText, [2]);
-  assert.match(result.blocked.message, /pages 2.*vision model/i);
+  const [outcome] = result.outcomes;
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.code, "assistant_attachment_partial");
+  assert.deepEqual(outcome.details.pagesWithoutText, [2]);
+  assert.equal(outcome.details.textCoverage, "partial");
+  assert.equal(outcome.details.pagesAttachedAsImages, undefined);
+  assert.equal(result.blocked, null);
+  assert.deepEqual(result.images, []);
+  assert.match(result.text, /Cover only/);
+  assert.match(
+    result.text,
+    /Extraction warning: PDF pages 2 have no extractable text; their visual content has not been read/,
+  );
+});
+
+test("a text-only model cannot take a PDF without any text", async (t) => {
+  const result = await prepared(t, [["scan.pdf", pdfPages([null, null])]]);
+  assert.deepEqual(result.outcomes[0], {
+    id: "scan.pdf",
+    status: "model_unsupported",
+    code: "assistant_vision_model_required",
+    details: { format: "pdf", pageCount: 2, pagesWithoutText: [1, 2] },
+  });
+  assert.match(
+    result.blocked.message,
+    /^assistant_vision_model_required: .*no extractable text.*vision model/,
+  );
 });
 
 test("damaged and password-protected PDFs are unreadable", async (t) => {
@@ -516,4 +556,125 @@ test("every selected attachment gets an outcome and the first failure blocks", a
     ["model_unsupported", "unreadable", "ready"],
   );
   assert.match(result.blocked.message, /^assistant_vision_model_required/);
+});
+
+async function centerPixel(image) {
+  const picture = await loadImage(Buffer.from(image.data, "base64"));
+  const { createCanvas } = await import("@napi-rs/canvas");
+  const canvas = createCanvas(picture.width, picture.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(picture, 0, 0);
+  return [
+    ...context.getImageData(
+      Math.floor(picture.width / 2),
+      Math.floor(picture.height / 2),
+      1,
+      1,
+    ).data,
+  ];
+}
+
+test("a scanned page whose image is over 4 megapixels renders its content", async (t) => {
+  // 2100 x 2100 is below a 300-dpi A4 scan (2480 x 3508).
+  const red = Buffer.alloc(2100 * 2100 * 3);
+  for (let index = 0; index < red.length; index += 3) red[index] = 255;
+  const store = await storeWith(t, [["scan.pdf", imagePdf(2100, 2100, red)]]);
+  assert.deepEqual(
+    await centerPixel(await store.image("scan.pdf", 1)),
+    [255, 0, 0, 255],
+  );
+});
+
+test("a rendered page too large as PNG is sent as JPEG, or else left unattached", async (t) => {
+  const root = await folder(t);
+  await writeFile(
+    path.join(root, "photo.pdf"),
+    imagePdf(300, 200, noisePixels(300, 200)),
+  );
+  const attachments = [{ id: "photo", path: "photo.pdf", name: "photo.pdf" }];
+  const png = await new AttachmentStore(root, attachments).image("photo", 1);
+  assert.equal(png.mimeType, "image/png");
+  const pngBytes = Buffer.from(png.data, "base64").length;
+  const jpeg = await new AttachmentStore(root, attachments, {
+    maxRenderedPage: pngBytes - 1,
+  }).image("photo", 1);
+  assert.equal(jpeg.mimeType, "image/jpeg");
+  assert.ok(Buffer.from(jpeg.data, "base64").length < pngBytes);
+  const tiny = new AttachmentStore(root, attachments, {
+    maxRenderedPage: 1000,
+  });
+  await assert.rejects(
+    () => tiny.image("photo", 1),
+    (error) =>
+      error.code === "assistant_attachment_too_large" &&
+      error.details.limit === "rendered_page",
+  );
+  // Inline, a page that cannot be rendered stays for read_attachment.
+  const result = await prepareAttachments(tiny, ["photo"], { vision: true });
+  assert.equal(result.blocked, null);
+  assert.equal(result.outcomes[0].status, "partial");
+  assert.deepEqual(result.outcomes[0].details.pagesAttachedAsImages, []);
+  assert.deepEqual(result.images, []);
+  assert.match(result.text, /Remaining pages without extractable text: 1/);
+});
+
+test("inline page renders read and parse a PDF once", async (t) => {
+  const root = await folder(t);
+  await writeFile(path.join(root, "scan.pdf"), pdfPages([null, null, null]));
+  let reads = 0;
+  class CountingStore extends AttachmentStore {
+    async file(id) {
+      reads++;
+      return await super.file(id);
+    }
+  }
+  const store = new CountingStore(root, [
+    { id: "scan", path: "scan.pdf", name: "scan.pdf" },
+  ]);
+  const result = await prepareAttachments(store, ["scan"], { vision: true });
+  assert.equal(result.images.length, 2);
+  // One read for the text, one for both rendered pages.
+  assert.equal(reads, 2);
+});
+
+test("PDFs over 100 pages cannot be rendered either", async (t) => {
+  const store = await storeWith(t, [
+    ["long.pdf", pdfPages(Array.from({ length: 101 }, () => null))],
+  ]);
+  await assert.rejects(
+    () => store.image("long.pdf", 1),
+    (error) =>
+      error.code === "assistant_attachment_too_large" &&
+      error.details.limit === "pdf_pages",
+  );
+});
+
+test("an abort stops a long PDF between pages", async (t) => {
+  const store = await storeWith(t, [
+    [
+      "long.pdf",
+      pdfPages(Array.from({ length: 100 }, (_, index) => `Page ${index}`)),
+    ],
+  ]);
+  const controller = new AbortController();
+  const reading = store.read("long.pdf", 0, 8000, {
+    signal: controller.signal,
+  });
+  // PDF.js would otherwise finish in one run of microtasks; these turns of
+  // the event loop only happen because extraction yields between pages.
+  let turns = 0;
+  const turn = () => {
+    if (++turns === 20) controller.abort();
+    else setImmediate(turn);
+  };
+  setImmediate(turn);
+  await assert.rejects(reading, { name: "AbortError" });
+  const aborted = new AbortController();
+  aborted.abort();
+  await assert.rejects(
+    () => store.image("long.pdf", 1, { signal: aborted.signal }),
+    { name: "AbortError" },
+  );
+  // Nothing partial was cached by the aborted read.
+  assert.equal((await store.read("long.pdf")).pageCount, 100);
 });

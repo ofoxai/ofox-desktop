@@ -90,19 +90,23 @@ per operation and the stable native session file, and ends the process after
 the response. Pi native JSONL is the context authority. Edit and regenerate
 branch on native entry IDs. Regenerate with `originalPrompt` rebuilds the turn
 from that text and `selectedAttachmentIds` (see [Attachments](#attachments));
-without it, it resends the native user text and images as stored. Every new turn has a non-context `ofox-desktop-run` marker with the run and
-operation IDs and the historical pricing-availability flags. Projection entries
+without it, a turn that failed before its request is rebuilt from the
+attachment selection kept with it, and any other turn is resent as stored,
+native images included. Every new turn has a non-context `ofox-desktop-run`
+marker with the run and operation IDs and the historical pricing-availability flags. Projection entries
 return normalized text, active branch, runId/operationId, usage, stopReason,
 pricingKnown and final (only the last assistant entry of each run). Images and
 system text are excluded from the projection; a user entry's content is the
 text sent to the model, inlined attachment blocks included, so the host keeps
 the user's own text and attachment selection. A turn that fails or is stopped
 before its model request is kept in native history, with the native images it
-was replaying, and can be retried explicitly.
+was replaying and (in a non-context `ofox-desktop-attachments` entry) its
+attachment selection, and can be retried explicitly.
 
 Events are `{method:"event",params:{sessionId,runId,operationId,type,data}}`.
 Types include run_start/attachment/text_delta/thinking_delta/tool_start/
-tool_end/message_end/usage/compaction_start/compaction_end/error/run_end. Streamed text holds back a tail long enough to scrub a split credential.
+tool_end/message_end/usage/compaction_start/compaction_end/error/run_end.
+Streamed text holds back a tail long enough to scrub a split credential.
 The host must persist the final RPC projection **before** publishing its UI
 run_end. message_end is a runtime summary, not the application's message object.
 
@@ -128,8 +132,11 @@ passes, on every `run`:
   this turn, inlined into it in order; duplicates are read once.
 - `originalPrompt`: with `regenerateEntryId`, the user's own text of the turn
   being regenerated. The turn is rebuilt from it and `selectedAttachmentIds`
-  and every selected attachment is read again. Without it the stored native
-  turn is replayed and the selection is ignored, so nothing is inlined twice.
+  and every selected attachment is read again. Without it, a turn that failed
+  before its request is rebuilt from its stored text and the selection kept
+  with it, so a plain retry never drops its attachments; any other turn is
+  replayed as stored and the selection is ignored, so nothing is inlined
+  twice.
 
 Malformed attachment parameters reject the request before a turn starts.
 
@@ -143,10 +150,13 @@ bytes. Other formats are unsupported.
 Selected attachments are inlined under `[User attachment: "<name>";
 id=<id>]`: the first 8,000 characters of text (the rest through
 `read_attachment`, which the line names), any extraction warning, and images
-for a model with image input. Pages of a PDF that have no extractable text
-need image input: the first two are rendered and attached; the line names the
-rest for `read_attachment` with `page`. A message carries at most 10 images or
-rendered pages.
+for a model with image input. With image input, the first two pages of a PDF
+that have no extractable text are rendered and attached (PNG, or JPEG when the
+PNG exceeds 5 MiB); the line names the rest, and any page that failed to
+render, for `read_attachment` with `page`. Without image input a PDF's text is
+still sent and its outcome is `partial`; only a PDF without any extractable
+text needs image input. A message carries at most 10 images or rendered pages.
+Stop interrupts reading between PDF pages.
 
 When the conversation has attachments the run registers `read_attachment`
 `{id, offset?, length? (<= 20000), page?}`. It returns a text window with
@@ -161,26 +171,28 @@ with the codes below.
 
 ### Outcome events
 
-For each selected attachment, after `run_start` and before any model request,
-the sidecar emits `type:"attachment"` with
+For each selected attachment, as soon as it has been read (after `run_start`,
+before any model request), the sidecar emits `type:"attachment"` with
 `data:{id, status, code, details}`:
 
-| status              | code                               | meaning                                                                                                         | run continues |
-| ------------------- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------- |
-| `ready`             | `null`                             | fully read and sent                                                                                             | yes           |
-| `partial`           | `assistant_attachment_partial`     | sent, but part was not read: text cut at the extraction limit, or PDF pages without text not attached as images | yes           |
-| `unreadable`        | `assistant_attachment_unreadable`  | not valid UTF-8, a damaged or password-protected PDF, a damaged image, or an unsafe or unreadable path          | no            |
-| `unreadable`        | `assistant_attachment_not_found`   | the id is not in `attachments`, or the file is gone                                                             | no            |
-| `unsupported`       | `assistant_attachment_unsupported` | not a readable format                                                                                           | no            |
-| `too_large`         | `assistant_attachment_too_large`   | over a size, page or image limit                                                                                | no            |
-| `model_unsupported` | `assistant_vision_model_required`  | an image, or a PDF with pages without text, sent to a model without image input                                 | no            |
+| status              | code                               | meaning                                                                                                                                         | run continues |
+| ------------------- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
+| `ready`             | `null`                             | fully read and sent                                                                                                                             | yes           |
+| `partial`           | `assistant_attachment_partial`     | sent, but part was not read: text cut at the extraction limit, or PDF pages without text not attached as images (always so without image input) | yes           |
+| `unreadable`        | `assistant_attachment_unreadable`  | not valid UTF-8, a damaged or password-protected PDF, a damaged image, or an unsafe or unreadable path                                          | no            |
+| `unreadable`        | `assistant_attachment_not_found`   | the id is not in `attachments`, or the file is gone                                                                                             | no            |
+| `unsupported`       | `assistant_attachment_unsupported` | not a readable format                                                                                                                           | no            |
+| `too_large`         | `assistant_attachment_too_large`   | over a size, page or image limit                                                                                                                | no            |
+| `model_unsupported` | `assistant_vision_model_required`  | an image, or a PDF without any extractable text, sent to a model without image input                                                            | no            |
 
 If any outcome blocks, every selected attachment is still reported, no model
 request is made, the `error` event has `code:"input_preparation_failed"`, and
 the result has `status:"error"` with `errorMessage` set to the first blocking
-attachment's `<code>: <message>`. The user's text is kept as a failed native
-turn; retry it by regenerating its assistant entry with `originalPrompt` and
-the selection. (A replayed native turn whose images need a vision model fails
+attachment's `<code>: <message>`. The user's text and selection are kept with
+a failed native turn; regenerating its assistant entry reads the kept
+selection again, or the host's `selectedAttachmentIds` when it passes
+`originalPrompt`. Stop during preparation ends the run as `stopped`; outcomes
+of attachments not yet read are not reported. (A replayed native turn whose images need a vision model fails
 the same way with `assistant_vision_model_required`, without an attachment
 event.)
 
@@ -203,13 +215,14 @@ event.)
 - `too_large`: `limit` is `file_size` or `image_size` (`maxBytes`),
   `pdf_pages` (`maxPages`, `pageCount`), `message_images` (`maxImages`) or
   `rendered_page` (`maxBytes`, `page`).
-- `model_unsupported`: an image has `mimeType`; a PDF has `pageCount` and
-  `pagesWithoutText`.
+- `model_unsupported`: an image has `mimeType`; a PDF (no extractable text on
+  any page) has `pageCount` and `pagesWithoutText`.
 
 ### Limits
 
 25 MiB per file, 10 MiB per image, 100 PDF pages, 16 Mi characters (UTF-16
 code units) of extracted text per attachment, 20,000 characters per
 `read_attachment` call, 10 images or rendered pages per message. Rendered
-pages are at most 2000 pixels per side, 4 megapixels and 5 MiB of PNG; no OCR
-text is invented. Extracted text is cached per run in a 32 Mi-character LRU.
+pages are at most 2000 pixels per side, 4 megapixels and 5 MiB (PNG, else
+JPEG); no OCR text is invented. PDF.js skips embedded images over 100
+megapixels (a 600-dpi A3 scan has about 70). Extracted text is cached per run in a 32 Mi-character LRU.

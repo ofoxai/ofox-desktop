@@ -10,6 +10,10 @@ const MAX_RENDERED_PAGE = 5 * 1024 * 1024;
 const MAX_TEXT = 16 * 1024 * 1024;
 const MAX_CACHED_TEXT = MAX_TEXT * 2;
 const MAX_PDF_PAGES = 100;
+// Embedded images above this many pixels are skipped by PDF.js (it guards
+// against decompression bombs). A 600-dpi A3 scan has about 70 MP; the
+// rendered output is bounded separately.
+const MAX_PDF_IMAGE_PIXELS = 100 * 1000 * 1000;
 const MAX_READ = 20000;
 const INLINE_TEXT = 8000;
 // Pages without text attached to the user turn; the model renders the rest.
@@ -85,16 +89,32 @@ const pdfjsRoot = path
   .split(path.sep)
   .join("/");
 
+// PDF.js parses in one long chain of microtasks. Yielding between pages lets a
+// stop request from the host arrive and abort the work.
+const yieldToHost = () => new Promise((resolve) => setImmediate(resolve));
+
+const pageLimit = (document) => {
+  if (document.numPages > MAX_PDF_PAGES)
+    throw tooLarge("PDF attachments are limited to 100 pages", {
+      format: "pdf",
+      limit: "pdf_pages",
+      maxPages: MAX_PDF_PAGES,
+      pageCount: document.numPages,
+    });
+};
+
 // Opens a PDF for read() and maps PDF.js failures to outcomes; our own errors
-// pass through. The loading task is destroyed even when opening fails.
-async function withPdf(bytes, read) {
+// pass through. Aborting the signal destroys the loading task, which is also
+// destroyed when opening fails.
+async function withPdf(bytes, read, signal) {
+  signal?.throwIfAborted();
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const task = getDocument({
     data: new Uint8Array(bytes),
     isEvalSupported: false,
     useSystemFonts: false,
     disableFontFace: true,
-    maxImageSize: 4000000,
+    maxImageSize: MAX_PDF_IMAGE_PIXELS,
     canvasMaxAreaInBytes: 16 * 1024 * 1024,
     cMapUrl: `${pdfjsRoot}/cmaps/`,
     cMapPacked: true,
@@ -102,9 +122,12 @@ async function withPdf(bytes, read) {
     wasmUrl: `${pdfjsRoot}/wasm/`,
     verbosity: 0,
   });
+  const stop = () => void task.destroy();
+  signal?.addEventListener("abort", stop, { once: true });
   try {
     return await read(await task.promise);
   } catch (error) {
+    if (signal?.aborted) throw signal.reason;
     if (error instanceof AttachmentError || error?.invalidPage) throw error;
     if (error?.name === "PasswordException")
       throw unreadable("password_protected", "The PDF is password-protected", {
@@ -114,6 +137,7 @@ async function withPdf(bytes, read) {
       format: "pdf",
     });
   } finally {
+    signal?.removeEventListener("abort", stop);
     await task.destroy();
   }
 }
@@ -170,7 +194,12 @@ function validAttachment(attachment) {
 }
 
 export class AttachmentStore {
-  constructor(root, attachments = []) {
+  // maxRenderedPage is configurable for tests of the encoding fallback.
+  constructor(
+    root,
+    attachments = [],
+    { maxRenderedPage = MAX_RENDERED_PAGE } = {},
+  ) {
     if (!Array.isArray(attachments) || attachments.length > 200)
       throw new Error("Invalid conversation attachments");
     if (
@@ -187,6 +216,7 @@ export class AttachmentStore {
     }
     this.cache = new Map();
     this.cachedCharacters = 0;
+    this.maxRenderedPage = maxRenderedPage;
   }
 
   get size() {
@@ -321,7 +351,7 @@ export class AttachmentStore {
     }
   }
 
-  async extract(id) {
+  async extract(id, { signal } = {}) {
     if (this.cache.has(id)) {
       const cached = this.cache.get(id);
       this.cache.delete(id);
@@ -335,7 +365,11 @@ export class AttachmentStore {
       result = { format, text: "", mimeType };
     } else if (format === "pdf") {
       const { bytes } = await this.file(id);
-      result = await withPdf(bytes, (document) => this.#pdfText(document));
+      result = await withPdf(
+        bytes,
+        (document) => this.#pdfText(document, signal),
+        signal,
+      );
     } else {
       const { bytes } = await this.file(id);
       let text;
@@ -361,14 +395,8 @@ export class AttachmentStore {
     return result;
   }
 
-  async #pdfText(document) {
-    if (document.numPages > MAX_PDF_PAGES)
-      throw tooLarge("PDF attachments are limited to 100 pages", {
-        format: "pdf",
-        limit: "pdf_pages",
-        maxPages: MAX_PDF_PAGES,
-        pageCount: document.numPages,
-      });
+  async #pdfText(document, signal) {
+    pageLimit(document);
     let text = "";
     let processedPages = 0;
     let textPages = 0;
@@ -378,6 +406,8 @@ export class AttachmentStore {
       number <= document.numPages && text.length < MAX_TEXT;
       number++
     ) {
+      await yieldToHost();
+      signal?.throwIfAborted();
       const page = await document.getPage(number);
       const content = await page.getTextContent();
       const pageText = content.items.map((item) => item.str ?? "").join(" ");
@@ -415,7 +445,7 @@ export class AttachmentStore {
     return result;
   }
 
-  async read(id, offset = 0, length = INLINE_TEXT) {
+  async read(id, offset = 0, length = INLINE_TEXT, { signal } = {}) {
     if (
       !Number.isSafeInteger(offset) ||
       offset < 0 ||
@@ -424,7 +454,7 @@ export class AttachmentStore {
       length > MAX_READ
     )
       throw new Error("Invalid attachment page range");
-    const result = await this.extract(id);
+    const result = await this.extract(id, { signal });
     return {
       ...result,
       characters: result.text.length,
@@ -467,69 +497,120 @@ export class AttachmentStore {
     return { mimeType, bytes };
   }
 
-  // The image itself, or one PDF page rendered as PNG.
-  async image(id, pageNumber) {
+  // The image itself, or one PDF page rendered as an image.
+  async image(id, pageNumber, { signal } = {}) {
     if (this.supportedFormat(id) !== "pdf") {
       const { mimeType, bytes } = await this.#imageBytes(id);
       return { type: "image", data: bytes.toString("base64"), mimeType };
     }
+    const [rendered] = await this.renderPages(id, [pageNumber], { signal });
+    if (rendered.error) throw rendered.error;
+    return rendered.image;
+  }
+
+  /**
+   * Renders PDF pages from one parse of the document. Each entry has the
+   * page's image, or the AttachmentError that kept it from rendering.
+   */
+  async renderPages(id, pageNumbers, { signal } = {}) {
     const { bytes } = await this.file(id);
     // Loaded outside withPdf: a missing native addon is not a damaged PDF.
     const { createCanvas } = await import("@napi-rs/canvas");
-    return await withPdf(bytes, async (document) => {
-      const pages = Math.min(MAX_PDF_PAGES, document.numPages);
-      if (
-        !Number.isSafeInteger(pageNumber) ||
-        pageNumber < 1 ||
-        pageNumber > pages
-      )
-        throw Object.assign(
-          new Error(`Invalid PDF page; this PDF has ${pages} page(s)`),
-          { invalidPage: true },
-        );
-      const page = await document.getPage(pageNumber);
-      const original = page.getViewport({ scale: 1 });
-      const scale = Math.min(
-        1.5,
-        2000 / original.width,
-        2000 / original.height,
-        Math.sqrt(4000000 / (original.width * original.height)),
-      );
-      if (!Number.isFinite(scale) || scale <= 0)
-        throw unreadable("invalid_pdf", "The PDF page has invalid dimensions", {
-          format: "pdf",
-        });
-      const viewport = page.getViewport({ scale });
-      const canvas = createCanvas(
-        Math.ceil(viewport.width),
-        Math.ceil(viewport.height),
-      );
-      await page.render({ canvasContext: canvas.getContext("2d"), viewport })
-        .promise;
-      const image = canvas.toBuffer("image/png");
-      if (image.length > MAX_RENDERED_PAGE)
-        throw tooLarge("A rendered PDF page exceeds 5 MiB", {
-          format: "pdf",
-          limit: "rendered_page",
-          maxBytes: MAX_RENDERED_PAGE,
-          page: pageNumber,
-        });
-      return {
-        type: "image",
-        data: image.toString("base64"),
-        mimeType: "image/png",
-      };
+    return await withPdf(
+      bytes,
+      async (document) => {
+        pageLimit(document);
+        for (const number of pageNumbers)
+          if (
+            !Number.isSafeInteger(number) ||
+            number < 1 ||
+            number > document.numPages
+          )
+            throw Object.assign(
+              new Error(
+                `Invalid PDF page; this PDF has ${document.numPages} page(s)`,
+              ),
+              { invalidPage: true },
+            );
+        const rendered = [];
+        for (const number of pageNumbers) {
+          await yieldToHost();
+          signal?.throwIfAborted();
+          try {
+            rendered.push({
+              page: number,
+              image: await this.#renderPage(document, number, createCanvas),
+            });
+          } catch (error) {
+            if (signal?.aborted) throw signal.reason;
+            rendered.push({
+              page: number,
+              error:
+                error instanceof AttachmentError
+                  ? error
+                  : unreadable(
+                      "invalid_pdf",
+                      "The PDF page could not be rendered",
+                      { format: "pdf", page: number },
+                    ),
+            });
+          }
+        }
+        return rendered;
+      },
+      signal,
+    );
+  }
+
+  // PNG keeps text sharp; a page too large as PNG, such as a photo, is sent
+  // as JPEG instead.
+  async #renderPage(document, number, createCanvas) {
+    const page = await document.getPage(number);
+    const original = page.getViewport({ scale: 1 });
+    const scale = Math.min(
+      1.5,
+      2000 / original.width,
+      2000 / original.height,
+      Math.sqrt(4000000 / (original.width * original.height)),
+    );
+    if (!Number.isFinite(scale) || scale <= 0)
+      throw unreadable("invalid_pdf", "The PDF page has invalid dimensions", {
+        format: "pdf",
+        page: number,
+      });
+    const viewport = page.getViewport({ scale });
+    const canvas = createCanvas(
+      Math.ceil(viewport.width),
+      Math.ceil(viewport.height),
+    );
+    await page.render({ canvasContext: canvas.getContext("2d"), viewport })
+      .promise;
+    page.cleanup();
+    for (const [mimeType, quality] of [["image/png"], ["image/jpeg", 85]]) {
+      const image = canvas.toBuffer(mimeType, quality);
+      if (image.length <= this.maxRenderedPage)
+        return { type: "image", data: image.toString("base64"), mimeType };
+    }
+    throw tooLarge("A rendered PDF page exceeds the image size limit", {
+      format: "pdf",
+      limit: "rendered_page",
+      maxBytes: this.maxRenderedPage,
+      page: number,
     });
   }
 }
 
 // One selected attachment as prompt text, native images and its outcome.
-async function prepareOne(store, id, { vision, room, imageLimit, scrub }) {
+async function prepareOne(
+  store,
+  id,
+  { vision, room, imageLimit, scrub, signal },
+) {
   const attachment = store.attachment(id);
   const header = `\n\n[User attachment: ${JSON.stringify(scrub(attachment.name))}; id=${id}`;
   const format = store.supportedFormat(id);
   if (format === "image") {
-    const image = await store.image(id);
+    const image = await store.image(id, undefined, { signal });
     const details = { format, mimeType: image.mimeType };
     if (!vision)
       throw visionRequired(
@@ -548,7 +629,7 @@ async function prepareOne(store, id, { vision, room, imageLimit, scrub }) {
       details,
     };
   }
-  const result = await store.read(id);
+  const result = await store.read(id, 0, INLINE_TEXT, { signal });
   const details = {
     format,
     characters: result.characters,
@@ -571,15 +652,26 @@ async function prepareOne(store, id, { vision, room, imageLimit, scrub }) {
     prompt += `\n[Extraction warning: ${scrub(result.warning)}]`;
   const visualPages = format === "pdf" ? result.pagesWithoutText : [];
   const attached = [];
-  if (visualPages.length) {
-    if (!vision)
-      throw visionRequired(
-        `PDF pages ${visualPages.join(", ")} have no extractable text and require a vision model; choose a vision model to read the complete document`,
-        { format, pageCount: result.pageCount, pagesWithoutText: visualPages },
-      );
-    const shown = visualPages.slice(0, Math.min(INLINE_PDF_PAGES, room));
-    for (const page of shown) attached.push(await store.image(id, page));
-    const remaining = visualPages.slice(shown.length);
+  // Without image input a PDF that has some text is still read, as partial:
+  // the extraction warning names the pages that were not read.
+  if (visualPages.length && !vision && result.textCoverage === "none")
+    throw visionRequired(
+      "This PDF has no extractable text; choose a vision model to read its pages",
+      { format, pageCount: result.pageCount, pagesWithoutText: visualPages },
+    );
+  if (visualPages.length && vision) {
+    // A page that fails to render stays for read_attachment with page.
+    const wanted = visualPages.slice(0, Math.min(INLINE_PDF_PAGES, room));
+    const rendered = wanted.length
+      ? await store.renderPages(id, wanted, { signal })
+      : [];
+    const shown = [];
+    for (const { page, image } of rendered)
+      if (image) {
+        shown.push(page);
+        attached.push(image);
+      }
+    const remaining = visualPages.filter((page) => !shown.includes(page));
     details.pagesAttachedAsImages = shown;
     prompt += `\n[${shown.length ? `PDF pages ${shown.join(", ")} are attached as images. ` : ""}${
       remaining.length
@@ -587,9 +679,7 @@ async function prepareOne(store, id, { vision, room, imageLimit, scrub }) {
         : "All pages without extractable text are included as images."
     }]`;
   }
-  const complete =
-    !result.truncated &&
-    (details.pagesAttachedAsImages?.length ?? 0) === visualPages.length;
+  const complete = !result.truncated && attached.length === visualPages.length;
   return {
     prompt,
     attached,
@@ -600,8 +690,9 @@ async function prepareOne(store, id, { vision, room, imageLimit, scrub }) {
 
 /**
  * Reads the attachments the user selected for this turn. Each gets one
- * outcome; the first outcome that is not ready or partial is returned as
- * `blocked` so the caller can stop before any model request.
+ * outcome, passed to onOutcome as soon as it is known; the first outcome that
+ * is not ready or partial is returned as `blocked` so the caller can stop
+ * before any model request. An abort rejects with the signal's reason.
  */
 export async function prepareAttachments(
   store,
@@ -611,6 +702,7 @@ export async function prepareAttachments(
     imageLimit = MAX_MESSAGE_IMAGES,
     scrub = (value) => value,
     signal,
+    onOutcome = () => {},
   } = {},
 ) {
   const outcomes = [];
@@ -625,6 +717,7 @@ export async function prepareAttachments(
         room: imageLimit - images.length,
         imageLimit,
         scrub,
+        signal,
       });
       text += prepared.prompt;
       images.push(...prepared.attached);
@@ -636,6 +729,7 @@ export async function prepareAttachments(
         details: prepared.details,
       });
     } catch (error) {
+      if (signal?.aborted) throw signal.reason;
       if (!(error instanceof AttachmentError)) throw error;
       outcomes.push({
         id,
@@ -645,6 +739,7 @@ export async function prepareAttachments(
       });
       blocked ??= error;
     }
+    onOutcome(outcomes.at(-1));
   }
   return { text, images, outcomes, blocked };
 }
@@ -684,7 +779,7 @@ export function readAttachmentTool(runtime, context, { vision }) {
     "read_attachment",
     description,
     parameters,
-    async ({ id, offset, length, page }) => {
+    async ({ id, offset, length, page }, signal) => {
       const format = store.supportedFormat(id);
       if (page !== undefined || format === "image") {
         if (!vision)
@@ -695,11 +790,11 @@ export function readAttachmentTool(runtime, context, { vision }) {
         if (page !== undefined && format !== "pdf")
           throw new Error("page applies only to PDF attachments");
         return {
-          content: [await store.image(id, page)],
+          content: [await store.image(id, page, { signal })],
           details: { id, ...(page === undefined ? {} : { page }) },
         };
       }
-      return await store.read(id, offset, length);
+      return await store.read(id, offset, length, { signal });
     },
   );
   return { ...tool, promptGuidelines: attachmentGuidelines(vision) };

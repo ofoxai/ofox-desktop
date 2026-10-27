@@ -1,3 +1,5 @@
+import { deflateSync } from "node:zlib";
+
 /** Serializes numbered PDF objects (1 is the catalog) with a valid xref. */
 export function pdfDocument(objects) {
   let output = "%PDF-1.4\n";
@@ -69,4 +71,37 @@ export function chinesePdf(text) {
     "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> /FontDescriptor 7 0 R >>",
     "<< /Type /FontDescriptor /FontName /STSong-Light /Flags 6 /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>",
   ]);
+}
+
+/**
+ * One page filled by a single RGB image (width x height pixels, 3 bytes
+ * each), Flate-compressed and hex-encoded so the file stays ASCII.
+ */
+export function imagePdf(
+  width,
+  height,
+  pixels,
+  pageWidth = 300,
+  pageHeight = 200,
+) {
+  const data = `${deflateSync(pixels).toString("hex")}>`;
+  const content = `q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im1 Do Q`;
+  return pdfDocument([
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>`,
+    `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    `<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter [/ASCIIHexDecode /FlateDecode] /Length ${data.length} >>\nstream\n${data}\nendstream`,
+  ]);
+}
+
+/** Deterministic noise pixels, which compress poorly as PNG. */
+export function noisePixels(width, height) {
+  const pixels = Buffer.alloc(width * height * 3);
+  let state = 0x2545f491;
+  for (let index = 0; index < pixels.length; index++) {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    pixels[index] = state >>> 24;
+  }
+  return pixels;
 }
