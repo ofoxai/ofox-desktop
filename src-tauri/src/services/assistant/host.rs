@@ -759,9 +759,10 @@ impl AssistantHost {
     }
 
     /// The regular sign-in finished: reopen admission, unless a logout is
-    /// still revoking keys or the app is shutting down.
+    /// still revoking keys or the app is shutting down. The authority stays
+    /// as it is: the `ofox-auth-restored` event of this sign-in already
+    /// cancelled runs, and the renderer may have read the authority since.
     pub fn sign_in_completed(&self) {
-        self.cancel_all();
         let _registration = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         let mut admission = self
             .admission
@@ -1596,6 +1597,35 @@ mod tests {
             "assistant_shutting_down",
             "a late sign-in never reopens shutdown"
         );
+    }
+
+    #[tokio::test]
+    async fn a_read_between_the_restored_event_and_the_end_of_sign_in_stays_current() {
+        let (_config, host) = fixture();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let receipt = host.begin_logout();
+        host.finish_logout(receipt);
+        // The device flow emits `ofox-auth-restored` (its listener cancels
+        // runs) and the renderer reads the authority before
+        // `ofox_poll_for_token` returns and completes the sign-in.
+        host.cancel_all();
+        let boot = host.bootstrap().await.unwrap();
+        host.sign_in_completed();
+        let update: UpdateRequest = serde_json::from_value(json!({
+            "sessionId": sid,
+            "draft": "kept",
+            "expectedOwner": boot["owner"],
+            "expectedGeneration": boot["authorityGeneration"],
+        }))
+        .unwrap();
+        assert_eq!(host.update_session(update).await.unwrap().draft, "kept");
+        assert!(host.ensure_accepting_runs().is_ok());
     }
 
     #[test]

@@ -94,24 +94,67 @@ export function useAssistant(enabled: boolean) {
     if (code === IDENTITY_CHANGED) reloadAuthority.current();
   }, []);
 
-  const persistDraft = useCallback((sessionId: string, text: string) => {
-    const generation = draftAuthority.current;
-    const task = (draftWrites.current.get(sessionId) ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(async () => {
-        if (generation !== draftAuthority.current) return;
-        if (savedDrafts.current.get(sessionId) === text) return;
-        await assistantApi.updateSession({
+  /** The backend's authority now, or null when it could not be read. */
+  const loadBootstrap = useCallback(async () => {
+    const generation = epoch.current;
+    // A sign-in that completes while this read runs moves the authority on
+    // once more: read it again instead of leaving the page disabled.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        const value = await assistantApi.bootstrap();
+        if (!mounted.current || generation !== epoch.current) return null;
+        bootstrapRef.current = value;
+        setBootstrap(value);
+        return value;
+      } catch (reason) {
+        const code = assistantErrorCode(reason);
+        if (attempt === 0 && code === IDENTITY_CHANGED) continue;
+        // Not through showError: a failed read must not ask for itself again.
+        if (mounted.current && generation === epoch.current) setError(code);
+        return null;
+      }
+    }
+  }, []);
+  reloadAuthority.current = () => void loadBootstrap();
+
+  const persistDraft = useCallback(
+    (sessionId: string, text: string) => {
+      const generation = draftAuthority.current;
+      const write = () =>
+        assistantApi.updateSession({
           sessionId,
           draft: text,
           ...expectedIdentity(bootstrapRef.current),
         });
-        if (generation === draftAuthority.current)
-          savedDrafts.current.set(sessionId, text);
-      });
-    draftWrites.current.set(sessionId, task);
-    return task;
-  }, []);
+      const task = (draftWrites.current.get(sessionId) ?? Promise.resolve())
+        .catch(() => undefined)
+        .then(async () => {
+          if (generation !== draftAuthority.current) return;
+          if (savedDrafts.current.get(sessionId) === text) return;
+          try {
+            await write();
+          } catch (reason) {
+            if (assistantErrorCode(reason) !== IDENTITY_CHANGED) throw reason;
+            // The authority moved on (a sign-in or region change completed).
+            // Saving a draft is safe to repeat once, for the same account.
+            const owner = bootstrapRef.current?.owner;
+            const current = await loadBootstrap();
+            if (
+              !current ||
+              current.owner !== owner ||
+              generation !== draftAuthority.current
+            )
+              throw reason;
+            await write();
+          }
+          if (generation === draftAuthority.current)
+            savedDrafts.current.set(sessionId, text);
+        });
+      draftWrites.current.set(sessionId, task);
+      return task;
+    },
+    [loadBootstrap],
+  );
 
   useEffect(
     () => () => {
@@ -119,22 +162,6 @@ export function useAssistant(enabled: boolean) {
     },
     [],
   );
-
-  const loadBootstrap = useCallback(async () => {
-    const generation = epoch.current;
-    try {
-      const value = await assistantApi.bootstrap();
-      if (mounted.current && generation === epoch.current) {
-        bootstrapRef.current = value;
-        setBootstrap(value);
-      }
-    } catch (reason) {
-      // Not through showError: a failed read must not ask for itself again.
-      if (mounted.current && generation === epoch.current)
-        setError(assistantErrorCode(reason));
-    }
-  }, []);
-  reloadAuthority.current = () => void loadBootstrap();
 
   /** `generation`: the identity generation the caller acts for. */
   const refreshSessions = useCallback(

@@ -1544,6 +1544,52 @@ describe("sign-in changes", () => {
     );
   });
 
+  it("reads the authority once more when sign-in completes during the first read", async () => {
+    // ofox-auth-restored arrives before the sign-in has finished: the first
+    // read can be refused as the backend moves its authority on.
+    mocks.bootstrap
+      .mockRejectedValueOnce("assistant_identity_changed")
+      .mockResolvedValue({ ...capabilities, authorityGeneration: 2 });
+    await openConversation();
+    expect(mocks.bootstrap).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("saves a refused draft again under the new authority without an error", async () => {
+    mocks.bootstrap
+      .mockResolvedValueOnce(capabilities)
+      .mockResolvedValue({ ...capabilities, authorityGeneration: 2 });
+    mocks.updateSession.mockRejectedValueOnce("assistant_identity_changed");
+    await openConversation();
+    await userEvent.type(composer(), "Kept draft");
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          draft: "Kept draft",
+          expectedGeneration: 2,
+        }),
+      ),
+    );
+    expect(current.session.draft).toBe("Kept draft");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("never sends a message again by itself after the authority moved on", async () => {
+    mocks.bootstrap
+      .mockResolvedValueOnce(capabilities)
+      .mockResolvedValue({ ...capabilities, authorityGeneration: 2 });
+    mocks.send.mockRejectedValueOnce("assistant_identity_changed");
+    await openConversation();
+    await userEvent.type(composer(), "Paid question");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The account or region changed. Please try again.",
+    );
+    await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalledTimes(2));
+    expect(mocks.send).toHaveBeenCalledOnce();
+    expect(composer()).toHaveValue("Paid question");
+  });
+
   it("drops the conversation and draft when sign-in expires, and reloads when it is restored", async () => {
     await openConversation();
     await userEvent.type(composer(), "Private draft");
