@@ -306,9 +306,10 @@ own stderr (already redacted) is forwarded to the sidecar's stderr.
 Run parameters:
 
 - `webSearch` (default off): registers both tools and their prompt guidelines
-  (search only for current or outside information, one paid search per call,
-  cite the sources used as Markdown links). Compaction runs register them too
-  but never call them.
+  (search only for current or outside information; search once with one
+  precise query and again only if the results are insufficient, at most 3
+  times; prefer the search summary to reading pages; cite the sources used as
+  Markdown links). Compaction runs register them too but never call them.
 - `allowedWebUrls` (default none): the HTTPS pages `web_fetch` may read,
   usually the URLs in the user's messages and the sources of earlier answers.
   At most 500 strings of at most 2048 characters; anything else rejects the
@@ -334,8 +335,12 @@ server's (see the search-mcp README) and the runtime's own:
 `search_unavailable` (the server could not start, or stopped; nothing was
 sent; a later call starts it again), `search_rejected`/`fetch_rejected` (the
 server rejected the arguments), `search_failed` without `status` also when the
-server answered with a JSON-RPC error (it never ran the search), and
-`fetch_not_allowed` (also: the URL is not allowed in this run).
+server answered with a JSON-RPC error (it never ran the search),
+`fetch_not_allowed` (also: the URL is not allowed in this run), and the
+run's budget: `search_limit_reached` (the run already sent 3 searches to the
+server) and `fetch_limit_reached` (3 `web_fetch` calls of the run already
+failed, refusals included). Both are ordinary failures without a request:
+they tell the model to answer with what it has, and the run goes on.
 Source URLs are passed on as the server returns them; `inputTokens` and
 `outputTokens` are `null` when the gateway did not report them.
 
@@ -343,8 +348,10 @@ Billing: every `web_search` success is `usage.searchCalls` paid searches at
 the web_search price of `usage.model`, plus its tokens. Nothing is retried
 automatically. The same query again in one run (case and spacing ignored)
 after a success, or while it runs, is answered from that result with
-`deduplicated: true` and zero usage; after a failure the model may try it
-again. A failure other than `search_outcome_unknown` cost nothing.
+`deduplicated: true` and zero usage, also past the limit; after a failure the
+model may try it again. A run sends at most 3 searches to the server, failed
+ones included; repeats answered from an earlier result do not count. A
+failure other than `search_outcome_unknown` cost nothing.
 
 Unknown outcome: `search_outcome_unknown` comes from the server, or from the
 runtime when the server did not answer within 70 s, answered malformed, the

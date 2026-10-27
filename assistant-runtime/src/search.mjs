@@ -18,15 +18,22 @@ const FETCH_TIMEOUT_MS = 30_000;
 const START_TIMEOUT_MS = 10_000;
 const MAX_ALLOWED_URLS = 500;
 const MAX_URL_CHARS = 2048;
+// Per run: searches sent to the server (a repeat answered from an earlier
+// result is not one), and failed page reads. Beyond them the tools refuse
+// without a request, so a model that keeps searching or retrying stops.
+const MAX_SEARCHES = 3;
+const MAX_FETCH_FAILURES = 3;
 // What Node itself may need on Windows and macOS; nothing else is inherited.
 const INHERITED_ENV = ["SystemRoot", "TEMP", "TMP", "PATH"];
 
 const SEARCH_GUIDELINES = [
-  "web_search searches the web through Ofox and returns a short summary with numbered source links. Each call is one paid search: search only when the answer needs current or outside information, use one focused query and do not repeat a query.",
+  "web_search searches the web through Ofox and returns a short summary with numbered source links. Each call is a paid search: search only when the answer needs current or outside information.",
+  `Search once with one precise query. Search again only if the results are insufficient, with a different query, and make at most ${MAX_SEARCHES} searches per turn.`,
   "When an answer uses search or page results, cite the sources you relied on as Markdown links to their URLs.",
 ];
 const FETCH_GUIDELINES = [
   "web_fetch reads the text of one public HTTPS page that the user linked or that a web search in this turn returned; other pages are refused.",
+  "Prefer the search summary: read a page only when the summary lacks what the answer needs, and do not retry a page that failed.",
 ];
 
 /**
@@ -86,6 +93,17 @@ function toolFailure(code, message, { status, outcomeUnknown = false } = {}) {
     ...(outcomeUnknown ? { outcomeUnknown: true } : {}),
   });
 }
+
+const searchLimit = () =>
+  toolFailure(
+    "search_limit_reached",
+    `This turn already made ${MAX_SEARCHES} web searches, the most allowed. Do not search again: answer with the information you already have.`,
+  );
+const fetchLimit = () =>
+  toolFailure(
+    "fetch_limit_reached",
+    `${MAX_FETCH_FAILURES} page reads already failed in this turn. Do not read more pages: answer with the information you already have.`,
+  );
 
 const unavailable = (reason) =>
   toolFailure(
@@ -330,18 +348,23 @@ const searchKey = (query) => query.trim().replace(/\s+/g, " ").toLowerCase();
  */
 export function webTools(runtime, context, { searchTimeoutMs }) {
   const searches = new Map();
+  let searchCount = 0;
+  let fetchFailures = 0;
   const runSignal = (signal) =>
     AbortSignal.any([context.abort.signal, ...(signal ? [signal] : [])]);
   const search = runtime.wrapTool(
     context,
     "web_search",
-    "Search the web through Ofox for current or outside information. Returns a short summary and numbered source links. Each call is one paid search.",
+    "Search the web through Ofox for current or outside information. Returns a short summary and numbered source links. Each call is a paid search.",
     Type.Object({
       query: Type.String({ minLength: 1, maxLength: 2000, pattern: "\\S" }),
     }),
     async ({ query }, signal) => {
       const key = searchKey(query);
       if (searches.has(key)) return repeatedSearch(await searches.get(key));
+      // Failed searches count too: a model retrying them stops as well.
+      if (searchCount >= MAX_SEARCHES) throw searchLimit();
+      searchCount++;
       const pending = context.search
         .call(
           "web_search",
@@ -370,17 +393,24 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
       url: Type.String({ minLength: 1, maxLength: MAX_URL_CHARS }),
     }),
     async ({ url }, signal) => {
+      if (fetchFailures >= MAX_FETCH_FAILURES) throw fetchLimit();
       const page = webUrlKey(url);
-      if (!page || !context.webUrls.has(page))
-        throw toolFailure(
-          "fetch_not_allowed",
-          "Only pages the user linked or a web search in this turn returned can be read",
+      let result;
+      try {
+        if (!page || !context.webUrls.has(page))
+          throw toolFailure(
+            "fetch_not_allowed",
+            "Only pages the user linked or a web search in this turn returned can be read",
+          );
+        result = await context.search.call(
+          "web_fetch",
+          { url },
+          { signal: runSignal(signal), timeoutMs: FETCH_TIMEOUT_MS },
         );
-      const result = await context.search.call(
-        "web_fetch",
-        { url },
-        { signal: runSignal(signal), timeoutMs: FETCH_TIMEOUT_MS },
-      );
+      } catch (error) {
+        fetchFailures++;
+        throw error;
+      }
       const data = result.structuredContent ?? {};
       return {
         content: textContent(result),

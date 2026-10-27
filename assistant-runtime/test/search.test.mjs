@@ -187,6 +187,10 @@ test("web tools exist only when the run enables web search, and start nothing un
   assert.match(search, /web_search searches the web/);
   assert.match(search, /web_fetch reads/);
   assert.match(search, /cite the sources/i);
+  assert.match(search, /Search once with one precise query/);
+  assert.match(search, /only if the results are insufficient/);
+  assert.match(search, /at most 3 searches/);
+  assert.match(search, /Prefer the search summary/);
 });
 
 test("a search reaches the model, its sources and usage reach the host, and the server stops with the run", async (t) => {
@@ -317,7 +321,6 @@ test("search and fetch failures reach the model as errors and the run goes on", 
     () =>
       callTools(
         ["web_search", { query: "rate limited" }],
-        ["web_search", { query: "rejected arguments" }],
         ["web_fetch", { url: "https://example.com/missing" }],
         ["web_search", { query: "protocol error" }],
         ["web_search", { query: "rate limited" }],
@@ -332,14 +335,13 @@ test("search and fetch failures reach the model as errors and the run goes on", 
     ends.map(({ success, details }) => ({ success, details })),
     [
       { success: false, details: { code: "search_failed", status: 429 } },
-      { success: false, details: { code: "search_rejected" } },
       { success: false, details: { code: "fetch_failed", status: 404 } },
       { success: false, details: { code: "search_failed" } },
       { success: false, details: { code: "search_failed", status: 429 } },
     ],
   );
   // A JSON-RPC error answer means the server never ran the search.
-  assert.match(ends[3].message, /no search was made/);
+  assert.match(ends[2].message, /no search was made/);
   // Only successes are reused: a failed query may be tried again.
   assert.equal(
     calls(await fixture.log()).filter(
@@ -351,16 +353,14 @@ test("search and fetch failures reach the model as errors and the run goes on", 
     ends[0].message,
     /^search_failed: The web search was rate-limited/,
   );
-  assert.match(ends[1].message, /^search_rejected: .*Input validation error/);
-  assert.match(ends[2].message, /^fetch_failed: Web page returned HTTP 404/);
+  assert.match(ends[1].message, /^fetch_failed: Web page returned HTTP 404/);
   const results = toolResults(model.requests[1]);
-  assert.equal(results.length, 5);
+  assert.equal(results.length, 4);
   assert.match(JSON.stringify(results[0].content), /rate-limited/);
   const tools = result.entries.filter((entry) => entry.role === "tool");
   assert.deepEqual(
     tools.map((entry) => [entry.toolName, entry.isError, entry.usageCoverage]),
     [
-      ["web_search", true, "complete"],
       ["web_search", true, "complete"],
       ["web_fetch", true, undefined],
       ["web_search", true, "complete"],
@@ -437,6 +437,107 @@ test("a repeated query in one run is answered once, without a second charge", as
   assert.deepEqual(ends[1].details.sources, ends[0].details.sources);
   const results = toolResults(model.requests[1]);
   assert.match(JSON.stringify(results[1].content), /already searched/);
+});
+
+test("a run makes at most 3 searches: repeats are free, failures count, and a fourth is refused unsent", async (t) => {
+  const fixture = await sandbox(t);
+  const model = scriptedModel(
+    () =>
+      callTools(
+        ["web_search", { query: "rejected arguments" }],
+        ["web_search", { query: "Tauri release" }],
+        ["web_search", { query: "  tauri   RELEASE " }],
+        ["web_search", { query: "Pi SDK" }],
+        ["web_search", { query: "Node 22" }],
+      ),
+    () => callTools(["web_search", { query: "Pi SDK" }]),
+    () => reply("Tauri 2 is out."),
+  );
+  const { runtime, events } = runtimeFor(t, fixture, model);
+  const result = await runtime.run(fixture.params);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    calls(await fixture.log()).map(([, args]) => args.query),
+    ["rejected arguments", "Tauri release", "Pi SDK"],
+  );
+  const ends = toolEvents(events).filter((event) => event.type === "tool_end");
+  assert.deepEqual(
+    ends.map(({ success, details }) => [success, details.code ?? null]),
+    [
+      [false, "search_rejected"],
+      [true, null],
+      [true, null],
+      [true, null],
+      [false, "search_limit_reached"],
+      [true, null],
+    ],
+  );
+  assert.match(ends[0].message, /^search_rejected: .*Input validation error/);
+  // The model reads why and what to do instead; nothing was billed.
+  assert.match(
+    ends[4].message,
+    /^search_limit_reached: .*3 web searches.*answer with the information you already have/,
+  );
+  assert.deepEqual(ends[4].details, { code: "search_limit_reached" });
+  // A repeat after the limit is still answered from the earlier result.
+  assert.equal(ends[5].details.deduplicated, true);
+  const [limited] = toolResults(model.requests[1]).slice(4);
+  assert.match(JSON.stringify(limited.content), /search_limit_reached/);
+  const entry = result.entries.filter((item) => item.role === "tool")[4];
+  assert.equal(entry.isError, true);
+  assert.equal(entry.usageCoverage, "complete");
+});
+
+test("after 3 failed page reads in a run, web_fetch refuses every page unsent", async (t) => {
+  const fixture = await sandbox(t, {
+    allowedWebUrls: [
+      "https://example.com/missing-1",
+      "https://example.com/missing-2",
+      "https://example.com/guide",
+    ],
+  });
+  const model = scriptedModel(
+    () =>
+      callTools(
+        ["web_fetch", { url: "https://example.com/missing-1" }],
+        ["web_fetch", { url: "https://example.com/guide" }],
+        ["web_fetch", { url: "https://elsewhere.example/" }],
+        ["web_fetch", { url: "https://example.com/missing-2" }],
+        ["web_fetch", { url: "https://example.com/guide" }],
+      ),
+    () => callTools(["web_search", { query: "Pi SDK" }]),
+    () => reply("Read what I could."),
+  );
+  const { runtime, events } = runtimeFor(t, fixture, model);
+  assert.equal((await runtime.run(fixture.params)).status, "completed");
+  assert.deepEqual(
+    calls(await fixture.log()).map(
+      ([name, args]) => `${name} ${args.url ?? args.query}`,
+    ),
+    [
+      "web_fetch https://example.com/missing-1",
+      "web_fetch https://example.com/guide",
+      "web_fetch https://example.com/missing-2",
+      "web_search Pi SDK",
+    ],
+  );
+  const ends = toolEvents(events).filter((event) => event.type === "tool_end");
+  assert.deepEqual(
+    ends.map(({ success, details }) => [success, details.code ?? null]),
+    [
+      [false, "fetch_failed"],
+      [true, null],
+      [false, "fetch_not_allowed"],
+      [false, "fetch_failed"],
+      [false, "fetch_limit_reached"],
+      [true, null],
+    ],
+  );
+  assert.match(
+    ends[4].message,
+    /^fetch_limit_reached: .*3 page reads.*answer with the information you already have/,
+  );
+  assert.deepEqual(ends[4].details, { code: "fetch_limit_reached" });
 });
 
 test("web_fetch reads only pages the host allows or this run's searches returned", async (t) => {
