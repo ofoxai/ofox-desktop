@@ -1,10 +1,16 @@
 import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
+import {
+  AttachmentStore,
+  MAX_MESSAGE_IMAGES,
+  prepareAttachments,
+  readAttachmentTool,
+} from "./attachments.mjs";
 import { errorMessage, modelForOfox, redact } from "./security.mjs";
 
 // Side-effect-free tools that may still run after another operation's outcome
-// became unknown. The chat-only runtime registers no tools yet.
-const READ_TOOLS = new Set();
+// became unknown.
+const READ_TOOLS = new Set(["read_attachment"]);
 const MAX_TOOL_CALLS = 20;
 
 function contentText(content) {
@@ -195,8 +201,8 @@ function projection(manager, secrets = []) {
   };
 }
 
-// Describe only what this run can do. Chat registers no tools; a later tool
-// enables its capability by carrying its own Pi-style promptGuidelines.
+// Describe only what this run can do. Without tools nothing is claimed; each
+// tool enables its capability by carrying its own Pi-style promptGuidelines.
 function systemPrompt(tools) {
   const capabilities = tools.length
     ? [
@@ -271,10 +277,17 @@ export class AssistantRuntime {
     this.secrets.clear();
   }
 
-  // Model tools for this run. Chat has none yet; later tools are built with
-  // wrapTool so they share the call budget and the unknown-outcome gate.
-  tools(_context, _model) {
-    return [];
+  // Model tools for this run, built with wrapTool so they share the call
+  // budget and the unknown-outcome gate. Attachments are readable only when
+  // the conversation has some.
+  tools(context, model) {
+    return context.attachments.size
+      ? [
+          readAttachmentTool(this, context, {
+            vision: model.input.includes("image"),
+          }),
+        ]
+      : [];
   }
 
   hostTool(context, name, args, signal, toolCallId) {
@@ -401,10 +414,22 @@ export class AssistantRuntime {
       baseUrl: params.baseUrl,
       allowLocalGateway: params.allowLocalGateway,
     });
+    const attachments = new AttachmentStore(
+      params.attachmentRoot,
+      params.attachments ?? [],
+    );
+    const selected = params.selectedAttachmentIds ?? [];
+    if (
+      !Array.isArray(selected) ||
+      selected.length > 200 ||
+      selected.some((id) => typeof id !== "string")
+    )
+      throw new Error("Invalid attachment selection");
     const apiKey = params.apiKey;
     this.secrets.add(apiKey);
     const context = {
       params,
+      attachments,
       abort: new AbortController(),
       callCount: 0,
       calls: new Map(),
@@ -451,14 +476,28 @@ export class AssistantRuntime {
           cacheWriteKnown: knownPrice(params.model.cost?.cacheWrite),
         });
       }
+      // Regenerate rebuilds the user's original input and attachment
+      // selection when the host supplies originalPrompt; otherwise it replays
+      // the native user turn, including its images, as stored.
+      const rebuild =
+        Boolean(params.regenerateEntryId) &&
+        typeof params.originalPrompt === "string";
+      const replay = Boolean(params.regenerateEntryId) && !rebuild;
+      const nativeImages =
+        replay && Array.isArray(branchUser.content)
+          ? branchUser.content.filter((part) => part.type === "image")
+          : [];
       context.rejectedInput = {
         manager,
         original: redact(
-          params.regenerateEntryId
-            ? contentText(branchUser.content)
-            : (params.prompt ?? ""),
+          rebuild
+            ? params.originalPrompt
+            : replay
+              ? contentText(branchUser.content)
+              : (params.prompt ?? ""),
           [apiKey],
         ),
+        images: nativeImages,
       };
       const settings = SettingsManager.inMemory({
         retry: {
@@ -737,23 +776,29 @@ export class AssistantRuntime {
           ),
         );
       else {
-        // Regenerate resends the native user turn, including its images.
-        const prompt = redact(
-          params.regenerateEntryId
-            ? contentText(branchUser.content)
-            : (params.prompt ?? ""),
-          [apiKey],
-        );
-        const images =
-          params.regenerateEntryId && Array.isArray(branchUser.content)
-            ? branchUser.content.filter((part) => part.type === "image")
-            : [];
+        let prompt = context.rejectedInput.original;
+        const images = [...nativeImages];
         if (images.length && !model.input.includes("image"))
           throw new Error(
             "assistant_vision_model_required: This model cannot read images; choose a vision model",
           );
-        if (images.length > 10)
-          throw new Error("A message supports at most 10 images");
+        if (images.length > MAX_MESSAGE_IMAGES)
+          throw new Error(
+            `A message supports at most ${MAX_MESSAGE_IMAGES} images`,
+          );
+        if (!replay && selected.length) {
+          const prepared = await prepareAttachments(attachments, selected, {
+            vision: model.input.includes("image"),
+            imageLimit: MAX_MESSAGE_IMAGES,
+            scrub: (value) => redact(value, [apiKey]),
+            signal: context.abort.signal,
+          });
+          for (const outcome of prepared.outcomes)
+            this.notify(context, "attachment", outcome);
+          if (prepared.blocked) throw prepared.blocked;
+          prompt += prepared.text;
+          images.push(...prepared.images);
+        }
         context.abort.signal.throwIfAborted();
         context.turnStarted = true;
         await session.prompt(prompt, { images, expandPromptTemplates: false });
@@ -780,10 +825,11 @@ export class AssistantRuntime {
       const message = errorMessage(error, [apiKey]);
       if (!compactOnly && context.rejectedInput && !context.turnStarted) {
         // Preserve failed input in native history before any paid request.
-        const { manager, original } = context.rejectedInput;
+        // Native images stay with the failed turn so a retry keeps them.
+        const { manager, original, images } = context.rejectedInput;
         manager.appendMessage({
           role: "user",
-          content: [{ type: "text", text: original }],
+          content: [{ type: "text", text: original }, ...images],
           timestamp: Date.now(),
         });
         manager.appendMessage({
