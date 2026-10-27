@@ -33,6 +33,8 @@ function view(
         role: "assistant",
         content: "",
         createdAt: 1,
+        nativeEntryId: "entry",
+        runId: "run",
         ...message,
       }}
       disabled={false}
@@ -129,6 +131,18 @@ describe("assistant transcript rendering", () => {
       screen.queryByRole("button", { name: "Edit and resend" }),
     ).not.toBeInTheDocument();
   });
+
+  it.each(["user", "assistant"] as const)(
+    "offers no edit or regenerate on a %s message the model never received",
+    (role) => {
+      // The backend can branch only from a turn in the model's history.
+      render(view({ role, content: "Kept", nativeEntryId: null }));
+      expect(screen.getByRole("button", { name: "Copy" })).toBeVisible();
+      expect(
+        screen.queryByRole("button", { name: /Edit and resend|Regenerate/ }),
+      ).toBeNull();
+    },
+  );
 
   it("marks a stopped or failed reply", () => {
     const rendered = render(view({ content: "Part", status: "stopped" }));

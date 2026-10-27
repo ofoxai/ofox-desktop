@@ -324,6 +324,9 @@ function AssistantWorkspace() {
             className="border-b border-line px-4 py-2 text-note text-ink-muted"
           >
             {t("assistant.modelUnavailable")}
+            <span className="block">
+              {t(assistantErrorKey(bootstrap.modelUnavailableReason))}
+            </span>
           </p>
         )}
         {bootstrap && !bootstrap.runtime.available && (

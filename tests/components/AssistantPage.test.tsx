@@ -523,6 +523,21 @@ describe("errors", () => {
     );
   });
 
+  it("says why the model list is unavailable, in words", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [],
+      defaultModelId: null,
+      modelUnavailableReason: "assistant_catalog_unavailable",
+    });
+    render(page());
+    const status = await screen.findByText(/Models are unavailable/);
+    expect(status).toHaveTextContent(
+      "The model list couldn't be loaded. Check your connection and try again.",
+    );
+    expect(document.body).not.toHaveTextContent("assistant_catalog");
+  });
+
   it("explains an unavailable runtime and does not simulate a working assistant", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
@@ -736,6 +751,8 @@ describe("running a reply", () => {
           role: "user",
           content: "Original question",
           createdAt: 1,
+          nativeEntryId: "entry-original",
+          runId: "run-original",
         },
       ],
     };
@@ -768,6 +785,8 @@ describe("running a reply", () => {
           content: "",
           createdAt: 2,
           status,
+          nativeEntryId: "entry-response",
+          runId: "run-response",
         },
       ];
       await openConversation();

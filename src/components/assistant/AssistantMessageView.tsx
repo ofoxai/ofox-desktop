@@ -27,6 +27,12 @@ export function AssistantMessageView({
   const [text, setText] = useState(message.content);
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
+  // Edit and regenerate branch from the model's own history: a turn that
+  // never reached it (it failed first) has no entry there to branch from.
+  const branchable =
+    !message.superseded &&
+    Boolean(message.nativeEntryId) &&
+    (isUser || Boolean(message.runId));
   const role = t(isUser ? "assistant.roles.user" : "assistant.roles.assistant");
   const body = (
     <article className="min-w-0 py-4" aria-label={role}>
@@ -124,7 +130,7 @@ export function AssistantMessageView({
       {!editing && !streaming && (
         <div className="mt-2 flex items-center gap-1">
           {message.content && <CopyButton text={message.content} />}
-          {isUser && !message.superseded && (
+          {isUser && branchable && (
             <Button
               variant="icon"
               aria-label={t("assistant.editMessage")}
@@ -138,7 +144,7 @@ export function AssistantMessageView({
               <Pencil className="h-3.5 w-3.5" />
             </Button>
           )}
-          {!isUser && !message.superseded && (
+          {!isUser && branchable && (
             <Button
               variant="icon"
               aria-label={t("assistant.regenerate")}
