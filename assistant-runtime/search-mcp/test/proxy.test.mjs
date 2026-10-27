@@ -1,16 +1,22 @@
 // The app's proxy. web_search reaches the Ofox gateway through it unless
 // OFOX_NO_PROXY excludes the gateway; web_fetch checks every DNS answer here
 // first, then tunnels by host name and verifies the certificate for that name.
+// Also the pinned TLS connection web_fetch makes without a proxy.
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { createServer as createTlsServer } from "node:https";
-import { connect } from "node:net";
+import { connect, isIP } from "node:net";
 import test from "node:test";
 import { bypassesProxy, proxiedFetch } from "../src/proxy.mjs";
 import { SearchError, webSearch } from "../src/search.mjs";
-import { FetchError, readWebPage, tunneledRequest } from "../src/web.mjs";
+import {
+  FetchError,
+  pinnedRequest,
+  readWebPage,
+  tunneledRequest,
+} from "../src/web.mjs";
 import { replyJson, startGateway } from "./helpers/gateway.mjs";
 
 const KEY = "sk-of-proxy-test-0123456789abcdef";
@@ -74,12 +80,17 @@ async function connectProxy(t, route) {
 /** An HTTPS site with a certificate for example.com only. */
 async function exampleSite(t, body = "<h1>Through the tunnel</h1>") {
   const requests = [];
+  const servernames = [];
   const server = createTlsServer(tls, (request, response) => {
     requests.push({ host: request.headers.host, url: request.url });
     response.writeHead(200, { "content-type": "text/html" });
     response.end(body);
   });
-  return { port: await listen(t, server), requests };
+  server.on("secureConnection", (socket) =>
+    servernames.push(socket.servername),
+  );
+  const port = await listen(t, server);
+  return { port, address: server.address().address, requests, servernames };
 }
 
 async function rejection(promise, type) {
@@ -368,4 +379,31 @@ test("a tunnelled page over 2 MiB is refused while it streams", async (t) => {
     FetchError,
   );
   assert.equal(error.code, "fetch_too_large");
+});
+
+test("a tunnelled read leaves no Host behind for the next request", async (t) => {
+  const site = await exampleSite(t);
+  const proxy = await connectProxy(t, () => site.port);
+  await readWebPage("https://example.com/first", {
+    lookup: async () => PUBLIC,
+    proxy: {
+      noProxy: "",
+      request: tunneledRequest(
+        { url: proxy.url },
+        { requestTls: { ca: tls.cert } },
+      ),
+    },
+  });
+  // undici adds the Host of a tunnelled request to the headers object it is
+  // given; a shared one would carry it to every later request.
+  const response = await pinnedRequest({ requestTls: { ca: tls.cert } })(
+    new URL(`https://example.com:${site.port}/second`),
+    { address: site.address, family: isIP(site.address) },
+    AbortSignal.timeout(5000),
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(site.requests, [
+    { host: "example.com", url: "/first" },
+    { host: `example.com:${site.port}`, url: "/second" },
+  ]);
 });

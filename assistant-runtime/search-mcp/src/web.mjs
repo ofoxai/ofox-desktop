@@ -36,11 +36,13 @@ const DOH_RECORDS = [
 ];
 const DOH_NXDOMAIN = 3;
 const FAKE_IP_DNS = "Web DNS gave only fake-IP addresses (198.18.0.0/15) and";
-const REQUEST_HEADERS = {
+// Frozen, and copied for every request: undici's ProxyAgent adds the Host of
+// a tunnelled request to the headers object it is given.
+const REQUEST_HEADERS = Object.freeze({
   Accept: "text/html,text/plain;q=0.9",
   "Accept-Encoding": "identity",
   "User-Agent": "OfoxDesktop-WebRead/1",
-};
+});
 const BLOCKED_HOSTS = new Set([
   "localhost",
   "api.ofox.ai",
@@ -138,17 +140,18 @@ function normalizedAddress(value) {
     : address;
 }
 
-async function pinnedRequest(url, pinned, signal) {
+async function directRequest(url, pinned, signal, requestTls) {
   return await new Promise((resolve, reject) => {
     const request = https.request(
       url,
       {
+        ...requestTls,
         method: "GET",
         signal,
         agent: false,
         rejectUnauthorized: true,
         maxHeaderSize: 16 * 1024,
-        headers: REQUEST_HEADERS,
+        headers: { ...REQUEST_HEADERS },
         lookup: (_hostname, options, callback) =>
           callback(
             null,
@@ -191,6 +194,16 @@ async function pinnedRequest(url, pinned, signal) {
 }
 
 /**
+ * A direct request to `pinned`, the checked address, with SNI and Host the
+ * URL's name and the certificate verified for it. `requestTls` adds TLS
+ * options (tests trust a local certificate with it).
+ */
+export function pinnedRequest({ requestTls } = {}) {
+  return (url, pinned, signal) =>
+    directRequest(url, pinned, signal, requestTls);
+}
+
+/**
  * A request through the app's proxy: a CONNECT (or SOCKS5) tunnel to the
  * host name, TLS verified for that name. The caller checked its DNS answers.
  * `requestTls` adds TLS options for the page connection (tests trust a local
@@ -210,7 +223,7 @@ export function tunneledRequest(proxy, { requestTls } = {}) {
         method: "GET",
         dispatcher,
         signal,
-        headers: REQUEST_HEADERS,
+        headers: { ...REQUEST_HEADERS },
       });
     } catch (error) {
       if (proxyRefused(error))
@@ -418,7 +431,7 @@ export async function readWebPage(
     secrets = [],
     timeoutMs = FETCH_TIMEOUT_MS,
     lookup = dnsLookup,
-    request = pinnedRequest,
+    request = pinnedRequest(),
     proxy = null,
     doh = {},
   } = {},
