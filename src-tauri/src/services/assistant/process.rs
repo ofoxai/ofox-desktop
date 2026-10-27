@@ -344,6 +344,8 @@ else if (role === 'parent') {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::path::Path;
 
     #[test]
     fn managed_commands_remove_credential_environment_entries() {
@@ -360,6 +362,43 @@ mod tests {
         assert!(!keys
             .iter()
             .any(|key| key == "ANTHROPIC_API_KEY" || key == "OFOX_ACCESS_TOKEN"));
+    }
+
+    /// A shell whose background descendant first writes `ready`, then, unless
+    /// it is killed, writes `child-survived` 0.3 s later. `wait` keeps the
+    /// parent alive; without it the parent exits and leaves the descendant.
+    #[cfg(unix)]
+    fn tree_command(home: &Path, parent_waits: bool) -> tokio::process::Command {
+        let script = if parent_waits {
+            "(touch ready; sleep 0.3; touch child-survived) & wait"
+        } else {
+            "(touch ready; sleep 0.3; touch child-survived) &"
+        };
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", script]).current_dir(home);
+        clean_environment(&mut command);
+        command
+    }
+
+    /// Handshake instead of a fixed sleep: the descendant is known to run.
+    #[cfg(unix)]
+    async fn wait_until_ready(home: &Path) {
+        let ready = home.join("ready");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !ready.exists() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "fixture never became ready"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Long enough for a surviving descendant to have written its marker.
+    #[cfg(unix)]
+    async fn assert_descendant_killed(home: &Path) {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        assert!(!home.join("child-survived").exists());
     }
 
     #[cfg(unix)]
@@ -390,34 +429,105 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
-    async fn dropping_a_managed_child_kills_its_own_descendants() {
+    async fn stop_ends_the_owned_tree_and_spares_a_same_name_process() {
         let sandbox = crate::test_sandbox::sandbox();
-        let marker = sandbox.home().join("child-survived");
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command
-            .args(["-c", "(sleep 0.3; touch child-survived) & wait"])
-            .current_dir(sandbox.home());
-        clean_environment(&mut command);
-        let child = Child::spawn(command).unwrap();
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let home = sandbox.home();
+        // Same executable, not ours: it must outlive our cleanup.
+        let mut sentinel = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .unwrap();
+        let mut child = Child::spawn(tree_command(home, true)).unwrap();
+        wait_until_ready(home).await;
+        // The host's deadline passes while the tree still runs, then it stops it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), child.child.wait())
+                .await
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), child.stop())
+            .await
+            .unwrap();
+        // Checked while the Child is still held: stop() alone ended the tree.
+        assert!(child.child.try_wait().unwrap().is_some());
+        assert_descendant_killed(home).await;
+        assert!(sentinel.try_wait().unwrap().is_none());
         drop(child);
-        tokio::time::sleep(Duration::from_millis(450)).await;
-        assert!(!marker.exists());
+        sentinel.kill().unwrap();
+        sentinel.wait().unwrap();
     }
 
     #[cfg(unix)]
     #[tokio::test]
     #[serial_test::serial]
-    async fn stop_ends_a_running_child_and_waits_for_it() {
+    async fn stop_ends_descendants_that_outlive_their_parent() {
         let sandbox = crate::test_sandbox::sandbox();
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command.args(["-c", "sleep 30"]).current_dir(sandbox.home());
-        clean_environment(&mut command);
-        let mut child = Child::spawn(command).unwrap();
+        let home = sandbox.home();
+        let mut child = Child::spawn(tree_command(home, false)).unwrap();
+        wait_until_ready(home).await;
+        let status = tokio::time::timeout(Duration::from_secs(5), child.child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success());
         tokio::time::timeout(Duration::from_secs(5), child.stop())
             .await
             .unwrap();
-        assert!(child.child.try_wait().unwrap().is_some());
+        assert_descendant_killed(home).await;
+        drop(child);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn dropping_a_managed_child_kills_its_own_descendants() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let home = sandbox.home();
+        let child = Child::spawn(tree_command(home, true)).unwrap();
+        wait_until_ready(home).await;
+        drop(child);
+        assert_descendant_killed(home).await;
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn windows_stop_ends_owned_parent_and_child_without_killing_same_name_sentinel() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let mut fixture = windows_fixture::Fixture::new(sandbox.home());
+        let mut child = Child::spawn(fixture.command()).unwrap();
+        fixture.observe_owned();
+        tokio::time::timeout(Duration::from_secs(10), child.stop())
+            .await
+            .unwrap();
+        // Checked while the Child is still held: stop() alone ended the Job's
+        // tree, and the same-name sentinel outside the Job is alive.
+        fixture.assert_owned_stopped();
+        drop(child);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial]
+    async fn windows_stop_after_a_missed_deadline_ends_the_running_tree() {
+        let sandbox = crate::test_sandbox::sandbox();
+        let mut fixture = windows_fixture::Fixture::new(sandbox.home());
+        let mut child = Child::spawn(fixture.command()).unwrap();
+        // Readiness and live native handles first, so "never started" cannot
+        // pass for "stopped".
+        fixture.observe_owned();
+        // The host's deadline passes while the tree still runs, then it stops it.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), child.child.wait())
+                .await
+                .is_err()
+        );
+        fixture.assert_owned_alive();
+        tokio::time::timeout(Duration::from_secs(10), child.stop())
+            .await
+            .unwrap();
+        fixture.assert_owned_stopped();
+        drop(child);
     }
 
     #[cfg(windows)]
