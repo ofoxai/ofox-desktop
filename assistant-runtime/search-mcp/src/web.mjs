@@ -6,6 +6,12 @@
 // answers are still checked here, but the tunnel opens by host name, so the
 // connection cannot be pinned; the certificate is verified for that name.
 //
+// Fake-IP DNS: a Clash/Surge-style TUN answers every name with an address in
+// 198.18.0.0/15 and resolves the real host itself. When every local answer is
+// such an address, the host is checked with public DNS over HTTPS instead
+// (every answer must be public), and the page is read through the local
+// fake-IP address, still pinned, by host name with the certificate verified.
+//
 // The "only URLs from the user or this conversation's search" allowlist is
 // not here: the client wrapper that exposes this tool to the model owns it.
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -14,11 +20,22 @@ import { isIP } from "node:net";
 import { ProxyAgent, request as undiciRequest } from "undici";
 import { bypassesProxy, proxyRefused } from "./proxy.mjs";
 import { scrubSecrets } from "./redact.mjs";
+import { readBounded } from "./search.mjs";
 
 export const FETCH_TIMEOUT_MS = 15_000;
 export const MAX_PAGE_BYTES = 2 * 1024 * 1024;
 export const MAX_PAGE_CHARS = 20_000;
 const MAX_REDIRECTS = 4;
+// A fixed public resolver, not an Ofox URL: Alibaba public DNS, JSON API.
+export const DOH_URL = "https://dns.alidns.com/resolve";
+export const DOH_TIMEOUT_MS = 5_000;
+const MAX_DOH_BYTES = 64 * 1024;
+const DOH_RECORDS = [
+  { name: "A", type: 1, family: 4 },
+  { name: "AAAA", type: 28, family: 6 },
+];
+const DOH_NXDOMAIN = 3;
+const FAKE_IP_DNS = "Web DNS gave only fake-IP addresses (198.18.0.0/15) and";
 const REQUEST_HEADERS = {
   Accept: "text/html,text/plain;q=0.9",
   "Accept-Encoding": "identity",
@@ -77,6 +94,13 @@ export function isPublicAddress(address) {
     );
   }
   return false;
+}
+
+/** An address of the 198.18.0.0/15 range that fake-IP DNS hands out. */
+export function isFakeIpAddress(address) {
+  if (isIP(address) !== 4) return false;
+  const [a, b] = address.split(".").map(Number);
+  return a === 198 && (b === 18 || b === 19);
 }
 
 export function validateWebUrl(value) {
@@ -244,7 +268,100 @@ export function htmlText(html) {
     .trim();
 }
 
-async function follow(start, { signal, secrets, lookup, request, proxy }) {
+// One record type's addresses from a DNS JSON answer; null when the query
+// failed or the answer is malformed. NXDOMAIN is a name without addresses.
+async function dohQuery(host, record, { fetchImpl, url, signal }) {
+  const target = new URL(url);
+  target.searchParams.set("name", host);
+  target.searchParams.set("type", record.name);
+  const response = await fetchImpl(target, {
+    headers: { Accept: "application/dns-json, application/json" },
+    redirect: "manual",
+    signal,
+  });
+  if (response.status !== 200) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  const bytes = await readBounded(response, MAX_DOH_BYTES);
+  if (bytes === null) return null;
+  let body;
+  try {
+    body = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (body?.Status === DOH_NXDOMAIN) return [];
+  if (body?.Status !== 0) return null;
+  const answers = body.Answer ?? [];
+  if (!Array.isArray(answers)) return null;
+  const addresses = [];
+  // CNAMEs and other records are skipped; every address record must be one.
+  for (const answer of answers) {
+    if (answer?.type !== record.type) continue;
+    if (typeof answer.data !== "string" || isIP(answer.data) !== record.family)
+      return null;
+    addresses.push({ address: answer.data, family: record.family });
+  }
+  return addresses;
+}
+
+/**
+ * The host's A and AAAA addresses from public DNS over HTTPS, at most
+ * `timeoutMs` and 64 KiB per answer. `fetchImpl` is the route web_search
+ * takes (the app's proxy, or a direct connection). Any failure refuses.
+ */
+export async function dohLookup(
+  host,
+  { fetchImpl = fetch, url = DOH_URL, timeoutMs = DOH_TIMEOUT_MS, signal } = {},
+) {
+  const done = new AbortController();
+  const signals = [done.signal, AbortSignal.timeout(timeoutMs)];
+  if (signal) signals.push(signal);
+  const options = { fetchImpl, url, signal: AbortSignal.any(signals) };
+  let answers;
+  try {
+    answers = await Promise.all(
+      DOH_RECORDS.map((record) => dohQuery(host, record, options)),
+    );
+  } catch {
+    answers = [null];
+  } finally {
+    // The other query, when one failed.
+    done.abort();
+  }
+  if (answers.includes(null))
+    throw notAllowed(`${FAKE_IP_DNS} the DNS-over-HTTPS check failed`);
+  return answers.flat();
+}
+
+// Every answer must be public. Only when all are fake-IP addresses does public
+// DNS decide instead; the page is still read through the local fake-IP.
+async function checkAddresses(host, addresses, { doh, signal }) {
+  if (
+    !isIP(host) &&
+    addresses.length &&
+    addresses.every((item) => isFakeIpAddress(item.address))
+  ) {
+    const resolved = await dohLookup(host, { ...doh, signal });
+    if (!resolved.length)
+      throw notAllowed(
+        `${FAKE_IP_DNS} DNS-over-HTTPS has no address for the host`,
+      );
+    if (resolved.some((item) => !isPublicAddress(item.address)))
+      throw notAllowed(
+        `${FAKE_IP_DNS} DNS-over-HTTPS contains a non-public address`,
+      );
+    return;
+  }
+  if (
+    !addresses.length ||
+    addresses.some((item) => !isPublicAddress(item.address))
+  )
+    throw notAllowed("Web DNS contains a non-public address");
+}
+
+async function follow(start, { signal, secrets, lookup, request, proxy, doh }) {
   let url = start;
   for (let redirects = 0; ; redirects++) {
     signal.throwIfAborted();
@@ -252,11 +369,7 @@ async function follow(start, { signal, secrets, lookup, request, proxy }) {
     const addresses = isIP(host)
       ? [{ address: host, family: isIP(host) }]
       : await lookup(host, { all: true, verbatim: true });
-    if (
-      !addresses.length ||
-      addresses.some((item) => !isPublicAddress(item.address))
-    )
-      throw notAllowed("Web DNS contains a non-public address");
+    await checkAddresses(host, addresses, { doh, signal });
     const send =
       proxy && !bypassesProxy(url, proxy.noProxy) ? proxy.request : request;
     const response = await send(url, addresses[0], signal);
@@ -307,6 +420,7 @@ export async function readWebPage(
     lookup = dnsLookup,
     request = pinnedRequest,
     proxy = null,
+    doh = {},
   } = {},
 ) {
   const url = validateWebUrl(value);
@@ -324,7 +438,7 @@ export async function readWebPage(
   try {
     return await Promise.race([
       aborted,
-      follow(url, { signal: combined, secrets, lookup, request, proxy }),
+      follow(url, { signal: combined, secrets, lookup, request, proxy, doh }),
     ]);
   } catch (error) {
     if (error instanceof FetchError) throw error;

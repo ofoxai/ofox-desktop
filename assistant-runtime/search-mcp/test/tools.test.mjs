@@ -227,7 +227,7 @@ test("both tools use the app's proxy only when the config names one", async (t) 
           return { summary: "S", results: [], usage: { searchCalls: 1 } };
         },
         fetchPage: async (url, options) => {
-          calls.push(options.proxy);
+          calls.push(options.proxy, options.doh);
           return { url, text: "T", truncated: false };
         },
       },
@@ -238,7 +238,9 @@ test("both tools use the app's proxy only when the config names one", async (t) 
       name: "web_fetch",
       arguments: { url: "https://example.com/" },
     });
-    const [fetchImpl, fetchProxy] = calls;
+    const [fetchImpl, fetchProxy, doh] = calls;
+    // A fake-IP host's DNS-over-HTTPS check takes the same route as a search.
+    assert.equal(doh.fetchImpl, fetchImpl);
     if (proxy === null) {
       assert.equal(fetchImpl, undefined);
       assert.equal(fetchProxy, null);

@@ -50,12 +50,14 @@ and diagnostics drop any `user:password@` part of a URL. `socks5h` means
   to the proxy, SOCKS5 failure) is `search_failed` without `status`: nothing
   was sent.
 - `web_fetch` still resolves the page's host here and requires every answer
-  to be public, then opens a CONNECT (or SOCKS5) tunnel to the host **name**
-  through the proxy and verifies the certificate for that name. The proxy
-  resolves the name itself, so the connection cannot be pinned to the
-  checked address. A host that `OFOX_NO_PROXY` matches (same rules as
-  undici's) keeps the pinned direct connection. A refused tunnel is
-  `fetch_failed`.
+  to be public (or, for fake-IP DNS, the DNS-over-HTTPS check below), then
+  opens a CONNECT (or SOCKS5) tunnel to the host **name** through the proxy
+  and verifies the certificate for that name. The proxy resolves the name
+  itself, so the connection cannot be pinned to the checked address. A host
+  that `OFOX_NO_PROXY` matches (same rules as undici's) keeps the pinned
+  direct connection. A refused tunnel is `fetch_failed`. The DNS-over-HTTPS
+  check takes the route `web_search` takes (the proxy unless `OFOX_NO_PROXY`
+  matches `dns.alidns.com`).
 
 ## Tools
 
@@ -108,6 +110,22 @@ HTML or plain text only, at most 20,000 characters of text, no cookies. The
 result is `{ url, text, truncated }`, where `url` is the final URL after
 redirects.
 
+**Fake-IP DNS.** Clash/Surge-style TUN modes ("fake-ip") answer every name
+locally with an address in `198.18.0.0/15` and resolve the real host
+themselves. When **every** local answer for a host is in that range, the
+server asks public DNS instead:
+`GET https://dns.alidns.com/resolve?name=<host>&type=A` and `type=AAAA`
+(Alibaba's DNS JSON API, a fixed infrastructure URL, not an Ofox one), 5 s
+and 64 KiB at most. The host is allowed only when both queries
+succeed, they give at least one address, and every address is public by the
+rules above; the page is then read through the local fake-IP address, still
+pinned, with SNI and `Host` set to the host name and the certificate verified
+as usual. A failed or malformed DNS-over-HTTPS answer, no address (NXDOMAIN
+included) or any non-public address is `fetch_not_allowed`. Mixed answers
+(some fake-IP, some not) and every other reserved range follow the normal
+rules; a `198.18.0.0/15` address in the URL itself is still refused. The check
+covers every redirect hop.
+
 **The allowlist is not here.** `web_fetch` reads any URL that passes the
 rules above. The runtime only lets the model fetch URLs that the host allows
 (`allowedWebUrls`: the user's links and earlier sources) or that a
@@ -146,7 +164,7 @@ cut to its limit.
 | `search_unauthorized`         | HTTP 401/403: the key was rejected.                                                                                                                                                                                                              |
 | `search_insufficient_balance` | HTTP 402, or a 4xx (never 429) with Ofox's own error shape `error.type: "insufficient_credits"` or `error.code: 402`. An upstream `insufficient_quota` is not the user's balance.                                                                |
 | `search_failed`               | Another 4xx (with `status`; 429 means rate-limited, try later), or connect()/DNS or the proxy failed before its tunnel (no `status`; nothing was sent). There is no separate rate-limit code: use `status` 429.                                  |
-| `fetch_not_allowed`           | The URL, a DNS answer or a redirect target broke the `web_fetch` rules.                                                                                                                                                                          |
+| `fetch_not_allowed`           | The URL, a DNS answer or a redirect target broke the `web_fetch` rules; for fake-IP DNS, also a failed DNS-over-HTTPS check.                                                                                                                     |
 | `fetch_too_large`             | The page body is over 2 MiB.                                                                                                                                                                                                                     |
 | `fetch_unsupported_content`   | The page is not HTML or plain text.                                                                                                                                                                                                              |
 | `fetch_failed`                | HTTP error (with `status`), network or DNS failure, timeout, or too many redirects.                                                                                                                                                              |
@@ -184,4 +202,5 @@ The tests use a local mock gateway on an ephemeral port with
 `StdioClientTransport` against a copy of the built bundle in an empty temp
 directory. The proxy tests run a local CONNECT proxy and an HTTPS server with
 a test-only certificate for `example.com` (`test/fixtures/tls/`, valid until
-2126); `web_fetch` DNS answers are injected.
+2126); `web_fetch` DNS answers are injected, and fake-IP checks use a local
+stub of the DNS JSON API.

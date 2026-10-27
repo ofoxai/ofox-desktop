@@ -86,7 +86,8 @@ function neverSent(error) {
   return false;
 }
 
-async function readBounded(response, limit) {
+/** A fetch Response body of at most `limit` bytes, else null. */
+export async function readBounded(response, limit) {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => {});

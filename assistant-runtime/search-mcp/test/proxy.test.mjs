@@ -217,6 +217,54 @@ test("web_fetch checks DNS locally, then tunnels by host name with a verified ce
   assert.deepEqual(site.requests, [{ host: "example.com", url: "/news" }]);
 });
 
+test("a fake-IP host is checked with DNS-over-HTTPS through the proxy, then tunnelled by name", async (t) => {
+  const site = await exampleSite(t);
+  const queries = [];
+  const doh = createServer((request, response) => {
+    const url = new URL(request.url, "http://localhost");
+    queries.push(
+      `${url.searchParams.get("type")} ${url.searchParams.get("name")}`,
+    );
+    const type = url.searchParams.get("type") === "A" ? 1 : 28;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        Status: 0,
+        Answer:
+          type === 1
+            ? [{ name: "example.com.", type, data: PUBLIC[0].address }]
+            : [],
+      }),
+    );
+  });
+  const dohPort = await listen(t, doh);
+  const proxy = await connectProxy(t, (target) =>
+    target === `localhost:${dohPort}`
+      ? dohPort
+      : target === "example.com:443"
+        ? site.port
+        : undefined,
+  );
+  const proxied = proxiedFetch({ url: proxy.url, noProxy: "" });
+  const page = await readWebPage("https://example.com/news", {
+    lookup: async () => [{ address: "198.18.0.90", family: 4 }],
+    doh: { fetchImpl: proxied, url: `http://localhost:${dohPort}/resolve` },
+    proxy: {
+      noProxy: "",
+      request: tunneledRequest(
+        { url: proxy.url },
+        { requestTls: { ca: tls.cert } },
+      ),
+    },
+  });
+  assert.equal(page.text, "Through the tunnel");
+  assert.deepEqual(queries.toSorted(), ["A example.com", "AAAA example.com"]);
+  const targets = proxy.tunnels.map((tunnel) => tunnel.target);
+  assert.ok(targets.includes(`localhost:${dohPort}`), String(targets));
+  assert.equal(targets.at(-1), "example.com:443");
+  assert.deepEqual(site.requests, [{ host: "example.com", url: "/news" }]);
+});
+
 test("web_fetch through the proxy never opens a tunnel to a private address", async (t) => {
   const proxy = await connectProxy(t, () => undefined);
   const error = await rejection(
