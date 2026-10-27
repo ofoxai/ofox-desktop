@@ -2148,12 +2148,13 @@ describe("conversation cost", () => {
   });
 
   it.each([
-    [2, "en", "Estimated cost ≈$0.040 incl. 2 searches"],
-    [1, "en", "Estimated cost ≈$0.040 incl. 1 search"],
-    [2, "ja", "推定コスト ≈$0.040（検索 2 回を含む）"],
-    [2, "zh", "预估成本 ≈$0.040（含 2 次搜索）"],
+    // searchCount counts billed search calls: one search can make two.
+    [2, "en", "Estimated cost ≈$0.040 incl. 2 search calls"],
+    [1, "en", "Estimated cost ≈$0.040 incl. 1 search call"],
+    [2, "ja", "推定コスト ≈$0.040（検索呼び出し 2 回を含む）"],
+    [2, "zh", "预估成本 ≈$0.040（含 2 次搜索调用）"],
   ])(
-    "says the saved cost includes %i web searches in %s",
+    "says the saved cost includes %i billed search calls in %s",
     async (searchCount, language, expected) => {
       current.usage = {
         inputTokens: 1234,
@@ -2284,11 +2285,20 @@ describe("web search", () => {
   });
 
   it.each([
-    ["en", "About $0.014–$0.028 per search, plus a little for its tokens"],
-    ["ja", "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）"],
-    ["zh", "每次搜索约 $0.014–$0.028，另加少量 Token 费用"],
+    [
+      "en",
+      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 3 searches per reply.",
+    ],
+    [
+      "ja",
+      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 3 回です。",
+    ],
+    [
+      "zh",
+      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 3 次。",
+    ],
   ])(
-    "always shows what a search may cost, one or two billed calls, in %s",
+    "always shows what a search may cost, one or two billed calls, and how many a reply makes at most, in %s",
     async (language, price) => {
       i18n.addResourceBundle("zh", "translation", zh, true, true);
       i18n.addResourceBundle("ja", "translation", ja, true, true);

@@ -51,19 +51,28 @@ const usd = new Intl.NumberFormat("en-US", {
   maximumSignificantDigits: 3,
 });
 
+/** The most web searches the runtime lets one reply make (its MAX_SEARCHES). */
+const MAX_SEARCHES_PER_REPLY = 3;
+
 /**
  * What one web search may cost: the gateway bills each search call, and one
- * search can make one or two (a search, then opening a page).
+ * search can make one or two (a search, then opening a page). A reply makes
+ * at most MAX_SEARCHES_PER_REPLY searches.
  */
-function searchPriceRange(unitPriceUsd: string) {
+function searchPriceNote(unitPriceUsd: string) {
   const price = Number(unitPriceUsd);
-  return { low: usd.format(price), high: usd.format(price * 2) };
+  return {
+    low: usd.format(price),
+    high: usd.format(price * 2),
+    max: MAX_SEARCHES_PER_REPLY,
+  };
 }
 
 /**
  * A conversation's tokens and cost. The cost is shown only once its runs are
  * saved, and as unavailable whenever a request's cost is unknown: never as
- * $0 or as a partial sum. A cost that includes web searches says how many.
+ * $0 or as a partial sum. A cost that includes web searches says how many
+ * search calls were billed (one search can bill two).
  */
 function usageSummary(
   usage: AssistantUsage | undefined,
@@ -174,7 +183,7 @@ function AssistantWorkspace() {
   const searchNote = !bootstrap
     ? null
     : searchPrice !== null
-      ? t("assistant.webSearchPrice", searchPriceRange(searchPrice))
+      ? t("assistant.webSearchPrice", searchPriceNote(searchPrice))
       : t("assistant.webSearchUnavailable");
   // What a search costs, or why there is none, whether search is on or not.
   const showSearchNote = available && searchNote !== null;
