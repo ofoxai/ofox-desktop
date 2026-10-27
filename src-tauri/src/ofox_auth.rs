@@ -939,6 +939,15 @@ impl OfoxAuthManager {
         *self.auth_state.write().await = OfoxAuthState::Active;
     }
 
+    /// 测试用：放一个一小时内不过期的 access token，`get_valid_access_token` 不走网络。
+    #[cfg(test)]
+    pub(crate) async fn set_access_token_for_test(&self, token: &str) {
+        *self.access_token.write().await = Some(CachedAccessToken {
+            token: token.into(),
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        });
+    }
+
     /// Snapshot the current auth state and cached user info — the data the
     /// frontend needs to decide between "show profile", "show expired banner",
     /// and "show login page".

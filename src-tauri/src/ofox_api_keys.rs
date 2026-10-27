@@ -22,14 +22,14 @@ use std::future::Future;
 use std::sync::Arc;
 
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::app_config::BindableTool;
 use crate::error::AppError;
 use crate::ofox_auth::OfoxAuthManager;
 use crate::ofox_secret::{SecretStore, Slot};
-use crate::settings::{self, ApiKeyMeta, KeyOwner, KeyToDelete};
+use crate::settings::{self, ApiKeyMeta, AssistantKeyMeta, KeyOwner, KeyToDelete};
 
 /// 上层（command / bind 流程）能拿到的强类型错误。
 ///
@@ -167,7 +167,7 @@ pub(crate) async fn create_unsaved(
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<(String, ApiKeyMeta), ApiKeyError> {
     let name = default_key_name(tool);
-    let created = call_create_endpoint(tool, &name, manager).await?;
+    let created = call_create_endpoint(&name, manager).await?;
     let meta = ApiKeyMeta {
         tool,
         key_id: created.key_id,
@@ -455,11 +455,19 @@ pub(crate) async fn delete_remote(key_id: &str, bearer: &str) -> Result<(), ApiK
 /// 返回 `(key_id, secret, key_start)`——上层 `fetch_or_create_api_key` 拿到
 /// 这三个值各自持久化到 settings / keychain。
 async fn call_create_endpoint(
-    tool: BindableTool,
     name: &str,
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<CreatedKey, ApiKeyError> {
-    log::debug!("[ofox_api_keys] creating key for tool={tool:?} name={name:?}");
+    create_key_at(&crate::ofox_apex::openapi_api_keys_url(), name, manager).await
+}
+
+/// [`call_create_endpoint`] 的主体；URL 由调用方传入，单测能注入本地 wiremock。
+async fn create_key_at(
+    url: &str,
+    name: &str,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+) -> Result<CreatedKey, ApiKeyError> {
+    log::debug!("[ofox_api_keys] creating key name={name:?}");
 
     let bearer = manager
         .read()
@@ -468,9 +476,8 @@ async fn call_create_endpoint(
         .await
         .map_err(|e| ApiKeyError::Unauthorized(e.to_string()))?;
 
-    let url = crate::ofox_apex::openapi_api_keys_url();
     let body = serde_json::json!({ "name": name });
-    call_create_endpoint_at(&url, &bearer, &body).await
+    call_create_endpoint_at(url, &bearer, &body).await
 }
 
 /// 端点调用的 URL-agnostic 内部实现——拆出来仅为单测能拿一个本地 wiremock
@@ -585,6 +592,15 @@ async fn classify_403(resp: reqwest::Response) -> ApiKeyError {
 /// 哪一把是正式版日常用的"。`-dev` 在服务端 regex 内合法。release 构建不带后
 /// 缀，正式用户看到的还是 `<tool> on <host>`。
 fn default_key_name(tool: BindableTool) -> String {
+    key_name_on_this_host(tool.as_str())
+}
+
+/// 内置助手的 key：`Ofox Assistant on <host>`，规则同 [`default_key_name`]。
+fn assistant_key_name() -> String {
+    key_name_on_this_host("Ofox Assistant")
+}
+
+fn key_name_on_this_host(label: &str) -> String {
     let host = hostname::get()
         .ok()
         .and_then(|s| s.into_string().ok())
@@ -606,7 +622,108 @@ fn default_key_name(tool: BindableTool) -> String {
     if cfg!(debug_assertions) {
         host.push_str("-dev");
     }
-    format!("{} on {}", tool.as_str(), host)
+    format!("{label} on {host}")
+}
+
+// ─── 内置助手专用 key ────────────────────────────────────────────────────
+//
+// 跟工具 key 同一套签发 / 吊销端点，但不进 `ofoxApiKeys`（旧版本按
+// `BindableTool` 严格解析，见 [`AssistantKeyMeta`]）：原文在钥匙串
+// [`Slot::AssistantKey`]，记录在 settings.json `ofoxAssistantKey`。第一次发消息时
+// 才签发，退出登录时吊销，换账号后丢掉；切换区域不动（同一把 key 两个区域都能用）。
+
+/// 签发助手 key 时串行：两次并发的首次发送只签一把。
+static ASSISTANT_KEY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 助手 key 在本机的状态（不访问网络，也不读钥匙串）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AssistantKeyStatus {
+    /// 有一把当前账号能用的 key 的记录。
+    Ready,
+    /// 没有，或不是当前账号的、已停用：下次发送时签发。
+    Missing,
+}
+
+/// 取或签发助手 key。`CachedOk` 时有当前账号能用的记录和原文就直接返回；
+/// `ForceRefresh`（网关 401 后）跳过缓存重签。换掉的旧 key 没停用的话排队，等它的
+/// 账号登录时在服务器上删掉。
+#[allow(dead_code)] // The assistant host calls it on the first send (S1 Task 4).
+pub async fn fetch_or_create_assistant_key(
+    mode: FetchMode,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+) -> Result<String, ApiKeyError> {
+    let url = crate::ofox_apex::openapi_api_keys_url();
+    fetch_or_create_assistant_key_at(mode, &default_store(), manager, &url).await
+}
+
+/// [`fetch_or_create_assistant_key`] 的主体；store 和签发 URL 由调用方传入。
+async fn fetch_or_create_assistant_key_at(
+    mode: FetchMode,
+    store: &Arc<dyn SecretStore>,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+    create_url: &str,
+) -> Result<String, ApiKeyError> {
+    let _serial = ASSISTANT_KEY_LOCK.lock().await;
+    let owner = manager.read().await.current_key_owner().await;
+    let previous = settings::get_assistant_key_meta();
+    let cached_usable = previous
+        .as_ref()
+        .is_some_and(|meta| meta.usable_by(owner.as_ref()));
+    if matches!(mode, FetchMode::CachedOk) && cached_usable {
+        if let Some(key) = store
+            .load(Slot::AssistantKey)
+            .map_err(ApiKeyError::Storage)?
+        {
+            return Ok(key);
+        }
+    }
+
+    let created = create_key_at(create_url, &assistant_key_name(), manager).await?;
+    let meta = AssistantKeyMeta {
+        key_id: created.key_id,
+        owner,
+        created_at: chrono::Utc::now().timestamp(),
+        revoked: false,
+    };
+    if let Err(e) = save_assistant_key(store, &created.secret, &meta) {
+        // 服务器上已经签了：记下来等这个账号删，不留一把没人管的 key。
+        queue_deletion(KeyToDelete {
+            key_id: meta.key_id,
+            owner: meta.owner,
+        });
+        return Err(e);
+    }
+    if let Some(previous) = previous.filter(|old| !old.revoked) {
+        queue_deletion(KeyToDelete {
+            key_id: previous.key_id,
+            owner: previous.owner,
+        });
+    }
+    Ok(created.secret)
+}
+
+/// 先落钥匙串再落记录，理由同 [`save_key`]。
+fn save_assistant_key(
+    store: &Arc<dyn SecretStore>,
+    secret: &str,
+    meta: &AssistantKeyMeta,
+) -> Result<(), ApiKeyError> {
+    store
+        .save(Slot::AssistantKey, secret)
+        .map_err(ApiKeyError::Storage)?;
+    settings::set_assistant_key_meta(Some(meta.clone()))
+        .map_err(|e| ApiKeyError::Storage(format!("settings: {e:?}")))
+}
+
+/// 助手 key 的状态，`current` 是当前登录的账号。只看 settings.json 里的记录：
+/// 不访问网络，也不读钥匙串（不会因此弹系统授权框）。
+#[allow(dead_code)] // The assistant bootstrap command reports it (S1 Task 4).
+pub fn assistant_key_status(current: Option<&KeyOwner>) -> AssistantKeyStatus {
+    match settings::get_assistant_key_meta() {
+        Some(meta) if meta.usable_by(current) => AssistantKeyStatus::Ready,
+        _ => AssistantKeyStatus::Missing,
+    }
 }
 
 // ─── 测试 ────────────────────────────────────────────────────────────────
@@ -1043,6 +1160,240 @@ mod tests {
         assert_eq!(
             settings::list_keys_to_delete(),
             [waiting("live", Some(org("org_b")))]
+        );
+    }
+
+    // ─── 内置助手专用 key ────────────────────────────────────────────────
+
+    async fn signed_in_as(org_id: &str) -> Arc<RwLock<OfoxAuthManager>> {
+        let user: crate::ofox_auth::OfoxUserInfo = serde_json::from_value(json!({
+            "id": format!("user_of_{org_id}"),
+            "email": "someone@example.com",
+            "name": "Someone",
+            "org_id": org_id,
+        }))
+        .unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            crate::config::get_app_config_dir(),
+            Arc::new(InMemoryStore::new()),
+        );
+        manager.set_signed_in_for_test(user).await;
+        manager.set_access_token_for_test("fake-bearer").await;
+        Arc::new(RwLock::new(manager))
+    }
+
+    fn owner_of(org_id: &str) -> KeyOwner {
+        KeyOwner {
+            org_id: Some(org_id.into()),
+            user_id: Some(format!("user_of_{org_id}")),
+        }
+    }
+
+    fn assistant_record(key_id: &str, owner: Option<KeyOwner>) -> AssistantKeyMeta {
+        AssistantKeyMeta {
+            key_id: key_id.into(),
+            owner,
+            created_at: 1,
+            revoked: false,
+        }
+    }
+
+    /// 已有一把助手 key：记录 + 钥匙串原文。
+    fn keep_assistant_key(store: &Arc<dyn SecretStore>, secret: &str, meta: AssistantKeyMeta) {
+        store.save(Slot::AssistantKey, secret).unwrap();
+        settings::set_assistant_key_meta(Some(meta)).unwrap();
+    }
+
+    /// 签发端点：每次 POST 发同一把新 key；`expected` 是应收到的请求数。
+    async fn mint_endpoint(expected: u64) -> (MockServer, String) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/openapi/api-keys"))
+            .and(header("authorization", "Bearer fake-bearer"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({ "id": "assistant-new", "key": "sk-of-assistant-new" }))
+                    .set_delay(std::time::Duration::from_millis(50)),
+            )
+            .expect(expected)
+            .mount(&server)
+            .await;
+        let url = format!("{}/openapi/api-keys", server.uri());
+        (server, url)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn two_first_sends_at_once_mint_one_assistant_key() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(1).await;
+
+        let (first, second) = tokio::join!(
+            fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url),
+            fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url),
+        );
+
+        server.verify().await;
+        assert_eq!(first.unwrap(), "sk-of-assistant-new");
+        assert_eq!(second.unwrap(), "sk-of-assistant-new");
+        assert_eq!(
+            store.load(Slot::AssistantKey).unwrap().as_deref(),
+            Some("sk-of-assistant-new")
+        );
+        let meta = settings::get_assistant_key_meta().expect("record saved");
+        assert_eq!(meta.key_id, "assistant-new");
+        assert_eq!(meta.owner, Some(owner_of("org_a")));
+        assert!(!meta.revoked);
+        // 不占工具的位置：旧版本按 BindableTool 严格解析 ofoxApiKeys。
+        assert!(settings::list_api_key_metas().is_empty());
+        let requests = server.received_requests().await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("Ofox Assistant on "),
+            "{body}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn the_assistant_key_of_this_account_is_reused() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-cached",
+            assistant_record("assistant-a", Some(owner_of("org_a"))),
+        );
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(0).await;
+
+        let key = fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url)
+            .await
+            .unwrap();
+
+        server.verify().await;
+        assert_eq!(key, "sk-of-cached");
+        assert!(settings::list_keys_to_delete().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn the_assistant_key_of_another_account_is_replaced_and_left_for_that_account() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-B",
+            assistant_record("assistant-b", Some(owner_of("org_b"))),
+        );
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(1).await;
+
+        let key = fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url)
+            .await
+            .unwrap();
+
+        server.verify().await;
+        assert_eq!(key, "sk-of-assistant-new");
+        assert_eq!(
+            settings::get_assistant_key_meta().unwrap().owner,
+            Some(owner_of("org_a"))
+        );
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("assistant-b", Some(owner_of("org_b")))]
+        );
+    }
+
+    /// 网关 401 后的兜底：跳过缓存重签，旧 key 排队等本账号删（服务器上可能还在）。
+    #[tokio::test]
+    #[serial]
+    async fn force_refresh_mints_a_new_assistant_key() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-rejected",
+            assistant_record("assistant-old", Some(owner_of("org_a"))),
+        );
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(1).await;
+
+        let key = fetch_or_create_assistant_key_at(FetchMode::ForceRefresh, &store, &manager, &url)
+            .await
+            .unwrap();
+
+        server.verify().await;
+        assert_eq!(key, "sk-of-assistant-new");
+        assert_eq!(
+            store.load(Slot::AssistantKey).unwrap().as_deref(),
+            Some("sk-of-assistant-new")
+        );
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [waiting("assistant-old", Some(owner_of("org_a")))]
+        );
+    }
+
+    /// 没有记录就不知道 key 是谁的（例如降级后旧版本重写 settings.json 丢了记录）：
+    /// 不用它，重新签。
+    #[tokio::test]
+    #[serial]
+    async fn an_assistant_secret_without_a_record_is_not_used() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        store.save(Slot::AssistantKey, "sk-of-unknown").unwrap();
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(1).await;
+
+        let key = fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url)
+            .await
+            .unwrap();
+
+        server.verify().await;
+        assert_eq!(key, "sk-of-assistant-new");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn assistant_key_status_is_ready_only_for_a_live_key_of_this_account() {
+        let _home = TempSettingsHome::new();
+        let a = owner_of("org_a");
+        assert_eq!(assistant_key_status(Some(&a)), AssistantKeyStatus::Missing);
+
+        settings::set_assistant_key_meta(Some(assistant_record("k", Some(a.clone())))).unwrap();
+        assert_eq!(assistant_key_status(Some(&a)), AssistantKeyStatus::Ready);
+        assert_eq!(
+            assistant_key_status(Some(&owner_of("org_b"))),
+            AssistantKeyStatus::Missing
+        );
+
+        settings::set_assistant_key_meta(Some(AssistantKeyMeta {
+            revoked: true,
+            ..assistant_record("k", Some(a.clone()))
+        }))
+        .unwrap();
+        assert_eq!(assistant_key_status(Some(&a)), AssistantKeyStatus::Missing);
+    }
+
+    #[test]
+    fn assistant_key_name_names_the_assistant_and_satisfies_the_remote_regex() {
+        let name = assistant_key_name();
+        assert!(name.starts_with("Ofox Assistant on "), "got: {name}");
+        assert_eq!(
+            name.ends_with("-dev"),
+            cfg!(debug_assertions),
+            "got: {name}"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '_' || c == '-'),
+            "got: {name}"
         );
     }
 

@@ -224,13 +224,43 @@ impl ApiKeyMeta {
     /// 当前账号能不能直接用这把缓存的 key：没停用，而且不是别的账号的。
     /// 判断不了（老数据、还没取到账号信息）时照旧可用。
     pub fn usable_by(&self, current: Option<&KeyOwner>) -> bool {
-        if self.revoked {
-            return false;
-        }
-        match (self.owner.as_ref(), current) {
-            (Some(owner), Some(current)) => owner.same_account(current) != Some(false),
-            _ => true,
-        }
+        key_usable_by(self.revoked, self.owner.as_ref(), current)
+    }
+}
+
+fn key_usable_by(revoked: bool, owner: Option<&KeyOwner>, current: Option<&KeyOwner>) -> bool {
+    if revoked {
+        return false;
+    }
+    match (owner, current) {
+        (Some(owner), Some(current)) => owner.same_account(current) != Some(false),
+        _ => true,
+    }
+}
+
+/// 内置助手专用 ofox API key 的元数据；key 本体在钥匙串 `Slot::AssistantKey`。
+///
+/// 不放进 `ofoxApiKeys`：那里的 `tool` 是 `BindableTool`，旧版本严格解析，多一个
+/// 变体会让降级后的整个 settings.json 读不出来。同样不含任何能反推 key 的字段。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssistantKeyMeta {
+    /// 服务端返回的 key id，吊销时用。
+    pub key_id: String,
+    /// 签发这把 key 的账号；换了账号就不能再用。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<KeyOwner>,
+    /// unix epoch 秒。
+    pub created_at: i64,
+    /// 退出登录时已停用（服务器上吊销，或已排队等它的账号删），本地原文已清掉。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub revoked: bool,
+}
+
+impl AssistantKeyMeta {
+    /// 同 [`ApiKeyMeta::usable_by`]。
+    pub fn usable_by(&self, current: Option<&KeyOwner>) -> bool {
+        key_usable_by(self.revoked, self.owner.as_ref(), current)
     }
 }
 
@@ -453,6 +483,10 @@ pub struct AppSettings {
     /// 等对应账号登录时要在服务器上删掉的 key，见 [`KeyToDelete`]。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ofox_keys_to_delete: Vec<KeyToDelete>,
+    /// 内置助手专用 key 的元数据，见 [`AssistantKeyMeta`]。旧版本不认识这个字段，
+    /// 读的时候直接忽略（本结构体没有 `deny_unknown_fields`），降级不受影响。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ofox_assistant_key: Option<AssistantKeyMeta>,
 }
 
 fn default_show_in_tray() -> bool {
@@ -513,6 +547,7 @@ impl Default for AppSettings {
             ofox_apex_pinned: None,
             ofox_api_keys: Vec::new(),
             ofox_keys_to_delete: Vec::new(),
+            ofox_assistant_key: None,
         }
     }
 }
@@ -1221,6 +1256,24 @@ pub fn forget_key_deletion(key_id: &str) -> Result<(), AppError> {
     })
 }
 
+/// 内置助手专用 key 的元数据（不读钥匙串）。
+pub fn get_assistant_key_meta() -> Option<AssistantKeyMeta> {
+    settings_store()
+        .read()
+        .ok()
+        .and_then(|s| s.ofox_assistant_key.clone())
+}
+
+/// 写入或清掉助手 key 的元数据。key id 为空时拒绝写入，同 [`upsert_api_key_meta`]。
+pub fn set_assistant_key_meta(meta: Option<AssistantKeyMeta>) -> Result<(), AppError> {
+    if meta.as_ref().is_some_and(|m| m.key_id.trim().is_empty()) {
+        return Err(AppError::Config(
+            "AssistantKeyMeta.key_id is empty; refuse to persist".into(),
+        ));
+    }
+    mutate_settings(|s| s.ofox_assistant_key = meta)
+}
+
 /// 测试专用：把 settings.json（以及同目录的 dev-secrets.json）放进临时 home，
 /// Drop 时还原环境变量并重新加载。环境变量是进程全局的，配合 `#[serial]` 用。
 #[cfg(test)]
@@ -1358,6 +1411,93 @@ mod api_key_meta_tests {
         let err = upsert_api_key_meta(meta).unwrap_err();
         let msg = format!("{err:?}");
         assert!(msg.contains("key_id"), "expected key_id error, got: {msg}");
+    }
+
+    fn assistant_key(owner: Option<KeyOwner>) -> AssistantKeyMeta {
+        AssistantKeyMeta {
+            key_id: "assistant-key-id".into(),
+            owner,
+            created_at: 1_700_000_000,
+            revoked: false,
+        }
+    }
+
+    #[test]
+    fn the_assistant_key_is_usable_only_by_its_account_and_not_after_logout() {
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let bob = owner(Some("org_b"), Some("user_bob"));
+        let key = assistant_key(Some(alice.clone()));
+        assert!(key.usable_by(Some(&alice)));
+        assert!(!key.usable_by(Some(&bob)));
+
+        let revoked = AssistantKeyMeta {
+            revoked: true,
+            ..key
+        };
+        assert!(!revoked.usable_by(Some(&alice)));
+    }
+
+    #[test]
+    fn saving_an_assistant_key_record_refuses_an_empty_key_id() {
+        let err = set_assistant_key_meta(Some(AssistantKeyMeta {
+            key_id: " ".into(),
+            ..assistant_key(None)
+        }))
+        .unwrap_err();
+        assert!(format!("{err:?}").contains("key_id"), "{err:?}");
+    }
+
+    #[test]
+    fn settings_written_before_the_assistant_key_load_without_one() {
+        let settings: AppSettings = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
+        assert_eq!(settings.ofox_assistant_key, None);
+        let saved = settings_json(&settings).unwrap();
+        assert!(!saved.contains("ofoxAssistantKey"), "{saved}");
+    }
+
+    /// 降级安全：旧版本读到带 `ofoxAssistantKey` 的 settings.json 不能整个读失败。
+    /// 旧版本的 `AppSettings` 跟现在一样只有 `rename_all = "camelCase"`、没有
+    /// `deny_unknown_fields`（这个文件的历史里从没加过），`ofoxApiKeys` 的 `tool`
+    /// 却是严格解析的 `BindableTool`。所以助手 key 不能进 `ofoxApiKeys`，待删的
+    /// 助手 key 进 `ofoxKeysToDelete` 也只能用不带工具的条目。
+    #[test]
+    fn settings_with_an_assistant_key_still_load_in_builds_that_predate_it() {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct SettingsBeforeAssistant {
+            #[serde(default)]
+            language: Option<String>,
+            #[serde(default)]
+            ofox_api_keys: Vec<ApiKeyMeta>,
+            #[serde(default)]
+            ofox_keys_to_delete: Vec<KeyToDelete>,
+        }
+
+        let alice = owner(Some("org_a"), Some("user_alice"));
+        let settings = AppSettings {
+            language: Some("zh".into()),
+            ofox_api_keys: vec![sample_meta(AppType::Claude, "claude-key")],
+            ofox_keys_to_delete: vec![KeyToDelete {
+                key_id: "old-assistant-key".into(),
+                owner: Some(alice.clone()),
+            }],
+            ofox_assistant_key: Some(assistant_key(Some(alice))),
+            ..AppSettings::default()
+        };
+        let saved = settings_json(&settings).unwrap();
+        assert!(saved.contains("\"ofoxAssistantKey\""), "{saved}");
+
+        let older: SettingsBeforeAssistant =
+            serde_json::from_str(&saved).expect("an older build reads the file");
+        assert_eq!(older.language.as_deref(), Some("zh"));
+        assert_eq!(older.ofox_api_keys, settings.ofox_api_keys);
+        assert_eq!(older.ofox_keys_to_delete, settings.ofox_keys_to_delete);
+
+        // The real struct ignores a field it does not know, the way older builds do.
+        let mut newer: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        newer["ofoxFieldFromANewerBuild"] = serde_json::json!({ "keyId": "x" });
+        let reread: AppSettings = serde_json::from_value(newer).expect("unknown fields ignored");
+        assert_eq!(reread.ofox_assistant_key, settings.ofox_assistant_key);
     }
 
     /// 直接对 Vec 操作做断言（不经过 settings 单例，避免污染全局状态）。
