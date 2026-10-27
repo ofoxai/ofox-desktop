@@ -1053,10 +1053,6 @@ export function useAssistant(enabled: boolean) {
   );
 
   /**
-   * Open the file dialog and add the files it imports to the draft, creating
-   * the conversation first when there is none. Cancelling changes nothing.
-   */
-  /**
    * Leave a conversation this window just created for a pick that imported
    * nothing: back to no conversation, with the unsent words, and the empty
    * conversation goes to the trash.
