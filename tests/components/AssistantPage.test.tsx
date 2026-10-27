@@ -2233,6 +2233,15 @@ describe("web search", () => {
     expect(status()).toEqual([]);
   });
 
+  it("tells the user the assistant searches the web only when asked to", async () => {
+    await openConversation();
+    expect(
+      screen.getByText(
+        "Replies come from the model you choose. The assistant reads only the files you attach and searches the web only when you turn on web search. It can't change your settings.",
+      ),
+    ).toBeVisible();
+  });
+
   it("can't be turned on, and says why, when search is unavailable", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,

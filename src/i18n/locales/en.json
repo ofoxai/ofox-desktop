@@ -4926,7 +4926,7 @@
     "noMatches": "No matching conversations",
     "untitled": "New conversation",
     "unreadable": "Can't be read",
-    "boundary": "Replies come from the model you choose. The assistant reads only the files you attach; it can't browse the web or change your settings.",
+    "boundary": "Replies come from the model you choose. The assistant reads only the files you attach and searches the web only when you turn on web search. It can't change your settings.",
     "chat": "Assistant conversation",
     "model": "Choose model",
     "searchModels": "Search models",
