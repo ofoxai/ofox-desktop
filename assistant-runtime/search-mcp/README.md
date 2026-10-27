@@ -135,11 +135,15 @@ rules above. The runtime only lets the model fetch URLs that the host allows
 
 The Ofox gateway bills every `web_search_call` output item, `open_page`
 actions included, at the model's `web_search` price. Without
-`max_tool_calls` the model also opened pages, each billed. With
-`max_tool_calls: 1` a request makes one billed search (about $0.014 plus
-tokens, verified 2026-10-27), and `include` still returns the 15-20 source
-URLs that search saw. `usage.searchCalls` counts the `web_search_call` items,
-so the host can estimate the cost. Missing token counts are `null`, not 0.
+`max_tool_calls` the model also opened pages, each billed. `max_tool_calls: 1`
+limits this but does **not** guarantee one billed call: a request usually
+makes one search (about $0.014 plus tokens, verified 2026-10-27), but one has
+returned a `search` and an `open_page` item, both billed (2026-10-28). One
+`web_search` therefore costs 1-2 times the `web_search` price, plus tokens.
+`include` still returns the 15-20 source URLs that search saw.
+`usage.searchCalls` counts the `web_search_call` items the response actually
+has, so the host prices a finished search exactly from it, never from an
+assumed 1. Missing token counts are `null`, not 0.
 
 Nothing is ever retried automatically: a repeated request is a repeated
 charge.

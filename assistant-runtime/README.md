@@ -345,7 +345,12 @@ Source URLs are passed on as the server returns them; `inputTokens` and
 `outputTokens` are `null` when the gateway did not report them.
 
 Billing: every `web_search` success is `usage.searchCalls` paid searches at
-the web_search price of `usage.model`, plus its tokens. Nothing is retried
+the web_search price of `usage.model`, plus its tokens. The server asks for
+one search (`max_tool_calls: 1`), but the gateway does not guarantee it: one
+`web_search` may bill 1-2 calls (a `search` and an `open_page`), so
+`searchCalls` is usually 1 and can be 2. A price shown before a search is a
+range, 1-2 times the web_search price plus tokens; a finished search is
+priced from its `searchCalls`, never from an assumed 1. Nothing is retried
 automatically. The same query again in one run (case and spacing ignored)
 after a success, or while it runs, is answered from that result with
 `deduplicated: true` and zero usage, also past the limit; after a failure the
