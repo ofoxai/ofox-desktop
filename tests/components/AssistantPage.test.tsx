@@ -2349,6 +2349,12 @@ describe("web search", () => {
       await screen.findByRole("button", { name: /My conversation/ });
       await waitFor(() => expect(toggle()).toBeEnabled());
       expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      // Leaving a conversation for a new one starts from the last choice:
+      // the old account's must be gone, not only the switch's state.
+      await userEvent.click(
+        screen.getByRole("button", { name: /My conversation/ }),
+      );
+      await waitFor(() => expect(composer()).toBeEnabled());
       await newConversation();
       await waitFor(() =>
         expect(mocks.createSession).toHaveBeenCalledWith({
