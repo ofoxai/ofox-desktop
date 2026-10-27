@@ -1387,6 +1387,51 @@ describe("attachments", () => {
     expect(within(reply()).getByRole("status")).toHaveTextContent("Thinking…");
   });
 
+  describe("stops saying it reads the files once the model is at work, even without their outcome", () => {
+    async function sendFiles() {
+      await openConversation();
+      await pick([pdf]);
+      await userEvent.click(sendButton());
+      await screen.findByRole("button", { name: "Stop" });
+      const sent = mocks.send.mock.calls[0][0];
+      const emit = (type: string, data: Record<string, unknown>) =>
+        act(() => mocks.listener?.({ ...sent, type, data }));
+      expect(
+        within(screen.getByRole("article", { name: "Assistant" })).getByRole(
+          "status",
+        ),
+      ).toHaveTextContent("Reading a file…");
+      return emit;
+    }
+
+    it.each(["text_delta", "thinking_delta"])("on a %s", async (type) => {
+      const emit = await sendFiles();
+      emit(type, { messageId: "reply", delta: "Let me see" });
+      expect(screen.queryByText("Reading a file…")).toBeNull();
+    });
+
+    it("on a tool_start, also after the tool ends", async () => {
+      const emit = await sendFiles();
+      emit("tool_start", {
+        messageId: "reply",
+        name: "web_search",
+        toolCallId: "c1",
+        args: { query: "x" },
+      });
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Searching the web…",
+      );
+      emit("tool_end", {
+        messageId: "reply",
+        name: "web_search",
+        toolCallId: "c1",
+        success: true,
+        details: {},
+      });
+      expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+    });
+  });
+
   it("says it is reading the files of a reply being regenerated", async () => {
     current.messages = [
       {

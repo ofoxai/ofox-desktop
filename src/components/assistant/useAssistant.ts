@@ -530,6 +530,10 @@ export function useAssistant(enabled: boolean) {
       createdAt: Date.now(),
       status: "streaming",
     });
+    // The model is at work (it writes, thinks or calls a tool): the run read
+    // its files first, even if an outcome never came in.
+    const doneReading = (runId: string) =>
+      setReading((old) => (old?.runId === runId ? null : old));
     void assistantApi
       .subscribe((event: AssistantEvent) => {
         if (disposed) return;
@@ -574,6 +578,7 @@ export function useAssistant(enabled: boolean) {
           case "thinking_delta": {
             const { delta } = event.data;
             if (typeof delta !== "string") return;
+            doneReading(event.runId);
             const thinking = event.type === "thinking_delta";
             setStream((previous) => {
               const value = previous ?? blank(event.runId);
@@ -629,6 +634,7 @@ export function useAssistant(enabled: boolean) {
           }
           case "tool_start": {
             const { name, toolCallId } = event.data;
+            doneReading(event.runId);
             const activity =
               typeof name === "string" ? TOOL_ACTIVITY.get(name) : undefined;
             if (!activity || typeof toolCallId !== "string") return;
