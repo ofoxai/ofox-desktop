@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NODE_VERSION: "20"
+  NODE_VERSION: "22.23.4"
   PNPM_VERSION: "10.12.3"
 
 jobs:
@@ -35,7 +35,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.23.4"
       - name: Require the independent Windows result
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,10 +83,11 @@ jobs:
             ${{ runner.os }}-${{ runner.arch }}-cargo-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      # Windows runs this as pwsh, which only checks the last native exit code.
+      - name: Prepare bundled assistant production closure
+        run: pnpm assistant:prepare
       - name: Verify bundled assistant production closure
-        run: |
-          pnpm assistant:prepare
-          pnpm assistant:smoke
+        run: pnpm assistant:smoke
       - name: Verify checkout and version; remove stale cached bundles
         id: identity
         shell: bash
