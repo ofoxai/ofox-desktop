@@ -13,6 +13,7 @@ import {
 } from "@/lib/api/assistant";
 
 const freshId = () => crypto.randomUUID();
+const IDENTITY_CHANGED = "assistant_identity_changed";
 
 /** A backend or renderer error code; the page turns it into a localized message. */
 export type AssistantError = string;
@@ -65,6 +66,7 @@ export function useAssistant(enabled: boolean) {
   const bootstrapRef = useRef<AssistantBootstrap | null>(null);
   const pendingSends = useRef(new Map<string, { cancelled: boolean }>());
   const refreshSessionsRef = useRef<() => Promise<void>>(async () => undefined);
+  const reloadAuthority = useRef<() => void>(() => undefined);
   selectedRef.current = selectedId;
   draftRef.current = draft;
 
@@ -80,7 +82,12 @@ export function useAssistant(enabled: boolean) {
   }, []);
 
   const showError = useCallback((value: unknown) => {
-    if (mounted.current) setError(assistantErrorCode(value));
+    if (!mounted.current) return;
+    const code = assistantErrorCode(value);
+    setError(code);
+    // A sign-in, sign-out or region change moved the backend's authority on:
+    // the owner and generation every write carries must be read again.
+    if (code === IDENTITY_CHANGED) reloadAuthority.current();
   }, []);
 
   const persistDraft = useCallback((sessionId: string, text: string) => {
@@ -118,9 +125,12 @@ export function useAssistant(enabled: boolean) {
         setBootstrap(value);
       }
     } catch (reason) {
-      if (generation === epoch.current) showError(reason);
+      // Not through showError: a failed read must not ask for itself again.
+      if (mounted.current && generation === epoch.current)
+        setError(assistantErrorCode(reason));
     }
-  }, [showError]);
+  }, []);
+  reloadAuthority.current = () => void loadBootstrap();
 
   const refreshSessions = useCallback(async () => {
     const sequence = ++listSequence.current;
@@ -363,6 +373,15 @@ export function useAssistant(enabled: boolean) {
             });
             return;
           }
+          case "usage": {
+            // The conversation's running totals; its cost is read once the
+            // run is saved.
+            const { usage } = event.data;
+            setDetail((old) =>
+              old?.session.id === event.sessionId ? { ...old, usage } : old,
+            );
+            return;
+          }
           case "compaction_start":
             setCompacting(true);
             return;
@@ -382,7 +401,7 @@ export function useAssistant(enabled: boolean) {
           }
           case "error":
             // A stop sends no error; a failure is shown by its code alone.
-            setError(assistantErrorCode(event.data));
+            showError(event.data);
             return;
           case "run_end":
             setRun(null);
@@ -600,6 +619,15 @@ export function useAssistant(enabled: boolean) {
           attachmentIds,
           ...options,
         });
+        // The send obtained the assistant's key, minting it the first time.
+        const identity = bootstrapRef.current;
+        if (
+          generation === epoch.current &&
+          identity?.key.status === "missing"
+        ) {
+          bootstrapRef.current = { ...identity, key: { status: "ready" } };
+          setBootstrap(bootstrapRef.current);
+        }
         if (!revision && generation === epoch.current) {
           savedDrafts.current.delete(sessionId);
           await persistDraft(

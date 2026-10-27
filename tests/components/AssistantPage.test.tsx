@@ -1259,6 +1259,165 @@ describe("run edges", () => {
   });
 });
 
+describe("conversation cost", () => {
+  const usageLine = () => screen.queryByText(/tokens|Cost/);
+
+  it("shows a saved conversation's tokens and estimated cost", async () => {
+    current.usage = {
+      inputTokens: 1234,
+      outputTokens: 340,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      estimatedCostUsd: "0.0123",
+      billedCostUsd: null,
+      modelRequests: 2,
+    };
+    await openConversation();
+    expect(usageLine()).toHaveTextContent(
+      "Input 1.2K · Output 340 tokens · Estimated cost ≈$0.012",
+    );
+  });
+
+  it.each([
+    [
+      "a request that may have been billed",
+      {
+        inputTokens: 900,
+        outputTokens: 20,
+        estimatedCostUsd: null,
+        usageCoverage: "incomplete" as const,
+        modelRequests: 1,
+      },
+    ],
+    [
+      "a model without a price",
+      {
+        inputTokens: 900,
+        outputTokens: 20,
+        estimatedCostUsd: null,
+        modelRequests: 1,
+      },
+    ],
+    [
+      "a reply stopped before it reported usage",
+      { usageCoverage: "incomplete" as const },
+    ],
+  ])("says the cost is unavailable after %s, never $0", async (_, usage) => {
+    current.usage = usage;
+    await openConversation();
+    expect(usageLine()).toHaveTextContent("Cost unavailable");
+    expect(usageLine()).not.toHaveTextContent("$");
+  });
+
+  it("says nothing about cost before the first request", async () => {
+    await openConversation();
+    expect(usageLine()).toBeNull();
+    expect(screen.queryByText(/Cost/)).toBeNull();
+  });
+
+  it("shows running tokens without a cost while a reply runs, then the saved outcome", async () => {
+    current.usage = {
+      inputTokens: 100,
+      outputTokens: 10,
+      estimatedCostUsd: "0.01",
+      modelRequests: 1,
+    };
+    await openConversation();
+    expect(usageLine()).toHaveTextContent("Estimated cost ≈$0.010");
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "usage",
+        data: {
+          usage: {
+            inputTokens: 300,
+            outputTokens: 50,
+            estimatedCostUsd: null,
+            billedCostUsd: null,
+            modelRequests: 1,
+          },
+        },
+      }),
+    );
+    expect(usageLine()).toHaveTextContent("Input 300 · Output 50 tokens");
+    expect(usageLine()).not.toHaveTextContent(/Cost|\$/);
+    // The user stops it: the host marks the cost unknown.
+    current.usage = {
+      inputTokens: 300,
+      outputTokens: 50,
+      estimatedCostUsd: null,
+      usageCoverage: "incomplete",
+      modelRequests: 1,
+    };
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "run_end",
+        data: { stopped: true, status: "stopped" },
+      }),
+    );
+    await waitFor(() =>
+      expect(usageLine()).toHaveTextContent(
+        "Input 300 · Output 50 tokens · Cost unavailable",
+      ),
+    );
+  });
+});
+
+describe("assistant key and authority", () => {
+  it("stops saying a key will be created once the first message is sent", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      key: { status: "missing" },
+    });
+    await openConversation();
+    const hint =
+      "Your first message creates a dedicated Ofox API key for the assistant.";
+    expect(screen.getByText(hint)).toBeVisible();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    await waitFor(() => expect(screen.queryByText(hint)).toBeNull());
+  });
+
+  it("reads the authority again when the backend says it moved on, and writes with the new one", async () => {
+    mocks.bootstrap
+      .mockResolvedValueOnce(capabilities)
+      .mockResolvedValue({ ...capabilities, authorityGeneration: 2 });
+    mocks.updateSession.mockRejectedValueOnce("assistant_identity_changed");
+    await openConversation();
+    const rename = async () => {
+      await userEvent.click(
+        screen.getByRole("button", { name: "Rename conversation" }),
+      );
+      const dialog = await screen.findByRole("dialog");
+      await userEvent.type(
+        within(dialog).getByRole("textbox", { name: "Conversation title" }),
+        "!",
+      );
+      await userEvent.click(
+        within(dialog).getByRole("button", { name: "Save" }),
+      );
+    };
+    await rename();
+    await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalledTimes(2));
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The account or region changed. Please try again.",
+    );
+    await rename();
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({ expectedGeneration: 2 }),
+      ),
+    );
+  });
+});
+
 describe("sign-in changes", () => {
   it("drops the conversation and draft when sign-in expires, and reloads when it is restored", async () => {
     await openConversation();

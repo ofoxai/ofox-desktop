@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import {
   AlertTriangle,
   ArrowUp,
@@ -11,7 +12,8 @@ import {
   Square,
   X,
 } from "lucide-react";
-import { assistantErrorKey } from "@/lib/api/assistant";
+import { assistantErrorKey, type AssistantUsage } from "@/lib/api/assistant";
+import { fmtCost, fmtTokens } from "@/lib/format";
 import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { Button } from "@/components/ui/button";
@@ -31,6 +33,44 @@ import { useShellRefresh } from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
 const STARTERS = ["summary", "writing", "explain"] as const;
+
+/**
+ * A conversation's tokens and cost. The cost is shown only once its runs are
+ * saved, and as unavailable whenever a request's cost is unknown: never as
+ * $0 or as a partial sum.
+ */
+function usageSummary(
+  usage: AssistantUsage | undefined,
+  settled: boolean,
+  t: TFunction,
+): string | null {
+  if (!usage) return null;
+  const input = usage.inputTokens ?? 0;
+  const output = usage.outputTokens ?? 0;
+  const counted = input > 0 || output > 0;
+  const parts = counted
+    ? [
+        t("assistant.usageTokens", {
+          input: fmtTokens(input),
+          output: fmtTokens(output),
+        }),
+      ]
+    : [];
+  if (settled) {
+    if (usage.usageCoverage === "incomplete")
+      parts.push(t("assistant.costUnavailable"));
+    else if (typeof usage.estimatedCostUsd === "string")
+      parts.push(
+        t("assistant.usageCost", {
+          cost: fmtCost(Number(usage.estimatedCostUsd)),
+        }),
+      );
+    // Requests were made but a model had no price.
+    else if (counted || (usage.modelRequests ?? 0) > 0)
+      parts.push(t("assistant.costUnavailable"));
+  }
+  return parts.length ? parts.join(" · ") : null;
+}
 
 interface AssistantPageProps {
   enabled?: boolean;
@@ -87,6 +127,14 @@ function AssistantWorkspace() {
       assistant.connected,
   );
   const writable = available && !run && !busy && !assistant.loading;
+  // While a run goes on, or until its saved outcome is read back, the totals
+  // are running ones and no cost is claimed.
+  const usage = usageSummary(
+    detail?.usage,
+    !run && !assistant.stream && !session?.activeRun,
+    t,
+  );
+  const keyMissing = bootstrap?.key.status === "missing";
   // Tool, system and other internal records stay out of the transcript.
   const messages = (detail?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
@@ -455,10 +503,11 @@ function AssistantWorkspace() {
                 )}
               </div>
             </div>
-            {bootstrap?.key.status === "missing" && (
-              <p className="mt-2 text-note text-ink-muted">
-                {t("assistant.keyMissingHint")}
-              </p>
+            {(keyMissing || usage) && (
+              <div className="mt-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1 text-note text-ink-muted">
+                {keyMissing && <p>{t("assistant.keyMissingHint")}</p>}
+                {usage && <p className="ml-auto text-right">{usage}</p>}
+              </div>
             )}
           </div>
         </footer>
