@@ -205,6 +205,14 @@ function AssistantWorkspace() {
   const files = assistant.attachments;
   // Files whose last read failed outright are never sent: they must go first.
   const blockedFiles = files.some((file) => !isSendable(file));
+  // A model the catalog says reads only text would refuse the turn (free of
+  // charge); say so before it is sent.
+  const composerModel = bootstrap?.models.find(
+    (item) => item.id === (session?.modelId ?? assistant.newModelId),
+  );
+  const imagesNeedVision =
+    composerModel?.supportsImages === false &&
+    files.some((file) => file.mimeType.startsWith("image/"));
 
   useShellRefresh("assistant", async () => {
     await assistant.loadBootstrap();
@@ -553,6 +561,11 @@ function AssistantWorkspace() {
                   {blockedFiles && (
                     <p className="mt-1.5 text-note text-danger">
                       {t("assistant.attachmentsBlocked")}
+                    </p>
+                  )}
+                  {imagesNeedVision && (
+                    <p className="mt-1.5 text-note text-warn">
+                      {t("assistant.imagesNeedVision")}
                     </p>
                   )}
                 </div>

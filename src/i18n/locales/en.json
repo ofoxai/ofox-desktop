@@ -4972,6 +4972,7 @@
     "attachedFiles": "Attached files",
     "removeAttachment": "Remove {{name}}",
     "attachmentsBlocked": "Remove the files that can't be read, then send.",
+    "imagesNeedVision": "This model can't read images. Choose a model that can, or remove the image.",
     "webSearch": "Web search",
     "webSearchPrice": "About {{low}}–{{high}} per search, plus a little for its tokens",
     "webSearchUnavailable": "Web search is unavailable right now. Replies use the model's own knowledge.",

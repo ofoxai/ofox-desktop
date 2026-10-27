@@ -1040,6 +1040,71 @@ describe("attachments", () => {
     },
   );
 
+  describe("an image for a model that can't read images", () => {
+    const warning =
+      "This model can't read images. Choose a model that can, or remove the image.";
+    beforeEach(() => {
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        models: [
+          ...capabilities.models,
+          { ...model("vision", "Vision model"), supportsImages: true },
+        ],
+      });
+    });
+
+    it("is warned about before sending, and can still be sent", async () => {
+      await openConversation();
+      await pick([photo]);
+      expect(screen.getByText(warning)).toBeVisible();
+      expect(sendButton()).toBeEnabled();
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Choose model" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /Vision model/ }),
+      );
+      await waitFor(() => expect(screen.queryByText(warning)).toBeNull());
+    });
+
+    it("is no longer warned about once the image is removed", async () => {
+      await openConversation();
+      await pick([pdf, photo]);
+      expect(screen.getByText(warning)).toBeVisible();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Remove photo.png" }),
+      );
+      expect(screen.queryByText(warning)).toBeNull();
+    });
+
+    it("is not warned about for a model that reads images or for other files", async () => {
+      current.session.modelId = "vision";
+      await openConversation();
+      await pick([photo]);
+      expect(screen.queryByText(warning)).toBeNull();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Remove photo.png" }),
+      );
+      current.session.modelId = "balanced";
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Choose model" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /Balanced model/ }),
+      );
+      await pick([pdf]);
+      expect(screen.queryByText(warning)).toBeNull();
+    });
+
+    it("is warned about before the first message, for the model chosen", async () => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+      render(page());
+      await waitFor(() => expect(attach()).toBeEnabled());
+      await pick([photo]);
+      expect(screen.getByText(warning)).toBeVisible();
+    });
+  });
+
   it("changes nothing when the file dialog is cancelled", async () => {
     await openConversation();
     await userEvent.click(attach());

@@ -4972,6 +4972,7 @@
     "attachedFiles": "添付ファイル",
     "removeAttachment": "{{name}} を削除",
     "attachmentsBlocked": "読み取れないファイルを削除してから送信してください。",
+    "imagesNeedVision": "このモデルは画像を読み取れません。画像を読み取れるモデルを選ぶか、画像を削除してください。",
     "webSearch": "Web 検索",
     "webSearchPrice": "検索 1 回あたり約 {{low}}〜{{high}}（別途わずかなトークン料金）",
     "webSearchUnavailable": "現在 Web 検索は利用できません。返信はモデル自身の知識で作成されます。",
