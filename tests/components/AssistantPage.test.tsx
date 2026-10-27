@@ -2263,6 +2263,21 @@ describe("web search", () => {
     ).toBeVisible();
     expect(document.body).not.toHaveTextContent("per search");
   });
+
+  it("takes a backend that says nothing about search as search unavailable", async () => {
+    const { search: _, ...older } = capabilities;
+    mocks.bootstrap.mockResolvedValue(older);
+    await openConversation();
+    expect(toggle()).toBeDisabled();
+    expect(
+      screen.getByText(
+        "Web search is unavailable right now. Replies use the model's own knowledge.",
+      ),
+    ).toBeVisible();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+  });
 });
 
 describe("assistant key and authority", () => {

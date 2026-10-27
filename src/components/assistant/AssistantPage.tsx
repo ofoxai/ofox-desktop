@@ -141,8 +141,9 @@ function AssistantWorkspace() {
     t,
   );
   const keyMissing = bootstrap?.key.status === "missing";
-  // Runs can search only while the catalog prices a search.
-  const searchPrice = bootstrap?.search.available
+  // Runs can search only while the catalog prices a search; a backend
+  // without search says nothing about it.
+  const searchPrice = bootstrap?.search?.available
     ? bootstrap.search.unitPriceUsd
     : null;
   const searchNote = !bootstrap

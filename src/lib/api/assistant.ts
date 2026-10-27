@@ -42,7 +42,8 @@ export interface AssistantBootstrap {
   modelUnavailableReason: string | null;
   /** The dedicated assistant key is created on the first send, never here. */
   key: { status: "ready" | "missing" };
-  search: AssistantSearchStatus;
+  /** Left out by a backend without web search: read as unavailable. */
+  search?: AssistantSearchStatus;
 }
 
 /**
@@ -56,7 +57,7 @@ export interface AssistantSearchStatus {
   model: string;
 }
 
-/** A page a reply's web searches found: always an HTTPS URL. */
+/** A page a reply's web searches found: always HTTPS on a public host. */
 export interface AssistantSource {
   id: string;
   /** The page's title, or its URL when it had none. */
@@ -172,7 +173,10 @@ export interface AssistantUsage {
   modelRequests?: number;
   /** Paid web searches in the conversation; counted again once a run is saved. */
   searchCount?: number;
-  /** What those searches cost; already part of `estimatedCostUsd`. */
+  /**
+   * What those searches cost; already part of `estimatedCostUsd`. Null
+   * whenever that is, and while a run goes on.
+   */
   searchCostUsd?: string | null;
   usageCoverage?: "incomplete";
 }
@@ -218,7 +222,12 @@ export interface AssistantSendRequest extends AssistantRunRef {
  * stop) and `run_end` last.
  */
 export type AssistantRunEvent =
-  | { type: "run_start"; data: { messageId: string } }
+  /**
+   * `messageId` is the run's reply. `webSearch` is whether the run got web
+   * search: false with the conversation's switch on means search was
+   * unavailable when it was sent.
+   */
+  | { type: "run_start"; data: { messageId: string; webSearch: boolean } }
   | {
       type: "text_delta" | "thinking_delta";
       data: { delta: string; messageId: string };
@@ -251,7 +260,11 @@ export type AssistantRunEvent =
         args: Record<string, string>;
       };
     }
-  /** `code` names a failure the model saw and continued from; null on success. */
+  /**
+   * `code` names a failure the model saw and continued from; null on success.
+   * A stop or failure may end the run without a call's `tool_end`: `run_end`
+   * ends every call still running.
+   */
   | {
       type: "tool_end";
       data: {
