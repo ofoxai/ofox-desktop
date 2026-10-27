@@ -1,0 +1,301 @@
+//! The Ofox model catalog as the assistant sees it: chat-capable models only,
+//! with the capacity and prices the runtime needs.
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::time::Duration;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Model {
+    pub id: String,
+    pub name: String,
+    pub context_window: u64,
+    pub max_output_tokens: u64,
+    pub supports_images: bool,
+    pub input_modalities: Vec<String>,
+    pub supported_endpoints: Vec<String>,
+    pub input_price_per_million: Option<String>,
+    pub output_price_per_million: Option<String>,
+    pub pricing: Value,
+    pub cost: Value,
+    pub pricing_known: bool,
+}
+
+/// Defaults tried in order when nothing remembered is still offered. Every
+/// entry was in the live `/v1/models` catalog of both apexes when chosen; one
+/// that disappears is skipped, never offered.
+pub const PREFERRED_MODEL_IDS: &[&str] = &[
+    "openai/gpt-6.1-sol",
+    "openai/gpt-6-sol",
+    "openai/gpt-5.4-mini",
+];
+
+/// Protocols the runtime can drive, as catalog paths without `/v1/`.
+const CHAT_ENDPOINTS: &[&str] = &["chat/completions", "responses", "messages"];
+
+fn million(value: &Value) -> Option<String> {
+    let value = value.as_str()?.parse::<rust_decimal::Decimal>().ok()?;
+    if value.is_sign_negative() {
+        return None;
+    }
+    Some(
+        (value.checked_mul(rust_decimal::Decimal::from(1_000_000))?)
+            .normalize()
+            .to_string(),
+    )
+}
+
+fn per_million_f64(value: &Value) -> Option<f64> {
+    million(value).and_then(|v| v.parse().ok())
+}
+
+fn strings(value: &Value) -> Option<Vec<String>> {
+    Some(
+        value
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+    )
+}
+
+fn is_chat_endpoint(endpoint: &str) -> bool {
+    let path = endpoint.trim_start_matches('/');
+    let path = path.strip_prefix("v1/").unwrap_or(path);
+    CHAT_ENDPOINTS.contains(&path)
+}
+
+/// A modality list the catalog states must include text; a missing list is no
+/// evidence either way (older rows and fixtures omit it).
+fn allows_text(modalities: &Option<Vec<String>>) -> bool {
+    modalities
+        .as_ref()
+        .is_none_or(|list| list.iter().any(|m| m == "text"))
+}
+
+/// Chat-capable means: a protocol the runtime speaks, text in, text out, and a
+/// usable context window. Image, audio, video and embedding models are dropped.
+pub fn parse_models(value: Value) -> Vec<Model> {
+    let Some(items) = value["data"].as_array() else {
+        return vec![];
+    };
+    items.iter().filter_map(parse_model).collect()
+}
+
+fn parse_model(item: &Value) -> Option<Model> {
+    let id = item["id"].as_str()?;
+    let context = item["context_length"].as_u64().filter(|v| *v >= 1024)?;
+    let endpoints = strings(&item["supported_endpoints"])?;
+    if !endpoints.iter().any(|e| is_chat_endpoint(e)) {
+        return None;
+    }
+    let inputs = strings(&item["architecture"]["input_modalities"]);
+    let outputs = strings(&item["architecture"]["output_modalities"]);
+    if !allows_text(&inputs) || !allows_text(&outputs) {
+        return None;
+    }
+    let inputs = inputs.unwrap_or_default();
+    let pricing = &item["pricing"];
+    let cache_write = pricing
+        .get("input_cache_write_5m")
+        .unwrap_or(&pricing["input_cache_write"]);
+    Some(Model {
+        id: id.into(),
+        name: item["name"].as_str().unwrap_or(id).into(),
+        context_window: context,
+        max_output_tokens: item["top_provider"]["max_completion_tokens"]
+            .as_u64()
+            .filter(|v| *v > 0)
+            .unwrap_or(8192)
+            .min(context / 2),
+        supports_images: inputs.iter().any(|v| v == "image"),
+        input_modalities: inputs,
+        supported_endpoints: endpoints,
+        input_price_per_million: million(&pricing["prompt"]),
+        output_price_per_million: million(&pricing["completion"]),
+        pricing: pricing.clone(),
+        cost: json!({
+            "input": per_million_f64(&pricing["prompt"]),
+            "output": per_million_f64(&pricing["completion"]),
+            "cacheRead": per_million_f64(&pricing["input_cache_read"]),
+            "cacheWrite": per_million_f64(cache_write),
+        }),
+        pricing_known: million(&pricing["prompt"]).is_some()
+            && million(&pricing["completion"]).is_some(),
+    })
+}
+
+/// The model a new session starts with: the remembered one if the catalog still
+/// offers it, else the first offered entry of [`PREFERRED_MODEL_IDS`], else the
+/// first model of `models` (all chat-capable, see [`parse_models`]). Never a
+/// model `models` does not contain; `None` only for an empty catalog.
+pub fn default_model_id(models: &[Model], remembered: Option<&str>) -> Option<String> {
+    let offered = |id: &str| models.iter().any(|m| m.id == id);
+    remembered
+        .filter(|id| offered(id))
+        .or_else(|| PREFERRED_MODEL_IDS.iter().copied().find(|id| offered(id)))
+        .or_else(|| models.first().map(|m| m.id.as_str()))
+        .map(str::to_owned)
+}
+
+pub async fn fetch_models(apex: &str) -> Result<Vec<Model>, String> {
+    let response = crate::proxy::http_client::get()
+        .get(format!(
+            "{}/v1/models",
+            crate::ofox_apex::models_catalog_base_for(apex)
+        ))
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|_| "assistant_catalog_unavailable")?;
+    if !response.status().is_success() {
+        return Err("assistant_catalog_unavailable".into());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "assistant_catalog_unavailable")?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        return Err("assistant_catalog_too_large".into());
+    }
+    let models =
+        parse_models(serde_json::from_slice(&bytes).map_err(|_| "assistant_catalog_invalid")?);
+    if models.is_empty() {
+        return Err("assistant_no_compatible_models".into());
+    }
+    Ok(models)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A catalog entry shaped like the live `/v1/models` rows.
+    fn entry(id: &str, endpoints: &[&str], inputs: &[&str], outputs: &[&str]) -> Value {
+        json!({
+            "id": id,
+            "context_length": 128000,
+            "top_provider": {"max_completion_tokens": 16000},
+            "supported_endpoints": endpoints,
+            "architecture": {"input_modalities": inputs, "output_modalities": outputs},
+            "pricing": {"prompt": "0.000002", "completion": "0.00001"}
+        })
+    }
+
+    fn ids(models: &[Model]) -> Vec<&str> {
+        models.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    fn catalog(ids: &[&str]) -> Vec<Model> {
+        parse_models(json!({"data": ids
+            .iter()
+            .map(|id| entry(id, &["/v1/chat/completions"], &["text"], &["text"]))
+            .collect::<Vec<_>>()}))
+    }
+
+    #[test]
+    fn runtime_fixture_projection_matches_the_sidecar_contract() {
+        assert!(million(&json!("-0.01")).is_none());
+        assert!(million(&json!("9999999999999999999999999999")).is_none());
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../assistant-runtime/test/fixtures/catalog-model.json"
+        ))
+        .unwrap();
+        let model = serde_json::to_value(&parse_models(fixture["catalog"].clone())[0]).unwrap();
+        for field in [
+            "id",
+            "contextWindow",
+            "maxOutputTokens",
+            "supportsImages",
+            "supportedEndpoints",
+        ] {
+            assert_eq!(model[field], fixture["runtime"][field]);
+        }
+        assert_eq!(model["cost"]["input"], 2.0);
+        assert_eq!(model["cost"]["cacheRead"], 0.5);
+    }
+
+    #[test]
+    fn model_projection_preserves_capacity_modalities_and_both_prices() {
+        let models = parse_models(
+            json!({"data":[{"id":"test/model","context_length":128000,"top_provider":{"max_completion_tokens":16000},"supported_endpoints":["/v1/responses"],"architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0.000002","completion":"0.00001"}}]}),
+        );
+        assert_eq!(models[0].context_window, 128000);
+        assert_eq!(models[0].max_output_tokens, 16000);
+        assert!(models[0].supports_images);
+        assert_eq!(models[0].input_price_per_million.as_deref(), Some("2"));
+        assert_eq!(models[0].output_price_per_million.as_deref(), Some("10"));
+        assert!(parse_models(json!({"data":[{"id":"unknown"}]})).is_empty());
+    }
+
+    #[test]
+    fn only_text_chat_models_are_offered() {
+        let models = parse_models(json!({"data": [
+            entry("chat/completions", &["/v1/chat/completions"], &["text", "image"], &["text"]),
+            entry("chat/responses", &["/v1/responses"], &["text"], &["text"]),
+            entry("chat/messages", &["/v1/messages"], &["text"], &["text"]),
+            // Live catalog rows that a chat endpoint alone would let through.
+            entry("image/out", &["/v1/chat/completions", "/v1/images/generations"], &["text", "image"], &["image"]),
+            entry("audio/in", &["/v1/chat/completions"], &["audio"], &["text"]),
+            entry("embed/text", &["/v1/embeddings"], &["text"], &["text"]),
+            entry("video/out", &["/v1/videos"], &["text"], &["video"]),
+            entry("decide/text", &["/v1/decisions"], &["text"], &["text"]),
+            entry("lookalike/path", &["/v1/realtime/responses-preview"], &["text"], &["text"]),
+        ]}));
+        assert_eq!(
+            ids(&models),
+            ["chat/completions", "chat/responses", "chat/messages"]
+        );
+    }
+
+    #[test]
+    fn a_remembered_model_still_in_the_catalog_wins() {
+        let models = catalog(&["z/first", PREFERRED_MODEL_IDS[0], "a/remembered"]);
+        assert_eq!(
+            default_model_id(&models, Some("a/remembered")).as_deref(),
+            Some("a/remembered")
+        );
+    }
+
+    #[test]
+    fn a_remembered_model_gone_from_the_catalog_falls_back_to_the_preference_list() {
+        let preferred = PREFERRED_MODEL_IDS[PREFERRED_MODEL_IDS.len() - 1];
+        let models = catalog(&["z/first", preferred]);
+        assert_eq!(
+            default_model_id(&models, Some("gone/model")).as_deref(),
+            Some(preferred)
+        );
+    }
+
+    #[test]
+    fn the_first_available_preference_is_picked_in_list_order() {
+        let mut offered = PREFERRED_MODEL_IDS.to_vec();
+        offered.reverse();
+        offered.push("z/other");
+        let models = catalog(&offered);
+        assert_eq!(
+            default_model_id(&models, None).as_deref(),
+            Some(PREFERRED_MODEL_IDS[0])
+        );
+    }
+
+    #[test]
+    fn without_any_preference_the_first_chat_model_is_the_default() {
+        let models = catalog(&["z/first", "a/second"]);
+        assert_eq!(default_model_id(&models, None).as_deref(), Some("z/first"));
+    }
+
+    #[test]
+    fn an_empty_catalog_has_no_default() {
+        assert_eq!(default_model_id(&[], Some(PREFERRED_MODEL_IDS[0])), None);
+    }
+
+    #[test]
+    fn the_preference_list_is_non_empty_and_has_no_duplicates() {
+        assert!(!PREFERRED_MODEL_IDS.is_empty());
+        let mut unique = PREFERRED_MODEL_IDS.to_vec();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), PREFERRED_MODEL_IDS.len());
+    }
+}
