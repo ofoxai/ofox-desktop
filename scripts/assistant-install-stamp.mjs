@@ -5,15 +5,28 @@ import path from "node:path";
 // The production dependency tree is installed with `npm ci`, which deletes
 // and downloads it again. Tauri's dev and build hooks prepare the runtime on
 // every run, so the install is skipped while what it was made from (the
-// lockfile, package.json, Node version and platform) is unchanged.
+// lockfile, package.json, the scripts that install and prune it, Node version
+// and platform) is unchanged.
 
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-/** What an install of `runtime`'s production dependencies is made from. */
-export async function installStamp({ runtime, nodeVersion, platform }) {
+/**
+ * What an install of `runtime`'s production dependencies is made from;
+ * `scripts` are the files that install and prune it.
+ */
+export async function installStamp({
+  runtime,
+  scripts,
+  nodeVersion,
+  platform,
+}) {
+  const scriptDigests = [];
+  for (const script of scripts)
+    scriptDigests.push(digest(await readFile(script)));
   return {
     lockSha256: digest(await readFile(path.join(runtime, "package-lock.json"))),
     packageSha256: digest(await readFile(path.join(runtime, "package.json"))),
+    scriptsSha256: digest(scriptDigests.join("\n")),
     nodeVersion,
     platform,
   };

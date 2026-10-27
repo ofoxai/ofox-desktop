@@ -13,6 +13,8 @@ let root: string;
 let runtime: string;
 let production: string;
 let stampFile: string;
+let prepareScript: string;
+let pruneScript: string;
 
 async function sources(lock: string) {
   await writeFile(path.join(runtime, "package.json"), '{"name":"runtime"}');
@@ -26,13 +28,23 @@ beforeEach(async () => {
   stampFile = path.join(runtime, "resources", "runtime-install.json");
   await mkdir(path.join(production, "node_modules"), { recursive: true });
   await sources('{"lockfileVersion":3}');
+  await mkdir(path.join(root, "scripts"));
+  prepareScript = path.join(root, "scripts", "assistant-prepare.mjs");
+  pruneScript = path.join(root, "scripts", "assistant-prune.mjs");
+  await writeFile(prepareScript, "await install();\n");
+  await writeFile(pruneScript, 'export const UNUSED = ["examples"];\n');
 });
 
 afterEach(() => rm(root, { recursive: true, force: true }));
 
 describe("assistant runtime preparation", () => {
   const stamp = (nodeVersion = "22.23.4") =>
-    installStamp({ runtime, nodeVersion, platform: "darwin-arm64" });
+    installStamp({
+      runtime,
+      scripts: [prepareScript, pruneScript],
+      nodeVersion,
+      platform: "darwin-arm64",
+    });
 
   it("installs the production tree when nothing was installed yet", async () => {
     expect(await installIsCurrent(production, stampFile, await stamp())).toBe(
@@ -60,6 +72,20 @@ describe("assistant runtime preparation", () => {
     expect(
       await installIsCurrent(production, stampFile, await stamp("22.24.0")),
     ).toBe(false);
+  });
+
+  it("installs and prunes again when the prepare or prune script changes", async () => {
+    for (const [script, changed] of [
+      [prepareScript, "await install({ prune: true });\n"],
+      [pruneScript, 'export const UNUSED = ["examples", "docs"];\n'],
+    ]) {
+      await writeInstallStamp(stampFile, await stamp());
+      await writeFile(script, changed);
+      expect(
+        await installIsCurrent(production, stampFile, await stamp()),
+        script,
+      ).toBe(false);
+    }
   });
 
   it("installs again when the installed tree is gone", async () => {

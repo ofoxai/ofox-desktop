@@ -38,9 +38,10 @@ fails on Node 22), the `web/` and `legacy/web/` viewers, the standalone
 neither) and `standard_fonts/` (read only through `standardFontDataUrl`,
 which the runtime never sets). The PDF.js `legacy/build/` and the `cmaps/`,
 `iccs/` and `wasm/` it reads stay. `resources/runtime-install.json` records the
-lockfile and `package.json` hashes, Node version and platform of that install;
+lockfile and `package.json` hashes, a hash of `scripts/assistant-prepare.mjs`
+and `scripts/assistant-prune.mjs`, Node version and platform of that install;
 while they are unchanged the next prepare skips `npm ci` and only copies `src/`
-and `notices/` again. `notices/` is copied to `resources/notices/`: third-party
+and `notices/` again, so a changed prune rule installs and prunes afresh. `notices/` is copied to `resources/notices/`: third-party
 notices for `@napi-rs/canvas` (including the libraries compiled into its native
 addon) and `pdfjs-dist`. `resources/manifest.json`
 records the protocol, SDK and Node versions and `minimumMacOS`, read from

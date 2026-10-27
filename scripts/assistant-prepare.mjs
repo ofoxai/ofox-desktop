@@ -233,6 +233,11 @@ if (process.argv.includes("--node-only")) {
   const stampFile = path.join(resources, "runtime-install.json");
   const wanted = await installStamp({
     runtime,
+    // A change to how the tree is installed or pruned redoes both.
+    scripts: [
+      fileURLToPath(import.meta.url),
+      path.join(root, "scripts", "assistant-prune.mjs"),
+    ],
     nodeVersion: manifest.version,
     platform: target,
   });
