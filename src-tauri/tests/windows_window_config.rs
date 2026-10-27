@@ -221,19 +221,24 @@ fn every_platform_maps_the_assistant_runtime_to_its_exact_bundle_root() {
                         .is_none_or(|extension| extension != "map")),
             "{config} must not ship Pi examples, doom.wasm or source maps"
         );
-        // Only the legacy PDF.js build runs on the bundled Node, and the
-        // runtime never loads PDF.js standard fonts.
+        // Only the legacy PDF.js build runs on the bundled Node; the runtime
+        // never loads PDF.js viewers, standalone decoders or standard fonts.
         let pdfjs = root
             .join("../assistant-runtime/resources/runtime/node_modules/pdfjs-dist")
             .canonicalize()
             .expect("PDF.js prepared before Cargo");
         assert!(
-            entries
-                .iter()
-                .all(|(source, _)| ["build", "web", "standard_fonts"]
-                    .iter()
-                    .all(|unused| !source.starts_with(pdfjs.join(unused)))),
-            "{config} must not ship the modern PDF.js build, viewer or standard fonts"
+            entries.iter().all(|(source, _)| [
+                "build",
+                "web",
+                "image_decoders",
+                "standard_fonts",
+                "legacy/web",
+                "legacy/image_decoders",
+            ]
+            .iter()
+            .all(|unused| !source.starts_with(pdfjs.join(unused)))),
+            "{config} must not ship the modern PDF.js build, viewers, decoders or standard fonts"
         );
     }
 }

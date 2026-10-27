@@ -32,10 +32,12 @@ executable and its LICENSE to `resources/node/`, installs the production
 dependencies from `package-lock.json` into `resources/runtime/` with
 `npm ci --omit=dev --ignore-scripts`, and prunes what the sidecar never loads
 (`scripts/assistant-prune.mjs`): Pi's `examples/` (a demo ships a GPL-licensed
-`doom.wasm`), every `*.map` file, and PDF.js's modern `build/` (it fails on
-Node 22), `web/` viewer and `standard_fonts/` (read only through
-`standardFontDataUrl`, which the runtime never sets). The PDF.js `legacy/`
-build and the `cmaps/`, `iccs/` and `wasm/` it reads stay. `notices/` is
+`doom.wasm`), every `*.map` file, and from PDF.js the modern `build/` (it
+fails on Node 22), the `web/` and `legacy/web/` viewers, the standalone
+`image_decoders/` and `legacy/image_decoders/` (the legacy build imports
+neither) and `standard_fonts/` (read only through `standardFontDataUrl`,
+which the runtime never sets). The PDF.js `legacy/build/` and the `cmaps/`,
+`iccs/` and `wasm/` it reads stay. `notices/` is
 copied to `resources/notices/`: third-party notices for `@napi-rs/canvas`
 (including the libraries compiled into its native addon) and `pdfjs-dist`.
 `resources/manifest.json`

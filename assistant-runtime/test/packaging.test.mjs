@@ -18,13 +18,16 @@ const exists = (file) =>
     () => false,
   );
 
-test("production pruning drops unused PDF.js builds and fonts but keeps the legacy runtime", async (t) => {
+test("production pruning drops unused PDF.js builds, viewers, decoders and fonts but keeps the legacy runtime", async (t) => {
   const production = await mkdtemp(path.join(tmpdir(), "ofox-prune-"));
   t.after(() => rm(production, { recursive: true, force: true }));
   const modules = path.join(production, "node_modules");
   const files = [
     "pdfjs-dist/build/pdf.mjs",
     "pdfjs-dist/web/pdf_viewer.mjs",
+    "pdfjs-dist/image_decoders/pdf.image_decoders.mjs",
+    "pdfjs-dist/legacy/web/pdf_viewer.mjs",
+    "pdfjs-dist/legacy/image_decoders/pdf.image_decoders.mjs",
     "pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf",
     "pdfjs-dist/standard_fonts/LICENSE_LIBERATION",
     "pdfjs-dist/legacy/build/pdf.mjs",
@@ -48,6 +51,9 @@ test("production pruning drops unused PDF.js builds and fonts but keeps the lega
     "pdfjs-dist/build",
     "pdfjs-dist/web",
     "pdfjs-dist/standard_fonts",
+    "pdfjs-dist/image_decoders",
+    "pdfjs-dist/legacy/web",
+    "pdfjs-dist/legacy/image_decoders",
     "pdfjs-dist/legacy/build/pdf.mjs.map",
     "@earendil-works/pi-coding-agent/examples",
   ])

@@ -3,14 +3,18 @@ import path from "node:path";
 
 // Package paths the sidecar never loads, kept out of the application bundle.
 // Pi ships demo extensions (one bundles a GPL-licensed doom.wasm). PDF.js
-// ships a modern build that fails on Node 22, a viewer, and standard fonts
-// that are read only when standardFontDataUrl is set, which the runtime never
-// does. The legacy build and the cmaps, iccs and wasm it reads stay.
+// ships a modern build that fails on Node 22, viewers and standalone image
+// decoders that the legacy build does not import, and standard fonts that are
+// read only when standardFontDataUrl is set, which the runtime never does.
+// The legacy build and the cmaps, iccs and wasm it reads stay.
 export const UNUSED_PACKAGE_PATHS = [
   "@earendil-works/pi-coding-agent/examples",
   "pdfjs-dist/build",
   "pdfjs-dist/web",
+  "pdfjs-dist/image_decoders",
   "pdfjs-dist/standard_fonts",
+  "pdfjs-dist/legacy/web",
+  "pdfjs-dist/legacy/image_decoders",
 ];
 
 export async function pruneProduction(directory) {

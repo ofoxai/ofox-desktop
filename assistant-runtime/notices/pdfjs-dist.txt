@@ -19,8 +19,9 @@ The package keeps these resources together with their own license files:
           (wasm/LICENSE_JBIG2, LICENSE_OPENJPEG, LICENSE_QCMS,
           LICENSE_PDFJS_JBIG2, LICENSE_PDFJS_OPENJPEG, LICENSE_PDFJS_QCMS)
 
-The package's modern build/, web/ viewer and standard_fonts/ directories are
-not distributed with Ofox Desktop.
+The package's modern build/, its web/ and legacy/web/ viewers, its
+image_decoders/ and legacy/image_decoders/ and its standard_fonts/ are not
+distributed with Ofox Desktop.
 
 -------------------------------------------------------------------------------
 
