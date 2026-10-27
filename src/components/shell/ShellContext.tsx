@@ -23,6 +23,7 @@ export const SHELL_PAGES: readonly ShellPage[] = [
   "sessions",
   "library",
   "usage",
+  "assistant",
 ];
 
 /** The id of a page's panel, for the tab's `aria-controls`. */

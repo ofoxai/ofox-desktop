@@ -368,7 +368,7 @@ describe("Console title bar", () => {
 });
 
 describe("Console navigation", () => {
-  it("offers 工具, 会话, 资源库 and 用量, and no 模型方案 tab", async () => {
+  it("offers 工具, 会话, 资源库, 用量 and 助手, and no 模型方案 tab", async () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
@@ -376,6 +376,7 @@ describe("Console navigation", () => {
       "会话",
       "资源库",
       "用量",
+      "助手",
     ]);
   });
 
@@ -414,6 +415,72 @@ describe("Console navigation", () => {
     expect(tools).toBeVisible();
     expect(usage).toBeInTheDocument();
     expect(usage).not.toBeVisible();
+  });
+});
+
+describe("Console assistant", () => {
+  const assistantCalls = () =>
+    mocks.invoke.mock.calls.filter(([name]) =>
+      String(name).startsWith("assistant_"),
+    );
+
+  it.each([false, true])(
+    "requires sign-in for the assistant independently of the local-tools route (local only: %s)",
+    async (localOnly) => {
+      const onLoginRequested = vi.fn();
+      render(
+        <ConsolePage
+          boundTools={[]}
+          localOnly={localOnly}
+          localSignedIn={false}
+          onLoginRequested={onLoginRequested}
+        />,
+      );
+      fireEvent.click(screen.getByRole("tab", { name: "助手" }));
+      await act(async () => undefined);
+      expect(assistantCalls()).toHaveLength(0);
+      expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+      expect(onLoginRequested).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "登录 Ofox" }));
+      expect(onLoginRequested).toHaveBeenCalledOnce();
+      expect(mocks.openExternal).not.toHaveBeenCalled();
+    },
+  );
+
+  it("mounts the signed-in assistant on its first visit and keeps it, hidden, after", async () => {
+    const tauri = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args) => {
+      if (command === "assistant_bootstrap")
+        return {
+          runtime: { available: true },
+          models: [{ id: "m", name: "Model" }],
+          defaultModelId: "m",
+          key: { status: "ready" },
+        };
+      if (command === "assistant_list_sessions")
+        return { sessions: [], unreadable: [] };
+      return tauri(command, args);
+    });
+    render(<ConsolePage boundTools={[]} localSignedIn />);
+    await screen.findByText("Test User");
+    expect(document.getElementById("shell-panel-assistant")).toBeNull();
+    expect(assistantCalls()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("tab", { name: "助手" }));
+    const assistant = screen.getByRole("tabpanel", { name: "助手" });
+    expect(assistant).toBeVisible();
+    expect(
+      await within(assistant).findByRole("textbox", { name: "消息" }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(assistantCalls().map(([name]) => name)).toContain(
+        "assistant_bootstrap",
+      ),
+    );
+
+    fireEvent.click(screen.getByRole("tab", { name: "工具" }));
+    expect(assistant).toBeInTheDocument();
+    expect(assistant).not.toBeVisible();
   });
 });
 

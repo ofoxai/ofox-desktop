@@ -277,7 +277,8 @@
       "tools": "ツール",
       "sessions": "セッション",
       "usage": "使用量",
-      "library": "リソース"
+      "library": "リソース",
+      "assistant": "アシスタント"
     },
     "refresh": "再読み込み",
     "settings": "設定",

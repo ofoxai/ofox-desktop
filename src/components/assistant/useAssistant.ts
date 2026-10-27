@@ -1,10 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  OFOX_AUTH_EXPIRED_EVENT,
-  OFOX_AUTH_RESTORED_EVENT,
-} from "@/lib/api/ofoxAuth";
-import {
   assistantApi,
   type AssistantBootstrap,
   type AssistantEvent,
@@ -251,10 +247,11 @@ export function useAssistant(enabled: boolean) {
       return;
     }
     void loadBootstrap();
-    for (const name of [OFOX_AUTH_EXPIRED_EVENT, OFOX_AUTH_RESTORED_EVENT]) {
+    // The backend's auth state events: either one ends the current identity.
+    for (const name of ["ofox-auth-expired", "ofox-auth-restored"]) {
       void listen(name, () => {
         reset();
-        if (name === OFOX_AUTH_RESTORED_EVENT) {
+        if (name === "ofox-auth-restored") {
           void loadBootstrap();
           void refreshSessionsRef.current();
         }

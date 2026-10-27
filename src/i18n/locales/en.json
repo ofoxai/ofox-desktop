@@ -277,7 +277,8 @@
       "tools": "Tools",
       "sessions": "Sessions",
       "usage": "Usage",
-      "library": "Library"
+      "library": "Library",
+      "assistant": "Assistant"
     },
     "refresh": "Refresh",
     "settings": "Settings",

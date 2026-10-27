@@ -26,6 +26,7 @@ import {
   type ShellPage,
 } from "@/components/shell/ShellContext";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
+import { AccountAssistantPanel } from "@/components/assistant/AccountAssistantPanel";
 import {
   OptionalToolsCatalog,
   type InstallCatalogHandle,
@@ -47,9 +48,9 @@ interface ConsolePageProps {
 }
 
 /**
- * The signed-in window: the header with the 工具 / 会话 / 用量 tabs over
- * the open page. 工具 is always mounted; 会话 and 用量 mount on their first
- * visit and stay mounted, hidden, so their state survives switching.
+ * The signed-in window: the header with the 工具 / 会话 / 资源库 / 用量 / 助手
+ * tabs over the open page. 工具 is always mounted; the others mount on their
+ * first visit and stay mounted, hidden, so their state survives switching.
  */
 export default function ConsolePage(props: ConsolePageProps) {
   const active = props.active ?? true;
@@ -199,6 +200,16 @@ function ConsoleShell({
               <LibraryPage
                 location={shell.libraryLocation}
                 onLocated={shell.consumeLibraryLocation}
+              />
+            </InteractionScope>
+          </div>
+        )}
+        {shell.visited.has("assistant") && (
+          <div {...panel("assistant")} className="h-full px-4 pb-4 pt-1">
+            <InteractionScope active={shell.active === "assistant"}>
+              <AccountAssistantPanel
+                enabled={Boolean(localSignedIn)}
+                onLoginRequested={onLoginRequested}
               />
             </InteractionScope>
           </div>
