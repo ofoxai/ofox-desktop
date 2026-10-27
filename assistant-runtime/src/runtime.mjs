@@ -1,10 +1,16 @@
 import { mkdir, stat } from "node:fs/promises";
 import path from "node:path";
+import {
+  AttachmentStore,
+  MAX_MESSAGE_IMAGES,
+  prepareAttachments,
+  readAttachmentTool,
+} from "./attachments.mjs";
 import { errorMessage, modelForOfox, scrubSecrets } from "./security.mjs";
 
 // Side-effect-free tools that may still run after another operation's outcome
-// became unknown. The chat-only runtime registers no tools yet.
-const READ_TOOLS = new Set();
+// became unknown.
+const READ_TOOLS = new Set(["read_attachment"]);
 const MAX_TOOL_CALLS = 20;
 
 function contentText(content) {
@@ -132,6 +138,10 @@ function knownPrice(value) {
   );
 }
 
+// Kept before the user turn of a run that failed before its model request:
+// the attachments selected for it, which a replay of that turn reads again.
+const FAILED_SELECTION = "ofox-desktop-attachments";
+
 function branchBefore(manager, entryId, regenerate) {
   if (!entryId) return;
   const entries = new Map(
@@ -151,9 +161,16 @@ function branchBefore(manager, entryId, regenerate) {
   }
   if (!entry || entry.type !== "message" || entry.message.role !== "user")
     throw new Error("Edit requires a native user message");
+  const parent = entries.get(entry.parentId);
+  const failedSelection =
+    parent?.type === "custom" &&
+    parent.customType === FAILED_SELECTION &&
+    Array.isArray(parent.data?.attachmentIds)
+      ? parent.data.attachmentIds.filter((id) => typeof id === "string")
+      : [];
   if (entry.parentId) manager.branch(entry.parentId);
   else manager.resetLeaf();
-  return entry.message;
+  return { message: entry.message, failedSelection };
 }
 
 function projection(manager, secrets = []) {
@@ -301,8 +318,8 @@ function projection(manager, secrets = []) {
   };
 }
 
-// Describe only what this run can do. Chat registers no tools; a later tool
-// enables its capability by carrying its own Pi-style promptGuidelines.
+// Describe only what this run can do. Without tools nothing is claimed; each
+// tool enables its capability by carrying its own Pi-style promptGuidelines.
 function systemPrompt(tools) {
   const capabilities = tools.length
     ? [
@@ -377,10 +394,17 @@ export class AssistantRuntime {
     this.secrets.clear();
   }
 
-  // Model tools for this run. Chat has none yet; later tools are built with
-  // wrapTool so they share the call budget and the unknown-outcome gate.
-  tools(_context, _model) {
-    return [];
+  // Model tools for this run, built with wrapTool so they share the call
+  // budget and the unknown-outcome gate. Attachments are readable only when
+  // the conversation has some.
+  tools(context, model) {
+    return context.attachments.size
+      ? [
+          readAttachmentTool(this, context, {
+            vision: model.input.includes("image"),
+          }),
+        ]
+      : [];
   }
 
   hostTool(context, name, args, signal, toolCallId) {
@@ -507,6 +531,17 @@ export class AssistantRuntime {
       baseUrl: params.baseUrl,
       allowLocalGateway: params.allowLocalGateway,
     });
+    const attachments = new AttachmentStore(
+      params.attachmentRoot,
+      params.attachments ?? [],
+    );
+    const selected = params.selectedAttachmentIds ?? [];
+    if (
+      !Array.isArray(selected) ||
+      selected.length > 200 ||
+      selected.some((id) => typeof id !== "string")
+    )
+      throw new Error("Invalid attachment selection");
     const apiKey = params.apiKey;
     // Every credential of this run: its key, and a key the gateway refused
     // earlier in the same run. Conversation content loses exactly these.
@@ -517,6 +552,7 @@ export class AssistantRuntime {
     for (const secret of secrets) this.secrets.add(secret);
     const context = {
       params,
+      attachments,
       abort: new AbortController(),
       callCount: 0,
       calls: new Map(),
@@ -550,11 +586,12 @@ export class AssistantRuntime {
       );
       if (params.editEntryId && params.regenerateEntryId)
         throw new Error("Choose edit or regenerate, not both");
-      const branchUser = branchBefore(
+      const branch = branchBefore(
         manager,
         params.editEntryId ?? params.regenerateEntryId,
         Boolean(params.regenerateEntryId),
       );
+      const branchUser = branch?.message;
       if (!compactOnly) {
         manager.appendCustomEntry("ofox-desktop-run", {
           runId: params.runId,
@@ -564,14 +601,37 @@ export class AssistantRuntime {
           cacheWriteKnown: knownPrice(params.model.cost?.cacheWrite),
         });
       }
+      // Regenerate rebuilds the user's original input and attachment
+      // selection when the host supplies originalPrompt. Otherwise a turn
+      // that failed before its request is rebuilt from its kept selection,
+      // and any other native turn is replayed as stored, images included.
+      const regenerate = Boolean(params.regenerateEntryId);
+      const hostRebuild =
+        regenerate && typeof params.originalPrompt === "string";
+      const restore =
+        regenerate && !hostRebuild && branch.failedSelection.length > 0;
+      const replay = regenerate && !hostRebuild && !restore;
+      const turnSelection = replay
+        ? []
+        : restore
+          ? branch.failedSelection
+          : selected;
+      const nativeImages =
+        replay && Array.isArray(branchUser.content)
+          ? branchUser.content.filter((part) => part.type === "image")
+          : [];
       context.rejectedInput = {
         manager,
         original: scrubSecrets(
-          params.regenerateEntryId
-            ? contentText(branchUser.content)
-            : (params.prompt ?? ""),
+          hostRebuild
+            ? params.originalPrompt
+            : regenerate
+              ? contentText(branchUser.content)
+              : (params.prompt ?? ""),
           secrets,
         ),
+        images: nativeImages,
+        attachmentIds: [...new Set(turnSelection)],
       };
       const settings = SettingsManager.inMemory({
         retry: {
@@ -883,23 +943,33 @@ export class AssistantRuntime {
           ),
         );
       else {
-        // Regenerate resends the native user turn, including its images.
-        const prompt = scrubSecrets(
-          params.regenerateEntryId
-            ? contentText(branchUser.content)
-            : (params.prompt ?? ""),
-          secrets,
-        );
-        const images =
-          params.regenerateEntryId && Array.isArray(branchUser.content)
-            ? branchUser.content.filter((part) => part.type === "image")
-            : [];
+        let prompt = context.rejectedInput.original;
+        const images = [...nativeImages];
         if (images.length && !model.input.includes("image"))
           throw new Error(
             "assistant_vision_model_required: This model cannot read images; choose a vision model",
           );
-        if (images.length > 10)
-          throw new Error("A message supports at most 10 images");
+        if (images.length > MAX_MESSAGE_IMAGES)
+          throw new Error(
+            `A message supports at most ${MAX_MESSAGE_IMAGES} images`,
+          );
+        if (turnSelection.length) {
+          const prepared = await prepareAttachments(
+            attachments,
+            turnSelection,
+            {
+              vision: model.input.includes("image"),
+              imageLimit: MAX_MESSAGE_IMAGES,
+              scrub: (value) => scrubSecrets(value, secrets),
+              signal: context.abort.signal,
+              onOutcome: (outcome) =>
+                this.notify(context, "attachment", outcome),
+            },
+          );
+          if (prepared.blocked) throw prepared.blocked;
+          prompt += prepared.text;
+          images.push(...prepared.images);
+        }
         context.abort.signal.throwIfAborted();
         context.turnStarted = true;
         await session.prompt(prompt, { images, expandPromptTemplates: false });
@@ -930,10 +1000,15 @@ export class AssistantRuntime {
       const message = errorMessage(error, secrets);
       if (!compactOnly && context.rejectedInput && !context.turnStarted) {
         // Preserve failed input in native history before any paid request.
-        const { manager, original } = context.rejectedInput;
+        // Native images and the attachment selection stay with the failed
+        // turn so a retry keeps them.
+        const { manager, original, images, attachmentIds } =
+          context.rejectedInput;
+        if (attachmentIds.length)
+          manager.appendCustomEntry(FAILED_SELECTION, { attachmentIds });
         manager.appendMessage({
           role: "user",
-          content: [{ type: "text", text: original }],
+          content: [{ type: "text", text: original }, ...images],
           timestamp: Date.now(),
         });
         manager.appendMessage({

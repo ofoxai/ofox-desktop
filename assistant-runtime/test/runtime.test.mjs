@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
-import { copyFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { pdfPages } from "./fixtures/pdf.mjs";
 import {
   probeGuideline,
   probeToolName,
@@ -1196,4 +1205,610 @@ test("the system prompt describes only the capabilities enabled for the run", as
   );
   assert.match(withTool, /Use only the provided tools\./);
   assert.ok(withTool.includes(probeGuideline));
+});
+
+// Imports files into the sandbox the way the host does: one directory per
+// conversation, each attachment described by id, name, MIME type and path.
+async function withAttachments(params, files) {
+  const root = path.join(path.dirname(params.sessionFile), "attachments");
+  await mkdir(root, { recursive: true });
+  const attachments = [];
+  for (const [name, bytes, mimeType] of files) {
+    await writeFile(path.join(root, name), bytes);
+    attachments.push({
+      id: name,
+      name,
+      mimeType,
+      sizeBytes: Buffer.byteLength(bytes),
+      path: name,
+    });
+  }
+  return { ...params, attachmentRoot: root, attachments };
+}
+
+function lastUserText(body) {
+  const content = body.messages
+    .filter((item) => item.role === "user")
+    .at(-1).content;
+  return typeof content === "string"
+    ? content
+    : content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("\n");
+}
+
+const attachmentEvents = (events) =>
+  events
+    .filter((event) => event.type === "attachment")
+    .map((event) => event.data);
+
+test("read_attachment and its guidance exist only when the conversation has attachments", async (t) => {
+  const seen = [];
+  for (const supportsImages of [false, true]) {
+    const params = await withAttachments(await sandbox(t), [
+      ["notes.txt", "kept for later", "text/plain"],
+    ]);
+    const runtime = new AssistantRuntime({
+      fetch: async (_url, options) => {
+        seen.push(JSON.parse(options.body));
+        return stream("ok");
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({
+      ...params,
+      model: { ...model, supportsImages },
+    });
+    assert.equal(result.status, "completed");
+  }
+  const [textOnly, vision] = seen;
+  for (const body of seen) {
+    assert.deepEqual(
+      body.tools.map((tool) => tool.function.name),
+      ["read_attachment"],
+    );
+    assert.match(body.messages[0].content, /read_attachment reads UTF-8 text/);
+    assert.doesNotMatch(lastUserText(body), /kept for later/);
+  }
+  assert.equal(
+    textOnly.tools[0].function.parameters.properties.page,
+    undefined,
+  );
+  assert.match(textOnly.messages[0].content, /cannot view images/);
+  assert.doesNotMatch(textOnly.messages[0].content, /renders one PDF page/);
+  assert.ok(vision.tools[0].function.parameters.properties.page);
+  assert.match(vision.messages[0].content, /renders one PDF page/);
+  assert.doesNotMatch(vision.messages[0].content, /cannot view images/);
+});
+
+test("selected attachments are reported, then inlined in the model request", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["notes.txt", "Quarterly revenue grew", "text/plain"],
+    ])),
+    prompt: "Summarize",
+    selectedAttachmentIds: ["notes.txt"],
+  };
+  const events = [];
+  let body;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return stream("Revenue grew");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  assert.deepEqual(attachmentEvents(events), [
+    {
+      id: "notes.txt",
+      status: "ready",
+      code: null,
+      details: {
+        format: "text",
+        characters: 22,
+        inlineCharacters: 22,
+        hasMore: false,
+        truncated: false,
+      },
+    },
+  ]);
+  const order = events.map((event) => event.type);
+  assert.ok(order.indexOf("run_start") < order.indexOf("attachment"));
+  assert.ok(order.indexOf("attachment") < order.indexOf("text_delta"));
+  assert.match(
+    lastUserText(body),
+    /^Summarize\n\n\[User attachment: "notes\.txt"; id=notes\.txt\]\nQuarterly revenue grew/,
+  );
+});
+
+test("a blocked attachment fails the turn before any request and a vision retry rebuilds it", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["photo.png", Buffer.from(onePixelPng, "base64"), "image/png"],
+      ["broken.txt", Buffer.from([0x61, 0xff]), "text/plain"],
+      ["notes.txt", "caption notes", "text/plain"],
+    ])),
+    prompt: "Describe the photo",
+    selectedAttachmentIds: ["photo.png", "broken.txt", "notes.txt"],
+  };
+  const events = [];
+  let requests = 0;
+  let body;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      requests++;
+      body = JSON.parse(init.body);
+      return stream("Vision retry worked");
+    },
+  });
+  t.after(() => runtime.close());
+  const rejected = await runtime.run(params);
+  assert.equal(requests, 0);
+  assert.equal(rejected.status, "error");
+  assert.match(rejected.errorMessage, /^assistant_vision_model_required: /);
+  assert.deepEqual(
+    attachmentEvents(events).map(({ id, status, code }) => [id, status, code]),
+    [
+      ["photo.png", "model_unsupported", "assistant_vision_model_required"],
+      ["broken.txt", "unreadable", "assistant_attachment_unreadable"],
+      ["notes.txt", "ready", null],
+    ],
+  );
+  assert.equal(
+    events.find((event) => event.type === "error").data.code,
+    "input_preparation_failed",
+  );
+  assert.equal(
+    rejected.entries.find((entry) => entry.role === "user").content,
+    params.prompt,
+  );
+  const failed = rejected.entries.find((entry) => entry.role === "assistant");
+  assert.deepEqual((await runtime.load(params)).entries, rejected.entries);
+  events.length = 0;
+  const retried = await runtime.run({
+    ...params,
+    runId: "vision-retry",
+    operationId: "vision-operation",
+    model: { ...model, supportsImages: true },
+    regenerateEntryId: failed.id,
+    originalPrompt: params.prompt,
+    selectedAttachmentIds: ["photo.png", "notes.txt"],
+  });
+  assert.equal(retried.status, "completed");
+  assert.equal(requests, 1);
+  assert.deepEqual(
+    attachmentEvents(events).map(({ status }) => status),
+    ["ready", "ready"],
+  );
+  assert.match(JSON.stringify(body.messages), /image_url/);
+  assert.match(lastUserText(body), /^Describe the photo[\s\S]*caption notes/);
+  assert.equal(
+    retried.entries.find((entry) => entry.id === failed.id).active,
+    false,
+  );
+});
+
+test("regenerate rebuilds the original input and attachment selection, not the extracted prompt", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["notes.txt", "NOTE-BODY", "text/plain"],
+    ])),
+    prompt: "Summarize",
+    selectedAttachmentIds: ["notes.txt"],
+  };
+  const bodies = [];
+  const events = [];
+  let reply = 0;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return stream(`reply ${++reply}`);
+    },
+  });
+  t.after(() => runtime.close());
+  const first = await runtime.run(params);
+  const assistantOf = (result) =>
+    result.entries.findLast(
+      (entry) => entry.active && entry.role === "assistant",
+    ).id;
+  const occurrences = (text, pattern) => text.split(pattern).length - 1;
+  const without = await runtime.run({
+    ...params,
+    runId: "without",
+    operationId: "without",
+    regenerateEntryId: assistantOf(first),
+    originalPrompt: "Summarize",
+    selectedAttachmentIds: [],
+  });
+  assert.equal(without.status, "completed");
+  assert.equal(lastUserText(bodies[1]), "Summarize");
+  events.length = 0;
+  const rebuilt = await runtime.run({
+    ...params,
+    runId: "rebuilt",
+    operationId: "rebuilt",
+    regenerateEntryId: assistantOf(without),
+    originalPrompt: "Summarize",
+  });
+  assert.equal(rebuilt.status, "completed");
+  assert.equal(occurrences(lastUserText(bodies[2]), "NOTE-BODY"), 1);
+  assert.match(lastUserText(bodies[2]), /^Summarize\n\n\[User attachment/);
+  assert.deepEqual(
+    attachmentEvents(events).map(({ id }) => id),
+    ["notes.txt"],
+  );
+  // Without originalPrompt the native turn is replayed as stored; the
+  // selection cannot add the attachment a second time.
+  const replayed = await runtime.run({
+    ...params,
+    runId: "replayed",
+    operationId: "replayed",
+    regenerateEntryId: assistantOf(rebuilt),
+  });
+  assert.equal(replayed.status, "completed");
+  assert.equal(occurrences(lastUserText(bodies[3]), "NOTE-BODY"), 1);
+});
+
+test("a failed preparation keeps native images so retrying it does not drop them", async (t) => {
+  const params = await sandbox(t);
+  const { assistantId } = await writeImageHistory(params.sessionFile);
+  let body;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return stream("I see one pixel");
+    },
+  });
+  t.after(() => runtime.close());
+  const rejected = await runtime.run({
+    ...params,
+    regenerateEntryId: assistantId,
+  });
+  assert.equal(rejected.status, "error");
+  const failed = rejected.entries.findLast(
+    (entry) => entry.active && entry.role === "assistant",
+  );
+  const native = (await readFile(params.sessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const failedUser = native.find(
+    (entry) => entry.id === failed.parentId && entry.type === "message",
+  );
+  assert.deepEqual(
+    failedUser.message.content.map((part) => part.type),
+    ["text", "image"],
+  );
+  const retried = await runtime.run({
+    ...params,
+    runId: "retry-failed",
+    operationId: "retry-failed",
+    model: { ...model, supportsImages: true },
+    regenerateEntryId: failed.id,
+  });
+  assert.equal(retried.status, "completed");
+  assert.match(JSON.stringify(body.messages.at(-1)), /image_url/);
+  assert.equal(lastUserText(body), "What is in this picture?");
+});
+
+test("a vision model receives mixed PDF text and the actual image-only page numbers", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["mixed.pdf", pdfPages(["Cover only", null, null, null])],
+    ])),
+    selectedAttachmentIds: ["mixed.pdf"],
+    model: { ...model, supportsImages: true },
+  };
+  let body;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return stream("Read the mixed document");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  const user = body.messages.findLast((message) => message.role === "user");
+  const text = lastUserText(body);
+  assert.match(text, /Cover only/);
+  assert.match(text, /pages 2, 3.*attached as images/i);
+  assert.match(text, /remaining.*4.*read_attachment/i);
+  assert.equal(
+    user.content.filter((part) => part.type === "image_url").length,
+    2,
+  );
+});
+
+test("a text-only model gets a mixed PDF's text with a partial outcome", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["mixed.pdf", pdfPages(["Cover only", null])],
+    ])),
+    selectedAttachmentIds: ["mixed.pdf"],
+  };
+  const events = [];
+  let body;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return stream("The cover says Cover only; page 2 was not read");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  const [outcome] = attachmentEvents(events);
+  assert.equal(outcome.status, "partial");
+  assert.equal(outcome.code, "assistant_attachment_partial");
+  assert.deepEqual(outcome.details.pagesWithoutText, [2]);
+  const text = lastUserText(body);
+  assert.match(text, /Cover only/);
+  assert.match(text, /PDF pages 2 have no extractable text/);
+  assert.doesNotMatch(JSON.stringify(body.messages), /image_url/);
+});
+
+test("a PDF without text blocks a text-only model, and retries read the kept selection again", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["scan.pdf", pdfPages([null])],
+    ])),
+    prompt: "What does the scan say?",
+    selectedAttachmentIds: ["scan.pdf"],
+  };
+  const events = [];
+  let requests = 0;
+  let body;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      requests++;
+      body = JSON.parse(init.body);
+      return stream("A red square");
+    },
+  });
+  t.after(() => runtime.close());
+  const failedAssistant = (result) =>
+    result.entries.findLast(
+      (entry) => entry.active && entry.role === "assistant",
+    );
+  const blocked = await runtime.run(params);
+  assert.equal(requests, 0);
+  assert.equal(blocked.status, "error");
+  assert.match(blocked.errorMessage, /no extractable text.*vision model/);
+  assert.match(
+    await readFile(params.sessionFile, "utf8"),
+    /"customType":"ofox-desktop-attachments"/,
+  );
+  // A plain retry (no originalPrompt or selection) reads the attachment
+  // again instead of dropping it, and fails the same explicit way.
+  events.length = 0;
+  const again = await runtime.run({
+    ...params,
+    runId: "retry-text-only",
+    operationId: "retry-text-only",
+    selectedAttachmentIds: undefined,
+    regenerateEntryId: failedAssistant(blocked).id,
+  });
+  assert.equal(requests, 0);
+  assert.equal(again.status, "error");
+  assert.deepEqual(
+    attachmentEvents(events).map(({ id, code }) => [id, code]),
+    [["scan.pdf", "assistant_vision_model_required"]],
+  );
+  events.length = 0;
+  const retried = await runtime.run({
+    ...params,
+    runId: "retry-vision",
+    operationId: "retry-vision",
+    model: { ...model, supportsImages: true },
+    selectedAttachmentIds: undefined,
+    regenerateEntryId: failedAssistant(again).id,
+  });
+  assert.equal(retried.status, "completed");
+  assert.equal(requests, 1);
+  assert.deepEqual(
+    attachmentEvents(events).map(({ status }) => status),
+    ["ready"],
+  );
+  assert.match(
+    lastUserText(body),
+    /^What does the scan say\?\n\n\[User attachment/,
+  );
+  assert.match(JSON.stringify(body.messages), /image_url/);
+  // Once sent, the turn replays as stored: nothing is inlined twice.
+  events.length = 0;
+  const replayed = await runtime.run({
+    ...params,
+    runId: "replay-sent",
+    operationId: "replay-sent",
+    model: { ...model, supportsImages: true },
+    selectedAttachmentIds: undefined,
+    regenerateEntryId: failedAssistant(retried).id,
+  });
+  assert.equal(replayed.status, "completed");
+  assert.deepEqual(attachmentEvents(events), []);
+  assert.equal(lastUserText(body).split("[User attachment").length - 1, 1);
+});
+
+test("stop interrupts a long PDF during preparation without a request", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      [
+        "long.pdf",
+        pdfPages(Array.from({ length: 100 }, (_, index) => `Page ${index}`)),
+      ],
+    ])),
+    selectedAttachmentIds: ["long.pdf"],
+  };
+  const events = [];
+  let requests = 0;
+  let runtime;
+  runtime = new AssistantRuntime({
+    emit: (event) => {
+      events.push(event);
+      if (event.type !== "run_start") return;
+      // Stop after some turns of the event loop: only reachable while the
+      // PDF is being read because extraction yields between pages.
+      let turns = 0;
+      const turn = () => {
+        if (++turns === 20) void runtime.stop(params);
+        else setImmediate(turn);
+      };
+      setImmediate(turn);
+    },
+    fetch: async () => {
+      requests++;
+      return stream("must not send");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "stopped");
+  assert.equal(requests, 0);
+  assert.deepEqual(attachmentEvents(events), []);
+});
+
+test("reading a mixed PDF through a tool discloses text coverage and missing pages", async (t) => {
+  const params = await withAttachments(await sandbox(t), [
+    ["mixed.pdf", pdfPages(["Cover only", null])],
+  ]);
+  let calls = 0;
+  let body;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return ++calls === 1
+        ? toolStream("read_attachment", { id: "mixed.pdf" })
+        : stream("Choose a vision model for page 2");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  const tool = body.messages.find((message) => message.role === "tool");
+  assert.match(tool.content, /Cover only/);
+  assert.match(tool.content, /pagesWithoutText.*2/);
+  assert.match(tool.content, /vision model/i);
+});
+
+test("a vision model renders a PDF page through read_attachment", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["scan.pdf", pdfPages([null])],
+    ])),
+    model: { ...model, supportsImages: true },
+  };
+  let calls = 0;
+  let body;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return ++calls === 1
+        ? toolStream("read_attachment", { id: "scan.pdf", page: 1 })
+        : stream("A red square");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "completed");
+  assert.match(JSON.stringify(body.messages), /data:image\/png;base64,/);
+});
+
+test("stopping during attachment preparation cannot start a later paid request", async (t) => {
+  const params = {
+    ...(await withAttachments(await sandbox(t), [
+      ["notes.txt", "text attachment", "text/plain"],
+    ])),
+    selectedAttachmentIds: ["notes.txt"],
+  };
+  let requests = 0;
+  let runtime;
+  runtime = new AssistantRuntime({
+    emit: (event) => {
+      if (event.type === "run_start")
+        queueMicrotask(() => void runtime.stop(params));
+    },
+    fetch: async () => {
+      requests++;
+      return stream("must not send");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  assert.equal(result.status, "stopped");
+  assert.equal(requests, 0);
+});
+
+test("a relocated attachment under an absolute host path continues a portable history", async (t) => {
+  const params = await sandbox(t);
+  await copyFile(
+    new URL("./fixtures/portable-session.jsonl", import.meta.url),
+    params.sessionFile,
+  );
+  const attachmentRoot = await realpath(path.dirname(params.sessionFile));
+  const attachmentId = "f5835424-a0a7-4f48-b0f0-2c8e4fb03f1b";
+  const attachmentPath = path.join(attachmentRoot, attachmentId);
+  await writeFile(attachmentPath, "portable attachment content");
+  let body;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, options) => {
+      body = JSON.parse(options.body);
+      return stream("continued after restore");
+    },
+  });
+  t.after(() => runtime.close());
+  const continued = await runtime.run({
+    ...params,
+    prompt: "Read the restored attachment",
+    attachmentRoot,
+    attachments: [
+      {
+        id: attachmentId,
+        path: attachmentPath,
+        name: "note.txt",
+        mimeType: "text/plain",
+        sizeBytes: 27,
+      },
+    ],
+    selectedAttachmentIds: [attachmentId],
+  });
+  assert.equal(continued.status, "completed");
+  assert.match(JSON.stringify(body.messages), /Your portable note is ready/);
+  assert.match(JSON.stringify(body.messages), /portable attachment content/);
+});
+
+test("malformed attachment parameters are rejected before any request", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => {
+      requests++;
+      return stream("must not send");
+    },
+  });
+  t.after(() => runtime.close());
+  const attachment = { id: "a", name: "a.txt", path: "a.txt" };
+  for (const invalid of [
+    { attachments: [attachment] },
+    { attachmentRoot: "relative", attachments: [attachment] },
+    { attachmentRoot: os.tmpdir(), attachments: "a" },
+    {
+      attachmentRoot: os.tmpdir(),
+      attachments: [attachment],
+      selectedAttachmentIds: "a",
+    },
+  ])
+    await assert.rejects(
+      () => runtime.run({ ...params, ...invalid }),
+      /attachment/i,
+    );
+  assert.equal(requests, 0);
 });

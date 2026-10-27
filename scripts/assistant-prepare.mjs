@@ -22,6 +22,7 @@ import {
   installStamp,
   writeInstallStamp,
 } from "./assistant-install-stamp.mjs";
+import { pruneProduction } from "./assistant-prune.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = path.join(root, "assistant-runtime");
@@ -181,30 +182,6 @@ async function install(directory) {
   );
 }
 
-// Pi ships demo extensions (one bundles a GPL-licensed doom.wasm) and source
-// maps that the sidecar never loads; keep both out of the application bundle.
-async function pruneProduction(directory) {
-  await rm(
-    path.join(
-      directory,
-      "node_modules",
-      "@earendil-works",
-      "pi-coding-agent",
-      "examples",
-    ),
-    { recursive: true, force: true },
-  );
-  await removeSourceMaps(directory);
-}
-
-async function removeSourceMaps(directory) {
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const filename = path.join(directory, entry.name);
-    if (entry.isDirectory()) await removeSourceMaps(filename);
-    else if (entry.isFile() && entry.name.endsWith(".map")) await rm(filename);
-  }
-}
-
 // The bundled Node must run on every macOS the application accepts, so the
 // manifest records the application's own minimum instead of a second copy.
 async function applicationMinimumMacOS() {
@@ -281,6 +258,12 @@ if (process.argv.includes("--node-only")) {
   await cp(path.join(runtime, "src"), path.join(production, "src"), {
     recursive: true,
   });
+  // Notices for third-party code the npm packages ship without them, such as
+  // the libraries compiled into the native canvas addon. Copied every time,
+  // like the source, because they change without the lockfile.
+  const notices = path.join(resources, "notices");
+  await rm(notices, { recursive: true, force: true });
+  await cp(path.join(runtime, "notices"), notices, { recursive: true });
   await signMacFiles(resources);
   const stamp = path.join(nodeDirectory, "source.json");
   const source = JSON.parse(await readFile(stamp, "utf8"));

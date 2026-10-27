@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { UNUSED_PACKAGE_PATHS } from "./assistant-prune.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const resources = path.join(root, "assistant-runtime/resources");
@@ -20,10 +21,11 @@ const environment = Object.fromEntries(
 // Run the actual copied production tree with no user credentials or SDK config.
 async function productionSmoke() {
   const assert = (await import("node:assert/strict")).default;
-  const { mkdtemp, readFile, rm } = await import("node:fs/promises");
+  const { mkdtemp, readFile, rm, writeFile } = await import("node:fs/promises");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
   const { pathToFileURL } = await import("node:url");
+  const { createRequire } = await import("node:module");
   const production = process.argv[1];
   for (const name of ["pi-ai", "pi-coding-agent"]) {
     const manifest = path.join(
@@ -35,6 +37,15 @@ async function productionSmoke() {
     );
     assert.equal(JSON.parse(await readFile(manifest, "utf8")).version, "1.4.0");
   }
+  // The native canvas addon loads in the bundled Node and encodes images.
+  const require = createRequire(path.join(production, "package.json"));
+  const { createCanvas } = await import(
+    pathToFileURL(require.resolve("@napi-rs/canvas")).href
+  );
+  assert.equal(
+    createCanvas(2, 2).toBuffer("image/png").subarray(1, 4).toString(),
+    "PNG",
+  );
   const { AssistantRuntime } = await import(
     pathToFileURL(path.join(production, "src/runtime.mjs")).href
   );
@@ -43,6 +54,47 @@ async function productionSmoke() {
   );
   const testToken = "in-memory-production-smoke-credential";
   try {
+    // The legacy PDF.js build reads text (CJK through the shipped CMaps) and
+    // renders a page without text through the native canvas.
+    const { AttachmentStore } = await import(
+      pathToFileURL(path.join(production, "src/attachments.mjs")).href
+    );
+    const pages = [
+      "BT /F1 12 Tf 20 150 Td <4E2D6587> Tj ET",
+      "q 80 0 0 80 20 20 cm BI /W 1 /H 1 /CS /RGB /BPC 8 /F /AHx ID FF0000> EI Q",
+    ];
+    const objects = [
+      "<< /Type /Catalog /Pages 2 0 R >>",
+      "<< /Type /Pages /Kids [4 0 R 6 0 R] /Count 2 >>",
+      "<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light /Encoding /UniGB-UCS2-H /DescendantFonts [8 0 R] >>",
+      ...pages.flatMap((content, index) => [
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + index * 2} 0 R >>`,
+        `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+      ]),
+      "<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> /FontDescriptor 9 0 R >>",
+      "<< /Type /FontDescriptor /FontName /STSong-Light /Flags 6 /FontBBox [0 0 1000 1000] /ItalicAngle 0 /Ascent 880 /Descent -120 /CapHeight 880 /StemV 80 >>",
+    ];
+    let pdf = "%PDF-1.4\n";
+    const offsets = objects.map((object, index) => {
+      const offset = pdf.length;
+      pdf += `${index + 1} 0 obj\n${object}\nendobj\n`;
+      return offset;
+    });
+    const xref = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((offset) => `${String(offset).padStart(10, "0")} 00000 n \n`).join("")}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+    await writeFile(path.join(directory, "smoke-pdf"), pdf);
+    const store = new AttachmentStore(directory, [
+      { id: "pdf", name: "smoke.pdf", path: "smoke-pdf" },
+    ]);
+    const extracted = await store.read("pdf");
+    assert.match(extracted.text, /中文/);
+    assert.deepEqual(extracted.pagesWithoutText, [2]);
+    const page = await store.image("pdf", 2);
+    assert.equal(
+      Buffer.from(page.data, "base64").subarray(1, 4).toString(),
+      "PNG",
+    );
+
     const runtime = new AssistantRuntime({
       fetch: async (url, init) => {
         assert.equal(String(url), "https://api.ofox.ai/v1/chat/completions");
@@ -96,7 +148,7 @@ async function productionSmoke() {
     );
     await runtime.close();
     process.stdout.write(
-      `Production smoke passed (${process.version}; Pi SDK, native JSONL)\n`,
+      `Production smoke passed (${process.version}; Pi SDK, native canvas, PDF text and rendering, native JSONL)\n`,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -111,6 +163,36 @@ assert.equal(
     ?.minimumSystemVersion,
   "resources/manifest.json minimumMacOS must equal tauri.conf.json bundle.macOS.minimumSystemVersion; run pnpm assistant:prepare",
 );
+
+// Pruned package paths stay out of the bundle; the PDF.js legacy build, its
+// resources and the third-party notices stay in it.
+const production = path.join(resources, "runtime");
+for (const unused of UNUSED_PACKAGE_PATHS)
+  assert.equal(
+    existsSync(path.join(production, "node_modules", unused)),
+    false,
+    `${unused} must be pruned; run pnpm assistant:prepare`,
+  );
+for (const kept of [
+  "node_modules/pdfjs-dist/legacy/build/pdf.mjs",
+  "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
+  "node_modules/pdfjs-dist/cmaps",
+  "node_modules/pdfjs-dist/iccs",
+  "node_modules/pdfjs-dist/wasm",
+  "node_modules/pdfjs-dist/LICENSE",
+])
+  assert.ok(existsSync(path.join(production, kept)), `${kept} must ship`);
+for (const office of ["fflate", "fast-xml-parser"])
+  assert.equal(
+    existsSync(path.join(production, "node_modules", office)),
+    false,
+    `${office} must not ship`,
+  );
+for (const notice of ["napi-rs-canvas.txt", "pdfjs-dist.txt"])
+  assert.ok(
+    existsSync(path.join(resources, "notices", notice)),
+    `notices/${notice} must ship; run pnpm assistant:prepare`,
+  );
 
 const result = spawnSync(
   node,

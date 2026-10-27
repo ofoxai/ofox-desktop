@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,6 +13,7 @@ import {
   writeModelStream,
   writeModelToolCall,
 } from "./fixtures/stdio-acceptance.mjs";
+import { pdfPages } from "./fixtures/pdf.mjs";
 import { probeToolName } from "./fixtures/probe-tool.mjs";
 
 test("private stdio waits for pipe closure and keeps output delivered after process exit", async () => {
@@ -383,5 +384,66 @@ test(
         await fixture.assertClean([token]);
       });
     }
+  },
+);
+
+test(
+  "private stdio reports attachment outcomes and sends a rendered scanned page",
+  { timeout: 30000 },
+  async (t) => {
+    const token = "synthetic-stdio-attachment-credential";
+    const fixture = await createStdioAcceptance(t, (_request, response) =>
+      writeModelStream(response, "A red square"),
+    );
+    const attachmentRoot = path.join(fixture.root, "attachments");
+    await mkdir(attachmentRoot);
+    const scan = pdfPages([null]);
+    await writeFile(path.join(attachmentRoot, "scan-id"), scan);
+    const params = fixture.params("attachment", token, {
+      prompt: "What does the scan show?",
+      attachmentRoot,
+      attachments: [
+        {
+          id: "scan-id",
+          name: "scan.pdf",
+          mimeType: "application/pdf",
+          sizeBytes: scan.length,
+          path: path.join(attachmentRoot, "scan-id"),
+        },
+      ],
+      selectedAttachmentIds: ["scan-id"],
+    });
+    params.model = { ...params.model, supportsImages: true };
+    const wire = fixture.spawnSidecar();
+    const result = await wire.start("run", params);
+    assert.equal(result.status, "completed");
+    const outcome = wire.messages.find(
+      (message) =>
+        message.method === "event" && message.params.type === "attachment",
+    ).params;
+    assert.equal(outcome.runId, params.runId);
+    assert.deepEqual(outcome.data, {
+      id: "scan-id",
+      status: "ready",
+      code: null,
+      details: {
+        format: "pdf",
+        characters: outcome.data.details.characters,
+        inlineCharacters: outcome.data.details.characters,
+        hasMore: false,
+        truncated: false,
+        pageCount: 1,
+        textCoverage: "none",
+        pagesWithoutText: [1],
+        pagesAttachedAsImages: [1],
+      },
+    });
+    assert.match(
+      JSON.stringify(fixture.requests[0].body.messages),
+      /data:image\/png;base64,/,
+    );
+    assert.equal(wire.stderr, "");
+    await wire.close();
+    await fixture.assertClean([token]);
   },
 );
