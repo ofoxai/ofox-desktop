@@ -336,6 +336,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_catalog_invalid: "catalogUnavailable",
   assistant_catalog_too_large: "catalogUnavailable",
   assistant_run_timeout: "runTimeout",
+  assistant_search_outcome_unknown: "searchOutcomeUnknown",
   assistant_cancelled: "stopped",
   assistant_runtime_unavailable: "runtimeMissing",
   assistant_runtime_failed: "runtime",

@@ -4908,6 +4908,7 @@
       "noModels": "No model the assistant can use is available right now. Try again later.",
       "catalogUnavailable": "The model list couldn't be loaded. Check your connection and try again.",
       "runTimeout": "The reply took too long and was stopped. Please try again.",
+      "searchOutcomeUnknown": "The reply stopped because a web search couldn't be confirmed. The search may have been charged, so it's not repeated automatically. Send your message again if you still need an answer.",
       "stopped": "The reply was stopped.",
       "runtimeMissing": "The assistant runtime is missing. Check that the app is installed correctly, then try again.",
       "runtime": "The assistant runtime stopped unexpectedly. Please try again.",

@@ -167,6 +167,10 @@ describe("assistant error messages", () => {
       { code: "assistant_vision_model_required" },
       "assistant.errors.visionModelRequired",
     ],
+    [
+      { code: "assistant_search_outcome_unknown" },
+      "assistant.errors.searchOutcomeUnknown",
+    ],
   ])("maps %o to its own message", (error, key) => {
     expect(assistantErrorKey(error)).toBe(key);
   });
@@ -214,6 +218,7 @@ describe("assistant error messages", () => {
     ["attachmentUnsupported", /images.*PDFs.*text files/i],
     ["attachmentUnreadable", /attach it again/i],
     ["visionModelRequired", /choose a model that can read images/i],
+    ["searchOutcomeUnknown", /may have been charged.*not repeated/i],
   ])("tells the user what to do about %s", (message, action) => {
     expect(
       en.assistant.errors[message as keyof typeof en.assistant.errors],
