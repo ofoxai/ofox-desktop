@@ -439,12 +439,14 @@ test("a repeated query in one run is answered once, without a second charge", as
   assert.match(JSON.stringify(results[1].content), /already searched/);
 });
 
-test("a run makes at most 3 searches: repeats are free, failures count, and a fourth is refused unsent", async (t) => {
+test("a run sends at most 3 searches: a sent failure counts, repeats and unsent failures do not", async (t) => {
   const fixture = await sandbox(t);
   const model = scriptedModel(
     () =>
       callTools(
+        ["web_search", { query: "rate limited" }],
         ["web_search", { query: "rejected arguments" }],
+        ["web_search", { query: "protocol error" }],
         ["web_search", { query: "Tauri release" }],
         ["web_search", { query: "  tauri   RELEASE " }],
         ["web_search", { query: "Pi SDK" }],
@@ -458,13 +460,23 @@ test("a run makes at most 3 searches: repeats are free, failures count, and a fo
   assert.equal(result.status, "completed");
   assert.deepEqual(
     calls(await fixture.log()).map(([, args]) => args.query),
-    ["rejected arguments", "Tauri release", "Pi SDK"],
+    [
+      "rate limited",
+      "rejected arguments",
+      "protocol error",
+      "Tauri release",
+      "Pi SDK",
+    ],
   );
   const ends = toolEvents(events).filter((event) => event.type === "tool_end");
   assert.deepEqual(
     ends.map(({ success, details }) => [success, details.code ?? null]),
     [
+      // Sent and refused by the gateway: it counts.
+      [false, "search_failed"],
+      // Never reached the gateway: they do not.
       [false, "search_rejected"],
+      [false, "search_failed"],
       [true, null],
       [true, null],
       [true, null],
@@ -472,18 +484,20 @@ test("a run makes at most 3 searches: repeats are free, failures count, and a fo
       [true, null],
     ],
   );
-  assert.match(ends[0].message, /^search_rejected: .*Input validation error/);
+  assert.equal(ends[0].details.status, 429);
+  assert.match(ends[1].message, /^search_rejected: .*Input validation error/);
+  assert.match(ends[2].message, /no search was made/);
   // The model reads why and what to do instead; nothing was billed.
   assert.match(
-    ends[4].message,
+    ends[6].message,
     /^search_limit_reached: .*3 web searches.*answer with the information you already have/,
   );
-  assert.deepEqual(ends[4].details, { code: "search_limit_reached" });
+  assert.deepEqual(ends[6].details, { code: "search_limit_reached" });
   // A repeat after the limit is still answered from the earlier result.
-  assert.equal(ends[5].details.deduplicated, true);
-  const [limited] = toolResults(model.requests[1]).slice(4);
+  assert.equal(ends[7].details.deduplicated, true);
+  const [limited] = toolResults(model.requests[1]).slice(6);
   assert.match(JSON.stringify(limited.content), /search_limit_reached/);
-  const entry = result.entries.filter((item) => item.role === "tool")[4];
+  const entry = result.entries.filter((item) => item.role === "tool")[6];
   assert.equal(entry.isError, true);
   assert.equal(entry.usageCoverage, "complete");
 });
@@ -622,11 +636,14 @@ process.exit(2);`,
     [path.join(directory, "missing.mjs"), /unavailable$/],
     [refusing, /unavailable \(OFOX_BASE_URL must be exactly/],
   ]) {
+    // More calls than the search limit: nothing was sent, none counts.
     const model = scriptedModel(
       () =>
         callTools(
           ["web_search", { query: "anything" }],
           ["web_search", { query: "anything" }],
+          ["web_search", { query: "something else" }],
+          ["web_search", { query: "a third query" }],
         ),
       () => reply("Search is unavailable."),
     );
@@ -638,7 +655,7 @@ process.exit(2);`,
     const ends = toolEvents(events).filter(
       (event) => event.type === "tool_end",
     );
-    assert.equal(ends.length, 2);
+    assert.equal(ends.length, 4);
     for (const end of ends) {
       assert.equal(end.success, false);
       assert.deepEqual(end.details, { code: "search_unavailable" });
@@ -651,7 +668,7 @@ process.exit(2);`,
   assert.equal(
     (await readFile(path.join(directory, "starts"), "utf8")).trim().split("\n")
       .length,
-    2,
+    4,
   );
 });
 

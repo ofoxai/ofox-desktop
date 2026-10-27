@@ -18,9 +18,10 @@ const FETCH_TIMEOUT_MS = 30_000;
 const START_TIMEOUT_MS = 10_000;
 const MAX_ALLOWED_URLS = 500;
 const MAX_URL_CHARS = 2048;
-// Per run: searches sent to the server (a repeat answered from an earlier
-// result is not one), and failed page reads. Beyond them the tools refuse
-// without a request, so a model that keeps searching or retrying stops.
+// Per run: searches that may have reached the gateway (a repeat answered from
+// an earlier result, or a failure that never reached it, is not one), and
+// failed page reads. Beyond them the tools refuse without a request, so a
+// model that keeps searching or retrying stops.
 const MAX_SEARCHES = 3;
 const MAX_FETCH_FAILURES = 3;
 // What Node itself may need on Windows and macOS; nothing else is inherited.
@@ -341,6 +342,18 @@ function repeatedSearch(result) {
 
 const searchKey = (query) => query.trim().replace(/\s+/g, " ").toLowerCase();
 
+// Failures known not to have reached the gateway: the server could not run
+// or refused the call, or it could not connect (search_failed without a
+// status). A gateway answer (with a status) or an unknown outcome may bill.
+function searchNotSent(error) {
+  const { code, status } = error?.details ?? {};
+  return (
+    code === "search_unavailable" ||
+    code === "search_rejected" ||
+    (code === "search_failed" && status === undefined)
+  );
+}
+
 /**
  * The two web tools for `context.search` (a SearchServer). `context.webUrls`
  * holds the fetchable pages: the host's allowedWebUrls, then every source a
@@ -362,7 +375,6 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
     async ({ query }, signal) => {
       const key = searchKey(query);
       if (searches.has(key)) return repeatedSearch(await searches.get(key));
-      // Failed searches count too: a model retrying them stops as well.
       if (searchCount >= MAX_SEARCHES) throw searchLimit();
       searchCount++;
       const pending = context.search
@@ -376,7 +388,14 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
       // tried again. An unknown outcome ends the run anyway.
       searches.set(key, pending);
       pending.catch(() => searches.delete(key));
-      const result = await pending;
+      let result;
+      try {
+        result = await pending;
+      } catch (error) {
+        // A sent failure counts: a model retrying it stops as well.
+        if (searchNotSent(error)) searchCount--;
+        throw error;
+      }
       for (const source of result.details.sources) {
         const page = webUrlKey(source.url);
         if (page) context.webUrls.add(page);

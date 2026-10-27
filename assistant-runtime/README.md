@@ -344,8 +344,8 @@ sent; a later call starts it again), `search_rejected`/`fetch_rejected` (the
 server rejected the arguments), `search_failed` without `status` also when the
 server answered with a JSON-RPC error (it never ran the search),
 `fetch_not_allowed` (also: the URL is not allowed in this run), and the
-run's budget: `search_limit_reached` (the run already sent 3 searches to the
-server) and `fetch_limit_reached` (3 `web_fetch` calls of the run already
+run's budget: `search_limit_reached` (the run already made 3 searches that
+may have reached the gateway) and `fetch_limit_reached` (3 `web_fetch` calls of the run already
 failed, refusals included). Both are ordinary failures without a request:
 they tell the model to answer with what it has, and the run goes on.
 Source URLs are passed on as the server returns them; `inputTokens` and
@@ -361,9 +361,12 @@ priced from its `searchCalls`, never from an assumed 1. Nothing is retried
 automatically. The same query again in one run (case and spacing ignored)
 after a success, or while it runs, is answered from that result with
 `deduplicated: true` and zero usage, also past the limit; after a failure the
-model may try it again. A run sends at most 3 searches to the server, failed
-ones included; repeats answered from an earlier result do not count. A
-failure other than `search_outcome_unknown` cost nothing.
+model may try it again. A run makes at most 3 searches that may have reached
+the gateway: a failure the gateway answered (with `status`) or an unknown
+outcome counts; repeats answered from an earlier result and failures that
+never reached it (`search_unavailable`, `search_rejected`, `search_failed`
+without `status`) do not. A failure other than `search_outcome_unknown` cost
+nothing.
 
 Unknown outcome: `search_outcome_unknown` comes from the server, or from the
 runtime when the server did not answer within 70 s, answered malformed, the
