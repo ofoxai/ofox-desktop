@@ -21,12 +21,18 @@ import type { AssistantActivity } from "./useAssistant";
 
 const MessageMarkdown = memo(SessionMarkdown);
 
-/** The backend keeps only HTTPS sources; anything else is never offered. */
-function isHttps(source: AssistantSource) {
+/**
+ * A source as offered: its site (without `www.`) when it is an HTTPS page,
+ * the only kind the backend keeps; anything else is never offered.
+ */
+function shownSource(source: AssistantSource) {
   try {
-    return new URL(source.url).protocol === "https:";
+    const url = new URL(source.url);
+    return url.protocol === "https:"
+      ? { ...source, site: url.hostname.replace(/^www\./, "") }
+      : [];
   } catch {
-    return false;
+    return [];
   }
 }
 
@@ -62,7 +68,7 @@ export function AssistantMessageView({
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
   const files = message.attachments ?? [];
-  const sources = (message.sources ?? []).filter(isHttps);
+  const sources = (message.sources ?? []).flatMap(shownSource);
   const sourcesLabel = useId();
   const progress =
     streaming && activity ? t(`assistant.activity.${activity}`) : null;
@@ -221,7 +227,8 @@ export function AssistantMessageView({
           <p id={sourcesLabel} className="mb-1 text-note text-ink-muted">
             {t("assistant.sources")}
           </p>
-          <ul className="space-y-1" aria-labelledby={sourcesLabel}>
+          {/* role="list": a list without bullets keeps its role in WebKit. */}
+          <ul role="list" className="space-y-1" aria-labelledby={sourcesLabel}>
             {sources.map((source, index) => (
               <li key={source.id}>
                 <Button
@@ -235,7 +242,12 @@ export function AssistantMessageView({
                   }
                 >
                   <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
-                  {index + 1}. {source.title}
+                  <span className="min-w-0 break-words">
+                    {index + 1}. {source.title}
+                  </span>{" "}
+                  <span className="shrink-0 text-note text-ink-muted">
+                    {source.site}
+                  </span>
                 </Button>
               </li>
             ))}

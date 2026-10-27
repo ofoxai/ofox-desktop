@@ -2294,7 +2294,7 @@ describe("web search", () => {
       });
     });
     expect(
-      screen.getByRole("button", { name: "1. Pi release notes" }),
+      screen.getByRole("button", { name: "1. Pi release notes pi.dev" }),
     ).toBeVisible();
     // Each event holds all of the reply's sources so far.
     act(() => {
@@ -2313,7 +2313,7 @@ describe("web search", () => {
       within(screen.getByRole("list", { name: "Sources" }))
         .getAllByRole("button")
         .map((link) => link.textContent),
-    ).toEqual(["1. Pi release notes", "2. Pi changelog"]);
+    ).toEqual(["1. Pi release notes pi.dev", "2. Pi changelog pi.dev"]);
     current = {
       ...current,
       messages: [
@@ -2341,7 +2341,7 @@ describe("web search", () => {
     );
     expect(screen.getAllByRole("list", { name: "Sources" })).toHaveLength(1);
     expect(
-      screen.getByRole("button", { name: "2. Pi changelog" }),
+      screen.getByRole("button", { name: "2. Pi changelog pi.dev" }),
     ).toBeVisible();
   });
 
