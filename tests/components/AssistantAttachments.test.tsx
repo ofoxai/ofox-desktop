@@ -52,8 +52,13 @@ describe("attachment chips", () => {
     expect(items[0]).toHaveTextContent("report.pdf");
     expect(items[0]).toHaveTextContent("2.0 KB");
     expect(items[1]).toHaveTextContent("photo.png");
-    expect(items[1]).toHaveTextContent("3.4 MB");
+    expect(items[1]).toHaveTextContent("3.2 MB");
     expect(items[0].textContent).toBe("report.pdf2.0 KB");
+  });
+
+  it("measures a file as its limits do, so a file at the limit reads as it", () => {
+    render(<AttachmentList files={[file({ sizeBytes: 26_214_400 })]} />);
+    expect(within(list()).getByRole("listitem")).toHaveTextContent("25 MB");
   });
 
   it.each<

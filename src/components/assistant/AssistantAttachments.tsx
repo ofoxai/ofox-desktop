@@ -2,7 +2,7 @@ import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { FileImage, FileText, X } from "lucide-react";
 import type { AssistantAttachment } from "@/lib/api/assistant";
-import { fmtBytes } from "@/lib/format";
+import { fmtBinaryBytes } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
@@ -154,7 +154,7 @@ function AttachmentChip({
           {file.name}
         </span>
         <span className="shrink-0 text-note text-ink-muted">
-          {fmtBytes(file.sizeBytes)}
+          {fmtBinaryBytes(file.sizeBytes)}
         </span>
         {onRemove && (
           <Button
