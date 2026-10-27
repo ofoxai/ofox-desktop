@@ -57,6 +57,8 @@
     --danger-soft: 251 233 233;
     --warn: 180 83 9;
     --warn-soft: 251 240 223;
+    --syntax-string: 16 110 67;
+    --syntax-number: 7 89 133;
 
     /* full colours, not channels: they carry their own alpha */
     --pop-bg: rgba(255, 255, 255, 0.94);
@@ -123,6 +125,8 @@
     --danger-soft: 69 39 42;
     --warn: 242 181 68;
     --warn-soft: 63 50 32;
+    --syntax-string: 134 217 166;
+    --syntax-number: 125 211 252;
 
     --pop-bg: rgba(35, 35, 39, 0.94);
     --seg-thumb: rgba(255, 255, 255, 0.15);
@@ -138,6 +142,39 @@
       "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui,
       sans-serif;
   }
+}
+
+.markdown-syntax .hljs-keyword,
+.markdown-syntax .hljs-literal,
+.markdown-syntax .hljs-selector-tag,
+.markdown-syntax .hljs-meta {
+  color: rgb(var(--brand-ink));
+}
+
+.markdown-syntax .hljs-string,
+.markdown-syntax .hljs-regexp,
+.markdown-syntax .hljs-addition,
+.markdown-syntax .hljs-attr {
+  color: rgb(var(--syntax-string));
+}
+
+.markdown-syntax .hljs-number,
+.markdown-syntax .hljs-type,
+.markdown-syntax .hljs-built_in,
+.markdown-syntax .hljs-attribute {
+  color: rgb(var(--syntax-number));
+}
+
+.markdown-syntax .hljs-comment,
+.markdown-syntax .hljs-quote {
+  color: rgb(var(--ink-2));
+  font-style: italic;
+}
+
+.markdown-syntax .hljs-title,
+.markdown-syntax .hljs-section {
+  color: rgb(var(--ink));
+  font-weight: 600;
 }
 
 .glass {
