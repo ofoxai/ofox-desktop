@@ -469,15 +469,21 @@ async fn create_key_at(
 ) -> Result<CreatedKey, ApiKeyError> {
     log::debug!("[ofox_api_keys] creating key name={name:?}");
 
-    let bearer = manager
+    let bearer = access_token(manager).await?;
+    let body = serde_json::json!({ "name": name });
+    call_create_endpoint_at(url, &bearer, &body).await
+}
+
+/// 签发、吊销 key 用的 OAuth access token，快过期时会先刷新。调用方不能给它套超时：
+/// 刷新中途被取消，服务器可能已经轮换了一次性的 refresh token，新的没存下，下次
+/// 刷新 `invalid_grant`，会话就过期了。
+async fn access_token(manager: &Arc<RwLock<OfoxAuthManager>>) -> Result<String, ApiKeyError> {
+    manager
         .read()
         .await
         .get_valid_access_token()
         .await
-        .map_err(|e| ApiKeyError::Unauthorized(e.to_string()))?;
-
-    let body = serde_json::json!({ "name": name });
-    call_create_endpoint_at(url, &bearer, &body).await
+        .map_err(|e| ApiKeyError::Unauthorized(e.to_string()))
 }
 
 /// 端点调用的 URL-agnostic 内部实现——拆出来仅为单测能拿一个本地 wiremock
@@ -636,12 +642,14 @@ fn key_name_on_this_host(label: &str) -> String {
 /// 等正在签的那把落盘后再吊销它。
 static ASSISTANT_KEY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// 持着 [`ASSISTANT_KEY_LOCK`] 签发、吊销时最多等服务器这么久：共享客户端的超时是
-/// 600 秒，不能让一次没回应的请求把所有发送和退出登录一起卡住。
+/// 持着 [`ASSISTANT_KEY_LOCK`] 签发、吊销时，签发或删除的那一个请求最多等服务器这么久：
+/// 共享客户端的超时是 600 秒，不能让一次没回应的请求把所有发送和退出登录一起卡住。
+/// 只限这个请求，不限之前取 OAuth token（见 [`access_token`]）。测试里放宽，免得
+/// 机器忙时正常的请求也超时；测超时的用例自己传短的。
 #[cfg(not(test))]
 const KEY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(test)]
-const KEY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+const KEY_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 助手 key 在本机的状态（不访问网络，也不读钥匙串）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -672,9 +680,17 @@ pub async fn fetch_or_create_assistant_key(
     manager: &Arc<RwLock<OfoxAuthManager>>,
 ) -> Result<String, ApiKeyError> {
     let url = assistant_keys_url(apex)?;
-    assistant_key_at(mode, None, admit, &default_store(), manager, &url)
-        .await?
-        .ok_or_else(|| ApiKeyError::RemoteRejected("no assistant key".into()))
+    assistant_key_at(
+        mode,
+        None,
+        admit,
+        &default_store(),
+        manager,
+        &url,
+        KEY_REQUEST_TIMEOUT,
+    )
+    .await?
+    .ok_or_else(|| ApiKeyError::RemoteRejected("no assistant key".into()))
 }
 
 /// 网关拒绝了 `rejected`（401）后调用：缓存里还是这把就重签（同
@@ -695,6 +711,7 @@ pub async fn refresh_rejected_assistant_key(
         &default_store(),
         manager,
         &url,
+        KEY_REQUEST_TIMEOUT,
     )
     .await
 }
@@ -712,9 +729,17 @@ async fn fetch_or_create_assistant_key_at(
     manager: &Arc<RwLock<OfoxAuthManager>>,
     create_url: &str,
 ) -> Result<String, ApiKeyError> {
-    assistant_key_at(mode, None, &|| true, store, manager, create_url)
-        .await?
-        .ok_or_else(|| ApiKeyError::RemoteRejected("no assistant key".into()))
+    assistant_key_at(
+        mode,
+        None,
+        &|| true,
+        store,
+        manager,
+        create_url,
+        KEY_REQUEST_TIMEOUT,
+    )
+    .await?
+    .ok_or_else(|| ApiKeyError::RemoteRejected("no assistant key".into()))
 }
 
 /// [`refresh_rejected_assistant_key`] 的主体（测试用）。
@@ -732,6 +757,7 @@ async fn refresh_rejected_assistant_key_at(
         store,
         manager,
         create_url,
+        KEY_REQUEST_TIMEOUT,
     )
     .await
 }
@@ -745,6 +771,7 @@ async fn assistant_key_at(
     store: &Arc<dyn SecretStore>,
     manager: &Arc<RwLock<OfoxAuthManager>>,
     create_url: &str,
+    request_timeout: std::time::Duration,
 ) -> Result<Option<String>, ApiKeyError> {
     let _serial = ASSISTANT_KEY_LOCK.lock().await;
     // 拿到锁后再问：退出登录持这把锁吊销 key，在锁外等着的发送拿不到新 key。
@@ -776,10 +803,12 @@ async fn assistant_key_at(
         }
     }
 
+    let bearer = access_token(manager).await?;
+    let body = serde_json::json!({ "name": assistant_key_name() });
     // 超时后服务器上可能已经签了一把：拿不到 id，只能留给用户在后台清理。
     let created = tokio::time::timeout(
-        KEY_REQUEST_TIMEOUT,
-        create_key_at(create_url, &assistant_key_name(), manager),
+        request_timeout,
+        call_create_endpoint_at(create_url, &bearer, &body),
     )
     .await
     .map_err(|_| ApiKeyError::RemoteRejected("creating the assistant key timed out".into()))??;
@@ -832,27 +861,51 @@ pub fn assistant_key_status(current: Option<&KeyOwner>) -> AssistantKeyStatus {
 /// 标为停用。吊销不了（例如没联网）就排队，等这个账号下次在这台电脑上登录时删。
 /// 返回服务器上是否已吊销；没有要吊销的 key 也算。
 pub async fn stop_assistant_key_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> bool {
-    let _serial = ASSISTANT_KEY_LOCK.lock().await;
-    let (bearer, current) = {
-        let manager = manager.read().await;
-        (
-            manager.get_valid_access_token().await.ok(),
-            manager.current_key_owner().await,
-        )
-    };
-    stop_assistant_key_with(&default_store(), current.as_ref(), |key_id| async move {
-        match bearer {
-            Some(bearer) => delete_remote(&key_id, &bearer).await,
-            None => Err(ApiKeyError::Unauthorized("signed out".into())),
-        }
-    })
+    stop_assistant_key_for_logout_with(
+        &default_store(),
+        manager,
+        KEY_REQUEST_TIMEOUT,
+        |key_id, bearer| async move { delete_remote(&key_id, &bearer).await },
+    )
     .await
 }
 
-/// [`stop_assistant_key_for_logout`] 的主体；删 key 的请求由调用方传入，测试不走网络。
+/// [`stop_assistant_key_for_logout`] 的主体；store、超时和删 key 的请求由调用方传入。
+async fn stop_assistant_key_for_logout_with<F, Fut>(
+    store: &Arc<dyn SecretStore>,
+    manager: &Arc<RwLock<OfoxAuthManager>>,
+    request_timeout: std::time::Duration,
+    delete: F,
+) -> bool
+where
+    F: FnOnce(String, String) -> Fut,
+    Fut: Future<Output = Result<(), ApiKeyError>>,
+{
+    // 先在 key 锁外取 token：刷新不能套超时（见 [`access_token`]），也不该让等 key 锁
+    // 的发送陪着等。
+    let bearer = access_token(manager).await.ok();
+    let current = manager.read().await.current_key_owner().await;
+    let _serial = ASSISTANT_KEY_LOCK.lock().await;
+    stop_assistant_key_with(
+        store,
+        current.as_ref(),
+        request_timeout,
+        |key_id| async move {
+            match bearer {
+                Some(bearer) => delete(key_id, bearer).await,
+                None => Err(ApiKeyError::Unauthorized("signed out".into())),
+            }
+        },
+    )
+    .await
+}
+
+/// 持着 key 锁吊销记录里的助手 key；删 key 的请求由调用方传入，测试不走网络。
+/// `request_timeout` 只限这一个请求。
 async fn stop_assistant_key_with<F, Fut>(
     store: &Arc<dyn SecretStore>,
     current: Option<&KeyOwner>,
+    request_timeout: std::time::Duration,
     delete: F,
 ) -> bool
 where
@@ -862,7 +915,7 @@ where
     let Some(meta) = settings::get_assistant_key_meta().filter(|meta| !meta.revoked) else {
         return true;
     };
-    let deleted = tokio::time::timeout(KEY_REQUEST_TIMEOUT, delete(meta.key_id.clone()))
+    let deleted = tokio::time::timeout(request_timeout, delete(meta.key_id.clone()))
         .await
         .unwrap_or_else(|_| {
             Err(ApiKeyError::RemoteRejected(
@@ -1673,7 +1726,16 @@ mod tests {
             );
             async move {
                 let admit = move || admitted.load(std::sync::atomic::Ordering::SeqCst);
-                assistant_key_at(FetchMode::CachedOk, None, &admit, &store, &manager, &url).await
+                assistant_key_at(
+                    FetchMode::CachedOk,
+                    None,
+                    &admit,
+                    &store,
+                    &manager,
+                    &url,
+                    KEY_REQUEST_TIMEOUT,
+                )
+                .await
             }
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1763,7 +1825,7 @@ mod tests {
         );
         let attempted = std::sync::Mutex::new(Vec::new());
 
-        let revoked = stop_assistant_key_with(&store, Some(&a), |key_id| {
+        let revoked = stop_assistant_key_with(&store, Some(&a), KEY_REQUEST_TIMEOUT, |key_id| {
             attempted.lock().unwrap().push(key_id.clone());
             deleted(key_id)
         })
@@ -1789,7 +1851,7 @@ mod tests {
             assistant_record("assistant-a", Some(a.clone())),
         );
 
-        let revoked = stop_assistant_key_with(&store, Some(&a), offline).await;
+        let revoked = stop_assistant_key_with(&store, Some(&a), KEY_REQUEST_TIMEOUT, offline).await;
 
         assert!(!revoked);
         assert_eq!(
@@ -1798,6 +1860,107 @@ mod tests {
         );
         assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
         assert!(settings::get_assistant_key_meta().unwrap().revoked);
+    }
+
+    /// 超时测试用的短超时：测试里默认的 [`KEY_REQUEST_TIMEOUT`] 放宽到 2 秒，免得
+    /// 机器忙时正常的请求也超时。
+    const SHORT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(300);
+
+    /// 模拟一次进行中、`delay` 后才完成的 OAuth 刷新：持着刷新锁，到时放进新的
+    /// access token `fake-bearer`。返回时刷新已经开始。
+    async fn refresh_in_flight(
+        manager: &Arc<RwLock<OfoxAuthManager>>,
+        delay: std::time::Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        manager
+            .read()
+            .await
+            .set_expiring_access_token_for_test("stale-bearer")
+            .await;
+        let (started, refreshing) = tokio::sync::oneshot::channel();
+        let manager = manager.clone();
+        let refresh = tokio::spawn(async move {
+            let manager = manager.read().await;
+            let _in_flight = manager.hold_refresh_for_test().await;
+            started.send(()).ok();
+            tokio::time::sleep(delay).await;
+            manager.set_access_token_for_test("fake-bearer").await;
+        });
+        refreshing.await.unwrap();
+        refresh
+    }
+
+    /// 签发前要刷新 OAuth token、刷新比签发超时还慢：等它刷完，不在中途取消（服务器
+    /// 可能已经轮换了一次性的 refresh token，取消就丢了，会话随之过期）。
+    #[tokio::test]
+    #[serial]
+    async fn a_mint_waits_for_a_slow_token_refresh_instead_of_cancelling_it() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let manager = signed_in_as("org_a").await;
+        let (server, url) = mint_endpoint(1).await;
+        let refresh = refresh_in_flight(&manager, SHORT_TIMEOUT * 3).await;
+
+        let key = assistant_key_at(
+            FetchMode::CachedOk,
+            None,
+            &|| true,
+            &store,
+            &manager,
+            &url,
+            SHORT_TIMEOUT,
+        )
+        .await;
+
+        refresh.await.unwrap();
+        assert_eq!(key.unwrap().as_deref(), Some("sk-of-assistant-new"));
+        server.verify().await;
+    }
+
+    /// 退出登录取 token 时要刷新：在 key 锁外刷新，不让等 key 锁的发送一起等；刷完
+    /// 用新 token 吊销。
+    #[tokio::test]
+    #[serial]
+    async fn a_logout_refreshes_its_token_outside_the_key_lock() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        keep_assistant_key(
+            &store,
+            "sk-of-A",
+            assistant_record("assistant-a", Some(owner_of("org_a"))),
+        );
+        let manager = signed_in_as("org_a").await;
+        let refresh = refresh_in_flight(&manager, SHORT_TIMEOUT).await;
+        let deletes = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let logout = tokio::spawn({
+            let (store, manager, deletes) = (store.clone(), manager.clone(), deletes.clone());
+            async move {
+                stop_assistant_key_for_logout_with(
+                    &store,
+                    &manager,
+                    KEY_REQUEST_TIMEOUT,
+                    |key_id, bearer| {
+                        deletes.lock().unwrap().push((key_id, bearer));
+                        std::future::ready(Ok(()))
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::sleep(SHORT_TIMEOUT / 3).await;
+        assert!(
+            ASSISTANT_KEY_LOCK.try_lock().is_ok(),
+            "the key lock is free while the logout refreshes its token"
+        );
+
+        refresh.await.unwrap();
+        assert!(logout.await.unwrap());
+        assert_eq!(
+            *deletes.lock().unwrap(),
+            [("assistant-a".to_string(), "fake-bearer".to_string())]
+        );
+        assert_eq!(store.load(Slot::AssistantKey).unwrap(), None);
     }
 
     #[tokio::test]
@@ -1812,21 +1975,29 @@ mod tests {
             .respond_with(
                 ResponseTemplate::new(201)
                     .set_body_json(json!({ "id": "late", "key": "sk-of-late" }))
-                    .set_delay(KEY_REQUEST_TIMEOUT * 20),
+                    .set_delay(SHORT_TIMEOUT * 20),
             )
             .mount(&server)
             .await;
         let url = format!("{}/openapi/api-keys", server.uri());
 
         let started = std::time::Instant::now();
-        let result =
-            fetch_or_create_assistant_key_at(FetchMode::CachedOk, &store, &manager, &url).await;
+        let result = assistant_key_at(
+            FetchMode::CachedOk,
+            None,
+            &|| true,
+            &store,
+            &manager,
+            &url,
+            SHORT_TIMEOUT,
+        )
+        .await;
 
         assert!(
             matches!(result, Err(ApiKeyError::RemoteRejected(_))),
             "{result:?}"
         );
-        assert!(started.elapsed() < KEY_REQUEST_TIMEOUT * 10);
+        assert!(started.elapsed() < SHORT_TIMEOUT * 10);
         assert!(
             ASSISTANT_KEY_LOCK.try_lock().is_ok(),
             "the lock is free again"
@@ -1846,7 +2017,7 @@ mod tests {
             assistant_record("assistant-a", Some(a.clone())),
         );
 
-        let revoked = stop_assistant_key_with(&store, Some(&a), |_| {
+        let revoked = stop_assistant_key_with(&store, Some(&a), SHORT_TIMEOUT, |_| {
             std::future::pending::<Result<(), ApiKeyError>>()
         })
         .await;
@@ -1865,14 +2036,14 @@ mod tests {
         let _home = TempSettingsHome::new();
         let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
         let a = owner_of("org_a");
-        assert!(stop_assistant_key_with(&store, Some(&a), offline).await);
+        assert!(stop_assistant_key_with(&store, Some(&a), KEY_REQUEST_TIMEOUT, offline).await);
 
         settings::set_assistant_key_meta(Some(AssistantKeyMeta {
             revoked: true,
             ..assistant_record("assistant-a", Some(a.clone()))
         }))
         .unwrap();
-        assert!(stop_assistant_key_with(&store, Some(&a), offline).await);
+        assert!(stop_assistant_key_with(&store, Some(&a), KEY_REQUEST_TIMEOUT, offline).await);
         assert!(settings::list_keys_to_delete().is_empty());
     }
 

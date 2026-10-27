@@ -948,6 +948,22 @@ impl OfoxAuthManager {
         });
     }
 
+    /// 测试用：access token 快过期、有 refresh token，`get_valid_access_token` 要先刷新。
+    #[cfg(test)]
+    pub(crate) async fn set_expiring_access_token_for_test(&self, token: &str) {
+        *self.access_token.write().await = Some(CachedAccessToken {
+            token: token.into(),
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 10_000,
+        });
+        *self.refresh_token.write().await = Some("refresh-token-for-test".into());
+    }
+
+    /// 测试用：占住刷新单飞锁，模拟一次进行中的刷新；放开前要刷新的调用都在等。
+    #[cfg(test)]
+    pub(crate) async fn hold_refresh_for_test(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.refresh_lock.lock().await
+    }
+
     /// Snapshot the current auth state and cached user info — the data the
     /// frontend needs to decide between "show profile", "show expired banner",
     /// and "show login page".
