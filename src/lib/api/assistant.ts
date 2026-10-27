@@ -75,15 +75,40 @@ export interface AssistantSessionList {
   unreadable: AssistantUnreadableSession[];
 }
 
+/**
+ * `ready` once imported; afterwards the outcome of the last run that read the
+ * file. `ready` and `partial` were sent; `model_unsupported` needs a model
+ * that can read images; the others cannot be read at all.
+ */
+export type AssistantAttachmentStatus =
+  | "ready"
+  | "partial"
+  | "unreadable"
+  | "unsupported"
+  | "too_large"
+  | "model_unsupported";
+
+/**
+ * A file imported into a conversation. In `AssistantSessionDetail.attachments`
+ * it carries the last outcome any run reported for it; on a user message the
+ * outcome of that turn.
+ */
 export interface AssistantAttachment {
   id: string;
   name: string;
   mimeType: string;
   sizeBytes: number;
-  status: string;
-  reason?: string | null;
-  /** A backend-owned asset URL, never a renderer-provided filesystem path. */
+  status: AssistantAttachmentStatus;
+  /** The outcome's code, e.g. `assistant_attachment_partial`; null when ready. */
+  reason: string | null;
+  /** Unused: no previews are shown. */
   previewUrl?: string | null;
+  /**
+   * The runtime's outcome details (assistant-runtime README "details
+   * fields"): `format`, `pageCount`, `pagesWithoutText`, `truncated`,
+   * `limit`, `maxBytes`, `reason`, …; null until a run has read the file.
+   */
+  details: Record<string, unknown> | null;
 }
 
 /**
@@ -147,8 +172,13 @@ export interface AssistantUpdateRequest {
 
 export interface AssistantSendRequest extends AssistantRunRef {
   sessionId: string;
+  /** May be empty when at least one file is attached. */
   text: string;
-  /** Must be empty until attachments arrive. */
+  /**
+   * The files sent with a new turn, in order. Ignored by a regenerate (its
+   * turn's own files are read again); for an edit `[]` keeps the edited
+   * message's files and a non-empty list replaces them.
+   */
   attachmentIds: string[];
   editMessageId?: string;
   regenerateMessageId?: string;
@@ -165,6 +195,19 @@ export type AssistantRunEvent =
   | {
       type: "text_delta" | "thinking_delta";
       data: { delta: string; messageId: string };
+    }
+  /**
+   * One per file sent with the turn, after it was read and before the model
+   * request. Saved on the file and on the run's user message first.
+   */
+  | {
+      type: "attachment";
+      data: {
+        id: string;
+        status: AssistantAttachmentStatus;
+        code: string | null;
+        details: Record<string, unknown> | null;
+      };
     }
   /** The conversation's running totals, not this run's. */
   | { type: "usage"; data: { usage: AssistantUsage } }
@@ -201,6 +244,13 @@ export const assistantApi = {
     invoke<AssistantSessionDetail>("assistant_get_session", { sessionId }),
   updateSession: (request: AssistantUpdateRequest) =>
     invoke<AssistantSession>("assistant_update_session", { request }),
+  /**
+   * Opens the native file dialog and imports the chosen files into the
+   * conversation, all or nothing. Returns them in pick order; `[]` when the
+   * dialog was cancelled.
+   */
+  pickAttachments: (sessionId: string) =>
+    invoke<AssistantAttachment[]>("assistant_pick_attachments", { sessionId }),
   send: (request: AssistantSendRequest) =>
     invoke<AssistantRunRef>("assistant_send", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
@@ -271,6 +321,14 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",
   assistant_attachment_not_found: "attachmentUnavailable",
+  assistant_attachment_too_many: "attachmentTooMany",
+  assistant_attachment_too_large: "attachmentTooLarge",
+  assistant_attachment_total_too_large: "attachmentTotalTooLarge",
+  assistant_attachment_unsupported: "attachmentUnsupported",
+  assistant_attachment_unreadable: "attachmentUnreadable",
+  assistant_attachment_write_failed: "attachmentWriteFailed",
+  assistant_attachment_dialog_failed: "attachmentDialogFailed",
+  assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",
   assistant_no_compatible_models: "noModels",
