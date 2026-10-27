@@ -103,6 +103,15 @@ pub struct Detail {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateRequest {
+    /// The catalog's default (or the remembered choice) when absent.
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub web_search: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateRequest {
     pub session_id: String,
     /// Checked by the host against the signed-in owner, not by the store.

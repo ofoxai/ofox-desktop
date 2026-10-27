@@ -75,6 +75,7 @@ pub use mcp::{
     sync_single_server_to_gemini, sync_single_server_to_hermes, sync_single_server_to_opencode,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use services::assistant;
 pub use services::library::{
     apply_operation as apply_resource_operation, delete_mcp_draft, preview_mcp_resource,
     recover_operation as recover_resource_operation, save_mcp_draft,

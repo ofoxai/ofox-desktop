@@ -1,0 +1,947 @@
+//! The assistant host and its commands end to end: the real prepared runtime
+//! (Node + Pi SDK) against a local OpenAI-compatible mock gateway, with the
+//! conversation files in a temp dir.
+use cc_switch_lib::assistant::{
+    catalog::Model,
+    host::{AssistantHost, BoxFuture, Environment, Identity},
+    types::{self, CreateRequest, Detail, Event, Message, SendRequest},
+};
+use serde_json::{json, Value};
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+const KEY: &str = "synthetic-assistant-key-Q7v2Lm9X";
+const NEW_KEY: &str = "synthetic-assistant-key-replacement-T4n8";
+const MODEL: &str = "test/chat-model";
+
+/// The prepared runtime, or `None` (with a message) when it is missing on a
+/// developer machine. In CI a missing runtime is a failure.
+fn runtime_dir() -> Option<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources");
+    let node = dir
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    if node.is_file() && dir.join("runtime/src/main.mjs").is_file() {
+        return Some(dir);
+    }
+    assert!(
+        std::env::var_os("CI").is_none(),
+        "the assistant runtime is not prepared at {}; CI must run `pnpm assistant:prepare` before cargo test",
+        dir.display()
+    );
+    eprintln!(
+        "skipping: the assistant runtime is not prepared at {} (run `pnpm assistant:prepare`)",
+        dir.display()
+    );
+    None
+}
+
+// ── mock gateway ─────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+enum Reply {
+    /// A complete streamed answer.
+    Stream(String),
+    /// Starts streaming, then holds the connection open until the client goes.
+    Hang(String),
+    /// An HTTP error with an OpenAI-style body.
+    Status(u16),
+}
+
+#[derive(Clone, Debug)]
+struct Request {
+    authorization: String,
+    body: Value,
+}
+
+impl Request {
+    fn text(&self) -> String {
+        self.body["messages"].to_string()
+    }
+}
+
+struct Gateway {
+    port: u16,
+    script: Arc<Mutex<VecDeque<Reply>>>,
+    requests: Arc<Mutex<Vec<Request>>>,
+}
+
+impl Gateway {
+    fn start() -> Self {
+        let v4 = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = v4.local_addr().unwrap().port();
+        let script = Arc::new(Mutex::new(VecDeque::new()));
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut listeners = vec![v4];
+        // `localhost` may resolve to ::1 first.
+        if let Ok(v6) = TcpListener::bind(("::1", port)) {
+            listeners.push(v6);
+        }
+        for listener in listeners {
+            let (script, requests) = (script.clone(), requests.clone());
+            std::thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    let (script, requests) = (script.clone(), requests.clone());
+                    std::thread::spawn(move || serve(stream, &script, &requests));
+                }
+            });
+        }
+        Self {
+            port,
+            script,
+            requests,
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://localhost:{}", self.port)
+    }
+
+    fn reply(&self, reply: Reply) {
+        self.script.lock().unwrap().push_back(reply);
+    }
+
+    fn requests(&self) -> Vec<Request> {
+        self.requests.lock().unwrap().clone()
+    }
+}
+
+fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Vec<Request>>) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut headers = HashMap::new();
+    let mut line = String::new();
+    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+        return;
+    }
+    loop {
+        line.clear();
+        reader.read_line(&mut line).unwrap();
+        let header = line.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
+    }
+    let body = if let Some(length) = headers.get("content-length") {
+        let mut body = vec![0; length.parse().unwrap()];
+        reader.read_exact(&mut body).unwrap();
+        body
+    } else {
+        read_chunked(&mut reader)
+    };
+    requests.lock().unwrap().push(Request {
+        authorization: headers.get("authorization").cloned().unwrap_or_default(),
+        body: serde_json::from_slice(&body).unwrap(),
+    });
+    let reply = script
+        .lock()
+        .unwrap()
+        .pop_front()
+        .expect("the gateway got a request the test did not script");
+    let mut out = stream;
+    match reply {
+        Reply::Stream(text) => {
+            start_stream(&mut out);
+            for part in split_in_three(&text) {
+                write_delta(&mut out, &part);
+                std::thread::sleep(Duration::from_millis(15));
+            }
+            let _ = out.write_all(
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})
+                )
+                .as_bytes(),
+            );
+        }
+        Reply::Hang(text) => {
+            start_stream(&mut out);
+            write_delta(&mut out, &text);
+            // Until the runtime aborts the request (or is killed).
+            out.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+            let _ = reader.read(&mut [0; 1]);
+        }
+        Reply::Status(code) => {
+            let body = json!({"error":{"message":"Invalid API key","type":"invalid_request_error","code":"invalid_api_key"}}).to_string();
+            let _ = out.write_all(
+                format!(
+                    "HTTP/1.1 {code} Unauthorized\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            );
+        }
+    }
+    let _ = out.flush();
+}
+
+fn read_chunked(reader: &mut impl BufRead) -> Vec<u8> {
+    let mut body = vec![];
+    loop {
+        let mut size = String::new();
+        reader.read_line(&mut size).unwrap();
+        let size = usize::from_str_radix(size.trim(), 16).unwrap();
+        let mut chunk = vec![0; size + 2];
+        reader.read_exact(&mut chunk).unwrap();
+        if size == 0 {
+            return body;
+        }
+        body.extend_from_slice(&chunk[..size]);
+    }
+}
+
+fn start_stream(out: &mut TcpStream) {
+    out.write_all(
+        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache\r\nconnection: close\r\n\r\n",
+    )
+    .unwrap();
+}
+
+fn write_delta(out: &mut TcpStream, text: &str) {
+    let chunk = json!({"id":"mock","choices":[{"index":0,"delta":{"role":"assistant","content":text},"finish_reason":null}]});
+    let _ = out.write_all(format!("data: {chunk}\n\n").as_bytes());
+    let _ = out.flush();
+}
+
+fn split_in_three(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let third = chars.len().div_ceil(3).max(1);
+    chars.chunks(third).map(|c| c.iter().collect()).collect()
+}
+
+// ── environment ──────────────────────────────────────────────────────────
+
+struct TestEnv {
+    config: PathBuf,
+    runtime: PathBuf,
+    state: Mutex<EnvState>,
+    events: Mutex<Vec<Event>>,
+}
+
+struct EnvState {
+    identity: Result<Identity, String>,
+    key: String,
+    replacement: Option<String>,
+    rejected: Vec<String>,
+    key_minted: bool,
+    gateways: HashMap<String, String>,
+}
+
+fn owner() -> String {
+    "ab".repeat(32)
+}
+
+impl TestEnv {
+    fn new(config: &Path, runtime: &Path, gateways: &[(&str, &Gateway)]) -> Arc<Self> {
+        Arc::new(Self {
+            config: config.to_path_buf(),
+            runtime: runtime.to_path_buf(),
+            state: Mutex::new(EnvState {
+                identity: Ok(Identity {
+                    owner: owner(),
+                    apex: gateways[0].0.into(),
+                }),
+                key: KEY.into(),
+                replacement: Some(NEW_KEY.into()),
+                rejected: vec![],
+                key_minted: false,
+                gateways: gateways
+                    .iter()
+                    .map(|(apex, gateway)| (apex.to_string(), gateway.base_url()))
+                    .collect(),
+            }),
+            events: Mutex::new(vec![]),
+        })
+    }
+
+    fn set_identity(&self, identity: Result<Identity, String>) {
+        self.state.lock().unwrap().identity = identity;
+    }
+
+    fn signed_in(&self, apex: &str) {
+        self.set_identity(Ok(Identity {
+            owner: owner(),
+            apex: apex.into(),
+        }));
+    }
+
+    fn events(&self, run_id: &str) -> Vec<Event> {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.run_id == run_id)
+            .cloned()
+            .collect()
+    }
+}
+
+impl Environment for TestEnv {
+    fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
+        Box::pin(async move { self.state.lock().unwrap().identity.clone() })
+    }
+
+    fn api_key<'a>(
+        &'a self,
+        identity: &'a Identity,
+        rejected: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<String, String>> {
+        Box::pin(async move {
+            let mut state = self.state.lock().unwrap();
+            if state.identity.as_ref() != Ok(identity) {
+                return Err("assistant_sign_in_required".into());
+            }
+            if let Some(rejected) = rejected {
+                state.rejected.push(rejected.into());
+                if state.key == rejected {
+                    if let Some(next) = state.replacement.take() {
+                        state.key = next;
+                    }
+                }
+            }
+            state.key_minted = true;
+            Ok(state.key.clone())
+        })
+    }
+
+    fn key_ready<'a>(&'a self, _identity: &'a Identity) -> BoxFuture<'a, bool> {
+        Box::pin(async move { self.state.lock().unwrap().key_minted })
+    }
+
+    fn models<'a>(&'a self, _apex: &'a str) -> BoxFuture<'a, Result<Vec<Model>, String>> {
+        Box::pin(async move { Ok(vec![test_model()]) })
+    }
+
+    fn gateway_base(&self, apex: &str) -> Result<String, String> {
+        self.state
+            .lock()
+            .unwrap()
+            .gateways
+            .get(apex)
+            .cloned()
+            .ok_or_else(|| "assistant_unknown_apex".into())
+    }
+
+    fn config_dir(&self) -> PathBuf {
+        self.config.clone()
+    }
+
+    fn runtime_dir(&self) -> Result<PathBuf, String> {
+        Ok(self.runtime.clone())
+    }
+
+    fn emit(&self, event: Event) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+fn test_model() -> Model {
+    serde_json::from_value(json!({
+        "id": MODEL,
+        "name": "Test chat model",
+        "contextWindow": 128000,
+        "maxOutputTokens": 4096,
+        "supportsImages": false,
+        "inputModalities": ["text"],
+        "supportedEndpoints": ["/v1/chat/completions"],
+        "inputPricePerMillion": "2",
+        "outputPricePerMillion": "10",
+        "pricing": {"prompt": "0.000002", "completion": "0.00001"},
+        "cost": {"input": 2.0, "output": 10.0, "cacheRead": null, "cacheWrite": null},
+        "pricingKnown": true,
+    }))
+    .unwrap()
+}
+
+// ── helpers ──────────────────────────────────────────────────────────────
+
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+fn request(sid: &str, text: &str, extra: Value) -> SendRequest {
+    let mut value = json!({
+        "sessionId": sid,
+        "runId": types::id(),
+        "operationId": types::id(),
+        "text": text,
+    });
+    value
+        .as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    serde_json::from_value(value).unwrap()
+}
+
+async fn create(host: &AssistantHost) -> String {
+    let request: CreateRequest = serde_json::from_value(json!({})).unwrap();
+    host.create_session(request).await.unwrap().id
+}
+
+async fn wait_for(env: &TestEnv, run_id: &str, kind: &str) -> Event {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        if let Some(event) = env.events(run_id).into_iter().find(|e| e.r#type == kind) {
+            return event;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no {kind} event for run {run_id}; got {:?}",
+            env.events(run_id)
+                .iter()
+                .map(|e| e.r#type.clone())
+                .collect::<Vec<_>>()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Send and wait for the end of the run; returns the run id.
+async fn turn(host: &Arc<AssistantHost>, env: &TestEnv, request: SendRequest) -> (String, Event) {
+    let run = host.send(request).await.unwrap();
+    let end = wait_for(env, &run.run_id, "run_end").await;
+    (run.run_id, end)
+}
+
+fn active(detail: &Detail) -> Vec<(String, String)> {
+    detail
+        .messages
+        .iter()
+        .filter(|m| !m.superseded)
+        .map(|m| (m.role.clone(), m.content.clone()))
+        .collect()
+}
+
+fn superseded(detail: &Detail) -> Vec<&Message> {
+    detail.messages.iter().filter(|m| m.superseded).collect()
+}
+
+fn session_dir(config: &Path, sid: &str) -> PathBuf {
+    config.join("assistant").join(owner()).join(sid)
+}
+
+fn saved(config: &Path, sid: &str) -> Value {
+    serde_json::from_slice(&std::fs::read(session_dir(config, sid).join("session.json")).unwrap())
+        .unwrap()
+}
+
+/// No file under `root` holds any of `secrets`.
+fn assert_no_secret_on_disk(root: &Path, secrets: &[&str]) {
+    let mut files = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files += 1;
+                let bytes = std::fs::read(&path).unwrap();
+                for secret in secrets {
+                    assert!(
+                        !bytes
+                            .windows(secret.len())
+                            .any(|window| window == secret.as_bytes()),
+                        "{secret} was written to {}",
+                        path.display()
+                    );
+                }
+            }
+        }
+    }
+    assert!(files > 0, "nothing was written under {}", root.display());
+}
+
+fn assert_no_secret_in_events(env: &TestEnv, secrets: &[&str]) {
+    let events = serde_json::to_string(&*env.events.lock().unwrap()).unwrap();
+    for secret in secrets {
+        assert!(!events.contains(secret), "{secret} reached an event");
+    }
+}
+
+// ── tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["owner"], owner());
+        assert_eq!(boot["runtime"]["available"], true);
+        assert_eq!(boot["runtime"]["version"], "1.4.0");
+        assert_eq!(boot["defaultModelId"], MODEL);
+        assert_eq!(boot["models"][0]["id"], MODEL);
+        assert_eq!(boot["key"]["status"], "missing", "bootstrap mints no key");
+
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream(format!(
+            "First answer, and the key {KEY} is never shown"
+        )));
+        let (first, end) = turn(&host, &env, request(&sid, "Hello there", json!({}))).await;
+        assert_eq!(end.data, json!({"stopped": false, "status": "completed"}));
+
+        let events = env.events(&first);
+        let kinds: Vec<_> = events.iter().map(|e| e.r#type.as_str()).collect();
+        assert_eq!(kinds.first(), Some(&"run_start"));
+        assert_eq!(kinds.last(), Some(&"run_end"));
+        let message_id = events[0].data["messageId"].as_str().unwrap().to_owned();
+        let deltas: String = events
+            .iter()
+            .filter(|e| e.r#type == "text_delta")
+            .inspect(|e| assert_eq!(e.data["messageId"], message_id))
+            .map(|e| e.data["delta"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(deltas.starts_with("First answer"), "{deltas}");
+        let usage = events.iter().find(|e| e.r#type == "usage").unwrap();
+        assert_eq!(usage.data["usage"]["inputTokens"], 10);
+        // The saved message goes out before run_end.
+        let message = events.iter().position(|e| e.r#type == "message").unwrap();
+        let session = events.iter().position(|e| e.r#type == "session").unwrap();
+        assert!(message < session && session < events.len() - 1, "{kinds:?}");
+        assert_eq!(events[message].data["message"]["id"], message_id);
+        assert_eq!(events[message].data["message"]["status"], "completed");
+        assert!(events[session].data["session"]["activeRun"].is_null());
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.session.title, "Hello there");
+        assert!(detail.session.active_run.is_none());
+        assert_eq!(detail.messages.len(), 2);
+        assert_eq!(detail.messages[0].content, "Hello there");
+        assert_eq!(detail.messages[1].id, message_id);
+        assert!(detail.messages[1].content.starts_with("First answer"));
+        assert!(detail.messages.iter().all(|m| m.status == "completed"));
+        assert!(detail.messages.iter().all(|m| m.native_entry_id.is_some()));
+        assert_eq!(detail.usage["modelRequests"], 1);
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        assert!(native.contains("Hello there") && native.contains("First answer"));
+        assert_eq!(
+            saved(config.path(), &sid)["messages"][1]["content"],
+            json!(detail.messages[1].content)
+        );
+        assert_eq!(host.bootstrap().await.unwrap()["key"]["status"], "ready");
+
+        gateway.reply(Reply::Stream("Second answer".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "And then?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests
+            .iter()
+            .all(|r| r.authorization == format!("Bearer {KEY}")));
+        let context = requests[1].text();
+        assert!(context.contains("Hello there") && context.contains("First answer"));
+        assert!(context.contains("And then?"));
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            active(&detail)
+                .iter()
+                .map(|(role, _)| role.as_str())
+                .collect::<Vec<_>>(),
+            ["user", "assistant", "user", "assistant"]
+        );
+        assert_eq!(detail.messages[3].content, "Second answer");
+
+        let list = host.list_sessions(false, "").await.unwrap();
+        assert_eq!(list.sessions.len(), 1);
+        assert!(list.unreadable.is_empty());
+        assert_eq!(
+            host.list_sessions(false, "then")
+                .await
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+        assert!(host
+            .list_sessions(false, "zzz")
+            .await
+            .unwrap()
+            .sessions
+            .is_empty());
+        let damaged = types::id();
+        std::fs::create_dir_all(session_dir(config.path(), &damaged)).unwrap();
+        std::fs::write(
+            session_dir(config.path(), &damaged).join("session.json"),
+            "{",
+        )
+        .unwrap();
+        let list = host.list_sessions(false, "").await.unwrap();
+        assert_eq!(list.unreadable.len(), 1);
+        assert_eq!(list.unreadable[0].id, damaged);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn stopping_mid_stream_keeps_the_partial_reply_and_the_stopped_operation() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Hang("Partial answer ".repeat(20)));
+        let send = request(&sid, "Tell me a long story", json!({}));
+        let run = host.send(send.clone()).await.unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+        assert_eq!(
+            host.get_session(&sid).await.unwrap().session.active_run,
+            Some(run.clone())
+        );
+        host.stop(&sid, &run.run_id, &run.operation_id)
+            .await
+            .unwrap();
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data, json!({"stopped": true, "status": "stopped"}));
+        assert!(env.events(&run.run_id).iter().all(|e| e.r#type != "error"));
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert!(detail.session.active_run.is_none());
+        let reply = &detail.messages[1];
+        assert_eq!(reply.status, "stopped");
+        assert!(reply.content.starts_with("Partial answer"), "{reply:?}");
+        assert_eq!(detail.usage["usageCoverage"], "incomplete");
+        assert_eq!(
+            saved(config.path(), &sid)["operations"][0]["status"],
+            "cancelled"
+        );
+        // The same operation never starts twice.
+        assert_eq!(host.send(send).await.unwrap_err(), "assistant_cancelled");
+
+        // A stop that arrives before its send wins.
+        let early = request(&sid, "Never sent", json!({}));
+        host.stop(&sid, &early.run_id, &early.operation_id)
+            .await
+            .unwrap();
+        assert_eq!(host.send(early).await.unwrap_err(), "assistant_cancelled");
+        assert_eq!(gateway.requests().len(), 1);
+
+        gateway.reply(Reply::Stream("Short story".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "A short one then", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn regenerate_and_edit_branch_and_keep_the_superseded_versions() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Answer one".into()));
+        turn(&host, &env, request(&sid, "Question A", json!({}))).await;
+        let first = host.get_session(&sid).await.unwrap();
+        let answer_one = first.messages[1].id.clone();
+
+        gateway.reply(Reply::Stream("Answer two".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "", json!({"regenerateMessageId": answer_one})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let regenerated = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            active(&regenerated),
+            [
+                ("user".into(), "Question A".into()),
+                ("assistant".into(), "Answer two".into())
+            ]
+        );
+        let old: Vec<_> = superseded(&regenerated)
+            .iter()
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(old, ["Question A", "Answer one"]);
+        let answer_two = regenerated
+            .messages
+            .iter()
+            .find(|m| m.content == "Answer two")
+            .unwrap();
+        assert_eq!(answer_two.revision_of.as_deref(), Some(answer_one.as_str()));
+        let resent = gateway.requests()[1].text();
+        assert!(resent.contains("Question A") && !resent.contains("Answer one"));
+
+        let question = regenerated
+            .messages
+            .iter()
+            .find(|m| m.role == "user" && !m.superseded)
+            .unwrap()
+            .id
+            .clone();
+        gateway.reply(Reply::Stream("Answer three".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Question B", json!({"editMessageId": question})),
+        )
+        .await;
+        let edited = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            active(&edited),
+            [
+                ("user".into(), "Question B".into()),
+                ("assistant".into(), "Answer three".into())
+            ]
+        );
+        assert_eq!(superseded(&edited).len(), 4);
+        let edit = gateway.requests()[2].text();
+        assert!(edit.contains("Question B"));
+        assert!(!edit.contains("Question A") && !edit.contains("Answer two"));
+
+        // A turn that never reached the runtime cannot be branched from.
+        let unknown = request(&sid, "x", json!({"editMessageId": types::id()}));
+        assert_eq!(
+            host.send(unknown).await.unwrap_err(),
+            "assistant_branch_unavailable"
+        );
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn a_restarted_host_settles_the_interrupted_run_and_continues_with_its_context() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+
+    // The first app process: one finished turn, then a crash mid-stream.
+    let crashed = runtime();
+    let host = AssistantHost::new(env.clone());
+    let (sid, interrupted) = crashed.block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Noted: apricot".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Remember the word apricot", json!({})),
+        )
+        .await;
+        gateway.reply(Reply::Hang("Thinking about it ".repeat(20)));
+        let run = host
+            .send(request(&sid, "Second question", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+        (sid, run)
+    });
+    // Dropping the runtime drops the run mid-stream, as a crash would; the
+    // owned runtime process goes with it.
+    crashed.shutdown_timeout(Duration::from_secs(2));
+    drop(host);
+    let left = saved(config.path(), &sid);
+    assert_eq!(left["session"]["activeRun"]["runId"], interrupted.run_id);
+    assert_eq!(left["operations"][1]["status"], "running");
+
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        host.recover_all().await;
+        let saved_now = saved(config.path(), &sid);
+        assert!(saved_now["session"]["activeRun"].is_null());
+        assert_eq!(saved_now["operations"][1]["status"], "interrupted");
+        let detail = host.get_session(&sid).await.unwrap();
+        assert!(detail.session.active_run.is_none());
+        assert_eq!(detail.messages.len(), 4);
+        assert_eq!(detail.messages[2].content, "Second question");
+        assert!(detail.messages[2].native_entry_id.is_some());
+        assert_eq!(detail.messages[3].status, "stopped");
+        assert_eq!(detail.usage["usageCoverage"], "incomplete");
+
+        gateway.reply(Reply::Stream("You asked me to remember apricot".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Which word did I give you?", json!({})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let context = gateway.requests().last().unwrap().text();
+        assert!(context.contains("Remember the word apricot"));
+        assert!(context.contains("Noted: apricot"));
+        assert!(context.contains("Second question"));
+        assert!(context.contains("Which word did I give you?"));
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn logging_out_cancels_the_run_and_blocks_sends_until_the_next_sign_in() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Hang("Partial answer ".repeat(20)));
+        let run = host
+            .send(request(&sid, "Long question", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+
+        let receipt = host.begin_logout();
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["stopped"], true);
+        let during = request(&sid, "While signing out", json!({}));
+        assert_eq!(
+            host.send(during).await.unwrap_err(),
+            "assistant_signing_out"
+        );
+
+        host.finish_logout(receipt);
+        env.set_identity(Err("assistant_sign_in_required".into()));
+        assert_eq!(
+            host.bootstrap().await.unwrap_err(),
+            "assistant_sign_in_required"
+        );
+        let signed_out = request(&sid, "Signed out", json!({}));
+        assert_eq!(
+            host.send(signed_out).await.unwrap_err(),
+            "assistant_sign_in_required"
+        );
+        // Credentials back alone do not reopen admission; the sign-in does.
+        env.signed_in("ofox.ai");
+        let early = request(&sid, "Before sign-in completed", json!({}));
+        assert_eq!(
+            host.send(early).await.unwrap_err(),
+            "assistant_sign_in_required"
+        );
+
+        host.sign_in_completed();
+        gateway.reply(Reply::Stream("Welcome back".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Hello again", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        assert_eq!(gateway.requests().len(), 2);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn a_run_keeps_the_region_it_started_in() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let global = Gateway::start();
+    let china = Gateway::start();
+    let env = TestEnv::new(
+        config.path(),
+        &runtime_dir,
+        &[("ofox.ai", &global), ("ofox.io", &china)],
+    );
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        global.reply(Reply::Hang("Partial answer ".repeat(20)));
+        let run = host
+            .send(request(&sid, "Where am I?", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+        // The region changes under the run: it ends rather than move hosts.
+        env.signed_in("ofox.io");
+        wait_for(&env, &run.run_id, "run_end").await;
+        let error = wait_for(&env, &run.run_id, "error").await;
+        assert_eq!(error.data["code"], "assistant_identity_changed");
+        assert_eq!(global.requests().len(), 1);
+        assert!(china.requests().is_empty());
+
+        // The next run starts in the new region, and region-change
+        // cancellation stops it without closing admission.
+        china.reply(Reply::Hang("Partial answer ".repeat(20)));
+        let run = host
+            .send(request(&sid, "And now?", json!({})))
+            .await
+            .unwrap();
+        wait_for(&env, &run.run_id, "text_delta").await;
+        assert_eq!(china.requests().len(), 1);
+        host.cancel_all();
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["stopped"], true);
+        china.reply(Reply::Stream("Still here".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Still there?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        assert_eq!(global.requests().len(), 1);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn a_refused_key_is_replaced_once_and_the_turn_is_kept_once() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Status(401));
+        gateway.reply(Reply::Stream("Answer with the new key".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Unique question", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        assert_eq!(requests[0].authorization, format!("Bearer {KEY}"));
+        assert_eq!(requests[1].authorization, format!("Bearer {NEW_KEY}"));
+        assert_eq!(env.state.lock().unwrap().rejected, [KEY]);
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            active(&detail),
+            [
+                ("user".into(), "Unique question".into()),
+                ("assistant".into(), "Answer with the new key".into())
+            ]
+        );
+        assert!(superseded(&detail).is_empty());
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        assert_eq!(native.matches("Unique question").count(), 1);
+
+        // A key refused again after the retry ends the run: one retry only.
+        gateway.reply(Reply::Status(401));
+        gateway.reply(Reply::Status(401));
+        let (run, end) = turn(&host, &env, request(&sid, "Again", json!({}))).await;
+        assert_eq!(end.data["status"], "error");
+        let error = wait_for(&env, &run, "error").await;
+        assert_eq!(error.data["code"], "assistant_key_rejected");
+        assert_eq!(gateway.requests().len(), 4);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
+    assert_no_secret_in_events(&env, &[KEY, NEW_KEY]);
+}
