@@ -4,7 +4,7 @@
 use cc_switch_lib::assistant::{
     catalog::Model,
     host::{Admit, AssistantHost, BoxFuture, Environment, Identity},
-    types::{self, CreateRequest, Detail, Event, Message, SendRequest},
+    types::{self, CreateRequest, Detail, Event, Message, RunProxy, SendRequest},
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -234,6 +234,8 @@ struct TestEnv {
     /// When set, a key fetch waits here first, as on a busy key lock.
     key_gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
     key_waiting: std::sync::atomic::AtomicBool,
+    /// The proxy model requests should take.
+    proxy: Mutex<Option<RunProxy>>,
 }
 
 struct EnvState {
@@ -274,6 +276,7 @@ impl TestEnv {
             events: Mutex::new(vec![]),
             key_gate: Mutex::new(None),
             key_waiting: std::sync::atomic::AtomicBool::new(false),
+            proxy: Mutex::new(None),
         })
     }
 
@@ -376,6 +379,10 @@ impl Environment for TestEnv {
 
     fn emit(&self, event: Event) {
         self.events.lock().unwrap().push(event);
+    }
+
+    fn proxy(&self) -> Option<RunProxy> {
+        self.proxy.lock().unwrap().clone()
     }
 }
 
@@ -1199,6 +1206,107 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
+}
+
+/// An HTTP CONNECT proxy that records each tunnel's target and credentials,
+/// then tunnels to it.
+struct Proxy {
+    port: u16,
+    tunnels: Arc<Mutex<Vec<(String, String)>>>,
+}
+
+impl Proxy {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tunnels = Arc::new(Mutex::new(Vec::new()));
+        let recorded = tunnels.clone();
+        std::thread::spawn(move || {
+            for client in listener.incoming().flatten() {
+                let recorded = recorded.clone();
+                std::thread::spawn(move || tunnel(client, &recorded));
+            }
+        });
+        Self { port, tunnels }
+    }
+
+    fn tunnels(&self) -> Vec<(String, String)> {
+        self.tunnels.lock().unwrap().clone()
+    }
+}
+
+fn tunnel(client: TcpStream, tunnels: &Mutex<Vec<(String, String)>>) {
+    let mut reader = BufReader::new(client.try_clone().unwrap());
+    let mut line = String::new();
+    reader.read_line(&mut line).unwrap();
+    let target = line
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or_default()
+        .to_owned();
+    let mut authorization = String::new();
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header).unwrap();
+        if header.trim_end().is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("proxy-authorization") {
+                authorization = value.trim().to_owned();
+            }
+        }
+    }
+    tunnels
+        .lock()
+        .unwrap()
+        .push((target.clone(), authorization));
+    let mut client = client;
+    let Ok(upstream) = TcpStream::connect(&target) else {
+        let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n");
+        return;
+    };
+    client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .unwrap();
+    let (mut up_read, mut up_write) = (upstream.try_clone().unwrap(), upstream);
+    let mut client_write = client.try_clone().unwrap();
+    let forward = std::thread::spawn(move || {
+        let _ = std::io::copy(&mut reader, &mut up_write);
+        let _ = up_write.shutdown(std::net::Shutdown::Write);
+    });
+    let _ = std::io::copy(&mut up_read, &mut client_write);
+    let _ = client_write.shutdown(std::net::Shutdown::Both);
+    let _ = forward.join();
+}
+
+#[test]
+fn model_requests_take_the_application_proxy() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let proxy = Proxy::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    *env.proxy.lock().unwrap() = Some(RunProxy {
+        url: format!("http://ofox:proxy-secret-9@127.0.0.1:{}", proxy.port),
+        no_proxy: String::new(),
+    });
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Answer through the proxy".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Behind a proxy", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let tunnels = proxy.tunnels();
+        assert_eq!(tunnels.len(), 1, "{tunnels:?}");
+        assert_eq!(tunnels[0].0, format!("localhost:{}", gateway.port));
+        assert!(tunnels[0].1.starts_with("Basic "), "{tunnels:?}");
+        assert_eq!(gateway.requests().len(), 1);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY, "proxy-secret-9"]);
+    assert_no_secret_in_events(&env, &[KEY, "proxy-secret-9"]);
 }
 
 /// A local port nothing listens on.

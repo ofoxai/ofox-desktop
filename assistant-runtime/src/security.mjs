@@ -46,6 +46,7 @@ export function redact(value, secrets = []) {
       if (typeof secret === "string" && secret.length > 0)
         result = result.split(secret).join(REDACTED);
     return result
+      .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+@/gi, `$1${REDACTED}@`)
       .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, `$1 ${REDACTED}`)
       .replace(/\bsk-(?:of-|ofi-|ant-|proj-)?[A-Za-z0-9_-]{8,}/g, REDACTED)
       .replace(

@@ -8,7 +8,7 @@ use crate::services::assistant::{
     catalog,
     host::{Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
     store::{self, SessionList},
-    types::{CreateRequest, Detail, Event, RunRef, SendRequest, Session, UpdateRequest},
+    types::{CreateRequest, Detail, Event, RunProxy, RunRef, SendRequest, Session, UpdateRequest},
     AssistantHost,
 };
 use crate::settings::KeyOwner;
@@ -255,6 +255,14 @@ impl Environment for AssistantEnvironment {
         if let Err(error) = self.app.emit(ASSISTANT_EVENT, event) {
             log::warn!("[Assistant] could not publish an event: {error}");
         }
+    }
+
+    /// The app's proxy (the one the catalog and key requests use), else the
+    /// system proxy as launched CLIs get it.
+    fn proxy(&self) -> Option<RunProxy> {
+        let configured = crate::proxy::http_client::get_current_proxy_url();
+        crate::commands::assistant_proxy(configured.as_deref())
+            .map(|(url, no_proxy)| RunProxy { url, no_proxy })
     }
 }
 

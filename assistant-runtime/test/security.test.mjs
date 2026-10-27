@@ -102,6 +102,14 @@ test("conversation content loses only the exact known secrets", () => {
   assert.doesNotMatch(errorMessage(new Error(text), [secret]), /YOUR_TOKEN/);
 });
 
+test("diagnostics never show the credentials of a proxy URL", () => {
+  const message = errorMessage(
+    new Error("tunnel via http://ofox-user:proxy-pass-1@127.0.0.1:7890 failed"),
+  );
+  assert.doesNotMatch(message, /ofox-user|proxy-pass-1/);
+  assert.match(message, /127\.0\.0\.1:7890 failed/);
+});
+
 test("only a trusted explicit debug flag can route a host-resolved gateway locally", () => {
   const input = {
     id: "test/local",

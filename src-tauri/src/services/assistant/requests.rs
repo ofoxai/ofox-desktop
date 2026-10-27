@@ -220,6 +220,11 @@ impl AssistantHost {
         }
         let branch = Branch::resolve(&record, &request)?;
         let base_url = self.env.gateway_base(&identity.apex)?;
+        let proxy = blocking({
+            let env = self.env.clone();
+            move || Ok(env.proxy())
+        })
+        .await?;
         // Checked again under the key lock: a logout that revokes keys while
         // this send waits for the lock leaves it with no key.
         self.ensure_current(&identity, generation).await?;
@@ -257,6 +262,7 @@ impl AssistantHost {
             "apex": identity.apex,
             "baseUrl": base_url,
             "allowLocalGateway": local_gateway_allowed(&base_url),
+            "proxy": proxy,
             "prompt": text,
             "editEntryId": branch.edit_entry,
             "regenerateEntryId": branch.regenerate_entry,

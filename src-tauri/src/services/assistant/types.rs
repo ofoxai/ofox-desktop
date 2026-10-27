@@ -3,6 +3,16 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// The proxy a run's model requests go through. `url` may carry the proxy's
+/// credentials: it goes to the runtime only, never to a log or an event.
+#[derive(Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProxy {
+    pub url: String,
+    /// Hosts that bypass the proxy, comma separated (`NO_PROXY` syntax).
+    pub no_proxy: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRef {

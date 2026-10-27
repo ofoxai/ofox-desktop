@@ -318,6 +318,36 @@ fn resolved_launch_proxy_env(
     Ok(result)
 }
 
+/// The proxy for the assistant runtime's model requests, chosen as for a CLI
+/// Ofox launches: the app's proxy, else a reachable process or OS proxy for
+/// HTTPS. An app proxy whose local listener is down is still used (requests
+/// fail through it, never around it). Returns the URL, which may hold
+/// credentials and must never be logged, and the hosts that bypass it.
+fn assistant_proxy_from(
+    configured: Option<&str>,
+    system: CliSystemProxy,
+    mut getenv: impl FnMut(&str) -> Option<String>,
+) -> Option<(String, String)> {
+    let selected = match resolved_launch_proxy_env(configured, system, &mut getenv) {
+        Ok(selected) => selected,
+        Err(_) => launch_proxy_env(configured, CliSystemProxy::default(), |_| None),
+    };
+    let value = |name: &str| {
+        selected
+            .iter()
+            .find(|(key, value)| key == name && !value.is_empty())
+            .map(|(_, value)| value.clone())
+    };
+    let url = value("HTTPS_PROXY").or_else(|| value("ALL_PROXY"))?;
+    Some((url, value("NO_PROXY").unwrap_or_default()))
+}
+
+/// [`assistant_proxy_from`] for this process and OS. Blocking: it asks the
+/// OS and probes a local proxy listener.
+pub(crate) fn assistant_proxy(configured: Option<&str>) -> Option<(String, String)> {
+    assistant_proxy_from(configured, system_proxy(), |key| std::env::var(key).ok())
+}
+
 /// The shared HTTP client also follows OS proxy settings when no in-app
 /// proxy is configured. Reuse the CLI's platform-aware detection so a dead
 /// loopback proxy cannot break the model catalog or account requests.
@@ -757,6 +787,47 @@ mod tests {
             env.iter().find(|(name, _)| name == "HTTP_PROXY").unwrap().1,
             ""
         );
+    }
+
+    #[test]
+    fn the_assistant_takes_the_app_proxy_else_a_reachable_https_proxy() {
+        use std::net::{Ipv4Addr, TcpListener};
+
+        let dead = {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let live = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let live = format!("http://127.0.0.1:{}", live.local_addr().unwrap().port());
+        let remote = || CliSystemProxy {
+            http: Some("http://system:8080".into()),
+            https: Some("http://system:7890".into()),
+            no_proxy: Some("*.corp".into()),
+        };
+
+        // The app's proxy wins, even with its local listener down, and the
+        // local debug gateway bypasses it.
+        let app = format!("http://user:secret@127.0.0.1:{dead}");
+        let (url, bypass) = assistant_proxy_from(Some(&app), remote(), |_| None).unwrap();
+        assert_eq!(url, app);
+        assert!(bypass.contains("localhost") && bypass.contains("127.0.0.1"));
+
+        // Else the process's HTTPS proxy, then the OS's.
+        let inherited = assistant_proxy_from(None, remote(), |key| {
+            (key == "HTTPS_PROXY").then(|| live.clone())
+        });
+        assert_eq!(inherited.map(|(url, _)| url), Some(live.clone()));
+        let (url, bypass) = assistant_proxy_from(None, remote(), |_| None).unwrap();
+        assert_eq!(url, "http://system:7890");
+        assert!(bypass.contains("*.corp"));
+
+        // An automatic proxy whose local listener is gone: direct.
+        let stale = CliSystemProxy {
+            https: Some(format!("http://127.0.0.1:{dead}")),
+            ..CliSystemProxy::default()
+        };
+        assert!(assistant_proxy_from(None, stale, |_| None).is_none());
+        assert!(assistant_proxy_from(None, CliSystemProxy::default(), |_| None).is_none());
     }
 
     #[cfg(target_os = "macos")]

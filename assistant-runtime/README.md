@@ -57,7 +57,7 @@ takes a trusted absolute `sessionFile`. `run` and `compact` take:
 
 ```text
 sessionId, runId, operationId, sessionFile, model, apiKey, knownSecrets?,
-apex (ofox.ai|ofox.io), baseUrl?, allowLocalGateway?, prompt,
+apex (ofox.ai|ofox.io), baseUrl?, allowLocalGateway?, proxy?, prompt,
 editEntryId?, regenerateEntryId?, thinkingLevel?, instructions? (compact)
 ```
 
@@ -71,6 +71,16 @@ become `[REDACTED]`: code and config such as `api_key=os.environ[...]` or
 error frames) are also scrubbed of anything that looks like a credential. Provider requests go only to `https://api.{apex}`;
 `baseUrl` may differ only when the host sets `allowLocalGateway` for its debug
 gateway, which must be `http://localhost:<port>`.
+
+`proxy` is `{url, noProxy}` or null. The host passes the app's own proxy
+setting, else the system proxy as it resolves one for launched CLIs (a local
+system proxy that does not answer means a direct connection), because the
+sidecar gets no proxy environment variables. Requests then use undici
+(pinned, the version Pi already depends on) with an `EnvHttpProxyAgent`: they
+tunnel through the `http`, `https` or `socks5` proxy unless the target matches
+`noProxy` (`NO_PROXY` syntax). The origin check above applies unchanged. The
+URL may carry the proxy's credentials; it is never logged or echoed, and
+diagnostics drop any `user:password@` part of a URL.
 
 `model` contains id, advertised supportedEndpoints, contextWindow,
 maxOutputTokens, inputModalities/supportsImages, reasoning, cost (USD per million

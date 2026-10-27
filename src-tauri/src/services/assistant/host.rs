@@ -84,6 +84,11 @@ pub trait Environment: Send + Sync + 'static {
     fn runtime_dir(&self) -> Result<PathBuf, String>;
     /// Publish an `assistant:event`.
     fn emit(&self, event: Event);
+    /// The proxy for model requests, as the app's other requests take it;
+    /// `None` connects directly. Blocking: it may ask the OS.
+    fn proxy(&self) -> Option<RunProxy> {
+        None
+    }
 }
 
 pub(super) struct Runtime {

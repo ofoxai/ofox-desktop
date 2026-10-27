@@ -95,6 +95,34 @@ function safeMessage(message, secrets) {
     : safe;
 }
 
+// The application's proxy for model requests: an HTTP(S) or SOCKS5 proxy URL
+// (credentials included) and the hosts that bypass it. Every request tunnels
+// through it; the Ofox origin check still applies to the target. Neither the
+// URL nor its credentials may appear in an error.
+async function proxiedFetch(proxy) {
+  if (proxy === undefined || proxy === null) return undefined;
+  let url;
+  try {
+    url = new URL(proxy.url);
+  } catch {
+    throw new Error("The proxy setting is not a valid URL");
+  }
+  if (url.protocol === "socks5h:") url.protocol = "socks5:";
+  if (!["http:", "https:", "socks5:"].includes(url.protocol))
+    throw new Error("The proxy setting uses an unsupported scheme");
+  const { EnvHttpProxyAgent, fetch } = await import("undici");
+  const dispatcher = new EnvHttpProxyAgent({
+    httpProxy: url.href,
+    httpsProxy: url.href,
+    noProxy: typeof proxy.noProxy === "string" ? proxy.noProxy : "",
+    proxyTunnel: true,
+  });
+  return {
+    fetch: (input, init) => fetch(input, { ...init, dispatcher }),
+    close: () => dispatcher.destroy().catch(() => undefined),
+  };
+}
+
 function knownPrice(value) {
   return (
     value !== undefined &&
@@ -496,6 +524,7 @@ export class AssistantRuntime {
     };
     this.runs.set(params.runId, context);
     let unsubscribe;
+    let proxy;
     try {
       const {
         createAgentSession,
@@ -581,7 +610,9 @@ export class AssistantRuntime {
       });
       await modelRuntime.setRuntimeApiKey(model.provider, apiKey);
       const originalStream = modelRuntime.streamSimple.bind(modelRuntime);
-      const providerFetch = this.providerFetch ?? globalThis.fetch;
+      proxy = await proxiedFetch(params.proxy);
+      const providerFetch =
+        this.providerFetch ?? proxy?.fetch ?? globalThis.fetch;
       const recordSummaryUsage = (target, usage) => {
         const coverage = usageCoverage(usage);
         manager.appendCustomEntry(
@@ -955,6 +986,7 @@ export class AssistantRuntime {
     } finally {
       unsubscribe?.();
       context.session?.dispose();
+      void proxy?.close();
       this.runs.delete(params.runId);
       // The process is one run long in production. Retain key fingerprints only until close
       // so a late diagnostic can never echo a previously supplied API key.
