@@ -162,6 +162,14 @@ address, not a name, so its domain rules do not apply unless it reads the
 name from the TLS SNI (for example a Clash/mihomo sniffer). A site reachable
 only through a domain rule may then fail to load under fake-IP DNS.
 
+Privacy: under fake-IP DNS, the host name of every page `web_fetch` reads
+(each redirect hop's too) is sent to Alibaba Cloud's public DNS (AliDNS), a
+third party outside Ofox and outside the user's own DNS or TUN setup, which
+also sees the address the query comes from (the app's proxy, when it has
+one; `OFOX_NO_PROXY` matching `dns.alidns.com` sends it directly). The
+query carries the name only, over HTTPS, never the page's path or query
+string. Without fake-IP DNS nothing goes there.
+
 **The allowlist is not here.** `web_fetch` reads any URL that passes the
 rules above. The runtime only lets the model fetch URLs that the host allows
 (`allowedWebUrls`: the user's links and earlier sources) or that a

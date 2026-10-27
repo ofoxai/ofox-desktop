@@ -328,6 +328,12 @@ Run parameters:
   is public, and connects to a checked public address (through the proxy:
   tunnels to it), never to the fake-IP. Sites that only a TUN or proxy domain
   rule can reach may then fail unless it reads the name from the TLS SNI.
+  Privacy: in fake-IP mode the host name of every page `web_fetch` reads,
+  redirect hops included, goes to Alibaba Cloud's public DNS (AliDNS), a
+  third party outside Ofox and outside the user's own DNS setup, along with
+  the address it is asked from (the proxy's, when there is one). Only the
+  name leaves this way, never the path or query; the host should say so
+  wherever it describes web search.
 
 Events: `tool_start` is `{name, toolCallId, args}` with `args` `{query}` or
 `{url}`. `tool_end` is `{name, toolCallId, success:true, details}` or
