@@ -243,3 +243,61 @@ test("the bundle sends web_search through the proxy named in its environment", a
   await client.close();
   assert.equal(stderr(), "");
 });
+
+const alive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+};
+
+test("the bundle dies with its client, even during a search", async (t) => {
+  const { copy } = await isolatedBundle(t);
+  let release;
+  const searching = new Promise((resolve) => (release = resolve));
+  // The gateway never answers: the search would wait for its 60 s timeout.
+  const gateway = await startGateway(() => release());
+  t.after(gateway.close);
+  // A client that starts the server in its own process group, as pi-mcp does
+  // on POSIX, so killing the client's group does not reach the server.
+  const client = spawn(
+    process.execPath,
+    [
+      "-e",
+      `const child = require("node:child_process").spawn(process.execPath, [process.argv[1]], {
+        detached: process.platform !== "win32",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const send = (message) => child.stdin.write(JSON.stringify({ jsonrpc: "2.0", ...message }) + "\\n");
+      send({ id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } });
+      send({ method: "notifications/initialized" });
+      send({ id: 2, method: "tools/call", params: { name: "web_search", arguments: { query: "slow" } } });
+      child.stdout.resume();
+      child.stderr.resume();
+      process.stdout.write(child.pid + "\\n");`,
+      copy,
+    ],
+    {
+      env: {
+        ...process.env,
+        OFOX_ASSISTANT_KEY: KEY,
+        OFOX_BASE_URL: gateway.baseUrl,
+        OFOX_ALLOW_LOCAL_GATEWAY: "1",
+      },
+      stdio: ["ignore", "pipe", "inherit"],
+    },
+  );
+  const [line] = await once(client.stdout, "data");
+  const server = Number(String(line).trim());
+  t.after(() => {
+    if (alive(server)) process.kill(server, "SIGKILL");
+  });
+  await searching;
+  client.kill("SIGKILL");
+  const deadline = Date.now() + 5000;
+  while (alive(server) && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(alive(server), false, "the server outlived its client");
+});

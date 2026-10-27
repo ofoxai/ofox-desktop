@@ -4,7 +4,9 @@
 // dist/bundled-packages.json lists the third-party packages compiled in, whose
 // notices ship in ../notices/ofox-search-mcp.txt (test/notices.test.mjs).
 import { build } from "esbuild";
-import { readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { bundledPackages } from "./build-packages.mjs";
 
 const OUTFILE = "dist/ofox-search-mcp.mjs";
 const PACKAGES = "dist/bundled-packages.json";
@@ -21,6 +23,7 @@ const result = await build({
   minify: true,
   legalComments: "eof",
   metafile: true,
+  write: false,
   logLevel: "warning",
   // Bundled CommonJS dependencies (ajv) may require Node built-ins.
   banner: {
@@ -35,21 +38,19 @@ if (forbidden.length > 0) {
   console.error(`HTTP server code in the bundle:\n${forbidden.join("\n")}`);
   process.exit(1);
 }
-const packages = new Set(
-  Object.keys(result.metafile.inputs)
-    .map(
-      (input) =>
-        /(?:^|\/)node_modules\/((?:@[^/]+\/)?[^/]+)\//.exec(input)?.[1],
-    )
-    .filter(Boolean),
+const bundled = await bundledPackages(
+  Object.keys(result.metafile.inputs),
+  async (file) => JSON.parse(await readFile(file, "utf8")),
 );
-const bundled = [];
-for (const name of [...packages].sort()) {
-  const manifest = JSON.parse(
-    await readFile(`node_modules/${name}/package.json`, "utf8"),
-  );
-  bundled.push({ name, version: manifest.version, license: manifest.license });
+
+// Test runs may build at the same time: each file appears whole, by rename.
+async function writeWhole(file, contents) {
+  await mkdir(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${process.pid}.tmp`;
+  await writeFile(temporary, contents);
+  await rename(temporary, file);
 }
-await writeFile(PACKAGES, `${JSON.stringify(bundled, null, 2)}\n`);
-const { size } = await stat(OUTFILE);
-console.log(`${OUTFILE} ${(size / 1024).toFixed(1)} KiB`);
+const [bundle] = result.outputFiles;
+await writeWhole(bundle.path, bundle.contents);
+await writeWhole(PACKAGES, `${JSON.stringify(bundled, null, 2)}\n`);
+console.log(`${OUTFILE} ${(bundle.contents.byteLength / 1024).toFixed(1)} KiB`);

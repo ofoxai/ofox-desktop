@@ -245,6 +245,7 @@ async function prepareSearchServer() {
     scripts: [
       fileURLToPath(import.meta.url),
       path.join(source, "build.mjs"),
+      path.join(source, "build-packages.mjs"),
       ...sources,
     ],
     nodeVersion: manifest.version,
@@ -274,7 +275,10 @@ await prepareNode();
 if (process.argv.includes("--node-only")) {
   process.stdout.write(`${node}\n`);
 } else if (process.argv.includes("--install-only")) {
+  // Test dependencies: the runtime's, and the search server's with its
+  // devDependencies (esbuild), which assistant:test builds and tests.
   await install(runtime);
+  await install(path.join(runtime, "search-mcp"), { omitDev: false });
 } else {
   const production = path.join(resources, "runtime");
   const stampFile = path.join(resources, "runtime-install.json");

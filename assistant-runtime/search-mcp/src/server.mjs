@@ -34,3 +34,8 @@ try {
 const server = createSearchServer(config);
 server.server.onerror = report;
 await server.connect(new StdioServerTransport());
+// The client owns this process. pi-mcp starts it in its own process group on
+// POSIX, so a client killed with its group leaves it running: stdin closing
+// is the one sign that always arrives. Exit then, even during a search.
+for (const event of ["end", "close"])
+  process.stdin.on(event, () => process.exit(0));

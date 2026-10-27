@@ -155,6 +155,10 @@ Invalid arguments (an empty or too long query, extra fields) are rejected by
 the SDK before the handler runs, as an `isError` result without
 `structuredContent`; no request is made.
 
+The server exits as soon as its stdin closes, even during a search: the
+client starts it in its own process group, so a client killed with its group
+would otherwise leave it running until the search ends.
+
 The server writes nothing but MCP messages to stdout. stderr gets only short
 diagnostics with the key and any bearer token redacted, because the host
 shows the tail of stderr to users.
@@ -168,6 +172,11 @@ npm ci
 npm run build   # dist/ofox-search-mcp.mjs, about 920 KiB (undici included)
 npm test        # builds first, then node --test; no live network calls
 ```
+
+`pnpm assistant:install` installs these dependencies and `pnpm assistant:test`
+(which CI runs) builds and runs these tests after the runtime's, on the
+bundled Node. The build writes each file whole (by rename), so test runs can
+overlap.
 
 The tests use a local mock gateway on an ephemeral port with
 `OFOX_ALLOW_LOCAL_GATEWAY=1`, real Ofox responses in `test/fixtures/`
