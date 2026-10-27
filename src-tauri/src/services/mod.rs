@@ -1,5 +1,9 @@
 pub(crate) mod account_keys;
 pub(crate) mod analytics_compact;
+// The assistant host and commands (S1 Task 4) are the first callers; drop this
+// allow when they land so anything still unused gets reported.
+#[allow(dead_code)]
+pub mod assistant;
 pub mod balance;
 pub mod balance_history;
 pub(crate) mod catalog_lifecycle;
