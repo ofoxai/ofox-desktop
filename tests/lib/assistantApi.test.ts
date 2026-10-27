@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { listen } from "@tauri-apps/api/event";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
 import zh from "@/i18n/locales/zh.json";
@@ -76,6 +77,26 @@ describe("sign-in changes", () => {
     off();
     expect(events.off).toHaveBeenCalledTimes(2);
   });
+
+  it.each([
+    ["the restored", [true, false]],
+    ["the expired", [false, true]],
+  ])(
+    "keeps no listener and reports it when %s listener cannot be registered",
+    async (_, registered) => {
+      const offs = registered.map(() => vi.fn());
+      for (const [index, ok] of registered.entries())
+        vi.mocked(listen).mockImplementationOnce(async () => {
+          if (!ok) throw new Error("listen failed");
+          return offs[index];
+        });
+      await expect(assistantApi.onAuthChange(() => undefined)).rejects.toThrow(
+        "listen failed",
+      );
+      for (const [index, ok] of registered.entries())
+        expect(offs[index]).toHaveBeenCalledTimes(ok ? 1 : 0);
+    },
+  );
 });
 
 describe("assistant error messages", () => {

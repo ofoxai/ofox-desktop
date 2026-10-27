@@ -211,14 +211,26 @@ export const assistantApi = {
    * The backend's sign-in state events; either one ends the identity the
    * workspace was showing. Names are literal (as in useModelSelection) so a
    * test that mocks the auth API module cannot turn them into `undefined`.
+   * Both or neither: when one cannot be registered the other is released and
+   * the failure is thrown.
    */
   onAuthChange: async (
     callback: (state: "expired" | "restored") => void,
   ): Promise<UnlistenFn> => {
-    const offs = await Promise.all([
+    const results = await Promise.allSettled([
       listen("ofox-auth-expired", () => callback("expired")),
       listen("ofox-auth-restored", () => callback("restored")),
     ]);
+    const offs = results.flatMap((result) =>
+      result.status === "fulfilled" ? [result.value] : [],
+    );
+    const failed = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failed) {
+      offs.forEach((off) => off());
+      throw failed.reason;
+    }
     return () => offs.forEach((off) => off());
   },
 };

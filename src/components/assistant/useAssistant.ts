@@ -65,7 +65,11 @@ export function useAssistant(enabled: boolean) {
   const savedDrafts = useRef(new Map<string, string>());
   const bootstrapRef = useRef<AssistantBootstrap | null>(null);
   const pendingSends = useRef(new Map<string, { cancelled: boolean }>());
-  const refreshSessionsRef = useRef<() => Promise<void>>(async () => undefined);
+  const refreshSessionsRef = useRef<(generation?: number) => Promise<void>>(
+    async () => undefined,
+  );
+  /** Sign-in expired: nothing of the account is listed until it is restored. */
+  const signedOut = useRef(false);
   const reloadAuthority = useRef<() => void>(() => undefined);
   selectedRef.current = selectedId;
   draftRef.current = draft;
@@ -132,24 +136,28 @@ export function useAssistant(enabled: boolean) {
   }, []);
   reloadAuthority.current = () => void loadBootstrap();
 
-  const refreshSessions = useCallback(async () => {
-    const sequence = ++listSequence.current;
-    const generation = epoch.current;
-    try {
-      const list = await assistantApi.listSessions(false, search);
-      if (
-        !mounted.current ||
-        generation !== epoch.current ||
-        sequence !== listSequence.current
-      )
-        return;
-      setSessions(list.sessions);
-      setUnreadable(list.unreadable);
-    } catch (reason) {
-      if (sequence === listSequence.current && generation === epoch.current)
-        showError(reason);
-    }
-  }, [search, showError]);
+  /** `generation`: the identity generation the caller acts for. */
+  const refreshSessions = useCallback(
+    async (generation = epoch.current) => {
+      if (signedOut.current || generation !== epoch.current) return;
+      const sequence = ++listSequence.current;
+      try {
+        const list = await assistantApi.listSessions(false, search);
+        if (
+          !mounted.current ||
+          generation !== epoch.current ||
+          sequence !== listSequence.current
+        )
+          return;
+        setSessions(list.sessions);
+        setUnreadable(list.unreadable);
+      } catch (reason) {
+        if (sequence === listSequence.current && generation === epoch.current)
+          showError(reason);
+      }
+    },
+    [search, showError],
+  );
   refreshSessionsRef.current = refreshSessions;
 
   const refreshDetail = useCallback(
@@ -235,6 +243,7 @@ export function useAssistant(enabled: boolean) {
     const cleanup: (() => void)[] = [];
     let disposed = false;
     const reset = () => {
+      signedOut.current = false;
       epoch.current += 1;
       draftAuthority.current += 1;
       for (const pending of pendingSends.current.values())
@@ -268,6 +277,7 @@ export function useAssistant(enabled: boolean) {
     void assistantApi
       .onAuthChange((state) => {
         reset();
+        signedOut.current = state === "expired";
         if (state === "restored") {
           void loadBootstrap();
           void refreshSessionsRef.current();
@@ -343,6 +353,10 @@ export function useAssistant(enabled: boolean) {
     });
     void assistantApi
       .subscribe((event: AssistantEvent) => {
+        if (disposed) return;
+        // The identity generation this event arrived under: a list read it
+        // asks for is fenced on it.
+        const generation = epoch.current;
         const current = runRef.current;
         if (
           !current ||
@@ -353,7 +367,8 @@ export function useAssistant(enabled: boolean) {
           // A run this view no longer follows (another conversation, or one
           // left behind) still changes the history's "Replying…" marks.
           // `run_end` is always its last event, also after an `error`.
-          if (event.type === "run_end") void refreshSessionsRef.current();
+          if (event.type === "run_end")
+            void refreshSessionsRef.current(generation);
           return;
         }
         // run_start, session and event types this build does not know change
@@ -411,7 +426,7 @@ export function useAssistant(enabled: boolean) {
               if (loaded && selectedRef.current === event.sessionId)
                 setStream(null);
             });
-            void refreshSessionsRef.current();
+            void refreshSessionsRef.current(generation);
             return;
         }
       })

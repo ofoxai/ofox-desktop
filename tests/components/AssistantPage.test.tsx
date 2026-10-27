@@ -1419,6 +1419,40 @@ describe("assistant key and authority", () => {
 });
 
 describe("sign-in changes", () => {
+  it("lists nothing for a background run that ends after sign-in expired, and again once it is restored", async () => {
+    const running = {
+      ...session,
+      activeRun: { runId: "bg-run", operationId: "bg-op" },
+    };
+    mocks.listSessions.mockResolvedValue(listOf([running]));
+    render(page());
+    const list = await screen.findByRole("list", { name: "Conversations" });
+    await within(list).findByText("Replying…");
+    act(() => mocks.auth?.("expired"));
+    const listed = mocks.listSessions.mock.calls.length;
+    // The backend ends the account's runs when sign-in expires.
+    const runEnd: AssistantEvent = {
+      sessionId: session.id,
+      runId: "bg-run",
+      operationId: "bg-op",
+      type: "run_end",
+      data: { stopped: true, status: "stopped" },
+    };
+    act(() => mocks.listener?.(runEnd));
+    await act(async () => undefined);
+    expect(mocks.listSessions).toHaveBeenCalledTimes(listed);
+    expect(within(list).queryByText("My conversation")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    act(() => mocks.auth?.("restored"));
+    await within(list).findByText("Replying…");
+    mocks.listSessions.mockResolvedValue(listOf([session]));
+    act(() => mocks.listener?.(runEnd));
+    await waitFor(() =>
+      expect(within(list).queryByText("Replying…")).toBeNull(),
+    );
+  });
+
   it("drops the conversation and draft when sign-in expires, and reloads when it is restored", async () => {
     await openConversation();
     await userEvent.type(composer(), "Private draft");
