@@ -104,7 +104,9 @@ summary is shortened before the source list.
 
 Errors are tool results with `isError: true`, text `"<code>: <message>"` and
 `structuredContent: { "error": { "code", "message", "status"? } }`. Messages
-are fixed strings: they never contain the key or a response body.
+are fixed strings: they never contain the key or a response body. Successful
+results pass upstream data on as is, except that any exact occurrence of the
+key becomes `[REDACTED]`.
 
 | Code                          | Meaning                                                                                                                                                                                             |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

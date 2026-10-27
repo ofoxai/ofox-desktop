@@ -263,3 +263,29 @@ test("unexpected search failures are outcome-unknown and never leak the key", as
   assert.match(logged[0], /unexpected web_search failure: socket closed/);
   assert.equal(logged.join("\n").includes(KEY), false);
 });
+
+test("results never echo the key, even when the upstream data contains it", async (t) => {
+  const client = await connect(t, {
+    search: async () => ({
+      summary: `leak ${KEY}`,
+      results: [
+        { title: `t ${KEY}`, url: `https://a.example/?k=${KEY}`, snippet: KEY },
+      ],
+      usage: { searchCalls: 1, inputTokens: 1, outputTokens: 1, model: "m" },
+    }),
+    fetchPage: async (url) => ({ url, text: `page ${KEY}`, truncated: false }),
+  });
+  const search = await client.callTool({
+    name: "web_search",
+    arguments: { query: "q" },
+  });
+  const page = await client.callTool({
+    name: "web_fetch",
+    arguments: { url: "https://example.com/" },
+  });
+  for (const result of [search, page]) {
+    assert.equal(result.isError, undefined);
+    assert.equal(JSON.stringify(result).includes(KEY), false);
+    assert.match(result.content[0].text, /\[REDACTED\]/);
+  }
+});

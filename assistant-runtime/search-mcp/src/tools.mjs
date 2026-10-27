@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 // A namespace import lets esbuild drop zod's ~250 KiB of unused locales.
 import * as z from "zod";
-import { redact } from "./redact.mjs";
+import { redact, scrubSecrets } from "./redact.mjs";
 import { SearchError, webSearch } from "./search.mjs";
 import { FetchError, readWebPage } from "./web.mjs";
 
@@ -140,9 +140,8 @@ export function createSearchServer(
     },
     async ({ query }, extra) => {
       try {
-        return searchToolResult(
-          await search(query, config, { signal: extra.signal }),
-        );
+        const result = await search(query, config, { signal: extra.signal });
+        return searchToolResult(scrubSecrets(result, secrets));
       } catch (error) {
         if (!(error instanceof SearchError)) unexpected("web_search", error);
         return toolError(error, "search_outcome_unknown", secrets);
@@ -165,7 +164,8 @@ export function createSearchServer(
     },
     async ({ url }, extra) => {
       try {
-        return fetchToolResult(await fetchPage(url, { signal: extra.signal }));
+        const page = await fetchPage(url, { signal: extra.signal });
+        return fetchToolResult(scrubSecrets(page, secrets));
       } catch (error) {
         if (!(error instanceof FetchError)) unexpected("web_fetch", error);
         return toolError(error, "fetch_failed", secrets);

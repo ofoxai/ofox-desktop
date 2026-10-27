@@ -148,7 +148,8 @@ test("the bundle serves web_search and web_fetch over stdio", async (t) => {
   for (const result of [search, denied, empty, page])
     assert.equal(JSON.stringify(result).includes(KEY), false);
   await client.close();
-  assert.equal(stderr().includes(KEY), false);
+  // Expected failures (401, bad input, blocked URL) log nothing at all.
+  assert.equal(stderr(), "");
 });
 
 test("the search model can be overridden through the environment", async (t) => {
