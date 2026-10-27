@@ -52,10 +52,12 @@ pub fn owner_key(owner: &KeyOwner) -> Result<String, String> {
     ))
 }
 
-/// `<config_dir>/assistant/<owner>`. Only an [`owner_key`] is accepted, so the
-/// owner can never name a path outside the assistant folder.
+/// `<config_dir>/assistant/<owner>`. Only an [`owner_key`] (64 lowercase hex
+/// digits) is accepted, so the owner can never name a path outside the
+/// assistant folder, nor a second folder on a case-insensitive disk.
 pub fn owner_dir(config_dir: &Path, owner: &str) -> Result<PathBuf, String> {
-    if owner.len() != 64 || !owner.bytes().all(|b| b.is_ascii_hexdigit()) {
+    let lower_hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+    if owner.len() != 64 || !owner.bytes().all(lower_hex) {
         return Err(INVALID_PATH.into());
     }
     Ok(config_dir.join(ASSISTANT_DIR).join(owner))
@@ -687,6 +689,7 @@ mod tests {
             "../../etc",
             &owner[..63],
             &format!("{}x", &owner[..63]),
+            &owner.to_uppercase(),
         ] {
             assert_eq!(
                 owner_dir(config, bad).unwrap_err(),

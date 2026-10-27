@@ -148,10 +148,13 @@ pub fn id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// Only the lowercase hyphenated form [`id`] produces. Ids name folders, so a
+/// braced, URN, simple or uppercase spelling of the same UUID is refused.
 pub fn validate_id(value: &str) -> Result<(), String> {
-    uuid::Uuid::parse_str(value)
-        .map(|_| ())
-        .map_err(|_| "assistant_invalid_identifier".to_string())
+    match uuid::Uuid::parse_str(value) {
+        Ok(parsed) if parsed.hyphenated().to_string() == value => Ok(()),
+        _ => Err("assistant_invalid_identifier".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -199,12 +202,24 @@ mod tests {
     }
 
     #[test]
-    fn only_uuids_are_identifiers() {
-        assert!(validate_id(&id()).is_ok());
-        for bad in ["", "../etc", "not-a-uuid"] {
+    fn only_lowercase_hyphenated_uuids_are_identifiers() {
+        let canonical = id();
+        assert!(validate_id(&canonical).is_ok());
+        let simple = canonical.replace('-', "");
+        // One spelling per id: other UUID forms would name a second folder for it.
+        for bad in [
+            String::new(),
+            "../etc".into(),
+            "not-a-uuid".into(),
+            canonical.to_uppercase(),
+            format!("{{{canonical}}}"),
+            format!("urn:uuid:{canonical}"),
+            simple,
+        ] {
             assert_eq!(
-                validate_id(bad).unwrap_err(),
-                "assistant_invalid_identifier"
+                validate_id(&bad).unwrap_err(),
+                "assistant_invalid_identifier",
+                "{bad}"
             );
         }
     }
