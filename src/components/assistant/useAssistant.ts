@@ -298,6 +298,17 @@ export function useAssistant(enabled: boolean) {
     return () => clearTimeout(timer);
   }, [enabled, refreshSessions]);
 
+  const loadSelected = useCallback(
+    (sessionId: string) => {
+      setLoading(true);
+      void refreshDetail(sessionId).finally(() => {
+        if (mounted.current && selectedRef.current === sessionId)
+          setLoading(false);
+      });
+    },
+    [refreshDetail],
+  );
+
   useEffect(() => {
     if (!enabled || !selectedId) return;
     if (createdSession.current === selectedId) {
@@ -305,12 +316,8 @@ export function useAssistant(enabled: boolean) {
       setLoading(false);
       return;
     }
-    setLoading(true);
-    void refreshDetail(selectedId).finally(() => {
-      if (mounted.current && selectedRef.current === selectedId)
-        setLoading(false);
-    });
-  }, [enabled, selectedId, refreshDetail]);
+    loadSelected(selectedId);
+  }, [enabled, selectedId, loadSelected]);
 
   // Persist only a draft which still belongs to the displayed session. The backend also checks owner.
   useEffect(() => {
@@ -448,9 +455,16 @@ export function useAssistant(enabled: boolean) {
   const select = useCallback(
     (id: string | null) => {
       const previous = selectedRef.current;
-      // Already showing it: reloading here would leave the pane on "Loading…",
-      // and leaving "no conversation" for itself would drop the unsent draft.
-      if (id === previous) return;
+      // Already showing or loading it: reloading here would leave the pane on
+      // "Loading…", and leaving "no conversation" for itself would drop the
+      // unsent draft. Only a conversation whose load failed is read again.
+      if (id === previous) {
+        if (id && !loading && detail?.session.id !== id) {
+          setError(null);
+          loadSelected(id);
+        }
+        return;
+      }
       if (previous && drafts.current.has(previous))
         void persistDraft(previous, draftRef.current).catch(showError);
       selectedRef.current = id;
@@ -469,7 +483,7 @@ export function useAssistant(enabled: boolean) {
       setDraftState(draftRef.current);
       setError(null);
     },
-    [setRun, persistDraft, showError],
+    [loading, detail, loadSelected, setRun, persistDraft, showError],
   );
 
   const ensureSession = useCallback(async () => {
@@ -634,6 +648,11 @@ export function useAssistant(enabled: boolean) {
           attachmentIds,
           ...options,
         });
+        // The backend has registered the run: a conversation read that began
+        // before then may still answer without it, and must not end it here.
+        // (Unless its run_end came first and already cleared it.)
+        const following = () => runRef.current?.runId === reference.runId;
+        if (following()) detailSequence.current += 1;
         // The send obtained the assistant's key, minting it the first time.
         const identity = bootstrapRef.current;
         if (

@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import zh from "@/i18n/locales/zh.json";
@@ -21,6 +21,7 @@ import type {
   AssistantEvent,
   AssistantMessage,
   AssistantModel,
+  AssistantRunRef,
   AssistantSession,
   AssistantSessionDetail,
   AssistantSessionList,
@@ -107,6 +108,8 @@ async function openConversation() {
 }
 const composer = () =>
   screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+
+afterEach(() => vi.unstubAllEnvs());
 
 beforeEach(async () => {
   Element.prototype.scrollIntoView = vi.fn();
@@ -1125,14 +1128,33 @@ describe("selection and history edges", () => {
   });
 
   it("dates the history in the app's language, not the system's", async () => {
-    const stamp = Date.UTC(2026, 9, 15, 12);
+    // A pinned zone where this moment is already the next day.
+    vi.stubEnv("TZ", "Asia/Shanghai");
+    const stamp = Date.UTC(2026, 9, 15, 20);
     mocks.listSessions.mockResolvedValue(
       listOf([{ ...session, updatedAt: stamp }]),
     );
     i18n.addResourceBundle("zh", "translation", zh, true, true);
     await i18n.changeLanguage("zh");
     render(page());
-    expect(await screen.findByText("2026/10/15")).toBeVisible();
+    expect(await screen.findByText("2026/10/16")).toBeVisible();
+  });
+
+  it("loads a conversation again when its row is clicked after its load failed", async () => {
+    mocks.getSession.mockRejectedValueOnce("assistant_storage_unavailable");
+    render(page());
+    const row = await screen.findByRole("button", { name: /My conversation/ });
+    await userEvent.click(row);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Local assistant data couldn't be read or saved.",
+    );
+    current.messages = [
+      { id: "q", role: "user", content: "Question", createdAt: 1 },
+    ];
+    await userEvent.click(row);
+    expect(await screen.findByText("Question")).toBeVisible();
+    expect(mocks.getSession).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
@@ -1167,6 +1189,56 @@ describe("run edges", () => {
       accept(run);
       await submission;
     });
+    act(() =>
+      mocks.listener?.({
+        sessionId: session.id,
+        ...run,
+        type: "text_delta",
+        data: { delta: "Answer", messageId: "reply" },
+      }),
+    );
+    expect(hook.result.current.stream?.content).toBe("Answer");
+  });
+
+  it("keeps a registered run when a read from before its registration answers after the send returned", async () => {
+    let accept!: (value: AssistantRunRef) => void;
+    mocks.send.mockReturnValue(
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+    );
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("Question"));
+    let submission!: Promise<boolean>;
+    act(() => {
+      submission = hook.result.current.send();
+    });
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    const run = hook.result.current.run!;
+    // Read while the backend has not registered the run yet ...
+    let answer!: (value: AssistantSessionDetail) => void;
+    mocks.getSession.mockReturnValueOnce(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    let reading!: Promise<boolean>;
+    act(() => {
+      reading = hook.result.current.refreshDetail(session.id);
+    });
+    // ... answered only after the send returned.
+    await act(async () => {
+      accept(run);
+      await submission;
+    });
+    await act(async () => {
+      answer({ ...current, session: { ...current.session, activeRun: null } });
+      await reading;
+    });
+    expect(hook.result.current.run).toEqual(run);
     act(() =>
       mocks.listener?.({
         sessionId: session.id,
