@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"b9f905bd-20ef-436a-acf4-9871fe84d8cb","timestamp":"2026-10-26T17:05:14.657Z","cwd":""}
+{"type":"model_change","id":"c527dc43","parentId":null,"timestamp":"2026-10-26T17:05:14.661Z","provider":"openai","modelId":"test/chat"}
+{"type":"custom","customType":"ofox-desktop-run","data":{"runId":"a48cac04-e861-4e76-92e8-6a73896a095c","operationId":"79346d31-7f3c-48d5-b3ac-81a889060608","pricingKnown":true,"cacheReadKnown":true,"cacheWriteKnown":true},"id":"5c1fdba1","parentId":"c527dc43","timestamp":"2026-10-26T17:05:14.661Z"}
+{"type":"message","id":"8ed73709","parentId":"5c1fdba1","timestamp":"2026-10-26T17:05:14.661Z","message":{"role":"user","content":"Read my portable note.","timestamp":1}}
+{"type":"message","id":"a005630a","parentId":"8ed73709","timestamp":"2026-10-26T17:05:14.661Z","message":{"role":"assistant","content":[{"type":"text","text":"Your portable note is ready."}],"api":"openai-completions","provider":"openai","model":"test/chat","usage":{"input":1,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":2,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"stop","timestamp":2}}
