@@ -36,8 +36,8 @@ copies `src/` again. `resources/manifest.json`
 records the protocol, SDK and Node versions and `minimumMacOS`, read from
 `src-tauri/tauri.conf.json` (`bundle.macOS.minimumSystemVersion`, 12.0). Node
 22 supports macOS 11 and later. With `APPLE_SIGNING_IDENTITY` set on macOS,
-every Mach-O file is signed (hardened runtime and the JIT entitlement for Node,
-except for ad-hoc `-` signing).
+every Mach-O file is signed (hardened runtime, a secure timestamp and the JIT
+entitlement for Node, except for ad-hoc `-` signing).
 
 Tauri's dev and build hooks run `assistant:prepare`, and the resource map ships
 `resources/` as `assistant-runtime/` in the application: the host starts

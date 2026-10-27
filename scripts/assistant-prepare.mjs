@@ -233,7 +233,8 @@ async function signMacFiles(directory) {
         // another ad-hoc addon. Preview bundles are not notarized; production
         // signs every Mach-O with the same Developer ID and keeps validation.
         const args = ["--force", "--sign", identity];
-        if (identity !== "-") args.push("--options", "runtime");
+        // Notarization needs a secure timestamp on every signed Mach-O.
+        if (identity !== "-") args.push("--options", "runtime", "--timestamp");
         if (filename === node)
           args.push(
             "--entitlements",
