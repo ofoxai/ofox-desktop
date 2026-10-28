@@ -106,6 +106,8 @@ export function modelForOfox(input, apex, { baseUrl, allowLocalGateway } = {}) {
     ["anthropic", "anthropic-messages"],
     ["anthropic-messages", "anthropic-messages"],
     ["messages", "anthropic-messages"],
+    // How the host lists a model of the /anthropic/v1/models catalog.
+    ["anthropic/v1/messages", "anthropic-messages"],
   ]);
   const supported = endpoints
     .map((endpoint) =>

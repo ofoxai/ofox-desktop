@@ -365,8 +365,12 @@ impl Environment for AssistantEnvironment {
         })
     }
 
-    fn models<'a>(&'a self, apex: &'a str) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
-        Box::pin(catalog::fetch_models(apex))
+    fn models<'a>(
+        &'a self,
+        apex: &'a str,
+        source: catalog::Source,
+    ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
+        Box::pin(catalog::fetch_models(apex, source))
     }
 
     fn gateway_base(&self, apex: &str) -> Result<String, String> {

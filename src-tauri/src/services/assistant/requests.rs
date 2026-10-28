@@ -20,10 +20,12 @@ impl AssistantHost {
     pub async fn bootstrap(&self) -> Result<Value, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
-        let (models, model_error) = match self.models(&identity.apex).await {
-            Ok(models) => (models, None),
-            Err(error) => (vec![], Some(error)),
+        let (merged, model_error) = match self.models(&identity.apex).await {
+            Ok(merged) => (merged, None),
+            Err(error) => (catalog::Catalog::default(), Some(error)),
         };
+        // Conversations use chat models only, until media generation lands.
+        let models = merged.conversation_models();
         // A damaged preferences file only loses the remembered choice.
         let remembered = blocking({
             let store = self.store(&identity.owner)?;
@@ -32,7 +34,7 @@ impl AssistantHost {
         .await
         .unwrap_or_default();
         let default_model_id = catalog::default_model_id(&models, remembered.as_deref());
-        let search = search_status(&models);
+        let search = search_status(&merged.models);
         let runtime = match self.runtime() {
             Ok(runtime) => json!({"available": true, "reason": null, "version": runtime.version}),
             Err(reason) => json!({"available": false, "reason": reason, "version": null}),
@@ -50,6 +52,8 @@ impl AssistantHost {
             "models": models,
             "defaultModelId": default_model_id,
             "modelUnavailableReason": model_error,
+            // Catalog sources that could not be read: some models are missing.
+            "partial": merged.partial,
             "key": {"status": key},
             "search": search,
         }))
@@ -88,14 +92,14 @@ impl AssistantHost {
         let selected = match request.model_id {
             Some(model) => self.model(&identity.apex, &model).await?.id,
             None => {
-                let models = self.models(&identity.apex).await?;
+                let merged = self.models(&identity.apex).await?;
                 let remembered = blocking({
                     let store = self.store(&identity.owner)?;
                     move || store.remembered_model()
                 })
                 .await
                 .unwrap_or_default();
-                catalog::default_model_id(&models, remembered.as_deref())
+                catalog::default_model_id(&merged.models, remembered.as_deref())
                     .ok_or("assistant_choose_model")?
             }
         };
@@ -264,7 +268,7 @@ impl AssistantHost {
         let selected = selection(&record, &request, &branch)?;
         // Search only at a price the catalog gives; the run keeps it.
         let search_price = if record.session.web_search {
-            catalog::search_price(&self.models(&identity.apex).await?)
+            catalog::search_price(&self.models(&identity.apex).await?.models)
         } else {
             None
         };
@@ -316,7 +320,7 @@ impl AssistantHost {
             "runId": request.run_id,
             "operationId": request.operation_id,
             "sessionFile": native_file,
-            "model": model,
+            "model": model.for_runtime(),
             "apiKey": key,
             "apex": identity.apex,
             "baseUrl": base_url,

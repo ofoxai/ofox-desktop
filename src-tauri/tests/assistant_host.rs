@@ -2,7 +2,7 @@
 //! (Node + Pi SDK) against a local OpenAI-compatible mock gateway, with the
 //! conversation files in a temp dir.
 use cc_switch_lib::assistant::{
-    catalog::Model,
+    catalog::{Model, Source},
     host::{Admit, AssistantHost, BoxFuture, Environment, Identity},
     types::{self, CreateRequest, Detail, Event, Message, RunProxy, SendRequest},
 };
@@ -402,8 +402,17 @@ impl Environment for TestEnv {
         Box::pin(async move { self.state.lock().unwrap().key_minted })
     }
 
-    fn models<'a>(&'a self, _apex: &'a str) -> BoxFuture<'a, Result<Vec<Model>, String>> {
-        Box::pin(async move { Ok(self.catalog.lock().unwrap().clone()) })
+    fn models<'a>(
+        &'a self,
+        _apex: &'a str,
+        source: Source,
+    ) -> BoxFuture<'a, Result<Vec<Model>, String>> {
+        Box::pin(async move {
+            Ok(match source {
+                Source::V1 => self.catalog.lock().unwrap().clone(),
+                Source::Anthropic => vec![],
+            })
+        })
     }
 
     fn gateway_base(&self, apex: &str) -> Result<String, String> {

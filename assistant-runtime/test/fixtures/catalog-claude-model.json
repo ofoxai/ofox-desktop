@@ -1,0 +1,81 @@
+{
+  "comment": "An /anthropic/v1/models row and the model the host hands a run for it (catalog.rs for_runtime); security.test.mjs checks the Pi model built from it.",
+  "catalog": {
+    "data": [
+      {
+        "type": "model",
+        "id": "anthropic/claude-haiku-5.5",
+        "display_name": "Anthropic: Claude Haiku 5.5",
+        "created_at": "2026-10-09T04:54:25Z",
+        "owned_by": "bedrock",
+        "canonical_slug": "claude-haiku-5-5",
+        "context_length": 1000000,
+        "architecture": {
+          "modality": "text+image+file->text",
+          "input_modalities": ["text", "image", "file"],
+          "output_modalities": ["text"],
+          "tokenizer": "claude",
+          "instruct_type": null
+        },
+        "pricing": {
+          "prompt": "0.0000001",
+          "completion": "0.0000005",
+          "input_cache_read": "0.00000001",
+          "input_cache_write_5m": "0.000000125",
+          "input_cache_write_1h": "0.0000002",
+          "web_search": "0.015"
+        },
+        "top_provider": {
+          "context_length": 1000000,
+          "max_completion_tokens": 128000,
+          "is_moderated": false
+        },
+        "supported_parameters": [
+          "temperature",
+          "top_p",
+          "max_tokens",
+          "stop",
+          "tools",
+          "tool_choice",
+          "response_format",
+          "reasoning"
+        ],
+        "expiration_date": null,
+        "is_deprecated": false,
+        "aliases": [
+          "claude-haiku-5-5",
+          "claude-haiku-5.5",
+          "anthropic/claude-haiku-latest",
+          "claude-haiku-latest"
+        ]
+      }
+    ],
+    "has_more": false
+  },
+  "runtime": {
+    "id": "anthropic/claude-haiku-5.5",
+    "name": "Anthropic: Claude Haiku 5.5",
+    "contextWindow": 1000000,
+    "maxOutputTokens": 128000,
+    "supportsImages": true,
+    "inputModalities": ["text", "image", "file"],
+    "supportedEndpoints": ["/anthropic/v1/messages"],
+    "inputPricePerMillion": "0.1",
+    "outputPricePerMillion": "0.5",
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000005",
+      "input_cache_read": "0.00000001",
+      "input_cache_write_5m": "0.000000125",
+      "input_cache_write_1h": "0.0000002",
+      "web_search": "0.015"
+    },
+    "cost": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125
+    },
+    "pricingKnown": true
+  }
+}

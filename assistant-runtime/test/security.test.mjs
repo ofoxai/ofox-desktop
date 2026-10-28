@@ -93,6 +93,63 @@ test("catalog models keep the protocol the host's catalog names for them", async
   }
 });
 
+test("a Claude model of the merged catalog runs with Anthropic Messages", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("./fixtures/catalog-claude-model.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const model = modelForOfox(fixture.runtime, "ofox.io");
+  assert.deepEqual(model, {
+    id: "anthropic/claude-haiku-5.5",
+    name: "Anthropic: Claude Haiku 5.5",
+    provider: "ofox-desktop",
+    api: "anthropic-messages",
+    baseUrl: "https://api.ofox.io/anthropic",
+    // Thinking stays as it is today until a run asks for a level.
+    reasoning: false,
+    input: ["text", "image"],
+    contextWindow: 1000000,
+    maxTokens: 128000,
+    cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+    compat: undefined,
+  });
+  assert.equal(
+    modelForOfox(fixture.runtime, "ofox.ai", {
+      baseUrl: "http://localhost:8088",
+      allowLocalGateway: true,
+    }).baseUrl,
+    "http://localhost:8088/anthropic",
+  );
+});
+
+test("the host names the protocol only when it is not the first advertised", () => {
+  const input = {
+    id: "anthropic/claude-test",
+    supportedEndpoints: ["/v1/chat/completions", "/v1/messages"],
+    contextWindow: 32000,
+    maxOutputTokens: 4096,
+  };
+  assert.equal(modelForOfox(input, "ofox.ai").api, "openai-completions");
+  assert.equal(
+    modelForOfox({ ...input, api: "anthropic-messages" }, "ofox.ai").api,
+    "anthropic-messages",
+  );
+  // A protocol the endpoints do not advertise is never taken.
+  assert.equal(
+    modelForOfox(
+      {
+        ...input,
+        supportedEndpoints: ["/v1/chat/completions"],
+        api: "anthropic-messages",
+      },
+      "ofox.ai",
+    ).api,
+    "openai-completions",
+  );
+});
+
 test("credential values are redacted before any protocol error or tool output", () => {
   const secret = "private-test-token-that-must-not-escape";
   const value = redact(

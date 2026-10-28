@@ -24,7 +24,68 @@ export interface AssistantModel {
     cacheWrite: number | null;
   };
   pricingKnown: boolean;
+  /** What the model makes; conversations are offered chat models only. */
+  kind?: AssistantModelKind;
+  /** The id's prefix (`openai`, `anthropic`, …); empty when it has none. */
+  vendor?: string;
+  /** `name` without a leading "Vendor: ", for a list grouped by vendor. */
+  shortName?: string;
+  /** The API a chat model runs with; null for the other kinds. */
+  protocol?: AssistantModelProtocol | null;
+  /** The catalog lists a `reasoning` parameter. */
+  reasoning?: boolean;
+  /** The model takes tools. */
+  tools?: boolean;
+  /** When the model was added, in Unix seconds. */
+  created?: number | null;
+  /** Image models only. */
+  image?: AssistantImageCapabilities;
+  /** Video models only. */
+  video?: AssistantVideoCapabilities;
 }
+
+export type AssistantModelKind =
+  | "chat"
+  | "image"
+  | "video"
+  | "speech"
+  | "transcription";
+
+export type AssistantModelProtocol =
+  | "openai-completions"
+  | "openai-responses"
+  | "anthropic-messages";
+
+/** Prices are decimal USD strings; token prices are per million tokens. */
+export interface AssistantImageCapabilities {
+  generations: boolean;
+  edits: boolean;
+  n: boolean;
+  sizes: string[];
+  qualities: string[];
+  perImagePrice: string | null;
+  tokenPricing: {
+    input: string | null;
+    inputImage: string | null;
+    outputImage: string;
+  } | null;
+}
+
+export interface AssistantVideoCapabilities {
+  modes: string[];
+  resolutions: string[];
+  defaultResolution: string | null;
+  /** Seconds. */
+  minDuration: number | null;
+  maxDuration: number | null;
+  supportsAudio: boolean;
+  aspectRatios: string[];
+  /** USD per second at the catalog's listed rate. */
+  fromPricePerSecond: string | null;
+}
+
+/** A model catalog the backend could not read: some models are missing. */
+export type AssistantCatalogSource = "v1" | "anthropic";
 
 export interface AssistantBootstrap {
   /** The signed-in account as the backend keys its data (64 hex). */
@@ -40,6 +101,8 @@ export interface AssistantBootstrap {
   defaultModelId: string | null;
   /** A catalog code when the model list could not be loaded. */
   modelUnavailableReason: string | null;
+  /** Catalog sources that could not be read; empty or absent when complete. */
+  partial?: AssistantCatalogSource[];
   /** The dedicated assistant key is created on the first send, never here. */
   key: { status: "ready" | "missing" };
   /** Left out by a backend without web search: read as unavailable. */

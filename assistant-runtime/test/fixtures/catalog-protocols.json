@@ -35,6 +35,11 @@
       "id": "x-ai/grok-4.7",
       "supportedEndpoints": ["/v1/chat/completions"],
       "api": "openai-completions"
+    },
+    {
+      "id": "anthropic/claude-haiku-5.5",
+      "supportedEndpoints": ["/anthropic/v1/messages"],
+      "api": "anthropic-messages"
     }
   ]
 }

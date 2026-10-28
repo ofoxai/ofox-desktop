@@ -1,14 +1,67 @@
-//! The Ofox model catalog as the assistant sees it: chat-capable models only,
-//! with the capacity and prices the runtime needs.
+//! The Ofox model catalog as the assistant sees it: `/v1/models` merged with
+//! `/anthropic/v1/models`, every row classified by kind, with the capacity,
+//! prices and capabilities the runtime and the model picker need.
+//! Conversations use the chat models only (see [`Catalog::conversation_models`]).
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::time::Duration;
+
+/// What a model makes. Rows of any other kind (embeddings, decisions) are
+/// dropped when the catalog is read.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// Text replies: the only kind offered for conversations so far. A model
+    /// saved before kinds existed reads as chat.
+    #[default]
+    Chat,
+    Image,
+    Video,
+    Speech,
+    Transcription,
+}
+
+/// The API a chat model runs with, named as the runtime (Pi) names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub enum Protocol {
+    #[serde(rename = "openai-completions")]
+    OpenAiCompletions,
+    #[serde(rename = "openai-responses")]
+    OpenAiResponses,
+    #[serde(rename = "anthropic-messages")]
+    AnthropicMessages,
+}
+
+/// The two catalogs the assistant reads. Both are public, keyless and
+/// always online (see [`crate::ofox_apex::models_catalog_base_for`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    /// `/v1/models`: every vendor and kind except Claude.
+    V1,
+    /// `/anthropic/v1/models`: Messages-API models, the only home of Claude.
+    Anthropic,
+}
+
+impl Source {
+    fn path(self) -> &'static str {
+        match self {
+            Self::V1 => "/v1/models",
+            Self::Anthropic => "/anthropic/v1/models",
+        }
+    }
+}
+
+/// Where an `/anthropic/v1/models` row is served; its rows list no endpoints.
+const ANTHROPIC_MESSAGES_ENDPOINT: &str = "/anthropic/v1/messages";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
+    /// The catalog's full name (an Anthropic row's `display_name`).
     pub name: String,
     pub context_window: u64,
     pub max_output_tokens: u64,
@@ -20,19 +73,143 @@ pub struct Model {
     pub pricing: Value,
     pub cost: Value,
     pub pricing_known: bool,
+    #[serde(default)]
+    pub kind: Kind,
+    /// The id's prefix (`openai`, `anthropic`, …); empty when it has none.
+    #[serde(default)]
+    pub vendor: String,
+    /// `name` without a leading "Vendor: ", for a list grouped by vendor.
+    #[serde(default)]
+    pub short_name: String,
+    /// The API a chat model runs with; `None` for the other kinds.
+    #[serde(default)]
+    pub protocol: Option<Protocol>,
+    /// The catalog lists a `reasoning` parameter.
+    #[serde(default)]
+    pub reasoning: bool,
+    /// The model takes tools; assumed when the catalog lists no parameters.
+    #[serde(default = "assumed_tools")]
+    pub tools: bool,
+    /// When the model was added, in Unix seconds.
+    #[serde(default)]
+    pub created: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<ImageCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video: Option<VideoCapabilities>,
+}
+
+fn assumed_tools() -> bool {
+    true
+}
+
+/// What an image model accepts, from its endpoints and `image_attributes`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCapabilities {
+    /// `/v1/images/generations`: draws from a prompt.
+    pub generations: bool,
+    /// `/v1/images/edits`: changes an input image.
+    pub edits: bool,
+    /// Takes `n`, several images per request.
+    pub n: bool,
+    /// The sizes the catalog lists; empty when it lists none.
+    pub sizes: Vec<String>,
+    /// The qualities the catalog lists; empty when it lists none.
+    pub qualities: Vec<String>,
+    /// USD per image (`pricing.output_image_per_num`).
+    pub per_image_price: Option<String>,
+    /// USD per million tokens, for a model billed by image tokens.
+    pub token_pricing: Option<ImageTokenPricing>,
+}
+
+/// An image model's token prices, USD per million tokens.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageTokenPricing {
+    /// Prompt text (`pricing.prompt`).
+    pub input: Option<String>,
+    /// Input images (`pricing.image`).
+    pub input_image: Option<String>,
+    /// Generated images (`pricing.output_image`).
+    pub output_image: String,
+}
+
+/// What a video model accepts, from its `video_attributes`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoCapabilities {
+    /// `t2v`, `i2v`, `v2v`.
+    pub modes: Vec<String>,
+    pub resolutions: Vec<String>,
+    pub default_resolution: Option<String>,
+    /// Seconds.
+    pub min_duration: Option<u64>,
+    /// Seconds.
+    pub max_duration: Option<u64>,
+    pub supports_audio: bool,
+    pub aspect_ratios: Vec<String>,
+    /// USD per second at the catalog's listed rate; tiers may cost more.
+    pub from_price_per_second: Option<String>,
+}
+
+/// A model as a run receives it: exactly the fields the runtime read before
+/// the catalog learned kinds, so today's run parameters stay byte for byte.
+/// New catalog fields reach the runtime only when a task wires them on
+/// purpose (`reasoning` would switch Pi's thinking parameters on).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeModel<'a> {
+    id: &'a str,
+    name: &'a str,
+    context_window: u64,
+    max_output_tokens: u64,
+    supports_images: bool,
+    input_modalities: &'a [String],
+    supported_endpoints: &'a [String],
+    input_price_per_million: &'a Option<String>,
+    output_price_per_million: &'a Option<String>,
+    pricing: &'a Value,
+    cost: &'a Value,
+    pricing_known: bool,
+    /// The protocol, only when it is not the first one the endpoints name:
+    /// the runtime picks that one by itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    api: Option<Protocol>,
+}
+
+impl Model {
+    pub fn for_runtime(&self) -> RuntimeModel<'_> {
+        let first = self
+            .supported_endpoints
+            .iter()
+            .find_map(|e| endpoint_protocol(e));
+        RuntimeModel {
+            id: &self.id,
+            name: &self.name,
+            context_window: self.context_window,
+            max_output_tokens: self.max_output_tokens,
+            supports_images: self.supports_images,
+            input_modalities: &self.input_modalities,
+            supported_endpoints: &self.supported_endpoints,
+            input_price_per_million: &self.input_price_per_million,
+            output_price_per_million: &self.output_price_per_million,
+            pricing: &self.pricing,
+            cost: &self.cost,
+            pricing_known: self.pricing_known,
+            api: self.protocol.filter(|protocol| Some(*protocol) != first),
+        }
+    }
 }
 
 /// Defaults tried in order when nothing remembered is still offered. Every
-/// entry was in the live `/v1/models` catalog of both apexes when chosen; one
-/// that disappears is skipped, never offered.
+/// entry was a chat model in the live `/v1/models` catalog of both apexes when
+/// chosen; one that disappears is skipped, never offered.
 pub const PREFERRED_MODEL_IDS: &[&str] = &[
     "openai/gpt-6.1-sol",
     "openai/gpt-6-sol",
     "openai/gpt-5.4-mini",
 ];
-
-/// Protocols the runtime can drive, as catalog paths without `/v1/`.
-const CHAT_ENDPOINTS: &[&str] = &["chat/completions", "responses", "messages"];
 
 /// The model the bundled search server searches with (search-mcp's
 /// `DEFAULT_SEARCH_MODEL`). The host prices every search at its catalog row.
@@ -99,6 +276,11 @@ fn per_million_f64(value: &Value) -> Option<f64> {
     million(value).and_then(|v| v.parse().ok())
 }
 
+/// A catalog price as it is (USD per image, per second), normalised.
+fn unit_price(value: &Value) -> Option<String> {
+    price(value).map(|price| price.normalize().to_string())
+}
+
 fn strings(value: &Value) -> Option<Vec<String>> {
     Some(
         value
@@ -109,41 +291,174 @@ fn strings(value: &Value) -> Option<Vec<String>> {
     )
 }
 
-fn is_chat_endpoint(endpoint: &str) -> bool {
+/// An endpoint as a path without its leading `/` and `v1/`:
+/// `/v1/chat/completions` → `chat/completions`.
+fn endpoint_path(endpoint: &str) -> &str {
     let path = endpoint.trim_start_matches('/');
-    let path = path.strip_prefix("v1/").unwrap_or(path);
-    CHAT_ENDPOINTS.contains(&path)
+    path.strip_prefix("v1/").unwrap_or(path)
 }
 
-/// A modality list the catalog states must include text; a missing list is no
-/// evidence either way (older rows and fixtures omit it).
-fn allows_text(modalities: &Option<Vec<String>>) -> bool {
+/// The protocol an endpoint speaks, if the runtime can drive it. The same
+/// table as the runtime's `modelForOfox` aliases, restricted to catalog paths.
+fn endpoint_protocol(endpoint: &str) -> Option<Protocol> {
+    match endpoint_path(endpoint) {
+        "chat/completions" => Some(Protocol::OpenAiCompletions),
+        "responses" => Some(Protocol::OpenAiResponses),
+        "messages" | "anthropic/v1/messages" => Some(Protocol::AnthropicMessages),
+        _ => None,
+    }
+}
+
+/// The runtime runs a model with the first protocol its endpoints name, which
+/// is the choice every `/v1` model keeps. Claude runs with Messages wherever
+/// it is listed.
+fn chat_protocol(vendor: &str, endpoints: &[String]) -> Option<Protocol> {
+    let mut advertised = endpoints.iter().filter_map(|e| endpoint_protocol(e));
+    if vendor == "anthropic"
+        && advertised
+            .clone()
+            .any(|protocol| protocol == Protocol::AnthropicMessages)
+    {
+        return Some(Protocol::AnthropicMessages);
+    }
+    advertised.next()
+}
+
+/// A modality list the catalog states must include `modality`; a missing list
+/// is no evidence either way (older rows and fixtures omit it).
+fn allows(modalities: &Option<Vec<String>>, modality: &str) -> bool {
     modalities
         .as_ref()
-        .is_none_or(|list| list.iter().any(|m| m == "text"))
+        .is_none_or(|list| list.iter().any(|m| m == modality))
 }
 
-/// Chat-capable means: a protocol the runtime speaks, text in, text out, and a
-/// usable context window. Image, audio, video and embedding models are dropped.
-pub fn parse_models(value: Value) -> Vec<Model> {
+/// A chat model needs at least this much context; media rows may report 0.
+const MIN_CHAT_CONTEXT: u64 = 1024;
+
+/// The kind of a row, first match wins: video, image (this catches the Gemini
+/// image models that also list chat), speech, transcription, then chat (a
+/// protocol the runtime speaks, text in, text out, a usable context window).
+/// Anything else is no kind the assistant uses.
+fn kind_of(
+    endpoints: &[String],
+    inputs: &Option<Vec<String>>,
+    outputs: &Option<Vec<String>>,
+    context: u64,
+) -> Option<Kind> {
+    let serves = |path: &str| endpoints.iter().any(|e| endpoint_path(e) == path);
+    if serves("videos") && allows(outputs, "video") {
+        Some(Kind::Video)
+    } else if (serves("images/generations") || serves("images/edits")) && allows(outputs, "image") {
+        Some(Kind::Image)
+    } else if serves("audio/speech") {
+        Some(Kind::Speech)
+    } else if serves("audio/transcriptions") {
+        Some(Kind::Transcription)
+    } else if endpoints.iter().any(|e| endpoint_protocol(e).is_some())
+        && allows(inputs, "text")
+        && allows(outputs, "text")
+        && context >= MIN_CHAT_CONTEXT
+    {
+        Some(Kind::Chat)
+    } else {
+        None
+    }
+}
+
+/// `name` without a leading one-word vendor and colon ("OpenAI: GPT-5.4" →
+/// "GPT-5.4"); unchanged when it has none.
+fn short_name(name: &str) -> &str {
+    match name.split_once(": ") {
+        Some((vendor, rest))
+            if !vendor.is_empty()
+                && !vendor.contains(char::is_whitespace)
+                && !rest.trim().is_empty() =>
+        {
+            rest.trim()
+        }
+        _ => name,
+    }
+}
+
+/// `created` (Unix seconds) on `/v1` rows, `created_at` (RFC 3339) on
+/// Anthropic rows.
+fn created(item: &Value) -> Option<i64> {
+    item["created"].as_i64().or_else(|| {
+        chrono::DateTime::parse_from_rfc3339(item["created_at"].as_str()?)
+            .ok()
+            .map(|at| at.timestamp())
+    })
+}
+
+fn image_capabilities(item: &Value, endpoints: &[String]) -> ImageCapabilities {
+    let serves = |path: &str| endpoints.iter().any(|e| endpoint_path(e) == path);
+    let attributes = &item["image_attributes"];
+    let params = strings(&attributes["supported_params"])
+        .or_else(|| strings(&item["supported_parameters"]))
+        .unwrap_or_default();
+    let pricing = &item["pricing"];
+    ImageCapabilities {
+        generations: serves("images/generations"),
+        edits: serves("images/edits"),
+        n: params.iter().any(|p| p == "n"),
+        sizes: strings(&attributes["sizes"]).unwrap_or_default(),
+        qualities: strings(&attributes["qualities"]).unwrap_or_default(),
+        per_image_price: unit_price(&pricing["output_image_per_num"]),
+        token_pricing: million(&pricing["output_image"]).map(|output_image| ImageTokenPricing {
+            input: million(&pricing["prompt"]),
+            input_image: million(&pricing["image"]),
+            output_image,
+        }),
+    }
+}
+
+fn video_capabilities(item: &Value) -> VideoCapabilities {
+    let attributes = &item["video_attributes"];
+    VideoCapabilities {
+        modes: strings(&attributes["modes"]).unwrap_or_default(),
+        resolutions: strings(&attributes["resolutions"]).unwrap_or_default(),
+        default_resolution: attributes["default_resolution"].as_str().map(str::to_owned),
+        min_duration: attributes["min_duration_seconds"].as_u64(),
+        max_duration: attributes["max_duration_seconds"].as_u64(),
+        supports_audio: attributes["supports_audio"].as_bool().unwrap_or(false),
+        aspect_ratios: strings(&attributes["aspect_ratios"]).unwrap_or_default(),
+        from_price_per_second: unit_price(&item["pricing"]["output_video_per_second"]),
+    }
+}
+
+/// The rows of one catalog the assistant can use, each with its kind.
+pub fn parse_models(value: Value, source: Source) -> Vec<Model> {
     let Some(items) = value["data"].as_array() else {
         return vec![];
     };
-    items.iter().filter_map(parse_model).collect()
+    items
+        .iter()
+        .filter_map(|item| parse_model(item, source))
+        .collect()
 }
 
-fn parse_model(item: &Value) -> Option<Model> {
+fn parse_model(item: &Value, source: Source) -> Option<Model> {
     let id = item["id"].as_str()?;
-    let context = item["context_length"].as_u64().filter(|v| *v >= 1024)?;
-    let endpoints = strings(&item["supported_endpoints"])?;
-    if !endpoints.iter().any(|e| is_chat_endpoint(e)) {
-        return None;
-    }
+    let endpoints = match source {
+        Source::V1 => strings(&item["supported_endpoints"])?,
+        // The catalog that lists the row is the Messages API's.
+        Source::Anthropic => vec![ANTHROPIC_MESSAGES_ENDPOINT.to_owned()],
+    };
+    let context = item["context_length"].as_u64().unwrap_or(0);
     let inputs = strings(&item["architecture"]["input_modalities"]);
     let outputs = strings(&item["architecture"]["output_modalities"]);
-    if !allows_text(&inputs) || !allows_text(&outputs) {
-        return None;
-    }
+    let kind = kind_of(&endpoints, &inputs, &outputs, context)?;
+    let vendor = id.split_once('/').map_or("", |(vendor, _)| vendor);
+    let name = item["name"]
+        .as_str()
+        .or_else(|| item["display_name"].as_str())
+        .unwrap_or(id);
+    let parameters = strings(&item["supported_parameters"]);
+    let lists = |parameter: &str| {
+        parameters
+            .as_ref()
+            .map(|list| list.iter().any(|p| p == parameter))
+    };
     let inputs = inputs.unwrap_or_default();
     let pricing = &item["pricing"];
     let cache_write = pricing
@@ -151,7 +466,7 @@ fn parse_model(item: &Value) -> Option<Model> {
         .unwrap_or(&pricing["input_cache_write"]);
     Some(Model {
         id: id.into(),
-        name: item["name"].as_str().unwrap_or(id).into(),
+        name: name.into(),
         context_window: context,
         max_output_tokens: item["top_provider"]["max_completion_tokens"]
             .as_u64()
@@ -160,7 +475,6 @@ fn parse_model(item: &Value) -> Option<Model> {
             .min(context / 2),
         supports_images: inputs.iter().any(|v| v == "image"),
         input_modalities: inputs,
-        supported_endpoints: endpoints,
         input_price_per_million: million(&pricing["prompt"]),
         output_price_per_million: million(&pricing["completion"]),
         pricing: pricing.clone(),
@@ -172,34 +486,104 @@ fn parse_model(item: &Value) -> Option<Model> {
         }),
         pricing_known: million(&pricing["prompt"]).is_some()
             && million(&pricing["completion"]).is_some(),
+        kind,
+        vendor: vendor.into(),
+        short_name: short_name(name).into(),
+        protocol: match kind {
+            Kind::Chat => chat_protocol(vendor, &endpoints),
+            _ => None,
+        },
+        reasoning: lists("reasoning").unwrap_or(false),
+        tools: lists("tools").unwrap_or(true),
+        created: created(item),
+        image: (kind == Kind::Image).then(|| image_capabilities(item, &endpoints)),
+        video: (kind == Kind::Video).then(|| video_capabilities(item)),
+        supported_endpoints: endpoints,
     })
 }
 
+/// Both catalogs of an apex as one list, and the sources that could not be
+/// read (shown as "some models are unavailable").
+#[derive(Clone, Debug, Default)]
+pub struct Catalog {
+    /// `/v1` rows in catalog order, then the Anthropic rows `/v1` lacks.
+    pub models: Vec<Model>,
+    pub partial: Vec<Source>,
+}
+
+impl Catalog {
+    /// The models a conversation can use: chat only, until media generation
+    /// is offered.
+    pub fn conversation_models(&self) -> Vec<Model> {
+        self.models
+            .iter()
+            .filter(|m| m.kind == Kind::Chat)
+            .cloned()
+            .collect()
+    }
+}
+
+/// One catalog from both sources. A row whose id `/v1` also lists is the
+/// `/v1` row. A source that failed is named in `partial`; with both failed
+/// the `/v1` error stands, and a catalog without any chat model is
+/// `assistant_no_compatible_models`.
+pub fn merge(
+    v1: Result<Vec<Model>, String>,
+    anthropic: Result<Vec<Model>, String>,
+) -> Result<Catalog, String> {
+    let (v1, anthropic) = match (v1, anthropic) {
+        (Err(error), Err(_)) => return Err(error),
+        pair => pair,
+    };
+    let mut partial = vec![];
+    let mut models = v1.unwrap_or_else(|_| {
+        partial.push(Source::V1);
+        vec![]
+    });
+    let listed: HashSet<String> = models.iter().map(|m| m.id.clone()).collect();
+    match anthropic {
+        Ok(rows) => models.extend(rows.into_iter().filter(|m| !listed.contains(&m.id))),
+        Err(_) => partial.push(Source::Anthropic),
+    }
+    if !models.iter().any(|m| m.kind == Kind::Chat) {
+        return Err(NO_COMPATIBLE_MODELS.into());
+    }
+    Ok(Catalog { models, partial })
+}
+
+const NO_COMPATIBLE_MODELS: &str = "assistant_no_compatible_models";
+
 /// The model a new session starts with: the remembered one if the catalog still
-/// offers it, else the first offered entry of [`PREFERRED_MODEL_IDS`], else the
-/// first model of `models` (all chat-capable, see [`parse_models`]). Never a
-/// model `models` does not contain; `None` only for an empty catalog.
+/// offers it for conversations, else the first offered entry of
+/// [`PREFERRED_MODEL_IDS`], else the first chat model of `models`. Never a
+/// model `models` does not contain, never one of another kind; `None` only
+/// when there is no chat model.
 pub fn default_model_id(models: &[Model], remembered: Option<&str>) -> Option<String> {
-    let offered = |id: &str| models.iter().any(|m| m.id == id);
+    let offered = |id: &str| models.iter().any(|m| m.id == id && m.kind == Kind::Chat);
     remembered
         .filter(|id| offered(id))
         .or_else(|| PREFERRED_MODEL_IDS.iter().copied().find(|id| offered(id)))
-        .or_else(|| models.first().map(|m| m.id.as_str()))
+        .or_else(|| {
+            models
+                .iter()
+                .find(|m| m.kind == Kind::Chat)
+                .map(|m| m.id.as_str())
+        })
         .map(str::to_owned)
 }
 
 /// The live catalog is ~150 KiB; anything near this is not a catalog.
 const MAX_CATALOG_BYTES: usize = 8 * 1024 * 1024;
 
-/// The chat models of `apex`'s public catalog. An apex that is not a known Ofox
-/// apex is refused before any request is made.
-pub async fn fetch_models(apex: &str) -> Result<Vec<Model>, String> {
+/// The usable rows of one of `apex`'s public catalogs. An apex that is not a
+/// known Ofox apex is refused before any request is made.
+pub async fn fetch_models(apex: &str, source: Source) -> Result<Vec<Model>, String> {
     let base = crate::ofox_apex::models_catalog_base_for(apex).ok_or("assistant_unknown_apex")?;
-    fetch_models_at(&format!("{base}/v1/models")).await
+    fetch_models_at(&format!("{base}{}", source.path()), source).await
 }
 
 /// [`fetch_models`] against a given URL, so tests can point it at a local server.
-async fn fetch_models_at(url: &str) -> Result<Vec<Model>, String> {
+async fn fetch_models_at(url: &str, source: Source) -> Result<Vec<Model>, String> {
     let unavailable = |_| "assistant_catalog_unavailable".to_string();
     let mut response = crate::proxy::http_client::get()
         .get(url)
@@ -225,10 +609,14 @@ async fn fetch_models_at(url: &str) -> Result<Vec<Model>, String> {
         }
         bytes.extend_from_slice(&chunk);
     }
-    let catalog = serde_json::from_slice(&bytes).map_err(|_| "assistant_catalog_invalid")?;
-    let models = parse_models(catalog);
+    let catalog: Value = serde_json::from_slice(&bytes).map_err(|_| "assistant_catalog_invalid")?;
+    if catalog["has_more"] == true {
+        log::warn!("[Assistant] {source:?} model catalog has more pages than the first");
+    }
+    let models = parse_models(catalog, source);
+    // An empty answer never replaces a catalog read before.
     if models.is_empty() {
-        return Err("assistant_no_compatible_models".into());
+        return Err(NO_COMPATIBLE_MODELS.into());
     }
     Ok(models)
 }
@@ -249,16 +637,56 @@ mod tests {
         })
     }
 
+    fn v1(value: Value) -> Vec<Model> {
+        parse_models(value, Source::V1)
+    }
+
     fn ids(models: &[Model]) -> Vec<&str> {
         models.iter().map(|m| m.id.as_str()).collect()
     }
 
+    fn kinds(models: &[Model]) -> Vec<(&str, Kind)> {
+        models.iter().map(|m| (m.id.as_str(), m.kind)).collect()
+    }
+
     fn catalog(ids: &[&str]) -> Vec<Model> {
-        parse_models(json!({"data": ids
+        v1(json!({"data": ids
             .iter()
             .map(|id| entry(id, &["/v1/chat/completions"], &["text"], &["text"]))
             .collect::<Vec<_>>()}))
     }
+
+    /// Rows trimmed from the live `/v1/models` (public, no key needed).
+    fn v1_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant-catalog/v1-models.json"
+        ))
+        .unwrap()
+    }
+
+    /// Rows trimmed from the live `/anthropic/v1/models`: Claude, which only
+    /// this catalog lists, and two ids `/v1` lists too.
+    fn anthropic_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant-catalog/anthropic-models.json"
+        ))
+        .unwrap()
+    }
+
+    fn real_catalog() -> Catalog {
+        merge(
+            Ok(v1(v1_fixture())),
+            Ok(parse_models(anthropic_fixture(), Source::Anthropic)),
+        )
+        .unwrap()
+    }
+
+    const CLAUDE_IDS: &[&str] = &[
+        "anthropic/claude-haiku-5.5",
+        "anthropic/claude-sonnet-5.5",
+        "anthropic/claude-opus-5.5",
+        "anthropic/claude-fable-5.1",
+    ];
 
     #[test]
     fn runtime_fixture_projection_matches_the_sidecar_contract() {
@@ -268,7 +696,7 @@ mod tests {
             "../../../../assistant-runtime/test/fixtures/catalog-model.json"
         ))
         .unwrap();
-        let model = serde_json::to_value(&parse_models(fixture["catalog"].clone())[0]).unwrap();
+        let model = serde_json::to_value(v1(fixture["catalog"].clone())[0].for_runtime()).unwrap();
         for field in [
             "id",
             "contextWindow",
@@ -283,8 +711,21 @@ mod tests {
     }
 
     #[test]
+    fn a_claude_row_projects_to_the_runtime_fixture() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../assistant-runtime/test/fixtures/catalog-claude-model.json"
+        ))
+        .unwrap();
+        let models = parse_models(fixture["catalog"].clone(), Source::Anthropic);
+        assert_eq!(
+            serde_json::to_value(models[0].for_runtime()).unwrap(),
+            fixture["runtime"]
+        );
+    }
+
+    #[test]
     fn model_projection_preserves_capacity_modalities_and_both_prices() {
-        let models = parse_models(
+        let models = v1(
             json!({"data":[{"id":"test/model","context_length":128000,"top_provider":{"max_completion_tokens":16000},"supported_endpoints":["/v1/responses"],"architecture":{"input_modalities":["text","image"]},"pricing":{"prompt":"0.000002","completion":"0.00001"}}]}),
         );
         assert_eq!(models[0].context_window, 128000);
@@ -292,27 +733,292 @@ mod tests {
         assert!(models[0].supports_images);
         assert_eq!(models[0].input_price_per_million.as_deref(), Some("2"));
         assert_eq!(models[0].output_price_per_million.as_deref(), Some("10"));
-        assert!(parse_models(json!({"data":[{"id":"unknown"}]})).is_empty());
+        assert!(v1(json!({"data":[{"id":"unknown"}]})).is_empty());
     }
 
     #[test]
-    fn only_text_chat_models_are_offered() {
-        let models = parse_models(json!({"data": [
+    fn each_row_gets_its_kind_and_unusable_rows_are_dropped() {
+        let models = v1(json!({"data": [
             entry("chat/completions", &["/v1/chat/completions"], &["text", "image"], &["text"]),
             entry("chat/responses", &["/v1/responses"], &["text"], &["text"]),
             entry("chat/messages", &["/v1/messages"], &["text"], &["text"]),
-            // Live catalog rows that a chat endpoint alone would let through.
+            // A chat endpoint alone does not make a chat model.
             entry("image/out", &["/v1/chat/completions", "/v1/images/generations"], &["text", "image"], &["image"]),
             entry("audio/in", &["/v1/chat/completions"], &["audio"], &["text"]),
             entry("embed/text", &["/v1/embeddings"], &["text"], &["text"]),
             entry("video/out", &["/v1/videos"], &["text"], &["video"]),
+            entry("speech/out", &["/v1/audio/speech"], &["text"], &["audio"]),
+            entry("transcribe/in", &["/v1/audio/transcriptions"], &["audio"], &["text"]),
             entry("decide/text", &["/v1/decisions"], &["text"], &["text"]),
             entry("lookalike/path", &["/v1/realtime/responses-preview"], &["text"], &["text"]),
         ]}));
         assert_eq!(
-            ids(&models),
-            ["chat/completions", "chat/responses", "chat/messages"]
+            kinds(&models),
+            [
+                ("chat/completions", Kind::Chat),
+                ("chat/responses", Kind::Chat),
+                ("chat/messages", Kind::Chat),
+                ("image/out", Kind::Image),
+                ("video/out", Kind::Video),
+                ("speech/out", Kind::Speech),
+                ("transcribe/in", Kind::Transcription),
+            ]
         );
+    }
+
+    #[test]
+    fn only_chat_rows_need_a_usable_context_window() {
+        let mut small = entry(
+            "chat/small",
+            &["/v1/chat/completions"],
+            &["text"],
+            &["text"],
+        );
+        small["context_length"] = json!(1000);
+        let mut video = entry("video/zero", &["/v1/videos"], &["text"], &["video"]);
+        video["context_length"] = json!(0);
+        let mut image = entry(
+            "image/small",
+            &["/v1/images/generations"],
+            &["text"],
+            &["image"],
+        );
+        image["context_length"] = json!(0);
+        assert_eq!(
+            ids(&v1(json!({"data": [small, video, image]}))),
+            ["video/zero", "image/small"]
+        );
+    }
+
+    #[test]
+    fn every_row_of_the_real_catalogs_gets_its_kind() {
+        let mut expected: Vec<(&str, Kind)> = vec![];
+        let chat = |ids: &'static [&'static str]| ids.iter().map(|id| (*id, Kind::Chat));
+        expected.extend(chat(TODAY_CHAT_IDS));
+        expected.extend([
+            ("google/gemini-3.1-flash-image", Kind::Image),
+            ("openai/gpt-image-2", Kind::Image),
+            ("volcengine/doubao-seedream-5.0-flash", Kind::Image),
+            ("qwen/qwen-image-3.0", Kind::Image),
+            ("microsoft/mai-image-2.5", Kind::Image),
+            ("bytedance/seedance-2.5", Kind::Video),
+            ("alibaba/wan-3.0", Kind::Video),
+            ("google/gemini-2.5-flash-tts", Kind::Speech),
+            ("elevenlabs/eleven_v4", Kind::Speech),
+            ("openai/gpt-4o-mini-transcribe", Kind::Transcription),
+            // openai/text-embedding-3-small and typesafe/jev-latest (decisions)
+            // are dropped.
+        ]);
+        expected.extend(chat(CLAUDE_IDS));
+        assert_eq!(kinds(&real_catalog().models), expected);
+    }
+
+    #[test]
+    fn claude_comes_from_the_anthropic_catalog_and_runs_with_messages() {
+        let models = parse_models(anthropic_fixture(), Source::Anthropic);
+        assert_eq!(models.len(), 6, "every row of the Anthropic fixture");
+        let haiku = &models[0];
+        assert_eq!(haiku.id, "anthropic/claude-haiku-5.5");
+        assert_eq!(haiku.name, "Anthropic: Claude Haiku 5.5");
+        assert_eq!(haiku.short_name, "Claude Haiku 5.5");
+        assert_eq!(haiku.vendor, "anthropic");
+        assert_eq!(haiku.kind, Kind::Chat);
+        assert_eq!(haiku.protocol, Some(Protocol::AnthropicMessages));
+        assert_eq!(haiku.supported_endpoints, ["/anthropic/v1/messages"]);
+        assert!(haiku.reasoning && haiku.tools && haiku.supports_images);
+        // 2026-10-09T04:54:25Z
+        assert_eq!(haiku.created, Some(1_791_521_665));
+        let conversation = real_catalog().conversation_models();
+        for id in CLAUDE_IDS {
+            let model = conversation.iter().find(|m| m.id == *id).unwrap();
+            assert_eq!(model.protocol, Some(Protocol::AnthropicMessages), "{id}");
+        }
+    }
+
+    #[test]
+    fn an_id_both_catalogs_list_is_the_v1_row() {
+        let merged = real_catalog();
+        let mut unique = ids(&merged.models);
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), merged.models.len(), "no id twice");
+        for id in ["deepseek/deepseek-v4-flash-0423", "openai/gpt-5.4-mini"] {
+            let model = merged.models.iter().find(|m| m.id == id).unwrap();
+            assert_eq!(
+                model.supported_endpoints,
+                ["/v1/chat/completions", "/v1/responses"],
+                "{id}"
+            );
+            assert_eq!(model.protocol, Some(Protocol::OpenAiCompletions), "{id}");
+        }
+        // The /v1 row's own timestamp, not the Anthropic `created_at`.
+        let deepseek = merged
+            .models
+            .iter()
+            .find(|m| m.id == "deepseek/deepseek-v4-flash-0423")
+            .unwrap();
+        assert_eq!(deepseek.created, Some(1_776_902_400));
+        assert!(merged.partial.is_empty());
+    }
+
+    #[test]
+    fn a_source_that_could_not_be_read_is_named_and_the_other_still_counts() {
+        let rows = || Ok(v1(v1_fixture()));
+        let claude = || Ok(parse_models(anthropic_fixture(), Source::Anthropic));
+        let down = || Err::<Vec<Model>, _>("assistant_catalog_unavailable".to_string());
+
+        let without_claude = merge(rows(), down()).unwrap();
+        assert_eq!(without_claude.partial, [Source::Anthropic]);
+        assert_eq!(ids(&without_claude.conversation_models()), TODAY_CHAT_IDS);
+
+        let only_anthropic = merge(down(), claude()).unwrap();
+        assert_eq!(only_anthropic.partial, [Source::V1]);
+        assert_eq!(only_anthropic.models.len(), 6);
+        assert_eq!(
+            serde_json::to_value(&only_anthropic.partial).unwrap(),
+            json!(["v1"])
+        );
+
+        // Both down: the `/v1` error, as before the second catalog.
+        assert_eq!(
+            merge(Err("assistant_catalog_invalid".into()), down()).unwrap_err(),
+            "assistant_catalog_invalid"
+        );
+        // Media alone is no catalog a conversation can use.
+        let only_images = v1(json!({"data": [
+            entry("image/model", &["/v1/images/generations"], &["text"], &["image"]),
+        ]}));
+        assert_eq!(
+            merge(Ok(only_images), down()).unwrap_err(),
+            "assistant_no_compatible_models"
+        );
+    }
+
+    #[test]
+    fn image_and_video_capabilities_come_from_the_catalog() {
+        let merged = real_catalog();
+        let find = |id: &str| merged.models.iter().find(|m| m.id == id).unwrap();
+        assert_eq!(
+            find("openai/gpt-image-2").image,
+            Some(ImageCapabilities {
+                generations: true,
+                edits: true,
+                n: true,
+                sizes: vec![],
+                qualities: vec![],
+                per_image_price: None,
+                token_pricing: Some(ImageTokenPricing {
+                    input: Some("5".into()),
+                    input_image: Some("8".into()),
+                    output_image: "30".into(),
+                }),
+            })
+        );
+        assert_eq!(
+            find("volcengine/doubao-seedream-5.0-flash").image,
+            Some(ImageCapabilities {
+                generations: true,
+                edits: false,
+                n: false,
+                sizes: vec!["1K".into(), "1.5K".into(), "2K".into()],
+                qualities: vec![],
+                per_image_price: Some("0.02".into()),
+                token_pricing: None,
+            })
+        );
+        let gemini_image = find("google/gemini-3.1-flash-image");
+        assert!(gemini_image.image.as_ref().is_some_and(|i| i.edits));
+        assert_eq!(gemini_image.protocol, None, "never run as a chat model");
+        let seedance = find("bytedance/seedance-2.5");
+        assert_eq!(seedance.context_window, 0);
+        assert_eq!(
+            seedance.video,
+            Some(VideoCapabilities {
+                modes: vec!["t2v".into(), "i2v".into(), "v2v".into()],
+                resolutions: vec!["480p".into(), "720p".into(), "1080p".into()],
+                default_resolution: Some("720p".into()),
+                min_duration: Some(4),
+                max_duration: Some(30),
+                supports_audio: true,
+                aspect_ratios: ["21:9", "16:9", "4:3", "1:1", "3:4", "9:16", "adaptive"]
+                    .map(String::from)
+                    .to_vec(),
+                from_price_per_second: Some("0.11".into()),
+            })
+        );
+        assert!(seedance.image.is_none() && !seedance.tools);
+        // Chat rows carry neither, and say so by leaving the fields out.
+        let chat = serde_json::to_value(find("openai/gpt-6.1-sol")).unwrap();
+        assert!(chat.get("image").is_none() && chat.get("video").is_none());
+        assert_eq!(chat["kind"], "chat");
+        assert_eq!(serde_json::to_value(seedance).unwrap()["kind"], "video");
+    }
+
+    #[test]
+    fn reasoning_and_tools_follow_the_listed_parameters() {
+        let with = |parameters: Option<&[&str]>| {
+            let mut row = entry(
+                "test/model",
+                &["/v1/chat/completions"],
+                &["text"],
+                &["text"],
+            );
+            if let Some(parameters) = parameters {
+                row["supported_parameters"] = json!(parameters);
+            }
+            let model = v1(json!({"data": [row]})).remove(0);
+            (model.reasoning, model.tools)
+        };
+        assert_eq!(with(None), (false, true), "no list: tools assumed");
+        assert_eq!(with(Some(&["tools", "reasoning"])), (true, true));
+        assert_eq!(with(Some(&["temperature"])), (false, false));
+    }
+
+    #[test]
+    fn a_leading_vendor_is_dropped_from_the_short_name_only() {
+        for (name, short) in [
+            ("OpenAI: GPT-6.1 Sol", "GPT-6.1 Sol"),
+            (
+                "Google: Nano Banana 2 (Gemini 3.1 Flash Image)",
+                "Nano Banana 2 (Gemini 3.1 Flash Image)",
+            ),
+            ("Z.ai: GLM-5", "GLM-5"),
+            ("GPT-5 Nano", "GPT-5 Nano"),
+            ("Doubao Seed 2.1 Pro: Turbo", "Doubao Seed 2.1 Pro: Turbo"),
+            ("Vendor: ", "Vendor: "),
+        ] {
+            assert_eq!(short_name(name), short, "{name}");
+        }
+        let gpt = real_catalog().models.remove(0);
+        assert_eq!(
+            (gpt.name.as_str(), gpt.short_name.as_str()),
+            ("OpenAI: GPT-6.1 Sol", "GPT-6.1 Sol")
+        );
+    }
+
+    #[test]
+    fn claude_listed_by_v1_would_still_run_with_messages() {
+        let both = ["/v1/chat/completions", "/v1/messages"];
+        let models = v1(json!({"data": [
+            entry("anthropic/claude-test", &both, &["text"], &["text"]),
+            entry("other/model", &both, &["text"], &["text"]),
+        ]}));
+        assert_eq!(models[0].protocol, Some(Protocol::AnthropicMessages));
+        assert_eq!(models[1].protocol, Some(Protocol::OpenAiCompletions));
+        // The runtime picks the first protocol by itself; it is told only
+        // when the catalog's choice differs.
+        let runtime = |model: &Model| serde_json::to_value(model.for_runtime()).unwrap();
+        assert_eq!(runtime(&models[0])["api"], "anthropic-messages");
+        assert!(runtime(&models[1]).get("api").is_none());
+    }
+
+    #[test]
+    fn a_model_saved_before_kinds_reads_as_a_chat_model() {
+        let model: Model = serde_json::from_str(TODAY_RUNTIME_MODEL).unwrap();
+        assert_eq!(model.kind, Kind::Chat);
+        assert!(model.tools && !model.reasoning);
+        assert_eq!(model.protocol, None);
+        assert!(model.image.is_none() && model.video.is_none());
     }
 
     #[test]
@@ -357,11 +1063,61 @@ mod tests {
         assert_eq!(default_model_id(&[], Some(PREFERRED_MODEL_IDS[0])), None);
     }
 
-    async fn serve(response: wiremock::ResponseTemplate) -> wiremock::MockServer {
-        use wiremock::matchers::{method, path};
+    #[test]
+    fn the_default_is_never_a_media_model() {
+        let mut media = v1(json!({"data": [
+            entry("image/first", &["/v1/images/generations"], &["text"], &["image"]),
+            entry("video/second", &["/v1/videos"], &["text"], &["video"]),
+        ]}));
+        assert_eq!(default_model_id(&media, Some("image/first")), None);
+        media.extend(catalog(&["chat/third"]));
+        for remembered in [None, Some("image/first"), Some("video/second")] {
+            assert_eq!(
+                default_model_id(&media, remembered).as_deref(),
+                Some("chat/third"),
+                "{remembered:?}"
+            );
+        }
+        // A preferred id listed as a media model is passed over too.
+        let mut preferred = entry(
+            PREFERRED_MODEL_IDS[0],
+            &["/v1/videos"],
+            &["text"],
+            &["video"],
+        );
+        preferred["context_length"] = json!(0);
+        media.insert(0, v1(json!({"data": [preferred]})).remove(0));
+        assert_eq!(
+            default_model_id(&media, None).as_deref(),
+            Some("chat/third")
+        );
+        assert_eq!(
+            default_model_id(&real_catalog().models, None).as_deref(),
+            Some(PREFERRED_MODEL_IDS[0])
+        );
+    }
+
+    #[test]
+    fn the_preferred_models_are_chat_models_of_the_real_catalog() {
+        let merged = real_catalog();
+        for id in PREFERRED_MODEL_IDS {
+            let model = merged.models.iter().find(|m| m.id == *id).unwrap();
+            assert_eq!(model.kind, Kind::Chat, "{id}");
+        }
+        assert_eq!(
+            merged
+                .models
+                .iter()
+                .find(|m| m.id == SEARCH_MODEL)
+                .map(|m| m.kind),
+            Some(Kind::Chat)
+        );
+    }
+
+    async fn serve(path: &str, response: wiremock::ResponseTemplate) -> wiremock::MockServer {
         let server = wiremock::MockServer::start().await;
-        wiremock::Mock::given(method("GET"))
-            .and(path("/v1/models"))
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(path))
             .respond_with(response)
             .mount(&server)
             .await;
@@ -369,24 +1125,53 @@ mod tests {
     }
 
     async fn fetch_from(server: &wiremock::MockServer) -> Result<Vec<Model>, String> {
-        fetch_models_at(&format!("{}/v1/models", server.uri())).await
+        fetch_models_at(&format!("{}/v1/models", server.uri()), Source::V1).await
     }
 
     #[tokio::test]
-    async fn fetch_returns_the_chat_models_of_the_catalog() {
+    async fn fetch_returns_every_usable_row_with_its_kind() {
         let body = json!({"data": [
             entry("chat/model", &["/v1/chat/completions"], &["text"], &["text"]),
             entry("image/model", &["/v1/images/generations"], &["text"], &["image"]),
+            entry("embed/model", &["/v1/embeddings"], &["text"], &["text"]),
         ]});
-        let server = serve(wiremock::ResponseTemplate::new(200).set_body_json(body)).await;
-        assert_eq!(ids(&fetch_from(&server).await.unwrap()), ["chat/model"]);
+        let server = serve(
+            "/v1/models",
+            wiremock::ResponseTemplate::new(200).set_body_json(body),
+        )
+        .await;
+        assert_eq!(
+            kinds(&fetch_from(&server).await.unwrap()),
+            [("chat/model", Kind::Chat), ("image/model", Kind::Image)]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_reads_the_anthropic_catalog_as_messages_models() {
+        assert_eq!(Source::V1.path(), "/v1/models");
+        assert_eq!(Source::Anthropic.path(), "/anthropic/v1/models");
+        let server = serve(
+            "/anthropic/v1/models",
+            wiremock::ResponseTemplate::new(200).set_body_json(anthropic_fixture()),
+        )
+        .await;
+        let models = fetch_models_at(
+            &format!("{}/anthropic/v1/models", server.uri()),
+            Source::Anthropic,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&ids(&models)[..CLAUDE_IDS.len()], CLAUDE_IDS);
+        assert!(models
+            .iter()
+            .all(|m| m.protocol == Some(Protocol::AnthropicMessages)));
     }
 
     #[tokio::test]
     async fn fetch_reports_each_failure_with_its_own_code() {
         use wiremock::ResponseTemplate;
-        let only_images = json!({"data": [
-            entry("image/model", &["/v1/images/generations"], &["text"], &["image"]),
+        let only_embeddings = json!({"data": [
+            entry("embed/model", &["/v1/embeddings"], &["text"], &["text"]),
         ]});
         for (response, code) in [
             (ResponseTemplate::new(503), "assistant_catalog_unavailable"),
@@ -395,11 +1180,11 @@ mod tests {
                 "assistant_catalog_invalid",
             ),
             (
-                ResponseTemplate::new(200).set_body_json(only_images),
+                ResponseTemplate::new(200).set_body_json(only_embeddings),
                 "assistant_no_compatible_models",
             ),
         ] {
-            let server = serve(response).await;
+            let server = serve("/v1/models", response).await;
             assert_eq!(fetch_from(&server).await.unwrap_err(), code);
         }
     }
@@ -407,7 +1192,11 @@ mod tests {
     #[tokio::test]
     async fn fetch_refuses_a_catalog_over_the_size_limit() {
         let body = vec![b' '; MAX_CATALOG_BYTES + 1];
-        let server = serve(wiremock::ResponseTemplate::new(200).set_body_bytes(body)).await;
+        let server = serve(
+            "/v1/models",
+            wiremock::ResponseTemplate::new(200).set_body_bytes(body),
+        )
+        .await;
         assert_eq!(
             fetch_from(&server).await.unwrap_err(),
             "assistant_catalog_too_large"
@@ -439,17 +1228,67 @@ mod tests {
             }
             let _ = socket.write_all(b"0\r\n\r\n").await;
         });
-        let result = fetch_models_at(&format!("http://{address}/v1/models")).await;
+        let result = fetch_models_at(&format!("http://{address}/v1/models"), Source::V1).await;
         server.abort();
         assert_eq!(result.unwrap_err(), "assistant_catalog_too_large");
     }
 
     #[tokio::test]
     async fn fetch_never_builds_a_host_from_an_unknown_apex() {
-        assert_eq!(
-            fetch_models("evil.example").await.unwrap_err(),
-            "assistant_unknown_apex"
-        );
+        for source in [Source::V1, Source::Anthropic] {
+            assert_eq!(
+                fetch_models("evil.example", source).await.unwrap_err(),
+                "assistant_unknown_apex"
+            );
+        }
+    }
+
+    /// Both live catalogs of both apexes, read and merged as the host does.
+    /// Free and keyless, but online: run with
+    /// `cargo test --lib assistant::catalog::tests::live -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore = "reads the live catalogs"]
+    async fn live_catalogs_of_both_apexes_merge() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (rows, claude) = tokio::join!(
+                fetch_models(apex, Source::V1),
+                fetch_models(apex, Source::Anthropic)
+            );
+            let (v1_rows, anthropic_rows) = (
+                rows.as_ref().map_or(0, Vec::len),
+                claude.as_ref().map_or(0, Vec::len),
+            );
+            let merged = merge(rows, claude).unwrap();
+            let count = |kind: Kind| merged.models.iter().filter(|m| m.kind == kind).count();
+            println!(
+                "{apex}: /v1 {v1_rows} usable, /anthropic {anthropic_rows}, merged {} \
+                 (chat {}, image {}, video {}, speech {}, transcription {}), \
+                 claude {}, partial {:?}, default {:?}",
+                merged.models.len(),
+                count(Kind::Chat),
+                count(Kind::Image),
+                count(Kind::Video),
+                count(Kind::Speech),
+                count(Kind::Transcription),
+                merged
+                    .conversation_models()
+                    .iter()
+                    .filter(|m| m.vendor == "anthropic")
+                    .count(),
+                merged.partial,
+                default_model_id(&merged.models, None),
+            );
+            assert!(merged.partial.is_empty(), "{apex}");
+            assert!(merged
+                .conversation_models()
+                .iter()
+                .any(|m| m.protocol == Some(Protocol::AnthropicMessages)));
+            // Every live chat model runs with the protocol the runtime picks
+            // by itself: no run is told one.
+            for model in merged.conversation_models() {
+                assert!(model.for_runtime().api.is_none(), "{}", model.id);
+            }
+        }
     }
 
     /// The live row of the search model (prices as `/v1/models` gave them).
@@ -465,7 +1304,7 @@ mod tests {
     }
 
     fn priced(pricing: Value) -> Option<SearchPrice> {
-        search_price(&parse_models(
+        search_price(&v1(
             json!({"data": [entry("chat/model", &["/v1/chat/completions"], &["text"], &["text"]), search_row(pricing)]}),
         ))
     }
@@ -512,14 +1351,6 @@ mod tests {
         assert!(search_price(&catalog(&["chat/model"])).is_none());
     }
 
-    /// Rows trimmed from the live `/v1/models` (public, no key needed).
-    fn v1_fixture() -> Value {
-        serde_json::from_str(include_str!(
-            "../../../tests/fixtures/assistant-catalog/v1-models.json"
-        ))
-        .unwrap()
-    }
-
     /// The chat models the assistant offered from [`v1_fixture`] before the
     /// catalog learned kinds. Every one must still be offered, in this order.
     const TODAY_CHAT_IDS: &[&str] = &[
@@ -540,7 +1371,11 @@ mod tests {
 
     #[test]
     fn todays_chat_models_of_the_real_catalog_are_pinned() {
-        assert_eq!(ids(&parse_models(v1_fixture())), TODAY_CHAT_IDS);
+        let offered = real_catalog().conversation_models();
+        let offered = ids(&offered);
+        let (today, added) = offered.split_at(TODAY_CHAT_IDS.len());
+        assert_eq!(today, TODAY_CHAT_IDS);
+        assert_eq!(added, CLAUDE_IDS, "Claude is added after them");
     }
 
     /// What the runtime received for one model before the catalog learned
@@ -557,12 +1392,31 @@ mod tests {
 
     #[test]
     fn todays_runtime_model_bytes_are_pinned() {
-        let models = parse_models(v1_fixture());
-        let model = models
+        let offered = real_catalog().conversation_models();
+        let model = offered
             .iter()
             .find(|m| m.id == "openai/gpt-6.1-sol")
             .unwrap();
-        assert_eq!(serde_json::to_string(model).unwrap(), TODAY_RUNTIME_MODEL);
+        assert_eq!(
+            serde_json::to_string(&model.for_runtime()).unwrap(),
+            TODAY_RUNTIME_MODEL
+        );
+        // No model of today's catalog hands the runtime a field it did not
+        // get before.
+        let today: Value = serde_json::from_str(TODAY_RUNTIME_MODEL).unwrap();
+        let fields: Vec<&String> = today.as_object().unwrap().keys().collect();
+        for model in offered
+            .iter()
+            .filter(|m| TODAY_CHAT_IDS.contains(&m.id.as_str()))
+        {
+            let runtime = serde_json::to_value(model.for_runtime()).unwrap();
+            assert_eq!(
+                runtime.as_object().unwrap().keys().collect::<Vec<_>>(),
+                fields,
+                "{}",
+                model.id
+            );
+        }
     }
 
     #[test]
@@ -571,15 +1425,16 @@ mod tests {
             "../../../../assistant-runtime/test/fixtures/catalog-protocols.json"
         ))
         .unwrap();
-        let models = parse_models(v1_fixture());
+        let merged = real_catalog();
         for pin in fixture["models"].as_array().unwrap() {
-            let model = models.iter().find(|m| m.id == pin["id"]).unwrap();
+            let model = merged.models.iter().find(|m| m.id == pin["id"]).unwrap();
             assert_eq!(
                 json!(model.supported_endpoints),
                 pin["supportedEndpoints"],
                 "{}",
                 model.id
             );
+            assert_eq!(json!(model.protocol), pin["api"], "{}", model.id);
         }
     }
 

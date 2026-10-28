@@ -78,8 +78,12 @@ pub trait Environment: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<String, String>>;
     /// Whether a key for `identity` is ready, without minting one.
     fn key_ready<'a>(&'a self, identity: &'a Identity) -> BoxFuture<'a, bool>;
-    /// The chat models offered in `apex`.
-    fn models<'a>(&'a self, apex: &'a str) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>>;
+    /// The usable rows of one of `apex`'s model catalogs, every kind.
+    fn models<'a>(
+        &'a self,
+        apex: &'a str,
+        source: catalog::Source,
+    ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>>;
     /// The LLM gateway base of `apex`.
     fn gateway_base(&self, apex: &str) -> Result<String, String>;
     /// The folder that holds `assistant/`.
@@ -173,11 +177,15 @@ pub struct AssistantHost {
     recovered: Mutex<HashSet<String>>,
     /// The live run of each session, by session id.
     runs: Mutex<HashMap<String, Arc<RunControl>>>,
-    models: Mutex<HashMap<String, (std::time::Instant, Vec<catalog::Model>)>>,
+    /// Each catalog source of each apex, as last read.
+    models: Mutex<HashMap<(String, catalog::Source), CachedSource>>,
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
 }
+
+/// One catalog source's rows and when they were read.
+type CachedSource = (std::time::Instant, Vec<catalog::Model>);
 
 fn session_key(owner: &str, sid: &str) -> String {
     format!("{owner}:{sid}")
@@ -537,35 +545,55 @@ impl AssistantHost {
         Ok(())
     }
 
-    /// The chat models of `apex`, fetched again after [`MODELS_TTL`]. When
-    /// that fetch fails, the last catalog is better than none.
-    pub(super) async fn models(&self, apex: &str) -> Result<Vec<catalog::Model>, String> {
+    /// `apex`'s model catalog, both sources merged. Each source is fetched
+    /// again after [`MODELS_TTL`]; when that fetch fails, its last copy is
+    /// better than none, and a source with no copy is named in `partial`.
+    pub(super) async fn models(&self, apex: &str) -> Result<catalog::Catalog, String> {
         self.catalog(apex, false).await
     }
 
-    async fn catalog(&self, apex: &str, refresh: bool) -> Result<Vec<catalog::Model>, String> {
-        let cached = self.models.lock().map_err(|_| STATE)?.get(apex).cloned();
+    async fn catalog(&self, apex: &str, refresh: bool) -> Result<catalog::Catalog, String> {
+        let (v1, anthropic) = tokio::join!(
+            self.catalog_source(apex, catalog::Source::V1, refresh),
+            self.catalog_source(apex, catalog::Source::Anthropic, refresh),
+        );
+        catalog::merge(v1, anthropic)
+    }
+
+    async fn catalog_source(
+        &self,
+        apex: &str,
+        source: catalog::Source,
+        refresh: bool,
+    ) -> Result<Vec<catalog::Model>, String> {
+        let key = (apex.to_owned(), source);
+        let cached = self.models.lock().map_err(|_| STATE)?.get(&key).cloned();
         if let Some((fetched, models)) = &cached {
             if !refresh && fetched.elapsed() < MODELS_TTL {
                 return Ok(models.clone());
             }
         }
-        match self.env.models(apex).await {
+        match self.env.models(apex, source).await {
             Ok(models) => {
                 self.models
                     .lock()
                     .map_err(|_| STATE)?
-                    .insert(apex.to_owned(), (std::time::Instant::now(), models.clone()));
+                    .insert(key, (std::time::Instant::now(), models.clone()));
                 Ok(models)
             }
             Err(error) => cached.map(|(_, models)| models).ok_or(error),
         }
     }
 
-    /// One model of `apex`'s catalog; a model the cached catalog lacks is
-    /// looked up once more in a fresh one.
+    /// One conversation model of `apex`'s catalog; a model the cached catalog
+    /// lacks is looked up once more in a fresh one.
     pub(super) async fn model(&self, apex: &str, id: &str) -> Result<catalog::Model, String> {
-        let find = |models: Vec<catalog::Model>| models.into_iter().find(|m| m.id == id);
+        let find = |merged: catalog::Catalog| {
+            merged
+                .conversation_models()
+                .into_iter()
+                .find(|m| m.id == id)
+        };
         if let Some(model) = find(self.models(apex).await?) {
             return Ok(model);
         }
@@ -574,7 +602,7 @@ impl AssistantHost {
 
     fn forget_models(&self, apex: &str) {
         if let Ok(mut models) = self.models.lock() {
-            models.remove(apex);
+            models.retain(|(cached, _), _| cached != apex);
         }
     }
 
@@ -1606,11 +1634,19 @@ mod tests {
     use std::sync::atomic::AtomicBool;
 
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
-    /// catalog whose fetches are counted; no key or runtime.
+    /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
+    /// or runtime.
     struct FixedEnvironment {
         config: PathBuf,
         catalog: Mutex<Vec<String>>,
+        /// `/v1` fetches.
         fetches: AtomicU64,
+        anthropic: Mutex<Vec<String>>,
+        anthropic_fetches: AtomicU64,
+        /// Sources whose fetch fails.
+        down: Mutex<HashSet<catalog::Source>>,
+        /// Rows of other kinds, after the `/v1` chat models.
+        media: Mutex<Vec<catalog::Model>>,
         runtime: Mutex<Option<PathBuf>>,
         events: Mutex<Vec<Event>>,
         stored_key: Mutex<Option<String>>,
@@ -1631,16 +1667,25 @@ mod tests {
         fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
             Box::pin(async { false })
         }
-        fn models<'a>(&'a self, _: &'a str) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
-            Box::pin(async {
-                self.fetches.fetch_add(1, Ordering::SeqCst);
-                Ok(self
-                    .catalog
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|id| model(id))
-                    .collect())
+        fn models<'a>(
+            &'a self,
+            _: &'a str,
+            source: catalog::Source,
+        ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
+            Box::pin(async move {
+                let (fetches, ids) = match source {
+                    catalog::Source::V1 => (&self.fetches, &self.catalog),
+                    catalog::Source::Anthropic => (&self.anthropic_fetches, &self.anthropic),
+                };
+                fetches.fetch_add(1, Ordering::SeqCst);
+                if self.down.lock().unwrap().contains(&source) {
+                    return Err("assistant_catalog_unavailable".to_string());
+                }
+                let mut models: Vec<_> = ids.lock().unwrap().iter().map(|id| model(id)).collect();
+                if source == catalog::Source::V1 {
+                    models.extend(self.media.lock().unwrap().iter().cloned());
+                }
+                Ok(models)
             })
         }
         fn gateway_base(&self, _: &str) -> Result<String, String> {
@@ -1687,6 +1732,10 @@ mod tests {
             config: config.path().to_path_buf(),
             catalog: Mutex::new(vec!["test/model".into()]),
             fetches: AtomicU64::new(0),
+            anthropic: Mutex::default(),
+            anthropic_fetches: AtomicU64::new(0),
+            down: Mutex::default(),
+            media: Mutex::default(),
             runtime: Mutex::new(None),
             events: Mutex::default(),
             stored_key: Mutex::default(),
@@ -2556,9 +2605,7 @@ mod tests {
         assert_eq!(env.fetches.load(Ordering::SeqCst), 3);
 
         // After the TTL the catalog is fetched again.
-        if let Some((fetched, _)) = host.models.lock().unwrap().get_mut("ofox.ai") {
-            *fetched -= MODELS_TTL;
-        }
+        age_catalogs(&host);
         host.models("ofox.ai").await.unwrap();
         assert_eq!(env.fetches.load(Ordering::SeqCst), 4);
 
@@ -2566,6 +2613,117 @@ mod tests {
         host.forget_models("ofox.ai");
         host.models("ofox.ai").await.unwrap();
         assert_eq!(env.fetches.load(Ordering::SeqCst), 5);
+        // Each lookup asked both sources.
+        assert_eq!(env.anthropic_fetches.load(Ordering::SeqCst), 5);
+    }
+
+    /// Make every cached catalog source older than [`MODELS_TTL`].
+    fn age_catalogs(host: &AssistantHost) {
+        for (fetched, _) in host.models.lock().unwrap().values_mut() {
+            *fetched -= MODELS_TTL;
+        }
+    }
+
+    fn catalog_ids(merged: &catalog::Catalog) -> Vec<&str> {
+        merged.models.iter().map(|m| m.id.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_catalog_source_that_fails_falls_back_to_its_own_last_copy() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = vec!["anthropic/claude-test".into()];
+        let merged = host.models("ofox.ai").await.unwrap();
+        assert_eq!(
+            catalog_ids(&merged),
+            ["test/model", "anthropic/claude-test"]
+        );
+        assert!(merged.partial.is_empty());
+
+        // Both copies go stale and the Anthropic catalog goes down: `/v1` is
+        // read again, Claude comes from its last copy.
+        age_catalogs(&host);
+        env.down.lock().unwrap().insert(catalog::Source::Anthropic);
+        env.catalog.lock().unwrap().push("new/model".into());
+        let merged = host.models("ofox.ai").await.unwrap();
+        assert_eq!(
+            catalog_ids(&merged),
+            ["test/model", "new/model", "anthropic/claude-test"]
+        );
+        assert!(merged.partial.is_empty());
+        assert_eq!(
+            host.model("ofox.ai", "anthropic/claude-test")
+                .await
+                .unwrap()
+                .id,
+            "anthropic/claude-test"
+        );
+
+        // With no copy to fall back to, the source is named and the rest is
+        // offered.
+        host.forget_models("ofox.ai");
+        let merged = host.models("ofox.ai").await.unwrap();
+        assert_eq!(catalog_ids(&merged), ["test/model", "new/model"]);
+        assert_eq!(merged.partial, [catalog::Source::Anthropic]);
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["partial"], json!(["anthropic"]));
+        assert_eq!(boot["models"].as_array().unwrap().len(), 2);
+        assert_eq!(boot["defaultModelId"], "test/model");
+        assert_eq!(boot["modelUnavailableReason"], Value::Null);
+
+        // `/v1` down instead: Claude alone is offered.
+        env.down.lock().unwrap().clear();
+        env.down.lock().unwrap().insert(catalog::Source::V1);
+        host.forget_models("ofox.ai");
+        let merged = host.models("ofox.ai").await.unwrap();
+        assert_eq!(catalog_ids(&merged), ["anthropic/claude-test"]);
+        assert_eq!(merged.partial, [catalog::Source::V1]);
+
+        // Both down with no copy: the error of before.
+        env.down.lock().unwrap().insert(catalog::Source::Anthropic);
+        host.forget_models("ofox.ai");
+        assert_eq!(
+            host.models("ofox.ai").await.unwrap_err(),
+            "assistant_catalog_unavailable"
+        );
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(
+            boot["modelUnavailableReason"],
+            "assistant_catalog_unavailable"
+        );
+        assert_eq!(boot["models"], json!([]));
+        assert_eq!(boot["partial"], json!([]));
+        assert_eq!(boot["defaultModelId"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn media_models_are_kept_but_not_offered_for_conversations_yet() {
+        let (_config, env, host) = fixture_with_env();
+        let video: catalog::Model = serde_json::from_value(json!({
+            "id": "video/model", "name": "Video", "contextWindow": 0, "maxOutputTokens": 0,
+            "supportsImages": false, "inputModalities": ["text"],
+            "supportedEndpoints": ["/v1/videos"], "inputPricePerMillion": null,
+            "outputPricePerMillion": null, "pricing": {}, "cost": {}, "pricingKnown": false,
+            "kind": "video",
+        }))
+        .unwrap();
+        env.media.lock().unwrap().push(video);
+        let merged = host.models("ofox.ai").await.unwrap();
+        assert_eq!(catalog_ids(&merged), ["test/model", "video/model"]);
+        assert_eq!(
+            host.model("ofox.ai", "video/model").await.unwrap_err(),
+            MODEL_UNAVAILABLE
+        );
+        let create: CreateRequest =
+            serde_json::from_value(json!({"modelId": "video/model"})).unwrap();
+        assert_eq!(
+            host.create_session(create).await.unwrap_err(),
+            MODEL_UNAVAILABLE
+        );
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["models"].as_array().unwrap().len(), 1);
+        assert_eq!(boot["models"][0]["id"], "test/model");
+        assert_eq!(boot["models"][0]["kind"], "chat");
+        assert_eq!(boot["defaultModelId"], "test/model");
     }
 
     #[tokio::test]
