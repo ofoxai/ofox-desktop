@@ -71,7 +71,7 @@ test("production pruning drops unused PDF.js builds, viewers, decoders and fonts
     assert.equal(await exists(path.join(modules, kept)), true, kept);
 });
 
-test("the runtime pins PDF.js, the native canvas and the MCP client and ships no Office parsers", async () => {
+test("the runtime pins PDF.js, the native canvas and the MCP client and the bounded Office parsers", async () => {
   const runtime = new URL("../", import.meta.url);
   const manifest = JSON.parse(
     await readFile(new URL("package.json", runtime), "utf8"),
@@ -89,7 +89,9 @@ test("the runtime pins PDF.js, the native canvas and the MCP client and ships no
     "1.4.0",
   );
   for (const name of Object.keys(lock.packages))
-    assert.doesNotMatch(name, /fflate|fast-xml-parser|mammoth|xlsx/);
+    assert.doesNotMatch(name, /fflate|word-extractor|mammoth|xlsx/);
+  assert.equal(manifest.dependencies.yauzl, "3.4.0");
+  assert.equal(manifest.dependencies["fast-xml-parser"], "5.11.2");
 });
 
 test("third-party notices cover the native canvas and PDF.js", async () => {
@@ -135,4 +137,34 @@ test("the search server's notice names the versions its lockfile bundles", async
     );
   }
   assert.match(notice, /Copyright \(c\) 2024 Anthropic, PBC/);
+});
+
+test("Office dependencies and vendored code have distributed license notices", async () => {
+  const lock = JSON.parse(
+    await readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
+  );
+  const notice = await readFile(
+    new URL("../notices/office.txt", import.meta.url),
+    "utf8",
+  );
+  const remaining = ["yauzl", "fast-xml-parser"],
+    visited = new Set();
+  while (remaining.length) {
+    const name = remaining.pop();
+    if (visited.has(name)) continue;
+    visited.add(name);
+    const pkg = lock.packages[`node_modules/${name}`];
+    assert.equal(pkg.license, "MIT");
+    assert.ok(
+      notice.includes(`\n${name} ${pkg.version} (${pkg.license})\n`),
+      name,
+    );
+    remaining.push(...Object.keys(pkg.dependencies ?? {}));
+  }
+  for (const marker of [
+    "2026 Nodable",
+    "2013 Brian J. Brennan",
+    "2014 Andrew Kelley",
+  ])
+    assert.ok(notice.includes(marker), marker);
 });

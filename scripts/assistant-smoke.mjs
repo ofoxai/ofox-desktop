@@ -95,6 +95,23 @@ async function productionSmoke() {
       "PNG",
     );
 
+    for (const [format, marker] of [
+      ["docx", "星河项目季度报告"],
+      ["xlsx", "中文收入"],
+      ["pptx", "中文第一页"],
+    ]) {
+      const bytes = await readFile(
+        path.join(process.argv[2], `chinese.${format}`),
+      );
+      await writeFile(path.join(directory, `office-${format}`), bytes);
+      const office = new AttachmentStore(directory, [
+        { id: format, name: `中文.${format}`, path: `office-${format}` },
+      ]);
+      const text = await office.read(format);
+      assert.ok(text.text.includes(marker));
+      assert.equal(text.textOnly, true);
+    }
+
     const runtime = new AssistantRuntime({
       fetch: async (url, init) => {
         assert.equal(String(url), "https://api.ofox.ai/v1/chat/completions");
@@ -322,11 +339,21 @@ for (const kept of [
   "node_modules/pdfjs-dist/LICENSE",
 ])
   assert.ok(existsSync(path.join(production, kept)), `${kept} must ship`);
-for (const office of ["fflate", "fast-xml-parser"])
+for (const office of ["fflate", "word-extractor"])
   assert.equal(
     existsSync(path.join(production, "node_modules", office)),
     false,
     `${office} must not ship`,
+  );
+for (const office of ["yauzl", "fast-xml-parser"])
+  assert.ok(
+    existsSync(path.join(production, "node_modules", office)),
+    `${office} must ship`,
+  );
+for (const module of ["office.mjs", "office-core.mjs", "office-worker.mjs"])
+  assert.ok(
+    existsSync(path.join(production, "src", module)),
+    `${module} must ship`,
   );
 assert.ok(
   existsSync(path.join(resources, "search-mcp", "ofox-search-mcp.mjs")),
@@ -336,6 +363,7 @@ for (const notice of [
   "napi-rs-canvas.txt",
   "pdfjs-dist.txt",
   "ofox-search-mcp.txt",
+  "office.txt",
 ])
   assert.ok(
     existsSync(path.join(resources, "notices", notice)),
@@ -349,6 +377,7 @@ const result = spawnSync(
     "--eval",
     `(${productionSmoke.toString()})().catch(error => { console.error(error); process.exitCode = 1; });`,
     path.join(resources, "runtime"),
+    path.join(root, "assistant-runtime/test/fixtures/office"),
   ],
   { env: environment, stdio: "inherit" },
 );

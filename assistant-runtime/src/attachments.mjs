@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Type } from "typebox";
+import { readOffice } from "./office.mjs";
 
 const MAX_FILE = 25 * 1024 * 1024;
 const MAX_IMAGE = 10 * 1024 * 1024;
@@ -37,6 +38,20 @@ const TEXT_EXTENSIONS = new Set([
   ".py",
   ".rs",
   ".go",
+]);
+const OFFICE_MIMES = new Map([
+  [
+    ".docx",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ],
+  [
+    ".xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ],
+  [
+    ".pptx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ],
 ]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
@@ -260,11 +275,13 @@ export class AttachmentStore {
     return attachment;
   }
 
-  // "text", "pdf" or "image" by name and MIME type; null is unsupported.
+  // Format by name and MIME type; null is unsupported.
   format(id) {
     const attachment = this.attachment(id);
     const extension = path.extname(attachment.name).toLowerCase();
     const mimeType = attachment.mimeType ?? "";
+    for (const [suffix, mime] of OFFICE_MIMES)
+      if (extension === suffix || mimeType === mime) return suffix.slice(1);
     if (extension === ".pdf" || mimeType === "application/pdf") return "pdf";
     if (IMAGE_EXTENSIONS.has(extension) || mimeType.startsWith("image/"))
       return "image";
@@ -284,7 +301,9 @@ export class AttachmentStore {
     throw new AttachmentError(
       "unsupported",
       "assistant_attachment_unsupported",
-      "Unsupported attachment format; use an image (PNG, JPEG, WebP or GIF), a PDF or a UTF-8 text file",
+      path.extname(attachment.name).toLowerCase() === ".doc"
+        ? "Word 97–2003 is not supported; save it as docx or PDF"
+        : "Unsupported attachment format; use an image (PNG, JPEG, WebP or GIF), PDF, docx, xlsx, pptx or UTF-8 text",
       {
         extension: path.extname(attachment.name).toLowerCase(),
         mimeType: attachment.mimeType ?? null,
@@ -401,6 +420,37 @@ export class AttachmentStore {
         (document) => this.#pdfText(document, signal),
         signal,
       );
+    } else if (OFFICE_MIMES.has(`.${format}`)) {
+      const { bytes } = await this.file(id);
+      try {
+        const office = await readOffice(bytes, `.${format}`, signal);
+        result = boundedText(office.text, {
+          format,
+          textOnly: true,
+          structureCoverage: office.structureCoverage,
+          warning: [
+            office.warning,
+            format === "docx"
+              ? "DOCX extraction reads the main document body and tables only; headers, footers, footnotes, endnotes and comments have not been read."
+              : "",
+            "Only Office text is extracted. Embedded images, charts, objects and document formatting have not been read. Spreadsheet formulas are not calculated; cached values may be out of date.",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        });
+      } catch (error) {
+        if (signal?.aborted) throw signal.reason;
+        if (error.reason === "office_expansion")
+          throw tooLarge("Office document exceeds safe extraction limits", {
+            format,
+            limit: "office_expansion",
+          });
+        throw unreadable(
+          error.reason ?? "invalid_office",
+          "Office document could not be read; save an unencrypted docx, xlsx or pptx copy",
+          { format },
+        );
+      }
     } else {
       const { bytes } = await this.file(id);
       let text;
@@ -704,6 +754,9 @@ async function prepareOne(
     hasMore: result.hasMore,
     truncated: result.truncated,
     ...(result.truncated ? { extractionLimit: result.extractionLimit } : {}),
+    ...(result.textOnly
+      ? { textOnly: true, structureCoverage: result.structureCoverage }
+      : {}),
     ...(format === "pdf"
       ? {
           pageCount: result.pageCount,
@@ -746,7 +799,10 @@ async function prepareOne(
         : "All pages without extractable text are included as images."
     }]`;
   }
-  const complete = !result.truncated && attached.length === visualPages.length;
+  const complete =
+    !result.truncated &&
+    !result.textOnly &&
+    attached.length === visualPages.length;
   return {
     prompt,
     attached,
@@ -815,7 +871,7 @@ export async function prepareAttachments(
 function attachmentGuidelines(vision) {
   return [
     'The user can import attachments into this conversation; a message names each one as [User attachment: "name"; id=...].',
-    "read_attachment reads UTF-8 text files and the text of PDFs of up to 100 pages, at most 20,000 characters per call.",
+    "read_attachment reads UTF-8 text, DOCX, XLSX, PPTX and PDFs of up to 100 pages, at most 20,000 characters per call. Office extraction reads text only, never embedded images or charts. Spreadsheet formulas use stored cached values, which may be stale. Respect structureCoverage warnings; never infer missing cells, sheet names or slide order.",
     vision
       ? "It also shows PNG, JPEG, WebP and GIF images, and renders one PDF page as an image when given page, for scanned pages, charts and other visual content."
       : "This model cannot view images: image attachments and PDF pages without extractable text cannot be read; ask the user to choose a vision model instead of guessing what they show.",

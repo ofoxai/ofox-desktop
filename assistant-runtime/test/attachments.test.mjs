@@ -317,17 +317,17 @@ test("invalid UTF-8 text is unreadable without a decoder message", async (t) => 
 
 test("an unsupported format names only the readable formats", async (t) => {
   const result = await prepared(t, [
-    ["report.docx", "PK", "application/octet-stream"],
+    ["archive.zip", "PK", "application/octet-stream"],
   ]);
   const [outcome] = result.outcomes;
   assert.equal(outcome.status, "unsupported");
   assert.equal(outcome.code, "assistant_attachment_unsupported");
   assert.deepEqual(outcome.details, {
-    extension: ".docx",
+    extension: ".zip",
     mimeType: "application/octet-stream",
   });
   assert.match(result.blocked.message, /image.*PDF.*UTF-8 text/i);
-  assert.doesNotMatch(result.blocked.message, /DOCX|XLSX|PPTX|Office/i);
+  assert.match(result.blocked.message, /docx, xlsx, pptx/i);
 });
 
 test("unsupported image types are not sent to the model", async (t) => {

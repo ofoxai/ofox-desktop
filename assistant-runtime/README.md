@@ -194,7 +194,17 @@ UTF-8 text (`.txt .md .csv .json .log .yaml .yml .toml .xml .html .js .ts .py
 .rs .go`, `text/*`, `application/json`); PDF text (`.pdf`, `application/pdf`)
 read with the PDF.js legacy build and its CMaps, so CJK text in predefined
 CMaps is extracted; and PNG, JPEG, WebP and GIF images, identified by their
-bytes. Other formats are unsupported.
+bytes. Office DOCX, XLSX and PPTX (standard OOXML MIME types) are read as
+text with pinned `yauzl` 3.4.0 and `fast-xml-parser` 5.11.2. DOCX covers the main
+body and tables, not headers/footers, footnotes/endnotes or comments. XLSX
+preserves sheet names/order and sparse cell references, strips phonetic guides,
+and reports stored formula/cached values without calculating or formatting them.
+PPTX follows slide relationships and includes slide notes. Missing or unsafe
+relationships produce explicit partial-structure warnings. Embedded images,
+charts, objects and formatting are never read; Office outcomes are always
+`partial` with `textOnly: true`. The model and user both receive these limits.
+Other formats, including legacy `.doc/.xls/.ppt`, are unsupported; `.doc` users
+are asked to save as docx or PDF. See [Office audit](../docs/assistant-office.md).
 
 Selected attachments are inlined under `[User attachment: "<name>";
 id=<id>]`: the first 8,000 characters of text (the rest through
@@ -247,25 +257,39 @@ event.)
 
 `details` fields:
 
-- `format`: `"text"`, `"pdf"` or `"image"`, whenever the format is known.
-- Text and PDF (`ready`, `partial`): `characters` (extracted), `inlineCharacters`,
+- `format`: `"text"`, `"pdf"`, `"image"`, `"docx"`, `"xlsx"` or `"pptx"`, whenever known.
+- Text, PDF and Office (`ready`, `partial`): `characters` (extracted), `inlineCharacters`,
   `hasMore` (more through `read_attachment`), `truncated` (the 16 Mi-character
   extraction limit was hit; unread content remains) and, when truncated,
   `extractionLimit`.
 - PDF: `pageCount`, `textCoverage` (`complete`, `partial` or `none`),
   `pagesWithoutText` and, with image input, `pagesAttachedAsImages`.
+- Office: `textOnly: true`, `structureCoverage` (`complete` or `partial`);
+  complete structure does not imply reading embedded images or omitted DOCX parts.
 - Image: `mimeType` (detected from the bytes).
 - `unreadable`: `reason` is `unknown_id` or `missing` (code
   `assistant_attachment_not_found`), `unsafe_path` (outside the root, symlink,
   not a regular file, or changed while opening), `read_failed`, `invalid_utf8`,
-  `invalid_pdf`, `password_protected` or `invalid_image`.
+  `invalid_pdf`, `password_protected`, `invalid_image`, `invalid_office`,
+  `encrypted_office` or `empty_office`.
 - `unsupported`: `extension` and the declared `mimeType`; an image type other
   than PNG, JPEG, WebP or GIF has `format:"image"` and `mimeType`.
 - `too_large`: `limit` is `file_size` or `image_size` (`maxBytes`),
   `pdf_pages` (`maxPages`, `pageCount`), `message_images` (`maxImages`),
-  `rendered_page` (`maxBytes`, `page`) or `pdf_image` (`maxPixels`, `page`).
+  `rendered_page` (`maxBytes`, `page`), `pdf_image` (`maxPixels`, `page`) or
+  `office_expansion` (safe archive/XML/worker limits).
 - `model_unsupported`: an image has `mimeType`; a PDF (no extractable text on
   any page) has `pageCount` and `pagesWithoutText`.
+
+Office extraction uses a worker with no inherited environment or Node startup
+arguments, a 128 MiB old-generation heap and a 10-second timeout. Stop terminates
+the worker. Archives allow at most 4,096 entries, 15 MiB of selected decompressed
+XML total, and a 500:1 per-part ratio above a 1 MiB floor. Actual streamed byte
+counts and CRC are checked; duplicate/unsafe paths, encrypted entries and DTDs
+are rejected. Nonselected parts are not inflated. XML depth is bounded to 100,
+with at most 200,000 `<` markers per part; shared-string output expansion is
+capped by the existing 16 Mi-character text budget. No Office programs or Python
+packages are required in the shipped macOS/Windows runtime.
 
 ### Limits
 
