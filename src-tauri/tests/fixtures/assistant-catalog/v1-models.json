@@ -1,0 +1,1399 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "openai/gpt-6.1-sol",
+      "object": "model",
+      "created": 1790640000,
+      "owned_by": "openrouter",
+      "canonical_slug": "openai/gpt-6.1-sol",
+      "name": "OpenAI: GPT-6.1 Sol",
+      "context_length": 1050000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "input_cache_read": "0.0000001",
+        "input_cache_write": "0.0000025"
+      },
+      "top_provider": {
+        "context_length": 1050000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "gpt-6.1-sol",
+        "gpt-sol-latest",
+        "openai/gpt-sol-latest"
+      ]
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "object": "model",
+      "created": 1790035200,
+      "owned_by": "openrouter",
+      "canonical_slug": "openai/gpt-6-sol",
+      "name": "OpenAI: GPT-6 Sol",
+      "context_length": 1050000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "input_cache_read": "0.0000002",
+        "input_cache_write": "0.0000025",
+        "web_search": "0.01"
+      },
+      "top_provider": {
+        "context_length": 1050000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "gpt-6-sol"
+      ]
+    },
+    {
+      "id": "openai/gpt-5.4-mini",
+      "object": "model",
+      "created": 1773705600,
+      "owned_by": "azure",
+      "canonical_slug": "gpt-5.4-mini-2026-03-17",
+      "name": "OpenAI: GPT-5.4 Mini",
+      "context_length": 400000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000075",
+        "completion": "0.0000045",
+        "input_cache_read": "0.000000075",
+        "output_image": "0.000032",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 400000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "gpt-5.4-mini"
+      ]
+    },
+    {
+      "id": "openai/gpt-5-nano",
+      "object": "model",
+      "created": 1754524800,
+      "owned_by": "azure",
+      "canonical_slug": "gpt-5-nano-2025-12-15",
+      "name": "GPT-5 Nano",
+      "context_length": 128000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000005",
+        "completion": "0.0000004",
+        "input_cache_read": "0.00000001",
+        "output_image": "0.000032",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 128000,
+        "max_completion_tokens": 16384,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "gpt-5-nano"
+      ]
+    },
+    {
+      "id": "openai/gpt-5.4-pro",
+      "object": "model",
+      "created": 1772668800,
+      "owned_by": "azure",
+      "canonical_slug": "gpt-5.4-pro-2026-03-05",
+      "name": "OpenAI: GPT-5.4 Pro",
+      "context_length": 1050000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00003",
+        "completion": "0.00018",
+        "output_image": "0.000032",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 1050000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/responses"
+      ],
+      "aliases": [
+        "gpt-5.4-pro"
+      ]
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite",
+      "object": "model",
+      "created": 1778112000,
+      "owned_by": "google",
+      "canonical_slug": "gemini-3.1-flash-lite",
+      "name": "Google: Gemini 3.1 Flash Lite",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image+audio+file->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "audio",
+          "file"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gemini",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000025",
+        "completion": "0.0000015",
+        "audio": "0.0000005",
+        "input_cache_read": "0.000000025",
+        "input_cache_write": "0.000001",
+        "input_cache_write_1h": "0.000001",
+        "input_cached_audio": "0.00000005",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 64000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions"
+      ],
+      "aliases": [
+        "gemini-3.1-flash-lite"
+      ]
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-0423",
+      "object": "model",
+      "created": 1776902400,
+      "owned_by": "deepseek",
+      "canonical_slug": "deepseek-v4-flash-20260423",
+      "name": "DeepSeek V4 Flash 0423",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "deepseek",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000019",
+        "completion": "0.00000051",
+        "input_cache_read": "0.000000028",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 384000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "deepseek-v4-flash-0423",
+        "deepseek-v4-flash-20260423",
+        "deepseek-v4-flash-20260424"
+      ]
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "object": "model",
+      "created": 1787616000,
+      "owned_by": "dashscope",
+      "canonical_slug": "qwen3.8-flash",
+      "name": "Qwen: Qwen3.8 Flash",
+      "context_length": 1131072,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "qwen",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000011",
+        "completion": "0.00000039",
+        "input_cache_read": "0.000000011",
+        "input_cache_write": "0.00000014",
+        "web_search": "0.01"
+      },
+      "top_provider": {
+        "context_length": 1131072,
+        "max_completion_tokens": 131072,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "qwen3.8-flash",
+        "bailian/qwen3.8-flash"
+      ]
+    },
+    {
+      "id": "z-ai/glm-5",
+      "object": "model",
+      "created": 1770768000,
+      "owned_by": "zhipu",
+      "canonical_slug": "glm-5",
+      "name": "Z.ai: GLM-5",
+      "context_length": 200000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "glm",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000001",
+        "completion": "0.0000032",
+        "input_cache_read": "0.0000002",
+        "web_search": "0.01"
+      },
+      "top_provider": {
+        "context_length": 200000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions"
+      ],
+      "aliases": [
+        "glm-5"
+      ]
+    },
+    {
+      "id": "x-ai/grok-4.7",
+      "object": "model",
+      "created": 1789948800,
+      "owned_by": "xai",
+      "canonical_slug": "grok-4.7",
+      "name": "xAI: Grok 4.7",
+      "context_length": 500000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "grok",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000002",
+        "completion": "0.000006",
+        "input_cache_read": "0.0000005"
+      },
+      "top_provider": {
+        "context_length": 500000,
+        "max_completion_tokens": 65536,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions"
+      ],
+      "aliases": [
+        "grok-4.7"
+      ]
+    },
+    {
+      "id": "moonshotai/kimi-k3",
+      "object": "model",
+      "created": 1784160000,
+      "owned_by": "MoonshotAI",
+      "canonical_slug": "kimi-k3-20260716",
+      "name": "MoonshotAI: Kimi K3",
+      "context_length": 1048576,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "kimi",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000003",
+        "completion": "0.000015",
+        "input_cache_read": "0.0000003",
+        "web_search": "0.005"
+      },
+      "top_provider": {
+        "context_length": 1048576,
+        "max_completion_tokens": 1048576,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "kimi-k3"
+      ]
+    },
+    {
+      "id": "volcengine/doubao-seed-2.1-pro",
+      "object": "model",
+      "created": 1782172800,
+      "owned_by": "volcengine",
+      "canonical_slug": "doubao-seed-2-1-pro-260628",
+      "name": "Doubao Seed 2.1 Pro",
+      "context_length": 256000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "doubao",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000000884",
+        "completion": "0.00000442",
+        "input_cache_read": "0.000000177",
+        "input_cache_write": "0.0000000025",
+        "web_search": "0.0012"
+      },
+      "top_provider": {
+        "context_length": 256000,
+        "max_completion_tokens": 256000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "doubao-seed-2.1-pro"
+      ]
+    },
+    {
+      "id": "minimax/minimax-m3",
+      "object": "model",
+      "created": 1780272000,
+      "owned_by": "minimax",
+      "canonical_slug": "minimax-m3-2026-05-31",
+      "name": "MiniMax: MiniMax M3",
+      "context_length": 1131000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "minimax",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000006",
+        "completion": "0.0000024",
+        "input_cache_read": "0.00000012"
+      },
+      "top_provider": {
+        "context_length": 1131000,
+        "max_completion_tokens": 131000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/responses"
+      ],
+      "aliases": [
+        "minimax-m3"
+      ]
+    },
+    {
+      "id": "google/gemini-3.1-flash-image",
+      "object": "model",
+      "created": 1781740800,
+      "owned_by": "google",
+      "canonical_slug": "gemini-3.1-flash-image",
+      "name": "Google: Nano Banana 2 (Gemini 3.1 Flash Image)",
+      "context_length": 131000,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "image"
+        ],
+        "tokenizer": "gemini",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.000003",
+        "output_image": "0.00006",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 131000,
+        "max_completion_tokens": 64000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "output_format",
+        "stream",
+        "user"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/chat/completions",
+        "/v1/images/edits",
+        "/v1/images/generations"
+      ],
+      "aliases": [
+        "gemini-3.1-flash-image"
+      ],
+      "image_attributes": {
+        "supported_params": [
+          "prompt",
+          "output_format",
+          "stream",
+          "user"
+        ]
+      }
+    },
+    {
+      "id": "openai/gpt-image-2",
+      "object": "model",
+      "created": 1776729600,
+      "owned_by": "azure",
+      "canonical_slug": "gpt-image-2-2026-04-21",
+      "name": "OpenAI: GPT Image 2",
+      "context_length": 0,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "image"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000005",
+        "completion": "0.00003",
+        "image": "0.000008",
+        "input_cache_read": "0.00000125",
+        "input_cached_image": "0.000002",
+        "output_image": "0.00003"
+      },
+      "top_provider": {
+        "context_length": 0,
+        "max_completion_tokens": null,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "n",
+        "size",
+        "quality",
+        "output_format",
+        "stream",
+        "user"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/images/edits",
+        "/v1/images/generations"
+      ],
+      "aliases": [
+        "gpt-image-2",
+        "gpt-image-2-2026-04-21",
+        "gpt-image-2-20260421"
+      ],
+      "image_attributes": {
+        "supported_params": [
+          "prompt",
+          "n",
+          "size",
+          "quality",
+          "output_format",
+          "stream",
+          "user"
+        ]
+      }
+    },
+    {
+      "id": "volcengine/doubao-seedream-5.0-flash",
+      "object": "model",
+      "created": 1789430400,
+      "owned_by": "volcengine",
+      "canonical_slug": "doubao-seedream-5-0-flash-260915",
+      "name": "Doubao Seedream 5.0 Flash",
+      "context_length": 100000,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "image"
+        ],
+        "tokenizer": "doubao",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "output_image_per_num": "0.02"
+      },
+      "top_provider": {
+        "context_length": 100000,
+        "max_completion_tokens": 100000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "image",
+        "size",
+        "watermark",
+        "output_format",
+        "response_format",
+        "optimize_prompt_options"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/images/generations"
+      ],
+      "aliases": [
+        "doubao-seedream-5.0-flash",
+        "doubao-seedream-5-0-flash",
+        "doubao-seedream-5-0-flash-260915"
+      ],
+      "image_attributes": {
+        "supported_params": [
+          "prompt",
+          "image",
+          "size",
+          "watermark",
+          "output_format",
+          "response_format",
+          "optimize_prompt_options"
+        ],
+        "sizes": [
+          "1K",
+          "1.5K",
+          "2K"
+        ],
+        "output_formats": [
+          "png",
+          "jpeg"
+        ],
+        "optimize_prompt_modes": [
+          "standard"
+        ],
+        "family": "seedream"
+      }
+    },
+    {
+      "id": "qwen/qwen-image-3.0",
+      "object": "model",
+      "created": 1785888000,
+      "owned_by": "bailian",
+      "canonical_slug": "qwen-image-3.0",
+      "name": "Qwen-Image 3.0",
+      "context_length": 100000,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "image"
+        ],
+        "tokenizer": "qwen",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "output_image_per_num": "0.03"
+      },
+      "top_provider": {
+        "context_length": 100000,
+        "max_completion_tokens": 100000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "n",
+        "size",
+        "output_format",
+        "stream",
+        "user"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/images/generations"
+      ],
+      "aliases": [
+        "qwen-image-3.0",
+        "bailian/qwen-image-3.0"
+      ]
+    },
+    {
+      "id": "microsoft/mai-image-2.5",
+      "object": "model",
+      "created": 1780358400,
+      "owned_by": "azure",
+      "canonical_slug": "mai-image-2.5-2026-06-02",
+      "name": "Microsoft: MAI Image 2.5",
+      "context_length": 4100,
+      "architecture": {
+        "modality": "text+image->image",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "image"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000005",
+        "completion": "0.000047",
+        "image": "0.000008",
+        "output_image": "0.000047"
+      },
+      "top_provider": {
+        "context_length": 4100,
+        "max_completion_tokens": 1000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "n",
+        "size",
+        "output_format",
+        "stream",
+        "user"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/images/edits",
+        "/v1/images/generations"
+      ],
+      "aliases": [
+        "mai-image-2.5",
+        "mai-image-2.5-2026-06-02",
+        "mai-image-2.5-20260602"
+      ]
+    },
+    {
+      "id": "bytedance/seedance-2.5",
+      "object": "model",
+      "created": 1786060800,
+      "owned_by": "openai",
+      "canonical_slug": "bytedance/seedance-2.5-20260807",
+      "name": "Seedance 2.5",
+      "context_length": 0,
+      "architecture": {
+        "modality": "text+image+video->video",
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "video"
+        ],
+        "tokenizer": "seedance",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "output_video_per_second": "0.11"
+      },
+      "top_provider": {
+        "context_length": 0,
+        "max_completion_tokens": null,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "duration",
+        "resolution",
+        "aspect_ratio",
+        "size",
+        "generate_audio",
+        "seed",
+        "frame_images",
+        "input_references",
+        "callback_url",
+        "provider"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/videos"
+      ],
+      "aliases": [
+        "seedance-2.5",
+        "seedance-2.5-20260807"
+      ],
+      "video_attributes": {
+        "modes": [
+          "t2v",
+          "i2v",
+          "v2v"
+        ],
+        "resolutions": [
+          "480p",
+          "720p",
+          "1080p"
+        ],
+        "default_resolution": "720p",
+        "min_duration_seconds": 4,
+        "max_duration_seconds": 30,
+        "supports_audio": true,
+        "aspect_ratios": [
+          "21:9",
+          "16:9",
+          "4:3",
+          "1:1",
+          "3:4",
+          "9:16",
+          "adaptive"
+        ]
+      }
+    },
+    {
+      "id": "alibaba/wan-3.0",
+      "object": "model",
+      "created": 1787529600,
+      "owned_by": "openai",
+      "canonical_slug": "alibaba/wan-3.0-20260824",
+      "name": "Wan 3.0",
+      "context_length": 0,
+      "architecture": {
+        "modality": "text+image+video->video",
+        "input_modalities": [
+          "text",
+          "image",
+          "video"
+        ],
+        "output_modalities": [
+          "video"
+        ],
+        "tokenizer": "wan",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "output_video_per_second": "0.054"
+      },
+      "top_provider": {
+        "context_length": 0,
+        "max_completion_tokens": null,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "prompt",
+        "duration",
+        "resolution",
+        "aspect_ratio",
+        "size",
+        "generate_audio",
+        "seed",
+        "frame_images",
+        "input_references",
+        "callback_url",
+        "provider"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/videos"
+      ],
+      "aliases": [
+        "wan-3.0",
+        "wan-3.0-20260824"
+      ],
+      "video_attributes": {
+        "modes": [
+          "t2v",
+          "i2v",
+          "v2v"
+        ],
+        "resolutions": [
+          "480p",
+          "720p",
+          "1080p"
+        ],
+        "default_resolution": "1080p",
+        "min_duration_seconds": 2,
+        "max_duration_seconds": 30,
+        "supports_audio": true,
+        "aspect_ratios": [
+          "16:9",
+          "4:3",
+          "1:1",
+          "3:4",
+          "9:16",
+          "adaptive"
+        ]
+      }
+    },
+    {
+      "id": "google/gemini-2.5-flash-tts",
+      "object": "model",
+      "created": 1791446044,
+      "owned_by": "openai",
+      "canonical_slug": "gemini-2.5-flash-tts",
+      "name": "Gemini 2.5 Flash TTS",
+      "context_length": 0,
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.00001",
+        "output_audio": "0.00001"
+      },
+      "top_provider": {
+        "context_length": 0,
+        "max_completion_tokens": null,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "instructions"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "aliases": [
+        "gemini-2.5-flash-tts"
+      ]
+    },
+    {
+      "id": "elevenlabs/eleven_v4",
+      "object": "model",
+      "created": 1791446044,
+      "owned_by": "openai",
+      "canonical_slug": "eleven_v4",
+      "name": "ElevenLabs Eleven v4",
+      "context_length": 0,
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "input_text_per_character": "0.00008"
+      },
+      "top_provider": {
+        "context_length": 0,
+        "max_completion_tokens": null,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "provider_options"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "aliases": [
+        "eleven_v4"
+      ]
+    },
+    {
+      "id": "openai/gpt-4o-mini-transcribe",
+      "object": "model",
+      "created": 1765756800,
+      "owned_by": "azure",
+      "canonical_slug": "gpt-4o-mini-transcribe-20251215",
+      "name": "OpenAI: GPT 4o Mini Transcribe",
+      "context_length": 128000,
+      "architecture": {
+        "modality": "audio->text",
+        "input_modalities": [
+          "audio"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000125",
+        "completion": "0.000005",
+        "audio": "0.000003",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 128000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "file",
+        "language",
+        "response_format"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/audio/transcriptions"
+      ],
+      "aliases": [
+        "gpt-4o-mini-transcribe",
+        "gpt-4o-mini-transcribe-20251215"
+      ]
+    },
+    {
+      "id": "openai/text-embedding-3-small",
+      "object": "model",
+      "created": 1761782400,
+      "owned_by": "azure",
+      "canonical_slug": "text-embedding-3-small",
+      "name": "OpenAI: Text Embedding 3 Small",
+      "context_length": 8200,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000002",
+        "completion": "0",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 8200,
+        "max_completion_tokens": 8200,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/embeddings"
+      ],
+      "aliases": [
+        "text-embedding-3-small"
+      ]
+    },
+    {
+      "id": "typesafe/jev-latest",
+      "object": "model",
+      "created": 1790121600,
+      "owned_by": "typesafe",
+      "canonical_slug": "jev-latest",
+      "name": "TypeSafe: Jev",
+      "context_length": 64000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "jev",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000000042",
+        "completion": "0"
+      },
+      "top_provider": {
+        "context_length": 64000,
+        "max_completion_tokens": null,
+        "is_moderated": false
+      },
+      "per_request_limits": null,
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop"
+      ],
+      "default_parameters": null,
+      "expiration_date": null,
+      "is_deprecated": false,
+      "supported_endpoints": [
+        "/v1/decisions"
+      ],
+      "aliases": [
+        "jev-latest"
+      ]
+    }
+  ]
+}

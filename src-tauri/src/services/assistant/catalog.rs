@@ -512,6 +512,77 @@ mod tests {
         assert!(search_price(&catalog(&["chat/model"])).is_none());
     }
 
+    /// Rows trimmed from the live `/v1/models` (public, no key needed).
+    fn v1_fixture() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant-catalog/v1-models.json"
+        ))
+        .unwrap()
+    }
+
+    /// The chat models the assistant offered from [`v1_fixture`] before the
+    /// catalog learned kinds. Every one must still be offered, in this order.
+    const TODAY_CHAT_IDS: &[&str] = &[
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6-sol",
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5-nano",
+        "openai/gpt-5.4-pro",
+        "google/gemini-3.1-flash-lite",
+        "deepseek/deepseek-v4-flash-0423",
+        "qwen/qwen3.8-flash",
+        "z-ai/glm-5",
+        "x-ai/grok-4.7",
+        "moonshotai/kimi-k3",
+        "volcengine/doubao-seed-2.1-pro",
+        "minimax/minimax-m3",
+    ];
+
+    #[test]
+    fn todays_chat_models_of_the_real_catalog_are_pinned() {
+        assert_eq!(ids(&parse_models(v1_fixture())), TODAY_CHAT_IDS);
+    }
+
+    /// What the runtime received for one model before the catalog learned
+    /// kinds, byte for byte.
+    const TODAY_RUNTIME_MODEL: &str = concat!(
+        r#"{"id":"openai/gpt-6.1-sol","name":"OpenAI: GPT-6.1 Sol","contextWindow":1050000,"#,
+        r#""maxOutputTokens":128000,"supportsImages":true,"inputModalities":["text","image"],"#,
+        r#""supportedEndpoints":["/v1/chat/completions","/v1/responses"],"#,
+        r#""inputPricePerMillion":"2","outputPricePerMillion":"10","#,
+        r#""pricing":{"prompt":"0.000002","completion":"0.00001","input_cache_read":"0.0000001","#,
+        r#""input_cache_write":"0.0000025"},"#,
+        r#""cost":{"input":2.0,"output":10.0,"cacheRead":0.1,"cacheWrite":2.5},"pricingKnown":true}"#,
+    );
+
+    #[test]
+    fn todays_runtime_model_bytes_are_pinned() {
+        let models = parse_models(v1_fixture());
+        let model = models
+            .iter()
+            .find(|m| m.id == "openai/gpt-6.1-sol")
+            .unwrap();
+        assert_eq!(serde_json::to_string(model).unwrap(), TODAY_RUNTIME_MODEL);
+    }
+
+    #[test]
+    fn todays_endpoints_of_the_protocol_fixture_are_pinned() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../assistant-runtime/test/fixtures/catalog-protocols.json"
+        ))
+        .unwrap();
+        let models = parse_models(v1_fixture());
+        for pin in fixture["models"].as_array().unwrap() {
+            let model = models.iter().find(|m| m.id == pin["id"]).unwrap();
+            assert_eq!(
+                json!(model.supported_endpoints),
+                pin["supportedEndpoints"],
+                "{}",
+                model.id
+            );
+        }
+    }
+
     #[test]
     fn the_preference_list_is_non_empty_and_has_no_duplicates() {
         assert!(!PREFERRED_MODEL_IDS.is_empty());

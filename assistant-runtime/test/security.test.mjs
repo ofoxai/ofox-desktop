@@ -70,6 +70,29 @@ test("the shared catalog projection fixture retains its actual protocol, limits 
   assert.deepEqual(model.cost, fixture.runtime.cost);
 });
 
+test("catalog models keep the protocol the host's catalog names for them", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("./fixtures/catalog-protocols.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const { id, supportedEndpoints, api } of fixture.models) {
+    const model = modelForOfox(
+      { id, supportedEndpoints, contextWindow: 128000, maxOutputTokens: 4096 },
+      "ofox.ai",
+    );
+    assert.equal(model.api, api, id);
+    assert.equal(
+      model.baseUrl,
+      api === "anthropic-messages"
+        ? "https://api.ofox.ai/anthropic"
+        : "https://api.ofox.ai/v1",
+      id,
+    );
+  }
+});
+
 test("credential values are redacted before any protocol error or tool output", () => {
   const secret = "private-test-token-that-must-not-escape";
   const value = redact(
