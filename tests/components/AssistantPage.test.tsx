@@ -293,6 +293,15 @@ describe("starting a conversation", () => {
   });
 });
 
+describe("the composer's hint", () => {
+  it("is readable: muted text like the other notes, not faint", async () => {
+    await openConversation();
+    const hint = screen.getByText("Enter to send · Shift+Enter for a new line");
+    expect(hint).toHaveClass("text-ink-muted");
+    expect(hint).not.toHaveClass("text-ink-faint");
+  });
+});
+
 describe("the empty state", () => {
   const invitation = "Start a new conversation, or type your question below.";
 

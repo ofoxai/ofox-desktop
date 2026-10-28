@@ -664,7 +664,7 @@ function AssistantWorkspace() {
                     <Globe aria-hidden className="h-3.5 w-3.5" />
                     {t("assistant.webSearch")}
                   </Button>
-                  <span className="min-w-0 truncate text-note text-ink-faint">
+                  <span className="min-w-0 truncate text-note text-ink-muted">
                     {run ? t("assistant.running") : t("assistant.sendHint")}
                   </span>
                 </div>
