@@ -4902,7 +4902,7 @@
       "attachmentUnreadable": "A file couldn't be read. It may have been moved, or be damaged or password-protected. Check the file and attach it again.",
       "attachmentWriteFailed": "The file couldn't be saved for this conversation. Check disk space and permissions, then try again.",
       "attachmentDialogFailed": "The file picker couldn't be opened. Please try again.",
-      "visionModelRequired": "This model can't read images. Choose a model that can read images, then regenerate the reply.",
+      "visionModelRequired": "This model can't read images. Choose a model that can read images, then send the message again.",
       "modelRequired": "Choose a model first.",
       "modelUnavailable": "This model isn't available right now. Choose another model.",
       "noModels": "No model the assistant can use is available right now. Try again later.",

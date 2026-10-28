@@ -403,6 +403,22 @@ describe("errors", () => {
       "zh",
       "没能创建助手的 API Key，请检查网络后重试。",
     ],
+    [
+      // A blocked turn never reached the model: it can only be sent again.
+      "assistant_vision_model_required",
+      "zh",
+      "此模型无法读取图片。请选择能读取图片的模型，然后再发一次这条消息。",
+    ],
+    [
+      "assistant_vision_model_required",
+      "en",
+      "This model can't read images. Choose a model that can read images, then send the message again.",
+    ],
+    [
+      "assistant_vision_model_required",
+      "ja",
+      "このモデルは画像を読み取れません。画像を読み取れるモデルを選んでから、メッセージをもう一度送信してください。",
+    ],
   ])(
     "localizes the command error %s in %s",
     async (code, language, expected) => {
@@ -1411,7 +1427,7 @@ describe("attachments", () => {
       }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "This model can't read images. Choose a model that can read images, then regenerate the reply.",
+      "This model can't read images. Choose a model that can read images, then send the message again.",
     );
     expect(document.body).not.toHaveTextContent("assistant_");
   });
