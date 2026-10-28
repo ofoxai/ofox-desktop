@@ -2321,12 +2321,14 @@ describe("conversation cost", () => {
 
   it.each([
     // searchCount counts billed search calls: one search can make two.
-    [2, "en", "Estimated cost ≈$0.040 incl. 2 search calls"],
-    [1, "en", "Estimated cost ≈$0.040 incl. 1 search call"],
-    [2, "ja", "推定コスト ≈$0.040（検索呼び出し 2 回を含む）"],
-    [2, "zh", "预估成本 ≈$0.040（含 2 次搜索调用）"],
+    [2, "en", "Estimated cost ≈$0.040 incl. 2 search charges"],
+    [1, "en", "Estimated cost ≈$0.040 incl. 1 search charge"],
+    [2, "ja", "推定コスト ≈$0.040（検索料金 2 回分を含む）"],
+    [1, "ja", "推定コスト ≈$0.040（検索料金 1 回分を含む）"],
+    [2, "zh", "预估成本 ≈$0.040（含 2 次搜索计费）"],
+    [1, "zh", "预估成本 ≈$0.040（含 1 次搜索计费）"],
   ])(
-    "says the saved cost includes %i billed search calls in %s",
+    "names the search charges a saved cost includes, for a count of %i, in %s",
     async (searchCount, language, expected) => {
       current.usage = {
         inputTokens: 1234,
@@ -2459,15 +2461,15 @@ describe("web search", () => {
   it.each([
     [
       "en",
-      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 3 searches per reply.",
+      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 3 searches per reply; one search can bring back several sources.",
     ],
     [
       "ja",
-      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 3 回です。",
+      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 3 回で、1 回の検索で複数の出典が見つかることがあります。",
     ],
     [
       "zh",
-      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 3 次。",
+      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 3 次，一次搜索可能带回多个来源。",
     ],
   ])(
     "always shows what a search may cost, one or two billed calls, and how many a reply makes at most, in %s",

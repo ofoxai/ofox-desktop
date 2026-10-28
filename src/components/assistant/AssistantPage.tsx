@@ -72,7 +72,7 @@ function searchPriceNote(unitPriceUsd: string) {
  * A conversation's tokens and cost. The cost is shown only once its runs are
  * saved, and as unavailable whenever a request's cost is unknown: never as
  * $0 or as a partial sum. A cost that includes web searches says how many
- * search calls were billed (one search can bill two).
+ * search charges it holds (one search can bill two).
  */
 function usageSummary(
   usage: AssistantUsage | undefined,
