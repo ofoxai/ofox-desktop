@@ -204,6 +204,34 @@ describe("auto-linked URLs in text without spaces", () => {
     ]);
   });
 
+  it.each([
+    ["(https://a.example/x)。后", ")。后"],
+    ["(见 https://a.example/x)，然后", ")，然后"],
+    ['"https://a.example/x"。后', '"。后'],
+    ["_https://a.example/x_。后", "_。后"],
+    ["**https://a.example/x**。后", "**。后"],
+  ])(
+    "leaves the brackets and quotes around %s out of the link",
+    (text, tail) => {
+      const { container } = render(message(text));
+      expect(container.querySelectorAll("a")).toHaveLength(1);
+      expect(link(container)).toHaveAttribute("href", "https://a.example/x");
+      expect(link(container).nextSibling?.textContent).toBe(tail);
+      expect(paragraph(container)).toHaveTextContent(text);
+    },
+  );
+
+  it("keeps the parentheses of an address that balances them", () => {
+    const { container } = render(
+      message("见 https://en.wikipedia.org/wiki/Foo_(bar)。后"),
+    );
+    expect(link(container)).toHaveAttribute(
+      "href",
+      "https://en.wikipedia.org/wiki/Foo_(bar)",
+    );
+    expect(link(container).nextSibling?.textContent).toBe("。后");
+  });
+
   it("keeps an address with ideographs whole", () => {
     const { container } = render(
       message(

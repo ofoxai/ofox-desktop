@@ -374,6 +374,8 @@ describe("a reply's sources", () => {
     ["，", "见 https://docs.example.com/ofox，然后"],
     ["）", "见（https://docs.example.com/ofox）。"],
     ["。", "详见https://docs.example.com/ofox。"],
+    ["_。", "见 _https://docs.example.com/ofox_。后"],
+    ["**。", "见 **https://docs.example.com/ofox**。后"],
   ])("counts a page cited in running text before %s as cited", (_, content) => {
     // The saved source carries tracking, so only the cleaned URLs match.
     const tracked = source(

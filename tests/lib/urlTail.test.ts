@@ -51,6 +51,41 @@ describe("where a URL ends in running text", () => {
   });
 
   it.each([
+    ["https://a.example/x)。", "https://a.example/x", ")。"],
+    ["https://a.example/x)，然后", "https://a.example/x", ")，然后"],
+    ['https://a.example/x"。', "https://a.example/x", '"。'],
+    ["https://a.example/x'。", "https://a.example/x", "'。"],
+    ["https://a.example/x_。然后", "https://a.example/x", "_。然后"],
+    ["https://a.example/x**。", "https://a.example/x", "**。"],
+    ["https://a.example/x~~。", "https://a.example/x", "~~。"],
+    ["https://a.example/x]。", "https://a.example/x", "]。"],
+    ["https://a.example/x.)。", "https://a.example/x", ".)。"],
+  ])(
+    "after a full-width cut, also drops the closers that went with it: %s",
+    (found, url, tail) => {
+      expect(splitUrlTail(found)).toEqual({ url, tail });
+    },
+  );
+
+  it("keeps the parentheses of an address that balances them", () => {
+    expect(splitUrlTail("https://en.wikipedia.org/wiki/Foo_(bar)。")).toEqual({
+      url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+      tail: "。",
+    });
+    expect(splitUrlTail("https://en.wikipedia.org/wiki/Foo_(bar))。")).toEqual({
+      url: "https://en.wikipedia.org/wiki/Foo_(bar)",
+      tail: ")。",
+    });
+  });
+
+  it("leaves closers alone when no full-width mark ends the URL", () => {
+    expect(splitUrlTail("https://a.example/x_")).toEqual({
+      url: "https://a.example/x_",
+      tail: "",
+    });
+  });
+
+  it.each([
     "https://a.example/x",
     "https://zh.wikipedia.org/wiki/东京",
     "https://ja.wikipedia.org/wiki/佐々木小次郎",
