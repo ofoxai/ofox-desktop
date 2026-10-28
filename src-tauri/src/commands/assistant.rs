@@ -6,8 +6,8 @@ use crate::ofox_api_keys::{self, ApiKeyError, AssistantKeyStatus, FetchMode};
 use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
     attachments, catalog,
-    host::{Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
-    store::{self, RestoreReport, SessionList},
+    host::{blocking, Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
+    store::{self, BackupReport, RestoreReport, SessionList},
     types::{
         Attachment, CreateRequest, DeleteRequest, Detail, Event, ExportMarkdownRequest, RunProxy,
         RunRef, SendRequest, Session, TransferRequest, UpdateRequest,
@@ -74,12 +74,13 @@ pub async fn assistant_delete_session(
     host.delete_session(request).await
 }
 
+/// `None` when the save dialog was cancelled.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_backup(
     app: tauri::AppHandle,
     host: Host<'_>,
     request: TransferRequest,
-) -> Result<bool, String> {
+) -> Result<Option<BackupReport>, String> {
     use tauri_plugin_dialog::DialogExt;
     host.backup(request, move || {
         app.dialog()
@@ -330,6 +331,26 @@ impl Environment for AssistantEnvironment {
                 result,
                 refusal.into_inner().unwrap_or_else(|e| e.into_inner()),
             )
+        })
+    }
+
+    fn stored_key<'a>(&'a self, identity: &'a Identity) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async move {
+            let manager = self.auth().ok()?;
+            let owner = key_owner(&manager, identity).await.ok()?;
+            // The keychain read blocks.
+            let read = blocking(move || {
+                ofox_api_keys::stored_assistant_key(&owner)
+                    .map_err(|error| crate::redact::scrub(&format!("{error:?}")).into_owned())
+            })
+            .await;
+            match read {
+                Ok(key) => key,
+                Err(error) => {
+                    log::warn!("[Assistant] the stored assistant key could not be read: {error}");
+                    None
+                }
+            }
         })
     }
 

@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { assistantErrorKey, type AssistantUsage } from "@/lib/api/assistant";
 import { fmtCost, fmtTokens } from "@/lib/format";
-import { useAssistant } from "./useAssistant";
+import { useAssistant, type AssistantTransferResult } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
@@ -35,6 +35,7 @@ import { isSendable } from "@/utils/assistantAttachments";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { SearchInput } from "@/components/ui/search-input";
 import {
@@ -115,6 +116,41 @@ function usageSummary(
   return parts.length ? parts.join(" · ") : null;
 }
 
+/**
+ * What a finished backup or restore did: one line for each thing that
+ * happened, and `warn` for those that left something undone.
+ */
+function transferLines(
+  result: AssistantTransferResult,
+  t: TFunction,
+): { text: string; warn?: boolean }[] {
+  if (result.kind === "backup")
+    return [
+      { text: t("assistant.backupSaved", { count: result.sessions }) },
+      ...(result.skipped > 0
+        ? [
+            {
+              text: t("assistant.backupSkipped", { count: result.skipped }),
+              warn: true,
+            },
+          ]
+        : []),
+    ];
+  const lines = [
+    result.imported > 0 && {
+      text: t("assistant.restoreImported", { count: result.imported }),
+    },
+    result.skipped > 0 && {
+      text: t("assistant.restoreSkipped", { count: result.skipped }),
+    },
+    result.conflicts > 0 && {
+      text: t("assistant.restoreConflicts", { count: result.conflicts }),
+      warn: true,
+    },
+  ].filter((line) => line !== false);
+  return lines.length ? lines : [{ text: t("assistant.restoreNothing") }];
+}
+
 interface AssistantPageProps {
   enabled?: boolean;
   onLoginRequested?: () => void;
@@ -170,6 +206,16 @@ function AssistantWorkspace() {
   const trashButton = useRef<HTMLButtonElement>(null);
   const deleteButton = useRef<HTMLButtonElement>(null);
   const renameButton = useRef<HTMLButtonElement>(null);
+  const exportButton = useRef<HTMLButtonElement>(null);
+  const backupButton = useRef<HTMLButtonElement>(null);
+  const restoreBackupButton = useRef<HTMLButtonElement>(null);
+  const moveToTrashButton = useRef<HTMLButtonElement>(null);
+  const restoreButton = useRef<HTMLButtonElement>(null);
+  // A button that is disabled while its action runs loses focus; once the
+  // action is over (done, cancelled or failed) it takes focus back.
+  const refocus = useRef<HTMLButtonElement | null>(null);
+  const busyNow = useRef(busy);
+  busyNow.current = busy;
   const focusStarter = useRef(false);
   const session = detail?.session;
   const available = Boolean(
@@ -178,6 +224,9 @@ function AssistantWorkspace() {
       assistant.connected,
   );
   const trashed = assistant.showTrash || session?.deletedAt != null;
+  // Closes with the conversation it asks about, e.g. once only its files are
+  // left to delete.
+  const deleteDialogOpen = confirmDelete && session !== undefined;
   const writable = available && !run && !busy && !assistant.loading && !trashed;
   // While a run goes on, or until its saved outcome is read back, the totals
   // are running ones and no cost is claimed.
@@ -218,6 +267,7 @@ function AssistantWorkspace() {
   const messages = (detail?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
   );
+  const emptyTranscript = !messages.length && !assistant.stream;
   // Runs whose reply failed or stopped. Their question can be sent again
   // when the model never kept it (nothing to edit or regenerate from).
   const unfinishedRuns = new Set(
@@ -254,10 +304,30 @@ function AssistantWorkspace() {
       .filter(Boolean)
       .join(" ") || undefined;
   const focusComposer = useCallback(() => composer.current?.focus(), []);
+  const returnFocusTo = (button: HTMLButtonElement | null) => {
+    refocus.current = button;
+    settleFocus();
+  };
+  function settleFocus() {
+    const button = refocus.current;
+    if (!button) return;
+    if (button.disabled) {
+      // Still disabled while the action runs: try again after the next render.
+      if (!busyNow.current) refocus.current = null;
+      return;
+    }
+    refocus.current = null;
+    // Not when the user has already moved on to something else.
+    const active = document.activeElement;
+    if (!active || active === document.body || active === button)
+      button.focus();
+  }
+  useEffect(settleFocus);
 
   useShellRefresh("assistant", async () => {
     await assistant.loadBootstrap();
     await assistant.refreshSessions();
+    await assistant.refreshUsage();
     if (assistant.selectedId)
       await assistant.refreshDetail(assistant.selectedId);
   });
@@ -314,23 +384,33 @@ function AssistantWorkspace() {
         </Button>
         <div className="grid shrink-0 grid-cols-2 gap-1">
           <Button
+            ref={backupButton}
             variant="secondary"
             size="sm"
             disabled={busy || assistant.loading || !bootstrap?.owner}
             aria-label={t("assistant.backupTitle")}
             title={t("assistant.backupHint")}
-            onClick={() => void assistant.transfer("backup")}
+            onClick={() =>
+              void assistant
+                .transfer("backup")
+                .then(() => returnFocusTo(backupButton.current))
+            }
           >
             <Download aria-hidden className="h-3.5 w-3.5" />
             {t("assistant.backupShort")}
           </Button>
           <Button
+            ref={restoreBackupButton}
             variant="secondary"
             size="sm"
             disabled={busy || assistant.loading || !bootstrap?.owner}
             aria-label={t("assistant.restoreBackupTitle")}
             title={t("assistant.backupHint")}
-            onClick={() => void assistant.transfer("restore")}
+            onClick={() =>
+              void assistant
+                .transfer("restore")
+                .then(() => returnFocusTo(restoreBackupButton.current))
+            }
           >
             <Upload aria-hidden className="h-3.5 w-3.5" />
             {t("assistant.restoreBackupShort")}
@@ -341,15 +421,18 @@ function AssistantWorkspace() {
             role="status"
             className="px-1 text-note leading-relaxed text-ink-muted"
           >
-            {assistant.transferResult.kind === "backup"
-              ? t("assistant.backupSaved")
-              : t("assistant.restoreSaved", {
-                  imported: assistant.transferResult.imported,
-                  count: assistant.transferResult.skipped,
-                })}
+            {transferLines(assistant.transferResult, t).map((line) => (
+              <span
+                key={line.text}
+                className={cn("block", line.warn && "text-warn")}
+              >
+                {line.text}
+              </span>
+            ))}
           </p>
         )}
         <div
+          role="group"
           className="grid grid-cols-2 gap-1"
           aria-label={t("assistant.historyView")}
         >
@@ -477,6 +560,8 @@ function AssistantWorkspace() {
                 ref={renameButton}
                 title={t("assistant.rename")}
                 aria-label={t("assistant.rename")}
+                // A conversation in the trash is read-only until restored.
+                disabled={session.deletedAt != null}
                 onClick={() => setRename(session.title)}
               >
                 <Pencil aria-hidden className="h-3.5 w-3.5" />
@@ -487,6 +572,7 @@ function AssistantWorkspace() {
             <div className="flex shrink-0 items-center gap-1">
               <Button
                 variant="icon"
+                ref={exportButton}
                 aria-label={t("assistant.exportMarkdown")}
                 title={t("assistant.exportMarkdown")}
                 disabled={busy || Boolean(run) || assistant.loading}
@@ -496,7 +582,10 @@ function AssistantWorkspace() {
                     .exportMarkdown((snapshot) =>
                       assistantMarkdown(snapshot, t, i18n.language),
                     )
-                    .then(setExported);
+                    .then((saved) => {
+                      setExported(saved);
+                      returnFocusTo(exportButton.current);
+                    });
                 }}
               >
                 <Download aria-hidden className="h-3.5 w-3.5" />
@@ -505,12 +594,14 @@ function AssistantWorkspace() {
                 <>
                   <Button
                     variant="icon"
+                    ref={restoreButton}
                     aria-label={t("assistant.restore")}
                     title={t("assistant.restore")}
                     disabled={busy || Boolean(run)}
                     onClick={() =>
                       void assistant.setDeleted(false).then((saved) => {
                         if (saved) conversationsButton.current?.focus();
+                        else returnFocusTo(restoreButton.current);
                       })
                     }
                   >
@@ -522,7 +613,11 @@ function AssistantWorkspace() {
                     aria-label={t("assistant.deletePermanently")}
                     title={t("assistant.deletePermanently")}
                     disabled={busy || Boolean(run)}
-                    onClick={() => setConfirmDelete(true)}
+                    onClick={() => {
+                      // A failure from before is not this dialog's to show.
+                      assistant.setError(null);
+                      setConfirmDelete(true);
+                    }}
                   >
                     <Trash2 aria-hidden className="h-3.5 w-3.5 text-danger" />
                   </Button>
@@ -530,12 +625,14 @@ function AssistantWorkspace() {
               ) : (
                 <Button
                   variant="icon"
+                  ref={moveToTrashButton}
                   aria-label={t("assistant.moveToTrash")}
                   title={t("assistant.moveToTrash")}
                   disabled={busy}
                   onClick={() =>
                     void assistant.setDeleted(true).then((saved) => {
                       if (saved) conversationsButton.current?.focus();
+                      else returnFocusTo(moveToTrashButton.current);
                     })
                   }
                 >
@@ -618,7 +715,9 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
-        {assistant.error !== null && (
+        {/* While the delete dialog is open it shows the failure itself: a
+            banner behind it would be announced a second time. */}
+        {assistant.error !== null && !deleteDialogOpen && (
           <div
             role="alert"
             className="flex items-start justify-between gap-3 border-b border-line bg-danger-soft px-4 py-2 text-ctl text-danger"
@@ -658,7 +757,7 @@ function AssistantWorkspace() {
             </div>
           ) : (
             <>
-              {!messages.length && !assistant.stream && (
+              {emptyTranscript && (
                 <div className="mx-auto flex min-h-full max-w-md flex-col items-center justify-center py-8 text-center">
                   <div className="mb-4 grid h-10 w-10 place-items-center rounded-card bg-brand-soft text-brand-ink">
                     <MessageSquare aria-hidden className="h-5 w-5" />
@@ -759,7 +858,8 @@ function AssistantWorkspace() {
             </>
           )}
         </div>
-        {session?.deletedAt != null && (
+        {/* Said once: an empty conversation's own empty state says it. */}
+        {session?.deletedAt != null && !emptyTranscript && (
           <p
             role="status"
             className="border-t border-line px-4 py-2 text-note text-ink-muted"
@@ -890,60 +990,46 @@ function AssistantWorkspace() {
                   <p role="status">{t("assistant.webSearchNextMessage")}</p>
                 )}
                 {usage && (
-                  <p
+                  <div
+                    role="group"
                     aria-label={t("assistant.conversationUsage")}
                     className="ml-auto text-right"
                   >
-                    {usage}
-                  </p>
+                    <p>{usage}</p>
+                  </div>
                 )}
               </div>
             )}
           </div>
         </footer>
       </section>
-      <Dialog
-        open={confirmDelete}
-        onOpenChange={(open) => {
-          if (!busy) setConfirmDelete(open);
+      <ConfirmDialog
+        isOpen={deleteDialogOpen}
+        title={t("assistant.deleteTitle")}
+        message={t("assistant.deleteDescription")}
+        confirmText={t("assistant.deletePermanently")}
+        busy={busy}
+        // The page's banner is behind the dialog: a failure shows here.
+        error={
+          assistant.error !== null
+            ? t(assistantErrorKey(assistant.error))
+            : undefined
+        }
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          (deleteButton.current ?? trashButton.current)?.focus();
         }}
-      >
-        <DialogContent
-          className="max-w-sm"
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            (deleteButton.current ?? trashButton.current)?.focus();
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>{t("assistant.deleteTitle")}</DialogTitle>
-            <DialogDescription>
-              {t("assistant.deleteDescription")}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              autoFocus
-              variant="ghost"
-              disabled={busy}
-              onClick={() => setConfirmDelete(false)}
-            >
-              {t("common.cancel")}
-            </Button>
-            <Button
-              variant="danger"
-              disabled={busy}
-              onClick={() =>
-                void assistant.deleteSession().then((deleted) => {
-                  if (deleted) setConfirmDelete(false);
-                })
-              }
-            >
-              {t("assistant.deletePermanently")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onConfirm={() =>
+          void assistant.deleteSession().then((deleted) => {
+            if (deleted) setConfirmDelete(false);
+          })
+        }
+        onCancel={() => {
+          setConfirmDelete(false);
+          // The failure was told in the dialog: it does not wait in the banner.
+          assistant.setError(null);
+        }}
+      />
       <Dialog
         open={rename !== null}
         onOpenChange={(open) => {

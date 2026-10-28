@@ -93,6 +93,12 @@ pub trait Environment: Send + Sync + 'static {
     fn proxy(&self) -> Option<RunProxy> {
         None
     }
+    /// The assistant key stored for `identity`'s account, read without
+    /// minting or fetching one, so a backup or export can leave it out.
+    /// `None` when there is none or it cannot be read.
+    fn stored_key<'a>(&'a self, _identity: &'a Identity) -> BoxFuture<'a, Option<String>> {
+        Box::pin(async { None })
+    }
 }
 
 pub(super) struct Runtime {
@@ -177,8 +183,9 @@ fn session_key(owner: &str, sid: &str) -> String {
     format!("{owner}:{sid}")
 }
 
-/// Run store IO (blocking file IO under blocking locks) off the async workers.
-pub(super) async fn blocking<T: Send + 'static>(
+/// Run store IO (blocking file IO under blocking locks) or a keychain read
+/// off the async workers.
+pub async fn blocking<T: Send + 'static>(
     work: impl FnOnce() -> Result<T, String> + Send + 'static,
 ) -> Result<T, String> {
     tokio::task::spawn_blocking(work)
@@ -498,6 +505,15 @@ impl AssistantHost {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Whether a run of `owner`'s conversations is live in this process.
+    pub(super) fn has_live_run(&self, owner: &str) -> bool {
+        self.runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|run| run.identity.owner == owner)
     }
 
     pub(super) fn store(&self, owner: &str) -> Result<AssistantStore, String> {
@@ -1597,6 +1613,7 @@ mod tests {
         fetches: AtomicU64,
         runtime: Mutex<Option<PathBuf>>,
         events: Mutex<Vec<Event>>,
+        stored_key: Mutex<Option<String>>,
     }
 
     impl Environment for FixedEnvironment {
@@ -1642,6 +1659,9 @@ mod tests {
         fn emit(&self, event: Event) {
             self.events.lock().unwrap().push(event);
         }
+        fn stored_key<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, Option<String>> {
+            Box::pin(async { self.stored_key.lock().unwrap().clone() })
+        }
     }
 
     fn identity() -> Identity {
@@ -1669,6 +1689,7 @@ mod tests {
             fetches: AtomicU64::new(0),
             runtime: Mutex::new(None),
             events: Mutex::default(),
+            stored_key: Mutex::default(),
         });
         let host = AssistantHost::new(env.clone());
         (config, env, host)
@@ -2586,7 +2607,11 @@ mod tests {
             expected_owner: identity().owner,
             expected_generation: host.generation(),
         };
-        assert!(!host.backup(authority.clone(), || Ok(None)).await.unwrap());
+        assert!(host
+            .backup(authority.clone(), || Ok(None))
+            .await
+            .unwrap()
+            .is_none());
         let wrong = TransferRequest {
             expected_owner: "b".repeat(64),
             ..authority.clone()
@@ -2600,10 +2625,12 @@ mod tests {
         let out = tempfile::tempdir().unwrap();
         let archive = out.path().join("backup.zip");
         let selected = archive.clone();
-        assert!(host
+        let backup = host
             .backup(authority, move || Ok(Some(selected)))
             .await
-            .unwrap());
+            .unwrap()
+            .unwrap();
+        assert_eq!((backup.sessions, backup.skipped), (1, 0));
         let (_target_config, target) = fixture();
         let request = TransferRequest {
             expected_owner: identity().owner,
@@ -2641,12 +2668,120 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(report.imported, 1);
+        assert_eq!((report.imported, report.conflicts), (1, 0));
         assert!(report.warning.is_none());
         assert_eq!(
             target.get_session(&sid).await.unwrap().session.model_id,
             "test/model"
         );
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_wait_for_a_live_reply_without_opening_a_dialog() {
+        let (_config, host) = fixture();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        host.register_run(control(&sid), host.generation(), || Ok(()))
+            .unwrap();
+        let authority = TransferRequest {
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        assert_eq!(
+            host.backup(authority.clone(), || panic!("no dialog while a reply runs"))
+                .await
+                .unwrap_err(),
+            "assistant_transfer_busy"
+        );
+        assert_eq!(
+            host.restore(authority, || panic!("no dialog while a reply runs"))
+                .await
+                .unwrap_err(),
+            "assistant_transfer_busy"
+        );
+    }
+
+    #[tokio::test]
+    async fn backups_and_exports_leave_out_the_stored_assistant_key() {
+        let (_config, env, host) = fixture_with_env();
+        let key = "synthetic-stored-assistant-key-0123456789";
+        *env.stored_key.lock().unwrap() = Some(key.into());
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |record| {
+                record.session.draft = format!("pasted {key}");
+                Ok(())
+            })
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        let selected = archive.clone();
+        let authority = TransferRequest {
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        host.backup(authority, move || Ok(Some(selected)))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(&archive).unwrap()).unwrap();
+        for index in 0..zip.len() {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut zip.by_index(index).unwrap(), &mut text).unwrap();
+            assert!(!text.contains(key));
+        }
+        let path = out.path().join("export.md");
+        let selected = path.clone();
+        host.export_markdown(
+            export_request(&host, &sid, &format!("# Chat\n\n{key}")),
+            move || Ok(Some(selected)),
+        )
+        .await
+        .unwrap();
+        assert!(!std::fs::read_to_string(path).unwrap().contains(key));
+    }
+
+    #[tokio::test]
+    async fn restore_refuses_an_archive_holding_the_stored_assistant_key() {
+        let (_source, source) = fixture();
+        let key = "synthetic-stored-assistant-key-0123456789";
+        let store = source.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |record| {
+                record.session.draft = format!("pasted {key}");
+                Ok(())
+            })
+            .unwrap();
+        // Written without knowing the key, as by a process that never saw it.
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let (_config, env, target) = fixture_with_env();
+        *env.stored_key.lock().unwrap() = Some(key.into());
+        let request = TransferRequest {
+            expected_owner: identity().owner,
+            expected_generation: target.generation(),
+        };
+        assert_eq!(
+            target
+                .restore(request, move || Ok(Some(archive)))
+                .await
+                .unwrap_err(),
+            "assistant_backup_contains_key"
+        );
+        assert!(target
+            .list_sessions(false, "")
+            .await
+            .unwrap()
+            .sessions
+            .is_empty());
     }
 
     fn export_request(host: &AssistantHost, sid: &str, markdown: &str) -> ExportMarkdownRequest {

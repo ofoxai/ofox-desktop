@@ -130,11 +130,16 @@ describe("assistant transcript rendering", () => {
     ],
     ["untrusted provider text with a credential", en.assistant.errors.generic],
   ])(
-    "shows the saved failure %s without a live error event",
+    "shows the saved failure %s as plain text that is not announced again",
     (errorCode, reason) => {
       const saved = { status: "error" as const, errorCode };
       render(view(saved));
-      expect(screen.getByRole("alert")).toHaveTextContent(reason);
+      // The live failure was announced by the page's banner when it
+      // happened; opening a saved conversation announces nothing.
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      const text = screen.getByText(reason);
+      expect(text).toBeVisible();
+      expect(text.closest("[role], [aria-live]")).toBeNull();
       expect(screen.queryByText(errorCode)).not.toBeInTheDocument();
     },
   );

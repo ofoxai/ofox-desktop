@@ -143,8 +143,13 @@ beforeEach(async () => {
   });
   mocks.deleteSession.mockResolvedValue(undefined);
   mocks.exportMarkdown.mockResolvedValue(true);
-  mocks.backup.mockResolvedValue(true);
-  mocks.restore.mockResolvedValue({ imported: 1, skipped: 0, warning: null });
+  mocks.backup.mockResolvedValue({ sessions: 1, skipped: 0 });
+  mocks.restore.mockResolvedValue({
+    imported: 1,
+    skipped: 0,
+    conflicts: 0,
+    warning: null,
+  });
   mocks.usageSummary.mockResolvedValue({
     inputTokens: 0,
     outputTokens: 0,
@@ -3857,6 +3862,92 @@ describe("conversation trash", () => {
   });
 });
 
+describe("permanently deleting a trashed conversation", () => {
+  beforeEach(() => {
+    current.session.deletedAt = 10;
+    mocks.listSessions.mockImplementation(async (deleted = false) =>
+      listOf(
+        Boolean(current.session.deletedAt) === deleted ? [current.session] : [],
+      ),
+    );
+  });
+  async function openDeleteDialog() {
+    render(page());
+    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete permanently" }),
+    );
+    return screen.getByRole("dialog", {
+      name: "Delete conversation permanently?",
+    });
+  }
+
+  it("says why it failed inside the dialog, once, and lets the user retry or cancel", async () => {
+    mocks.deleteSession.mockRejectedValueOnce("assistant_storage_unavailable");
+    const dialog = await openDeleteDialog();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Local assistant data couldn't be read or saved.",
+    );
+    // The page's own banner sits behind the dialog and is not announced too.
+    expect(screen.getAllByRole("alert")).toEqual([alert]);
+    expect(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    ).toHaveFocus();
+    expect(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    ).toBeEnabled();
+
+    // A second try clears the old message while it runs and succeeds.
+    mocks.deleteSession.mockImplementationOnce(async () => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+    });
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mocks.deleteSession).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("leaves no stale failure behind when the dialog is cancelled", async () => {
+    mocks.deleteSession.mockRejectedValueOnce("assistant_storage_unavailable");
+    const dialog = await openDeleteDialog();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    await within(dialog).findByRole("alert");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Delete permanently" }),
+      ).toHaveFocus(),
+    );
+  });
+
+  it("closes the dialog and says so in the page when only the disk cleanup is left to retry", async () => {
+    mocks.deleteSession.mockRejectedValueOnce("assistant_delete_pending");
+    const dialog = await openDeleteDialog();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Delete permanently" }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The conversation was removed, but some files could not be deleted.",
+    );
+  });
+});
+
 describe("Markdown export", () => {
   it.each(["selection", "account"])(
     "does not export a snapshot that arrived after the %s changed",
@@ -4004,7 +4095,16 @@ describe("all conversation usage", () => {
       estimatedCostUsd: "2.50",
       usageCoverage: "complete",
     });
-    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    // A run ending reads the totals again.
+    act(() =>
+      mocks.listener?.({
+        sessionId: "background",
+        runId: "run",
+        operationId: "operation",
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
     const totals = screen.getByRole("region", { name: "All conversations" });
     await within(totals).findByText(/2.50/);
     await act(async () =>
@@ -4070,7 +4170,15 @@ describe("all conversation usage", () => {
     expect(totals).not.toHaveTextContent("$0");
     expect(totals).not.toHaveTextContent("0 search");
     mocks.usageSummary.mockRejectedValue("assistant_storage_unavailable");
-    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    act(() =>
+      mocks.listener?.({
+        sessionId: "background",
+        runId: "run",
+        operationId: "operation",
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
     await within(totals).findByText(
       "Usage could not be loaded. Refresh to try again.",
     );
@@ -4080,13 +4188,16 @@ describe("all conversation usage", () => {
 describe("complete conversation backups", () => {
   it("does not rewrite an untouched conversation before restoring an identical backup", async () => {
     await openConversation();
-    mocks.restore.mockResolvedValue({ imported: 0, skipped: 1, warning: null });
+    mocks.restore.mockResolvedValue({
+      imported: 0,
+      skipped: 1,
+      conflicts: 0,
+      warning: null,
+    });
     await userEvent.click(
       screen.getByRole("button", { name: "Restore conversations from backup" }),
     );
-    await screen.findByText(
-      "Restored 0 conversations; 1 identical conversation skipped.",
-    );
+    await screen.findByText("1 conversation was already on this device.");
     expect(mocks.updateSession).not.toHaveBeenCalled();
   });
 
@@ -4129,7 +4240,7 @@ describe("complete conversation backups", () => {
         ...capabilities,
         defaultModelId: "fast",
       });
-      return { imported: 1, skipped: 0, warning: null };
+      return { imported: 1, skipped: 0, conflicts: 0, warning: null };
     });
     const hook = renderHook(() => useAssistant(true));
     await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
@@ -4147,7 +4258,7 @@ describe("complete conversation backups", () => {
   it("does not overwrite restored preferences when their bootstrap reload fails", async () => {
     mocks.restore.mockImplementation(async () => {
       mocks.bootstrap.mockRejectedValue("assistant_network_error");
-      return { imported: 1, skipped: 0, warning: null };
+      return { imported: 1, skipped: 0, conflicts: 0, warning: null };
     });
     const hook = renderHook(() => useAssistant(true));
     await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
@@ -4182,7 +4293,7 @@ describe("complete conversation backups", () => {
     });
     mocks.backup.mockImplementation(async () => {
       expect(current.session.draft).toBe("Draft in complete backup");
-      return true;
+      return { sessions: 1, skipped: 0 };
     });
     await userEvent.click(
       screen.getByRole("button", { name: "Back up all conversations" }),
@@ -4193,13 +4304,14 @@ describe("complete conversation backups", () => {
         expectedGeneration: capabilities.authorityGeneration,
       }),
     );
-    expect(await screen.findByText("Backup saved")).toHaveAttribute(
-      "role",
-      "status",
-    );
+    expect(
+      (await screen.findByText("Backed up 1 conversation.")).closest(
+        "[role=status]",
+      ),
+    ).not.toBeNull();
   });
   it("keeps native backup cancellation quiet", async () => {
-    mocks.backup.mockResolvedValue(false);
+    mocks.backup.mockResolvedValue(null);
     render(page());
     const button = await screen.findByRole("button", {
       name: "Back up all conversations",
@@ -4207,12 +4319,13 @@ describe("complete conversation backups", () => {
     await waitFor(() => expect(button).toBeEnabled());
     await userEvent.click(button);
     await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
-    expect(screen.queryByText("Backup saved")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Backed up/)).not.toBeInTheDocument();
   });
   it("reports partial restore counts and its warning without discarding the current conversation", async () => {
     mocks.restore.mockResolvedValue({
       imported: 2,
       skipped: 1,
+      conflicts: 0,
       warning: "assistant_backup_conflict",
     });
     await openConversation();
@@ -4225,16 +4338,15 @@ describe("complete conversation backups", () => {
         expectedGeneration: capabilities.authorityGeneration,
       }),
     );
-    expect(
-      await screen.findByText(
-        "Restored 2 conversations; 1 identical conversation skipped.",
-      ),
-    ).toHaveAttribute("role", "status");
+    const imported = await screen.findByText("Restored 2 conversations.");
+    expect(imported.closest("[role=status]")).toHaveTextContent(
+      "1 conversation was already on this device.",
+    );
     expect(await screen.findByRole("alert")).toHaveTextContent("same ID");
     expect(screen.getByRole("heading", { name: session.title })).toBeVisible();
   });
   it("does not report an old account's completed backup after sign-in expires", async () => {
-    let resolve!: (saved: boolean) => void;
+    let resolve!: (saved: { sessions: number; skipped: number }) => void;
     mocks.backup.mockImplementation(
       () =>
         new Promise((done) => {
@@ -4247,7 +4359,596 @@ describe("complete conversation backups", () => {
     );
     await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
     act(() => mocks.auth?.("expired"));
-    await act(async () => resolve(true));
-    expect(screen.queryByText("Backup saved")).not.toBeInTheDocument();
+    await act(async () => resolve({ sessions: 1, skipped: 0 }));
+    expect(screen.queryByText(/Backed up/)).not.toBeInTheDocument();
+  });
+});
+
+describe("a failed reply", () => {
+  const reason = /Your Ofox balance is too low for this reply/;
+  const failedMessage: AssistantMessage = {
+    id: "reply",
+    role: "assistant",
+    content: "Half an answ",
+    status: "error",
+    errorCode: "assistant_insufficient_balance",
+    createdAt: 2,
+  };
+
+  it("is announced once: the banner alerts, the saved reason of the reply is plain text", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    act(() => {
+      mocks.listener?.({
+        ...sent,
+        type: "message",
+        data: { message: failedMessage },
+      });
+      mocks.listener?.({
+        ...sent,
+        type: "error",
+        data: { code: "assistant_insufficient_balance" },
+      });
+    });
+    await screen.findByRole("alert");
+    expect(screen.getAllByRole("alert")).toHaveLength(1);
+    // The reply still says why, for whoever reads the transcript.
+    expect(screen.getAllByText(reason)).toHaveLength(2);
+  });
+
+  it("announces nothing when a conversation with a saved failure is opened", async () => {
+    current.messages = [failedMessage];
+    await openConversation();
+    expect(screen.getByText(reason)).toBeVisible();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+});
+
+describe("conversation trash, in detail", () => {
+  const hint =
+    "This conversation is in the trash. Restore it to continue chatting.";
+  beforeEach(() => {
+    current.session.deletedAt = 10;
+    mocks.listSessions.mockImplementation(async (deleted = false) =>
+      listOf(
+        Boolean(current.session.deletedAt) === deleted ? [current.session] : [],
+      ),
+    );
+    mocks.updateSession.mockImplementation(async (patch) => {
+      current.session = {
+        ...current.session,
+        ...patch,
+        ...(patch.deleted === undefined
+          ? {}
+          : { deletedAt: patch.deleted ? 10 : null }),
+      };
+      return current.session;
+    });
+  });
+  async function openTrashed() {
+    render(page());
+    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await screen.findByRole("button", { name: "Restore conversation" });
+  }
+
+  it("is read-only: the title can't be renamed until it is restored", async () => {
+    await openTrashed();
+    expect(
+      screen.getByRole("button", { name: "Rename conversation" }),
+    ).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Restore conversation" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Rename conversation" }),
+      ).toBeEnabled(),
+    );
+  });
+
+  it("says it is in the trash once when it has no messages", async () => {
+    await openTrashed();
+    expect(screen.getAllByText(hint)).toHaveLength(1);
+  });
+
+  it("says it is in the trash once when it has messages", async () => {
+    current.messages = [
+      { id: "q", role: "user", content: "Old question", createdAt: 1 },
+    ];
+    await openTrashed();
+    await screen.findByText("Old question");
+    expect(screen.getAllByText(hint)).toHaveLength(1);
+  });
+
+  it("goes back to the conversations without listing the trash again for it", async () => {
+    await openTrashed();
+    const reads = mocks.listSessions.mock.calls.length;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Restore conversation" }),
+    );
+    await waitFor(() => expect(current.session.deletedAt).toBeNull());
+    await waitFor(() =>
+      expect(mocks.listSessions).toHaveBeenLastCalledWith(false, ""),
+    );
+    // A read of the trash begun for the restore would flash the restored
+    // conversation among the trashed ones.
+    expect(
+      mocks.listSessions.mock.calls
+        .slice(reads)
+        .every(([deleted]) => deleted === false),
+    ).toBe(true);
+    expect(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    ).toBeVisible();
+  });
+});
+
+describe("the labels of the sidebar", () => {
+  it.each(["en", "zh", "ja"])(
+    "names the backup and restore buttons by words that contain what they show (%s)",
+    async (language) => {
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      i18n.addResourceBundle("ja", "translation", ja, true, true);
+      await act(async () => {
+        await i18n.changeLanguage(language);
+      });
+      render(page());
+      for (const [title, shown] of [
+        ["assistant.backupTitle", "assistant.backupShort"],
+        ["assistant.restoreBackupTitle", "assistant.restoreBackupShort"],
+      ]) {
+        const button = await screen.findByRole("button", {
+          name: i18n.t(title),
+        });
+        expect(button).toHaveTextContent(i18n.t(shown));
+        expect(i18n.t(title)).toContain(i18n.t(shown));
+      }
+    },
+  );
+
+  it("groups the view toggles and the conversation's usage under their names", async () => {
+    current.usage = { inputTokens: 10, outputTokens: 5 };
+    await openConversation();
+    expect(
+      screen.getByRole("group", { name: "Conversation view" }),
+    ).toContainElement(screen.getByRole("button", { name: "Trash" }));
+    expect(
+      screen.getByRole("group", { name: "This conversation" }),
+    ).toHaveTextContent("Input 10 · Output 5 tokens");
+  });
+});
+
+describe("what a backup or restore reports", () => {
+  const backupButton = () =>
+    screen.findByRole("button", { name: "Back up all conversations" });
+  const restoreButton = () =>
+    screen.findByRole("button", { name: "Restore conversations from backup" });
+  const status = (line: string) =>
+    screen.findByText(line).then((found) => found.closest("[role=status]"));
+
+  async function ready(button: () => Promise<HTMLElement>) {
+    render(page());
+    const found = await button();
+    await waitFor(() => expect(found).toBeEnabled());
+    return found;
+  }
+
+  it("says how many conversations a backup holds", async () => {
+    mocks.backup.mockResolvedValue({ sessions: 3, skipped: 0 });
+    await userEvent.click(await ready(backupButton));
+    expect(await status("Backed up 3 conversations.")).not.toBeNull();
+    expect(screen.queryByText(/damaged/)).toBeNull();
+  });
+
+  it("warns, in the same place, about damaged conversations left out of it", async () => {
+    mocks.backup.mockResolvedValue({ sessions: 3, skipped: 2 });
+    await userEvent.click(await ready(backupButton));
+    const line = await screen.findByText(
+      "2 conversations couldn't be read and were left out of the backup.",
+    );
+    expect(line.closest("[role=status]")).toHaveTextContent(
+      "Backed up 3 conversations.",
+    );
+    expect(line).toHaveClass("text-warn");
+  });
+
+  it.each([
+    [1, "Backed up 1 conversation."],
+    [2, "Backed up 2 conversations."],
+  ])(
+    "counts %i backed up conversation(s) in the singular or plural",
+    async (sessions, text) => {
+      mocks.backup.mockResolvedValue({ sessions, skipped: 0 });
+      await userEvent.click(await ready(backupButton));
+      expect(await screen.findByText(text)).toBeVisible();
+    },
+  );
+
+  it("says what a restore imported, already had, and left unchanged, each with its own count", async () => {
+    mocks.restore.mockResolvedValue({
+      imported: 1,
+      skipped: 3,
+      conflicts: 2,
+      warning: null,
+    });
+    await userEvent.click(await ready(restoreButton));
+    const line = await screen.findByText("Restored 1 conversation.");
+    const result = line.closest("[role=status]");
+    expect(result).toHaveTextContent(
+      "3 conversations were already on this device.",
+    );
+    expect(result).toHaveTextContent(
+      "2 conversations on this device are different or in use, so they were left unchanged.",
+    );
+  });
+
+  it("names only conflicts when nothing else happened, and never claims a restore", async () => {
+    mocks.restore.mockResolvedValue({
+      imported: 0,
+      skipped: 0,
+      conflicts: 1,
+      warning: null,
+    });
+    await userEvent.click(await ready(restoreButton));
+    expect(
+      await screen.findByText(
+        "1 conversation on this device is different or in use, so it was left unchanged.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/Restored/)).toBeNull();
+  });
+
+  it("says so when the backup had nothing to restore", async () => {
+    mocks.restore.mockResolvedValue({
+      imported: 0,
+      skipped: 0,
+      conflicts: 0,
+      warning: null,
+    });
+    await userEvent.click(await ready(restoreButton));
+    expect(
+      await screen.findByText("The backup has no conversations to restore."),
+    ).toBeVisible();
+  });
+
+  it.each([
+    [
+      "zh",
+      ["已备份 3 个对话。", "2 个对话无法读取，未放进备份。"],
+      [
+        "已恢复 1 个对话。",
+        "3 个对话已在本机，已跳过。",
+        "2 个对话与本机已有的内容不同或正在使用，已保留本机的版本。",
+      ],
+    ],
+    [
+      "ja",
+      [
+        "3 件の会話をバックアップしました。",
+        "2 件の会話を読み取れなかったため、バックアップに含まれていません。",
+      ],
+      [
+        "1 件の会話を復元しました。",
+        "3 件の会話は既にこの端末にあるため、スキップしました。",
+        "2 件の会話は、この端末に別の内容で存在するか使用中のため、そのままにしました。",
+      ],
+    ],
+  ])("tells the results in %s", async (language, backed, restored) => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    i18n.addResourceBundle("ja", "translation", ja, true, true);
+    await act(async () => {
+      await i18n.changeLanguage(language);
+    });
+    mocks.backup.mockResolvedValue({ sessions: 3, skipped: 2 });
+    mocks.restore.mockResolvedValue({
+      imported: 1,
+      skipped: 3,
+      conflicts: 2,
+      warning: null,
+    });
+    render(page());
+    const backup = await screen.findByRole("button", {
+      name: i18n.t("assistant.backupTitle"),
+    });
+    await waitFor(() => expect(backup).toBeEnabled());
+    await userEvent.click(backup);
+    for (const line of backed)
+      expect(await screen.findByText(line)).toBeVisible();
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: i18n.t("assistant.restoreBackupTitle"),
+      }),
+    );
+    for (const line of restored)
+      expect(await screen.findByText(line)).toBeVisible();
+  });
+
+  it("refuses with its own message while another conversation sends or imports, and does not open the dialog", async () => {
+    mocks.send.mockImplementation(() => new Promise(() => undefined));
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("A question"));
+    act(() => {
+      void hook.result.current.send();
+    });
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    // Leave for no conversation: the send goes on in the background.
+    act(() => hook.result.current.select(null));
+    await act(async () => {
+      await hook.result.current.transfer("backup");
+    });
+    expect(hook.result.current.error).toBe("assistant_transfer_busy");
+    expect(mocks.backup).not.toHaveBeenCalled();
+    await act(async () => {
+      await hook.result.current.transfer("restore");
+    });
+    expect(hook.result.current.error).toBe("assistant_transfer_busy");
+    expect(mocks.restore).not.toHaveBeenCalled();
+  });
+
+  it("keeps the model the user chose when a restore imported nothing", async () => {
+    mocks.restore.mockResolvedValue({
+      imported: 0,
+      skipped: 2,
+      conflicts: 0,
+      warning: null,
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    act(() => hook.result.current.chooseNewModel("fast"));
+    const reads = mocks.bootstrap.mock.calls.length;
+    await act(async () => {
+      await hook.result.current.transfer("restore");
+    });
+    expect(hook.result.current.newModelId).toBe("fast");
+    expect(mocks.bootstrap).toHaveBeenCalledTimes(reads);
+  });
+
+  it("goes to the conversations when a new unsent draft is saved for a backup from the trash, and is not called trashed", async () => {
+    render(page());
+    await waitFor(() => expect(composer()).toBeEnabled());
+    fireEvent.change(composer(), { target: { value: "Unsent words" } });
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    expect(composer()).toHaveAttribute("readonly");
+    expect(composer()).toHaveValue("Unsent words");
+    await userEvent.click(await backupButton());
+    await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
+    expect(
+      screen.getByRole("button", { name: "Conversations", pressed: true }),
+    ).toBeVisible();
+    await waitFor(() => expect(composer()).not.toHaveAttribute("readonly"));
+    expect(composer()).toHaveValue("Unsent words");
+    expect(
+      screen.queryByText(
+        "This conversation is in the trash. Restore it to continue chatting.",
+      ),
+    ).toBeNull();
+    expect(mocks.updateSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ deleted: true }),
+    );
+  });
+});
+
+describe("when the totals of all conversations are read", () => {
+  const runEnd = () =>
+    act(() =>
+      mocks.listener?.({
+        sessionId: "background",
+        runId: "run",
+        operationId: "operation",
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
+
+  it("reads them once for the page, not for a search or a switch of the list", async () => {
+    render(page());
+    await screen.findByRole("button", { name: /My conversation/ });
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
+    await userEvent.type(
+      screen.getByRole("searchbox", { name: "Search conversations" }),
+      "notes",
+    );
+    await waitFor(() =>
+      expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await waitFor(() =>
+      expect(mocks.listSessions).toHaveBeenLastCalledWith(true, "notes"),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Conversations" }),
+    );
+    await waitFor(() =>
+      expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
+    );
+    expect(mocks.usageSummary).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads them again when a run ends, and when sign-in is restored", async () => {
+    render(page());
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
+    runEnd();
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(2));
+    act(() => mocks.auth?.("restored"));
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(3));
+  });
+
+  it("reads them again after a restore that imported conversations, not after one that did not", async () => {
+    mocks.restore
+      .mockResolvedValueOnce({
+        imported: 0,
+        skipped: 1,
+        conflicts: 0,
+        warning: null,
+      })
+      .mockResolvedValueOnce({
+        imported: 1,
+        skipped: 0,
+        conflicts: 0,
+        warning: null,
+      });
+    render(page());
+    const restore = await screen.findByRole("button", {
+      name: "Restore conversations from backup",
+    });
+    await waitFor(() => expect(restore).toBeEnabled());
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
+    await userEvent.click(restore);
+    await screen.findByText("1 conversation was already on this device.");
+    expect(mocks.usageSummary).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(restore).toBeEnabled());
+    await userEvent.click(restore);
+    await screen.findByText("Restored 1 conversation.");
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(2));
+  });
+
+  it("reads them again after a conversation is deleted for good", async () => {
+    current.session.deletedAt = 10;
+    mocks.listSessions.mockImplementation(async (deleted = false) =>
+      listOf(
+        Boolean(current.session.deletedAt) === deleted ? [current.session] : [],
+      ),
+    );
+    render(page());
+    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete permanently" }),
+    );
+    const reads = mocks.usageSummary.mock.calls.length;
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Delete permanently",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.usageSummary.mock.calls.length).toBeGreaterThan(reads),
+    );
+  });
+});
+
+describe("focus after a button's action is over", () => {
+  // A browser drops the focus of a button that is disabled while its action
+  // runs; jsdom doesn't, and can't blur a disabled button, so move it to the
+  // body instead.
+  const dropFocus = () => {
+    document.body.tabIndex = -1;
+    document.body.focus();
+    document.body.removeAttribute("tabindex");
+    expect(document.body).toHaveFocus();
+  };
+
+  it.each([
+    ["Export Markdown", "exportMarkdown", false, "assistant_export_failed"],
+    ["Back up all conversations", "backup", null, "assistant_backup_failed"],
+    [
+      "Restore conversations from backup",
+      "restore",
+      null,
+      "assistant_backup_invalid",
+    ],
+  ] as const)(
+    "gives it back to %s once the action was cancelled or failed",
+    async (name, command, cancelled, failure) => {
+      await openConversation();
+      for (const outcome of [() => cancelled, () => Promise.reject(failure)]) {
+        mocks[command].mockImplementationOnce(async () => {
+          dropFocus();
+          return outcome();
+        });
+        const button = screen.getByRole("button", { name });
+        const calls = mocks[command].mock.calls.length;
+        await userEvent.click(button);
+        await waitFor(() =>
+          expect(mocks[command]).toHaveBeenCalledTimes(calls + 1),
+        );
+        await waitFor(() => expect(button).toBeEnabled());
+        await waitFor(() => expect(button).toHaveFocus());
+      }
+    },
+  );
+
+  it("gives it back to Move to trash when moving the conversation failed", async () => {
+    await openConversation();
+    mocks.updateSession.mockImplementation(async (patch) => {
+      if (patch.deleted === undefined) return current.session;
+      dropFocus();
+      throw "assistant_storage_unavailable";
+    });
+    const button = screen.getByRole("button", { name: "Move to trash" });
+    await userEvent.click(button);
+    await screen.findByRole("alert");
+    await waitFor(() => expect(button).toBeEnabled());
+    await waitFor(() => expect(button).toHaveFocus());
+  });
+
+  it("leaves focus where the user has put it meanwhile", async () => {
+    await openConversation();
+    mocks.exportMarkdown.mockImplementation(async () => {
+      composer().focus();
+      return false;
+    });
+    const button = screen.getByRole("button", { name: "Export Markdown" });
+    await userEvent.click(button);
+    await waitFor(() => expect(mocks.exportMarkdown).toHaveBeenCalled());
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(composer()).toHaveFocus();
+  });
+});
+
+describe("a pick that imported files", () => {
+  it("keeps the conversation it created when saving the draft after the import fails", async () => {
+    const pdf: AssistantAttachment = {
+      id: "file-pdf",
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      sizeBytes: 2048,
+      status: "ready",
+      reason: null,
+      previewUrl: null,
+      details: null,
+    };
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    mocks.createSession.mockImplementation(async (request) => ({
+      ...session,
+      title: "",
+      ...request,
+    }));
+    mocks.updateSession.mockImplementation(async (patch) => {
+      if (patch.draftAttachmentIds?.length)
+        throw "assistant_storage_unavailable";
+      return current.session;
+    });
+    mocks.pickAttachments.mockResolvedValueOnce([pdf]);
+    render(page());
+    const attach = screen.getByRole("button", { name: "Attach files" });
+    await waitFor(() => expect(attach).toBeEnabled());
+    await userEvent.click(attach);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "couldn't be read or saved",
+    );
+    expect(mocks.updateSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ deleted: true }),
+    );
+    expect(
+      within(composer().closest("footer") as HTMLElement).getByRole("list", {
+        name: "Attached files",
+      }),
+    ).toHaveTextContent("report.pdf");
   });
 });

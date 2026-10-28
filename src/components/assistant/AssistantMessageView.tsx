@@ -347,8 +347,10 @@ export function AssistantMessageView({
           {progress && statusLine(progress, "mt-2")}
         </>
       )}
+      {/* Plain text: a live failure was already announced by the page's
+          banner, and opening a conversation must not announce its old ones. */}
       {message.status === "error" && message.errorCode && (
-        <p role="alert" className="mt-2 text-ctl text-danger">
+        <p className="mt-2 text-ctl text-danger">
           {t(assistantErrorKey(message.errorCode))}
         </p>
       )}

@@ -105,6 +105,39 @@ fn message(value: &Value) -> bool {
     }
 }
 
+/// The history as a backup archives it: the header's working folder (an
+/// absolute path that names the user) is blanked and a fork's parent session
+/// file is dropped. The runtime sets its own working folder when it opens the
+/// history. Every other byte is kept.
+pub(super) fn portable(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
+    // The header is the first line that is not blank, as `validate` reads it.
+    let mut start = 0;
+    let end = loop {
+        let end = bytes[start..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(bytes.len(), |at| start + at);
+        if !bytes[start..end].trim_ascii().is_empty() {
+            break end;
+        }
+        if end == bytes.len() {
+            return Err(INVALID.into());
+        }
+        start = end + 1;
+    };
+    let mut header: Value = serde_json::from_slice(&bytes[start..end]).map_err(|_| INVALID)?;
+    let fields = header.as_object_mut().ok_or(INVALID)?;
+    if fields.get("cwd").is_some_and(|cwd| cwd == "") && !fields.contains_key("parentSession") {
+        return Ok(bytes);
+    }
+    fields.insert("cwd".into(), Value::String(String::new()));
+    fields.shift_remove("parentSession");
+    let mut out = bytes[..start].to_vec();
+    out.extend(serde_json::to_vec(&header).map_err(|_| INVALID)?);
+    out.extend_from_slice(&bytes[end..]);
+    Ok(out)
+}
+
 pub(super) fn validate(
     bytes: &[u8],
     record: &SessionRecord,

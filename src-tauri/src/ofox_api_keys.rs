@@ -848,6 +848,24 @@ fn save_assistant_key(
         .map_err(|e| ApiKeyError::Storage(format!("settings: {e:?}")))
 }
 
+/// `owner` 能用的助手 key 原文：只读本机记录和钥匙串，不访问网络、不签发。助手备份和导出
+/// 用它把对话里出现的这把 key 抹掉。没有记录、不是这个账号的或已停用时返回 `None`。
+pub fn stored_assistant_key(owner: &KeyOwner) -> Result<Option<String>, ApiKeyError> {
+    stored_assistant_key_in(&default_store(), owner)
+}
+
+fn stored_assistant_key_in(
+    store: &Arc<dyn SecretStore>,
+    owner: &KeyOwner,
+) -> Result<Option<String>, ApiKeyError> {
+    match settings::get_assistant_key_meta() {
+        Some(meta) if meta.usable_by(Some(owner)) => {
+            store.load(Slot::AssistantKey).map_err(ApiKeyError::Storage)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// 助手 key 的状态，`current` 是当前登录的账号。只看 settings.json 里的记录：
 /// 不访问网络，也不读钥匙串（不会因此弹系统授权框）。
 pub fn assistant_key_status(current: Option<&KeyOwner>) -> AssistantKeyStatus {
@@ -1810,6 +1828,34 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(assistant_key_status(Some(&a)), AssistantKeyStatus::Missing);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn the_stored_assistant_key_is_read_only_for_its_live_account() {
+        let _home = TempSettingsHome::new();
+        let store: Arc<dyn SecretStore> = Arc::new(InMemoryStore::new());
+        let a = owner_of("org_a");
+        assert_eq!(stored_assistant_key_in(&store, &a).unwrap(), None);
+        keep_assistant_key(
+            &store,
+            "sk-of-A",
+            assistant_record("assistant-a", Some(a.clone())),
+        );
+        assert_eq!(
+            stored_assistant_key_in(&store, &a).unwrap().as_deref(),
+            Some("sk-of-A")
+        );
+        assert_eq!(
+            stored_assistant_key_in(&store, &owner_of("org_b")).unwrap(),
+            None
+        );
+        settings::set_assistant_key_meta(Some(AssistantKeyMeta {
+            revoked: true,
+            ..assistant_record("assistant-a", Some(a.clone()))
+        }))
+        .unwrap();
+        assert_eq!(stored_assistant_key_in(&store, &a).unwrap(), None);
     }
 
     #[tokio::test]

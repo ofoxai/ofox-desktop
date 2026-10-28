@@ -84,7 +84,11 @@ pub fn import(
         return Ok(vec![]);
     }
     store.with_attachment_lock(sid, || {
-        store.cleanup_orphans_locked(sid)?;
+        // Best effort, as after an update: a leftover copy is in no record,
+        // so one that cannot be removed must not block new files.
+        if let Err(error) = store.cleanup_orphans_locked(sid) {
+            log::warn!("[Assistant] could not remove unused attachment copies: {error}");
+        }
         stage(store, sid, sources)?.commit(store, sid, precondition)
     })
 }
@@ -634,6 +638,26 @@ mod tests {
             import(&store, &id(), &[source], ok).unwrap_err(),
             "assistant_session_not_found"
         );
+    }
+
+    /// A copy no record lists that cannot be removed (here: flagged
+    /// immutable) is logged and left; it must not block new files.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_leftover_copy_that_cannot_be_removed_does_not_block_an_import() {
+        let (config, store, sid) = fixture();
+        let leftover = store.attachment_dir(&sid).unwrap().join(id());
+        fs::write(&leftover, b"left by a crash").unwrap();
+        let name = std::ffi::CString::new(leftover.to_str().unwrap()).unwrap();
+        assert_eq!(
+            unsafe { libc::chflags(name.as_ptr(), libc::UF_IMMUTABLE) },
+            0
+        );
+        let source = file(config.path(), "new.txt", b"new");
+        let imported = import(&store, &sid, &[source], ok);
+        unsafe { libc::chflags(name.as_ptr(), 0) };
+        assert_eq!(imported.unwrap().len(), 1);
+        assert!(leftover.exists());
     }
 
     #[cfg(unix)]

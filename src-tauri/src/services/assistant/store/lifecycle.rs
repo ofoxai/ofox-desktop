@@ -40,10 +40,12 @@ impl AssistantStore {
                 if record.session.active_run.is_some() {
                     return Err("assistant_session_busy".into());
                 }
+                // An earlier deletion of this id never finished, and the
+                // conversation was restored since: its old copy goes first.
                 if real_dir(&tombstone)? {
-                    return Err(INVALID_PATH.into());
+                    fs::remove_dir_all(&tombstone).map_err(|_| UNAVAILABLE)?;
                 }
-                fs::rename(&source, &tombstone).map_err(|_| UNAVAILABLE)?;
+                crate::config::rename_dir(&source, &tombstone).map_err(|_| UNAVAILABLE)?;
             } else if !real_dir(&tombstone)? {
                 return Err(NOT_FOUND.into());
             }
@@ -51,6 +53,17 @@ impl AssistantStore {
             // itself must be a real directory, including on Windows.
             remove(&tombstone).map_err(|_| DELETE_PENDING.to_string())
         })
+    }
+
+    /// Remove what an interrupted deletion of `sid` left: an old copy no
+    /// record points at, even when the conversation was restored since.
+    /// Requires the attachment lock. A link in its place is refused.
+    pub(super) fn finish_pending_delete(&self, sid: &str) -> Result<(), String> {
+        let tombstone = self.root.join(format!("{DELETING}{sid}"));
+        if real_dir(&tombstone)? {
+            fs::remove_dir_all(&tombstone).map_err(|_| DELETE_PENDING)?;
+        }
+        Ok(())
     }
 
     /// Retry only this store's well-formed tombstones, never foreign names or
@@ -78,15 +91,7 @@ impl AssistantStore {
             if validate_id(sid).is_err() {
                 continue;
             }
-            let result = self.with_attachment_lock(sid, || {
-                if real_dir(&self.root.join(sid))? {
-                    return Err(INVALID_PATH.into());
-                }
-                if real_dir(&entry.path())? {
-                    fs::remove_dir_all(entry.path()).map_err(|_| DELETE_PENDING)?;
-                }
-                Ok(())
-            });
+            let result = self.with_attachment_lock(sid, || self.finish_pending_delete(sid));
             if let Err(error) = result {
                 failure.get_or_insert(error);
             }
@@ -196,6 +201,30 @@ mod tests {
         store.cleanup_deleted().unwrap();
         assert!(!tombstone.exists());
         assert!(foreign.is_dir());
+    }
+
+    #[test]
+    fn an_old_tombstone_of_the_same_id_does_not_block_deleting_it_again() {
+        let (_temp, store, sid) = fixture();
+        // Left by an earlier deletion of this id; the conversation came back
+        // from a backup since.
+        let tombstone = store.root.join(format!(".deleting-{sid}"));
+        fs::create_dir(&tombstone).unwrap();
+        fs::write(tombstone.join("leftover"), b"old copy").unwrap();
+        trash(&store, &sid);
+        store.delete_trashed(&sid, || Ok(())).unwrap();
+        assert_eq!(fs::read_dir(&store.root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn startup_removes_a_tombstone_beside_a_restored_conversation() {
+        let (_temp, store, sid) = fixture();
+        let tombstone = store.root.join(format!(".deleting-{sid}"));
+        fs::create_dir(&tombstone).unwrap();
+        fs::write(tombstone.join("leftover"), b"old copy").unwrap();
+        store.cleanup_deleted().unwrap();
+        assert!(!tombstone.exists());
+        assert!(store.load_record(&sid).is_ok());
     }
 
     #[cfg(unix)]

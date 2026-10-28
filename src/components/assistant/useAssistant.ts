@@ -3,6 +3,7 @@ import {
   assistantApi,
   assistantErrorCode,
   type AssistantAttachment,
+  type AssistantBackupReport,
   type AssistantBootstrap,
   type AssistantEvent,
   type AssistantMessage,
@@ -18,9 +19,16 @@ import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
+/** A backup or restore refused because a reply or a file import is going on. */
+const TRANSFER_BUSY = "assistant_transfer_busy";
 
 /** A backend or renderer error code; the page turns it into a localized message. */
 export type AssistantError = string;
+
+/** What the last backup or restore did, for the page to tell. */
+export type AssistantTransferResult =
+  | ({ kind: "backup" } & AssistantBackupReport)
+  | ({ kind: "restore" } & AssistantRestoreReport);
 
 /** What a running reply is doing, as the user is told; never a tool's name. */
 export type AssistantActivity = "searching" | "readingPage" | "readingFile";
@@ -47,7 +55,6 @@ interface RunSearch {
   got: boolean | null;
 }
 
-/** A conversation's draft as last saved; `files` unknown until read or written. */
 interface DraftWriteScope {
   held: boolean;
 }
@@ -57,6 +64,7 @@ interface PendingSend extends AssistantRunRef {
   cancelled: boolean;
 }
 
+/** A conversation's draft as last saved; `files` unknown until read or written. */
 interface SavedDraft {
   text: string;
   files?: string[];
@@ -122,20 +130,21 @@ export function useAssistant(enabled: boolean) {
   const [operationBusy, setBusy] = useState(false);
   const [transferring, setTransferring] = useState(false);
   const transferInFlight = useRef(false);
-  const [transferResult, setTransferResult] = useState<
-    { kind: "backup" } | ({ kind: "restore" } & AssistantRestoreReport) | null
-  >(null);
+  const [transferResult, setTransferResult] =
+    useState<AssistantTransferResult | null>(null);
   const busy = operationBusy || transferring;
   const [connected, setConnected] = useState(false);
   const mounted = useRef(false);
   const epoch = useRef(0);
   const listSequence = useRef(0);
+  const usageSequence = useRef(0);
   const detailSequence = useRef(0);
   const selectionSequence = useRef(0);
   const updateSequence = useRef(0);
   const draftSequence = useRef(0);
   const createdSession = useRef<string | null>(null);
   const selectedRef = useRef(selectedId);
+  const showTrashRef = useRef(showTrash);
   const runRef = useRef(run);
   const draftRef = useRef(draft);
   const drafts = useRef(new Map<string, string>());
@@ -157,6 +166,7 @@ export function useAssistant(enabled: boolean) {
   const signedOut = useRef(false);
   const reloadAuthority = useRef<() => void>(() => undefined);
   selectedRef.current = selectedId;
+  showTrashRef.current = showTrash;
   draftRef.current = draft;
 
   const setNewWebSearch = useCallback((value: boolean) => {
@@ -317,21 +327,15 @@ export function useAssistant(enabled: boolean) {
       if (signedOut.current || generation !== epoch.current) return;
       const sequence = ++listSequence.current;
       try {
-        const [listed, usage] = await Promise.allSettled([
-          assistantApi.listSessions(showTrash, search),
-          assistantApi.usageSummary(),
-        ]);
+        const listed = await assistantApi.listSessions(showTrash, search);
         if (
           !mounted.current ||
           generation !== epoch.current ||
           sequence !== listSequence.current
         )
           return;
-        setTotalUsage(usage.status === "fulfilled" ? usage.value : null);
-        setUsageUnavailable(usage.status === "rejected");
-        if (listed.status === "rejected") throw listed.reason;
-        setSessions(listed.value.sessions);
-        setUnreadable(listed.value.unreadable);
+        setSessions(listed.sessions);
+        setUnreadable(listed.unreadable);
       } catch (reason) {
         if (sequence === listSequence.current && generation === epoch.current)
           showError(reason);
@@ -339,6 +343,33 @@ export function useAssistant(enabled: boolean) {
     },
     [search, showTrash, showError],
   );
+  // The totals cover every conversation, trash included, so only what changes
+  // them reads them again: a run ending, a restore, a delete, a sign-in.
+  // Searching and switching the list change nothing of them.
+  const refreshUsage = useCallback(async (generation = epoch.current) => {
+    if (signedOut.current || generation !== epoch.current) return;
+    const sequence = ++usageSequence.current;
+    try {
+      const usage = await assistantApi.usageSummary();
+      if (
+        !mounted.current ||
+        generation !== epoch.current ||
+        sequence !== usageSequence.current
+      )
+        return;
+      setTotalUsage(usage);
+      setUsageUnavailable(false);
+    } catch {
+      if (
+        mounted.current &&
+        generation === epoch.current &&
+        sequence === usageSequence.current
+      ) {
+        setTotalUsage(null);
+        setUsageUnavailable(true);
+      }
+    }
+  }, []);
   refreshSessionsRef.current = refreshSessions;
 
   const refreshDetail = useCallback(
@@ -488,6 +519,7 @@ export function useAssistant(enabled: boolean) {
         if (state === "restored") {
           void loadBootstrap();
           void refreshSessionsRef.current();
+          void refreshUsage();
         }
       })
       .then((off) => (disposed ? off() : cleanup.push(off)))
@@ -500,6 +532,7 @@ export function useAssistant(enabled: boolean) {
   }, [
     enabled,
     loadBootstrap,
+    refreshUsage,
     setAttachments,
     setDraft,
     setNewWebSearch,
@@ -507,6 +540,10 @@ export function useAssistant(enabled: boolean) {
     setRunSearch,
     showError,
   ]); // List refresh uses its current request fencing separately.
+
+  useEffect(() => {
+    if (enabled) void refreshUsage();
+  }, [enabled, refreshUsage]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -609,8 +646,10 @@ export function useAssistant(enabled: boolean) {
         // asks for is fenced on it.
         const generation = epoch.current;
         if (event.type === "run_start") {
+          // The saved totals are not final while a run goes on.
           setTotalUsage(null);
           void refreshSessionsRef.current(generation);
+          void refreshUsage(generation);
         }
         const current = runRef.current;
         if (
@@ -622,8 +661,10 @@ export function useAssistant(enabled: boolean) {
           // A run this view no longer follows (another conversation, or one
           // left behind) still changes the history's "Replying…" marks.
           // `run_end` is always its last event, also after an `error`.
-          if (event.type === "run_end")
+          if (event.type === "run_end") {
             void refreshSessionsRef.current(generation);
+            void refreshUsage(generation);
+          }
           return;
         }
         // session and event types this build does not know change nothing
@@ -763,6 +804,7 @@ export function useAssistant(enabled: boolean) {
                 setStream(null);
             });
             void refreshSessionsRef.current(generation);
+            void refreshUsage(generation);
             return;
         }
       })
@@ -779,7 +821,7 @@ export function useAssistant(enabled: boolean) {
       off?.();
       setConnected(false);
     };
-  }, [enabled, refreshDetail, setRun, setRunSearch, showError]);
+  }, [enabled, refreshDetail, refreshUsage, setRun, setRunSearch, showError]);
 
   const select = useCallback(
     (id: string | null) => {
@@ -842,15 +884,26 @@ export function useAssistant(enabled: boolean) {
     ],
   );
 
+  /**
+   * Show the trash or the conversations: none of the other list stays on
+   * screen, and no read of it still on its way is applied, while the list of
+   * this one is read (the view changing reads it).
+   */
+  const switchList = useCallback((deleted: boolean) => {
+    listSequence.current += 1;
+    setSessions([]);
+    setUnreadable([]);
+    showTrashRef.current = deleted;
+    setShowTrash(deleted);
+  }, []);
+
   const viewTrash = useCallback(
     (deleted: boolean) => {
       if (transferInFlight.current || deleted === showTrash) return;
       select(null);
-      listSequence.current += 1;
-      setSessions([]);
-      setShowTrash(deleted);
+      switchList(deleted);
     },
-    [select, showTrash],
+    [select, showTrash, switchList],
   );
 
   const ensureSession = useCallback(async () => {
@@ -879,7 +932,7 @@ export function useAssistant(enabled: boolean) {
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessionsRef.current();
     return value;
-  }, [detail, newModelId, refreshSessions, setNewWebSearch]);
+  }, [detail, newModelId, setNewWebSearch]);
 
   const create = useCallback(async () => {
     if (busy) return;
@@ -938,7 +991,7 @@ export function useAssistant(enabled: boolean) {
           showError(reason);
       }
     },
-    [refreshSessions, showError],
+    [showError],
   );
 
   const setDeleted = useCallback(
@@ -963,8 +1016,11 @@ export function useAssistant(enabled: boolean) {
         });
         if (generation !== epoch.current) return false;
         if (selectedRef.current === sid) select(null);
-        if (!deleted) setShowTrash(false);
-        void refreshSessionsRef.current();
+        // Restored, the conversation goes back to the conversations view, whose
+        // list is read once the view has changed: reading the trash now would
+        // flash the restored conversation among the trashed ones.
+        if (!deleted && showTrashRef.current) switchList(false);
+        else void refreshSessionsRef.current();
         if (saved.cleanupWarning) showError(saved.cleanupWarning);
         return true;
       } catch (reason) {
@@ -978,7 +1034,7 @@ export function useAssistant(enabled: boolean) {
           setBusy(false);
       }
     },
-    [busy, loading, persistDraft, select, refreshSessions, showError],
+    [busy, loading, persistDraft, select, switchList, showError],
   );
 
   const deleteSession = useCallback(async () => {
@@ -1014,11 +1070,15 @@ export function useAssistant(enabled: boolean) {
       if (generation !== epoch.current) return false;
       forget();
       void refreshSessionsRef.current();
+      void refreshUsage(generation);
       return true;
     } catch (reason) {
       if (generation === epoch.current) {
         // The namespace move succeeded; only disk removal needs a retry.
-        if (assistantErrorCode(reason) === "assistant_delete_pending") forget();
+        if (assistantErrorCode(reason) === "assistant_delete_pending") {
+          forget();
+          void refreshUsage(generation);
+        }
         void refreshSessionsRef.current();
         showError(reason);
       }
@@ -1029,7 +1089,7 @@ export function useAssistant(enabled: boolean) {
         if (!selectedRef.current || selectedRef.current === sid) setBusy(false);
       }
     }
-  }, [busy, loading, select, refreshSessions, showError]);
+  }, [busy, loading, select, refreshUsage, showError]);
 
   const transfer = useCallback(
     async (kind: "backup" | "restore") => {
@@ -1052,15 +1112,21 @@ export function useAssistant(enabled: boolean) {
       setTransferResult(null);
       setError(null);
       try {
+        // Another conversation is sending, or importing files: a backup or
+        // restore now would meet it half done.
         if ([...draftScopes.current.values()].some((scope) => scope.held))
-          throw new Error("assistant_session_busy");
+          throw new Error(TRANSFER_BUSY);
         // A new unsent composer has no store record yet. Preserve it too, even
         // when the user subsequently cancels the file dialog.
         if (
           !selectedRef.current &&
           (draftRef.current.trim() || attachmentsRef.current.length)
-        )
+        ) {
+          // Its record is an active conversation, not one in the trash the
+          // page may be showing: show the conversations.
+          if (showTrashRef.current) switchList(false);
           await ensureSession();
+        }
         for (const [sid, text] of drafts.current) {
           if (!current()) return;
           if (
@@ -1070,7 +1136,7 @@ export function useAssistant(enabled: boolean) {
               attachmentDrafts.current.get(sid)?.map((file) => file.id),
             ))
           )
-            throw new Error("assistant_session_busy");
+            throw new Error(TRANSFER_BUSY);
         }
         if (!current()) return;
         const request = {
@@ -1078,23 +1144,28 @@ export function useAssistant(enabled: boolean) {
           expectedGeneration: identity.authorityGeneration,
         };
         if (kind === "backup") {
-          const saved = await assistantApi.backup(request);
-          if (current() && saved) setTransferResult({ kind });
+          const report = await assistantApi.backup(request);
+          if (current() && report) setTransferResult({ kind, ...report });
         } else {
           const report = await assistantApi.restore(request);
           if (!current() || !report) return;
           setTransferResult({ kind, ...report });
-          // An empty profile may have acquired its model preference from the
-          // archive. Read it before the next create can overwrite it.
-          const restored = await loadBootstrap();
-          if (!current()) return;
-          setChosenModel(null);
-          if (!restored) {
-            // Do not let an old default overwrite the restored preference
-            // while its refresh is unavailable. A refresh can retry the read.
-            bootstrapRef.current = null;
-            setBootstrap(null);
-            return;
+          // Only conversations that came in change the totals, and an empty
+          // profile may have acquired its model preference from the archive.
+          // Read it before the next create can overwrite it; a restore that
+          // imported nothing leaves the user's own choice alone.
+          if (report.imported > 0) {
+            void refreshUsage(generation);
+            const restored = await loadBootstrap();
+            if (!current()) return;
+            setChosenModel(null);
+            if (!restored) {
+              // Do not let an old default overwrite the restored preference
+              // while its refresh is unavailable. A refresh can retry the read.
+              bootstrapRef.current = null;
+              setBootstrap(null);
+              return;
+            }
           }
           await refreshSessionsRef.current();
           if (!current()) return;
@@ -1117,6 +1188,8 @@ export function useAssistant(enabled: boolean) {
       persistDraft,
       loadBootstrap,
       refreshDetail,
+      refreshUsage,
+      switchList,
       showError,
     ],
   );
@@ -1210,18 +1283,14 @@ export function useAssistant(enabled: boolean) {
       const fromComposer = options?.text === undefined;
       const revision = Boolean(editMessageId || regenerateMessageId);
       // A regenerate reads its turn's own files again. An edit or a question
-      // sent again carries its files, leaving out those that can't be read;
-      // the composer's files are sent only when all of them can be.
+      // sent again carries the files its caller chose, leaving out those that
+      // can't be read; the composer's files are sent only when all of them can
+      // be.
       const chosen = regenerateMessageId
         ? []
-        : editMessageId
-          ? (options?.attachments ??
-            detail?.messages.find((message) => message.id === editMessageId)
-              ?.attachments ??
-            [])
-          : fromComposer
-            ? attachmentsRef.current
-            : (options?.attachments ?? []);
+        : fromComposer
+          ? attachmentsRef.current
+          : (options?.attachments ?? []);
       const files = fromComposer ? chosen : chosen.filter(isSendable);
       // What the run reads first: a regenerate reads its question's files.
       const regenerated = regenerateMessageId
@@ -1449,7 +1518,7 @@ export function useAssistant(enabled: boolean) {
       });
       void refreshSessionsRef.current();
     },
-    [select, setDraft, refreshSessions],
+    [select, setDraft],
   );
 
   /**
@@ -1473,6 +1542,8 @@ export function useAssistant(enabled: boolean) {
     const creates = !selectedRef.current;
     let sessionId: string | undefined;
     let scope: DraftWriteScope | undefined;
+    // Files are in the conversation: it is no longer empty.
+    let imported = false;
     const current = () =>
       mounted.current &&
       generation === epoch.current &&
@@ -1500,6 +1571,7 @@ export function useAssistant(enabled: boolean) {
         if (creates && current()) await discardCreated(id).catch(showError);
         return;
       }
+      imported = true;
       const existing = attachmentDrafts.current.get(id) ?? [];
       const files = [
         ...existing,
@@ -1552,7 +1624,10 @@ export function useAssistant(enabled: boolean) {
           : selection !== selectionSequence.current)
       )
         return;
-      const created = creates && sessionId && current() ? sessionId : null;
+      // A failure after the import (saving the draft) keeps the conversation
+      // that holds the files; only one that is still empty goes to the trash.
+      const created =
+        creates && !imported && sessionId && current() ? sessionId : null;
       const discarding = created ? discardCreated(created) : null;
       showError(reason);
       await discarding?.catch(showError);
@@ -1667,6 +1742,7 @@ export function useAssistant(enabled: boolean) {
     send,
     stop,
     refreshSessions,
+    refreshUsage,
     refreshDetail,
     loadBootstrap,
     showError,

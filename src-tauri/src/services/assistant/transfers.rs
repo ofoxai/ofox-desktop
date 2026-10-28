@@ -1,7 +1,7 @@
 //! Native file transfers are bound to the account confirmed by the renderer.
 use super::{
-    host::{blocking, scrub_secrets, AssistantHost, IDENTITY_CHANGED},
-    store::RestoreReport,
+    host::{blocking, scrub_secrets, AssistantHost, Identity, IDENTITY_CHANGED},
+    store::{BackupReport, RestoreReport, TRANSFER_BUSY},
     types::{validate_id, ExportMarkdownRequest, TransferRequest},
 };
 use std::{
@@ -42,7 +42,7 @@ impl AssistantHost {
     async fn transfer_identity(
         &self,
         request: &TransferRequest,
-    ) -> Result<(super::host::Identity, u64), String> {
+    ) -> Result<(Identity, u64), String> {
         let identity = self.identity().await?;
         let generation = self.generation();
         if identity.owner != request.expected_owner || generation != request.expected_generation {
@@ -51,27 +51,53 @@ impl AssistantHost {
         Ok((identity, generation))
     }
 
+    /// No transfer while one of this owner's replies runs: its conversation
+    /// is being written. Each conversation is checked again under its lock.
+    fn ensure_no_reply(&self, owner: &str) -> Result<(), String> {
+        if self.has_live_run(owner) {
+            return Err(TRANSFER_BUSY.into());
+        }
+        Ok(())
+    }
+
+    /// The keys a file leaving the app must not hold: every key this process
+    /// handed to a run, and the account's stored assistant key.
+    async fn transfer_secrets(&self, identity: &Identity) -> Vec<String> {
+        let mut secrets = self.known_keys();
+        if let Some(key) = self.env.stored_key(identity).await {
+            if !secrets.contains(&key) {
+                secrets.push(key);
+            }
+        }
+        secrets
+    }
+
+    /// `None` when the dialog was cancelled.
     pub async fn backup(
         self: &Arc<Self>,
         request: TransferRequest,
         pick: impl FnOnce() -> Result<Option<PathBuf>, String> + Send + 'static,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<BackupReport>, String> {
         let (identity, generation) = self.transfer_identity(&request).await?;
+        self.ensure_no_reply(&identity.owner)?;
         let Some(path) = blocking(pick).await? else {
-            return Ok(false);
+            return Ok(None);
         };
         self.ensure_current(&identity, generation).await?;
+        let secrets = self.transfer_secrets(&identity).await;
         let host = self.clone();
         blocking(move || {
+            host.ensure_no_reply(&identity.owner)?;
             let store = host.store(&identity.owner)?;
-            store.backup(&path, &host.known_keys(), || {
-                if host.generation() != generation {
-                    Err(IDENTITY_CHANGED.into())
-                } else {
-                    Ok(())
-                }
-            })?;
-            Ok(true)
+            store
+                .backup(&path, &secrets, || {
+                    if host.generation() != generation {
+                        Err(IDENTITY_CHANGED.into())
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map(Some)
         })
         .await
     }
@@ -82,15 +108,18 @@ impl AssistantHost {
         pick: impl FnOnce() -> Result<Option<PathBuf>, String> + Send + 'static,
     ) -> Result<Option<RestoreReport>, String> {
         let (identity, generation) = self.transfer_identity(&request).await?;
+        self.ensure_no_reply(&identity.owner)?;
         let Some(path) = blocking(pick).await? else {
             return Ok(None);
         };
         self.ensure_current(&identity, generation).await?;
+        let secrets = self.transfer_secrets(&identity).await;
         let host = self.clone();
         blocking(move || {
+            host.ensure_no_reply(&identity.owner)?;
             let store = host.store(&identity.owner)?;
             store
-                .restore(&path, &host.known_keys(), || {
+                .restore(&path, &secrets, || {
                     if host.generation() != generation {
                         Err(IDENTITY_CHANGED.into())
                     } else {
@@ -132,6 +161,7 @@ impl AssistantHost {
             return Ok(false);
         };
         self.ensure_current(&identity, generation).await?;
+        let secrets = self.transfer_secrets(&identity).await;
         let host = self.clone();
         blocking(move || {
             if host.generation() != generation {
@@ -145,7 +175,7 @@ impl AssistantHost {
                 return Err("assistant_session_busy".into());
             }
             let path = destination(&path, &host.env.config_dir())?;
-            let text = scrub_secrets(&request.markdown, &host.known_keys());
+            let text = scrub_secrets(&request.markdown, &secrets);
             if host.generation() != generation {
                 return Err(IDENTITY_CHANGED.into());
             }

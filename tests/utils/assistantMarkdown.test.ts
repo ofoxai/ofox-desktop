@@ -108,7 +108,9 @@ describe("assistant Markdown export", () => {
     );
     expect(text).toContain("报告\\[1\\].docx");
     expect(text).toContain("Only text was read.");
-    expect(text).toContain("headers, footers, footnotes");
+    expect(text).toContain(
+      "headers, footers, comments and hidden text were not",
+    );
     expect(text).toContain("Continue later");
     expect(text).toContain("not embedded");
     expect(text).not.toMatch(
@@ -117,8 +119,8 @@ describe("assistant Markdown export", () => {
   });
   it("keeps the exact cost and localized uncertain-search reason without internal codes", async () => {
     const text = await render(fixture());
-    expect(text).toContain("0.123456789123456789");
-    expect(text).toContain("2");
+    expect(text).toContain("Estimated cost (USD): 0.123456789123456789");
+    expect(text).toContain("Search charges (included in estimated cost): 2");
     expect(text).toContain("may have been charged");
     expect(text).not.toContain("assistant_search_outcome_unknown");
     const unknown = fixture();

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 
@@ -66,6 +66,51 @@ describe("ConfirmDialog", () => {
     fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
     expect(onCancel).not.toHaveBeenCalled();
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+
+  it("says why the action failed inside the dialog, and puts focus on Cancel", () => {
+    const { rerender } = render(
+      <ConfirmDialog
+        isOpen
+        title="Remove Codex?"
+        message="Its config goes back to how it was."
+        confirmText="Remove"
+        cancelText="Keep"
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("alert")).toBeNull();
+    rerender(
+      <ConfirmDialog
+        isOpen
+        title="Remove Codex?"
+        message="Its config goes back to how it was."
+        confirmText="Remove"
+        cancelText="Keep"
+        error="Codex could not be removed."
+        onConfirm={vi.fn()}
+        onCancel={vi.fn()}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("Codex could not be removed.");
+    expect(screen.getByRole("dialog")).toContainElement(alert);
+    expect(screen.getByRole("button", { name: "Keep" })).toHaveFocus();
+  });
+
+  it("hands focus back through onCloseAutoFocus when it closes", async () => {
+    const onCloseAutoFocus = vi.fn((event: Event) => event.preventDefault());
+    const props = {
+      title: "Remove Codex?",
+      message: "Its config goes back to how it was.",
+      onConfirm: vi.fn(),
+      onCancel: vi.fn(),
+      onCloseAutoFocus,
+    };
+    const { rerender } = render(<ConfirmDialog isOpen {...props} />);
+    rerender(<ConfirmDialog isOpen={false} {...props} />);
+    await waitFor(() => expect(onCloseAutoFocus).toHaveBeenCalledTimes(1));
   });
 
   it("cancels on Escape when not busy", () => {

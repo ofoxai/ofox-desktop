@@ -259,9 +259,22 @@ it("reads aggregate assistant usage through the native host", async () => {
 
 it("binds backup and restore native dialogs to the confirmed account", async () => {
   const request = { expectedOwner: "owner", expectedGeneration: 3 };
-  invoke.mockResolvedValueOnce(false).mockResolvedValueOnce(null);
-  expect(await assistantApi.backup(request)).toBe(false);
+  invoke.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+  expect(await assistantApi.backup(request)).toBeNull();
   expect(await assistantApi.restore(request)).toBeNull();
   expect(invoke).toHaveBeenNthCalledWith(1, "assistant_backup", { request });
   expect(invoke).toHaveBeenNthCalledWith(2, "assistant_restore", { request });
+});
+
+it("passes on what a backup holds and what a restore did", async () => {
+  const request = { expectedOwner: "owner", expectedGeneration: 3 };
+  const restored = { imported: 2, skipped: 1, conflicts: 3, warning: null };
+  invoke
+    .mockResolvedValueOnce({ sessions: 4, skipped: 1 })
+    .mockResolvedValueOnce(restored);
+  expect(await assistantApi.backup(request)).toEqual({
+    sessions: 4,
+    skipped: 1,
+  });
+  expect(await assistantApi.restore(request)).toEqual(restored);
 });

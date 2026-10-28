@@ -4887,6 +4887,7 @@
       "modelRequestFailed": "The model service couldn't complete the reply. Please try again.",
       "sessionLoading": "The conversation is still loading. Please try again shortly.",
       "sessionBusy": "This conversation is still replying. Wait for it to finish or stop it first.",
+      "transferBusy": "A reply or a file import is in progress. Back up or restore when it finishes.",
       "runChanged": "That reply has already started, finished or been replaced. Refresh the conversation.",
       "sessionMissing": "This conversation no longer exists. Refresh the list and try again.",
       "sessionUnreadable": "This conversation's saved file is damaged and can't be opened.",
@@ -5023,7 +5024,7 @@
       "invalidOffice": "This Office file is damaged or isn't a valid docx, xlsx or pptx. Save a new copy and attach it again.",
       "emptyOffice": "No readable text was found. Export as PDF to read images or scanned pages.",
       "legacyDoc": "Word 97–2003 (.doc) is not supported. Save it as docx or PDF.",
-      "officeWordScope": "Only the document body and tables were read; headers, footers, footnotes, endnotes and comments were not."
+      "officeWordScope": "The body, tables, text boxes, footnotes and endnotes were read; headers, footers, comments and hidden text were not."
     },
     "reasoning": "Reasoning",
     "sources": "Sources",
@@ -5075,11 +5076,19 @@
     "usageUnavailable": "Usage could not be loaded. Refresh to try again.",
     "backupTitle": "Back up all conversations",
     "restoreBackupTitle": "Restore conversations from backup",
-    "backupShort": "Backup",
+    "backupShort": "Back up",
     "restoreBackupShort": "Restore",
     "backupHint": "Backups include conversations, earlier message versions and attachments, without API keys. Restore adds missing conversations and preserves existing ones.",
-    "backupSaved": "Backup saved",
-    "restoreSaved_one": "Restored {{imported}} conversations; {{count}} identical conversation skipped.",
-    "restoreSaved_other": "Restored {{imported}} conversations; {{count}} identical conversations skipped."
+    "backupSaved_one": "Backed up {{count}} conversation.",
+    "backupSaved_other": "Backed up {{count}} conversations.",
+    "backupSkipped_one": "{{count}} conversation couldn't be read and was left out of the backup.",
+    "backupSkipped_other": "{{count}} conversations couldn't be read and were left out of the backup.",
+    "restoreImported_one": "Restored {{count}} conversation.",
+    "restoreImported_other": "Restored {{count}} conversations.",
+    "restoreSkipped_one": "{{count}} conversation was already on this device.",
+    "restoreSkipped_other": "{{count}} conversations were already on this device.",
+    "restoreConflicts_one": "{{count}} conversation on this device is different or in use, so it was left unchanged.",
+    "restoreConflicts_other": "{{count}} conversations on this device are different or in use, so they were left unchanged.",
+    "restoreNothing": "The backup has no conversations to restore."
   }
 }

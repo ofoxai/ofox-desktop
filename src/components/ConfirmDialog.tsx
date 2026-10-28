@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -24,6 +24,11 @@ interface ConfirmDialogProps {
   /** The confirmed action is running: both buttons are disabled and the
    *  dialog cannot be dismissed until it settles. */
   busy?: boolean;
+  /** Why the confirmed action failed. Shown, and announced, inside the
+   *  dialog; focus goes to Cancel, which the busy state had disabled. */
+  error?: string;
+  /** Where focus goes once the dialog has closed (default: the trigger). */
+  onCloseAutoFocus?: (event: Event) => void;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -38,10 +43,16 @@ export function ConfirmDialog({
   variant = "destructive",
   zIndex = "alert",
   busy = false,
+  error,
+  onCloseAutoFocus,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const { t } = useTranslation();
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (error) cancelButton.current?.focus();
+  }, [error]);
 
   const IconComponent = variant === "info" ? Info : AlertTriangle;
   const iconClass =
@@ -56,7 +67,11 @@ export function ConfirmDialog({
         }
       }}
     >
-      <DialogContent className="max-w-sm" zIndex={zIndex}>
+      <DialogContent
+        className="max-w-sm"
+        zIndex={zIndex}
+        onCloseAutoFocus={onCloseAutoFocus}
+      >
         <DialogHeader className="gap-2 border-b-0 pb-0 pt-[18px]">
           <DialogTitle className="flex items-center gap-2">
             <IconComponent className={iconClass} />
@@ -67,8 +82,21 @@ export function ConfirmDialog({
           </DialogDescription>
         </DialogHeader>
         {details && <div className="px-[18px] pt-3 text-ctl">{details}</div>}
+        {error && (
+          <p
+            role="alert"
+            className="break-words px-[18px] pt-3 text-ctl text-danger"
+          >
+            {error}
+          </p>
+        )}
         <DialogFooter className="border-t-0 pb-[18px] pt-4">
-          <Button variant="secondary" onClick={onCancel} disabled={busy}>
+          <Button
+            ref={cancelButton}
+            variant="secondary"
+            onClick={onCancel}
+            disabled={busy}
+          >
             {cancelText || t("common.cancel")}
           </Button>
           <Button

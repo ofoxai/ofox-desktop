@@ -36,9 +36,10 @@ pub(super) fn settle_run(
                 "error"
             }
             .into();
-            // Only the host's stable code is saved; never provider error text.
+            // Only the host's stable code is saved; never provider error text
+            // (a saved record refuses anything else, see `store::check_record`).
             message.error_code = error_code
-                .filter(|_| !completed && !stopped)
+                .filter(|code| !completed && !stopped && is_assistant_code(code))
                 .map(str::to_owned);
             message.clone()
         });
@@ -397,17 +398,6 @@ impl AttachmentOutcome {
             "id": self.id, "status": self.status, "code": self.code, "details": self.details,
         })
     }
-}
-
-/// An `assistant_*` code: lowercase letters, digits and underscores.
-fn is_assistant_code(code: &str) -> bool {
-    code.len() <= 100
-        && code.strip_prefix("assistant_").is_some_and(|name| {
-            !name.is_empty()
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-        })
 }
 
 /// Keep a run's outcome for one file: on the conversation's file (its last
@@ -881,6 +871,11 @@ mod tests {
             assert_eq!(settled.messages[0].status, status);
             assert!(settled.messages[0].error_code.is_none());
         }
+        // Anything but an `assistant_*` code would make the record unsavable.
+        let mut settled = record.clone();
+        settle_run(&mut settled, &run, false, false, false, Some("ECONNRESET")).unwrap();
+        assert_eq!(settled.messages[0].status, "error");
+        assert!(settled.messages[0].error_code.is_none());
     }
 
     #[test]

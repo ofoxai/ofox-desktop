@@ -4887,6 +4887,7 @@
       "modelRequestFailed": "モデルサービスが返信を完了できませんでした。もう一度お試しください。",
       "sessionLoading": "会話を読み込み中です。少し待ってからもう一度お試しください。",
       "sessionBusy": "この会話はまだ返信中です。完了を待つか、先に停止してください。",
+      "transferBusy": "返信またはファイルの取り込みが進行中です。完了してからバックアップまたは復元してください。",
       "runChanged": "この返信はすでに開始、完了、または置き換えられています。会話を更新してください。",
       "sessionMissing": "この会話はもう存在しません。一覧を更新してからもう一度お試しください。",
       "sessionUnreadable": "この会話の保存ファイルが破損しているため開けません。",
@@ -4926,7 +4927,7 @@
       "backupTooLarge": "バックアップが上限を超えています（ZIP 512 MiB、展開後 2 GiB、20,000 ファイル）。",
       "backupConflict": "同じ ID で内容の異なる会話があります。既存の会話は保持されています。",
       "backupFailed": "バックアップを読み書きできませんでした。ファイルとディスクの空き容量を確認してください。",
-      "backupContainsKey": "ファイルに管理対象のアシスタント API キーが含まれています。キーを削除してからバックアップまたは復元してください。",
+      "backupContainsKey": "ファイルにアシスタント専用の API キーが含まれています。キーを削除してからバックアップまたは復元してください。",
       "backupOwnerMismatch": "このバックアップは別のアカウントまたは組織のものです。元のアカウントでログインして復元してください。"
     },
     "title": "Ofox アシスタント",
@@ -5023,7 +5024,7 @@
       "invalidOffice": "この Office ファイルは破損しているか、有効な docx、xlsx、pptx ではありません。保存し直してから再度添付してください。",
       "emptyOffice": "読み取れるテキストがありません。画像やスキャンページを読むには PDF に書き出してください。",
       "legacyDoc": "Word 97–2003（.doc）は未対応です。docx または PDF で保存してください。",
-      "officeWordScope": "本文と表のみを読み取りました。ヘッダー、フッター、脚注、後注、コメントは読み取っていません。"
+      "officeWordScope": "本文、表、テキストボックス、脚注、文末脚注を読み取りました。ヘッダー、フッター、コメント、非表示の文字は読み取っていません。"
     },
     "reasoning": "思考過程",
     "sources": "出典",
@@ -5065,8 +5066,8 @@
     "markdownDraft": "未送信の下書き",
     "markdownUsage": "使用量",
     "markdownCache": "キャッシュ読み取り {{read}} · キャッシュ書き込み {{write}} トークン",
-    "markdownCost": "推定費用（USD）：{{cost}}",
-    "markdownSearchCharges": "検索の課金回数（推定費用に含む）：{{count}}",
+    "markdownCost": "推定コスト（USD）：{{cost}}",
+    "markdownSearchCharges": "検索の課金回数（推定コストに含む）：{{count}}",
     "exportMarkdown": "Markdown をエクスポート",
     "markdownSaved": "Markdown を保存しました",
     "allUsage": "すべての会話の使用量",
@@ -5077,9 +5078,17 @@
     "restoreBackupTitle": "バックアップから会話を復元",
     "backupShort": "バックアップ",
     "restoreBackupShort": "復元",
-    "backupHint": "会話、過去のメッセージ版、添付ファイルを含み、API キーは含みません。復元では不足する会話を追加し、既存の会話を保持します。",
-    "backupSaved": "バックアップを保存しました",
-    "restoreSaved_one": "{{imported}} 件の会話を復元し、同一内容の {{count}} 件をスキップしました。",
-    "restoreSaved_other": "{{imported}} 件の会話を復元し、同一内容の {{count}} 件をスキップしました。"
+    "backupHint": "会話、メッセージの以前のバージョン、添付ファイルを含み、API キーは含みません。復元では不足している会話だけを追加し、既存の会話は変更しません。",
+    "backupSaved_one": "{{count}} 件の会話をバックアップしました。",
+    "backupSaved_other": "{{count}} 件の会話をバックアップしました。",
+    "backupSkipped_one": "{{count}} 件の会話を読み取れなかったため、バックアップに含まれていません。",
+    "backupSkipped_other": "{{count}} 件の会話を読み取れなかったため、バックアップに含まれていません。",
+    "restoreImported_one": "{{count}} 件の会話を復元しました。",
+    "restoreImported_other": "{{count}} 件の会話を復元しました。",
+    "restoreSkipped_one": "{{count}} 件の会話は既にこの端末にあるため、スキップしました。",
+    "restoreSkipped_other": "{{count}} 件の会話は既にこの端末にあるため、スキップしました。",
+    "restoreConflicts_one": "{{count}} 件の会話は、この端末に別の内容で存在するか使用中のため、そのままにしました。",
+    "restoreConflicts_other": "{{count}} 件の会話は、この端末に別の内容で存在するか使用中のため、そのままにしました。",
+    "restoreNothing": "バックアップに復元できる会話はありません。"
   }
 }

@@ -244,6 +244,17 @@ pub fn validate_id(value: &str) -> Result<(), String> {
     }
 }
 
+/// An `assistant_*` code: lowercase letters, digits and underscores.
+pub fn is_assistant_code(code: &str) -> bool {
+    code.len() <= 100
+        && code.strip_prefix("assistant_").is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

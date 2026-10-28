@@ -193,9 +193,21 @@ export interface AssistantTransferRequest {
   expectedGeneration: number;
 }
 
+/** What a finished backup holds: `skipped` damaged conversations were left out. */
+export interface AssistantBackupReport {
+  sessions: number;
+  skipped: number;
+}
+
+/**
+ * `imported` conversations are new here; `skipped` were already here and
+ * identical; `conflicts` are here with other content, or in use, and were
+ * left as they are. `warning` is a code for the page's error banner.
+ */
 export interface AssistantRestoreReport {
   imported: number;
   skipped: number;
+  conflicts: number;
   warning: string | null;
 }
 
@@ -325,8 +337,9 @@ export const ASSISTANT_EVENT = "assistant:event";
 export const assistantApi = {
   bootstrap: () => invoke<AssistantBootstrap>("assistant_bootstrap"),
   usageSummary: () => invoke<AssistantUsage>("assistant_usage_summary"),
+  /** `null` when the save dialog was cancelled. */
   backup: (request: AssistantTransferRequest) =>
-    invoke<boolean>("assistant_backup", { request }),
+    invoke<AssistantBackupReport | null>("assistant_backup", { request }),
   restore: (request: AssistantTransferRequest) =>
     invoke<AssistantRestoreReport | null>("assistant_restore", { request }),
   listSessions: (deleted = false, search = "") =>
@@ -396,8 +409,10 @@ export const assistantApi = {
  * Every error code the backend can send (a command rejection, a list row's
  * `error`, a bootstrap reason or a run's `error` event), mapped to its message
  * under `assistant.errors.*`, plus the renderer's own `assistant_session_loading`
- * and `assistant_request_expired`. Codes that mean the same thing to the user
- * share a message. A guard test keeps this list equal to the backend's.
+ * and `assistant_request_expired`. The renderer also raises
+ * `assistant_transfer_busy` when it refuses a backup or restore itself. Codes
+ * that mean the same thing to the user share a message. A guard test keeps
+ * this list equal to the backend's.
  */
 export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_sign_in_required: "signInRequired",
@@ -416,6 +431,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_model_request_failed: "modelRequestFailed",
   assistant_session_loading: "sessionLoading",
   assistant_session_busy: "sessionBusy",
+  assistant_transfer_busy: "transferBusy",
   assistant_operation_already_submitted: "runChanged",
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",

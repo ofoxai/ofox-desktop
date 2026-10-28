@@ -14,7 +14,7 @@
 //! error for that session; it is never read as, or overwritten by, an empty one.
 mod backup;
 mod lifecycle;
-pub use backup::RestoreReport;
+pub use backup::{BackupReport, RestoreReport, TRANSFER_BUSY};
 
 use super::types::*;
 use crate::settings::KeyOwner;
@@ -256,10 +256,13 @@ impl AssistantStore {
         precondition: impl FnOnce() -> Result<(), String>,
     ) -> Result<Session, String> {
         self.with_attachment_lock(&request.session_id, || {
-            let mut session = self.mutate(&request.session_id, |record| {
+            let (mut session, shrank) = self.mutate(&request.session_id, |record| {
                 precondition()?;
                 let previous = record.session.draft_attachment_ids.clone();
                 apply_update(record, request)?;
+                let shrank = previous
+                    .iter()
+                    .any(|id| !record.session.draft_attachment_ids.contains(id));
                 let removed: HashSet<_> = previous
                     .into_iter()
                     .filter(|id| !record.session.draft_attachment_ids.contains(id))
@@ -279,11 +282,12 @@ impl AssistantStore {
                         .attachments
                         .retain(|item| !removed.contains(&item.id));
                 }
-                Ok(record.session.clone())
+                Ok((record.session.clone(), shrank))
             })?;
             // Persist removed references first. A crash can then leave only
             // an unreferenced copy, never a saved draft pointing at a lost file.
-            if self.cleanup_orphans_locked(&request.session_id).is_err() {
+            // Only a draft that dropped files can have left copies to remove.
+            if shrank && self.cleanup_orphans_locked(&request.session_id).is_err() {
                 // The update is durable. Return it so host side effects and
                 // renderer state still follow the committed settings.
                 session.cleanup_warning = Some("assistant_attachment_cleanup_failed".into());
@@ -346,6 +350,7 @@ impl AssistantStore {
             return Ok(0);
         }
         let mut removed = 0;
+        let mut failed = false;
         for entry in fs::read_dir(dir).map_err(|_| "assistant_attachment_cleanup_failed")? {
             let entry = entry.map_err(|_| "assistant_attachment_cleanup_failed")?;
             let name = entry.file_name();
@@ -359,9 +364,20 @@ impl AssistantStore {
                 .file_type()
                 .map_err(|_| "assistant_attachment_cleanup_failed")?;
             if kind.is_file() || kind.is_symlink() {
-                fs::remove_file(entry.path()).map_err(|_| "assistant_attachment_cleanup_failed")?;
-                removed += 1;
+                // One copy that cannot go must not keep the others.
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => removed += 1,
+                    Err(error) => {
+                        log::warn!(
+                            "[Assistant] could not remove an unused attachment copy: {error}"
+                        );
+                        failed = true;
+                    }
+                }
             }
+        }
+        if failed {
+            return Err("assistant_attachment_cleanup_failed".into());
         }
         Ok(removed)
     }
@@ -675,7 +691,28 @@ fn has_content(dir: &Path) -> Result<bool, String> {
     }
 }
 
+/// A saved record for use. A message's `errorCode` that is not an
+/// `assistant_*` code (a hand-edited or foreign file) is dropped: only the
+/// host's stable codes are ever shown or saved.
 fn decode(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
+    let mut record = parse_record(bytes, sid)?;
+    for message in record.messages.iter_mut().filter(|m| unknown_code(m)) {
+        log::warn!("assistant session {sid} has a message with an unknown error code");
+        message.error_code = None;
+    }
+    check_record(&record, sid)?;
+    Ok(record)
+}
+
+/// A saved record exactly as written, for backup and restore: what
+/// [`decode`] would repair makes it invalid instead.
+fn decode_exact(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
+    let record = parse_record(bytes, sid)?;
+    check_record(&record, sid)?;
+    Ok(record)
+}
+
+fn parse_record(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
     let file: SessionFileIn = serde_json::from_slice(bytes).map_err(|error| {
         // Line and column only: the message can quote conversation text.
         log::warn!(
@@ -693,27 +730,42 @@ fn decode(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
         );
         return Err(INVALID_SESSION.into());
     }
-    check_record(&file.record, sid)?;
     Ok(file.record)
 }
 
-/// A record belongs in `<sid>/session.json` only if it names that session and
-/// its usage is an object.
+/// A record belongs in `<sid>/session.json` only if it names that session,
+/// its usage is an object and every saved error is an `assistant_*` code.
 fn check_record(record: &SessionRecord, sid: &str) -> Result<(), String> {
     if record.session.id != sid || !record.usage.is_object() {
         log::warn!("assistant session {sid} does not match its folder or has no usage object");
         return Err(INVALID_SESSION.into());
     }
+    if record.messages.iter().any(unknown_code) {
+        log::warn!("assistant session {sid} has a message with an unknown error code");
+        return Err(INVALID_SESSION.into());
+    }
     Ok(())
+}
+
+fn unknown_code(message: &Message) -> bool {
+    message
+        .error_code
+        .as_deref()
+        .is_some_and(|code| !is_assistant_code(code))
 }
 
 fn write_record(path: &Path, record: &SessionRecord) -> Result<(), String> {
     ensure_regular_or_absent(path)?;
+    write_bytes(path, &encode_record(record)?)
+}
+
+/// `record` as `session.json` holds it.
+fn encode_record(record: &SessionRecord) -> Result<Vec<u8>, String> {
     let file = SessionFileOut {
         version: FORMAT_VERSION,
         record,
     };
-    write_bytes(path, &serde_json::to_vec(&file).map_err(|_| UNAVAILABLE)?)
+    serde_json::to_vec(&file).map_err(|_| UNAVAILABLE.to_string())
 }
 
 fn write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -1010,11 +1062,20 @@ mod tests {
     fn a_committed_update_returns_success_even_when_orphan_cleanup_fails() {
         let (_config, store) = fixture();
         let sid = store.create("model", false).unwrap().session.id;
+        let item = attachment("ready");
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(item.clone());
+                record.session.draft_attachment_ids.push(item.id.clone());
+                Ok(())
+            })
+            .unwrap();
         let dir = store.attachment_dir(&sid).unwrap();
         fs::remove_dir(&dir).unwrap();
         fs::write(&dir, b"blocked attachment directory").unwrap();
         let request: UpdateRequest = serde_json::from_value(json!({
-            "sessionId": sid, "webSearch": true, "modelId": "another-model"
+            "sessionId": sid, "webSearch": true, "modelId": "another-model",
+            "draftAttachmentIds": [],
         }))
         .unwrap();
         let session = store.update(&request, || Ok(())).unwrap();
@@ -1030,6 +1091,69 @@ mod tests {
         assert!(serde_json::to_value(saved).unwrap()["session"]
             .get("cleanupWarning")
             .is_none());
+    }
+
+    #[test]
+    fn only_an_update_that_drops_draft_files_cleans_the_attachments_folder() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let item = attachment("ready");
+        let dir = store.attachment_dir(&sid).unwrap();
+        fs::write(dir.join(&item.id), b"x").unwrap();
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(item.clone());
+                record.session.draft_attachment_ids.push(item.id.clone());
+                Ok(())
+            })
+            .unwrap();
+        let orphan = dir.join(id());
+        fs::write(&orphan, b"left by a crash").unwrap();
+        let mut rename = request(&sid);
+        rename.title = Some("Renamed".into());
+        store.update(&rename, no_precondition).unwrap();
+        assert!(orphan.exists(), "a title change leaves the folder alone");
+        let mut remove = request(&sid);
+        remove.draft_attachment_ids = Some(vec![]);
+        store.update(&remove, no_precondition).unwrap();
+        assert!(!orphan.exists());
+        assert!(!dir.join(&item.id).exists());
+    }
+
+    #[test]
+    fn an_error_that_is_not_an_assistant_code_is_dropped_on_load_and_never_saved() {
+        let (config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let mut failed = message("Failed");
+        failed.status = "error".into();
+        failed.error_code = Some("assistant_network_error".into());
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(failed.clone());
+                Ok(())
+            })
+            .unwrap();
+        // Hand-edited: provider text where only a stable code belongs.
+        let file = session_file(config.path(), &store, &sid);
+        let text = fs::read_to_string(&file)
+            .unwrap()
+            .replace("assistant_network_error", "Upstream said: private detail");
+        fs::write(&file, text).unwrap();
+        let loaded = store.load_record(&sid).unwrap();
+        assert!(loaded.messages[0].error_code.is_none());
+        assert_eq!(loaded.messages[0].status, "error");
+        assert_eq!(
+            store
+                .mutate(&sid, |record| {
+                    record.messages[0].error_code = Some("ECONNRESET".into());
+                    Ok(())
+                })
+                .unwrap_err(),
+            INVALID_SESSION
+        );
+        assert!(fs::read_to_string(&file)
+            .unwrap()
+            .contains("Upstream said: private detail"));
     }
 
     #[test]

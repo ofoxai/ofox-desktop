@@ -1,9 +1,10 @@
 //! Portable archives contain conversation records, native history, referenced
-//! attachments and preferences. Each session is published atomically on restore;
-//! existing conversations are compared and never overwritten.
+//! attachments and preferences. A backup leaves damaged conversations out and
+//! counts them. Restore adds the conversations that are missing, each
+//! published atomically; existing ones are compared and never overwritten.
 mod native;
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 const INVALID: &str = "assistant_backup_invalid";
@@ -11,6 +12,8 @@ const TOO_LARGE: &str = "assistant_backup_too_large";
 const CONFLICT: &str = "assistant_backup_conflict";
 const FAILED: &str = "assistant_backup_failed";
 const CONTAINS_KEY: &str = "assistant_backup_contains_key";
+/// A reply is running for this owner: a backup or restore waits until it ends.
+pub const TRANSFER_BUSY: &str = "assistant_transfer_busy";
 const MAX_ZIP: u64 = 512 * 1024 * 1024;
 const MAX_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_FILES: usize = 20_000;
@@ -22,9 +25,23 @@ const MANIFEST: &str = "manifest.json";
 
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RestoreReport {
-    pub imported: usize,
+pub struct BackupReport {
+    /// Conversations written to the archive.
+    pub sessions: usize,
+    /// Damaged conversations left out: an unreadable or invalid record, a
+    /// missing native history or attachment file, a file over its limit.
     pub skipped: usize,
+}
+
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreReport {
+    /// Conversations that were missing and are now installed.
+    pub imported: usize,
+    /// Already present with the same content.
+    pub skipped: usize,
+    /// Present with other content, or replying: kept as they are.
+    pub conflicts: usize,
     /// Some sessions may already have been published. They are valid and kept;
     /// retrying the same archive skips them rather than deleting user work.
     pub warning: Option<String>,
@@ -44,6 +61,34 @@ struct Manifest {
     owner: String,
     sessions: Vec<String>,
     files: BTreeMap<String, Fingerprint>,
+}
+
+/// One conversation folder as a backup finds it.
+enum Found {
+    /// No content: a creation that never wrote its record, or one removed
+    /// meanwhile. A listing does not show it either.
+    Empty,
+    /// Left out of the archive and counted.
+    Damaged,
+    /// Checked: its record's bytes and the member names it consists of.
+    Ready {
+        record: Vec<u8>,
+        names: BTreeSet<String>,
+    },
+}
+
+/// A conversation of the archive against the local one with its id.
+enum Local {
+    Missing,
+    Same,
+    /// Other content, unreadable or replying: never replaced.
+    Different,
+}
+
+enum Placed {
+    Imported,
+    Skipped,
+    Conflict,
 }
 
 fn digest(bytes: &[u8]) -> Fingerprint {
@@ -93,6 +138,150 @@ fn read_file(path: &Path, max: u64) -> Result<Option<Vec<u8>>, String> {
     read_bounded(file, max).map(Some)
 }
 
+/// A member's bytes, exactly as long as the central directory declares:
+/// the `zip` crate inflates a member past a smaller declared size.
+fn read_member(
+    zip: &mut zip::ZipArchive<fs::File>,
+    name: &str,
+    max: u64,
+) -> Result<Vec<u8>, String> {
+    let entry = zip.by_name(name).map_err(|_| INVALID)?;
+    let declared = entry.size();
+    let bytes = read_bounded(entry, max)?;
+    if bytes.len() as u64 != declared {
+        return Err(INVALID.into());
+    }
+    Ok(bytes)
+}
+
+fn little_endian(bytes: &[u8]) -> u64 {
+    bytes
+        .iter()
+        .rev()
+        .fold(0, |value, &byte| value << 8 | u64::from(byte))
+}
+
+fn read_at(reader: &mut (impl Read + Seek), at: u64, len: usize) -> Result<Vec<u8>, String> {
+    reader.seek(SeekFrom::Start(at)).map_err(|_| INVALID)?;
+    let mut bytes = vec![0; len];
+    reader.read_exact(&mut bytes).map_err(|_| INVALID)?;
+    Ok(bytes)
+}
+
+/// The member count of an archive whose layout the `zip` crate is certain to
+/// read as it is checked here, before the crate parses anything.
+///
+/// The crate searches end records backwards and silently falls back to an
+/// earlier one when the last fails its checks or its directory does not
+/// parse: a fake record at the end would hide a huge directory before it.
+/// So only the last end record is accepted, with no trailing bytes, one disk
+/// and archive offset 0, and only when every check the crate makes holds:
+/// the ZIP64 locator and record exactly where they point (when the classic
+/// record defers to them), a central directory that ends exactly at the end
+/// record and holds exactly the declared headers, each without extra fields
+/// (nothing the crate could fail to parse), stored or deflated, pointing at
+/// a local header before the directory. Our writer produces exactly this.
+fn checked_entries(reader: &mut (impl Read + Seek)) -> Result<u64, String> {
+    const END: usize = 22;
+    const LOCATOR: usize = 20;
+    const RECORD64: usize = 56;
+    const HEADER: usize = 46;
+    const LOCAL: usize = 30;
+    /// Room for 20,000 of our member names; ours stay far below it.
+    const MAX_DIRECTORY: u64 = MAX_FILES as u64 * 512;
+    let len = reader.seek(SeekFrom::End(0)).map_err(|_| INVALID)?;
+    let tail_len = len.min((END + LOCATOR + usize::from(u16::MAX)) as u64);
+    let tail = read_at(reader, len - tail_len, tail_len as usize)?;
+    let at = tail
+        .windows(4)
+        .rposition(|part| part == b"PK\x05\x06")
+        .filter(|&at| at + END <= tail.len())
+        .ok_or(INVALID)?;
+    let field = |from: usize, size: usize| little_endian(&tail[at + from..at + from + size]);
+    let end = len - tail_len + at as u64;
+    if at + END + field(20, 2) as usize != tail.len() || field(4, 2) != 0 || field(6, 2) != 0 {
+        return Err(INVALID.into());
+    }
+    let (on_disk, total) = (field(8, 2), field(10, 2));
+    let (count, directory, directory_end) = if total == u64::from(u16::MAX)
+        || field(16, 4) == u64::from(u32::MAX)
+    {
+        // The crate then reads only the ZIP64 record.
+        let locator = at.checked_sub(LOCATOR).ok_or(INVALID)?;
+        let locator_field =
+            |from: usize, size: usize| little_endian(&tail[locator + from..locator + from + size]);
+        let locator_at = end - LOCATOR as u64;
+        let record_at = locator_field(8, 8);
+        if tail[locator..locator + 4] != *b"PK\x06\x07"
+            || locator_field(4, 4) != 0
+            || locator_field(16, 4) > 1
+            || record_at
+                .checked_add(RECORD64 as u64)
+                .is_none_or(|end| end > locator_at)
+        {
+            return Err(INVALID.into());
+        }
+        let record = read_at(reader, record_at, RECORD64)?;
+        let field = |from: usize, size: usize| little_endian(&record[from..from + size]);
+        let count = field(32, 8);
+        if record[..4] != *b"PK\x06\x06"
+            || field(4, 8) < 44
+            || field(4, 8).checked_add(12) != Some(locator_at - record_at)
+            || field(14, 2) > field(12, 2)
+            || field(16, 4) != 0
+            || field(20, 4) != 0
+            || field(24, 8) != count
+            || on_disk != total
+            || (total != u64::from(u16::MAX) && total != count)
+        {
+            return Err(INVALID.into());
+        }
+        (count, (field(48, 8), field(40, 8)), record_at)
+    } else if on_disk == total {
+        (total, (field(16, 4), field(12, 4)), end)
+    } else {
+        return Err(INVALID.into());
+    };
+    if count > MAX_FILES as u64 {
+        return Err(TOO_LARGE.into());
+    }
+    let (start, size) = directory;
+    if start.checked_add(size) != Some(directory_end) {
+        return Err(INVALID.into());
+    }
+    if size > MAX_DIRECTORY {
+        return Err(TOO_LARGE.into());
+    }
+    let headers = read_at(reader, start, size as usize)?;
+    let (mut at, mut found) = (0, 0u64);
+    while at < headers.len() {
+        let header = headers.get(at..at + HEADER).ok_or(INVALID)?;
+        let field = |from: usize, size: usize| little_endian(&header[from..from + size]);
+        let local = field(42, 4);
+        if header[..4] != *b"PK\x01\x02"
+            || !matches!(field(10, 2), 0 | 8)
+            || field(30, 2) != 0
+            || local
+                .checked_add(LOCAL as u64)
+                .is_none_or(|end| end > start)
+        {
+            return Err(INVALID.into());
+        }
+        let block = read_at(reader, local, LOCAL)?;
+        let data =
+            local + (LOCAL as u64) + little_endian(&block[26..28]) + little_endian(&block[28..30]);
+        if block[..4] != *b"PK\x03\x04" || data > start {
+            return Err(INVALID.into());
+        }
+        at += HEADER + field(28, 2) as usize + field(32, 2) as usize;
+        found += 1;
+    }
+    if at != headers.len() || found != count {
+        return Err(INVALID.into());
+    }
+    Ok(count)
+}
+
 fn contains_key(bytes: &[u8], secrets: &[String]) -> bool {
     secrets
         .iter()
@@ -103,6 +292,27 @@ fn contains_key(bytes: &[u8], secrets: &[String]) -> bool {
 fn clean_json(bytes: Vec<u8>, secrets: &[String]) -> Result<Vec<u8>, String> {
     let text = String::from_utf8(bytes).map_err(|_| INVALID)?;
     Ok(super::super::host::scrub_secrets(&text, secrets).into_bytes())
+}
+
+/// A record as an archive holds it: as saved, or as a load repairs it (a
+/// foreign `errorCode` dropped), since the archive must restore strictly.
+fn portable_record(bytes: Vec<u8>, sid: &str) -> Result<Vec<u8>, String> {
+    if decode_exact(&bytes, sid).is_ok() {
+        return Ok(bytes);
+    }
+    encode_record(&decode(&bytes, sid)?)
+}
+
+/// A conversation member as an archive holds it: JSON without the known
+/// keys, the record as a load repairs it, native history without local
+/// paths, attachments unchanged (one holding a key blocks the backup).
+fn archived(name: &str, bytes: Vec<u8>, secrets: &[String]) -> Result<Vec<u8>, String> {
+    match name.split('/').collect::<Vec<_>>().as_slice() {
+        [sid, SESSION_FILE] => clean_json(portable_record(bytes, sid)?, secrets),
+        [_, NATIVE_HISTORY_FILE] => clean_json(native::portable(bytes)?, secrets),
+        _ if contains_key(&bytes, secrets) => Err(CONTAINS_KEY.into()),
+        _ => Ok(bytes),
+    }
 }
 
 fn idle(record: &SessionRecord) -> Result<(), String> {
@@ -116,16 +326,21 @@ fn idle(record: &SessionRecord) -> Result<(), String> {
             .iter()
             .any(|message| message.status == "streaming")
     {
-        return Err("assistant_session_busy".into());
+        return Err(TRANSFER_BUSY.into());
     }
     Ok(())
 }
 
-fn validate_session(root: &Path, sid: &str, names: &HashSet<String>) -> Result<(), String> {
-    let bytes = read_file(&root.join(sid).join(SESSION_FILE), MAX_RECORD)?.ok_or(INVALID)?;
-    let record = decode(&bytes, sid).map_err(|_| INVALID)?;
-    idle(&record)?;
-    let mut expected = HashSet::from([format!("{sid}/{SESSION_FILE}")]);
+/// Check one conversation's files under `root` against its record: each
+/// listed attachment (its size, and the type its messages expect), the
+/// draft's files, and the native history's shape and lineage. Returns the
+/// member names the conversation consists of.
+fn validate_session(
+    root: &Path,
+    sid: &str,
+    record: &SessionRecord,
+) -> Result<BTreeSet<String>, String> {
+    let mut expected = BTreeSet::from([format!("{sid}/{SESSION_FILE}")]);
     let mut attachments = HashMap::new();
     for file in &record.attachments {
         validate_id(&file.id).map_err(|_| INVALID)?;
@@ -157,7 +372,7 @@ fn validate_session(root: &Path, sid: &str, names: &HashSet<String>) -> Result<(
     let native_ids = match read_file(&root.join(&native), MAX_NATIVE)? {
         Some(bytes) => {
             expected.insert(native);
-            native::validate(&bytes, &record)?
+            native::validate(&bytes, record)?
         }
         None => HashMap::new(),
     };
@@ -171,17 +386,7 @@ fn validate_session(root: &Path, sid: &str, names: &HashSet<String>) -> Result<(
             }
         }
     }
-    let prefix = format!("{sid}/");
-    if names
-        .iter()
-        .filter(|name| name.starts_with(&prefix))
-        .cloned()
-        .collect::<HashSet<_>>()
-        != expected
-    {
-        return Err(INVALID.into());
-    }
-    Ok(())
+    Ok(expected)
 }
 
 fn options() -> zip::write::SimpleFileOptions {
@@ -210,78 +415,69 @@ fn add_member(
 }
 
 impl AssistantStore {
-    /// Per-session consistent snapshots; a changed session inventory aborts the
-    /// archive. The final destination is replaced only after the ZIP is complete.
+    /// Per-session consistent snapshots; damaged conversations are left out
+    /// and counted, a changed session inventory aborts the archive. The final
+    /// destination is replaced only after the ZIP is complete.
     pub fn backup(
         &self,
         path: &Path,
         secrets: &[String],
         admit: impl Fn() -> Result<(), String>,
-    ) -> Result<(), String> {
+    ) -> Result<BackupReport, String> {
         let lock = file_lock(&self.root.join(".transfer-lock"));
         let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         admit()?;
         let path = super::super::transfers::destination(path, &self.config_dir)?;
-        let mut sessions = if real_dir(&self.root)? {
+        let mut ids = if real_dir(&self.root)? {
             self.session_ids()?
         } else {
             vec![]
         };
-        sessions.sort();
+        ids.sort();
         let mut manifest = Manifest {
             version: 1,
             native_version: 3,
             owner: self.owner.clone(),
-            sessions: sessions.clone(),
+            sessions: vec![],
             files: BTreeMap::new(),
         };
         let mut writer = zip::ZipWriter::new(tempfile::tempfile().map_err(|_| FAILED)?);
         let mut total = 0;
-        for sid in &sessions {
+        let mut report = BackupReport::default();
+        // What a listing shows, archived or damaged; see `listed_ids`.
+        let mut listed = vec![];
+        for sid in &ids {
             self.with_attachment_lock(sid, || {
                 let lock = file_lock(&self.root.join(sid).join(SESSION_FILE));
                 let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 admit()?;
-                let raw = read_file(&self.root.join(sid).join(SESSION_FILE), MAX_RECORD)?
-                    .ok_or(INVALID)?;
-                let record = decode(&raw, sid)?;
-                idle(&record)?;
+                let (record, names) = match self.inspect(sid)? {
+                    Found::Empty => return Ok(()),
+                    Found::Damaged => {
+                        listed.push(sid.clone());
+                        report.skipped += 1;
+                        return Ok(());
+                    }
+                    Found::Ready { record, names } => (record, names),
+                };
+                let record_name = format!("{sid}/{SESSION_FILE}");
                 add_member(
                     &mut writer,
                     &mut manifest,
                     &mut total,
-                    format!("{sid}/{SESSION_FILE}"),
-                    clean_json(raw, secrets)?,
+                    record_name.clone(),
+                    archived(&record_name, record, secrets)?,
                 )?;
-                if let Some(native) = read_file(&self.native_history_path(sid)?, MAX_NATIVE)? {
-                    add_member(
-                        &mut writer,
-                        &mut manifest,
-                        &mut total,
-                        format!("{sid}/{NATIVE_HISTORY_FILE}"),
-                        clean_json(native, secrets)?,
-                    )?;
+                // Checked under the same locks just now; read one at a time.
+                for name in names.into_iter().filter(|name| *name != record_name) {
+                    let bytes = read_file(&self.root.join(&name), limit(&name)?)?.ok_or(INVALID)?;
+                    let bytes = archived(&name, bytes, secrets)?;
+                    add_member(&mut writer, &mut manifest, &mut total, name, bytes)?;
                 }
-                for file in &record.attachments {
-                    validate_id(&file.id)?;
-                    let bytes =
-                        read_file(&self.attachment_root(sid)?.join(&file.id), MAX_ATTACHMENT)?
-                            .ok_or(INVALID)?;
-                    if bytes.len() as u64 != file.size_bytes {
-                        return Err(INVALID.into());
-                    }
-                    if contains_key(&bytes, secrets) {
-                        return Err(CONTAINS_KEY.into());
-                    }
-                    add_member(
-                        &mut writer,
-                        &mut manifest,
-                        &mut total,
-                        format!("{sid}/{ATTACHMENTS_DIR}/{}", file.id),
-                        bytes,
-                    )?;
-                }
-                validate_session(&self.root, sid, &manifest.files.keys().cloned().collect())
+                listed.push(sid.clone());
+                manifest.sessions.push(sid.clone());
+                report.sessions += 1;
+                Ok::<_, String>(())
             })?;
         }
         if let Some(prefs) = read_file(&self.root.join(PREFS_FILE), limit(PREFS_FILE)?)? {
@@ -297,13 +493,7 @@ impl AssistantStore {
                 clean_json(serde_json::to_vec(&value).map_err(|_| FAILED)?, secrets)?,
             )?;
         }
-        let mut after = if real_dir(&self.root)? {
-            self.session_ids()?
-        } else {
-            vec![]
-        };
-        after.sort();
-        if after != sessions {
+        if self.listed_ids()? != listed {
             return Err(CONFLICT.into());
         }
         let bytes = serde_json::to_vec(&manifest).map_err(|_| FAILED)?;
@@ -317,19 +507,76 @@ impl AssistantStore {
             return Err(TOO_LARGE.into());
         }
         zip.seek(SeekFrom::Start(0)).map_err(|_| FAILED)?;
-        let bytes = read_bounded(zip, MAX_ZIP)?;
         admit()?;
         let path = super::super::transfers::destination(&path, &self.config_dir)?;
-        crate::config::atomic_write_with(
+        crate::config::atomic_copy_with(
             &path,
-            &bytes,
+            &mut zip,
             crate::config::AtomicOpts { mode: Some(0o600) },
         )
-        .map_err(|_| FAILED.to_string())
+        .map_err(|_| FAILED)?;
+        Ok(report)
     }
 
-    /// Validate the complete archive, then add missing sessions. Never replace
-    /// a local conversation or its preferences. Publication failure after some
+    /// One conversation for a backup, under its attachment and record locks.
+    /// Only a live reply is an error; any other problem makes it damaged.
+    fn inspect(&self, sid: &str) -> Result<Found, String> {
+        let dir = self.root.join(sid);
+        let checked = (|| {
+            if !real_dir(&dir)? {
+                return Ok(None);
+            }
+            let Some(record) = read_file(&dir.join(SESSION_FILE), MAX_RECORD)? else {
+                // As in a listing: files without a record are a damaged
+                // conversation, an empty folder is none.
+                return if has_content(&dir)? {
+                    Err(INVALID.to_string())
+                } else {
+                    Ok(None)
+                };
+            };
+            // As a load reads it; the archive gets the repaired record.
+            let saved = decode(&record, sid)?;
+            idle(&saved)?;
+            let names = validate_session(&self.root, sid, &saved)?;
+            Ok(Some((record, names)))
+        })();
+        match checked {
+            Ok(Some((record, names))) => Ok(Found::Ready { record, names }),
+            Ok(None) => Ok(Found::Empty),
+            Err(error) if error == TRANSFER_BUSY => Err(error),
+            Err(error) => {
+                log::warn!("[Assistant] the backup leaves out damaged conversation {sid}: {error}");
+                Ok(Found::Damaged)
+            }
+        }
+    }
+
+    /// Conversation folders a listing shows, readable or not, sorted. The
+    /// empty folder of an unfinished creation is not one.
+    fn listed_ids(&self) -> Result<Vec<String>, String> {
+        if !real_dir(&self.root)? {
+            return Ok(vec![]);
+        }
+        let mut ids = vec![];
+        for sid in self.session_ids()? {
+            let dir = self.root.join(&sid);
+            let shown = match real_dir(&dir) {
+                Ok(true) => has_content(&dir)?,
+                Ok(false) => false,
+                Err(_) => true,
+            };
+            if shown {
+                ids.push(sid);
+            }
+        }
+        ids.sort();
+        Ok(ids)
+    }
+
+    /// Validate the complete archive, then add the missing sessions. Never
+    /// replace a local conversation or its preferences: one that differs or
+    /// is replying is counted as a conflict. Publication failure after some
     /// imports returns their counts and a warning, so retries stay idempotent.
     pub fn restore(
         &self,
@@ -341,13 +588,14 @@ impl AssistantStore {
         let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         admit()?;
         ensure_regular_or_absent(path)?;
-        let file = fs::File::open(path).map_err(|_| INVALID)?;
+        let mut file = fs::File::open(path).map_err(|_| INVALID)?;
         if file.metadata().map_err(|_| INVALID)?.len() > MAX_ZIP {
             return Err(TOO_LARGE.into());
         }
+        let count = checked_entries(&mut file)?;
         let mut zip = zip::ZipArchive::new(file).map_err(|_| INVALID)?;
-        if zip.len() > MAX_FILES {
-            return Err(TOO_LARGE.into());
+        if zip.len() as u64 != count {
+            return Err(INVALID.into());
         }
         let mut names = HashSet::new();
         let mut declared = 0u64;
@@ -358,17 +606,17 @@ impl AssistantStore {
                 || entry
                     .unix_mode()
                     .is_some_and(|mode| mode & 0o170000 == 0o120000)
-                || !names.insert(entry.name().to_string())
             {
                 return Err(INVALID.into());
             }
+            // Unique: the crate keeps one entry per name and the count matched.
+            names.insert(entry.name().to_string());
             declared = declared.checked_add(entry.size()).ok_or(TOO_LARGE)?;
             if entry.size() > max || declared > MAX_TOTAL {
                 return Err(TOO_LARGE.into());
             }
         }
-        let manifest_bytes =
-            read_bounded(zip.by_name(MANIFEST).map_err(|_| INVALID)?, MAX_MANIFEST)?;
+        let manifest_bytes = read_member(&mut zip, MANIFEST, MAX_MANIFEST)?;
         let manifest: Manifest = serde_json::from_slice(&manifest_bytes).map_err(|_| INVALID)?;
         if manifest.version != 1 || manifest.native_version != 3 {
             return Err(INVALID.into());
@@ -403,7 +651,7 @@ impl AssistantStore {
         let mut total = manifest_bytes.len() as u64;
         for (name, fingerprint) in &manifest.files {
             admit()?;
-            let bytes = read_bounded(zip.by_name(name).map_err(|_| INVALID)?, limit(name)?)?;
+            let bytes = read_member(&mut zip, name, limit(name)?)?;
             total = total.checked_add(bytes.len() as u64).ok_or(TOO_LARGE)?;
             if total > MAX_TOTAL {
                 return Err(TOO_LARGE.into());
@@ -420,7 +668,20 @@ impl AssistantStore {
             write_bytes(&target, &bytes)?;
         }
         for sid in &manifest.sessions {
-            validate_session(staging.path(), sid, &names)?;
+            let record = read_file(&staging.path().join(sid).join(SESSION_FILE), MAX_RECORD)?
+                .ok_or(INVALID)?;
+            let record = decode_exact(&record, sid).map_err(|_| INVALID)?;
+            // A backup never holds a conversation that was replying.
+            idle(&record).map_err(|_| INVALID)?;
+            let prefix = format!("{sid}/");
+            let members: BTreeSet<_> = names
+                .iter()
+                .filter(|name| name.starts_with(&prefix))
+                .cloned()
+                .collect();
+            if validate_session(staging.path(), sid, &record)? != members {
+                return Err(INVALID.into());
+            }
         }
         if names.contains(PREFS_FILE) {
             let prefs: Prefs = serde_json::from_slice(
@@ -431,30 +692,31 @@ impl AssistantStore {
                 return Err(INVALID.into());
             }
         }
-        // Preflight all conflicts before publishing the first conversation.
-        for sid in &manifest.sessions {
-            self.with_attachment_lock(sid, || {
-                let lock = file_lock(&root.join(sid).join(SESSION_FILE));
-                let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                admit()?;
-                self.same_backup_session(sid, &manifest).map(|_| ())
-            })?;
-        }
         let mut report = RestoreReport::default();
         for sid in &manifest.sessions {
             let result = self.with_attachment_lock(sid, || {
                 let lock = file_lock(&root.join(sid).join(SESSION_FILE));
                 let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 admit()?;
-                if self.same_backup_session(sid, &manifest)? {
-                    return Ok(false);
+                match self.local_copy(sid, &manifest, secrets) {
+                    Local::Same => return Ok(Placed::Skipped),
+                    Local::Different => return Ok(Placed::Conflict),
+                    Local::Missing => {}
                 }
-                fs::rename(staging.path().join(sid), root.join(sid)).map_err(|_| FAILED)?;
-                Ok(true)
+                // A deletion of this id that never finished must not outlive
+                // the restore: the conversation could not be deleted again.
+                if let Err(error) = self.finish_pending_delete(sid) {
+                    log::warn!("[Assistant] restore keeps out {sid}: its old deletion is pending ({error})");
+                    return Ok(Placed::Conflict);
+                }
+                crate::config::rename_dir(&staging.path().join(sid), &root.join(sid))
+                    .map_err(|_| FAILED)?;
+                Ok(Placed::Imported)
             });
             match result {
-                Ok(true) => report.imported += 1,
-                Ok(false) => report.skipped += 1,
+                Ok(Placed::Imported) => report.imported += 1,
+                Ok(Placed::Skipped) => report.skipped += 1,
+                Ok(Placed::Conflict) => report.conflicts += 1,
                 Err(error) if report.imported > 0 => {
                     report.warning = Some(error);
                     return Ok(report);
@@ -525,30 +787,44 @@ impl AssistantStore {
         failure.map_or(Ok(()), Err)
     }
 
-    fn same_backup_session(&self, sid: &str, manifest: &Manifest) -> Result<bool, String> {
-        if !real_dir(&self.root.join(sid))? {
-            return Ok(false);
+    /// The local conversation `sid` against the archive's copy, compared as a
+    /// backup would archive it. Anything that keeps them from comparing equal
+    /// makes it different.
+    fn local_copy(&self, sid: &str, manifest: &Manifest, secrets: &[String]) -> Local {
+        match real_dir(&self.root.join(sid)) {
+            Ok(false) => return Local::Missing,
+            Ok(true) => {}
+            Err(_) => return Local::Different,
         }
-        let record = read_record(&self.root, sid).map_err(|_| CONFLICT)?;
-        idle(&record)?;
-        let prefix = format!("{sid}/");
-        for (name, expected) in manifest
-            .files
-            .iter()
-            .filter(|(name, _)| name.starts_with(&prefix))
-        {
-            let bytes = read_file(&self.root.join(name), limit(name)?)?.ok_or(CONFLICT)?;
-            if digest(&bytes) != *expected {
-                return Err(CONFLICT.into());
+        let same = (|| {
+            idle(&read_record(&self.root, sid)?)?;
+            let prefix = format!("{sid}/");
+            for (name, expected) in manifest
+                .files
+                .iter()
+                .filter(|(name, _)| name.starts_with(&prefix))
+            {
+                let Some(bytes) = read_file(&self.root.join(name), limit(name)?)? else {
+                    return Ok(false);
+                };
+                // Archives made before blanking and repair hold the raw bytes.
+                if digest(&bytes) != *expected
+                    && digest(&archived(name, bytes, secrets)?) != *expected
+                {
+                    return Ok(false);
+                }
             }
+            let native = format!("{sid}/{NATIVE_HISTORY_FILE}");
+            Ok::<_, String>(
+                manifest.files.contains_key(&native)
+                    || read_file(&self.root.join(native), MAX_NATIVE)?.is_none(),
+            )
+        })();
+        if matches!(same, Ok(true)) {
+            Local::Same
+        } else {
+            Local::Different
         }
-        let native = format!("{sid}/{NATIVE_HISTORY_FILE}");
-        if !manifest.files.contains_key(&native)
-            && read_file(&self.root.join(native), MAX_NATIVE)?.is_some()
-        {
-            return Err(CONFLICT.into());
-        }
-        Ok(true)
     }
 }
 #[cfg(test)]
@@ -659,7 +935,10 @@ mod tests {
         let (_source, store, sid, attachment) = seeded();
         let output = tempfile::tempdir().unwrap();
         let archive = output.path().join("完整备份.zip");
-        store.backup(&archive, &[], || Ok(())).unwrap();
+        let report = store.backup(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((report.sessions, report.skipped), (1, 0));
+        #[cfg(unix)]
+        assert_eq!(crate::config::file_mode(&archive), Some(0o600));
         let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
         assert!(!zip
             .file_names()
@@ -704,7 +983,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_restore_refuses_other_owner_conflicts_and_stale_authority_without_overwrite() {
+    fn backup_restore_refuses_other_owner_and_stale_authority_and_never_overwrites() {
         let (_tmp, store, sid, _) = seeded();
         let output = tempfile::tempdir().unwrap();
         let archive = output.path().join("backup.zip");
@@ -720,9 +999,10 @@ mod tests {
                 Ok(())
             })
             .unwrap();
+        let report = store.restore(&archive, &[], || Ok(())).unwrap();
         assert_eq!(
-            store.restore(&archive, &[], || Ok(())).unwrap_err(),
-            "assistant_backup_conflict"
+            (report.imported, report.skipped, report.conflicts),
+            (0, 0, 1)
         );
         assert_eq!(
             store.load_record(&sid).unwrap().session.draft,
@@ -737,14 +1017,11 @@ mod tests {
     }
 
     #[test]
-    fn backup_rejects_missing_files_and_live_runs_and_keeps_existing_output() {
-        let (_tmp, store, sid, attachment) = seeded();
+    fn backup_waits_for_live_runs_and_keeps_existing_output() {
+        let (_tmp, store, sid, _) = seeded();
         let output = tempfile::tempdir().unwrap();
         let archive = output.path().join("backup.zip");
         fs::write(&archive, "keep old backup").unwrap();
-        fs::remove_file(store.attachment_root(&sid).unwrap().join(attachment)).unwrap();
-        assert!(store.backup(&archive, &[], || Ok(())).is_err());
-        assert_eq!(fs::read_to_string(&archive).unwrap(), "keep old backup");
         store
             .mutate(&sid, |record| {
                 record.session.active_run = Some(RunRef {
@@ -756,8 +1033,303 @@ mod tests {
             .unwrap();
         assert_eq!(
             store.backup(&archive, &[], || Ok(())).unwrap_err(),
-            "assistant_session_busy"
+            TRANSFER_BUSY
         );
+        assert_eq!(fs::read_to_string(&archive).unwrap(), "keep old backup");
+    }
+
+    fn message_json(value: Value) -> Message {
+        let mut message = json!({
+            "id": id(), "role": "user", "content": "hello", "createdAt": 1,
+            "reasoning": null, "status": "completed", "revisionOf": null, "nativeEntryId": null,
+        });
+        message
+            .as_object_mut()
+            .unwrap()
+            .extend(value.as_object().unwrap().clone());
+        serde_json::from_value(message).unwrap()
+    }
+
+    #[test]
+    fn backup_ignores_empty_folders_and_counts_damaged_conversations() {
+        let (_tmp, store, sid, _) = seeded();
+        // Unfinished creations: empty, or holding only the record's temp file.
+        fs::create_dir(store.root.join(id())).unwrap();
+        let unfinished = store.root.join(id());
+        fs::create_dir(&unfinished).unwrap();
+        fs::write(unfinished.join(".session.json.ofox-tmp-1-2"), "{").unwrap();
+        let unreadable = store.root.join(id());
+        fs::create_dir(&unreadable).unwrap();
+        fs::write(unreadable.join(SESSION_FILE), "{not json").unwrap();
+        let lost_history = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&lost_history, |record| {
+                record.messages = vec![message_json(json!({"nativeEntryId": "8ed73709"}))];
+                Ok(())
+            })
+            .unwrap();
+        let lost_file = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&lost_file, |record| {
+                record.attachments.push(Attachment {
+                    id: id(),
+                    name: "gone.txt".into(),
+                    mime_type: "text/plain".into(),
+                    size_bytes: 4,
+                    status: "ready".into(),
+                    reason: None,
+                    preview_url: None,
+                    details: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        let oversized = store.create("test/model", false).unwrap().session.id;
+        let big = id();
+        fs::File::create(store.attachment_dir(&oversized).unwrap().join(&big))
+            .unwrap()
+            .set_len(MAX_ATTACHMENT + 1)
+            .unwrap();
+        store
+            .mutate(&oversized, |record| {
+                record.attachments.push(Attachment {
+                    id: big.clone(),
+                    name: "big.pdf".into(),
+                    mime_type: "application/pdf".into(),
+                    size_bytes: MAX_ATTACHMENT + 1,
+                    status: "ready".into(),
+                    reason: None,
+                    preview_url: None,
+                    details: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        // Loads fine with the code dropped, so it is archived that way.
+        let foreign_code = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&foreign_code, |record| {
+                record.messages = vec![message_json(
+                    json!({"status": "error", "errorCode": "assistant_network_error"}),
+                )];
+                Ok(())
+            })
+            .unwrap();
+        let file = store.root.join(&foreign_code).join(SESSION_FILE);
+        let text = fs::read_to_string(&file)
+            .unwrap()
+            .replace("assistant_network_error", "Upstream said no");
+        fs::write(&file, text).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        let report = store.backup(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((report.sessions, report.skipped), (2, 4));
+        let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        let mut bytes = Vec::new();
+        zip.by_name(MANIFEST)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        let manifest: Manifest = serde_json::from_slice(&bytes).unwrap();
+        let mut archived = vec![sid.clone(), foreign_code.clone()];
+        archived.sort();
+        assert_eq!(manifest.sessions, archived);
+        let report = store.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((report.skipped, report.conflicts), (2, 0));
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            2
+        );
+        let repaired = &restored.load_record(&foreign_code).unwrap().messages[0];
+        assert_eq!(repaired.status, "error");
+        assert!(repaired.error_code.is_none());
+        assert!(
+            !fs::read_to_string(restored.root.join(&foreign_code).join(SESSION_FILE))
+                .unwrap()
+                .contains("Upstream said no")
+        );
+    }
+
+    #[test]
+    fn restore_adds_missing_conversations_and_counts_changed_or_replying_ones() {
+        let (_tmp, store, changed) = fixture();
+        let deleted = store.create("test/model", false).unwrap().session.id;
+        let replying = store.create("test/model", false).unwrap().session.id;
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        assert_eq!(store.backup(&archive, &[], || Ok(())).unwrap().sessions, 3);
+        store
+            .mutate(&changed, |record| {
+                record.session.draft = "newer local draft".into();
+                Ok(())
+            })
+            .unwrap();
+        store
+            .update(
+                &serde_json::from_value(json!({"sessionId":deleted,"deleted":true})).unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        store.delete_trashed(&deleted, || Ok(())).unwrap();
+        store
+            .mutate(&replying, |record| {
+                record.session.active_run = Some(RunRef {
+                    run_id: id(),
+                    operation_id: id(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let report = store.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(
+            (report.imported, report.skipped, report.conflicts),
+            (1, 0, 2)
+        );
+        assert!(report.warning.is_none());
+        assert_eq!(
+            store.load_record(&changed).unwrap().session.draft,
+            "newer local draft"
+        );
+        assert!(store.load_record(&deleted).is_ok());
+        assert!(store
+            .load_record(&replying)
+            .unwrap()
+            .session
+            .active_run
+            .is_some());
+    }
+
+    #[test]
+    fn a_retry_after_a_partial_restore_imports_the_rest_beside_a_changed_one() {
+        let (_tmp, store, first) = fixture();
+        let mut sids = [
+            first,
+            store.create("test/model", false).unwrap().session.id,
+            store.create("test/model", false).unwrap().session.id,
+        ];
+        sids.sort();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        let published = restored.root.join(&sids[0]);
+        let report = restored
+            .restore(&archive, &[], || {
+                if published.exists() {
+                    Err("assistant_identity_changed".into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap();
+        assert_eq!(report.imported, 1);
+        assert!(report.warning.is_some());
+        restored
+            .mutate(&sids[0], |record| {
+                record.session.title = "Renamed after the first attempt".into();
+                Ok(())
+            })
+            .unwrap();
+        let retry = restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((retry.imported, retry.skipped, retry.conflicts), (2, 0, 1));
+        assert_eq!(restored.list(false, "").unwrap().sessions.len(), 3);
+    }
+
+    #[test]
+    fn backup_blanks_the_native_working_folder_and_restore_still_finds_it_unchanged() {
+        let (_tmp, store, sid, _) = seeded();
+        let path = store.native_history_path(&sid).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let (header, rest) = raw.split_once('\n').unwrap();
+        let mut header: Value = serde_json::from_str(header).unwrap();
+        header["cwd"] = json!("/Users/someone/Library/private/workspace");
+        header["parentSession"] = json!("/Users/someone/Library/private/parent.jsonl");
+        let local = format!("{}\n{rest}", serde_json::to_string(&header).unwrap());
+        fs::write(&path, &local).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let name = format!("{sid}/{NATIVE_HISTORY_FILE}");
+        let (_, archived) = members_of(&archive)
+            .into_iter()
+            .find(|(member, _)| *member == name)
+            .unwrap();
+        let archived = String::from_utf8(archived).unwrap();
+        assert!(!archived.contains("/Users/someone"));
+        let (header, kept) = archived.split_once('\n').unwrap();
+        let header: Value = serde_json::from_str(header).unwrap();
+        assert_eq!(header["cwd"], "");
+        assert!(header.get("parentSession").is_none());
+        assert_eq!(kept, rest);
+        // Restoring into the profile it came from finds the same conversation.
+        let report = store.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((report.skipped, report.conflicts), (1, 0));
+        assert_eq!(fs::read_to_string(&path).unwrap(), local);
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        assert_eq!(
+            fs::read_to_string(restored.native_history_path(&sid).unwrap()).unwrap(),
+            archived
+        );
+    }
+
+    #[test]
+    fn an_archive_from_before_the_blanked_working_folder_still_matches_its_profile() {
+        let (_tmp, store, sid, _) = seeded();
+        let path = store.native_history_path(&sid).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        let (header, rest) = raw.split_once('\n').unwrap();
+        let mut header: Value = serde_json::from_str(header).unwrap();
+        header["cwd"] = json!("/Users/someone/Library/private/workspace");
+        let local = format!("{}\n{rest}", serde_json::to_string(&header).unwrap());
+        fs::write(&path, &local).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let current = out.path().join("current.zip");
+        store.backup(&current, &[], || Ok(())).unwrap();
+        // Earlier archives kept the native history byte for byte.
+        let mut members = members_of(&current);
+        replace_member(
+            &mut members,
+            &format!("{sid}/{NATIVE_HISTORY_FILE}"),
+            local.clone().into_bytes(),
+        );
+        let older = out.path().join("older.zip");
+        write_zip(&older, &members, false);
+        let report = store.restore(&older, &[], || Ok(())).unwrap();
+        assert_eq!((report.skipped, report.conflicts), (1, 0));
+        assert_eq!(fs::read_to_string(&path).unwrap(), local);
+    }
+
+    #[test]
+    fn restore_refuses_a_saved_error_that_is_not_an_assistant_code() {
+        let (_tmp, store, sid, _) = seeded();
+        store
+            .mutate(&sid, |record| {
+                record.messages[1].status = "error".into();
+                record.messages[1].error_code = Some("assistant_network_error".into());
+                Ok(())
+            })
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let original = out.path().join("original.zip");
+        store.backup(&original, &[], || Ok(())).unwrap();
+        let name = format!("{sid}/{SESSION_FILE}");
+        let mut members = members_of(&original);
+        let (_, record) = members.iter().find(|(member, _)| *member == name).unwrap();
+        let record = String::from_utf8(record.clone())
+            .unwrap()
+            .replace("assistant_network_error", "ECONNRESET");
+        replace_member(&mut members, &name, record.into_bytes());
+        let changed = out.path().join("changed.zip");
+        write_zip(&changed, &members, false);
+        assert_refused(&changed, &store.owner, INVALID);
     }
 
     #[test]
@@ -847,7 +1419,7 @@ mod tests {
         );
         assert_eq!(restored.list(false, "").unwrap().sessions.len(), 1);
         let retry = restored.restore(&archive, &[], || Ok(())).unwrap();
-        assert_eq!((retry.imported, retry.skipped), (1, 1));
+        assert_eq!((retry.imported, retry.skipped, retry.conflicts), (1, 1, 0));
         assert!(retry.warning.is_none());
     }
 
@@ -992,6 +1564,242 @@ mod tests {
             native.as_bytes()
         );
     }
+    /// Every member of `archive`, in archive order.
+    fn members_of(archive: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut zip = zip::ZipArchive::new(fs::File::open(archive).unwrap()).unwrap();
+        (0..zip.len())
+            .map(|i| {
+                let mut file = zip.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                file.read_to_end(&mut bytes).unwrap();
+                (file.name().to_string(), bytes)
+            })
+            .collect()
+    }
+
+    fn write_zip(path: &Path, members: &[(String, Vec<u8>)], zip64: bool) {
+        let mut writer = zip::ZipWriter::new(fs::File::create(path).unwrap());
+        if zip64 {
+            writer.set_zip64_comment(Some(""));
+        }
+        for (name, bytes) in members {
+            writer.start_file(name.as_str(), options()).unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap();
+    }
+
+    /// Where the last `magic` record starts.
+    fn last(bytes: &[u8], magic: &[u8]) -> usize {
+        bytes
+            .windows(magic.len())
+            .rposition(|part| part == magic)
+            .unwrap()
+    }
+
+    /// `members` with `name` holding `bytes`, and the manifest saying so.
+    fn replace_member(members: &mut [(String, Vec<u8>)], name: &str, bytes: Vec<u8>) {
+        let at = |name: &str| {
+            members
+                .iter()
+                .position(|(member, _)| member == name)
+                .unwrap()
+        };
+        let mut manifest: Manifest = serde_json::from_slice(&members[at(MANIFEST)].1).unwrap();
+        manifest.files.insert(name.into(), digest(&bytes));
+        let (named, list) = (at(name), at(MANIFEST));
+        members[named].1 = bytes;
+        members[list].1 = serde_json::to_vec(&manifest).unwrap();
+    }
+
+    fn assert_refused(archive: &Path, owner: &str, code: &str) {
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), owner).unwrap();
+        assert_eq!(restored.restore(archive, &[], || Ok(())).unwrap_err(), code);
+        assert!(restored.list(false, "").unwrap().sessions.is_empty());
+    }
+
+    #[test]
+    fn restore_refuses_two_members_with_one_name() {
+        let (_tmp, store, _sid, _) = seeded();
+        let out = tempfile::tempdir().unwrap();
+        let original = out.path().join("original.zip");
+        store.backup(&original, &[], || Ok(())).unwrap();
+        // The zip crate keeps one entry per name: an earlier copy with other
+        // bytes would be invisible to every check made by name.
+        let mut members = vec![("manifesT.json".to_string(), b"{}".to_vec())];
+        members.extend(members_of(&original));
+        let doubled = out.path().join("doubled.zip");
+        write_zip(&doubled, &members, false);
+        let mut bytes = fs::read(&doubled).unwrap();
+        while let Some(at) = bytes.windows(13).position(|part| part == b"manifesT.json") {
+            bytes[at..at + 13].copy_from_slice(MANIFEST.as_bytes());
+        }
+        fs::write(&doubled, bytes).unwrap();
+        assert_refused(&doubled, &store.owner, INVALID);
+    }
+
+    #[test]
+    fn restore_refuses_a_declared_entry_count_over_the_limit_before_reading_entries() {
+        let (_tmp, store, _sid, _) = seeded();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        let end = last(&bytes, b"PK\x05\x06");
+        for field in [end + 8, end + 10] {
+            bytes[field..field + 2].copy_from_slice(&30_000u16.to_le_bytes());
+        }
+        fs::write(&archive, bytes).unwrap();
+        assert_refused(&archive, &store.owner, TOO_LARGE);
+    }
+
+    #[test]
+    fn restore_reads_the_zip64_entry_count() {
+        let (_tmp, store, _sid, _) = seeded();
+        let out = tempfile::tempdir().unwrap();
+        let original = out.path().join("original.zip");
+        store.backup(&original, &[], || Ok(())).unwrap();
+        let archive = out.path().join("zip64.zip");
+        write_zip(&archive, &members_of(&original), true);
+        // Send readers to the ZIP64 record, as an archive of 65,535 or more
+        // members must.
+        let mut bytes = fs::read(&archive).unwrap();
+        let end = last(&bytes, b"PK\x05\x06");
+        bytes[end + 8..end + 12].copy_from_slice(&[0xff; 4]);
+        fs::write(&archive, &bytes).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        let locator = end - 20;
+        assert_eq!(&bytes[locator..locator + 4], b"PK\x06\x07");
+        let record =
+            u64::from_le_bytes(bytes[locator + 8..locator + 16].try_into().unwrap()) as usize;
+        for field in [record + 24, record + 32] {
+            bytes[field..field + 8].copy_from_slice(&30_000u64.to_le_bytes());
+        }
+        fs::write(&archive, bytes).unwrap();
+        assert_refused(&archive, &store.owner, TOO_LARGE);
+    }
+
+    #[test]
+    fn restore_refuses_a_fake_end_record_after_the_real_one() {
+        let (_tmp, store, _sid, _) = seeded();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        // The crate skips a last end record that fails its checks (here: a
+        // directory starting at the record itself) and parses the one before,
+        // so a count taken from the fake says nothing about what is parsed.
+        let end = last(&bytes, b"PK\x05\x06");
+        let mut fake = bytes[end..end + 22].to_vec();
+        fake[16..20].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        bytes.extend(fake);
+        assert!(checked_entries(&mut std::io::Cursor::new(&bytes)).is_err());
+        fs::write(&archive, bytes).unwrap();
+        assert_refused(&archive, &store.owner, INVALID);
+    }
+
+    /// Every shorter prefix is refused; any single changed byte near the end
+    /// is refused or still consistent, never a panic.
+    fn survives_damage(bytes: &[u8]) {
+        for len in 0..bytes.len() {
+            assert!(
+                checked_entries(&mut std::io::Cursor::new(&bytes[..len])).is_err(),
+                "a prefix of {len} bytes"
+            );
+        }
+        for at in bytes.len().saturating_sub(800)..bytes.len() {
+            for value in [0x00, 0x7f, 0xff] {
+                let mut changed = bytes.to_vec();
+                changed[at] = value;
+                let _ = checked_entries(&mut std::io::Cursor::new(&changed));
+            }
+        }
+    }
+
+    #[test]
+    fn truncated_or_damaged_archive_ends_are_refused_without_panicking() {
+        let (_tmp, store, _sid, _) = seeded();
+        let out = tempfile::tempdir().unwrap();
+        let original = out.path().join("backup.zip");
+        store.backup(&original, &[], || Ok(())).unwrap();
+        let bytes = fs::read(&original).unwrap();
+        let members = members_of(&original);
+        assert_eq!(
+            checked_entries(&mut std::io::Cursor::new(&bytes)).unwrap(),
+            members.len() as u64
+        );
+        survives_damage(&bytes);
+        let zip64 = out.path().join("zip64.zip");
+        write_zip(&zip64, &members, true);
+        let mut bytes = fs::read(&zip64).unwrap();
+        let end = last(&bytes, b"PK\x05\x06");
+        bytes[end + 8..end + 12].copy_from_slice(&[0xff; 4]);
+        assert_eq!(
+            checked_entries(&mut std::io::Cursor::new(&bytes)).unwrap(),
+            members.len() as u64
+        );
+        survives_damage(&bytes);
+        let empty = out.path().join("empty.zip");
+        fs::write(&empty, b"").unwrap();
+        assert_refused(&empty, &store.owner, INVALID);
+        let cut = out.path().join("cut.zip");
+        fs::write(&cut, &bytes[..bytes.len() - 1]).unwrap();
+        assert_refused(&cut, &store.owner, INVALID);
+    }
+
+    #[test]
+    fn restore_refuses_a_member_that_inflates_past_its_declared_size() {
+        let (_tmp, store, _sid, _) = seeded();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        let header = (0..bytes.len() - 4)
+            .filter(|&at| &bytes[at..at + 4] == b"PK\x01\x02")
+            .find(|&at| {
+                let length = u16::from_le_bytes([bytes[at + 28], bytes[at + 29]]) as usize;
+                bytes[at + 46..at + 46 + length].ends_with(b"/session.json")
+            })
+            .unwrap();
+        let size = u32::from_le_bytes(bytes[header + 24..header + 28].try_into().unwrap());
+        bytes[header + 24..header + 28].copy_from_slice(&(size - 1).to_le_bytes());
+        fs::write(&archive, bytes).unwrap();
+        assert_refused(&archive, &store.owner, INVALID);
+    }
+
+    #[test]
+    fn restoring_a_conversation_finishes_its_interrupted_deletion_first() {
+        let (_tmp, store, sid) = fixture();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let trash = || {
+            store
+                .update(
+                    &serde_json::from_value(json!({"sessionId":sid,"deleted":true})).unwrap(),
+                    || Ok(()),
+                )
+                .unwrap();
+        };
+        trash();
+        // A permanent deletion that stopped after its move, before removal.
+        let tombstone = store.root.join(format!(".deleting-{sid}"));
+        fs::rename(store.root.join(&sid), &tombstone).unwrap();
+        fs::write(tombstone.join("leftover"), b"old copy").unwrap();
+        assert_eq!(store.restore(&archive, &[], || Ok(())).unwrap().imported, 1);
+        assert!(!tombstone.exists());
+        trash();
+        store.delete_trashed(&sid, || Ok(())).unwrap();
+        assert!(store.list(true, "").unwrap().sessions.is_empty());
+        assert!(!store.root.join(&sid).exists());
+    }
+
     #[test]
     fn restore_rejects_symlink_members_and_oversized_expanded_manifest() {
         let (_tmp, store, _sid, _) = seeded();

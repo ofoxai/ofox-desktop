@@ -76,6 +76,8 @@ libc = "0.2"
 rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 thiserror = "2.0"
 anyhow = "1.0"
+# The assistant backup check (services/assistant/store/backup.rs, checked_entries)
+# mirrors zip 2.4.2's end-of-directory fallback; re-review it when upgrading zip.
 zip = "2.2"
 serde_yaml = "0.9"
 # Token-level tag checks use the same parser already pinned by serde_yaml.

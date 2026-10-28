@@ -514,6 +514,24 @@ pub(crate) fn atomic_write_private_with(
 ///   写完 `sync_all` 之后才 rename：断电不会留下长度对、内容全零的文件。
 /// - 任何一步失败，临时文件都会被清掉，目标文件保持原样。
 pub fn atomic_write_with(path: &Path, data: &[u8], opts: AtomicOpts) -> Result<(), AppError> {
+    atomic_fill(path, opts, |file| file.write_all(data))
+}
+
+/// 同 [`atomic_write_with`]，内容从 `source` 边读边写，不先整个读进内存（几百 MiB 的备份）。
+pub(crate) fn atomic_copy_with(
+    path: &Path,
+    source: &mut dyn std::io::Read,
+    opts: AtomicOpts,
+) -> Result<(), AppError> {
+    atomic_fill(path, opts, |file| std::io::copy(source, file).map(|_| ()))
+}
+
+/// [`atomic_write_with`] 的主体：`fill` 写临时文件，其余步骤和保证都一样。
+fn atomic_fill(
+    path: &Path,
+    opts: AtomicOpts,
+    fill: impl FnOnce(&mut fs::File) -> std::io::Result<()>,
+) -> Result<(), AppError> {
     let target = write_target(path)?;
     let file_name = target
         .file_name()
@@ -527,7 +545,7 @@ pub fn atomic_write_with(path: &Path, data: &[u8], opts: AtomicOpts) -> Result<(
 
     let (tmp, mut file) = create_temp_file(parent, file_name, &target, opts)?;
     let mut guard = TempFileGuard::new(tmp.clone());
-    file.write_all(data).map_err(|e| AppError::io(&tmp, e))?;
+    fill(&mut file).map_err(|e| AppError::io(&tmp, e))?;
     file.sync_all().map_err(|e| AppError::io(&tmp, e))?;
     // Windows 不能重命名还开着的文件。
     drop(file);
@@ -686,6 +704,12 @@ fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
     fs::rename(from, to)
+}
+
+/// 把目录 `from` 改名成还不存在的 `to`。Windows 上目录里有文件正被别的进程（杀毒、索引）
+/// 开着时改名会短暂失败（5/32/33），和 [`rename_over`] 一样重试。
+pub(crate) fn rename_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    rename_over(from, to)
 }
 
 /// ERROR_ACCESS_DENIED / ERROR_SHARING_VIOLATION / ERROR_LOCK_VIOLATION。
@@ -1259,6 +1283,68 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(names_in(dir.path()), ["settings.json"]);
+    }
+
+    #[test]
+    fn atomic_copy_streams_the_source_privately_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("backup.zip");
+        fs::write(&target, b"old").unwrap();
+        let data = vec![7u8; 3 * 1024 * 1024 + 5];
+
+        atomic_copy_with(
+            &target,
+            &mut data.as_slice(),
+            AtomicOpts { mode: Some(0o600) },
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), data);
+        assert_eq!(names_in(dir.path()), ["backup.zip"]);
+        #[cfg(unix)]
+        assert_eq!(file_mode(&target), Some(0o600));
+    }
+
+    #[test]
+    fn rename_dir_moves_a_folder_with_its_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let from = dir.path().join("staged");
+        fs::create_dir(&from).unwrap();
+        fs::write(from.join("session.json"), b"{}").unwrap();
+        let to = dir.path().join("published");
+
+        rename_dir(&from, &to).unwrap();
+
+        assert_eq!(fs::read(to.join("session.json")).unwrap(), b"{}");
+        assert!(!from.exists());
+    }
+
+    /// Windows 专属：目录里有文件被别的进程以“不共享删除”的方式开着（杀毒、索引）时，
+    /// 目录 rename 会失败（5），等它放手而不是报错。
+    #[cfg(windows)]
+    #[test]
+    fn rename_dir_waits_for_a_reader_of_a_file_inside() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let from = dir.path().join("staged");
+        fs::create_dir(&from).unwrap();
+        fs::write(from.join("session.json"), b"{}").unwrap();
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x3)
+            .open(from.join("session.json"))
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(holder);
+        });
+        let to = dir.path().join("published");
+
+        rename_dir(&from, &to).unwrap();
+
+        release.join().unwrap();
+        assert_eq!(fs::read(to.join("session.json")).unwrap(), b"{}");
     }
 
     /// Windows 专属，只在 Windows CI 上跑：rename 目标被别的进程以“不共享删除”的方式开着时，
