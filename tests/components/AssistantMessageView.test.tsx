@@ -414,6 +414,18 @@ describe("a reply's sources", () => {
     );
   });
 
+  it("lines a source's icon and site up with the first line of its wrapped title", () => {
+    const long = "https://www.example.org/" + "a".repeat(300);
+    render(
+      view({ content: citing(long), sources: [source("s1", long, long)] }),
+    );
+    const link = screen.getByRole("button", { name: `1. ${long} example.org` });
+    expect(link).toHaveClass("items-start");
+    expect(link).not.toHaveClass("items-center");
+    // Half the gap between the line (1.4 x 12px) and the 12px icon.
+    expect(link.querySelector("svg")).toHaveClass("mt-0.5");
+  });
+
   it("opens a source in the browser", async () => {
     render(
       view({

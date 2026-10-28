@@ -95,14 +95,15 @@ function SourceList({
       <Button
         variant="link"
         title={source.url}
-        className="h-auto max-w-full justify-start whitespace-normal px-0 text-left"
+        className="h-auto max-w-full items-start justify-start whitespace-normal px-0 text-left"
         onClick={() =>
           void settingsApi
             .openExternal(source.url)
             .catch(() => toast.error(t("shell.openFailed")))
         }
       >
-        <ExternalLink aria-hidden className="h-3 w-3 shrink-0" />
+        {/* mt-0.5 centres the icon on the title's first line. */}
+        <ExternalLink aria-hidden className="mt-0.5 h-3 w-3 shrink-0" />
         <span className="min-w-0 break-words">
           {number}. {source.title}
         </span>{" "}
