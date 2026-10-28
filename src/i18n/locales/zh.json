@@ -3109,6 +3109,15 @@
       "all": "全部",
       "90d": "90 天",
       "custom": "自定义"
+    },
+    "assistant": {
+      "input": "输入 Token",
+      "output": "输出 Token",
+      "cost": "预估成本",
+      "searches": "搜索计费",
+      "costUnavailable": "成本无法确定",
+      "includesTrash": "包含回收站中的对话。",
+      "unavailable": "暂时无法读取助手用量，请刷新后重试。"
     }
   },
   "toolUninstall": {
@@ -4939,7 +4948,6 @@
     "noMatches": "没有匹配的对话",
     "untitled": "新对话",
     "unreadable": "无法读取",
-    "boundary": "回复来自你选择的模型。助手只读取你附加的文件，只在你开启联网搜索时搜索网页，无法修改你的设置。",
     "chat": "助手对话",
     "model": "选择模型",
     "searchModels": "搜索模型",
@@ -5051,8 +5059,16 @@
         "prompt": "请用通俗的语言解释以下问题，并举一个例子：\n\n"
       }
     },
-    "historyView": "对话视图",
     "trash": "回收站",
+    "trashWithCount_one": "回收站 · {{count}}",
+    "trashWithCount_other": "回收站 · {{count}}",
+    "backToConversations": "返回对话列表",
+    "moreActions": "更多操作",
+    "backupMenu": "备份…",
+    "restoreMenu": "恢复…",
+    "sidebar": "对话列表",
+    "hideSidebar": "收起对话列表",
+    "showSidebar": "展开对话列表",
     "trashEmpty": "回收站为空",
     "moveToTrash": "移入回收站",
     "restore": "恢复对话",
@@ -5070,14 +5086,7 @@
     "markdownSearchCharges": "搜索计费次数（已包含在预估成本中）：{{count}}",
     "exportMarkdown": "导出 Markdown",
     "markdownSaved": "Markdown 已保存",
-    "allUsage": "全部对话用量",
     "conversationUsage": "当前对话用量",
-    "usageIncludesTrash": "包含回收站中的对话。",
-    "usageUnavailable": "无法读取用量，请刷新后重试。",
-    "backupTitle": "备份全部对话",
-    "restoreBackupTitle": "从备份恢复对话",
-    "backupShort": "备份",
-    "restoreBackupShort": "恢复",
     "backupHint": "备份包含对话、消息之前的版本及附件，不含 API Key。恢复时只新增缺失的对话，已有的对话保持不变。",
     "backupSaved_one": "已备份 {{count}} 个对话。",
     "backupSaved_other": "已备份 {{count}} 个对话。",

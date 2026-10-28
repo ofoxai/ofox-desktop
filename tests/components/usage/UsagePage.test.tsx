@@ -71,6 +71,14 @@ const overview: UsageOverview = {
   lastSyncedAt: 1791993600000,
   unsupportedTools: ["hermes", "pi", "dsh"],
 };
+const assistantTotals = {
+  inputTokens: 0,
+  outputTokens: 0,
+  estimatedCostUsd: "0",
+  searchCount: 0,
+  searchCostUsd: "0",
+  usageCoverage: "complete",
+};
 function Refresh() {
   const shell = useShell();
   useEffect(() => shell.setActive("usage"), [shell.setActive]);
@@ -78,6 +86,7 @@ function Refresh() {
     <>
       <button onClick={() => void shell.refresh()}>refresh-page</button>
       <button onClick={() => shell.setActive("tools")}>hide-page</button>
+      <button onClick={() => shell.setActive("usage")}>show-page</button>
     </>
   );
 }
@@ -128,6 +137,7 @@ beforeEach(() => {
       return { forbidden: false, monthlyUsedUsd: 5, monthlyLimitUsd: 50 };
     if (command === "ofox_refresh_user_info") return user;
     if (command === "sync_session_usage") return {};
+    if (command === "assistant_usage_summary") return assistantTotals;
     throw new Error(command);
   });
 });
@@ -1126,4 +1136,115 @@ it("publishes local statistics even when the parallel account refresh fails", as
       ([command]) => command === "get_usage_overview",
     ),
   ).toHaveLength(1);
+});
+
+describe("the Ofox assistant's usage", () => {
+  const withTotals = (totals: object | Promise<never>) => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation((command: string, ...args: unknown[]) =>
+      command === "assistant_usage_summary"
+        ? Promise.resolve(totals)
+        : normal(command, ...args),
+    );
+  };
+  const summaryReads = () =>
+    mocks.invoke.mock.calls.filter(
+      ([name]) => name === "assistant_usage_summary",
+    ).length;
+
+  it("shows every conversation's tokens, cost and search charges between the balance and the local history", async () => {
+    withTotals({
+      inputTokens: 12_000,
+      outputTokens: 3_400,
+      estimatedCostUsd: "1.25",
+      searchCount: 3,
+      searchCostUsd: "0.042",
+      usageCoverage: "complete",
+    });
+    render(<Page />);
+    const card = await screen.findByRole("region", { name: "Ofox 助手" });
+    expect(await within(card).findByText("12K")).toBeVisible();
+    expect(within(card).getByText("3.4K")).toBeVisible();
+    expect(within(card).getByText("≈$1.25")).toBeVisible();
+    expect(within(card).getByText("3")).toBeVisible();
+    expect(within(card).getByText("≈$0.042")).toBeVisible();
+    expect(card).toHaveTextContent("包含回收站中的对话。");
+    const balance = screen.getByRole("region", { name: "Ofox 余额" });
+    const history = screen.getByText("本机历史");
+    expect(
+      balance.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      card.compareDocumentPosition(history) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("never shows an incomplete cost as a sum or as zero", async () => {
+    withTotals({
+      inputTokens: 800,
+      outputTokens: 0,
+      estimatedCostUsd: null,
+      searchCount: 0,
+      searchCostUsd: null,
+      usageCoverage: "incomplete",
+    });
+    render(<Page />);
+    const card = await screen.findByRole("region", { name: "Ofox 助手" });
+    expect(await within(card).findByText("成本无法确定")).toBeVisible();
+    expect(card).not.toHaveTextContent("$");
+  });
+
+  it("is left out, and not read, while no account is signed in", async () => {
+    render(<Page value={{ ...account, user: null }} />);
+    await screen.findAllByText("1.2K");
+    expect(screen.queryByRole("region", { name: "Ofox 助手" })).toBeNull();
+    expect(summaryReads()).toBe(0);
+  });
+
+  it("says quietly when the totals can't be read", async () => {
+    withTotals(Promise.reject("assistant_storage_unavailable"));
+    render(<Page />);
+    const card = await screen.findByRole("region", { name: "Ofox 助手" });
+    expect(
+      await within(card).findByText("暂时无法读取助手用量，请刷新后重试。"),
+    ).toBeVisible();
+    expect(within(card).queryByRole("alert")).toBeNull();
+    expect(card).not.toHaveTextContent("包含回收站");
+  });
+
+  it("never shows one account's totals for another", async () => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    let releaseA!: (totals: object) => void;
+    mocks.invoke.mockImplementation((command: string, ...args: unknown[]) =>
+      command === "assistant_usage_summary" && !releaseA
+        ? new Promise((resolve) => {
+            releaseA = resolve;
+          })
+        : normal(command, ...args),
+    );
+    const view = render(<Page />);
+    await waitFor(() => expect(releaseA).toBeTypeOf("function"));
+    const b = {
+      ...account,
+      user: { ...user, org_id: "b", email: "b@example.test" },
+    };
+    view.rerender(<Page value={b} />);
+    await waitFor(() => expect(summaryReads()).toBe(2));
+    await act(async () =>
+      releaseA({ ...assistantTotals, inputTokens: 987_000 }),
+    );
+    const card = screen.getByRole("region", { name: "Ofox 助手" });
+    expect(card).not.toHaveTextContent("987K");
+  });
+
+  it("reads the totals again each time the overview is shown, and on a manual refresh", async () => {
+    render(<Page />);
+    await screen.findByRole("region", { name: "Ofox 助手" });
+    await waitFor(() => expect(summaryReads()).toBe(1));
+    fireEvent.click(screen.getByText("hide-page"));
+    fireEvent.click(screen.getByText("show-page"));
+    await waitFor(() => expect(summaryReads()).toBe(2));
+    fireEvent.click(screen.getByText("refresh-page"));
+    await waitFor(() => expect(summaryReads()).toBe(3));
+  });
 });

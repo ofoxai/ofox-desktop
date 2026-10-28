@@ -13,7 +13,6 @@ import {
   type AssistantSessionDetail,
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
-  type AssistantUsage,
 } from "@/lib/api/assistant";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 
@@ -100,8 +99,7 @@ export function useAssistant(enabled: boolean) {
   const [unreadable, setUnreadable] = useState<AssistantUnreadableSession[]>(
     [],
   );
-  const [totalUsage, setTotalUsage] = useState<AssistantUsage | null>(null);
-  const [usageUnavailable, setUsageUnavailable] = useState(false);
+  const [trashCount, setTrashCount] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AssistantSessionDetail | null>(null);
   const [draft, setDraftState] = useState("");
@@ -137,7 +135,6 @@ export function useAssistant(enabled: boolean) {
   const mounted = useRef(false);
   const epoch = useRef(0);
   const listSequence = useRef(0);
-  const usageSequence = useRef(0);
   const detailSequence = useRef(0);
   const selectionSequence = useRef(0);
   const updateSequence = useRef(0);
@@ -336,6 +333,7 @@ export function useAssistant(enabled: boolean) {
           return;
         setSessions(listed.sessions);
         setUnreadable(listed.unreadable);
+        setTrashCount(listed.trashCount);
       } catch (reason) {
         if (sequence === listSequence.current && generation === epoch.current)
           showError(reason);
@@ -343,33 +341,6 @@ export function useAssistant(enabled: boolean) {
     },
     [search, showTrash, showError],
   );
-  // The totals cover every conversation, trash included, so only what changes
-  // them reads them again: a run ending, a restore, a delete, a sign-in.
-  // Searching and switching the list change nothing of them.
-  const refreshUsage = useCallback(async (generation = epoch.current) => {
-    if (signedOut.current || generation !== epoch.current) return;
-    const sequence = ++usageSequence.current;
-    try {
-      const usage = await assistantApi.usageSummary();
-      if (
-        !mounted.current ||
-        generation !== epoch.current ||
-        sequence !== usageSequence.current
-      )
-        return;
-      setTotalUsage(usage);
-      setUsageUnavailable(false);
-    } catch {
-      if (
-        mounted.current &&
-        generation === epoch.current &&
-        sequence === usageSequence.current
-      ) {
-        setTotalUsage(null);
-        setUsageUnavailable(true);
-      }
-    }
-  }, []);
   refreshSessionsRef.current = refreshSessions;
 
   const refreshDetail = useCallback(
@@ -485,8 +456,7 @@ export function useAssistant(enabled: boolean) {
       setDetail(null);
       setSessions([]);
       setShowTrash(false);
-      setTotalUsage(null);
-      setUsageUnavailable(false);
+      setTrashCount(0);
       transferInFlight.current = false;
       setTransferring(false);
       setTransferResult(null);
@@ -519,7 +489,6 @@ export function useAssistant(enabled: boolean) {
         if (state === "restored") {
           void loadBootstrap();
           void refreshSessionsRef.current();
-          void refreshUsage();
         }
       })
       .then((off) => (disposed ? off() : cleanup.push(off)))
@@ -532,7 +501,6 @@ export function useAssistant(enabled: boolean) {
   }, [
     enabled,
     loadBootstrap,
-    refreshUsage,
     setAttachments,
     setDraft,
     setNewWebSearch,
@@ -540,10 +508,6 @@ export function useAssistant(enabled: boolean) {
     setRunSearch,
     showError,
   ]); // List refresh uses its current request fencing separately.
-
-  useEffect(() => {
-    if (enabled) void refreshUsage();
-  }, [enabled, refreshUsage]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -645,12 +609,8 @@ export function useAssistant(enabled: boolean) {
         // The identity generation this event arrived under: a list read it
         // asks for is fenced on it.
         const generation = epoch.current;
-        if (event.type === "run_start") {
-          // The saved totals are not final while a run goes on.
-          setTotalUsage(null);
+        if (event.type === "run_start")
           void refreshSessionsRef.current(generation);
-          void refreshUsage(generation);
-        }
         const current = runRef.current;
         if (
           !current ||
@@ -661,10 +621,8 @@ export function useAssistant(enabled: boolean) {
           // A run this view no longer follows (another conversation, or one
           // left behind) still changes the history's "Replying…" marks.
           // `run_end` is always its last event, also after an `error`.
-          if (event.type === "run_end") {
+          if (event.type === "run_end")
             void refreshSessionsRef.current(generation);
-            void refreshUsage(generation);
-          }
           return;
         }
         // session and event types this build does not know change nothing
@@ -804,7 +762,6 @@ export function useAssistant(enabled: boolean) {
                 setStream(null);
             });
             void refreshSessionsRef.current(generation);
-            void refreshUsage(generation);
             return;
         }
       })
@@ -821,7 +778,7 @@ export function useAssistant(enabled: boolean) {
       off?.();
       setConnected(false);
     };
-  }, [enabled, refreshDetail, refreshUsage, setRun, setRunSearch, showError]);
+  }, [enabled, refreshDetail, setRun, setRunSearch, showError]);
 
   const select = useCallback(
     (id: string | null) => {
@@ -1070,15 +1027,11 @@ export function useAssistant(enabled: boolean) {
       if (generation !== epoch.current) return false;
       forget();
       void refreshSessionsRef.current();
-      void refreshUsage(generation);
       return true;
     } catch (reason) {
       if (generation === epoch.current) {
         // The namespace move succeeded; only disk removal needs a retry.
-        if (assistantErrorCode(reason) === "assistant_delete_pending") {
-          forget();
-          void refreshUsage(generation);
-        }
+        if (assistantErrorCode(reason) === "assistant_delete_pending") forget();
         void refreshSessionsRef.current();
         showError(reason);
       }
@@ -1089,7 +1042,7 @@ export function useAssistant(enabled: boolean) {
         if (!selectedRef.current || selectedRef.current === sid) setBusy(false);
       }
     }
-  }, [busy, loading, select, refreshUsage, showError]);
+  }, [busy, loading, select, showError]);
 
   const transfer = useCallback(
     async (kind: "backup" | "restore") => {
@@ -1150,12 +1103,10 @@ export function useAssistant(enabled: boolean) {
           const report = await assistantApi.restore(request);
           if (!current() || !report) return;
           setTransferResult({ kind, ...report });
-          // Only conversations that came in change the totals, and an empty
-          // profile may have acquired its model preference from the archive.
-          // Read it before the next create can overwrite it; a restore that
-          // imported nothing leaves the user's own choice alone.
+          // An empty profile may have acquired its model preference from the
+          // archive. Read it before the next create can overwrite it; a
+          // restore that imported nothing leaves the user's own choice alone.
           if (report.imported > 0) {
-            void refreshUsage(generation);
             const restored = await loadBootstrap();
             if (!current()) return;
             setChosenModel(null);
@@ -1188,7 +1139,6 @@ export function useAssistant(enabled: boolean) {
       persistDraft,
       loadBootstrap,
       refreshDetail,
-      refreshUsage,
       switchList,
       showError,
     ],
@@ -1718,8 +1668,7 @@ export function useAssistant(enabled: boolean) {
     transferResult,
     sessions,
     unreadable,
-    totalUsage,
-    usageUnavailable,
+    trashCount,
     selectedId,
     detail,
     draft,
@@ -1742,7 +1691,6 @@ export function useAssistant(enabled: boolean) {
     send,
     stop,
     refreshSessions,
-    refreshUsage,
     refreshDetail,
     loadBootstrap,
     showError,

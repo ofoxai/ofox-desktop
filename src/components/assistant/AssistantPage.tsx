@@ -9,17 +9,16 @@ import {
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import {
-  AlertTriangle,
   ArrowUp,
   ArrowUpRight,
   Globe,
   Download,
-  Upload,
   Loader2,
   MessageSquare,
+  PanelLeftClose,
+  PanelLeftOpen,
   Paperclip,
   Pencil,
-  Plus,
   Square,
   Trash2,
   RotateCcw,
@@ -27,9 +26,11 @@ import {
 } from "lucide-react";
 import { assistantErrorKey, type AssistantUsage } from "@/lib/api/assistant";
 import { fmtCost, fmtTokens } from "@/lib/format";
-import { useAssistant, type AssistantTransferResult } from "./useAssistant";
+import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
+import { AssistantSidebar } from "./AssistantSidebar";
+import { usePendingFocus } from "./usePendingFocus";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { isSendable } from "@/utils/assistantAttachments";
 import { Button } from "@/components/ui/button";
@@ -37,7 +38,6 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { MenuSelect } from "@/components/ui/menu-select";
-import { SearchInput } from "@/components/ui/search-input";
 import {
   Dialog,
   DialogContent,
@@ -50,6 +50,25 @@ import { useShellRefresh } from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
 const STARTERS = ["summary", "writing", "explain"] as const;
+
+const SIDEBAR_COLLAPSED_KEY = "ofox.assistant.sidebarCollapsed";
+
+// Storage can be unavailable (a private window, blocked site data): the
+// sidebar then opens expanded and the choice lasts for this window only.
+function readSidebarCollapsed() {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+function saveSidebarCollapsed(collapsed: boolean) {
+  try {
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // See readSidebarCollapsed.
+  }
+}
 
 const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -116,41 +135,6 @@ function usageSummary(
   return parts.length ? parts.join(" · ") : null;
 }
 
-/**
- * What a finished backup or restore did: one line for each thing that
- * happened, and `warn` for those that left something undone.
- */
-function transferLines(
-  result: AssistantTransferResult,
-  t: TFunction,
-): { text: string; warn?: boolean }[] {
-  if (result.kind === "backup")
-    return [
-      { text: t("assistant.backupSaved", { count: result.sessions }) },
-      ...(result.skipped > 0
-        ? [
-            {
-              text: t("assistant.backupSkipped", { count: result.skipped }),
-              warn: true,
-            },
-          ]
-        : []),
-    ];
-  const lines = [
-    result.imported > 0 && {
-      text: t("assistant.restoreImported", { count: result.imported }),
-    },
-    result.skipped > 0 && {
-      text: t("assistant.restoreSkipped", { count: result.skipped }),
-    },
-    result.conflicts > 0 && {
-      text: t("assistant.restoreConflicts", { count: result.conflicts }),
-      warn: true,
-    },
-  ].filter((line) => line !== false);
-  return lines.length ? lines : [{ text: t("assistant.restoreNothing") }];
-}
-
 interface AssistantPageProps {
   enabled?: boolean;
   onLoginRequested?: () => void;
@@ -197,18 +181,20 @@ function AssistantWorkspace() {
   const [rename, setRename] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [exported, setExported] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] =
+    useState(readSidebarCollapsed);
+  const sidebarId = useId();
   const blockedHint = useId();
   const visionHint = useId();
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const composer = useRef<HTMLTextAreaElement>(null);
-  const conversationsButton = useRef<HTMLButtonElement>(null);
-  const trashButton = useRef<HTMLButtonElement>(null);
+  const newConversationButton = useRef<HTMLButtonElement>(null);
+  const trashEntry = useRef<HTMLButtonElement>(null);
+  const trashBack = useRef<HTMLButtonElement>(null);
   const deleteButton = useRef<HTMLButtonElement>(null);
   const renameButton = useRef<HTMLButtonElement>(null);
   const exportButton = useRef<HTMLButtonElement>(null);
-  const backupButton = useRef<HTMLButtonElement>(null);
-  const restoreBackupButton = useRef<HTMLButtonElement>(null);
   const moveToTrashButton = useRef<HTMLButtonElement>(null);
   const restoreButton = useRef<HTMLButtonElement>(null);
   // A button that is disabled while its action runs loses focus; once the
@@ -217,6 +203,7 @@ function AssistantWorkspace() {
   const busyNow = useRef(busy);
   busyNow.current = busy;
   const focusStarter = useRef(false);
+  const focusSoon = usePendingFocus();
   const session = detail?.session;
   const available = Boolean(
     bootstrap?.runtime.available &&
@@ -327,7 +314,6 @@ function AssistantWorkspace() {
   useShellRefresh("assistant", async () => {
     await assistant.loadBootstrap();
     await assistant.refreshSessions();
-    await assistant.refreshUsage();
     if (assistant.selectedId)
       await assistant.refreshDetail(assistant.selectedId);
   });
@@ -360,6 +346,11 @@ function AssistantWorkspace() {
   };
   const stop = () =>
     void assistant.stop().then(() => composer.current?.focus());
+  const toggleSidebar = () => {
+    const collapsed = !sidebarCollapsed;
+    setSidebarCollapsed(collapsed);
+    saveSidebarCollapsed(collapsed);
+  };
   const saveTitle = () => {
     const title = rename?.trim();
     if (title)
@@ -370,187 +361,42 @@ function AssistantWorkspace() {
 
   return (
     <div className="flex h-full min-h-0 overflow-hidden rounded-list border border-line bg-card">
-      <aside
-        className="flex w-52 shrink-0 flex-col gap-2 border-r border-line bg-card-2 p-3"
-        aria-label={t("assistant.conversations")}
-      >
-        <Button
-          className="w-full"
-          disabled={!available || busy}
-          onClick={() => void assistant.create()}
-        >
-          <Plus aria-hidden className="h-3.5 w-3.5" />
-          {t("assistant.newConversation")}
-        </Button>
-        <div className="grid shrink-0 grid-cols-2 gap-1">
-          <Button
-            ref={backupButton}
-            variant="secondary"
-            size="sm"
-            disabled={busy || assistant.loading || !bootstrap?.owner}
-            aria-label={t("assistant.backupTitle")}
-            title={t("assistant.backupHint")}
-            onClick={() =>
-              void assistant
-                .transfer("backup")
-                .then(() => returnFocusTo(backupButton.current))
-            }
-          >
-            <Download aria-hidden className="h-3.5 w-3.5" />
-            {t("assistant.backupShort")}
-          </Button>
-          <Button
-            ref={restoreBackupButton}
-            variant="secondary"
-            size="sm"
-            disabled={busy || assistant.loading || !bootstrap?.owner}
-            aria-label={t("assistant.restoreBackupTitle")}
-            title={t("assistant.backupHint")}
-            onClick={() =>
-              void assistant
-                .transfer("restore")
-                .then(() => returnFocusTo(restoreBackupButton.current))
-            }
-          >
-            <Upload aria-hidden className="h-3.5 w-3.5" />
-            {t("assistant.restoreBackupShort")}
-          </Button>
-        </div>
-        {assistant.transferResult && (
-          <p
-            role="status"
-            className="px-1 text-note leading-relaxed text-ink-muted"
-          >
-            {transferLines(assistant.transferResult, t).map((line) => (
-              <span
-                key={line.text}
-                className={cn("block", line.warn && "text-warn")}
-              >
-                {line.text}
-              </span>
-            ))}
-          </p>
-        )}
-        <div
-          role="group"
-          className="grid grid-cols-2 gap-1"
-          aria-label={t("assistant.historyView")}
-        >
-          <Button
-            variant="ghost"
-            ref={conversationsButton}
-            disabled={assistant.transferring}
-            className={cn(
-              !assistant.showTrash && "bg-brand-soft text-brand-ink",
-            )}
-            aria-pressed={!assistant.showTrash}
-            onClick={() => assistant.viewTrash(false)}
-          >
-            {t("assistant.conversations")}
-          </Button>
-          <Button
-            variant="ghost"
-            ref={trashButton}
-            disabled={assistant.transferring}
-            className={cn(
-              assistant.showTrash && "bg-brand-soft text-brand-ink",
-            )}
-            aria-pressed={assistant.showTrash}
-            onClick={() => assistant.viewTrash(true)}
-          >
-            {t("assistant.trash")}
-          </Button>
-        </div>
-        <SearchInput
-          className="w-full"
-          aria-label={t("assistant.search")}
-          placeholder={t("assistant.search")}
-          value={assistant.search}
-          onChange={assistant.setSearch}
-        />
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          <ul className="space-y-1" aria-label={t("assistant.conversations")}>
-            {assistant.sessions.map((item) => (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  disabled={assistant.transferring}
-                  aria-current={
-                    assistant.selectedId === item.id ? "page" : undefined
-                  }
-                  onClick={() => assistant.select(item.id)}
-                  className={cn(
-                    "w-full rounded-ctl px-2 py-2 text-left text-ctl transition-colors hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-50",
-                    assistant.selectedId === item.id &&
-                      "bg-brand-soft text-brand-ink",
-                  )}
-                >
-                  <span className="block truncate">
-                    {item.title || t("assistant.untitled")}
-                  </span>
-                  <span className="mt-0.5 block truncate text-note text-ink-muted">
-                    {item.activeRun
-                      ? t("assistant.running")
-                      : new Date(item.updatedAt).toLocaleDateString(
-                          i18n.language,
-                        )}
-                  </span>
-                </button>
-              </li>
-            ))}
-            {assistant.unreadable.map((item) => (
-              <li
-                key={item.id}
-                className="rounded-ctl px-2 py-2 text-ctl text-ink-muted"
-              >
-                <span className="flex items-center gap-1.5 font-medium text-danger">
-                  <AlertTriangle aria-hidden className="h-3.5 w-3.5" />
-                  {t("assistant.unreadable")}
-                </span>
-                <span className="mt-0.5 block text-note">
-                  {t(assistantErrorKey(item.error))}
-                </span>
-              </li>
-            ))}
-          </ul>
-          {!assistant.sessions.length && !assistant.unreadable.length && (
-            <p className="px-2 py-6 text-center text-note text-ink-muted">
-              {t(
-                assistant.search
-                  ? "assistant.noMatches"
-                  : assistant.showTrash
-                    ? "assistant.trashEmpty"
-                    : "assistant.noConversations",
-              )}
-            </p>
-          )}
-        </div>
-        <section
-          aria-label={t("assistant.allUsage")}
-          className="shrink-0 border-t border-line px-1 pt-2 text-note text-ink-muted"
-        >
-          <h2 className="font-medium text-ink">{t("assistant.allUsage")}</h2>
-          <p className="mt-1 leading-relaxed">
-            {assistant.usageUnavailable
-              ? t("assistant.usageUnavailable")
-              : assistant.totalUsage
-                ? usageSummary(assistant.totalUsage, true, t)
-                : t("common.loading")}
-          </p>
-          <p className="mt-1 leading-relaxed">
-            {t("assistant.usageIncludesTrash")}
-          </p>
-        </section>
-        <p className="border-t border-line px-1 pt-2 text-note leading-relaxed text-ink-muted">
-          {t("assistant.boundary")}
-        </p>
-      </aside>
+      <AssistantSidebar
+        id={sidebarId}
+        collapsed={sidebarCollapsed}
+        assistant={assistant}
+        canCreate={available && !busy}
+        newConversationRef={newConversationButton}
+        trashEntryRef={trashEntry}
+        trashBackRef={trashBack}
+        onTransfer={(kind, trigger) =>
+          void assistant.transfer(kind).then(() => returnFocusTo(trigger))
+        }
+      />
       <section
         className="flex min-h-0 min-w-0 flex-1 flex-col"
         aria-label={t("assistant.chat")}
       >
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-2.5">
           <div className="flex min-w-0 items-center gap-1">
+            <Button
+              variant="icon"
+              aria-label={t("assistant.sidebar")}
+              title={t(
+                sidebarCollapsed
+                  ? "assistant.showSidebar"
+                  : "assistant.hideSidebar",
+              )}
+              aria-expanded={!sidebarCollapsed}
+              aria-controls={sidebarId}
+              onClick={toggleSidebar}
+            >
+              {sidebarCollapsed ? (
+                <PanelLeftOpen aria-hidden className="h-3.5 w-3.5" />
+              ) : (
+                <PanelLeftClose aria-hidden className="h-3.5 w-3.5" />
+              )}
+            </Button>
             <h1 className="min-w-0 truncate text-ui font-semibold">
               {session?.title || t("assistant.title")}
             </h1>
@@ -600,7 +446,9 @@ function AssistantWorkspace() {
                     disabled={busy || Boolean(run)}
                     onClick={() =>
                       void assistant.setDeleted(false).then((saved) => {
-                        if (saved) conversationsButton.current?.focus();
+                        // Back in the conversations, whose footer has the
+                        // trash entry again.
+                        if (saved) focusSoon(trashEntry);
                         else returnFocusTo(restoreButton.current);
                       })
                     }
@@ -631,7 +479,7 @@ function AssistantWorkspace() {
                   disabled={busy}
                   onClick={() =>
                     void assistant.setDeleted(true).then((saved) => {
-                      if (saved) conversationsButton.current?.focus();
+                      if (saved) focusSoon(trashEntry);
                       else returnFocusTo(moveToTrashButton.current);
                     })
                   }
@@ -1017,7 +865,7 @@ function AssistantWorkspace() {
         }
         onCloseAutoFocus={(event) => {
           event.preventDefault();
-          (deleteButton.current ?? trashButton.current)?.focus();
+          (deleteButton.current ?? trashBack.current)?.focus();
         }}
         onConfirm={() =>
           void assistant.deleteSession().then((deleted) => {
@@ -1040,7 +888,7 @@ function AssistantWorkspace() {
           className="max-w-sm"
           onCloseAutoFocus={(event) => {
             event.preventDefault();
-            (renameButton.current ?? conversationsButton.current)?.focus();
+            (renameButton.current ?? newConversationButton.current)?.focus();
           }}
         >
           <DialogHeader>

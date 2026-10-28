@@ -3109,6 +3109,15 @@
       "all": "全期間",
       "90d": "90 日",
       "custom": "カスタム"
+    },
+    "assistant": {
+      "input": "入力トークン",
+      "output": "出力トークン",
+      "cost": "推定コスト",
+      "searches": "検索料金",
+      "costUnavailable": "コストを確定できません",
+      "includesTrash": "ゴミ箱内の会話を含みます。",
+      "unavailable": "アシスタントの使用量を読み込めませんでした。更新して再試行してください。"
     }
   },
   "toolUninstall": {
@@ -4939,7 +4948,6 @@
     "noMatches": "一致する会話はありません",
     "untitled": "新しい会話",
     "unreadable": "読み取れません",
-    "boundary": "返信は選んだモデルが生成します。アシスタントが読むのは添付したファイルだけで、Web 検索はオンにしたときだけ行います。設定の変更はできません。",
     "chat": "アシスタントとの会話",
     "model": "モデルを選択",
     "searchModels": "モデルを検索",
@@ -5051,8 +5059,16 @@
         "prompt": "以下の質問を分かりやすい言葉で説明し、例を挙げてください：\n\n"
       }
     },
-    "historyView": "会話の表示",
     "trash": "ゴミ箱",
+    "trashWithCount_one": "ゴミ箱 · {{count}}",
+    "trashWithCount_other": "ゴミ箱 · {{count}}",
+    "backToConversations": "会話一覧に戻る",
+    "moreActions": "その他の操作",
+    "backupMenu": "バックアップ…",
+    "restoreMenu": "復元…",
+    "sidebar": "会話一覧",
+    "hideSidebar": "会話一覧を閉じる",
+    "showSidebar": "会話一覧を開く",
     "trashEmpty": "ゴミ箱は空です",
     "moveToTrash": "ゴミ箱に移動",
     "restore": "会話を復元",
@@ -5070,14 +5086,7 @@
     "markdownSearchCharges": "検索の課金回数（推定コストに含む）：{{count}}",
     "exportMarkdown": "Markdown をエクスポート",
     "markdownSaved": "Markdown を保存しました",
-    "allUsage": "すべての会話の使用量",
     "conversationUsage": "この会話の使用量",
-    "usageIncludesTrash": "ゴミ箱内の会話を含みます。",
-    "usageUnavailable": "使用量を読み込めませんでした。更新して再試行してください。",
-    "backupTitle": "すべての会話をバックアップ",
-    "restoreBackupTitle": "バックアップから会話を復元",
-    "backupShort": "バックアップ",
-    "restoreBackupShort": "復元",
     "backupHint": "会話、メッセージの以前のバージョン、添付ファイルを含み、API キーは含みません。復元では不足している会話だけを追加し、既存の会話は変更しません。",
     "backupSaved_one": "{{count}} 件の会話をバックアップしました。",
     "backupSaved_other": "{{count}} 件の会話をバックアップしました。",

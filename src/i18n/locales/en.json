@@ -3109,6 +3109,15 @@
       "all": "All time",
       "90d": "90 days",
       "custom": "Custom"
+    },
+    "assistant": {
+      "input": "Input tokens",
+      "output": "Output tokens",
+      "cost": "Estimated cost",
+      "searches": "Search charges",
+      "costUnavailable": "Cost unavailable",
+      "includesTrash": "Includes conversations in the trash.",
+      "unavailable": "Assistant usage could not be loaded. Refresh to try again."
     }
   },
   "toolUninstall": {
@@ -4939,7 +4948,6 @@
     "noMatches": "No matching conversations",
     "untitled": "New conversation",
     "unreadable": "Can't be read",
-    "boundary": "Replies come from the model you choose. The assistant reads only the files you attach and searches the web only when you turn on web search. It can't change your settings.",
     "chat": "Assistant conversation",
     "model": "Choose model",
     "searchModels": "Search models",
@@ -5051,8 +5059,16 @@
         "prompt": "Please explain the following question in plain language and give an example:\n\n"
       }
     },
-    "historyView": "Conversation view",
     "trash": "Trash",
+    "trashWithCount_one": "Trash · {{count}}",
+    "trashWithCount_other": "Trash · {{count}}",
+    "backToConversations": "Back to conversations",
+    "moreActions": "More actions",
+    "backupMenu": "Back up…",
+    "restoreMenu": "Restore…",
+    "sidebar": "Conversation list",
+    "hideSidebar": "Hide the conversation list",
+    "showSidebar": "Show the conversation list",
     "trashEmpty": "Trash is empty",
     "moveToTrash": "Move to trash",
     "restore": "Restore conversation",
@@ -5070,14 +5086,7 @@
     "markdownSearchCharges": "Search charges (included in estimated cost): {{count}}",
     "exportMarkdown": "Export Markdown",
     "markdownSaved": "Markdown saved",
-    "allUsage": "All conversations",
     "conversationUsage": "This conversation",
-    "usageIncludesTrash": "Includes conversations in the trash.",
-    "usageUnavailable": "Usage could not be loaded. Refresh to try again.",
-    "backupTitle": "Back up all conversations",
-    "restoreBackupTitle": "Restore conversations from backup",
-    "backupShort": "Back up",
-    "restoreBackupShort": "Restore",
     "backupHint": "Backups include conversations, earlier message versions and attachments, without API keys. Restore adds missing conversations and preserves existing ones.",
     "backupSaved_one": "Backed up {{count}} conversation.",
     "backupSaved_other": "Backed up {{count}} conversations.",

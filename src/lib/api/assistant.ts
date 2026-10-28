@@ -101,6 +101,8 @@ export interface AssistantUnreadableSession {
 export interface AssistantSessionList {
   sessions: AssistantSession[];
   unreadable: AssistantUnreadableSession[];
+  /** Readable conversations in the trash, whatever the filter and search. */
+  trashCount: number;
 }
 
 /**

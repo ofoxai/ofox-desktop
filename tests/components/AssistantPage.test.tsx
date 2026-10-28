@@ -54,6 +54,12 @@ vi.mock("@/lib/api/assistant", async (importOriginal) => ({
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
 }));
+const toasts = vi.hoisted(() => ({
+  success: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+}));
+vi.mock("sonner", () => ({ toast: toasts }));
 
 const session: AssistantSession = {
   id: "session-a",
@@ -99,7 +105,8 @@ let current: AssistantSessionDetail;
 const listOf = (
   sessions: AssistantSession[],
   unreadable: AssistantSessionList["unreadable"] = [],
-): AssistantSessionList => ({ sessions, unreadable });
+  trashCount = 0,
+): AssistantSessionList => ({ sessions, unreadable, trashCount });
 
 function page(enabled = true) {
   return (
@@ -120,6 +127,38 @@ async function openConversation() {
 }
 const composer = () =>
   screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
+/** Open the search behind its icon button and type into it. */
+async function searchFor(text: string) {
+  await userEvent.click(
+    screen.getByRole("button", { name: "Search conversations" }),
+  );
+  await userEvent.type(
+    screen.getByRole("searchbox", { name: "Search conversations" }),
+    text,
+  );
+}
+/** Pick an entry of the sidebar footer's More actions menu once it can run. */
+async function chooseFromMenu(name: string) {
+  await userEvent.click(
+    screen.getByRole("button", { name: i18n.t("assistant.moreActions") }),
+  );
+  const item = await screen.findByRole("menuitem", { name });
+  await waitFor(() =>
+    expect(item).not.toHaveAttribute("aria-disabled", "true"),
+  );
+  await userEvent.click(item);
+}
+/** Each toast shown so far: its kind, then its title and description lines. */
+const toasted = () =>
+  (["success", "warning"] as const).flatMap((kind) =>
+    toasts[kind].mock.calls.map(([title, options]) => ({
+      kind,
+      lines: [
+        title,
+        ...(options?.description ? options.description.split("\n") : []),
+      ],
+    })),
+  );
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -372,10 +411,7 @@ describe("history", () => {
   it("searches conversations through the backend filter", async () => {
     render(page());
     await screen.findByRole("button", { name: /My conversation/ });
-    await userEvent.type(
-      screen.getByRole("searchbox", { name: "Search conversations" }),
-      "notes",
-    );
+    await searchFor("notes");
     await waitFor(() =>
       expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
     );
@@ -2391,7 +2427,7 @@ describe("selection and history edges", () => {
     expect(list).not.toHaveTextContent("damaged");
   });
 
-  it("dates the history in the app's language, not the system's", async () => {
+  it("dates the history in the app's language, not the system's, on hover", async () => {
     // A pinned zone where this moment is already the next day.
     vi.stubEnv("TZ", "Asia/Shanghai");
     const stamp = Date.UTC(2026, 9, 15, 20);
@@ -2401,7 +2437,21 @@ describe("selection and history edges", () => {
     i18n.addResourceBundle("zh", "translation", zh, true, true);
     await i18n.changeLanguage("zh");
     render(page());
-    expect(await screen.findByText("2026/10/16")).toBeVisible();
+    const row = await screen.findByRole("button", { name: "My conversation" });
+    // One line: the title, with the full time on hover.
+    expect(row).toHaveTextContent(/^My conversation$/);
+    expect(row).toHaveAttribute("title", "2026年10月16日 04:00");
+  });
+
+  it("marks a conversation that is replying with a spinner that says so", async () => {
+    mocks.listSessions.mockResolvedValue(
+      listOf([{ ...session, activeRun: { runId: "r", operationId: "o" } }]),
+    );
+    render(page());
+    const row = await screen.findByRole("button", {
+      name: "My conversation Replying…",
+    });
+    expect(row.querySelector("svg.animate-spin")).not.toBeNull();
   });
 
   it("loads a conversation again when its row is clicked after its load failed", async () => {
@@ -3182,7 +3232,11 @@ describe("web search", () => {
       expect(screen.getByRole("link", { name: "log" })).toBeVisible(),
     );
     expect(screen.getAllByRole("list", { name: "Sources" })).toHaveLength(1);
-    expect(screen.queryByRole("button", { expanded: false })).toBeNull();
+    expect(
+      within(
+        screen.getByRole("region", { name: "Assistant conversation" }),
+      ).queryByRole("button", { expanded: false }),
+    ).toBeNull();
     expect(
       screen.getByRole("button", { name: "2. Pi changelog pi.dev" }),
     ).toBeVisible();
@@ -3338,15 +3392,6 @@ describe("web search", () => {
     expect(screen.queryByRole("button", { name: /source/ })).toBeNull();
     expect(screen.queryByText(/Web search was unavailable/)).toBeNull();
     expect(screen.getByText("Thinking…")).toBeVisible();
-  });
-
-  it("tells the user the assistant searches the web only when asked to", async () => {
-    await openConversation();
-    expect(
-      screen.getByText(
-        "Replies come from the model you choose. The assistant reads only the files you attach and searches the web only when you turn on web search. It can't change your settings.",
-      ),
-    ).toBeVisible();
   });
 
   it("can't be turned on, and says why, when search is unavailable", async () => {
@@ -4033,158 +4078,6 @@ describe("Markdown export", () => {
   });
 });
 
-describe("all conversation usage", () => {
-  it("hides the saved total price while a background run starts and refreshes after it ends", async () => {
-    mocks.usageSummary.mockResolvedValue({
-      estimatedCostUsd: "1.25",
-      usageCoverage: "complete",
-    });
-    render(page());
-    const totals = await screen.findByRole("region", {
-      name: "All conversations",
-    });
-    await within(totals).findByText(/1.25/);
-    let resolve!: (usage: object) => void;
-    mocks.usageSummary.mockImplementationOnce(
-      () =>
-        new Promise((done) => {
-          resolve = done;
-        }),
-    );
-    act(() =>
-      mocks.listener?.({
-        sessionId: "background",
-        runId: "run",
-        operationId: "operation",
-        type: "run_start",
-        data: { messageId: "background-reply", webSearch: false },
-      }),
-    );
-    expect(totals).not.toHaveTextContent("1.25");
-    await act(async () =>
-      resolve({ estimatedCostUsd: null, usageCoverage: "incomplete" }),
-    );
-    await within(totals).findByText("Cost unavailable");
-    mocks.usageSummary.mockResolvedValue({
-      estimatedCostUsd: "1.50",
-      usageCoverage: "complete",
-    });
-    act(() =>
-      mocks.listener?.({
-        sessionId: "background",
-        runId: "run",
-        operationId: "operation",
-        type: "run_end",
-        data: { stopped: false, status: "completed" },
-      }),
-    );
-    await within(totals).findByText(/1.50/);
-  });
-
-  it("keeps the latest total when an older refresh arrives later", async () => {
-    let resolve!: (usage: object) => void;
-    mocks.usageSummary.mockImplementationOnce(
-      () =>
-        new Promise((done) => {
-          resolve = done;
-        }),
-    );
-    render(page());
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
-    mocks.usageSummary.mockResolvedValue({
-      estimatedCostUsd: "2.50",
-      usageCoverage: "complete",
-    });
-    // A run ending reads the totals again.
-    act(() =>
-      mocks.listener?.({
-        sessionId: "background",
-        runId: "run",
-        operationId: "operation",
-        type: "run_end",
-        data: { stopped: false, status: "completed" },
-      }),
-    );
-    const totals = screen.getByRole("region", { name: "All conversations" });
-    await within(totals).findByText(/2.50/);
-    await act(async () =>
-      resolve({ estimatedCostUsd: "1.25", usageCoverage: "complete" }),
-    );
-    expect(totals).toHaveTextContent("2.50");
-    expect(totals).not.toHaveTextContent("1.25");
-  });
-
-  it("drops totals that arrive after sign-in expires", async () => {
-    let resolve!: (usage: object) => void;
-    mocks.usageSummary.mockImplementation(
-      () =>
-        new Promise((done) => {
-          resolve = done;
-        }),
-    );
-    render(page());
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalled());
-    act(() => mocks.auth?.("expired"));
-    await act(async () =>
-      resolve({ estimatedCostUsd: "987.65", usageCoverage: "complete" }),
-    );
-    expect(
-      screen.getByRole("region", { name: "All conversations" }),
-    ).not.toHaveTextContent("987.65");
-    expect(
-      screen.queryByRole("button", { name: "My conversation" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("shows saved totals across active and trashed conversations, independently of the list search", async () => {
-    mocks.usageSummary.mockResolvedValue({
-      inputTokens: 1200,
-      outputTokens: 400,
-      estimatedCostUsd: "1.25",
-      searchCount: 3,
-      usageCoverage: "complete",
-    });
-    render(page());
-    const totals = await screen.findByRole("region", {
-      name: "All conversations",
-    });
-    await within(totals).findByText(/Input 1.2K/);
-    expect(totals).toHaveTextContent("$1.25");
-    expect(totals).toHaveTextContent("3 search");
-    expect(totals).toHaveTextContent("Includes conversations in the trash.");
-    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
-    expect(totals).toHaveTextContent("$1.25");
-  });
-  it("does not present incomplete or failed totals as a zero cost", async () => {
-    mocks.usageSummary.mockResolvedValue({
-      inputTokens: 800,
-      estimatedCostUsd: null,
-      searchCount: 0,
-      usageCoverage: "incomplete",
-    });
-    render(page());
-    const totals = await screen.findByRole("region", {
-      name: "All conversations",
-    });
-    await within(totals).findByText(/Cost unavailable/);
-    expect(totals).not.toHaveTextContent("$0");
-    expect(totals).not.toHaveTextContent("0 search");
-    mocks.usageSummary.mockRejectedValue("assistant_storage_unavailable");
-    act(() =>
-      mocks.listener?.({
-        sessionId: "background",
-        runId: "run",
-        operationId: "operation",
-        type: "run_end",
-        data: { stopped: false, status: "completed" },
-      }),
-    );
-    await within(totals).findByText(
-      "Usage could not be loaded. Refresh to try again.",
-    );
-  });
-});
-
 describe("complete conversation backups", () => {
   it("does not rewrite an untouched conversation before restoring an identical backup", async () => {
     await openConversation();
@@ -4194,10 +4087,15 @@ describe("complete conversation backups", () => {
       conflicts: 0,
       warning: null,
     });
-    await userEvent.click(
-      screen.getByRole("button", { name: "Restore conversations from backup" }),
+    await chooseFromMenu("Restore…");
+    await waitFor(() =>
+      expect(toasted()).toEqual([
+        {
+          kind: "success",
+          lines: ["1 conversation was already on this device."],
+        },
+      ]),
     );
-    await screen.findByText("1 conversation was already on this device.");
     expect(mocks.updateSession).not.toHaveBeenCalled();
   });
 
@@ -4295,31 +4193,26 @@ describe("complete conversation backups", () => {
       expect(current.session.draft).toBe("Draft in complete backup");
       return { sessions: 1, skipped: 0 };
     });
-    await userEvent.click(
-      screen.getByRole("button", { name: "Back up all conversations" }),
-    );
+    await chooseFromMenu("Back up…");
     await waitFor(() =>
       expect(mocks.backup).toHaveBeenCalledWith({
         expectedOwner: capabilities.owner,
         expectedGeneration: capabilities.authorityGeneration,
       }),
     );
-    expect(
-      (await screen.findByText("Backed up 1 conversation.")).closest(
-        "[role=status]",
-      ),
-    ).not.toBeNull();
+    await waitFor(() =>
+      expect(toasted()).toEqual([
+        { kind: "success", lines: ["Backed up 1 conversation."] },
+      ]),
+    );
   });
   it("keeps native backup cancellation quiet", async () => {
     mocks.backup.mockResolvedValue(null);
     render(page());
-    const button = await screen.findByRole("button", {
-      name: "Back up all conversations",
-    });
-    await waitFor(() => expect(button).toBeEnabled());
-    await userEvent.click(button);
+    await chooseFromMenu("Back up…");
     await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
-    expect(screen.queryByText(/Backed up/)).not.toBeInTheDocument();
+    await act(async () => undefined);
+    expect(toasted()).toEqual([]);
   });
   it("reports partial restore counts and its warning without discarding the current conversation", async () => {
     mocks.restore.mockResolvedValue({
@@ -4329,18 +4222,23 @@ describe("complete conversation backups", () => {
       warning: "assistant_backup_conflict",
     });
     await openConversation();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Restore conversations from backup" }),
-    );
+    await chooseFromMenu("Restore…");
     await waitFor(() =>
       expect(mocks.restore).toHaveBeenCalledWith({
         expectedOwner: capabilities.owner,
         expectedGeneration: capabilities.authorityGeneration,
       }),
     );
-    const imported = await screen.findByText("Restored 2 conversations.");
-    expect(imported.closest("[role=status]")).toHaveTextContent(
-      "1 conversation was already on this device.",
+    await waitFor(() =>
+      expect(toasted()).toEqual([
+        {
+          kind: "success",
+          lines: [
+            "Restored 2 conversations.",
+            "1 conversation was already on this device.",
+          ],
+        },
+      ]),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent("same ID");
     expect(screen.getByRole("heading", { name: session.title })).toBeVisible();
@@ -4354,13 +4252,11 @@ describe("complete conversation backups", () => {
         }),
     );
     await openConversation();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Back up all conversations" }),
-    );
+    await chooseFromMenu("Back up…");
     await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
     act(() => mocks.auth?.("expired"));
     await act(async () => resolve({ sessions: 1, skipped: 0 }));
-    expect(screen.queryByText(/Backed up/)).not.toBeInTheDocument();
+    expect(toasted()).toEqual([]);
   });
 });
 
@@ -4494,7 +4390,7 @@ describe("conversation trash, in detail", () => {
 
 describe("the labels of the sidebar", () => {
   it.each(["en", "zh", "ja"])(
-    "names the backup and restore buttons by words that contain what they show (%s)",
+    "names backup and restore by what they show, and describes what a backup holds (%s)",
     async (language) => {
       i18n.addResourceBundle("zh", "translation", zh, true, true);
       i18n.addResourceBundle("ja", "translation", ja, true, true);
@@ -4502,25 +4398,23 @@ describe("the labels of the sidebar", () => {
         await i18n.changeLanguage(language);
       });
       render(page());
-      for (const [title, shown] of [
-        ["assistant.backupTitle", "assistant.backupShort"],
-        ["assistant.restoreBackupTitle", "assistant.restoreBackupShort"],
-      ]) {
-        const button = await screen.findByRole("button", {
-          name: i18n.t(title),
-        });
-        expect(button).toHaveTextContent(i18n.t(shown));
-        expect(i18n.t(title)).toContain(i18n.t(shown));
+      await userEvent.click(
+        await screen.findByRole("button", {
+          name: i18n.t("assistant.moreActions"),
+        }),
+      );
+      for (const key of ["assistant.backupMenu", "assistant.restoreMenu"]) {
+        const item = await screen.findByRole("menuitem", { name: i18n.t(key) });
+        expect(item).toHaveAccessibleDescription(
+          i18n.t("assistant.backupHint"),
+        );
       }
     },
   );
 
-  it("groups the view toggles and the conversation's usage under their names", async () => {
+  it("groups the conversation's usage under its name", async () => {
     current.usage = { inputTokens: 10, outputTokens: 5 };
     await openConversation();
-    expect(
-      screen.getByRole("group", { name: "Conversation view" }),
-    ).toContainElement(screen.getByRole("button", { name: "Trash" }));
     expect(
       screen.getByRole("group", { name: "This conversation" }),
     ).toHaveTextContent("Input 10 · Output 5 tokens");
@@ -4528,37 +4422,45 @@ describe("the labels of the sidebar", () => {
 });
 
 describe("what a backup or restore reports", () => {
-  const backupButton = () =>
-    screen.findByRole("button", { name: "Back up all conversations" });
-  const restoreButton = () =>
-    screen.findByRole("button", { name: "Restore conversations from backup" });
-  const status = (line: string) =>
-    screen.findByText(line).then((found) => found.closest("[role=status]"));
-
-  async function ready(button: () => Promise<HTMLElement>) {
-    render(page());
-    const found = await button();
-    await waitFor(() => expect(found).toBeEnabled());
-    return found;
-  }
+  // The menu waits for its entries to be enabled.
+  const ready = async () => void render(page());
+  const toastedOnce = () =>
+    waitFor(() => {
+      expect(toasted()).toHaveLength(1);
+      return toasted()[0];
+    });
 
   it("says how many conversations a backup holds", async () => {
     mocks.backup.mockResolvedValue({ sessions: 3, skipped: 0 });
-    await userEvent.click(await ready(backupButton));
-    expect(await status("Backed up 3 conversations.")).not.toBeNull();
-    expect(screen.queryByText(/damaged/)).toBeNull();
+    await ready();
+    await chooseFromMenu("Back up…");
+    expect(await toastedOnce()).toEqual({
+      kind: "success",
+      lines: ["Backed up 3 conversations."],
+    });
   });
 
-  it("warns, in the same place, about damaged conversations left out of it", async () => {
+  it("warns, in the same toast, about damaged conversations left out of it", async () => {
     mocks.backup.mockResolvedValue({ sessions: 3, skipped: 2 });
-    await userEvent.click(await ready(backupButton));
-    const line = await screen.findByText(
-      "2 conversations couldn't be read and were left out of the backup.",
-    );
-    expect(line.closest("[role=status]")).toHaveTextContent(
-      "Backed up 3 conversations.",
-    );
-    expect(line).toHaveClass("text-warn");
+    await ready();
+    await chooseFromMenu("Back up…");
+    expect(await toastedOnce()).toEqual({
+      kind: "warning",
+      lines: [
+        "Backed up 3 conversations.",
+        "2 conversations couldn't be read and were left out of the backup.",
+      ],
+    });
+  });
+
+  it("keeps a result in view long enough to read its lines", async () => {
+    mocks.backup.mockResolvedValue({ sessions: 3, skipped: 2 });
+    await ready();
+    await chooseFromMenu("Back up…");
+    await toastedOnce();
+    const [, options] = toasts.warning.mock.calls[0];
+    expect(options.duration).toBeGreaterThanOrEqual(6000);
+    expect(options.classNames.description).toContain("whitespace-pre-line");
   });
 
   it.each([
@@ -4568,8 +4470,9 @@ describe("what a backup or restore reports", () => {
     "counts %i backed up conversation(s) in the singular or plural",
     async (sessions, text) => {
       mocks.backup.mockResolvedValue({ sessions, skipped: 0 });
-      await userEvent.click(await ready(backupButton));
-      expect(await screen.findByText(text)).toBeVisible();
+      await ready();
+      await chooseFromMenu("Back up…");
+      expect((await toastedOnce()).lines).toEqual([text]);
     },
   );
 
@@ -4580,15 +4483,16 @@ describe("what a backup or restore reports", () => {
       conflicts: 2,
       warning: null,
     });
-    await userEvent.click(await ready(restoreButton));
-    const line = await screen.findByText("Restored 1 conversation.");
-    const result = line.closest("[role=status]");
-    expect(result).toHaveTextContent(
-      "3 conversations were already on this device.",
-    );
-    expect(result).toHaveTextContent(
-      "2 conversations on this device are different or in use, so they were left unchanged.",
-    );
+    await ready();
+    await chooseFromMenu("Restore…");
+    expect(await toastedOnce()).toEqual({
+      kind: "warning",
+      lines: [
+        "Restored 1 conversation.",
+        "3 conversations were already on this device.",
+        "2 conversations on this device are different or in use, so they were left unchanged.",
+      ],
+    });
   });
 
   it("names only conflicts when nothing else happened, and never claims a restore", async () => {
@@ -4598,13 +4502,14 @@ describe("what a backup or restore reports", () => {
       conflicts: 1,
       warning: null,
     });
-    await userEvent.click(await ready(restoreButton));
-    expect(
-      await screen.findByText(
+    await ready();
+    await chooseFromMenu("Restore…");
+    expect(await toastedOnce()).toEqual({
+      kind: "warning",
+      lines: [
         "1 conversation on this device is different or in use, so it was left unchanged.",
-      ),
-    ).toBeVisible();
-    expect(screen.queryByText(/Restored/)).toBeNull();
+      ],
+    });
   });
 
   it("says so when the backup had nothing to restore", async () => {
@@ -4614,10 +4519,12 @@ describe("what a backup or restore reports", () => {
       conflicts: 0,
       warning: null,
     });
-    await userEvent.click(await ready(restoreButton));
-    expect(
-      await screen.findByText("The backup has no conversations to restore."),
-    ).toBeVisible();
+    await ready();
+    await chooseFromMenu("Restore…");
+    expect(await toastedOnce()).toEqual({
+      kind: "warning",
+      lines: ["The backup has no conversations to restore."],
+    });
   });
 
   it.each([
@@ -4655,21 +4562,12 @@ describe("what a backup or restore reports", () => {
       conflicts: 2,
       warning: null,
     });
-    render(page());
-    const backup = await screen.findByRole("button", {
-      name: i18n.t("assistant.backupTitle"),
-    });
-    await waitFor(() => expect(backup).toBeEnabled());
-    await userEvent.click(backup);
-    for (const line of backed)
-      expect(await screen.findByText(line)).toBeVisible();
-    await userEvent.click(
-      await screen.findByRole("button", {
-        name: i18n.t("assistant.restoreBackupTitle"),
-      }),
-    );
-    for (const line of restored)
-      expect(await screen.findByText(line)).toBeVisible();
+    await ready();
+    await chooseFromMenu(i18n.t("assistant.backupMenu"));
+    await waitFor(() => expect(toasted()).toHaveLength(1));
+    await chooseFromMenu(i18n.t("assistant.restoreMenu"));
+    await waitFor(() => expect(toasted()).toHaveLength(2));
+    expect(toasted().map((told) => told.lines)).toEqual([backed, restored]);
   });
 
   it("refuses with its own message while another conversation sends or imports, and does not open the dialog", async () => {
@@ -4723,11 +4621,12 @@ describe("what a backup or restore reports", () => {
     await userEvent.click(screen.getByRole("button", { name: "Trash" }));
     expect(composer()).toHaveAttribute("readonly");
     expect(composer()).toHaveValue("Unsent words");
-    await userEvent.click(await backupButton());
+    await chooseFromMenu("Back up…");
     await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "Trash" })).toBeVisible();
     expect(
-      screen.getByRole("button", { name: "Conversations", pressed: true }),
-    ).toBeVisible();
+      screen.queryByRole("button", { name: "Back to conversations" }),
+    ).toBeNull();
     await waitFor(() => expect(composer()).not.toHaveAttribute("readonly"));
     expect(composer()).toHaveValue("Unsent words");
     expect(
@@ -4741,104 +4640,246 @@ describe("what a backup or restore reports", () => {
   });
 });
 
-describe("when the totals of all conversations are read", () => {
-  const runEnd = () =>
-    act(() =>
-      mocks.listener?.({
-        sessionId: "background",
-        runId: "run",
-        operationId: "operation",
-        type: "run_end",
-        data: { stopped: false, status: "completed" },
-      }),
-    );
-
-  it("reads them once for the page, not for a search or a switch of the list", async () => {
+describe("the sidebar", () => {
+  it("keeps to the list: no view tabs, totals of all conversations or disclaimer", async () => {
     render(page());
     await screen.findByRole("button", { name: /My conversation/ });
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
-    await userEvent.type(
-      screen.getByRole("searchbox", { name: "Search conversations" }),
-      "notes",
-    );
-    await waitFor(() =>
-      expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
-    await waitFor(() =>
-      expect(mocks.listSessions).toHaveBeenLastCalledWith(true, "notes"),
-    );
-    await userEvent.click(
-      screen.getByRole("button", { name: "Conversations" }),
-    );
-    await waitFor(() =>
-      expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
-    );
-    expect(mocks.usageSummary).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("group", { name: /view/i })).toBeNull();
+    expect(
+      screen.queryByText(/Includes conversations in the trash/),
+    ).toBeNull();
+    expect(screen.queryByText(/Replies come from the model/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Conversations" })).toBeNull();
+    expect(mocks.usageSummary).not.toHaveBeenCalled();
   });
 
-  it("reads them again when a run ends, and when sign-in is restored", async () => {
+  it("starts a new conversation from its icon button", async () => {
     render(page());
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
-    runEnd();
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(2));
-    act(() => mocks.auth?.("restored"));
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(3));
-  });
-
-  it("reads them again after a restore that imported conversations, not after one that did not", async () => {
-    mocks.restore
-      .mockResolvedValueOnce({
-        imported: 0,
-        skipped: 1,
-        conflicts: 0,
-        warning: null,
-      })
-      .mockResolvedValueOnce({
-        imported: 1,
-        skipped: 0,
-        conflicts: 0,
-        warning: null,
-      });
-    render(page());
-    const restore = await screen.findByRole("button", {
-      name: "Restore conversations from backup",
+    const create = await screen.findByRole("button", {
+      name: "New conversation",
     });
-    await waitFor(() => expect(restore).toBeEnabled());
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
-    await userEvent.click(restore);
-    await screen.findByText("1 conversation was already on this device.");
-    expect(mocks.usageSummary).toHaveBeenCalledTimes(1);
-    await waitFor(() => expect(restore).toBeEnabled());
-    await userEvent.click(restore);
-    await screen.findByText("Restored 1 conversation.");
-    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(2));
+    expect(create).toHaveTextContent("");
+    await waitFor(() => expect(create).toBeEnabled());
+    await userEvent.click(create);
+    await waitFor(() => expect(mocks.createSession).toHaveBeenCalled());
   });
 
-  it("reads them again after a conversation is deleted for good", async () => {
-    current.session.deletedAt = 10;
-    mocks.listSessions.mockImplementation(async (deleted = false) =>
-      listOf(
-        Boolean(current.session.deletedAt) === deleted ? [current.session] : [],
-      ),
-    );
-    render(page());
-    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
-    await userEvent.click(
-      await screen.findByRole("button", { name: /My conversation/ }),
-    );
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Delete permanently" }),
-    );
-    const reads = mocks.usageSummary.mock.calls.length;
-    await userEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", {
-        name: "Delete permanently",
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.usageSummary.mock.calls.length).toBeGreaterThan(reads),
-    );
+  describe("search", () => {
+    it("shows only an icon until it is opened, then a focused field", async () => {
+      render(page());
+      await screen.findByRole("button", { name: /My conversation/ });
+      const open = screen.getByRole("button", { name: "Search conversations" });
+      expect(open).toHaveTextContent("");
+      expect(screen.queryByRole("searchbox")).toBeNull();
+      await userEvent.click(open);
+      expect(
+        screen.getByRole("searchbox", { name: "Search conversations" }),
+      ).toHaveFocus();
+    });
+
+    it("closes and clears with Escape, back on its button, without leaving the page", async () => {
+      const left = vi.fn();
+      window.addEventListener("keydown", left);
+      try {
+        render(page());
+        await screen.findByRole("button", { name: /My conversation/ });
+        await searchFor("notes");
+        await waitFor(() =>
+          expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
+        );
+        await userEvent.keyboard("{Escape}");
+        expect(screen.queryByRole("searchbox")).toBeNull();
+        await waitFor(() =>
+          expect(
+            screen.getByRole("button", { name: "Search conversations" }),
+          ).toHaveFocus(),
+        );
+        await waitFor(() =>
+          expect(mocks.listSessions).toHaveBeenLastCalledWith(false, ""),
+        );
+        // The app's Escape handler sees it as handled.
+        expect(left.mock.calls.at(-1)?.[0].defaultPrevented).toBe(true);
+      } finally {
+        window.removeEventListener("keydown", left);
+      }
+    });
+
+    it("closes when it loses focus empty, and stays open with its filter", async () => {
+      render(page());
+      await screen.findByRole("button", { name: /My conversation/ });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Search conversations" }),
+      );
+      await userEvent.tab();
+      expect(screen.queryByRole("searchbox")).toBeNull();
+      await searchFor("notes");
+      await userEvent.tab();
+      expect(
+        screen.getByRole("searchbox", { name: "Search conversations" }),
+      ).toHaveValue("notes");
+    });
+
+    it("filters the trash too, and the conversations again on the way back", async () => {
+      render(page());
+      await screen.findByRole("button", { name: /My conversation/ });
+      await searchFor("notes");
+      await waitFor(() =>
+        expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+      await waitFor(() =>
+        expect(mocks.listSessions).toHaveBeenLastCalledWith(true, "notes"),
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Back to conversations" }),
+      );
+      await waitFor(() =>
+        expect(mocks.listSessions).toHaveBeenLastCalledWith(false, "notes"),
+      );
+    });
+  });
+
+  describe("the trash", () => {
+    it("counts every trashed conversation in its entry, whatever the search", async () => {
+      mocks.listSessions.mockImplementation(async (_deleted, search) =>
+        listOf(search ? [] : [session], [], 3),
+      );
+      render(page());
+      const entry = await screen.findByRole("button", { name: "Trash · 3" });
+      await searchFor("nothing like it");
+      await waitFor(() =>
+        expect(mocks.listSessions).toHaveBeenLastCalledWith(
+          false,
+          "nothing like it",
+        ),
+      );
+      await screen.findByText("No matching conversations");
+      expect(entry).toHaveTextContent("Trash · 3");
+    });
+
+    it("shows its conversations under a way back that takes focus, and returns to its entry", async () => {
+      current.session.deletedAt = 10;
+      mocks.listSessions.mockImplementation(async (deleted = false) =>
+        listOf(deleted ? [current.session] : [], [], 1),
+      );
+      render(page());
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Trash · 1" }),
+      );
+      const back = screen.getByRole("button", {
+        name: "Back to conversations",
+      });
+      await waitFor(() => expect(back).toHaveFocus());
+      const sidebar = screen.getByRole("complementary", {
+        name: "Conversations",
+      });
+      expect(
+        within(sidebar).getByRole("heading", { name: "Trash" }),
+      ).toBeVisible();
+      const list = within(sidebar).getByRole("list", { name: "Trash" });
+      expect(
+        await within(list).findByRole("button", { name: "My conversation" }),
+      ).toBeVisible();
+      expect(screen.queryByRole("button", { name: "Trash · 1" })).toBeNull();
+      await userEvent.click(back);
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Trash · 1" })).toHaveFocus(),
+      );
+      expect(
+        screen.queryByRole("button", { name: "Back to conversations" }),
+      ).toBeNull();
+    });
+
+    it("gives focus to its entry once the open conversation is moved there, and once it is restored", async () => {
+      mocks.listSessions.mockImplementation(async (deleted = false) =>
+        listOf(
+          Boolean(current.session.deletedAt) === deleted
+            ? [current.session]
+            : [],
+        ),
+      );
+      mocks.updateSession.mockImplementation(async (patch) => {
+        current.session = {
+          ...current.session,
+          ...patch,
+          ...(patch.deleted === undefined
+            ? {}
+            : { deletedAt: patch.deleted ? 10 : null }),
+        };
+        return current.session;
+      });
+      await openConversation();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Move to trash" }),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
+      );
+      await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+      await userEvent.click(
+        await screen.findByRole("button", { name: "My conversation" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Restore conversation" }),
+      );
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
+      );
+    });
+  });
+
+  describe("collapsing", () => {
+    afterEach(() => localStorage.clear());
+
+    it("hides the list behind the header toggle, says so to assistive tech, and remembers it", async () => {
+      const view = render(page());
+      const toggle = await screen.findByRole("button", {
+        name: "Conversation list",
+      });
+      const sidebar = screen.getByRole("complementary", {
+        name: "Conversations",
+      });
+      expect(toggle).toHaveAttribute("aria-expanded", "true");
+      expect(toggle).toHaveAttribute("aria-controls", sidebar.id);
+      await userEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-expanded", "false");
+      expect(sidebar).not.toBeVisible();
+      expect(toggle).toHaveAttribute("title", "Show the conversation list");
+      view.unmount();
+
+      render(page());
+      expect(
+        await screen.findByRole("button", { name: "Conversation list" }),
+      ).toHaveAttribute("aria-expanded", "false");
+      expect(
+        screen.queryByRole("complementary", { name: "Conversations" }),
+      ).toBeNull();
+    });
+
+    it("still works when storage can't be used", async () => {
+      const read = vi
+        .spyOn(Storage.prototype, "getItem")
+        .mockImplementation(() => {
+          throw new Error("blocked");
+        });
+      const write = vi
+        .spyOn(Storage.prototype, "setItem")
+        .mockImplementation(() => {
+          throw new Error("blocked");
+        });
+      try {
+        render(page());
+        const toggle = await screen.findByRole("button", {
+          name: "Conversation list",
+        });
+        expect(toggle).toHaveAttribute("aria-expanded", "true");
+        await userEvent.click(toggle);
+        expect(toggle).toHaveAttribute("aria-expanded", "false");
+      } finally {
+        read.mockRestore();
+        write.mockRestore();
+      }
+    });
   });
 });
 
@@ -4853,32 +4894,49 @@ describe("focus after a button's action is over", () => {
     expect(document.body).toHaveFocus();
   };
 
+  it("gives it back to Export Markdown once the action was cancelled or failed", async () => {
+    await openConversation();
+    for (const outcome of [
+      () => false,
+      () => Promise.reject("assistant_export_failed"),
+    ]) {
+      mocks.exportMarkdown.mockImplementationOnce(async () => {
+        dropFocus();
+        return outcome();
+      });
+      const button = screen.getByRole("button", { name: "Export Markdown" });
+      const calls = mocks.exportMarkdown.mock.calls.length;
+      await userEvent.click(button);
+      await waitFor(() =>
+        expect(mocks.exportMarkdown).toHaveBeenCalledTimes(calls + 1),
+      );
+      await waitFor(() => expect(button).toBeEnabled());
+      await waitFor(() => expect(button).toHaveFocus());
+    }
+  });
+
   it.each([
-    ["Export Markdown", "exportMarkdown", false, "assistant_export_failed"],
-    ["Back up all conversations", "backup", null, "assistant_backup_failed"],
-    [
-      "Restore conversations from backup",
-      "restore",
-      null,
-      "assistant_backup_invalid",
-    ],
+    ["Back up…", "backup", "assistant_backup_failed"],
+    ["Restore…", "restore", "assistant_backup_invalid"],
   ] as const)(
-    "gives it back to %s once the action was cancelled or failed",
-    async (name, command, cancelled, failure) => {
+    "gives it back to the menu button once %s was cancelled or failed",
+    async (item, command, failure) => {
       await openConversation();
-      for (const outcome of [() => cancelled, () => Promise.reject(failure)]) {
+      for (const outcome of [() => null, () => Promise.reject(failure)]) {
         mocks[command].mockImplementationOnce(async () => {
           dropFocus();
           return outcome();
         });
-        const button = screen.getByRole("button", { name });
         const calls = mocks[command].mock.calls.length;
-        await userEvent.click(button);
+        await chooseFromMenu(item);
         await waitFor(() =>
           expect(mocks[command]).toHaveBeenCalledTimes(calls + 1),
         );
-        await waitFor(() => expect(button).toBeEnabled());
-        await waitFor(() => expect(button).toHaveFocus());
+        await waitFor(() =>
+          expect(
+            screen.getByRole("button", { name: "More actions" }),
+          ).toHaveFocus(),
+        );
       }
     },
   );

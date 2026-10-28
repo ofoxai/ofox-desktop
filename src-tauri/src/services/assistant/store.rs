@@ -120,6 +120,8 @@ pub struct SessionList {
     /// Session folders whose `session.json` could not be read, whatever the
     /// filter: their title, content and trash state are unknown.
     pub unreadable: Vec<UnreadableSession>,
+    /// Readable conversations in the trash, whatever the filter and search.
+    pub trash_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -179,7 +181,7 @@ impl AssistantStore {
 
     /// Sessions in the trash (`deleted`) or out of it, most recently updated
     /// first (ties by id). `search` matches the title or any message, ignoring
-    /// case.
+    /// case. The trash count covers the whole trash either way.
     ///
     /// Blocking file IO (reads every session): async callers run it in
     /// `spawn_blocking`.
@@ -192,9 +194,11 @@ impl AssistantStore {
         for sid in self.session_ids()? {
             match read_listed(&self.root, &sid) {
                 Ok(Some(record)) => {
-                    if record.session.deleted_at.is_some() == deleted
-                        && matches_search(&record, &search)
-                    {
+                    let trashed = record.session.deleted_at.is_some();
+                    if trashed {
+                        list.trash_count += 1;
+                    }
+                    if trashed == deleted && matches_search(&record, &search) {
                         list.sessions.push(record.session);
                     }
                 }
@@ -1643,6 +1647,26 @@ mod tests {
         assert_eq!(found("RUST LIFE"), [talked]);
         assert!(found("nowhere").is_empty());
         assert_eq!(found("").len(), 3);
+    }
+
+    #[test]
+    fn the_trash_count_covers_every_trashed_conversation_whatever_the_list_shows() {
+        let (_config, store) = fixture();
+        assert_eq!(store.list(false, "").unwrap().trash_count, 0);
+        for title in ["kept", "first gone", "second gone"] {
+            let sid = store.create("test/model", false).unwrap().session.id;
+            let mut update = request(&sid);
+            update.title = Some(title.into());
+            update.deleted = Some(title != "kept");
+            store.update(&update, no_precondition).unwrap();
+        }
+
+        for (deleted, search) in [(false, ""), (true, ""), (false, "kept"), (true, "nowhere")] {
+            assert_eq!(store.list(deleted, search).unwrap().trash_count, 2);
+        }
+        // The renderer reads it as `trashCount`.
+        let listed = serde_json::to_value(store.list(false, "").unwrap()).unwrap();
+        assert_eq!(listed["trashCount"], 2);
     }
 
     #[test]
