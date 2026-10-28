@@ -163,13 +163,16 @@ replaying and (in a non-context `ofox-desktop-attachments` entry) its
 attachment selection, and can be retried explicitly.
 
 Events are `{method:"event",params:{sessionId,runId,operationId,type,data}}`.
-Types include run_start/attachment/thinking_start/text_delta/thinking_delta/
-tool_start/tool_end/message_end/usage/compaction_start/compaction_end/error/
-run_end (`tool_start`/`tool_end` of the web tools: see
+Types include run_start/attachment/thinking_start/thinking_end/text_delta/
+thinking_delta/tool_start/tool_end/message_end/usage/compaction_start/
+compaction_end/error/run_end (`tool_start`/`tool_end` of the web tools: see
 [Web search](#web-search)). Streamed text holds back a tail long enough to
 replace a key split across deltas. `thinking_start` (no data) goes out with a
 thinking block's first reasoning, before that hold-back, so the host can time
-the reasoning from when it really began; hidden reasoning sends none.
+the reasoning from when it really began; `thinking_end` (no data) follows the
+last of that reasoning as soon as it stops (the model begins its text or a tool
+call, or the block or message ends), before the held-back text that follows.
+Hidden reasoning sends neither.
 The host must persist the final RPC projection **before** publishing its UI
 run_end. message_end is a runtime summary, not the application's message object.
 
