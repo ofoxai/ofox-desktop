@@ -633,6 +633,20 @@ impl AssistantHost {
         }
     }
 
+    /// Lift the pause on `apex`'s failed catalog sources, keeping their last
+    /// rows: the next read asks them again, and a copy still stands in if
+    /// that read fails too. For reads the user starts (opening the page,
+    /// Retry, a refresh), never for those a send makes.
+    pub(super) fn retry_failed_catalog_sources(&self, apex: &str) {
+        if let Ok(mut models) = self.models.lock() {
+            for ((cached, _), source) in models.iter_mut() {
+                if cached == apex {
+                    source.failed = None;
+                }
+            }
+        }
+    }
+
     /// Admission for a key fetch: open, and no revocation since `generation`.
     pub(super) fn admit(&self, generation: u64) -> Result<(), String> {
         self.ensure_accepting_runs()?;
@@ -2743,7 +2757,6 @@ mod tests {
             host.models("ofox.ai").await.unwrap().partial,
             [catalog::Source::Anthropic]
         );
-        host.bootstrap().await.unwrap();
         assert_eq!(
             anthropic_reads(),
             1,
@@ -2783,6 +2796,74 @@ mod tests {
             );
         }
         assert_eq!(anthropic_reads(), 4);
+    }
+
+    #[tokio::test]
+    async fn opening_the_page_asks_a_failed_catalog_source_again_at_once() {
+        let (_config, env, host) = fixture_with_env();
+        let anthropic_reads = || env.anthropic_fetches.load(Ordering::SeqCst);
+        let boot_ids = |boot: &Value| -> Vec<String> {
+            boot["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["id"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        *env.anthropic.lock().unwrap() = vec!["anthropic/claude-test".into()];
+        host.models("ofox.ai").await.unwrap();
+        age_catalogs(&host);
+        env.down.lock().unwrap().insert(catalog::Source::Anthropic);
+        // The read fails: the stale copy stands in.
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 2);
+
+        // Send-time reads within the pause do not ask again.
+        host.model("ofox.ai", "test/model").await.unwrap();
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 2);
+
+        // Opening the page (or Retry) does, and keeps the copy when that
+        // read fails too.
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(anthropic_reads(), 3);
+        assert_eq!(boot_ids(&boot), ["test/model", "anthropic/claude-test"]);
+        assert_eq!(boot["partial"], json!([]));
+        // That failure pauses send-time reads again.
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 3);
+
+        // Back up: the next page read gets the new rows at once.
+        env.down.lock().unwrap().clear();
+        env.anthropic
+            .lock()
+            .unwrap()
+            .push("anthropic/claude-new".into());
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(anthropic_reads(), 4);
+        assert_eq!(
+            boot_ids(&boot),
+            [
+                "test/model",
+                "anthropic/claude-test",
+                "anthropic/claude-new"
+            ]
+        );
+        // Fresh rows are not read again.
+        host.bootstrap().await.unwrap();
+        assert_eq!(anthropic_reads(), 4);
+
+        // With no copy, each page read asks again and reports the gap.
+        host.forget_models("ofox.ai");
+        env.down.lock().unwrap().insert(catalog::Source::Anthropic);
+        for read in [5, 6] {
+            let boot = host.bootstrap().await.unwrap();
+            assert_eq!(anthropic_reads(), read);
+            assert_eq!(boot["partial"], json!(["anthropic"]));
+            assert_eq!(boot_ids(&boot), ["test/model"]);
+        }
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 6, "send-time reads stay paused");
     }
 
     #[tokio::test]

@@ -20,6 +20,9 @@ impl AssistantHost {
     pub async fn bootstrap(&self) -> Result<Value, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
+        // The user opened the page, retried or refreshed: a source that
+        // failed moments ago is asked again (its last rows still stand in).
+        self.retry_failed_catalog_sources(&identity.apex);
         let (merged, model_error) = match self.models(&identity.apex).await {
             Ok(merged) => (merged, None),
             Err(error) => (catalog::Catalog::default(), Some(error)),
