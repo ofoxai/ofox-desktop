@@ -2,6 +2,42 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant backup and restore (2026-10-28)
+
+Complete ZIP backups are owner-scoped and preserve stored run prices. Restore
+adds missing sessions, skips exact matches and refuses same-ID differences;
+it does not merge or overwrite conversations. Valid imports remain when a later
+publication fails. Archives are unencrypted, bounded and validated against the
+pinned Ofox/Pi history format; arbitrary Pi CLI histories and SDK-only empty
+compaction/root-branch sentinels are not supported. Known managed keys are
+excluded, but arbitrary secrets pasted into documents cannot be inferred.
+See [backup contract](assistant-backup.md) and [native acceptance](assistant-acceptance.md).
+Subsequent [macOS native acceptance](assistant-native-acceptance.md) covers the
+real Tauri controls, file dialogs and bundled runtime with local mock services.
+Windows is deferred at the user’s request. Search prices remain estimates from
+the saved catalog: the account balance endpoint cannot reconcile individual requests.
+
+## Assistant saved failures and attachment edits (2026-10-28)
+
+On `feat/assistant-chat`, new failed replies retain a localized reason across
+restarts. Older records without `errorCode` remain readable but cannot recover a
+reason that was never saved. Removing a file from an edited turn preserves the
+original version and its file; it is not permanent deletion or storage cleanup.
+This increment has macOS automated coverage and a 900 × 600 mock-backend renderer
+check, not native Windows or real-gateway acceptance. S4's remaining scope and
+verification evidence are recorded in [assistant progress](assistant-s4-progress.md).
+
+## Assistant Office text extraction (2026-10-28)
+
+DOCX reads body/table text only; headers, footers, footnotes/endnotes and comments
+are not included. XLSX values are unformatted cached values; formulas are not
+recalculated. PPTX includes slide text and notes in presentation order. Embedded
+images, charts, objects and layouts are excluded in all three formats. Localized
+text-only/partial warnings accompany model input and attachment chips. Legacy
+`.doc` is deliberately unsupported after malformed-file assessment of
+word-extractor 1.0.4; users are directed to docx or PDF. Bounds, license evidence,
+fixtures and platform verification limits are in the [Office audit](assistant-office.md).
+
 ## Request dashboard alignment
 
 - Cache-inclusive totals apply to Requests only. Overview and session-analysis
