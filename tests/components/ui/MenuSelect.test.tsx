@@ -130,6 +130,17 @@ describe("MenuSelect", () => {
     );
   });
 
+  it("truncates an option's note to one line, or lets it wrap when asked to", async () => {
+    const { unmount } = render(<Harness />);
+    await openMenu();
+    expect(screen.getByText("Anthropic")).toHaveClass("truncate");
+    unmount();
+    render(<Harness wrapNotes />);
+    await openMenu();
+    expect(screen.getByText("Anthropic")).toHaveClass("break-words");
+    expect(screen.getByText("Anthropic")).not.toHaveClass("truncate");
+  });
+
   it("ticks the chosen option and highlights it when the menu opens", async () => {
     render(<Harness />);
     await openMenu();

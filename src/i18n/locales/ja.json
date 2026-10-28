@@ -4930,7 +4930,7 @@
     "chat": "アシスタントとの会話",
     "model": "モデルを選択",
     "searchModels": "モデルを検索",
-    "contextWindow": "コンテキスト {{count}} トークン",
+    "contextWindow": "コンテキスト {{tokens}} トークン",
     "modelPrice": "100 万トークンあたり 入力 ${{input}} / 出力 ${{output}}",
     "modelUnavailable": "モデルは現在利用できません。既存の会話は引き続き閲覧できます。",
     "runtimeUnavailable": "アシスタントの実行環境を利用できません",

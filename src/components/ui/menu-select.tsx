@@ -43,6 +43,8 @@ export interface MenuSelectProps<T extends string> {
   disabled?: boolean;
   /** Replaces the chosen option's label on the trigger. */
   valueLabel?: string;
+  /** Lets a long note wrap onto more lines instead of cutting it short. */
+  wrapNotes?: boolean;
 }
 
 /**
@@ -118,6 +120,7 @@ export function MenuSelect<T extends string>({
   id,
   disabled = false,
   valueLabel,
+  wrapNotes = false,
 }: MenuSelectProps<T>) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
@@ -321,7 +324,12 @@ export function MenuSelect<T extends string>({
                       {option.label}
                     </span>
                     {option.note && (
-                      <span className="truncate text-note leading-[15px] text-ink-muted">
+                      <span
+                        className={cn(
+                          "text-note leading-[15px] text-ink-muted",
+                          wrapNotes ? "break-words" : "truncate",
+                        )}
+                      >
                         {option.note}
                       </span>
                     )}

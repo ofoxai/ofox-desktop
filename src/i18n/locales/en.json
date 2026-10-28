@@ -4930,7 +4930,7 @@
     "chat": "Assistant conversation",
     "model": "Choose model",
     "searchModels": "Search models",
-    "contextWindow": "Context {{count}} tokens",
+    "contextWindow": "Context {{tokens}} tokens",
     "modelPrice": "Input ${{input}} / output ${{output}} per million tokens",
     "modelUnavailable": "Models are unavailable right now. You can still read your conversations.",
     "runtimeUnavailable": "Assistant runtime unavailable",

@@ -392,6 +392,7 @@ function AssistantWorkspace() {
               searchPlaceholder={t("assistant.searchModels")}
               placeholder={session?.modelId || t("assistant.model")}
               width={310}
+              wrapNotes
               align="end"
               triggerClassName="!max-w-[min(250px,100%)]"
               options={(bootstrap?.models ?? []).map((model) => ({
@@ -400,7 +401,7 @@ function AssistantWorkspace() {
                 note: [
                   model.contextWindow
                     ? t("assistant.contextWindow", {
-                        count: model.contextWindow,
+                        tokens: fmtTokens(model.contextWindow),
                       })
                     : "",
                   model.inputPricePerMillion

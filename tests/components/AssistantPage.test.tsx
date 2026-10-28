@@ -369,6 +369,53 @@ describe("history", () => {
   });
 });
 
+describe("the model picker", () => {
+  it("says a model's context window in compact units and shows its whole note, which may wrap", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [
+        {
+          ...model("balanced", "Balanced model"),
+          contextWindow: 128_000,
+          inputPricePerMillion: "0.28",
+          outputPricePerMillion: "0.42",
+        },
+        { ...model("fast", "Fast model"), contextWindow: 1_048_576 },
+      ],
+    });
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "Choose model" }),
+    );
+    const balanced = await screen.findByRole("option", {
+      name: /Balanced model/,
+    });
+    const note = within(balanced).getByText(/^Context /);
+    expect(note).toHaveTextContent(
+      "Context 128K tokens · Input $0.28 / output $0.42 per million tokens",
+    );
+    expect(note).toHaveClass("break-words");
+    expect(note).not.toHaveClass("truncate");
+    expect(
+      within(screen.getByRole("option", { name: /Fast model/ })).getByText(
+        "Context 1M tokens",
+      ),
+    ).toBeVisible();
+    expect(document.body).not.toHaveTextContent("128000");
+  });
+
+  it.each([
+    ["zh", "上下文 128K Token"],
+    ["ja", "コンテキスト 128K トークン"],
+  ])("words the context window in %s", async (language, expected) => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    i18n.addResourceBundle("ja", "translation", ja, true, true);
+    expect(
+      i18n.getFixedT(language)("assistant.contextWindow", { tokens: "128K" }),
+    ).toBe(expected);
+  });
+});
+
 describe("errors", () => {
   it.each([
     ["assistant_signing_out", "zh", "正在退出账号，已停止接受新的助手任务。"],
