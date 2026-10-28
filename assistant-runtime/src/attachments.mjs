@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { Type } from "typebox";
-import { readOffice } from "./office.mjs";
+import { OfficeError, readOffice as readOfficeText } from "./office.mjs";
 
 const MAX_FILE = 25 * 1024 * 1024;
 const MAX_IMAGE = 10 * 1024 * 1024;
@@ -54,6 +54,19 @@ const OFFICE_MIMES = new Map([
   ],
 ]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+const OFFICE_FAILURES = {
+  invalid_office:
+    "The Office document is damaged or is not a valid docx, xlsx or pptx file",
+  encrypted_office:
+    "The Office document is password-protected; save a copy without a password",
+  empty_office: "The Office document has no readable text",
+};
+// What each Office reader covers, for the model (office-core.mjs).
+const OFFICE_SCOPE = {
+  docx: "Word extraction reads the body, tables, text boxes, footnotes and endnotes; headers, footers, comments and hidden text have not been read.",
+  xlsx: 'Excel extraction labels each sheet [Sheet N: "name"]; dates are shown as ISO dates and other numbers as stored, without number formatting. Formulas are not calculated; their stored results may be out of date.',
+  pptx: "PowerPoint extraction reads slide text, tables and speaker notes in slide order; slide masters, layouts and comments have not been read.",
+};
 
 /**
  * A per-attachment failure with the outcome the host shows for it. The
@@ -240,11 +253,12 @@ function validAttachment(attachment) {
 }
 
 export class AttachmentStore {
-  // maxRenderedPage is configurable for tests of the encoding fallback.
+  // maxRenderedPage is configurable for tests of the encoding fallback, and
+  // readOffice for tests of an Office reader that cannot start.
   constructor(
     root,
     attachments = [],
-    { maxRenderedPage = MAX_RENDERED_PAGE } = {},
+    { maxRenderedPage = MAX_RENDERED_PAGE, readOffice = readOfficeText } = {},
   ) {
     if (!Array.isArray(attachments) || attachments.length > 200)
       throw new Error("Invalid conversation attachments");
@@ -263,6 +277,7 @@ export class AttachmentStore {
     this.cache = new Map();
     this.cachedCharacters = 0;
     this.maxRenderedPage = maxRenderedPage;
+    this.readOffice = readOffice;
   }
 
   get size() {
@@ -422,35 +437,42 @@ export class AttachmentStore {
       );
     } else if (OFFICE_MIMES.has(`.${format}`)) {
       const { bytes } = await this.file(id);
+      let office;
       try {
-        const office = await readOffice(bytes, `.${format}`, signal);
-        result = boundedText(office.text, {
-          format,
-          textOnly: true,
-          structureCoverage: office.structureCoverage,
-          warning: [
-            office.warning,
-            format === "docx"
-              ? "DOCX extraction reads the main document body and tables only; headers, footers, footnotes, endnotes and comments have not been read."
-              : "",
-            "Only Office text is extracted. Embedded images, charts, objects and document formatting have not been read. Spreadsheet formulas are not calculated; cached values may be out of date.",
-          ]
-            .filter(Boolean)
-            .join(" "),
-        });
+        office = await this.readOffice(bytes, `.${format}`, signal);
       } catch (error) {
         if (signal?.aborted) throw signal.reason;
+        // A reader that cannot start is the runtime's failure, not the file's.
+        if (!(error instanceof OfficeError)) throw error;
         if (error.reason === "office_expansion")
           throw tooLarge("Office document exceeds safe extraction limits", {
             format,
             limit: "office_expansion",
           });
-        throw unreadable(
-          error.reason ?? "invalid_office",
-          "Office document could not be read; save an unencrypted docx, xlsx or pptx copy",
-          { format },
-        );
+        throw unreadable(error.reason, OFFICE_FAILURES[error.reason], {
+          format,
+        });
       }
+      result = boundedText(
+        office.text,
+        {
+          format: office.format,
+          textOnly: true,
+          structureCoverage: office.structureCoverage,
+          warning: [
+            office.warning,
+            OFFICE_SCOPE[office.format],
+            "Only Office text is extracted. Embedded images, charts, objects and document formatting have not been read.",
+          ]
+            .filter(Boolean)
+            .join(" "),
+        },
+        office.truncated,
+      );
+      // An Office size or time limit can stop reading before the text
+      // limit: say how much was read.
+      if (office.truncated)
+        result.extractionLimit = Math.min(MAX_TEXT, office.text.length);
     } else {
       const { bytes } = await this.file(id);
       let text;
@@ -748,7 +770,8 @@ async function prepareOne(
   }
   const result = await store.read(id, 0, INLINE_TEXT, { signal });
   const details = {
-    format,
+    // An Office package can be another family than its name says.
+    format: result.format ?? format,
     characters: result.characters,
     inlineCharacters: result.text.length,
     hasMore: result.hasMore,
@@ -871,7 +894,8 @@ export async function prepareAttachments(
 function attachmentGuidelines(vision) {
   return [
     'The user can import attachments into this conversation; a message names each one as [User attachment: "name"; id=...].',
-    "read_attachment reads UTF-8 text, DOCX, XLSX, PPTX and PDFs of up to 100 pages, at most 20,000 characters per call. Office extraction reads text only, never embedded images or charts. Spreadsheet formulas use stored cached values, which may be stale. Respect structureCoverage warnings; never infer missing cells, sheet names or slide order.",
+    "read_attachment reads UTF-8 text, DOCX, XLSX, PPTX and PDFs of up to 100 pages, at most 20,000 characters per call.",
+    'Word, Excel and PowerPoint files are read as text only: pictures, charts and embedded objects are never read, and hidden Word text is skipped. Sheets are labelled [Sheet N: "name"] and slides [Slide N] in their real order, with (hidden) or (veryHidden) on hidden ones, which are still read; hidden rows, columns and shapes are read without a label. Table rows are lines of tab-separated cells; a spreadsheet row starts with its first cell\'s coordinate, and so does a cell after a gap. Excel dates are converted to ISO dates; other numbers are shown as stored, without number formatting. Formulas show as value [=formula] with the stored result, which may be stale; value [shared formula] marks a cell that reuses a formula written on another cell of its range, whose text is not repeated. Respect structureCoverage warnings; never infer missing cells, sheet names or slide order.',
     vision
       ? "It also shows PNG, JPEG, WebP and GIF images, and renders one PDF page as an image when given page, for scanned pages, charts and other visual content."
       : "This model cannot view images: image attachments and PDF pages without extractable text cannot be read; ask the user to choose a vision model instead of guessing what they show.",
@@ -894,9 +918,11 @@ export function readAttachmentTool(runtime, context, { vision }) {
         }
       : {}),
   });
+  const office =
+    " Word, Excel and PowerPoint files are text only: sheets and slides are labelled (hidden ones marked; hidden rows, columns and shapes are not), Excel dates converted, other numbers unformatted, [shared formula] marks a formula written on another cell, pictures not read.";
   const description = vision
-    ? "Read an attachment imported into this conversation by id: text in pages of up to 20,000 characters (follow nextOffset while hasMore is true), an image attachment as an image, or with page one PDF page rendered as an image."
-    : "Read an attachment imported into this conversation by id: text in pages of up to 20,000 characters (follow nextOffset while hasMore is true).";
+    ? `Read an attachment imported into this conversation by id: text in pages of up to 20,000 characters (follow nextOffset while hasMore is true), an image attachment as an image, or with page one PDF page rendered as an image.${office}`
+    : `Read an attachment imported into this conversation by id: text in pages of up to 20,000 characters (follow nextOffset while hasMore is true).${office}`;
   const tool = runtime.wrapTool(
     context,
     "read_attachment",

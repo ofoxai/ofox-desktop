@@ -95,10 +95,11 @@ async function productionSmoke() {
       "PNG",
     );
 
+    // Office text comes from a forked child of this same Node.
     for (const [format, marker] of [
-      ["docx", "星河项目季度报告"],
-      ["xlsx", "中文收入"],
-      ["pptx", "中文第一页"],
+      ["docx", "城市\t数量\n上海\t42"],
+      ["xlsx", '[Sheet 1: "中文收入"]'],
+      ["pptx", "[Slide 1]\n中文第一页"],
     ]) {
       const bytes = await readFile(
         path.join(process.argv[2], `chinese.${format}`),
@@ -108,8 +109,9 @@ async function productionSmoke() {
         { id: format, name: `中文.${format}`, path: `office-${format}` },
       ]);
       const text = await office.read(format);
-      assert.ok(text.text.includes(marker));
+      assert.ok(text.text.includes(marker), format);
       assert.equal(text.textOnly, true);
+      assert.equal(text.structureCoverage, "complete");
     }
 
     const runtime = new AssistantRuntime({
@@ -339,18 +341,18 @@ for (const kept of [
   "node_modules/pdfjs-dist/LICENSE",
 ])
   assert.ok(existsSync(path.join(production, kept)), `${kept} must ship`);
-for (const office of ["fflate", "word-extractor"])
+for (const office of ["fflate", "word-extractor", "fast-xml-parser"])
   assert.equal(
     existsSync(path.join(production, "node_modules", office)),
     false,
-    `${office} must not ship`,
+    `${office} must not ship; run pnpm assistant:prepare`,
   );
-for (const office of ["yauzl", "fast-xml-parser"])
+for (const office of ["yauzl", "pend", "saxes", "xmlchars"])
   assert.ok(
     existsSync(path.join(production, "node_modules", office)),
     `${office} must ship`,
   );
-for (const module of ["office.mjs", "office-core.mjs", "office-worker.mjs"])
+for (const module of ["office.mjs", "office-core.mjs", "office-child.mjs"])
   assert.ok(
     existsSync(path.join(production, "src", module)),
     `${module} must ship`,

@@ -89,9 +89,14 @@ test("the runtime pins PDF.js, the native canvas and the MCP client and the boun
     "1.4.0",
   );
   for (const name of Object.keys(lock.packages))
-    assert.doesNotMatch(name, /fflate|word-extractor|mammoth|xlsx/);
+    assert.doesNotMatch(
+      name,
+      /fflate|word-extractor|mammoth|xlsx|jszip|fast-xml-parser/,
+    );
   assert.equal(manifest.dependencies.yauzl, "3.4.0");
-  assert.equal(manifest.dependencies["fast-xml-parser"], "5.11.2");
+  assert.equal(manifest.dependencies.saxes, "5.0.1");
+  assert.equal(lock.packages["node_modules/yauzl"].version, "3.4.0");
+  assert.equal(lock.packages["node_modules/saxes"].version, "5.0.1");
 });
 
 test("third-party notices cover the native canvas and PDF.js", async () => {
@@ -139,32 +144,38 @@ test("the search server's notice names the versions its lockfile bundles", async
   assert.match(notice, /Copyright \(c\) 2024 Anthropic, PBC/);
 });
 
-test("Office dependencies and vendored code have distributed license notices", async () => {
+test("the Office notice covers exactly the shipped Office packages, with their license texts", async () => {
+  const runtime = new URL("../", import.meta.url);
   const lock = JSON.parse(
-    await readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
+    await readFile(new URL("package-lock.json", runtime), "utf8"),
   );
-  const notice = await readFile(
-    new URL("../notices/office.txt", import.meta.url),
-    "utf8",
-  );
-  const remaining = ["yauzl", "fast-xml-parser"],
-    visited = new Set();
+  const notice = await readFile(new URL("notices/office.txt", runtime), "utf8");
+  const remaining = ["yauzl", "saxes"],
+    shipped = new Set();
   while (remaining.length) {
     const name = remaining.pop();
-    if (visited.has(name)) continue;
-    visited.add(name);
+    if (shipped.has(name)) continue;
+    shipped.add(name);
     const pkg = lock.packages[`node_modules/${name}`];
-    assert.equal(pkg.license, "MIT");
+    assert.match(pkg.license, /^(MIT|ISC)$/, name);
     assert.ok(
       notice.includes(`\n${name} ${pkg.version} (${pkg.license})\n`),
       name,
     );
+    // A package's own license file is reproduced verbatim.
+    const own = new URL(`node_modules/${name}/LICENSE`, runtime);
+    if (await exists(own))
+      assert.ok(notice.includes((await readFile(own, "utf8")).trim()), name);
     remaining.push(...Object.keys(pkg.dependencies ?? {}));
   }
+  assert.deepEqual([...shipped].sort(), ["pend", "saxes", "xmlchars", "yauzl"]);
+  // No package that does not ship is named.
+  for (const [, name] of notice.matchAll(/^(\S+) \S+ \((?:MIT|ISC)\)$/gm))
+    assert.ok(shipped.has(name), name);
   for (const marker of [
-    "2026 Nodable",
-    "2013 Brian J. Brennan",
-    "2014 Andrew Kelley",
+    "Isaac Z. Schlueter and Contributors", // sax, in saxes' repository LICENSE
+    "2013 Brian J. Brennan", // buffer-crc32, vendored in yauzl
+    "2014 Andrew Kelley", // fd-slicer, vendored in yauzl
   ])
     assert.ok(notice.includes(marker), marker);
 });

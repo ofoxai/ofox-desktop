@@ -195,16 +195,42 @@ UTF-8 text (`.txt .md .csv .json .log .yaml .yml .toml .xml .html .js .ts .py
 read with the PDF.js legacy build and its CMaps, so CJK text in predefined
 CMaps is extracted; and PNG, JPEG, WebP and GIF images, identified by their
 bytes. Office DOCX, XLSX and PPTX (standard OOXML MIME types) are read as
-text with pinned `yauzl` 3.4.0 and `fast-xml-parser` 5.11.2. DOCX covers the main
-body and tables, not headers/footers, footnotes/endnotes or comments. XLSX
-preserves sheet names/order and sparse cell references, strips phonetic guides,
-and reports stored formula/cached values without calculating or formatting them.
-PPTX follows slide relationships and includes slide notes. Missing or unsafe
-relationships produce explicit partial-structure warnings. Embedded images,
-charts, objects and formatting are never read; Office outcomes are always
-`partial` with `textOnly: true`. The model and user both receive these limits.
-Other formats, including legacy `.doc/.xls/.ppt`, are unsupported; `.doc` users
-are asked to save as docx or PDF. See [Office audit](../docs/assistant-office.md).
+text with pinned `yauzl` 3.4.0 and `saxes` 5.0.1, streamed part by part (see
+below). The package's `officeDocument` relationship names the main part and
+so the family, which wins over the file name; every other part is found
+through relationships, and an external, unsafe or missing one is never
+followed: its sheet or slide reads `(not readable)` and `structureCoverage` is
+`partial`. A part that two sheets or slides name, in any letter case, is read
+once; the second reads `(same part as Sheet 1)`.
+
+- DOCX: the body, text boxes, tracked insertions, and footnotes and endnotes
+  (`[^1]` and `[^e1]` in the text, listed under `[Footnotes]` and
+  `[Endnotes]`). Not read: headers, footers, comments, tracked deletions and
+  moved-from text, field codes, hidden (`w:vanish`) text, and a compatibility
+  fallback when its choice has text.
+- XLSX: sheets in workbook order as `[Sheet N: "name"]`, hidden ones marked
+  `(hidden)` or `(veryHidden)` and still read (hidden rows and columns are
+  read without a label); a chart sheet reads
+  `(chart sheet: not read)` and leaves the structure complete. One line per
+  row, cells separated by tabs; a row's first cell and any cell after a gap
+  carry their coordinate (`D3: 42`). Shared and inline strings lose their
+  phonetic guides; booleans read `TRUE`/`FALSE`. Numbers whose cell format is
+  a date (built-in or custom codes, the 1900 or 1904 date system) become ISO
+  dates, date-times or times; other numbers stay as stored, unformatted.
+  Formulas read `value [=formula]` with the stored result, `[shared formula]`
+  for a cell sharing another's, and are never calculated.
+- PPTX: slides in presentation order as `[Slide N]`, hidden ones `(hidden)`
+  (hidden shapes are read without a label), then `[Notes for slide N]`.
+- Word and PowerPoint tables: one line per row, cells separated by tabs (an
+  empty cell keeps its tab), paragraphs within a cell joined by a space;
+  nested tables are flattened into their cell.
+
+Pictures, charts, diagrams, embedded objects and formatting are never read;
+the warning counts them (`Not read: 2 images, 1 chart.`). Office outcomes are
+always `partial` with `textOnly: true`, and the model and user both receive
+these limits. Other formats, including legacy `.doc/.xls/.ppt`, are
+unsupported; `.doc` users are asked to save as docx or PDF. See
+[Office attachments](../docs/assistant-office.md).
 
 Selected attachments are inlined under `[User attachment: "<name>";
 id=<id>]`: the first 8,000 characters of text (the rest through
@@ -257,11 +283,14 @@ event.)
 
 `details` fields:
 
-- `format`: `"text"`, `"pdf"`, `"image"`, `"docx"`, `"xlsx"` or `"pptx"`, whenever known.
+- `format`: `"text"`, `"pdf"`, `"image"`, `"docx"`, `"xlsx"` or `"pptx"`, whenever known
+  (for Office, read from the package once it opens).
 - Text, PDF and Office (`ready`, `partial`): `characters` (extracted), `inlineCharacters`,
-  `hasMore` (more through `read_attachment`), `truncated` (the 16 Mi-character
-  extraction limit was hit; unread content remains) and, when truncated,
-  `extractionLimit`.
+  `hasMore` (more through `read_attachment`), `truncated` (an extraction limit
+  was hit; unread content remains: the 16 Mi-character text limit or, for
+  Office, the inflate budget or the reader's deadline) and, when truncated,
+  `extractionLimit` (the characters read: 16 Mi at the text limit, fewer when
+  an Office limit stopped first).
 - PDF: `pageCount`, `textCoverage` (`complete`, `partial` or `none`),
   `pagesWithoutText` and, with image input, `pagesAttachedAsImages`.
 - Office: `textOnly: true`, `structureCoverage` (`complete` or `partial`);
@@ -277,19 +306,39 @@ event.)
 - `too_large`: `limit` is `file_size` or `image_size` (`maxBytes`),
   `pdf_pages` (`maxPages`, `pageCount`), `message_images` (`maxImages`),
   `rendered_page` (`maxBytes`, `page`), `pdf_image` (`maxPixels`, `page`) or
-  `office_expansion` (safe archive/XML/worker limits).
+  `office_expansion` (more than 10,000 ZIP entries, XML nested deeper than
+  256, an Office reader that ran out of memory, died or did not answer in
+  time, or a limit reached before any text).
 - `model_unsupported`: an image has `mimeType`; a PDF (no extractable text on
   any page) has `pageCount` and `pagesWithoutText`.
 
-Office extraction uses a worker with no inherited environment or Node startup
-arguments, a 128 MiB old-generation heap and a 10-second timeout. Stop terminates
-the worker. Archives allow at most 4,096 entries, 15 MiB of selected decompressed
-XML total, and a 500:1 per-part ratio above a 1 MiB floor. Actual streamed byte
-counts and CRC are checked; duplicate/unsafe paths, encrypted entries and DTDs
-are rejected. Nonselected parts are not inflated. XML depth is bounded to 100,
-with at most 200,000 `<` markers per part; shared-string output expansion is
-capped by the existing 16 Mi-character text budget. No Office programs or Python
-packages are required in the shipped macOS/Windows runtime.
+Office extraction runs in a child process of the same Node
+(`src/office-child.mjs`, forked with `process.execPath`, the bundled `node` or
+`node.exe`, with `windowsHide`): `--max-old-space-size=128` whatever heap the
+sidecar has, ignored stdio, the file's bytes sent once over IPC, and an empty
+environment, to which the OS adds only what every process gets: on Windows
+libuv copies `SYSTEMROOT`, `TEMP`, `USERPROFILE` and the like from the
+sidecar, on macOS the system sets `__CF_USER_TEXT_ENCODING`. Measured, its V8 heap
+limit is about 176 MiB (the young generation on top of the 128 MiB old
+space); its resident memory can reach about 350 MiB with the inflate and
+decode buffers outside that heap. It is killed on Stop, after 10 seconds, and
+once it has answered; at 7.5 seconds it stops reading and returns what it
+has, as truncated. A child that cannot start or never reports ready is a run
+error, not an attachment outcome; one that dies or times out after it started
+is `too_large` with `office_expansion`. Parts are inflated chunk by
+chunk into a namespace-aware SAX parser, never held whole: at most 128 MiB is
+inflated per file, counted while inflating, and reaching it, the 16 Mi text
+limit, 8 Mi characters or 1 Mi entries of shared strings, or the deadline
+ends the read as `partial` with what was read. A number format code longer
+than Excel's 255 characters is not a date format; each code is classified
+once. Archives allow at most 10,000
+entries; bytes after the end of the central directory are ignored; streamed
+sizes and CRC are checked against the directory; duplicate or unsafe paths,
+encrypted entries and DTDs are rejected; XML nesting is bounded to 256; parts
+may be UTF-8 or UTF-16 with a byte order mark; a cell keeps at most 32,767
+characters. Only text parts are inflated, never media or embedded objects. No
+Office programs or Python packages are required in the shipped macOS/Windows
+runtime.
 
 ### Limits
 
