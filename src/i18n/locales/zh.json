@@ -5041,6 +5041,10 @@
     "sourcesShow_one": "显示 {{count}} 个来源",
     "sourcesShow_other": "显示 {{count}} 个来源",
     "compacting": "正在整理对话上下文…",
+    "scrollToEnd": "回到底部",
+    "scrollToEndNew": "回到底部（下方有新内容）",
+    "lengthHint": "消息长度 {{percent}}%",
+    "lengthExceeded": "消息过长，请缩短或作为文件发送",
     "roles": {
       "user": "你",
       "assistant": "助手"

@@ -4,11 +4,9 @@ import { toast } from "sonner";
 import {
   ChevronDown,
   ExternalLink,
-  MessageSquare,
   Pencil,
   RotateCcw,
   RotateCw,
-  UserRound,
 } from "lucide-react";
 import type {
   AssistantAttachment,
@@ -19,6 +17,7 @@ import { assistantErrorKey } from "@/lib/api/assistant";
 import { settingsApi } from "@/lib/api/settings";
 import { splitUrlTail } from "@/lib/urlTail";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
 import { Textarea } from "@/components/ui/textarea";
@@ -168,17 +167,25 @@ function SourceList({
 
 /**
  * One user question or assistant reply. Only those two roles reach this view.
- * `onRetry` is given for a question whose turn failed before the model kept
- * it: it can only be sent again, as a new turn. A question shows the files it
- * was sent with and that turn's outcome; an edit sends them again, leaving
- * out those that can't be read. `activity` says what a streaming reply is
- * doing while one of its tools runs. `searchUnavailable` marks a reply whose
- * run went without the web search its conversation asked for.
+ * Its callbacks name the message they are about, so the page can hand every
+ * message the same functions and a message that did not change is not drawn
+ * again while another one streams.
+ *
+ * A question is a bubble on the right, with the files it was sent with under
+ * it and that turn's outcome; an edit sends them again, leaving out those
+ * that can't be read. A reply uses the full width. `onRetry` is given for a
+ * question whose turn failed before the model kept it: it can only be sent
+ * again, as a new turn. `activity` says what a streaming reply is doing while
+ * one of its tools runs. `searchUnavailable` marks a reply whose run went
+ * without the web search its conversation asked for. `latest` marks the
+ * newest reply, whose actions stay in view; the others show theirs while the
+ * pointer or keyboard focus is on the message.
  */
-export function AssistantMessageView({
+export const AssistantMessageView = memo(function AssistantMessageView({
   message,
   activity = null,
   searchUnavailable = false,
+  latest = false,
   disabled,
   onEdit,
   onRegenerate,
@@ -187,13 +194,15 @@ export function AssistantMessageView({
   message: AssistantMessage;
   activity?: AssistantActivity | null;
   searchUnavailable?: boolean;
+  latest?: boolean;
   disabled: boolean;
   onEdit: (
+    messageId: string,
     text: string,
     attachments: AssistantAttachment[],
   ) => Promise<boolean>;
-  onRegenerate: () => void;
-  onRetry?: () => void;
+  onRegenerate: (messageId: string) => void;
+  onRetry?: (messageId: string) => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -234,34 +243,16 @@ export function AssistantMessageView({
     Boolean(message.nativeEntryId) &&
     (isUser || Boolean(message.runId));
   const role = t(isUser ? "assistant.roles.user" : "assistant.roles.assistant");
+  // A failed turn's question can only be sent again: that stays in view.
+  const retryable = isUser && Boolean(onRetry) && !message.superseded;
+  const actionsShown = latest || retryable;
+  const hasActions = Boolean(message.content) || branchable || retryable;
   const body = (
-    <article className="min-w-0 py-4" aria-label={role}>
-      <div className="mb-2 flex items-center gap-2 text-ctl font-semibold text-ink-2">
-        <span
-          aria-hidden
-          className={cn(
-            "grid h-6 w-6 shrink-0 place-items-center rounded-ctl",
-            isUser ? "bg-pill text-ink-muted" : "bg-brand-soft text-brand-ink",
-          )}
-        >
-          {isUser ? (
-            <UserRound className="h-3.5 w-3.5" />
-          ) : (
-            <MessageSquare className="h-3.5 w-3.5" />
-          )}
-        </span>
-        {role}
-        {message.status === "stopped" && (
-          <span className="font-normal text-ink-muted">
-            {t("assistant.stopped")}
-          </span>
-        )}
-        {message.status === "error" && (
-          <span className="font-normal text-danger">
-            {t("assistant.failed")}
-          </span>
-        )}
-      </div>
+    <article
+      className={cn("group min-w-0 py-2", isUser && "flex flex-col items-end")}
+      aria-label={role}
+    >
+      <h2 className="sr-only">{role}</h2>
       {message.reasoning && (
         <details className="mb-3 rounded-ctl bg-card-2 px-3 py-2 text-ctl text-ink-muted">
           <summary className="cursor-pointer">
@@ -273,7 +264,7 @@ export function AssistantMessageView({
         </details>
       )}
       {editing ? (
-        <div className="space-y-2">
+        <div className="w-full space-y-2">
           <Textarea
             ref={editor}
             autoFocus
@@ -311,7 +302,7 @@ export function AssistantMessageView({
             <Button
               disabled={disabled || (!text.trim() && !editFiles.length)}
               onClick={() => {
-                void onEdit(text, editFiles).then((sent) => {
+                void onEdit(message.id, text, editFiles).then((sent) => {
                   if (sent) setEditing(false);
                 });
               }}
@@ -332,7 +323,7 @@ export function AssistantMessageView({
             <div
               className={cn(
                 "min-w-0 break-words text-ui leading-relaxed text-ink",
-                isUser && "rounded-list bg-card-2 px-3 py-2.5",
+                isUser && "max-w-[80%] rounded-list bg-pill px-3.5 py-2",
               )}
             >
               <MessageMarkdown content={message.content} syntaxHighlight />
@@ -341,7 +332,10 @@ export function AssistantMessageView({
           {files.length > 0 && (
             <AttachmentList
               files={files}
-              className={message.content ? "mt-2" : undefined}
+              className={cn(
+                message.content && "mt-2",
+                isUser && "max-w-[80%] justify-end",
+              )}
             />
           )}
           {progress && statusLine(progress, "mt-2")}
@@ -363,39 +357,76 @@ export function AssistantMessageView({
         <SourceList sources={sources} content={message.content} />
       )}
       {!editing && !streaming && (
-        <div className="mt-2 flex items-center gap-1">
-          {message.content && <CopyButton text={message.content} />}
-          {isUser && branchable && (
-            <Button
-              variant="icon"
-              aria-label={t("assistant.editMessage")}
-              title={t("assistant.editMessage")}
-              disabled={disabled}
-              onClick={() => {
-                setText(message.content);
-                setEditFiles(resendable);
-                setEditing(true);
-              }}
-            >
-              <Pencil className="h-3.5 w-3.5" />
-            </Button>
+        <div
+          className={cn(
+            "mt-1 flex flex-wrap items-center gap-1.5",
+            isUser && "justify-end",
           )}
-          {!isUser && branchable && (
-            <Button
-              variant="icon"
-              aria-label={t("assistant.regenerate")}
-              title={t("assistant.regenerate")}
-              disabled={disabled}
-              onClick={onRegenerate}
+        >
+          {message.status === "stopped" && (
+            <Badge
+              variant="outline"
+              className="border-line bg-pill px-1.5 py-0 text-note font-normal text-ink-muted"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
-            </Button>
+              {t("assistant.stopped")}
+            </Badge>
           )}
-          {isUser && onRetry && !message.superseded && (
-            <Button variant="ghost" disabled={disabled} onClick={onRetry}>
-              <RotateCw aria-hidden className="h-3.5 w-3.5" />
-              {t("assistant.retryMessage")}
-            </Button>
+          {message.status === "error" && (
+            <Badge
+              variant="outline"
+              className="border-transparent bg-danger-soft px-1.5 py-0 text-note font-normal text-danger"
+            >
+              {t("assistant.failed")}
+            </Badge>
+          )}
+          {/* Hidden by opacity only: the buttons stay in the tab order, and
+              the row shows once one has focus. */}
+          {hasActions && (
+            <div
+              className={cn(
+                "flex items-center gap-1 transition-opacity motion-reduce:transition-none",
+                !actionsShown &&
+                  "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
+              )}
+            >
+              {message.content && <CopyButton text={message.content} />}
+              {isUser && branchable && (
+                <Button
+                  variant="icon"
+                  aria-label={t("assistant.editMessage")}
+                  title={t("assistant.editMessage")}
+                  disabled={disabled}
+                  onClick={() => {
+                    setText(message.content);
+                    setEditFiles(resendable);
+                    setEditing(true);
+                  }}
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {!isUser && branchable && (
+                <Button
+                  variant="icon"
+                  aria-label={t("assistant.regenerate")}
+                  title={t("assistant.regenerate")}
+                  disabled={disabled}
+                  onClick={() => onRegenerate(message.id)}
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </Button>
+              )}
+              {retryable && (
+                <Button
+                  variant="ghost"
+                  disabled={disabled}
+                  onClick={() => onRetry?.(message.id)}
+                >
+                  <RotateCw aria-hidden className="h-3.5 w-3.5" />
+                  {t("assistant.retryMessage")}
+                </Button>
+              )}
+            </div>
           )}
         </div>
       )}
@@ -411,4 +442,4 @@ export function AssistantMessageView({
   ) : (
     body
   );
-}
+});

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import i18n from "i18next";
 import { useState } from "react";
@@ -78,5 +78,16 @@ describe("SearchInput", () => {
     onChange.mockClear();
     await user.keyboard("{Escape}");
     expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("leaves the Escape that cancels an input method candidate to the method", () => {
+    const onChange = vi.fn();
+    render(<Filter initial="にほん" onChange={onChange} />);
+    const box = screen.getByRole("searchbox");
+    // WKWebView reports it with isComposing false but keyCode 229.
+    fireEvent.keyDown(box, { key: "Escape", keyCode: 229 });
+    fireEvent.keyDown(box, { key: "Escape", isComposing: true });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(box).toHaveValue("にほん");
   });
 });

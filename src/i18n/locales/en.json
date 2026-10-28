@@ -5041,6 +5041,10 @@
     "sourcesShow_one": "Show {{count}} source",
     "sourcesShow_other": "Show {{count}} sources",
     "compacting": "Organizing conversation context…",
+    "scrollToEnd": "Jump to the latest",
+    "scrollToEndNew": "Jump to the latest (new content below)",
+    "lengthHint": "Message length {{percent}}%",
+    "lengthExceeded": "Message too long. Shorten it or send it as a file.",
     "roles": {
       "user": "You",
       "assistant": "Assistant"

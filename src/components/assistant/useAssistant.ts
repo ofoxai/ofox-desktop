@@ -54,6 +54,22 @@ interface RunSearch {
   got: boolean | null;
 }
 
+/** A reply with nothing in it yet, for the run that is writing it. */
+const blankReply = (runId: string): AssistantMessage => ({
+  id: `stream-${runId}`,
+  role: "assistant",
+  content: "",
+  createdAt: Date.now(),
+  status: "streaming",
+});
+
+/** The words of the followed run that arrived since the screen last changed. */
+interface PendingDeltas {
+  runId: string;
+  text: string;
+  thinking: string;
+}
+
 interface DraftWriteScope {
   held: boolean;
 }
@@ -182,6 +198,60 @@ export function useAssistant(enabled: boolean) {
     runRef.current = value;
     setRunState(value);
   }, []);
+
+  // Words stream in many times a second: they are gathered here and put on
+  // screen once per animation frame, or at once when the run says anything
+  // else (its last words must never wait for a frame that may not come).
+  const pendingDeltas = useRef<PendingDeltas | null>(null);
+  const deltaFrame = useRef<number | null>(null);
+
+  /** Forgets the words not yet shown: their reply is no longer on screen. */
+  const dropDeltas = useCallback(() => {
+    if (
+      deltaFrame.current !== null &&
+      typeof cancelAnimationFrame === "function"
+    )
+      cancelAnimationFrame(deltaFrame.current);
+    deltaFrame.current = null;
+    pendingDeltas.current = null;
+  }, []);
+
+  const flushDeltas = useCallback(() => {
+    const pending = pendingDeltas.current;
+    dropDeltas();
+    // Only the run still followed has a reply on screen to add to.
+    if (!pending || runRef.current?.runId !== pending.runId) return;
+    setStream((previous) => {
+      const value = previous ?? blankReply(pending.runId);
+      return {
+        ...value,
+        content: value.content + pending.text,
+        ...(pending.thinking
+          ? { reasoning: (value.reasoning ?? "") + pending.thinking }
+          : {}),
+      };
+    });
+  }, [dropDeltas]);
+
+  const queueDelta = useCallback(
+    (runId: string, field: "text" | "thinking", delta: string) => {
+      let pending = pendingDeltas.current;
+      if (pending?.runId !== runId) {
+        flushDeltas();
+        pending = { runId, text: "", thinking: "" };
+        pendingDeltas.current = pending;
+      }
+      pending[field] += delta;
+      if (deltaFrame.current !== null) return;
+      if (typeof requestAnimationFrame !== "function") flushDeltas();
+      else
+        deltaFrame.current = requestAnimationFrame(() => {
+          deltaFrame.current = null;
+          flushDeltas();
+        });
+    },
+    [flushDeltas],
+  );
 
   const setDraft = useCallback((value: string) => {
     draftRef.current = value;
@@ -461,6 +531,7 @@ export function useAssistant(enabled: boolean) {
       setTransferring(false);
       setTransferResult(null);
       setUnreadable([]);
+      dropDeltas();
       setStream(null);
       setCompacting(false);
       setBusy(false);
@@ -499,6 +570,7 @@ export function useAssistant(enabled: boolean) {
       cleanup.forEach((off) => off());
     };
   }, [
+    dropDeltas,
     enabled,
     loadBootstrap,
     setAttachments,
@@ -592,13 +664,6 @@ export function useAssistant(enabled: boolean) {
     if (!enabled) return;
     let disposed = false;
     let off: (() => void) | undefined;
-    const blank = (runId: string): AssistantMessage => ({
-      id: `stream-${runId}`,
-      role: "assistant",
-      content: "",
-      createdAt: Date.now(),
-      status: "streaming",
-    });
     // The model is at work (it writes, thinks or calls a tool): the run read
     // its files first, even if an outcome never came in.
     const doneReading = (runId: string) =>
@@ -625,6 +690,10 @@ export function useAssistant(enabled: boolean) {
             void refreshSessionsRef.current(generation);
           return;
         }
+        // Anything but more words shows the words that came before it first,
+        // so a reply that ends, fails or is replaced never loses its last ones.
+        if (event.type !== "text_delta" && event.type !== "thinking_delta")
+          flushDeltas();
         // session and event types this build does not know change nothing
         // on screen: the transcript and session are read again at run_end.
         switch (event.type) {
@@ -640,7 +709,7 @@ export function useAssistant(enabled: boolean) {
             if (requested && !webSearch)
               setSearchSkipped((old) => new Set(old).add(messageId));
             setStream((previous) => ({
-              ...(previous ?? blank(event.runId)),
+              ...(previous ?? blankReply(event.runId)),
               id: messageId,
             }));
             return;
@@ -650,13 +719,11 @@ export function useAssistant(enabled: boolean) {
             const { delta } = event.data;
             if (typeof delta !== "string") return;
             doneReading(event.runId);
-            const thinking = event.type === "thinking_delta";
-            setStream((previous) => {
-              const value = previous ?? blank(event.runId);
-              return thinking
-                ? { ...value, reasoning: (value.reasoning ?? "") + delta }
-                : { ...value, content: value.content + delta };
-            });
+            queueDelta(
+              event.runId,
+              event.type === "thinking_delta" ? "thinking" : "text",
+              delta,
+            );
             return;
           }
           case "usage": {
@@ -727,7 +794,7 @@ export function useAssistant(enabled: boolean) {
             const { sources } = event.data;
             if (!Array.isArray(sources)) return;
             setStream((previous) => ({
-              ...(previous ?? blank(event.runId)),
+              ...(previous ?? blankReply(event.runId)),
               sources,
             }));
             return;
@@ -775,10 +842,20 @@ export function useAssistant(enabled: boolean) {
       .catch(showError);
     return () => {
       disposed = true;
+      // Words received before a new subscription still belong on screen.
+      flushDeltas();
       off?.();
       setConnected(false);
     };
-  }, [enabled, refreshDetail, setRun, setRunSearch, showError]);
+  }, [
+    enabled,
+    flushDeltas,
+    queueDelta,
+    refreshDetail,
+    setRun,
+    setRunSearch,
+    showError,
+  ]);
 
   const select = useCallback(
     (id: string | null) => {
@@ -812,6 +889,7 @@ export function useAssistant(enabled: boolean) {
       setSelectedId(id);
       setLoading(Boolean(id));
       setDetail(null);
+      dropDeltas();
       setStream(null);
       setCompacting(false);
       const pending = [...pendingSends.current.values()].find(
@@ -834,6 +912,7 @@ export function useAssistant(enabled: boolean) {
       loading,
       detail,
       loadSelected,
+      dropDeltas,
       setRun,
       setNewWebSearch,
       persistDraft,

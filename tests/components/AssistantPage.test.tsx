@@ -394,6 +394,20 @@ describe("the composer's controls", () => {
     );
   });
 
+  it("shows the Send tooltip on hover while Send is disabled", async () => {
+    await openConversation();
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    // A disabled button takes no pointer events: the wrapper around it is
+    // what the pointer lands on and what opens the tooltip.
+    const wrapper = send.parentElement as HTMLElement;
+    expect(wrapper).toHaveAttribute("data-state", "closed");
+    await userEvent.hover(wrapper);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Send (Enter)",
+    );
+  });
+
   it("says nothing about keys or progress in text under the composer", async () => {
     await openConversation();
     expect(within(footer()).queryByText(/Shift\+Enter/)).toBeNull();
@@ -432,6 +446,21 @@ describe("the empty state", () => {
     );
     expect(new Set(buttons.map((button) => button.parentElement)).size).toBe(1);
     for (const button of buttons) expect(button).toHaveClass("rounded-full");
+  });
+
+  it("is a title, one row of starters and one line, with no brand icon", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    const title = await screen.findByRole("heading", {
+      level: 2,
+      name: "How can I help?",
+    });
+    await waitFor(() => expect(composer()).toBeEnabled());
+    const empty = title.parentElement as HTMLElement;
+    expect(empty.querySelector("svg")).toBeNull();
+    expect(
+      [...empty.children].map((child) => child.tagName.toLowerCase()),
+    ).toEqual(["h2", "div", "p"]);
   });
 
   it("says in one line what the assistant reads, and nothing else about starting", async () => {
@@ -2756,7 +2785,10 @@ describe("run edges", () => {
         data: { delta: "Answer", messageId: "reply" },
       }),
     );
-    expect(hook.result.current.stream?.content).toBe("Answer");
+    // Words are put on screen with the next animation frame.
+    await waitFor(() =>
+      expect(hook.result.current.stream?.content).toBe("Answer"),
+    );
   });
 
   it("keeps a registered run when a read from before its registration answers after the send returned", async () => {
@@ -2806,7 +2838,10 @@ describe("run edges", () => {
         data: { delta: "Answer", messageId: "reply" },
       }),
     );
-    expect(hook.result.current.stream?.content).toBe("Answer");
+    // Words are put on screen with the next animation frame.
+    await waitFor(() =>
+      expect(hook.result.current.stream?.content).toBe("Answer"),
+    );
   });
 
   it("does not send the Enter that confirms an input-method candidate", async () => {
@@ -3361,7 +3396,7 @@ describe("web search", () => {
             data: { delta: "Working on it", messageId: "reply" },
           }),
         );
-        expect(screen.getByText("Working on it")).toBeVisible();
+        expect(await screen.findByText("Working on it")).toBeVisible();
         expect(screen.queryByText(skipped)).toBeNull();
         expect(screen.queryByText(nextMessage)).toBeNull();
       },
@@ -5000,6 +5035,26 @@ describe("the sidebar", () => {
       }
     });
 
+    it("leaves the Escape that cancels an input method candidate to the method", async () => {
+      render(page());
+      await screen.findByRole("button", { name: /My conversation/ });
+      await searchFor("にほん");
+      const field = screen.getByRole("searchbox", {
+        name: "Search conversations",
+      });
+      // WKWebView reports it with isComposing false but keyCode 229.
+      expect(fireEvent.keyDown(field, { key: "Escape", keyCode: 229 })).toBe(
+        true,
+      );
+      expect(fireEvent.keyDown(field, { key: "Escape", isComposing: true })).toBe(
+        true,
+      );
+      expect(field).toBeVisible();
+      expect(field).toHaveValue("にほん");
+      expect(fireEvent.keyDown(field, { key: "Escape" })).toBe(false);
+      expect(screen.queryByRole("searchbox")).toBeNull();
+    });
+
     it("closes when it loses focus empty, and stays open with its filter", async () => {
       render(page());
       await screen.findByRole("button", { name: /My conversation/ });
@@ -5379,5 +5434,400 @@ describe("a pick that imported files", () => {
         name: "Attached files",
       }),
     ).toHaveTextContent("report.pdf");
+  });
+});
+
+describe("the length of a message", () => {
+  // The backend refuses a message of more than 128,000 bytes of text.
+  const LIMIT = 128_000;
+  const write = (text: string) =>
+    fireEvent.change(composer(), { target: { value: text } });
+  const send = () => screen.getByRole("button", { name: "Send" });
+
+  it("says nothing below 80% of the limit", async () => {
+    await openConversation();
+    write("a".repeat(LIMIT * 0.79));
+    expect(screen.queryByText(/Message length/)).toBeNull();
+    expect(send()).toBeEnabled();
+  });
+
+  it("says how full the message is from 80%, next to Send", async () => {
+    await openConversation();
+    write("a".repeat(LIMIT * 0.85));
+    const hint = screen.getByText("Message length 85%");
+    expect(hint.parentElement).toContainElement(send().parentElement);
+    expect(send()).toBeEnabled();
+    write("a".repeat(LIMIT * 0.8));
+    expect(screen.getByText("Message length 80%")).toBeVisible();
+  });
+
+  it("counts bytes, not characters", async () => {
+    await openConversation();
+    // 36,000 characters of 3 bytes each: 108,000 bytes, 84% of the limit.
+    write("你".repeat(36_000));
+    expect(screen.getByText("Message length 84%")).toBeVisible();
+  });
+
+  it("still sends exactly as much as the limit allows", async () => {
+    await openConversation();
+    write("a".repeat(LIMIT));
+    expect(screen.getByText("Message length 100%")).toBeVisible();
+    expect(send()).toBeEnabled();
+    expect(screen.queryByText(en.assistant.lengthExceeded)).toBeNull();
+  });
+
+  it("turns into a warning and disables Send above the limit", async () => {
+    await openConversation();
+    write("a".repeat(LIMIT + 1));
+    const warning = screen.getByText(
+      "Message too long. Shorten it or send it as a file.",
+    );
+    expect(warning).toHaveClass("text-danger");
+    expect(screen.queryByText(/Message length/)).toBeNull();
+    expect(send()).toBeDisabled();
+    expect(send()).toHaveAttribute(
+      "aria-describedby",
+      expect.stringContaining(warning.id),
+    );
+    // Enter does not send it either.
+    fireEvent.keyDown(composer(), { key: "Enter", keyCode: 13 });
+    await act(async () => undefined);
+    expect(mocks.send).not.toHaveBeenCalled();
+    // Shortened, it can be sent again.
+    write("a".repeat(LIMIT));
+    expect(send()).toBeEnabled();
+    expect(screen.queryByText(en.assistant.lengthExceeded)).toBeNull();
+  });
+
+  it("counts the message in the bytes a multi-byte text takes above the limit", async () => {
+    await openConversation();
+    // 42,667 characters of 3 bytes each: 128,001 bytes.
+    write("你".repeat(42_667));
+    expect(send()).toBeDisabled();
+    expect(screen.getByText(en.assistant.lengthExceeded)).toBeVisible();
+  });
+
+  it.each([
+    ["zh", "消息长度 85%", "消息过长，请缩短或作为文件发送"],
+    [
+      "ja",
+      "メッセージの長さ 85%",
+      "メッセージが長すぎます。短くするか、ファイルとして送信してください。",
+    ],
+  ])("says it in %s", async (language, hint, warning) => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    i18n.addResourceBundle("ja", "translation", ja, true, true);
+    await i18n.changeLanguage(language);
+    mocks.listSessions.mockImplementation(async () =>
+      listOf([current.session]),
+    );
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: i18n.t("assistant.message") })).toBeEnabled(),
+    );
+    const field = screen.getByRole("textbox", {
+      name: i18n.t("assistant.message"),
+    });
+    fireEvent.change(field, { target: { value: "a".repeat(LIMIT * 0.85) } });
+    expect(screen.getByText(hint)).toBeVisible();
+    fireEvent.change(field, { target: { value: "a".repeat(LIMIT + 1) } });
+    expect(screen.getByText(warning)).toBeVisible();
+  });
+});
+
+describe("scrolling to the end of a conversation", () => {
+  const geometry = { height: 3000, view: 500, top: 0 };
+  const scrollTo = vi.fn();
+  const toEnd = () => screen.queryByRole("button", { name: /Jump to the latest/ });
+  /** The transcript's scroll area, with a size jsdom does not compute. */
+  function scrollArea() {
+    const area = screen
+      .getByRole("article", { name: "Assistant" })
+      .closest("[aria-busy]") as HTMLElement;
+    Object.defineProperties(area, {
+      scrollHeight: { configurable: true, get: () => geometry.height },
+      clientHeight: { configurable: true, get: () => geometry.view },
+      scrollTop: {
+        configurable: true,
+        get: () => geometry.top,
+        set: (value: number) => {
+          geometry.top = value;
+        },
+      },
+      scrollTo: { configurable: true, value: scrollTo },
+    });
+    return area;
+  }
+  const scrollToTop = (area: HTMLElement, top: number) => {
+    geometry.top = top;
+    fireEvent.scroll(area);
+  };
+  const run = { runId: "run-1", operationId: "operation-1" };
+  /** A conversation with a reply being written, as when it is reopened. */
+  async function openRunning() {
+    current = {
+      ...current,
+      session: { ...session, activeRun: run },
+      messages: [
+        { id: "q", role: "user", content: "Question", createdAt: 1 },
+        {
+          id: "a",
+          role: "assistant",
+          content: "Saved prefix",
+          status: "streaming",
+          createdAt: 2,
+        },
+      ],
+    };
+    await openConversation();
+    await screen.findByText("Saved prefix");
+    return scrollArea();
+  }
+  const write = (delta: string) =>
+    act(() =>
+      mocks.listener?.({
+        sessionId: "session-a",
+        ...run,
+        type: "text_delta",
+        data: { delta, messageId: "a" },
+      }),
+    );
+
+  beforeEach(() => {
+    Object.assign(geometry, { height: 3000, view: 500, top: 0 });
+    scrollTo.mockReset();
+  });
+
+  it("offers no button while the view is at the end", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 2500);
+    expect(toEnd()).toBeNull();
+    // Within 100px of the end still counts as following it.
+    scrollToTop(area, 2420);
+    expect(toEnd()).toBeNull();
+  });
+
+  it("offers an icon button above the composer once the view has left the end", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    const button = screen.getByRole("button", { name: "Jump to the latest" });
+    expect(button).toHaveTextContent("");
+    expect(button).toHaveClass("absolute", "rounded-full");
+    expect(button.querySelector("svg")).not.toBeNull();
+    expect(screen.queryByTestId("scroll-to-end-dot")).toBeNull();
+  });
+
+  it("marks new content that arrives while the reader is away", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    write(" and more");
+    await screen.findByText("Saved prefix and more");
+    expect(
+      await screen.findByRole("button", {
+        name: "Jump to the latest (new content below)",
+      }),
+    ).toBeVisible();
+    expect(screen.getByTestId("scroll-to-end-dot")).toBeInTheDocument();
+    // The reader's place is not taken away.
+    expect(geometry.top).toBe(1000);
+  });
+
+  it("goes away, with its mark, once the reader scrolls back to the end", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    write(" and more");
+    await screen.findByTestId("scroll-to-end-dot");
+    scrollToTop(area, 2450);
+    expect(toEnd()).toBeNull();
+    scrollToTop(area, 1000);
+    expect(screen.getByRole("button", { name: "Jump to the latest" })).toBeVisible();
+  });
+
+  it("scrolls smoothly to the end on click and goes on following the reply", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    write(" and more");
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: "Jump to the latest (new content below)",
+      }),
+    );
+    expect(scrollTo).toHaveBeenCalledWith({ top: 3000, behavior: "smooth" });
+    expect(toEnd()).toBeNull();
+    // The jump's own scroll events start far from the end and must not end
+    // the following.
+    scrollToTop(area, 1500);
+    expect(toEnd()).toBeNull();
+    scrollToTop(area, 2600);
+    // Once there, new words keep the end in view.
+    geometry.height = 3400;
+    write(" even more");
+    await screen.findByText("Saved prefix and more even more");
+    expect(geometry.top).toBe(3400);
+  });
+
+  it("lets the reader leave while a jump is under way", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    await userEvent.click(screen.getByRole("button", { name: "Jump to the latest" }));
+    fireEvent.wheel(area);
+    scrollToTop(area, 900);
+    expect(
+      screen.getByRole("button", { name: "Jump to the latest" }),
+    ).toBeVisible();
+  });
+
+  it("follows a reply the reader has not left", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 2500);
+    geometry.height = 3300;
+    write(" and more");
+    await screen.findByText("Saved prefix and more");
+    expect(geometry.top).toBe(3300);
+    expect(toEnd()).toBeNull();
+  });
+
+  it("starts at the end again in another conversation", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    expect(screen.getByRole("button", { name: "Jump to the latest" })).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", { name: "New conversation" }),
+    );
+    await waitFor(() => expect(toEnd()).toBeNull());
+  });
+});
+
+describe("streamed words", () => {
+  const frame = () => act(() => void vi.advanceTimersByTime(20));
+  let sent: AssistantRunRef & { sessionId: string };
+  let hook: ReturnType<typeof renderHook<ReturnType<typeof useAssistant>, void>>;
+  let renders = 0;
+  const emit = (type: string, data: Record<string, unknown>) =>
+    act(() =>
+      mocks.listener?.({ ...sent, type, data } as unknown as AssistantEvent),
+    );
+  const words = (count: number, prefix = "w") =>
+    Array.from({ length: count }, (_, index) => `${prefix}${index} `);
+
+  beforeEach(async () => {
+    renders = 0;
+    hook = renderHook(() => {
+      renders += 1;
+      return useAssistant(true);
+    });
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("Question"));
+    // The backend never answers the send: the run stays the one followed.
+    mocks.send.mockReturnValue(new Promise(() => undefined));
+    act(() => void hook.result.current.send());
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    sent = mocks.send.mock.calls[0][0];
+    // Frames are driven by the test from here on.
+    vi.useFakeTimers({
+      toFake: ["requestAnimationFrame", "cancelAnimationFrame"],
+    });
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("are shown together with the next frame, with nothing lost", () => {
+    const text = words(200);
+    const thinking = words(20, "t");
+    act(() => {
+      for (const delta of text) {
+        mocks.listener?.({
+          ...sent,
+          type: "text_delta",
+          data: { delta, messageId: "reply" },
+        } as AssistantEvent);
+      }
+      for (const delta of thinking) {
+        mocks.listener?.({
+          ...sent,
+          type: "thinking_delta",
+          data: { delta, messageId: "reply" },
+        } as AssistantEvent);
+      }
+    });
+    // Nothing on screen yet: a frame has not come.
+    expect(hook.result.current.stream?.content).toBe("");
+    expect(hook.result.current.stream?.reasoning).toBeUndefined();
+    frame();
+    expect(hook.result.current.stream?.content).toBe(text.join(""));
+    expect(hook.result.current.stream?.reasoning).toBe(thinking.join(""));
+    // Words after that start the next batch.
+    emit("text_delta", { delta: "tail", messageId: "reply" });
+    expect(hook.result.current.stream?.content).toBe(text.join(""));
+    frame();
+    expect(hook.result.current.stream?.content).toBe(`${text.join("")}tail`);
+  });
+
+  it("draw the screen once per frame, however many arrive", () => {
+    // The first words end the reading of the files, which is its own change.
+    emit("text_delta", { delta: "First", messageId: "reply" });
+    frame();
+    const drawn = renders;
+    // Each word arrives on its own, as events do.
+    for (const delta of words(100))
+      emit("text_delta", { delta, messageId: "reply" });
+    frame();
+    // One draw for the frame (React may spend one more on an update that
+    // changes nothing), where one draw per word would be 100.
+    expect(renders - drawn).toBeLessThanOrEqual(2);
+    expect(hook.result.current.stream?.content).toBe(
+      `First${words(100).join("")}`,
+    );
+    // A frame with nothing new draws nothing.
+    const settled = renders;
+    frame();
+    expect(renders).toBe(settled);
+  });
+
+  it("are shown at once when the saved reply arrives, and not added to it later", () => {
+    emit("text_delta", { delta: "Streamed ", messageId: "reply" });
+    emit("message", {
+      message: {
+        id: "reply",
+        role: "assistant",
+        content: "Saved reply",
+        status: "completed",
+        createdAt: 1,
+      },
+    });
+    expect(hook.result.current.stream?.content).toBe("Saved reply");
+    frame();
+    expect(hook.result.current.stream?.content).toBe("Saved reply");
+  });
+
+  it("are shown at once when the run fails", () => {
+    emit("text_delta", { delta: "Half an answer", messageId: "reply" });
+    emit("error", { code: "assistant_provider_failed" });
+    expect(hook.result.current.stream?.content).toBe("Half an answer");
+    expect(hook.result.current.error).not.toBeNull();
+  });
+
+  it("are shown at once when the run ends", async () => {
+    emit("text_delta", { delta: "The last words", messageId: "reply" });
+    emit("run_end", { status: "completed" });
+    expect(hook.result.current.stream?.content).toBe("The last words");
+    expect(hook.result.current.run).toBeNull();
+    // The saved transcript is read next and replaces the streamed reply.
+    await act(async () => undefined);
+  });
+
+  it("are dropped with the conversation they belong to, even when it is opened again", async () => {
+    emit("text_delta", { delta: "Left behind", messageId: "reply" });
+    act(() => hook.result.current.select(null));
+    // The run is still being sent, so opening its conversation follows it.
+    act(() => hook.result.current.select(session.id));
+    expect(hook.result.current.run).not.toBeNull();
+    frame();
+    expect(hook.result.current.stream).toBeNull();
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
   });
 });

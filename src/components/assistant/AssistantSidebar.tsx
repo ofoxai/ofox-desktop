@@ -159,6 +159,9 @@ export function AssistantSidebar({
             onChange={assistant.setSearch}
             onKeyDown={(event) => {
               if (event.key !== "Escape") return;
+              // The Escape that cancels an IME candidate is not ours.
+              if (event.nativeEvent.isComposing || event.keyCode === 229)
+                return;
               // Also keeps the app's own Escape from leaving the page.
               event.preventDefault();
               assistant.setSearch("");

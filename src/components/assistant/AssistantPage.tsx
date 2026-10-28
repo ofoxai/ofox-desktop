@@ -3,14 +3,17 @@ import {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
+  type KeyboardEvent,
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
+  ArrowDown,
   ArrowUp,
   Download,
   Ellipsis,
@@ -26,7 +29,11 @@ import {
   RotateCcw,
   X,
 } from "lucide-react";
-import { assistantErrorKey, type AssistantUsage } from "@/lib/api/assistant";
+import {
+  assistantErrorKey,
+  type AssistantAttachment,
+  type AssistantUsage,
+} from "@/lib/api/assistant";
 import { fmtCost, fmtTokens } from "@/lib/format";
 import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
@@ -47,6 +54,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useInteractionActive } from "@/components/ui/interaction-scope";
 import { MenuSelect } from "@/components/ui/menu-select";
 import {
   Tooltip,
@@ -58,6 +66,14 @@ import { useShellRefresh } from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
 const STARTERS = ["summary", "writing", "explain"] as const;
+
+/** The most bytes of text one message may carry (the backend's limit). */
+const MAX_MESSAGE_BYTES = 128_000;
+/** From this share of the limit the composer says how full the message is. */
+const LENGTH_HINT_FROM = 0.8;
+
+const noEdit = async () => false;
+const noRegenerate = () => undefined;
 
 const SIDEBAR_COLLAPSED_KEY = "ofox.assistant.sidebarCollapsed";
 
@@ -197,8 +213,17 @@ function AssistantWorkspace() {
   const blockedHint = useId();
   const visionHint = useId();
   const searchNoteId = useId();
+  const lengthHintId = useId();
+  const interactionActive = useInteractionActive();
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  // The view is more than a screen above the end of the conversation, and
+  // whether something new has come in below since it left it.
+  const [awayFromEnd, setAwayFromEnd] = useState(false);
+  const [unseenBelow, setUnseenBelow] = useState(false);
+  // The jump to the end is under way: its first scroll events are still far
+  // from the end and must not end the following.
+  const jumping = useRef(false);
   const composer = useRef<HTMLTextAreaElement>(null);
   const newConversationButton = useRef<HTMLButtonElement>(null);
   const trashEntry = useRef<HTMLButtonElement>(null);
@@ -267,6 +292,12 @@ function AssistantWorkspace() {
     (message) => message.role === "user" || message.role === "assistant",
   );
   const emptyTranscript = !messages.length && !assistant.stream;
+  // The newest reply keeps its actions in view; only a reply has them there.
+  const newest =
+    assistant.stream?.role === "assistant"
+      ? assistant.stream
+      : messages[messages.length - 1];
+  const latestReplyId = newest?.role === "assistant" ? newest.id : undefined;
   // Runs whose reply failed or stopped. Their question can be sent again
   // when the model never kept it (nothing to edit or regenerate from).
   const unfinishedRuns = new Set(
@@ -297,9 +328,22 @@ function AssistantWorkspace() {
   const imagesNeedVision =
     composerModel?.supportsImages === false &&
     files.some((file) => file.mimeType.startsWith("image/"));
+  // The backend refuses a message of more than MAX_MESSAGE_BYTES of text.
+  const draftBytes = useMemo(
+    () => new TextEncoder().encode(assistant.draft).length,
+    [assistant.draft],
+  );
+  const overLength = draftBytes > MAX_MESSAGE_BYTES;
+  const lengthPercent = Math.floor((draftBytes / MAX_MESSAGE_BYTES) * 100);
+  const showLength =
+    !overLength && draftBytes >= MAX_MESSAGE_BYTES * LENGTH_HINT_FROM;
   // What Send's state is about: the composer's warnings.
   const sendHints =
-    [blockedFiles && blockedHint, imagesNeedVision && visionHint]
+    [
+      blockedFiles && blockedHint,
+      imagesNeedVision && visionHint,
+      overLength && lengthHintId,
+    ]
       .filter(Boolean)
       .join(" ") || undefined;
   const focusComposer = useCallback(() => composer.current?.focus(), []);
@@ -334,10 +378,15 @@ function AssistantWorkspace() {
     setRenaming(false);
     setConfirmDelete(false);
     follow.current = true;
+    jumping.current = false;
+    setAwayFromEnd(false);
+    setUnseenBelow(false);
   }, [assistant.selectedId]);
   useEffect(() => {
-    if (follow.current && scroll.current)
-      scroll.current.scrollTop = scroll.current.scrollHeight;
+    const view = scroll.current;
+    if (!view) return;
+    if (follow.current) view.scrollTop = view.scrollHeight;
+    else setUnseenBelow(true);
   }, [assistant.stream, messages.length]);
   useLayoutEffect(() => {
     if (!focusStarter.current) return;
@@ -357,6 +406,90 @@ function AssistantWorkspace() {
   };
   const stop = () =>
     void assistant.stop().then(() => composer.current?.focus());
+  const trackScroll = () => {
+    const view = scroll.current;
+    if (!view) return;
+    const atEnd = view.scrollHeight - view.scrollTop - view.clientHeight < 100;
+    if (jumping.current) {
+      if (!atEnd) return;
+      jumping.current = false;
+    }
+    follow.current = atEnd;
+    setAwayFromEnd(!atEnd);
+    if (atEnd) setUnseenBelow(false);
+  };
+  // The reader taking the scroll over ends a jump that is still under way.
+  const endJump = () => {
+    jumping.current = false;
+  };
+  const jumpToEnd = () => {
+    const view = scroll.current;
+    if (!view) return;
+    follow.current = true;
+    setAwayFromEnd(false);
+    setUnseenBelow(false);
+    if (typeof view.scrollTo !== "function") {
+      view.scrollTop = view.scrollHeight;
+      return;
+    }
+    jumping.current = true;
+    view.scrollTo({
+      top: view.scrollHeight,
+      behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+        ? "auto"
+        : "smooth",
+    });
+  };
+  const newConversation = () =>
+    void assistant.create().then(() => focusSoon(composer));
+  // Shortcuts of the page: only while it is the one on screen, and never for
+  // a key that confirms an input method candidate. An Escape that something
+  // inside (a menu, the title field) already used is not ours either.
+  const handleShortcuts = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (!interactionActive) return;
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+    if (
+      (event.metaKey || event.ctrlKey) &&
+      !event.shiftKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === "n"
+    ) {
+      if (!available || busy) return;
+      event.preventDefault();
+      newConversation();
+    } else if (event.key === "Escape" && run && !event.defaultPrevented) {
+      // Left alone when no reply is running: the app's own Escape goes on.
+      event.preventDefault();
+      stop();
+    }
+  };
+
+  // Everything a message needs to act, reached through one ref so that the
+  // functions below never change and a message that did not change is not
+  // drawn again while another one streams.
+  const actions = useRef({ send: assistant.send, messages });
+  actions.current = { send: assistant.send, messages };
+  const editMessage = useCallback(
+    (editMessageId: string, text: string, attachments: AssistantAttachment[]) =>
+      actions.current.send({ text, attachments, editMessageId }),
+    [],
+  );
+  const regenerateMessage = useCallback(
+    (regenerateMessageId: string) =>
+      void actions.current.send({ text: "", regenerateMessageId }),
+    [],
+  );
+  const retryMessage = useCallback((messageId: string) => {
+    const message = actions.current.messages.find(
+      (item) => item.id === messageId,
+    );
+    if (!message) return;
+    follow.current = true;
+    void actions.current.send({
+      text: message.content,
+      attachments: message.attachments,
+    });
+  }, []);
   const toggleSidebar = () => {
     const collapsed = !sidebarCollapsed;
     setSidebarCollapsed(collapsed);
@@ -414,7 +547,10 @@ function AssistantWorkspace() {
   );
 
   return (
-    <div className="flex h-full min-h-0 overflow-hidden rounded-list border border-line bg-card">
+    <div
+      className="flex h-full min-h-0 overflow-hidden rounded-list border border-line bg-card"
+      onKeyDown={handleShortcuts}
+    >
       <AssistantSidebar
         id={sidebarId}
         collapsed={sidebarCollapsed}
@@ -652,129 +788,130 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
-        <div
-          ref={scroll}
-          onScroll={() => {
-            if (scroll.current)
-              follow.current =
-                scroll.current.scrollHeight -
-                  scroll.current.scrollTop -
-                  scroll.current.clientHeight <
-                100;
-          }}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
-          aria-busy={assistant.loading}
-        >
-          {assistant.loading ? (
-            <div
-              role="status"
-              className="flex justify-center gap-2 py-12 text-ctl text-ink-muted"
-            >
-              <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
-              {t("assistant.loading")}
-            </div>
-          ) : (
-            <>
-              {emptyTranscript && (
-                <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
-                  <div className="mb-4 grid h-10 w-10 place-items-center rounded-card bg-brand-soft text-brand-ink">
-                    <MessageSquare aria-hidden className="h-5 w-5" />
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scroll}
+            onScroll={trackScroll}
+            onWheel={endJump}
+            onTouchMove={endJump}
+            onPointerDown={endJump}
+            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
+            aria-busy={assistant.loading}
+          >
+            {assistant.loading ? (
+              <div
+                role="status"
+                className="flex justify-center gap-2 py-12 text-ctl text-ink-muted"
+              >
+                <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
+                {t("assistant.loading")}
+              </div>
+            ) : (
+              <>
+                {emptyTranscript && (
+                  <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
+                    <h2 className="text-title font-semibold">
+                      {t(trashed ? "assistant.trash" : "assistant.welcome")}
+                    </h2>
+                    {trashed && (
+                      <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
+                        {t(
+                          session
+                            ? "assistant.trashHint"
+                            : "assistant.trashSelect",
+                        )}
+                      </p>
+                    )}
+                    {writable && !assistant.draft.trim() && (
+                      <div className="mt-5 flex flex-wrap justify-center gap-2">
+                        {STARTERS.map((id) => (
+                          <Button
+                            key={id}
+                            variant="pill"
+                            className="h-8 px-3.5 text-ctl"
+                            onClick={() => {
+                              focusStarter.current = true;
+                              assistant.setDraft(
+                                t(`assistant.starters.${id}.prompt`),
+                              );
+                            }}
+                          >
+                            {t(`assistant.starters.${id}.label`)}
+                          </Button>
+                        ))}
+                      </div>
+                    )}
+                    {!trashed && (
+                      <p className="mt-4 text-note text-ink-muted">
+                        {t("assistant.emptyBoundary")}
+                      </p>
+                    )}
+                    {!trashed && keyMissing && (
+                      <p className="mt-2 text-note text-ink-muted">
+                        {t("assistant.keyMissingHint")}
+                      </p>
+                    )}
                   </div>
-                  <h2 className="text-title font-semibold">
-                    {t(trashed ? "assistant.trash" : "assistant.welcome")}
-                  </h2>
-                  {trashed && (
-                    <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
-                      {t(
-                        session
-                          ? "assistant.trashHint"
-                          : "assistant.trashSelect",
+                )}
+                <div className="mx-auto max-w-[760px]">
+                  {messages.map((message) => (
+                    <AssistantMessageView
+                      key={message.id}
+                      message={message}
+                      searchUnavailable={assistant.searchSkipped.has(
+                        message.id,
                       )}
-                    </p>
+                      latest={message.id === latestReplyId}
+                      disabled={!writable}
+                      onEdit={editMessage}
+                      onRegenerate={regenerateMessage}
+                      onRetry={retryable(message) ? retryMessage : undefined}
+                    />
+                  ))}
+                  {assistant.stream?.role === "assistant" && (
+                    <AssistantMessageView
+                      message={assistant.stream}
+                      activity={assistant.activity}
+                      searchUnavailable={assistant.searchSkipped.has(
+                        assistant.stream.id,
+                      )}
+                      latest={assistant.stream.id === latestReplyId}
+                      disabled
+                      onEdit={noEdit}
+                      onRegenerate={noRegenerate}
+                    />
                   )}
-                  {writable && !assistant.draft.trim() && (
-                    <div className="mt-5 flex flex-wrap justify-center gap-2">
-                      {STARTERS.map((id) => (
-                        <Button
-                          key={id}
-                          variant="pill"
-                          className="h-8 px-3.5 text-ctl"
-                          onClick={() => {
-                            focusStarter.current = true;
-                            assistant.setDraft(
-                              t(`assistant.starters.${id}.prompt`),
-                            );
-                          }}
-                        >
-                          {t(`assistant.starters.${id}.label`)}
-                        </Button>
-                      ))}
-                    </div>
-                  )}
-                  {!trashed && (
-                    <p className="mt-4 text-note text-ink-muted">
-                      {t("assistant.emptyBoundary")}
-                    </p>
-                  )}
-                  {!trashed && keyMissing && (
-                    <p className="mt-2 text-note text-ink-muted">
-                      {t("assistant.keyMissingHint")}
+                  {assistant.compacting && (
+                    <p role="status" className="py-2 text-note text-ink-muted">
+                      {t("assistant.compacting")}
                     </p>
                   )}
                 </div>
+              </>
+            )}
+          </div>
+          {awayFromEnd && !assistant.loading && (
+            <Button
+              variant="secondary"
+              size="icon"
+              className="absolute bottom-3 left-1/2 h-8 w-8 -translate-x-1/2 rounded-full shadow-md"
+              aria-label={t(
+                unseenBelow
+                  ? "assistant.scrollToEndNew"
+                  : "assistant.scrollToEnd",
               )}
-              <div className="mx-auto max-w-[760px]">
-                {messages.map((message) => (
-                  <AssistantMessageView
-                    key={message.id}
-                    message={message}
-                    searchUnavailable={assistant.searchSkipped.has(message.id)}
-                    disabled={!writable}
-                    onEdit={(text, attachments) =>
-                      assistant.send({
-                        text,
-                        attachments,
-                        editMessageId: message.id,
-                      })
-                    }
-                    onRegenerate={() =>
-                      void assistant.send({
-                        text: "",
-                        regenerateMessageId: message.id,
-                      })
-                    }
-                    onRetry={
-                      retryable(message)
-                        ? () => {
-                            follow.current = true;
-                            void assistant.send({
-                              text: message.content,
-                              attachments: message.attachments,
-                            });
-                          }
-                        : undefined
-                    }
-                  />
-                ))}
-                {assistant.stream?.role === "assistant" && (
-                  <AssistantMessageView
-                    message={assistant.stream}
-                    activity={assistant.activity}
-                    searchUnavailable={assistant.searchSkipped.has(
-                      assistant.stream.id,
-                    )}
-                    disabled
-                    onEdit={async () => false}
-                    onRegenerate={() => undefined}
-                  />
-                )}
-                {assistant.compacting && (
-                  <p role="status" className="py-2 text-note text-ink-muted">
-                    {t("assistant.compacting")}
-                  </p>
-                )}
-              </div>
-            </>
+              title={t("assistant.scrollToEnd")}
+              onClick={jumpToEnd}
+            >
+              <ArrowDown aria-hidden className="h-4 w-4" />
+              {unseenBelow && (
+                <span
+                  aria-hidden
+                  data-testid="scroll-to-end-dot"
+                  className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full border-2 border-card bg-brand"
+                />
+              )}
+            </Button>
           )}
         </div>
         {/* Said once: an empty conversation's own empty state says it. */}
@@ -817,6 +954,11 @@ function AssistantWorkspace() {
                     {t("assistant.imagesNeedVision")}
                   </p>
                 )}
+                {overLength && (
+                  <p id={lengthHintId} className="mt-1.5 text-note text-danger">
+                    {t("assistant.lengthExceeded")}
+                  </p>
+                )}
               </div>
               <Textarea
                 ref={composer}
@@ -838,7 +980,7 @@ function AssistantWorkspace() {
                     event.keyCode !== 229
                   ) {
                     event.preventDefault();
-                    if (writable) send();
+                    if (writable && !overLength) send();
                   }
                 }}
               />
@@ -876,46 +1018,61 @@ function AssistantWorkspace() {
                     </span>
                   )}
                 </div>
-                {run ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="secondary"
-                        size="icon"
-                        className="h-7 w-7 rounded-full"
-                        aria-label={t("assistant.stop")}
-                        onClick={stop}
-                      >
-                        <Square aria-hidden className="h-3 w-3 fill-current" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">
-                      {t("assistant.stop")}
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        size="icon"
-                        className="h-7 w-7 rounded-full"
-                        aria-label={t("assistant.send")}
-                        aria-describedby={sendHints}
-                        disabled={
-                          !writable ||
-                          blockedFiles ||
-                          (!assistant.draft.trim() && !files.length)
-                        }
-                        onClick={send}
-                      >
-                        <ArrowUp aria-hidden className="h-3.5 w-3.5" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="top">
-                      {t("assistant.sendTooltip")}
-                    </TooltipContent>
-                  </Tooltip>
-                )}
+                <div className="flex shrink-0 items-center gap-2">
+                  {showLength && (
+                    <span className="text-note tabular-nums text-ink-muted">
+                      {t("assistant.lengthHint", { percent: lengthPercent })}
+                    </span>
+                  )}
+                  {run ? (
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Button
+                          variant="secondary"
+                          size="icon"
+                          className="h-7 w-7 rounded-full"
+                          aria-label={t("assistant.stop")}
+                          onClick={stop}
+                        >
+                          <Square
+                            aria-hidden
+                            className="h-3 w-3 fill-current"
+                          />
+                        </Button>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        {t("assistant.stop")}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    <Tooltip>
+                      {/* The wrapper takes the hover while Send is disabled:
+                          a disabled button gets no pointer events. */}
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex shrink-0">
+                          <Button
+                            size="icon"
+                            className="h-7 w-7 rounded-full"
+                            aria-label={t("assistant.send")}
+                            aria-describedby={sendHints}
+                            disabled={
+                              !writable ||
+                              blockedFiles ||
+                              overLength ||
+                              (!assistant.draft.trim() && !files.length)
+                            }
+                            onClick={send}
+                          >
+                            <ArrowUp aria-hidden className="h-3.5 w-3.5" />
+                          </Button>
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">
+                        {t("assistant.sendTooltip")}
+                      </TooltipContent>
+                    </Tooltip>
+                  )}
+                </div>
               </div>
             </div>
             {assistant.webSearchWaits && (

@@ -13,6 +13,7 @@ import type {
 } from "@/lib/api/assistant";
 
 const markdown = vi.hoisted(() => vi.fn());
+const copyButtonRenders = vi.hoisted(() => vi.fn());
 const external = vi.hoisted(() => ({
   openExternal: vi.fn(),
   toastError: vi.fn(),
@@ -21,6 +22,19 @@ vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: external.openExternal },
 }));
 vi.mock("sonner", () => ({ toast: { error: external.toastError } }));
+// Counts how often a message draws its actions, to tell a message that is
+// drawn again from one that is not.
+vi.mock("@/components/ui/copy-button", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("@/components/ui/copy-button")>();
+  return {
+    ...original,
+    CopyButton: (props: Parameters<typeof original.CopyButton>[0]) => {
+      copyButtonRenders(props.text);
+      return <original.CopyButton {...props} />;
+    },
+  };
+});
 vi.mock("@/components/sessions/SessionMarkdown", () => ({
   SessionMarkdown: ({ content }: { content: string }) => {
     markdown(content);
@@ -33,16 +47,22 @@ beforeEach(async () => {
   await i18n.changeLanguage("en");
   external.openExternal.mockReset().mockResolvedValue(undefined);
   external.toastError.mockReset();
+  copyButtonRenders.mockReset();
 });
 
 function view(
   message: Partial<AssistantMessage>,
   handlers: {
-    onEdit?: (text: string) => Promise<boolean>;
-    onRegenerate?: () => void;
-    onRetry?: () => void;
+    onEdit?: (
+      messageId: string,
+      text: string,
+      attachments: AssistantAttachment[],
+    ) => Promise<boolean>;
+    onRegenerate?: (messageId: string) => void;
+    onRetry?: (messageId: string) => void;
   } = {},
   disabled = false,
+  latest = false,
 ) {
   return (
     <AssistantMessageView
@@ -56,6 +76,7 @@ function view(
         ...message,
       }}
       disabled={disabled}
+      latest={latest}
       onEdit={handlers.onEdit ?? (async () => false)}
       onRegenerate={handlers.onRegenerate ?? (() => undefined)}
       onRetry={handlers.onRetry}
@@ -182,6 +203,7 @@ describe("assistant transcript rendering", () => {
     expect(screen.getByRole("button", { name: "Copy" })).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Regenerate" }));
     expect(onRegenerate).toHaveBeenCalledOnce();
+    expect(onRegenerate).toHaveBeenCalledWith("m");
   });
 
   it("edits a question in place and resends it", async () => {
@@ -195,7 +217,7 @@ describe("assistant transcript rendering", () => {
     await userEvent.clear(editor);
     await userEvent.type(editor, "Better question");
     await userEvent.click(screen.getByRole("button", { name: "Resend" }));
-    expect(onEdit).toHaveBeenCalledWith("Better question", []);
+    expect(onEdit).toHaveBeenCalledWith("m", "Better question", []);
     expect(
       screen.queryByRole("textbox", { name: "Edit and resend" }),
     ).not.toBeInTheDocument();
@@ -233,6 +255,7 @@ describe("assistant transcript rendering", () => {
     rendered.rerender(view(failed, { onRetry }));
     await userEvent.click(screen.getByRole("button", { name: "Send again" }));
     expect(onRetry).toHaveBeenCalledOnce();
+    expect(onRetry).toHaveBeenCalledWith("m");
     rendered.rerender(view(failed));
     expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
   });
@@ -269,7 +292,7 @@ describe("files sent with a question", () => {
     const editor = screen.getByRole("textbox", { name: "Edit and resend" });
     expect(editor).toHaveFocus();
     await userEvent.click(screen.getByRole("button", { name: "Resend" }));
-    expect(onEdit).toHaveBeenCalledWith("Read it", []);
+    expect(onEdit).toHaveBeenCalledWith("m", "Read it", []);
     await userEvent.clear(editor);
     expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
     await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -323,7 +346,7 @@ describe("files sent with a question", () => {
     );
     // The files alone can be sent again.
     await userEvent.click(screen.getByRole("button", { name: "Resend" }));
-    expect(onEdit).toHaveBeenCalledWith("", [file()]);
+    expect(onEdit).toHaveBeenCalledWith("m", "", [file()]);
   });
 
   it("says an edit leaves out the files that can't be read", async () => {
@@ -361,7 +384,7 @@ describe("files sent with a question", () => {
     );
     expect(screen.getByText(en.assistant.editDropsFiles)).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Resend" }));
-    expect(onEdit).toHaveBeenCalledWith("Read it", []);
+    expect(onEdit).toHaveBeenCalledWith("m", "Read it", []);
   });
 });
 
@@ -593,5 +616,215 @@ describe("what a streaming reply is doing", () => {
   it("says nothing once the reply is finished", () => {
     render(streaming("Answer", "searching", "completed"));
     expect(screen.queryByText("Searching the web…")).toBeNull();
+  });
+});
+
+describe("a message's layout", () => {
+  it("shows a question as a bubble on the right, with its files under it", () => {
+    render(
+      view({ role: "user", content: "Polish this", attachments: [file()] }),
+    );
+    const article = screen.getByRole("article", { name: "You" });
+    expect(article).toHaveClass("items-end");
+    const bubble = screen.getByText("Polish this").parentElement!;
+    expect(bubble).toHaveClass("bg-pill", "max-w-[80%]");
+    const files = screen.getByRole("list", { name: "Attached files" });
+    expect(files).toHaveClass("max-w-[80%]", "justify-end");
+    expect(
+      bubble.compareDocumentPosition(files) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("gives a reply the full width, with no bubble", () => {
+    render(view({ content: "A long answer", status: "completed" }));
+    const article = screen.getByRole("article", { name: "Assistant" });
+    expect(article).not.toHaveClass("items-end");
+    const body = screen.getByText("A long answer").parentElement!;
+    expect(body).not.toHaveClass("bg-pill");
+    expect(body).not.toHaveClass("max-w-[80%]");
+  });
+
+  it.each([
+    ["user", "You"],
+    ["assistant", "Assistant"],
+  ] as const)(
+    "names a %s message for assistive tech only, with no role row",
+    (role, name) => {
+      render(view({ role, content: "Words", status: "completed" }));
+      const article = screen.getByRole("article", { name });
+      const heading = within(article).getByRole("heading", { name });
+      expect(heading).toHaveClass("sr-only");
+      // The name is nowhere else on the message, and no avatar is drawn.
+      expect(within(article).getAllByText(name)).toEqual([heading]);
+      for (const icon of article.querySelectorAll("svg"))
+        expect(icon.closest("button")).not.toBeNull();
+    },
+  );
+});
+
+describe("a message's actions", () => {
+  const toolbarOf = (name: string) =>
+    screen.getByRole("button", { name }).parentElement!;
+
+  it("keeps the newest reply's actions in view", () => {
+    render(view({ content: "Newest", status: "completed" }, {}, false, true));
+    expect(toolbarOf("Copy")).not.toHaveClass("opacity-0");
+  });
+
+  it("shows another message's actions while the pointer or focus is on it", async () => {
+    render(view({ content: "Older", status: "completed" }));
+    const toolbar = toolbarOf("Copy");
+    expect(toolbar).toHaveClass(
+      "opacity-0",
+      "group-hover:opacity-100",
+      "focus-within:opacity-100",
+    );
+    expect(screen.getByRole("article", { name: "Assistant" })).toHaveClass(
+      "group",
+    );
+    // Hidden only by opacity: the keyboard still reaches them.
+    await userEvent.tab();
+    expect(screen.getByRole("button", { name: "Copy" })).toHaveFocus();
+    await userEvent.tab();
+    expect(screen.getByRole("button", { name: "Regenerate" })).toHaveFocus();
+  });
+
+  it("keeps the way to send a failed question again in view", () => {
+    render(
+      view(
+        { role: "user", content: "Lost", nativeEntryId: null },
+        { onRetry: vi.fn() },
+      ),
+    );
+    expect(toolbarOf("Send again")).not.toHaveClass("opacity-0");
+  });
+
+  it("marks a stopped or failed reply with a badge in the actions' row", () => {
+    const rendered = render(view({ content: "Part", status: "stopped" }));
+    const badge = screen.getByText("Stopped");
+    const row = badge.parentElement!;
+    expect(row).toContainElement(screen.getByRole("button", { name: "Copy" }));
+    // Said whether or not the actions are in view.
+    expect(toolbarOf("Copy")).not.toContainElement(badge);
+    expect(badge).toHaveClass("rounded-full");
+    rendered.rerender(view({ content: "Part", status: "error" }));
+    expect(screen.getByText("Failed")).toHaveClass("text-danger");
+    expect(screen.getByText("Failed").parentElement).toContainElement(
+      screen.getByRole("button", { name: "Copy" }),
+    );
+  });
+
+  it("has no actions row while the reply is still being written", () => {
+    render(view({ content: "So far", status: "streaming" }, {}, false, true));
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+  });
+});
+
+describe("drawing a message again", () => {
+  function Transcript({
+    message = saved,
+    onEdit,
+    onRegenerate,
+    tick,
+  }: {
+    message?: AssistantMessage;
+    onEdit: () => Promise<boolean>;
+    onRegenerate: () => void;
+    tick: number;
+  }) {
+    return (
+      <>
+        <span data-tick={tick} />
+        <AssistantMessageView
+          message={message}
+          disabled={false}
+          onEdit={onEdit}
+          onRegenerate={onRegenerate}
+        />
+      </>
+    );
+  }
+  const saved: AssistantMessage = {
+    id: "saved",
+    role: "assistant",
+    content: "Saved answer",
+    createdAt: 1,
+  };
+
+  it("leaves a message that did not change alone while the page draws again", () => {
+    const onEdit = async () => false;
+    const onRegenerate = () => undefined;
+    const rendered = render(
+      <Transcript onEdit={onEdit} onRegenerate={onRegenerate} tick={1} />,
+    );
+    expect(copyButtonRenders).toHaveBeenCalledTimes(1);
+    for (let tick = 2; tick < 12; tick++)
+      rendered.rerender(
+        <Transcript onEdit={onEdit} onRegenerate={onRegenerate} tick={tick} />,
+      );
+    expect(copyButtonRenders).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws it again once its message or a callback changes", () => {
+    const onEdit = async () => false;
+    const onRegenerate = () => undefined;
+    const rendered = render(
+      <Transcript onEdit={onEdit} onRegenerate={onRegenerate} tick={1} />,
+    );
+    rendered.rerender(
+      <Transcript onEdit={onEdit} onRegenerate={() => undefined} tick={1} />,
+    );
+    expect(copyButtonRenders).toHaveBeenCalledTimes(2);
+    rendered.rerender(
+      <Transcript
+        message={{ ...saved, content: "Changed answer" }}
+        onEdit={onEdit}
+        onRegenerate={onRegenerate}
+        tick={1}
+      />,
+    );
+    expect(copyButtonRenders).toHaveBeenCalledTimes(3);
+    expect(copyButtonRenders).toHaveBeenLastCalledWith("Changed answer");
+  });
+
+  it("names the message in each callback, so one function serves every message", async () => {
+    const onEdit = vi.fn(async () => true);
+    const onRegenerate = vi.fn();
+    render(
+      <>
+        <AssistantMessageView
+          message={{
+            id: "q1",
+            role: "user",
+            content: "First",
+            createdAt: 1,
+            nativeEntryId: "e1",
+          }}
+          disabled={false}
+          onEdit={onEdit}
+          onRegenerate={onRegenerate}
+        />
+        <AssistantMessageView
+          message={{
+            id: "a1",
+            role: "assistant",
+            content: "Answer",
+            createdAt: 2,
+            nativeEntryId: "e2",
+            runId: "run",
+          }}
+          disabled={false}
+          onEdit={onEdit}
+          onRegenerate={onRegenerate}
+        />
+      </>,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+    expect(onRegenerate).toHaveBeenCalledWith("a1");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Resend" }));
+    expect(onEdit).toHaveBeenCalledWith("q1", "First", []);
   });
 });

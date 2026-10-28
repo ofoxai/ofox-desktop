@@ -5041,6 +5041,10 @@
     "sourcesShow_one": "出典 {{count}} 件を表示",
     "sourcesShow_other": "出典 {{count}} 件を表示",
     "compacting": "会話のコンテキストを整理中…",
+    "scrollToEnd": "最新の位置へ移動",
+    "scrollToEndNew": "最新の位置へ移動（下に新しい内容があります）",
+    "lengthHint": "メッセージの長さ {{percent}}%",
+    "lengthExceeded": "メッセージが長すぎます。短くするか、ファイルとして送信してください。",
     "roles": {
       "user": "あなた",
       "assistant": "アシスタント"
