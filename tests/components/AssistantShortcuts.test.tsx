@@ -107,6 +107,19 @@ async function startReply() {
   };
 }
 
+/** The user agent the page sees: ⌘ is the shortcut key only on macOS. */
+const platformSpies: { mockRestore: () => void }[] = [];
+function runOn(system: "mac" | "other") {
+  platformSpies.push(
+    vi
+      .spyOn(navigator, "userAgent", "get")
+      .mockReturnValue(system === "mac" ? "Macintosh" : "Windows NT 10.0"),
+    vi
+      .spyOn(navigator, "platform", "get")
+      .mockReturnValue(system === "mac" ? "MacIntel" : "Win32"),
+  );
+}
+
 /** What the app's own window listener sees of each key (App.tsx's Escape). */
 let seenByApp: KeyboardEvent[] = [];
 const recordKey = (event: KeyboardEvent) => seenByApp.push(event);
@@ -147,13 +160,17 @@ beforeEach(async () => {
   });
   mocks.onAuthChange.mockImplementation(async () => () => undefined);
 });
-afterEach(() => window.removeEventListener("keydown", recordKey));
+afterEach(() => {
+  window.removeEventListener("keydown", recordKey);
+  for (const spy of platformSpies.splice(0)) spy.mockRestore();
+});
 
 describe("New conversation shortcut", () => {
   it.each([
-    ["Command+N", { metaKey: true }],
-    ["Ctrl+N", { ctrlKey: true }],
-  ])("starts a conversation with %s", async (_, modifier) => {
+    ["Command+N on macOS", "mac", { metaKey: true }],
+    ["Ctrl+N elsewhere", "other", { ctrlKey: true }],
+  ] as const)("starts a conversation with %s", async (_, system, modifier) => {
+    runOn(system);
     await openConversation();
     const prevented = !fireEvent.keyDown(composer(), { key: "n", ...modifier });
     expect(prevented).toBe(true);
@@ -162,7 +179,82 @@ describe("New conversation shortcut", () => {
     await waitFor(() => expect(composer()).toHaveFocus());
   });
 
+  it.each([
+    ["Ctrl+N on macOS, where it moves the cursor to the next line", "mac", { ctrlKey: true }],
+    ["Command+N elsewhere, where the Windows key is not ours", "other", { metaKey: true }],
+  ] as const)("is not %s", async (_, system, modifier) => {
+    runOn(system);
+    await openConversation();
+    expect(fireEvent.keyDown(composer(), { key: "n", ...modifier })).toBe(true);
+    await act(async () => undefined);
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it("ignores a key that is held down", async () => {
+    await openConversation();
+    expect(
+      fireEvent.keyDown(composer(), { key: "n", ctrlKey: true, repeat: true }),
+    ).toBe(true);
+    await act(async () => undefined);
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it("ignores a key pressed in a menu, which is drawn outside the workspace", async () => {
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Conversation actions" }),
+    );
+    const item = await screen.findByRole("menuitem", { name: "Rename" });
+    expect(fireEvent.keyDown(item, { key: "n", ctrlKey: true })).toBe(true);
+    await act(async () => undefined);
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it("leaves a title being edited alone instead of dropping the edit", async () => {
+    await openConversation();
+    await userEvent.dblClick(screen.getByRole("heading", { level: 1 }));
+    const title = await screen.findByRole("textbox", {
+      name: "Conversation title",
+    });
+    expect(fireEvent.keyDown(title, { key: "n", ctrlKey: true })).toBe(true);
+    await act(async () => undefined);
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(title).toBeInTheDocument();
+  });
+
+  it("leaves a message being edited alone, wherever the key is pressed", async () => {
+    current.messages = [
+      {
+        id: "original",
+        role: "user",
+        content: "Original question",
+        createdAt: 1,
+        nativeEntryId: "entry-original",
+        runId: "run-original",
+      },
+    ];
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    const editor = screen.getByRole("textbox", { name: "Edit and resend" });
+    expect(fireEvent.keyDown(editor, { key: "n", ctrlKey: true })).toBe(true);
+    // Not from the conversation list either.
+    const row = screen.getByRole("button", { name: /My conversation/ });
+    expect(fireEvent.keyDown(row, { key: "n", ctrlKey: true })).toBe(true);
+    await act(async () => undefined);
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(editor).toBeInTheDocument();
+    // Once the edit is over the shortcut works again.
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(fireEvent.keyDown(composer(), { key: "n", ctrlKey: true })).toBe(
+      false,
+    );
+    await waitFor(() => expect(mocks.createSession).toHaveBeenCalledOnce());
+  });
+
   it("works from anywhere in the workspace, such as the conversation list", async () => {
+    runOn("mac");
     await openConversation();
     const row = screen.getByRole("button", { name: /My conversation/ });
     row.focus();
@@ -174,9 +266,9 @@ describe("New conversation shortcut", () => {
     await openConversation();
     for (const combination of [
       { key: "n" },
-      { key: "n", metaKey: true, shiftKey: true },
+      { key: "n", ctrlKey: true, shiftKey: true },
       { key: "n", ctrlKey: true, altKey: true },
-      { key: "m", metaKey: true },
+      { key: "m", ctrlKey: true },
     ])
       expect(fireEvent.keyDown(composer(), combination)).toBe(true);
     await act(async () => undefined);
@@ -189,7 +281,7 @@ describe("New conversation shortcut", () => {
   ])("is not for a key that belongs to an input method (%s)", async (_, ime) => {
     await openConversation();
     expect(
-      fireEvent.keyDown(composer(), { key: "n", metaKey: true, ...ime }),
+      fireEvent.keyDown(composer(), { key: "n", ctrlKey: true, ...ime }),
     ).toBe(true);
     await act(async () => undefined);
     expect(mocks.createSession).not.toHaveBeenCalled();
@@ -197,7 +289,7 @@ describe("New conversation shortcut", () => {
 
   it("does nothing while the page is not the one on screen", async () => {
     await openConversation(false);
-    expect(fireEvent.keyDown(composer(), { key: "n", metaKey: true })).toBe(
+    expect(fireEvent.keyDown(composer(), { key: "n", ctrlKey: true })).toBe(
       true,
     );
     await act(async () => undefined);
@@ -299,10 +391,57 @@ describe("Escape while a reply is running", () => {
   it("does not stop it for an Escape pressed outside the workspace", async () => {
     await openConversation();
     await startReply();
-    fireEvent.keyDown(document.body, { key: "Escape" });
+    const outside = document.body.appendChild(document.createElement("button"));
+    fireEvent.keyDown(outside, { key: "Escape" });
+    outside.remove();
     expect(mocks.stop).not.toHaveBeenCalled();
     expect(seenByApp.at(-1)?.defaultPrevented).toBe(false);
   });
+
+  it("still stops it after a click on the reply's own text, which has no focus to give", async () => {
+    await openConversation();
+    const sent = await startReply();
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        type: "text_delta",
+        data: { delta: "Some reply words", messageId: "reply" },
+      } as unknown as AssistantEvent),
+    );
+    await userEvent.click(await screen.findByText("Some reply words"));
+    // Focus stays in the workspace instead of falling to the page.
+    expect(document.activeElement).not.toBe(document.body);
+    await userEvent.keyboard("{Escape}");
+    expect(mocks.stop).toHaveBeenCalledOnce();
+    expect(seenByApp.at(-1)?.defaultPrevented).toBe(true);
+  });
+
+  it("stops it with the first Escape while the Stop button's own tooltip is open", async () => {
+    await openConversation();
+    await startReply();
+    // Keyboard focus opens the tooltip, which would otherwise take the Escape.
+    act(() => screen.getByRole("button", { name: "Stop" }).focus());
+    await screen.findByRole("tooltip");
+    await userEvent.keyboard("{Escape}");
+    expect(mocks.stop).toHaveBeenCalledOnce();
+    await waitFor(() => expect(screen.queryByRole("tooltip")).toBeNull());
+  });
+
+  it.each([
+    ["isComposing", { isComposing: true }],
+    ["keyCode 229", { keyCode: 229 }],
+  ])(
+    "does not stop it for the Escape that cancels an input method candidate while the tooltip is open (%s)",
+    async (_, ime) => {
+      await openConversation();
+      await startReply();
+      const stop = screen.getByRole("button", { name: "Stop" });
+      act(() => stop.focus());
+      await screen.findByRole("tooltip");
+      fireEvent.keyDown(stop, { key: "Escape", ...ime });
+      expect(mocks.stop).not.toHaveBeenCalled();
+    },
+  );
 
   it("does nothing while the page is not the one on screen", async () => {
     const rendered = await openConversation();

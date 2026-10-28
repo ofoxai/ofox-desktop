@@ -43,7 +43,7 @@ function AttachmentNotes({ info, warn }: { info: string[]; warn: string[] }) {
             <Badge
               variant="outline"
               tabIndex={0}
-              className="shrink-0 cursor-default border-line bg-pill px-1.5 py-0 text-note font-normal text-ink-muted focus:ring-brand focus:ring-offset-0"
+              className="shrink-0 cursor-default border-line bg-pill px-1.5 py-0 text-note font-normal text-ink-ctl focus:ring-brand focus:ring-offset-0"
             >
               {t("assistant.attachmentOutcome.textOnlyBadge")}
             </Badge>

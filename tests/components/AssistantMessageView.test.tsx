@@ -58,6 +58,7 @@ function view(
       text: string,
       attachments: AssistantAttachment[],
     ) => Promise<boolean>;
+    onEditingChange?: (editing: boolean) => void;
     onRegenerate?: (messageId: string) => void;
     onRetry?: (messageId: string) => void;
   } = {},
@@ -78,6 +79,7 @@ function view(
       disabled={disabled}
       latest={latest}
       onEdit={handlers.onEdit ?? (async () => false)}
+      onEditingChange={handlers.onEditingChange}
       onRegenerate={handlers.onRegenerate ?? (() => undefined)}
       onRetry={handlers.onRetry}
     />
@@ -221,6 +223,28 @@ describe("assistant transcript rendering", () => {
     expect(
       screen.queryByRole("textbox", { name: "Edit and resend" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("tells the page while a question is being edited, and when it no longer is", async () => {
+    const onEditingChange = vi.fn();
+    const rendered = render(
+      view({ role: "user", content: "Original" }, { onEditingChange }),
+    );
+    expect(onEditingChange).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    // Gone with its edit still open: that edit is over too.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    expect(onEditingChange).toHaveBeenLastCalledWith(true);
+    rendered.unmount();
+    expect(onEditingChange).toHaveBeenLastCalledWith(false);
+    expect(onEditingChange).toHaveBeenCalledTimes(4);
   });
 
   it("keeps a replaced version readable behind a disclosure, without actions", () => {

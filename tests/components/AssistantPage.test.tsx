@@ -149,6 +149,10 @@ async function chooseFromMenu(name: string) {
   );
   await userEvent.click(item);
 }
+/** A trashed conversation can be restored from its header and from where the composer was. */
+const restoreButtons = () => screen.getAllByRole("button", { name: "Restore" });
+const headerRestore = () => restoreButtons()[0];
+const noticeRestore = () => restoreButtons()[1];
 const conversationMenuButton = () =>
   screen.getByRole("button", { name: "Conversation actions" });
 /** Open the header's menu for the conversation, unless it already is. */
@@ -2714,7 +2718,7 @@ describe("selection and history edges", () => {
     const row = await screen.findByRole("button", { name: "My conversation" });
     // One line: the title, with the full time on hover.
     expect(row).toHaveTextContent(/^My conversation$/);
-    expect(row).toHaveAttribute("title", "2026年10月16日 04:00");
+    expect(row).toHaveAttribute("title", "My conversation\n2026年10月16日 04:00");
   });
 
   it("marks a conversation that is replying with a spinner that says so", async () => {
@@ -4147,10 +4151,13 @@ describe("conversation trash", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await waitFor(() => expect(composer()).toHaveValue("Keep this draft"));
-    expect(composer()).toHaveAttribute("readonly");
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+    // Read-only means no composer at all: the notice stands in its place.
+    await screen.findByText(
+      "This conversation is in the trash. Restore it to continue chatting.",
+    );
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    await userEvent.click(headerRestore());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
@@ -4371,7 +4378,7 @@ describe("complete conversation backups", () => {
       conflicts: 0,
       warning: null,
     });
-    await chooseFromMenu("Restore…");
+    await chooseFromMenu("Restore from backup…");
     await waitFor(() =>
       expect(toasted()).toEqual([
         {
@@ -4506,7 +4513,7 @@ describe("complete conversation backups", () => {
       warning: "assistant_backup_conflict",
     });
     await openConversation();
-    await chooseFromMenu("Restore…");
+    await chooseFromMenu("Restore from backup…");
     await waitFor(() =>
       expect(mocks.restore).toHaveBeenCalledWith({
         expectedOwner: capabilities.owner,
@@ -4614,7 +4621,7 @@ describe("conversation trash, in detail", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await screen.findByRole("button", { name: "Restore" });
+    await screen.findAllByRole("button", { name: "Restore" });
   }
 
   it("is read-only: the title can't be renamed until it is restored", async () => {
@@ -4629,7 +4636,7 @@ describe("conversation trash, in detail", () => {
     expect(
       screen.queryByRole("textbox", { name: "Conversation title" }),
     ).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await userEvent.click(headerRestore());
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
@@ -4643,9 +4650,7 @@ describe("conversation trash, in detail", () => {
 
   it("restores with a visible secondary button, and keeps permanent deletion in the menu", async () => {
     await openTrashed();
-    expect(screen.getByRole("button", { name: "Restore" })).toHaveClass(
-      "border",
-    );
+    expect(headerRestore()).toHaveClass("border");
     await openConversationMenu();
     expect(
       screen.getByRole("menuitem", { name: "Delete permanently" }),
@@ -4653,6 +4658,40 @@ describe("conversation trash, in detail", () => {
     expect(
       screen.queryByRole("menuitem", { name: "Move to trash" }),
     ).toBeNull();
+  });
+
+  it("puts a centred notice with a Restore button where the composer was", async () => {
+    current.messages = [
+      { id: "q", role: "user", content: "Old question", createdAt: 1 },
+    ];
+    await openTrashed();
+    expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Attach files" })).toBeNull();
+    const notice = screen.getByText(hint).closest("footer") as HTMLElement;
+    expect(notice).not.toBeNull();
+    expect(notice).toContainElement(noticeRestore());
+    expect(screen.getByText(hint)).toHaveClass("text-center");
+  });
+
+  it("restores from the notice's button as from the header's", async () => {
+    await openTrashed();
+    await userEvent.click(noticeRestore());
+    await waitFor(() => expect(current.session.deletedAt).toBeNull());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
+    );
+    expect(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    ).toBeVisible();
+  });
+
+  it("gives the focus back to the button that was pressed when the restore fails", async () => {
+    await openTrashed();
+    mocks.updateSession.mockRejectedValueOnce(new Error("assistant_failed"));
+    noticeRestore().focus();
+    await userEvent.click(noticeRestore());
+    await waitFor(() => expect(mocks.updateSession).toHaveBeenCalled());
+    await waitFor(() => expect(noticeRestore()).toHaveFocus());
   });
 
   it("says it is in the trash once when it has no messages", async () => {
@@ -4672,7 +4711,7 @@ describe("conversation trash, in detail", () => {
   it("goes back to the conversations without listing the trash again for it", async () => {
     await openTrashed();
     const reads = mocks.listSessions.mock.calls.length;
-    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await userEvent.click(headerRestore());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await waitFor(() =>
       expect(mocks.listSessions).toHaveBeenLastCalledWith(false, ""),
@@ -4730,6 +4769,40 @@ describe("the labels of the sidebar", () => {
       screen.queryByRole("menuitem", { name: /This conversation/ }),
     ).toBeNull();
   });
+
+  it("describes the menu by that usage, so a screen reader that skips the label still hears it", async () => {
+    current.usage = { inputTokens: 10, outputTokens: 5 };
+    await openConversation();
+    const menu = await openConversationMenu();
+    expect(menu).toHaveAccessibleDescription(
+      /^This conversation: Input 10 · Output 5 tokens/,
+    );
+  });
+
+  it("does not describe the menu when there is no usage to tell", async () => {
+    await openConversation();
+    const menu = await openConversationMenu();
+    expect(menu).not.toHaveAttribute("aria-describedby");
+  });
+
+  it.each(["en", "zh", "ja"])(
+    "tells the footer's restore from the header's: it restores from a backup (%s)",
+    async (language) => {
+      i18n.addResourceBundle("zh", "translation", zh, true, true);
+      i18n.addResourceBundle("ja", "translation", ja, true, true);
+      await i18n.changeLanguage(language);
+      expect(i18n.t("assistant.restoreMenu")).not.toBe(
+        i18n.t("assistant.restore"),
+      );
+      expect(i18n.t("assistant.restoreMenu")).toBe(
+        {
+          en: "Restore from backup…",
+          zh: "从备份恢复…",
+          ja: "バックアップから復元…",
+        }[language],
+      );
+    },
+  );
 
   it.each([
     ["zh", "本对话用量：输入 10 · 输出 5 Token"],
@@ -4815,7 +4888,7 @@ describe("what a backup or restore reports", () => {
       warning: null,
     });
     await ready();
-    await chooseFromMenu("Restore…");
+    await chooseFromMenu("Restore from backup…");
     expect(await toastedOnce()).toEqual({
       kind: "warning",
       lines: [
@@ -4834,7 +4907,7 @@ describe("what a backup or restore reports", () => {
       warning: null,
     });
     await ready();
-    await chooseFromMenu("Restore…");
+    await chooseFromMenu("Restore from backup…");
     expect(await toastedOnce()).toEqual({
       kind: "warning",
       lines: [
@@ -4851,7 +4924,7 @@ describe("what a backup or restore reports", () => {
       warning: null,
     });
     await ready();
-    await chooseFromMenu("Restore…");
+    await chooseFromMenu("Restore from backup…");
     expect(await toastedOnce()).toEqual({
       kind: "warning",
       lines: ["The backup has no conversations to restore."],
@@ -4993,6 +5066,64 @@ describe("the sidebar", () => {
     await waitFor(() => expect(create).toBeEnabled());
     await userEvent.click(create);
     await waitFor(() => expect(mocks.createSession).toHaveBeenCalled());
+    // As with the keyboard shortcut, the new conversation is ready to type in.
+    await waitFor(() => expect(composer()).toHaveFocus());
+  });
+
+  it.each([
+    ["Ctrl+N", "Windows NT 10.0", "Win32"],
+    ["⌘N", "Macintosh", "MacIntel"],
+  ])("tells the shortcut of its icon button: %s", async (shortcut, agent, platform) => {
+    const spies = [
+      vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent),
+      vi.spyOn(navigator, "platform", "get").mockReturnValue(platform),
+    ];
+    try {
+      render(page());
+      const create = await screen.findByRole("button", {
+        name: "New conversation",
+      });
+      expect(create).toHaveAttribute("title", `New conversation (${shortcut})`);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+  });
+
+  it("shows the whole title on hover, above its time, so a truncated title can be read", async () => {
+    const stamp = Date.UTC(2026, 9, 15, 20);
+    const title = "A conversation whose title is far too long for one line";
+    mocks.listSessions.mockResolvedValue(
+      listOf([{ ...session, title, updatedAt: stamp }]),
+    );
+    render(page());
+    const row = await screen.findByRole("button", { name: title });
+    const [first, ...rest] = (row.getAttribute("title") ?? "").split("\n");
+    expect(first).toBe(title);
+    expect(rest.join("\n")).toMatch(/2026/);
+  });
+
+  it("builds one date formatter for all its rows, not one for each row and render", async () => {
+    mocks.listSessions.mockResolvedValue(
+      listOf(
+        ["a", "b", "c"].map((id) => ({
+          ...session,
+          id,
+          title: `Conversation ${id}`,
+        })),
+      ),
+    );
+    const formatter = vi.spyOn(Intl, "DateTimeFormat");
+    try {
+      const rendered = render(page());
+      await screen.findByRole("button", { name: "Conversation c" });
+      for (let again = 0; again < 3; again += 1) rendered.rerender(page());
+      const stamps = formatter.mock.calls.filter(
+        ([, options]) => options?.timeStyle === "short",
+      );
+      expect(stamps).toHaveLength(1);
+    } finally {
+      formatter.mockRestore();
+    }
   });
 
   describe("search", () => {
@@ -5168,9 +5299,8 @@ describe("the sidebar", () => {
       await userEvent.click(
         await screen.findByRole("button", { name: "My conversation" }),
       );
-      await userEvent.click(
-        await screen.findByRole("button", { name: "Restore" }),
-      );
+      await screen.findAllByRole("button", { name: "Restore" });
+      await userEvent.click(headerRestore());
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
       );
@@ -5261,7 +5391,7 @@ describe("focus when the conversation list is collapsed", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await screen.findByRole("button", { name: "Restore" });
+    await screen.findAllByRole("button", { name: "Restore" });
     await userEvent.click(toggle());
     expect(
       screen.queryByRole("button", { name: "Back to conversations" }),
@@ -5279,7 +5409,7 @@ describe("focus when the conversation list is collapsed", () => {
 
   it("lands on the toggle once a trashed conversation is restored", async () => {
     await openTrashedAndCollapse();
-    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await userEvent.click(headerRestore());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await waitFor(() => expect(toggle()).toHaveFocus());
   });
@@ -5345,7 +5475,7 @@ describe("focus after a button's action is over", () => {
 
   it.each([
     ["Back up…", "backup", "assistant_backup_failed"],
-    ["Restore…", "restore", "assistant_backup_invalid"],
+    ["Restore from backup…", "restore", "assistant_backup_invalid"],
   ] as const)(
     "gives it back to the menu button once %s was cancelled or failed",
     async (item, command, failure) => {
@@ -5678,6 +5808,37 @@ describe("scrolling to the end of a conversation", () => {
     expect(
       screen.getByRole("button", { name: "Jump to the latest" }),
     ).toBeVisible();
+  });
+
+  it("lets the reader leave with a key that scrolls while a jump is under way", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    await userEvent.click(screen.getByRole("button", { name: "Jump to the latest" }));
+    fireEvent.keyDown(area, { key: "PageUp" });
+    scrollToTop(area, 900);
+    expect(
+      screen.getByRole("button", { name: "Jump to the latest" }),
+    ).toBeVisible();
+  });
+
+  it("hands focus to the message box when the button that had it goes away", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    const button = screen.getByRole("button", { name: "Jump to the latest" });
+    act(() => button.focus());
+    await userEvent.keyboard("{Enter}");
+    expect(toEnd()).toBeNull();
+    expect(composer()).toHaveFocus();
+  });
+
+  it("leaves the focus alone when the button is used without it", async () => {
+    const area = await openRunning();
+    scrollToTop(area, 1000);
+    const other = screen.getByRole("button", { name: "Conversation list" });
+    act(() => other.focus());
+    fireEvent.click(screen.getByRole("button", { name: "Jump to the latest" }));
+    expect(toEnd()).toBeNull();
+    expect(other).toHaveFocus();
   });
 
   it("follows a reply the reader has not left", async () => {

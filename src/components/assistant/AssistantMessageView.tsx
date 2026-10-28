@@ -1,4 +1,4 @@
-import { memo, useId, useRef, useState } from "react";
+import { memo, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -188,6 +188,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   latest = false,
   disabled,
   onEdit,
+  onEditingChange,
   onRegenerate,
   onRetry,
 }: {
@@ -201,6 +202,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     text: string,
     attachments: AssistantAttachment[],
   ) => Promise<boolean>;
+  /** Tells the page whether this message is being edited. */
+  onEditingChange?: (editing: boolean) => void;
   onRegenerate: (messageId: string) => void;
   onRetry?: (messageId: string) => void;
 }) {
@@ -209,6 +212,12 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   const [text, setText] = useState(message.content);
   const [editFiles, setEditFiles] = useState<AssistantAttachment[]>([]);
   const editor = useRef<HTMLTextAreaElement>(null);
+  // Also told when the message goes away with its edit still open.
+  useEffect(() => {
+    if (!editing) return;
+    onEditingChange?.(true);
+    return () => onEditingChange?.(false);
+  }, [editing, onEditingChange]);
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
   const files = message.attachments ?? [];
@@ -248,8 +257,10 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   const actionsShown = latest || retryable;
   const hasActions = Boolean(message.content) || branchable || retryable;
   const body = (
+    // The room between two turns is the actions row of the one above (always
+    // kept, so that showing it moves nothing): no more is added to it.
     <article
-      className={cn("group min-w-0 py-2", isUser && "flex flex-col items-end")}
+      className={cn("group min-w-0 pt-1", isUser && "flex flex-col items-end")}
       aria-label={role}
     >
       <h2 className="sr-only">{role}</h2>
@@ -322,7 +333,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {(message.content || !files.length) && (
             <div
               className={cn(
-                "min-w-0 break-words text-ui leading-relaxed text-ink",
+                // The markdown's first and last block keep no outer margin, or
+                // it would add to the room between turns (and fatten a bubble).
+                "min-w-0 break-words text-ui leading-relaxed text-ink [&>div>:first-child]:mt-0 [&>div>:last-child]:mb-0",
                 isUser && "max-w-[80%] rounded-list bg-pill px-3.5 py-2",
               )}
             >
@@ -359,14 +372,14 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       {!editing && !streaming && (
         <div
           className={cn(
-            "mt-1 flex flex-wrap items-center gap-1.5",
+            "mt-0.5 flex flex-wrap items-center gap-1.5",
             isUser && "justify-end",
           )}
         >
           {message.status === "stopped" && (
             <Badge
               variant="outline"
-              className="border-line bg-pill px-1.5 py-0 text-note font-normal text-ink-muted"
+              className="border-line bg-pill px-1.5 py-0 text-note font-normal text-ink-ctl"
             >
               {t("assistant.stopped")}
             </Badge>
@@ -393,6 +406,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
               {isUser && branchable && (
                 <Button
                   variant="icon"
+                  className="h-6 w-6"
                   aria-label={t("assistant.editMessage")}
                   title={t("assistant.editMessage")}
                   disabled={disabled}
@@ -408,6 +422,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
               {!isUser && branchable && (
                 <Button
                   variant="icon"
+                  className="h-6 w-6"
                   aria-label={t("assistant.regenerate")}
                   title={t("assistant.regenerate")}
                   disabled={disabled}

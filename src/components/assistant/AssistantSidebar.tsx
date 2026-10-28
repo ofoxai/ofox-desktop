@@ -1,4 +1,11 @@
-import { useEffect, useId, useRef, useState, type RefObject } from "react";
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import { toast } from "sonner";
@@ -14,6 +21,7 @@ import {
   Upload,
 } from "lucide-react";
 import { assistantErrorKey } from "@/lib/api/assistant";
+import { isMac } from "@/lib/platform";
 import { Button } from "@/components/ui/button";
 import { SearchInput } from "@/components/ui/search-input";
 import {
@@ -93,6 +101,8 @@ interface AssistantSidebarProps {
   assistant: ReturnType<typeof useAssistant>;
   /** A new conversation can be started now. */
   canCreate: boolean;
+  /** Start one: the same action as the keyboard shortcut. */
+  onCreate: () => void;
   newConversationRef: RefObject<HTMLButtonElement>;
   trashEntryRef: RefObject<HTMLButtonElement>;
   trashBackRef: RefObject<HTMLButtonElement>;
@@ -113,6 +123,7 @@ export function AssistantSidebar({
   collapsed,
   assistant,
   canCreate,
+  onCreate,
   newConversationRef,
   trashEntryRef,
   trashBackRef,
@@ -131,11 +142,17 @@ export function AssistantSidebar({
     assistant.busy || assistant.loading || !assistant.bootstrap?.owner;
   useTransferToast(assistant.transferResult);
 
-  const stamp = (at: number) =>
-    new Date(at).toLocaleString(i18n.language, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
+  // Every row is dated on each render, and the list renders with each
+  // streamed frame: one formatter per language, not one per row.
+  const stampFormat = useMemo(
+    () =>
+      new Intl.DateTimeFormat(i18n.language, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
+    [i18n.language],
+  );
+  const stamp = (at: number) => stampFormat.format(at);
 
   return (
     <aside
@@ -190,9 +207,12 @@ export function AssistantSidebar({
           ref={newConversationRef}
           variant="icon"
           aria-label={t("assistant.newConversation")}
-          title={t("assistant.newConversation")}
+          aria-keyshortcuts={isMac() ? "Meta+N" : "Control+N"}
+          title={t("assistant.newConversationShortcut", {
+            shortcut: isMac() ? "⌘N" : "Ctrl+N",
+          })}
           disabled={!canCreate}
-          onClick={() => void assistant.create()}
+          onClick={onCreate}
         >
           <SquarePen aria-hidden className="h-3.5 w-3.5" />
         </Button>
@@ -229,7 +249,8 @@ export function AssistantSidebar({
               <button
                 type="button"
                 disabled={transferring}
-                title={stamp(item.updatedAt)}
+                // The title may be cut short in the row: here it is whole.
+                title={`${item.title || t("assistant.untitled")}\n${stamp(item.updatedAt)}`}
                 aria-current={
                   assistant.selectedId === item.id ? "page" : undefined
                 }
