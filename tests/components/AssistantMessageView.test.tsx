@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantMessageView } from "@/components/assistant/AssistantMessageView";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { chipNotes } from "../utils/chipNotes";
 import type {
   AssistantAttachment,
   AssistantMessage,
@@ -276,18 +278,20 @@ describe("files sent with a question", () => {
     ).toHaveTextContent("notes.txt");
   });
 
-  it("shows the files a question was sent with, and that turn's outcome", () => {
+  it("shows the files a question was sent with, and that turn's outcome", async () => {
+    // The outcome's words are in a tooltip, which the page's provider serves.
     render(
       view({
         role: "user",
         content: "Compare these",
         attachments: [file(), scanned],
       }),
+      { wrapper: TooltipProvider },
     );
     const files = screen.getByRole("list", { name: "Attached files" });
     const [notes, scan] = within(files).getAllByRole("listitem");
     expect(notes).toHaveTextContent("notes.txt");
-    expect(scan).toHaveTextContent(
+    expect(await chipNotes(scan)).toContain(
       "Page 3 has no text and wasn't read. Choose a model that can read images to read it.",
     );
     expect(document.body).not.toHaveTextContent("assistant_");

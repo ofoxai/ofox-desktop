@@ -7,6 +7,8 @@ import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
 import zh from "@/i18n/locales/zh.json";
 import { AttachmentList } from "@/components/assistant/AssistantAttachments";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { chipNotes } from "../utils/chipNotes";
 import type {
   AssistantAttachment,
   AssistantAttachmentStatus,
@@ -32,10 +34,13 @@ const file = (
 });
 
 const list = () => screen.getByRole("list", { name: "Attached files" });
+// Notes sit in tooltips, which need the provider the assistant page mounts.
+const renderList = (ui: React.ReactElement) =>
+  render(ui, { wrapper: TooltipProvider });
 
 describe("attachment chips", () => {
   it("shows each file's name and size, and no outcome while it is ready", () => {
-    render(
+    renderList(
       <AttachmentList
         files={[
           file(),
@@ -80,20 +85,20 @@ describe("attachment chips", () => {
     ],
   ] as const)(
     "explains Office %s outcomes",
-    (status, details, first, second) => {
-      render(
+    async (status, details, first, second) => {
+      renderList(
         <AttachmentList
           files={[file({ name: "文档.xlsx", status, details })]}
         />,
       );
-      const item = within(list()).getByRole("listitem");
-      expect(item).toHaveTextContent(first);
-      expect(item).toHaveTextContent(second);
+      const notes = await chipNotes(within(list()).getByRole("listitem"));
+      expect(notes).toContain(first);
+      expect(notes).toContain(second);
     },
   );
 
   it("measures a file as its limits do, so a file at the limit reads as it", () => {
-    render(<AttachmentList files={[file({ sizeBytes: 26_214_400 })]} />);
+    renderList(<AttachmentList files={[file({ sizeBytes: 26_214_400 })]} />);
     expect(within(list()).getByRole("listitem")).toHaveTextContent("25 MB");
   });
 
@@ -262,16 +267,18 @@ describe("attachment chips", () => {
     ],
   ])(
     "explains a %s in words, with what to do next",
-    (_, status, reason, details, expected) => {
-      render(<AttachmentList files={[file({ status, reason, details })]} />);
-      const item = within(list()).getByRole("listitem");
-      expect(item).toHaveTextContent(expected);
-      expect(item).not.toHaveTextContent(/assistant_|_/);
+    async (_, status, reason, details, expected) => {
+      renderList(
+        <AttachmentList files={[file({ status, reason, details })]} />,
+      );
+      const notes = await chipNotes(within(list()).getByRole("listitem"));
+      expect(notes).toContain(expected);
+      expect(notes).not.toMatch(/assistant_|_/);
     },
   );
 
   it("never shows an unknown status or reason as it came", () => {
-    render(
+    renderList(
       <AttachmentList
         files={[
           file({
@@ -297,21 +304,119 @@ describe("attachment chips", () => {
       reason: "assistant_vision_model_required",
       details: { format: "image" },
     });
-    const view = render(<AttachmentList files={[blocked]} />);
+    const view = renderList(<AttachmentList files={[blocked]} />);
     await act(async () => {
       await i18n.changeLanguage("zh");
     });
     view.rerender(<AttachmentList files={[blocked]} />);
     expect(
-      screen.getByRole("list", { name: zh.assistant.attachedFiles }),
-    ).toHaveTextContent(zh.assistant.attachmentOutcome.imageNeedsVision);
+      await chipNotes(
+        within(
+          screen.getByRole("list", { name: zh.assistant.attachedFiles }),
+        ).getByRole("listitem"),
+      ),
+    ).toContain(zh.assistant.attachmentOutcome.imageNeedsVision);
     await act(async () => {
       await i18n.changeLanguage("ja");
     });
     view.rerender(<AttachmentList files={[blocked]} />);
     expect(
-      screen.getByRole("list", { name: ja.assistant.attachedFiles }),
-    ).toHaveTextContent(ja.assistant.attachmentOutcome.imageNeedsVision);
+      await chipNotes(
+        within(
+          screen.getByRole("list", { name: ja.assistant.attachedFiles }),
+        ).getByRole("listitem"),
+      ),
+    ).toContain(ja.assistant.attachmentOutcome.imageNeedsVision);
+  });
+
+  describe("by how much a note matters", () => {
+    const wordText = {
+      info: "Only text was read",
+      warn: "Page 3 has no text and wasn't read",
+      error: "password-protected",
+    };
+    const textOnly = file({
+      name: "memo.docx",
+      status: "partial",
+      details: { format: "docx", textOnly: true },
+    });
+    const unreadPage = file({
+      name: "scan.pdf",
+      status: "partial",
+      details: { format: "pdf", pagesWithoutText: [3] },
+    });
+    const locked = file({
+      name: "locked.pdf",
+      status: "unreadable",
+      details: { format: "pdf", reason: "password_protected" },
+    });
+
+    it("keeps what to know about a file that was read to a quiet focusable badge with a tooltip", async () => {
+      renderList(<AttachmentList files={[textOnly]} />);
+      const item = within(list()).getByRole("listitem");
+      const badge = within(item).getByText("Text only");
+      expect(badge).toHaveAttribute("tabindex", "0");
+      expect(item).not.toHaveTextContent(wordText.info);
+      expect(item.querySelector(".text-danger, .text-warn")).toBeNull();
+      await userEvent.tab();
+      expect(badge).toHaveFocus();
+      const tip = await screen.findByRole("tooltip");
+      expect(tip).toHaveTextContent(wordText.info);
+      expect(tip).toHaveTextContent("headers, footers, comments");
+      expect(badge).toHaveAccessibleDescription(
+        expect.stringContaining(wordText.info),
+      );
+    });
+
+    it("marks an unread part with a warning icon whose tooltip says what was left out", async () => {
+      renderList(<AttachmentList files={[unreadPage]} />);
+      const item = within(list()).getByRole("listitem");
+      const icon = within(item).getByRole("button", { name: "File notes" });
+      expect(icon).toHaveClass("text-warn");
+      expect(within(item).queryByText("Text only")).toBeNull();
+      expect(item).not.toHaveTextContent(wordText.warn);
+      await userEvent.tab();
+      expect(icon).toHaveFocus();
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(
+        wordText.warn,
+      );
+    });
+
+    it("shows a file that can't be used in red text, where it explains why Send is off", () => {
+      renderList(<AttachmentList files={[locked]} />);
+      const item = within(list()).getByRole("listitem");
+      const reason = within(item).getByText(new RegExp(wordText.error));
+      expect(reason).toHaveClass("text-danger");
+      expect(within(item).queryByText("Text only")).toBeNull();
+      expect(within(item).queryByRole("button")).toBeNull();
+    });
+
+    it("gives each kind of note its own mark when a file has both", async () => {
+      renderList(
+        <AttachmentList
+          files={[
+            file({
+              name: "mixed.docx",
+              status: "partial",
+              details: {
+                format: "docx",
+                textOnly: true,
+                truncated: true,
+                extractionLimit: 1000,
+              },
+            }),
+          ]}
+        />,
+      );
+      const item = within(list()).getByRole("listitem");
+      expect(within(item).getByText("Text only")).toBeVisible();
+      expect(
+        within(item).getByRole("button", { name: "File notes" }),
+      ).toBeVisible();
+      const notes = await chipNotes(item);
+      expect(notes).toContain(wordText.info);
+      expect(notes).toContain("only the first 1,000 characters were read");
+    });
   });
 
   it("has every outcome message in every language", () => {
@@ -321,7 +426,7 @@ describe("attachment chips", () => {
   });
 
   it("keeps its list role however it is styled, and gives remove a 24 px target", () => {
-    render(<AttachmentList files={[file()]} onRemove={() => undefined} />);
+    renderList(<AttachmentList files={[file()]} onRemove={() => undefined} />);
     expect(list()).toHaveAttribute("role", "list");
     expect(
       screen.getByRole("button", { name: "Remove report.pdf" }),
@@ -345,7 +450,7 @@ describe("attachment chips", () => {
         />
       );
     }
-    render(<Draft />);
+    renderList(<Draft />);
     await userEvent.click(
       screen.getByRole("button", { name: "Remove report.pdf" }),
     );
@@ -359,7 +464,7 @@ describe("attachment chips", () => {
 
   it("removes a file by name when the list allows it", async () => {
     const onRemove = vi.fn();
-    const rendered = render(
+    const rendered = renderList(
       <AttachmentList files={[file()]} onRemove={onRemove} removeDisabled />,
     );
     const remove = screen.getByRole("button", { name: "Remove report.pdf" });

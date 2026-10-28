@@ -43,7 +43,9 @@ export function assistantMarkdown(
     parts.push(
       items
         .map((file) => {
-          const notes = describeAttachmentOutcome(file, t, language);
+          const notes = describeAttachmentOutcome(file, t, language).map(
+            (note) => note.text,
+          );
           return `- ${inline(file.name)} (${fmtBinaryBytes(file.sizeBytes)}, ${inline(file.mimeType)})${notes.length ? ` — ${notes.join(" ")}` : ""}`;
         })
         .join("\n"),

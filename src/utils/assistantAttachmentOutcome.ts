@@ -28,6 +28,19 @@ const megabytes = (bytes: number) =>
   `${Number((bytes / 2 ** 20).toFixed(1))} MB`;
 
 /**
+ * How much a note matters: `info` is what to know about a file that was read
+ * (an Office file read as text), `warn` a part that was not read or a model
+ * that can't read it (the file can still be sent), `error` a file that can't
+ * be used at all.
+ */
+export type AttachmentNoteTone = "info" | "warn" | "error";
+
+export interface AttachmentNote {
+  text: string;
+  tone: AttachmentNoteTone;
+}
+
+/**
  * What the last read of a file means for the user and what to do about it,
  * from its status and the runtime's details. Never a raw code or reason.
  */
@@ -35,22 +48,33 @@ export function describeAttachmentOutcome(
   file: AssistantAttachment,
   t: TFunction,
   language: string,
-): string[] {
+): AttachmentNote[] {
   const details = file.details ?? {};
-  const key = (name: string, values?: Record<string, unknown>) =>
-    t(`assistant.attachmentOutcome.${name}`, values);
+  const note = (
+    tone: AttachmentNoteTone,
+    name: string,
+    values?: Record<string, unknown>,
+  ): AttachmentNote => ({
+    text: t(`assistant.attachmentOutcome.${name}`, values),
+    tone,
+  });
+  const info = (name: string) => note("info", name);
+  const warn = (name: string, values?: Record<string, unknown>) =>
+    note("warn", name, values);
+  const error = (name: string, values?: Record<string, unknown>) =>
+    note("error", name, values);
   switch (file.status) {
     case "ready":
       return [];
     case "partial": {
-      const notes: string[] = [];
-      if (details.textOnly === true) notes.push(key("officeTextOnly"));
+      const notes: AttachmentNote[] = [];
+      if (details.textOnly === true) notes.push(info("officeTextOnly"));
       if (details.format === "docx" && details.textOnly === true)
-        notes.push(key("officeWordScope"));
+        notes.push(info("officeWordScope"));
       if (details.structureCoverage === "partial")
-        notes.push(key("officeStructure"));
+        notes.push(info("officeStructure"));
       if (details.format === "xlsx" && details.textOnly === true)
-        notes.push(key("officeCachedValues"));
+        notes.push(info("officeCachedValues"));
       // Without image input there is no `pagesAttachedAsImages`.
       const vision = Array.isArray(details.pagesAttachedAsImages);
       const shown = integers(details.pagesAttachedAsImages);
@@ -66,16 +90,16 @@ export function describeAttachmentOutcome(
           : one
             ? "pageNeedsVision"
             : "pagesNeedVision";
-        notes.push(key(name, { pages: pageList(unread) }));
+        notes.push(warn(name, { pages: pageList(unread) }));
       }
       const limit = integer(details.extractionLimit);
       if (details.truncated === true && limit !== undefined)
         notes.push(
-          key("truncated", {
+          warn("truncated", {
             characters: new Intl.NumberFormat(language).format(limit),
           }),
         );
-      return notes.length ? notes : [key("partial")];
+      return notes.length ? notes : [warn("partial")];
     }
     case "model_unsupported": {
       // The runtime's own reading of the format wins over the file name's.
@@ -83,29 +107,30 @@ export function describeAttachmentOutcome(
         typeof details.format === "string"
           ? details.format === "pdf"
           : file.mimeType === "application/pdf";
-      return [key(pdf ? "pdfNeedsVision" : "imageNeedsVision")];
+      return [warn(pdf ? "pdfNeedsVision" : "imageNeedsVision")];
     }
     case "too_large": {
-      if (details.limit === "office_expansion") return [key("officeTooLarge")];
+      if (details.limit === "office_expansion")
+        return [error("officeTooLarge")];
       const maxBytes = integer(details.maxBytes);
       const page = integer(details.page);
       const maxPages = integer(details.maxPages);
       const pageCount = integer(details.pageCount);
       const maxImages = integer(details.maxImages);
       if (details.limit === "file_size" && maxBytes)
-        return [key("tooLargeFile", { size: megabytes(maxBytes) })];
+        return [error("tooLargeFile", { size: megabytes(maxBytes) })];
       if (details.limit === "image_size" && maxBytes)
-        return [key("tooLargeImage", { size: megabytes(maxBytes) })];
+        return [error("tooLargeImage", { size: megabytes(maxBytes) })];
       if (details.limit === "pdf_pages" && maxPages && pageCount)
-        return [key("tooManyPages", { max: maxPages, pages: pageCount })];
+        return [error("tooManyPages", { max: maxPages, pages: pageCount })];
       if (details.limit === "message_images" && maxImages)
-        return [key("tooManyImages", { max: maxImages })];
+        return [error("tooManyImages", { max: maxImages })];
       if (
         (details.limit === "rendered_page" || details.limit === "pdf_image") &&
         page
       )
-        return [key("pageTooLarge", { page })];
-      return [key("tooLarge")];
+        return [error("pageTooLarge", { page })];
+      return [error("tooLarge")];
     }
     case "unreadable": {
       if (
@@ -113,7 +138,7 @@ export function describeAttachmentOutcome(
         details.reason === "missing" ||
         details.reason === "unknown_id"
       )
-        return [key("missing")];
+        return [error("missing")];
       const reasons: Record<string, string> = {
         password_protected: "passwordProtected",
         invalid_pdf: "invalidPdf",
@@ -128,11 +153,13 @@ export function describeAttachmentOutcome(
         Object.prototype.hasOwnProperty.call(reasons, details.reason)
           ? reasons[details.reason]
           : "unreadable";
-      return [key(reason)];
+      return [error(reason)];
     }
     case "unsupported":
-      return [key(details.extension === ".doc" ? "legacyDoc" : "unsupported")];
+      return [
+        error(details.extension === ".doc" ? "legacyDoc" : "unsupported"),
+      ];
     default:
-      return [key("unavailable")];
+      return [error("unavailable")];
   }
 }

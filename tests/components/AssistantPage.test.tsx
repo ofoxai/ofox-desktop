@@ -14,6 +14,7 @@ import en from "@/i18n/locales/en.json";
 import zh from "@/i18n/locales/zh.json";
 import ja from "@/i18n/locales/ja.json";
 import { AssistantPage } from "@/components/assistant/AssistantPage";
+import { chipNotes } from "../utils/chipNotes";
 import { useAssistant } from "@/components/assistant/useAssistant";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import type {
@@ -147,6 +148,31 @@ async function chooseFromMenu(name: string) {
     expect(item).not.toHaveAttribute("aria-disabled", "true"),
   );
   await userEvent.click(item);
+}
+const conversationMenuButton = () =>
+  screen.getByRole("button", { name: "Conversation actions" });
+/** Open the header's menu for the conversation, unless it already is. */
+async function openConversationMenu() {
+  const trigger = await screen.findByRole("button", {
+    name: "Conversation actions",
+  });
+  if (trigger.getAttribute("aria-expanded") !== "true")
+    await userEvent.click(trigger);
+  return screen.findByRole("menu");
+}
+/** Pick an entry of the header's menu once it can run. */
+async function chooseFromConversationMenu(name: string) {
+  await openConversationMenu();
+  const item = await screen.findByRole("menuitem", { name });
+  await waitFor(() =>
+    expect(item).not.toHaveAttribute("aria-disabled", "true"),
+  );
+  await userEvent.click(item);
+}
+/** The conversation's rename field, once its title has been double-clicked. */
+async function startRename() {
+  await userEvent.dblClick(screen.getByRole("heading", { level: 1 }));
+  return screen.findByRole("textbox", { name: "Conversation title" });
 }
 /** Each toast shown so far: its kind, then its title and description lines. */
 const toasted = () =>
@@ -353,23 +379,107 @@ describe("starting a conversation", () => {
   });
 });
 
-describe("the composer's hint", () => {
-  it("is readable: muted text like the other notes, not faint", async () => {
+describe("the composer's controls", () => {
+  const footer = () => composer().closest("footer") as HTMLElement;
+
+  it("sends with an icon-only button whose tooltip names the Enter key", async () => {
     await openConversation();
-    const hint = screen.getByText("Enter to send · Shift+Enter for a new line");
-    expect(hint).toHaveClass("text-ink-muted");
-    expect(hint).not.toHaveClass("text-ink-faint");
+    await userEvent.type(composer(), "Hello");
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toHaveTextContent("");
+    expect(send).toHaveClass("rounded-full");
+    act(() => send.focus());
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Send (Enter)",
+    );
+  });
+
+  it("says nothing about keys or progress in text under the composer", async () => {
+    await openConversation();
+    expect(within(footer()).queryByText(/Shift\+Enter/)).toBeNull();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    expect(within(footer()).queryByText("Replying…")).toBeNull();
+  });
+
+  it("stops a reply with an icon-only button whose tooltip says Stop", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const stop = await screen.findByRole("button", { name: "Stop" });
+    expect(stop).toHaveTextContent("");
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    act(() => stop.focus());
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Stop");
   });
 });
 
 describe("the empty state", () => {
-  const invitation = "Start a new conversation, or type your question below.";
+  const starters = [
+    "Summarize content",
+    "Polish writing",
+    "Explain a question",
+  ];
 
-  it("invites a question while the composer can take one", async () => {
+  it("offers the starters in one row while the composer can take a question", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
-    expect(await screen.findByText(invitation)).toBeVisible();
+    expect(await screen.findByText("How can I help?")).toBeVisible();
     await waitFor(() => expect(composer()).toBeEnabled());
+    const buttons = starters.map((name) =>
+      screen.getByRole("button", { name }),
+    );
+    expect(new Set(buttons.map((button) => button.parentElement)).size).toBe(1);
+    for (const button of buttons) expect(button).toHaveClass("rounded-full");
+  });
+
+  it("says in one line what the assistant reads, and nothing else about starting", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(
+      await screen.findByText(
+        "The assistant only reads files you attach, and searches the web only when web search is on.",
+      ),
+    ).toBeVisible();
+    expect(screen.queryByText(/Start a new conversation/)).toBeNull();
+    expect(screen.queryByText(/Ask questions, write, translate/)).toBeNull();
+  });
+
+  it.each([
+    [
+      "en",
+      "The assistant only reads files you attach, and searches the web only when web search is on.",
+    ],
+    ["zh", "助手只读取你附加的文件；开启联网后才会搜索网页。"],
+    [
+      "ja",
+      "アシスタントが読むのは添付したファイルだけです。Web 検索をオンにしたときだけ Web を検索します。",
+    ],
+  ])("says it in %s", async (language, line) => {
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    i18n.addResourceBundle("ja", "translation", ja, true, true);
+    await i18n.changeLanguage(language);
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(await screen.findByText(line)).toBeVisible();
+  });
+
+  it("says the assistant's key is made with the first message only while the conversation is empty", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      key: { status: "missing" },
+    });
+    current.messages = [
+      { id: "q", role: "user", content: "Old question", createdAt: 1 },
+    ];
+    await openConversation();
+    await screen.findByText("Old question");
+    expect(
+      screen.queryByText(
+        "Your first message creates a dedicated Ofox API key for the assistant.",
+      ),
+    ).toBeNull();
   });
 
   it.each([
@@ -394,17 +504,21 @@ describe("the empty state", () => {
       "the page can't follow runs",
       () => mocks.subscribe.mockRejectedValue("assistant_storage_unavailable"),
     ],
-  ])("doesn't, when %s and the composer is disabled", async (_, setUp) => {
-    mocks.listSessions.mockResolvedValue(listOf([]));
-    setUp();
-    render(page());
-    expect(await screen.findByText("How can I help?")).toBeVisible();
-    // Let the capabilities and the event subscription settle.
-    await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalled());
-    await act(async () => undefined);
-    expect(composer()).toBeDisabled();
-    expect(screen.queryByText(invitation)).toBeNull();
-  });
+  ])(
+    "offers no starters, when %s and the composer is disabled",
+    async (_, setUp) => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+      setUp();
+      render(page());
+      expect(await screen.findByText("How can I help?")).toBeVisible();
+      // Let the capabilities and the event subscription settle.
+      await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalled());
+      await act(async () => undefined);
+      expect(composer()).toBeDisabled();
+      for (const name of starters)
+        expect(screen.queryByRole("button", { name })).toBeNull();
+    },
+  );
 });
 
 describe("history", () => {
@@ -437,20 +551,14 @@ describe("history", () => {
     expect(mocks.getSession).not.toHaveBeenCalled();
   });
 
-  it("renames the open conversation", async () => {
+  it("renames the open conversation in place of its title, and Enter saves it", async () => {
     await openConversation();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Rename conversation" }),
-    );
-    const dialog = await screen.findByRole("dialog", {
-      name: "Rename conversation",
-    });
-    const title = within(dialog).getByRole("textbox", {
-      name: "Conversation title",
-    });
+    const title = await startRename();
+    expect(title).toHaveValue("My conversation");
+    expect(title).toHaveFocus();
+    expect(screen.queryByRole("dialog")).toBeNull();
     await userEvent.clear(title);
-    await userEvent.type(title, "Trip plan");
-    await userEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+    await userEvent.type(title, "Trip plan{Enter}");
     await waitFor(() =>
       expect(mocks.updateSession).toHaveBeenCalledWith({
         sessionId: "session-a",
@@ -459,11 +567,142 @@ describe("history", () => {
         expectedGeneration: capabilities.authorityGeneration,
       }),
     );
-    await waitFor(() =>
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Trip plan" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("textbox", { name: "Conversation title" }),
+    ).toBeNull();
+    await waitFor(() => expect(conversationMenuButton()).toHaveFocus());
+  });
+
+  it("renames from the conversation menu, with the title ready to be replaced", async () => {
+    await openConversation();
+    await chooseFromConversationMenu("Rename");
+    const title = (await screen.findByRole("textbox", {
+      name: "Conversation title",
+    })) as HTMLInputElement;
+    await waitFor(() => expect(title).toHaveFocus());
+    expect(title.selectionStart).toBe(0);
+    expect(title.selectionEnd).toBe("My conversation".length);
+  });
+
+  describe("renaming in place", () => {
+    const saved = () =>
+      mocks.updateSession.mock.calls.filter(([patch]) => "title" in patch);
+
+    it("drops the edit with Escape, without leaving the page", async () => {
+      await openConversation();
+      const title = await startRename();
+      await userEvent.type(title, " draft");
+      // A prevented keydown is one the app's own Escape handling skips.
+      expect(fireEvent.keyDown(title, { key: "Escape" })).toBe(false);
       expect(
-        screen.getByRole("button", { name: "Rename conversation" }),
-      ).toHaveFocus(),
-    );
+        await screen.findByRole("heading", {
+          level: 1,
+          name: "My conversation",
+        }),
+      ).toBeVisible();
+      expect(saved()).toHaveLength(0);
+      await waitFor(() => expect(conversationMenuButton()).toHaveFocus());
+    });
+
+    it("saves what was typed when the field is left", async () => {
+      await openConversation();
+      const title = await startRename();
+      await userEvent.clear(title);
+      await userEvent.type(title, "Left behind");
+      await userEvent.click(composer());
+      await waitFor(() =>
+        expect(mocks.updateSession).toHaveBeenCalledWith(
+          expect.objectContaining({ title: "Left behind" }),
+        ),
+      );
+      await screen.findByRole("heading", { level: 1, name: "Left behind" });
+      // Leaving is the user's choice of where to go: focus stays there.
+      expect(composer()).toHaveFocus();
+    });
+
+    it("trims the title, and sends it once however it is confirmed", async () => {
+      await openConversation();
+      const title = await startRename();
+      await userEvent.clear(title);
+      await userEvent.type(title, "  Padded  {Enter}");
+      await userEvent.click(composer());
+      await screen.findByRole("heading", { level: 1, name: "Padded" });
+      expect(saved()).toHaveLength(1);
+      expect(saved()[0][0]).toMatchObject({ title: "Padded" });
+    });
+
+    it("sends nothing for a title left as it was", async () => {
+      await openConversation();
+      const title = await startRename();
+      await userEvent.type(title, "{Enter}");
+      await screen.findByRole("heading", { level: 1, name: "My conversation" });
+      expect(saved()).toHaveLength(0);
+    });
+
+    it("never saves a blank title: Enter keeps the field, leaving restores the title", async () => {
+      await openConversation();
+      const title = await startRename();
+      await userEvent.clear(title);
+      await userEvent.type(title, "   {Enter}");
+      expect(title).toBeVisible();
+      expect(title).toHaveFocus();
+      await userEvent.click(composer());
+      await screen.findByRole("heading", { level: 1, name: "My conversation" });
+      expect(saved()).toHaveLength(0);
+    });
+
+    it("keeps a title to 120 characters", async () => {
+      await openConversation();
+      expect(await startRename()).toHaveAttribute("maxlength", "120");
+    });
+
+    it("leaves the Enter that confirms an input method candidate to the method", async () => {
+      await openConversation();
+      const title = await startRename();
+      await userEvent.type(title, "x");
+      fireEvent.keyDown(title, { key: "Enter", keyCode: 229 });
+      fireEvent.keyDown(title, { key: "Escape", keyCode: 229 });
+      expect(title).toBeVisible();
+      expect(saved()).toHaveLength(0);
+    });
+
+    it("stays open with what was typed when Enter's save is refused, and Escape then drops it", async () => {
+      mocks.updateSession.mockRejectedValueOnce(
+        "assistant_storage_unavailable",
+      );
+      await openConversation();
+      const title = await startRename();
+      await userEvent.type(title, "!{Enter}");
+      expect(await screen.findByRole("alert")).toBeVisible();
+      expect(title).toBeVisible();
+      expect(title).toHaveValue("My conversation!");
+      await userEvent.keyboard("{Escape}");
+      await screen.findByRole("heading", { level: 1, name: "My conversation" });
+    });
+
+    it("ends the edit when the user leaves a field whose save is refused", async () => {
+      mocks.updateSession.mockRejectedValueOnce(
+        "assistant_storage_unavailable",
+      );
+      await openConversation();
+      const title = await startRename();
+      await userEvent.type(title, "!");
+      await userEvent.click(composer());
+      expect(await screen.findByRole("alert")).toBeVisible();
+      await screen.findByRole("heading", { level: 1, name: "My conversation" });
+    });
+
+    it("starts only for a conversation that is open and not in the trash", async () => {
+      render(page());
+      await screen.findByRole("button", { name: /My conversation/ });
+      await userEvent.dblClick(screen.getByRole("heading", { level: 1 }));
+      expect(
+        screen.queryByRole("textbox", { name: "Conversation title" }),
+      ).toBeNull();
+    });
   });
 
   it("switches the model of an open conversation", async () => {
@@ -813,7 +1052,8 @@ describe("running a reply", () => {
     await userEvent.keyboard("Hello{Enter}");
     const stop = await screen.findByRole("button", { name: "Stop" });
     await waitFor(() => expect(composer()).toHaveFocus());
-    stop.focus();
+    // Focus opens the button's tooltip.
+    act(() => stop.focus());
     await userEvent.keyboard("{Enter}");
     expect(mocks.stop).toHaveBeenCalledOnce();
     await waitFor(() => expect(composer()).toHaveFocus());
@@ -1573,9 +1813,14 @@ describe("attachments", () => {
       }),
     );
     const question = screen.getByRole("article", { name: "You" });
+    // A file the model can't read is a warning icon whose tooltip says why.
     expect(
-      within(question).getByRole("list", { name: "Attached files" }),
-    ).toHaveTextContent(
+      await chipNotes(
+        within(
+          within(question).getByRole("list", { name: "Attached files" }),
+        ).getByRole("listitem"),
+      ),
+    ).toContain(
       "This model can't read images. Choose a model that can read images, then try again.",
     );
     act(() =>
@@ -2646,8 +2891,11 @@ describe("run edges", () => {
 });
 
 describe("conversation cost", () => {
-  // Scope the assertion to this conversation, apart from the new all-conversation card.
-  const usageLine = () => screen.queryByLabelText("This conversation");
+  // The conversation's usage is the label of the header's menu.
+  const usageLine = async () => {
+    await openConversationMenu();
+    return screen.queryByText(/^This conversation: /);
+  };
 
   it("shows a saved conversation's tokens and estimated cost", async () => {
     current.usage = {
@@ -2660,7 +2908,7 @@ describe("conversation cost", () => {
       modelRequests: 2,
     };
     await openConversation();
-    expect(usageLine()).toHaveTextContent(
+    expect(await usageLine()).toHaveTextContent(
       "Input 1.2K · Output 340 tokens · Estimated cost ≈$0.012",
     );
   });
@@ -2692,8 +2940,8 @@ describe("conversation cost", () => {
   ])("says the cost is unavailable after %s, never $0", async (_, usage) => {
     current.usage = usage;
     await openConversation();
-    expect(usageLine()).toHaveTextContent("Cost unavailable");
-    expect(usageLine()).not.toHaveTextContent("$");
+    expect(await usageLine()).toHaveTextContent("Cost unavailable");
+    expect(await usageLine()).not.toHaveTextContent("$");
   });
 
   it.each([
@@ -2722,6 +2970,11 @@ describe("conversation cost", () => {
       await userEvent.click(
         await screen.findByRole("button", { name: /My conversation/ }),
       );
+      await userEvent.click(
+        await screen.findByRole("button", {
+          name: i18n.t("assistant.conversationActions"),
+        }),
+      );
       // After the tokens, on the same line.
       const line = await screen.findByText(expected, { exact: false });
       expect(line.textContent?.endsWith(` · ${expected}`)).toBe(true);
@@ -2739,15 +2992,15 @@ describe("conversation cost", () => {
       modelRequests: 1,
     };
     await openConversation();
-    expect(usageLine()).toHaveTextContent(
+    expect(await usageLine()).toHaveTextContent(
       "Input 900 · Output 20 tokens · Cost unavailable",
     );
-    expect(usageLine()).not.toHaveTextContent(/search|\$/);
+    expect(await usageLine()).not.toHaveTextContent(/search|\$/);
   });
 
   it("says nothing about cost before the first request", async () => {
     await openConversation();
-    expect(usageLine()).toBeNull();
+    expect(await usageLine()).toBeNull();
     expect(screen.queryByText(/Cost/)).toBeNull();
   });
 
@@ -2759,7 +3012,7 @@ describe("conversation cost", () => {
       modelRequests: 1,
     };
     await openConversation();
-    expect(usageLine()).toHaveTextContent("Estimated cost ≈$0.010");
+    expect(await usageLine()).toHaveTextContent("Estimated cost ≈$0.010");
     await userEvent.type(composer(), "Hello");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await screen.findByRole("button", { name: "Stop" });
@@ -2779,8 +3032,8 @@ describe("conversation cost", () => {
         },
       }),
     );
-    expect(usageLine()).toHaveTextContent("Input 300 · Output 50 tokens");
-    expect(usageLine()).not.toHaveTextContent(/Cost|\$/);
+    expect(await usageLine()).toHaveTextContent("Input 300 · Output 50 tokens");
+    expect(await usageLine()).not.toHaveTextContent(/Cost|\$/);
     // The user stops it: the host marks the cost unknown.
     current.usage = {
       inputTokens: 300,
@@ -2796,8 +3049,8 @@ describe("conversation cost", () => {
         data: { stopped: true, status: "stopped" },
       }),
     );
-    await waitFor(() =>
-      expect(usageLine()).toHaveTextContent(
+    await waitFor(async () =>
+      expect(await usageLine()).toHaveTextContent(
         "Input 300 · Output 50 tokens · Cost unavailable",
       ),
     );
@@ -2849,7 +3102,7 @@ describe("web search", () => {
       "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 3 次，一次搜索可能带回多个来源。",
     ],
   ])(
-    "always shows what a search may cost, one or two billed calls, and how many a reply makes at most, in %s",
+    "always describes what a search may cost, one or two billed calls, and how many a reply makes at most, and says it in a tooltip, in %s",
     async (language, price) => {
       i18n.addResourceBundle("zh", "translation", zh, true, true);
       i18n.addResourceBundle("ja", "translation", ja, true, true);
@@ -2862,15 +3115,42 @@ describe("web search", () => {
         name: language === "en" ? "Web search" : /Web|联网/,
       });
       await waitFor(() => expect(button).toBeEnabled());
+      // Described to assistive tech by text that is not shown...
       expect(button).toHaveAccessibleDescription(price);
-      expect(screen.getByText(price)).toBeVisible();
+      expect(screen.queryByRole("tooltip")).toBeNull();
+      // ...and shown in a tooltip that focus opens.
+      act(() => button.focus());
+      expect(await screen.findByRole("tooltip")).toHaveTextContent(price);
       await userEvent.click(button);
       await waitFor(() =>
         expect(button).toHaveAttribute("aria-pressed", "true"),
       );
-      expect(screen.getByText(price)).toBeVisible();
+      expect(button).toHaveAccessibleDescription(price);
     },
   );
+
+  it("keeps the price note out of what is shown under the composer", async () => {
+    await openConversation();
+    const footer = composer().closest("footer") as HTMLElement;
+    // Its words are there for assistive tech only.
+    expect(within(footer).getByText(/per search/)).toHaveClass("sr-only");
+    expect(
+      within(footer).getByRole("button", { name: "Web search" }),
+    ).toHaveAccessibleDescription(/per search/);
+  });
+
+  it("explains on hover why web search is off, though its switch can't be pressed", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      search: { available: false, unitPriceUsd: null, model: null },
+    });
+    await openConversation();
+    expect(toggle()).toBeDisabled();
+    await userEvent.hover(toggle().parentElement as HTMLElement);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent(
+      "Web search is unavailable right now. Replies use the model's own knowledge.",
+    );
+  });
 
   it("starts the first conversation with web search when it was turned on before the first message", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
@@ -3235,7 +3515,7 @@ describe("web search", () => {
     expect(
       within(
         screen.getByRole("region", { name: "Assistant conversation" }),
-      ).queryByRole("button", { expanded: false }),
+      ).queryByRole("button", { expanded: false, name: /sources?$/ }),
     ).toBeNull();
     expect(
       screen.getByRole("button", { name: "2. Pi changelog pi.dev" }),
@@ -3583,21 +3863,13 @@ describe("assistant key and authority", () => {
     mocks.updateSession.mockRejectedValueOnce("assistant_identity_changed");
     await openConversation();
     const rename = async () => {
-      await userEvent.click(
-        screen.getByRole("button", { name: "Rename conversation" }),
-      );
-      const dialog = await screen.findByRole("dialog");
-      await userEvent.type(
-        within(dialog).getByRole("textbox", { name: "Conversation title" }),
-        "!",
-      );
-      await userEvent.click(
-        within(dialog).getByRole("button", { name: "Save" }),
-      );
+      const title = await startRename();
+      await userEvent.type(title, "!{Enter}");
     };
     await rename();
     await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalledTimes(2));
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    // The refused save leaves the field open; Escape drops it.
+    await userEvent.keyboard("{Escape}");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "The account or region changed. Please try again.",
     );
@@ -3833,9 +4105,7 @@ describe("conversation trash", () => {
   it("saves the draft before trashing, shows it read-only, and restores the conversation", async () => {
     await openConversation();
     fireEvent.change(composer(), { target: { value: "Keep this draft" } });
-    await userEvent.click(
-      screen.getByRole("button", { name: "Move to trash" }),
-    );
+    await chooseFromConversationMenu("Move to trash");
     await waitFor(() => expect(current.session.deletedAt).toBe(10));
     expect(current.session.draft).toBe("Keep this draft");
     await userEvent.click(screen.getByRole("button", { name: "Trash" }));
@@ -3845,9 +4115,7 @@ describe("conversation trash", () => {
     await waitFor(() => expect(composer()).toHaveValue("Keep this draft"));
     expect(composer()).toHaveAttribute("readonly");
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Restore conversation" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
@@ -3866,10 +4134,8 @@ describe("conversation trash", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Delete permanently" }),
-    );
-    const dialog = screen.getByRole("dialog", {
+    await chooseFromConversationMenu("Delete permanently");
+    const dialog = await screen.findByRole("dialog", {
       name: "Delete conversation permanently?",
     });
     expect(
@@ -3879,16 +4145,10 @@ describe("conversation trash", () => {
       within(dialog).getByRole("button", { name: "Cancel" }),
     );
     expect(mocks.deleteSession).not.toHaveBeenCalled();
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Delete permanently" }),
-      ).toHaveFocus(),
-    );
+    await waitFor(() => expect(conversationMenuButton()).toHaveFocus());
+    await chooseFromConversationMenu("Delete permanently");
     await userEvent.click(
-      screen.getByRole("button", { name: "Delete permanently" }),
-    );
-    await userEvent.click(
-      within(screen.getByRole("dialog")).getByRole("button", {
+      within(await screen.findByRole("dialog")).getByRole("button", {
         name: "Delete permanently",
       }),
     );
@@ -3922,10 +4182,8 @@ describe("permanently deleting a trashed conversation", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Delete permanently" }),
-    );
-    return screen.getByRole("dialog", {
+    await chooseFromConversationMenu("Delete permanently");
+    return screen.findByRole("dialog", {
       name: "Delete conversation permanently?",
     });
   }
@@ -3973,11 +4231,7 @@ describe("permanently deleting a trashed conversation", () => {
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(screen.queryByRole("alert")).toBeNull();
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: "Delete permanently" }),
-      ).toHaveFocus(),
-    );
+    await waitFor(() => expect(conversationMenuButton()).toHaveFocus());
   });
 
   it("closes the dialog and says so in the page when only the disk cleanup is left to retry", async () => {
@@ -4006,9 +4260,7 @@ describe("Markdown export", () => {
           }),
       );
       const reads = mocks.getSession.mock.calls.length;
-      await userEvent.click(
-        screen.getByRole("button", { name: "Export Markdown" }),
-      );
+      await chooseFromConversationMenu("Export Markdown");
       await waitFor(() =>
         expect(mocks.getSession).toHaveBeenCalledTimes(reads + 1),
       );
@@ -4016,7 +4268,7 @@ describe("Markdown export", () => {
       else await userEvent.click(screen.getByRole("button", { name: "Trash" }));
       await act(async () => resolve(current));
       expect(mocks.exportMarkdown).not.toHaveBeenCalled();
-      expect(screen.queryByText("Markdown saved")).not.toBeInTheDocument();
+      expect(toasted()).toEqual([]);
     },
   );
 
@@ -4035,9 +4287,7 @@ describe("Markdown export", () => {
         },
       ],
     };
-    await userEvent.click(
-      screen.getByRole("button", { name: "Export Markdown" }),
-    );
+    await chooseFromConversationMenu("Export Markdown");
     await waitFor(() => expect(mocks.exportMarkdown).toHaveBeenCalledTimes(1));
     const request = mocks.exportMarkdown.mock.calls[0][0];
     expect(request).toMatchObject({
@@ -4047,21 +4297,22 @@ describe("Markdown export", () => {
     });
     expect(request.markdown).toContain("latest unsent draft");
     expect(request.markdown).toContain("Saved response from disk");
-    expect(await screen.findByText("Markdown saved")).toHaveAttribute(
-      "role",
-      "status",
+    // Told once, as a toast; no status line stays in the page.
+    await waitFor(() =>
+      expect(toasted()).toEqual([
+        { kind: "success", lines: ["Markdown saved"] },
+      ]),
     );
+    expect(screen.queryByText("Markdown saved")).not.toBeInTheDocument();
   });
 
   it("keeps cancellation quiet and the draft editable", async () => {
     mocks.exportMarkdown.mockResolvedValue(false);
     await openConversation();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Export Markdown" }),
-    );
+    await chooseFromConversationMenu("Export Markdown");
     await waitFor(() => expect(mocks.exportMarkdown).toHaveBeenCalled());
     await waitFor(() => expect(composer()).toBeEnabled());
-    expect(screen.queryByText("Markdown saved")).not.toBeInTheDocument();
+    expect(toasted()).toEqual([]);
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -4069,9 +4320,7 @@ describe("Markdown export", () => {
     await openConversation();
     mocks.updateSession.mockRejectedValue("assistant_storage_unavailable");
     fireEvent.change(composer(), { target: { value: "keep this" } });
-    await userEvent.click(
-      screen.getByRole("button", { name: "Export Markdown" }),
-    );
+    await chooseFromConversationMenu("Export Markdown");
     await screen.findByRole("alert");
     expect(mocks.exportMarkdown).not.toHaveBeenCalled();
     expect(composer()).toHaveValue("keep this");
@@ -4330,25 +4579,45 @@ describe("conversation trash, in detail", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await screen.findByRole("button", { name: "Restore conversation" });
+    await screen.findByRole("button", { name: "Restore" });
   }
 
   it("is read-only: the title can't be renamed until it is restored", async () => {
     await openTrashed();
-    expect(
-      screen.getByRole("button", { name: "Rename conversation" }),
-    ).toBeDisabled();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Restore conversation" }),
+    await openConversationMenu();
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
     );
+    await userEvent.keyboard("{Escape}");
+    await userEvent.dblClick(screen.getByRole("heading", { level: 1 }));
+    expect(
+      screen.queryByRole("textbox", { name: "Conversation title" }),
+    ).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
+    await openConversationMenu();
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Rename conversation" }),
-      ).toBeEnabled(),
+        screen.getByRole("menuitem", { name: "Rename" }),
+      ).not.toHaveAttribute("aria-disabled", "true"),
     );
+  });
+
+  it("restores with a visible secondary button, and keeps permanent deletion in the menu", async () => {
+    await openTrashed();
+    expect(screen.getByRole("button", { name: "Restore" })).toHaveClass(
+      "border",
+    );
+    await openConversationMenu();
+    expect(
+      screen.getByRole("menuitem", { name: "Delete permanently" }),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("menuitem", { name: "Move to trash" }),
+    ).toBeNull();
   });
 
   it("says it is in the trash once when it has no messages", async () => {
@@ -4368,9 +4637,7 @@ describe("conversation trash, in detail", () => {
   it("goes back to the conversations without listing the trash again for it", async () => {
     await openTrashed();
     const reads = mocks.listSessions.mock.calls.length;
-    await userEvent.click(
-      screen.getByRole("button", { name: "Restore conversation" }),
-    );
+    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await waitFor(() =>
       expect(mocks.listSessions).toHaveBeenLastCalledWith(false, ""),
@@ -4412,12 +4679,41 @@ describe("the labels of the sidebar", () => {
     },
   );
 
-  it("groups the conversation's usage under its name", async () => {
+  it("labels the conversation's usage by whose it is, in the conversation menu and not under the composer", async () => {
     current.usage = { inputTokens: 10, outputTokens: 5 };
     await openConversation();
+    expect(composer().closest("footer") as HTMLElement).not.toHaveTextContent(
+      "Input 10",
+    );
+    await openConversationMenu();
+    const label = screen.getByText(/^This conversation: /);
+    expect(label).toHaveTextContent(
+      "This conversation: Input 10 · Output 5 tokens",
+    );
+    // Information, not a command.
     expect(
-      screen.getByRole("group", { name: "This conversation" }),
-    ).toHaveTextContent("Input 10 · Output 5 tokens");
+      screen.queryByRole("menuitem", { name: /This conversation/ }),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["zh", "本对话用量：输入 10 · 输出 5 Token"],
+    ["ja", "この会話の使用量：入力 10 · 出力 5 トークン"],
+  ])("labels it in %s too", async (language, expected) => {
+    current.usage = { inputTokens: 10, outputTokens: 5 };
+    i18n.addResourceBundle("zh", "translation", zh, true, true);
+    i18n.addResourceBundle("ja", "translation", ja, true, true);
+    await i18n.changeLanguage(language);
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: i18n.t("assistant.conversationActions"),
+      }),
+    );
+    expect(await screen.findByText(expected, { exact: false })).toBeVisible();
   });
 });
 
@@ -4809,9 +5105,7 @@ describe("the sidebar", () => {
         return current.session;
       });
       await openConversation();
-      await userEvent.click(
-        screen.getByRole("button", { name: "Move to trash" }),
-      );
+      await chooseFromConversationMenu("Move to trash");
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
       );
@@ -4820,7 +5114,7 @@ describe("the sidebar", () => {
         await screen.findByRole("button", { name: "My conversation" }),
       );
       await userEvent.click(
-        await screen.findByRole("button", { name: "Restore conversation" }),
+        await screen.findByRole("button", { name: "Restore" }),
       );
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
@@ -4883,6 +5177,86 @@ describe("the sidebar", () => {
   });
 });
 
+describe("focus when the conversation list is collapsed", () => {
+  afterEach(() => localStorage.clear());
+  beforeEach(() => {
+    mocks.listSessions.mockImplementation(async (deleted = false) =>
+      listOf(
+        Boolean(current.session.deletedAt) === deleted ? [current.session] : [],
+      ),
+    );
+    mocks.updateSession.mockImplementation(async (patch) => {
+      current.session = {
+        ...current.session,
+        ...patch,
+        ...(patch.deleted === undefined
+          ? {}
+          : { deletedAt: patch.deleted ? 10 : null }),
+      };
+      return current.session;
+    });
+  });
+  const toggle = () =>
+    screen.getByRole("button", { name: "Conversation list" });
+  /** Open the trashed conversation, then hide the list it was chosen from. */
+  async function openTrashedAndCollapse() {
+    current.session.deletedAt = 10;
+    render(page());
+    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await screen.findByRole("button", { name: "Restore" });
+    await userEvent.click(toggle());
+    expect(
+      screen.queryByRole("button", { name: "Back to conversations" }),
+    ).toBeNull();
+  }
+
+  it("lands on the toggle, not on a hidden trash entry, once the conversation is moved to the trash", async () => {
+    await openConversation();
+    await userEvent.click(toggle());
+    expect(screen.queryByRole("button", { name: "Trash" })).toBeNull();
+    await chooseFromConversationMenu("Move to trash");
+    await waitFor(() => expect(current.session.deletedAt).toBe(10));
+    await waitFor(() => expect(toggle()).toHaveFocus());
+  });
+
+  it("lands on the toggle once a trashed conversation is restored", async () => {
+    await openTrashedAndCollapse();
+    await userEvent.click(screen.getByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(current.session.deletedAt).toBeNull());
+    await waitFor(() => expect(toggle()).toHaveFocus());
+  });
+
+  it("lands on the toggle once the permanent-delete dialog closes on a deleted conversation", async () => {
+    mocks.deleteSession.mockImplementation(async () => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+    });
+    await openTrashedAndCollapse();
+    await chooseFromConversationMenu("Delete permanently");
+    await userEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Delete permanently",
+      }),
+    );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mocks.deleteSession).toHaveBeenCalledOnce();
+    await waitFor(() => expect(toggle()).toHaveFocus());
+  });
+
+  it("gives focus back to the conversation menu's button when the dialog is cancelled", async () => {
+    await openTrashedAndCollapse();
+    await chooseFromConversationMenu("Delete permanently");
+    await userEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", {
+        name: "Cancel",
+      }),
+    );
+    await waitFor(() => expect(conversationMenuButton()).toHaveFocus());
+  });
+});
+
 describe("focus after a button's action is over", () => {
   // A browser drops the focus of a button that is disabled while its action
   // runs; jsdom doesn't, and can't blur a disabled button, so move it to the
@@ -4894,7 +5268,7 @@ describe("focus after a button's action is over", () => {
     expect(document.body).toHaveFocus();
   };
 
-  it("gives it back to Export Markdown once the action was cancelled or failed", async () => {
+  it("gives it back to the conversation menu's button once Export Markdown was cancelled or failed", async () => {
     await openConversation();
     for (const outcome of [
       () => false,
@@ -4904,13 +5278,12 @@ describe("focus after a button's action is over", () => {
         dropFocus();
         return outcome();
       });
-      const button = screen.getByRole("button", { name: "Export Markdown" });
+      const button = conversationMenuButton();
       const calls = mocks.exportMarkdown.mock.calls.length;
-      await userEvent.click(button);
+      await chooseFromConversationMenu("Export Markdown");
       await waitFor(() =>
         expect(mocks.exportMarkdown).toHaveBeenCalledTimes(calls + 1),
       );
-      await waitFor(() => expect(button).toBeEnabled());
       await waitFor(() => expect(button).toHaveFocus());
     }
   });
@@ -4941,17 +5314,16 @@ describe("focus after a button's action is over", () => {
     },
   );
 
-  it("gives it back to Move to trash when moving the conversation failed", async () => {
+  it("gives it back to the conversation menu's button when moving the conversation to the trash failed", async () => {
     await openConversation();
     mocks.updateSession.mockImplementation(async (patch) => {
       if (patch.deleted === undefined) return current.session;
       dropFocus();
       throw "assistant_storage_unavailable";
     });
-    const button = screen.getByRole("button", { name: "Move to trash" });
-    await userEvent.click(button);
+    const button = conversationMenuButton();
+    await chooseFromConversationMenu("Move to trash");
     await screen.findByRole("alert");
-    await waitFor(() => expect(button).toBeEnabled());
     await waitFor(() => expect(button).toHaveFocus());
   });
 
@@ -4961,10 +5333,9 @@ describe("focus after a button's action is over", () => {
       composer().focus();
       return false;
     });
-    const button = screen.getByRole("button", { name: "Export Markdown" });
-    await userEvent.click(button);
+    await chooseFromConversationMenu("Export Markdown");
     await waitFor(() => expect(mocks.exportMarkdown).toHaveBeenCalled());
-    await waitFor(() => expect(button).toBeEnabled());
+    await waitFor(() => expect(conversationMenuButton()).toBeEnabled());
     expect(composer()).toHaveFocus();
   });
 });

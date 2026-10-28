@@ -5,14 +5,16 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
+import { toast } from "sonner";
 import {
   ArrowUp,
-  ArrowUpRight,
-  Globe,
   Download,
+  Ellipsis,
+  Globe,
   Loader2,
   MessageSquare,
   PanelLeftClose,
@@ -30,22 +32,28 @@ import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
 import { AssistantSidebar } from "./AssistantSidebar";
+import { InlineRename } from "./InlineRename";
 import { usePendingFocus } from "./usePendingFocus";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { isSendable } from "@/utils/assistantAttachments";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { MenuSelect } from "@/components/ui/menu-select";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useShellRefresh } from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
@@ -167,8 +175,11 @@ export function AssistantPage({
   enabled = true,
   onLoginRequested,
 }: AssistantPageProps) {
+  // Tooltips need a provider, and the root mounts none.
   return enabled ? (
-    <AssistantWorkspace />
+    <TooltipProvider delayDuration={300}>
+      <AssistantWorkspace />
+    </TooltipProvider>
   ) : (
     <AssistantLoginRequired onLoginRequested={onLoginRequested} />
   );
@@ -178,25 +189,25 @@ function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
   const { detail, bootstrap, run, busy } = assistant;
-  const [rename, setRename] = useState<string | null>(null);
+  const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [exported, setExported] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(readSidebarCollapsed);
   const sidebarId = useId();
   const blockedHint = useId();
   const visionHint = useId();
+  const searchNoteId = useId();
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const composer = useRef<HTMLTextAreaElement>(null);
   const newConversationButton = useRef<HTMLButtonElement>(null);
   const trashEntry = useRef<HTMLButtonElement>(null);
   const trashBack = useRef<HTMLButtonElement>(null);
-  const deleteButton = useRef<HTMLButtonElement>(null);
-  const renameButton = useRef<HTMLButtonElement>(null);
-  const exportButton = useRef<HTMLButtonElement>(null);
-  const moveToTrashButton = useRef<HTMLButtonElement>(null);
+  const sidebarToggle = useRef<HTMLButtonElement>(null);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
   const restoreButton = useRef<HTMLButtonElement>(null);
+  // What the header menu's chosen item does, once the menu has closed.
+  const menuAction = useRef<(() => void) | null>(null);
   // A button that is disabled while its action runs loses focus; once the
   // action is over (done, cancelled or failed) it takes focus back.
   const refocus = useRef<HTMLButtonElement | null>(null);
@@ -210,7 +221,8 @@ function AssistantWorkspace() {
       bootstrap.models.length > 0 &&
       assistant.connected,
   );
-  const trashed = assistant.showTrash || session?.deletedAt != null;
+  const sessionTrashed = session?.deletedAt != null;
+  const trashed = assistant.showTrash || sessionTrashed;
   // Closes with the conversation it asks about, e.g. once only its files are
   // left to delete.
   const deleteDialogOpen = confirmDelete && session !== undefined;
@@ -319,9 +331,8 @@ function AssistantWorkspace() {
   });
 
   useEffect(() => {
-    setRename(null);
+    setRenaming(false);
     setConfirmDelete(false);
-    setExported(false);
     follow.current = true;
   }, [assistant.selectedId]);
   useEffect(() => {
@@ -351,13 +362,56 @@ function AssistantWorkspace() {
     setSidebarCollapsed(collapsed);
     saveSidebarCollapsed(collapsed);
   };
-  const saveTitle = () => {
-    const title = rename?.trim();
-    if (title)
-      void assistant.update({ title }).then((saved) => {
-        if (saved) setRename(null);
+  // With the list collapsed its entries are hidden: focus goes to the toggle
+  // that opens it, the nearest control still on screen.
+  const landOnSidebar = (
+    entry: RefObject<HTMLButtonElement>,
+  ): RefObject<HTMLButtonElement> => (sidebarCollapsed ? sidebarToggle : entry);
+  const saveTitle = async (title: string) =>
+    Boolean(await assistant.update({ title }));
+  const exportConversation = () =>
+    void assistant
+      .exportMarkdown((snapshot) =>
+        assistantMarkdown(snapshot, t, i18n.language),
+      )
+      .then((saved) => {
+        if (saved) toast.success(t("assistant.markdownSaved"));
+        returnFocusTo(menuTrigger.current);
       });
+  const moveToTrash = () =>
+    void assistant.setDeleted(true).then((saved) => {
+      if (saved) focusSoon(landOnSidebar(trashEntry));
+      else returnFocusTo(menuTrigger.current);
+    });
+  const restore = () =>
+    void assistant.setDeleted(false).then((saved) => {
+      // Back in the conversations, whose footer has the trash entry again.
+      if (saved) focusSoon(landOnSidebar(trashEntry));
+      else returnFocusTo(restoreButton.current);
+    });
+  const askToDelete = () => {
+    // A failure from before is not this dialog's to show.
+    assistant.setError(null);
+    setConfirmDelete(true);
   };
+
+  const webSearchToggle = (
+    <Button
+      variant="ghost"
+      aria-pressed={assistant.webSearch}
+      aria-describedby={showSearchNote ? searchNoteId : undefined}
+      disabled={searchLocked}
+      onClick={() => assistant.setWebSearch(!assistant.webSearch)}
+      className={cn(
+        "shrink-0 px-2",
+        searchLit &&
+          "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
+      )}
+    >
+      <Globe aria-hidden className="h-3.5 w-3.5" />
+      {t("assistant.webSearch")}
+    </Button>
+  );
 
   return (
     <div className="flex h-full min-h-0 overflow-hidden rounded-list border border-line bg-card">
@@ -377,9 +431,10 @@ function AssistantWorkspace() {
         className="flex min-h-0 min-w-0 flex-1 flex-col"
         aria-label={t("assistant.chat")}
       >
-        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-2.5">
-          <div className="flex min-w-0 items-center gap-1">
+        <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
+          <div className="flex min-w-0 flex-1 items-center gap-1">
             <Button
+              ref={sidebarToggle}
               variant="icon"
               aria-label={t("assistant.sidebar")}
               title={t(
@@ -397,98 +452,29 @@ function AssistantWorkspace() {
                 <PanelLeftClose aria-hidden className="h-3.5 w-3.5" />
               )}
             </Button>
-            <h1 className="min-w-0 truncate text-ui font-semibold">
-              {session?.title || t("assistant.title")}
-            </h1>
-            {session && (
-              <Button
-                variant="icon"
-                ref={renameButton}
-                title={t("assistant.rename")}
-                aria-label={t("assistant.rename")}
+            {renaming && session ? (
+              <InlineRename
+                title={session.title}
+                onSave={saveTitle}
+                onClose={(byKeyboard) => {
+                  setRenaming(false);
+                  if (byKeyboard) focusSoon(menuTrigger);
+                }}
+              />
+            ) : (
+              <h1
+                className="min-w-0 truncate text-ui font-semibold"
                 // A conversation in the trash is read-only until restored.
-                disabled={session.deletedAt != null}
-                onClick={() => setRename(session.title)}
+                onDoubleClick={
+                  session && !sessionTrashed
+                    ? () => setRenaming(true)
+                    : undefined
+                }
               >
-                <Pencil aria-hidden className="h-3.5 w-3.5" />
-              </Button>
+                {session?.title || t("assistant.title")}
+              </h1>
             )}
           </div>
-          {session && (
-            <div className="flex shrink-0 items-center gap-1">
-              <Button
-                variant="icon"
-                ref={exportButton}
-                aria-label={t("assistant.exportMarkdown")}
-                title={t("assistant.exportMarkdown")}
-                disabled={busy || Boolean(run) || assistant.loading}
-                onClick={() => {
-                  setExported(false);
-                  void assistant
-                    .exportMarkdown((snapshot) =>
-                      assistantMarkdown(snapshot, t, i18n.language),
-                    )
-                    .then((saved) => {
-                      setExported(saved);
-                      returnFocusTo(exportButton.current);
-                    });
-                }}
-              >
-                <Download aria-hidden className="h-3.5 w-3.5" />
-              </Button>
-              {session.deletedAt != null ? (
-                <>
-                  <Button
-                    variant="icon"
-                    ref={restoreButton}
-                    aria-label={t("assistant.restore")}
-                    title={t("assistant.restore")}
-                    disabled={busy || Boolean(run)}
-                    onClick={() =>
-                      void assistant.setDeleted(false).then((saved) => {
-                        // Back in the conversations, whose footer has the
-                        // trash entry again.
-                        if (saved) focusSoon(trashEntry);
-                        else returnFocusTo(restoreButton.current);
-                      })
-                    }
-                  >
-                    <RotateCcw aria-hidden className="h-3.5 w-3.5" />
-                  </Button>
-                  <Button
-                    variant="icon"
-                    ref={deleteButton}
-                    aria-label={t("assistant.deletePermanently")}
-                    title={t("assistant.deletePermanently")}
-                    disabled={busy || Boolean(run)}
-                    onClick={() => {
-                      // A failure from before is not this dialog's to show.
-                      assistant.setError(null);
-                      setConfirmDelete(true);
-                    }}
-                  >
-                    <Trash2 aria-hidden className="h-3.5 w-3.5 text-danger" />
-                  </Button>
-                </>
-              ) : (
-                <Button
-                  variant="icon"
-                  ref={moveToTrashButton}
-                  aria-label={t("assistant.moveToTrash")}
-                  title={t("assistant.moveToTrash")}
-                  disabled={busy}
-                  onClick={() =>
-                    void assistant.setDeleted(true).then((saved) => {
-                      if (saved) focusSoon(trashEntry);
-                      else returnFocusTo(moveToTrashButton.current);
-                    })
-                  }
-                >
-                  <Trash2 aria-hidden className="h-3.5 w-3.5" />
-                </Button>
-              )}
-            </div>
-          )}
           {Boolean(session || bootstrap?.models.length) && (
             <MenuSelect
               aria-label={t("assistant.model")}
@@ -527,15 +513,99 @@ function AssistantWorkspace() {
               }))}
             />
           )}
+          {session && sessionTrashed && (
+            <Button
+              ref={restoreButton}
+              variant="secondary"
+              className="shrink-0"
+              disabled={busy || Boolean(run)}
+              onClick={restore}
+            >
+              <RotateCcw aria-hidden className="h-3.5 w-3.5" />
+              {t("assistant.restore")}
+            </Button>
+          )}
+          {session && (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  ref={menuTrigger}
+                  variant="icon"
+                  aria-label={t("assistant.conversationActions")}
+                  title={t("assistant.conversationActions")}
+                  className="shrink-0 data-[state=open]:bg-pill data-[state=open]:text-ink"
+                >
+                  <Ellipsis aria-hidden className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="end"
+                className="min-w-[160px] max-w-[280px]"
+                // An item acts once the menu is closed, so the dialog or the
+                // field it opens is not the focus the menu gives back.
+                onCloseAutoFocus={(event) => {
+                  const action = menuAction.current;
+                  if (!action) return;
+                  menuAction.current = null;
+                  event.preventDefault();
+                  menuTrigger.current?.focus();
+                  action();
+                }}
+              >
+                <DropdownMenuItem
+                  disabled={sessionTrashed}
+                  onSelect={() => {
+                    menuAction.current = () => setRenaming(true);
+                  }}
+                >
+                  <Pencil aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  {t("assistant.rename")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={busy || Boolean(run) || assistant.loading}
+                  onSelect={() => {
+                    menuAction.current = exportConversation;
+                  }}
+                >
+                  <Download aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  {t("assistant.exportMarkdown")}
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                {usage && (
+                  <>
+                    <DropdownMenuLabel className="whitespace-normal px-2 py-1 text-note font-normal normal-case tracking-normal text-ink-muted">
+                      {t("assistant.conversationUsageLabel", { usage })}
+                    </DropdownMenuLabel>
+                    <DropdownMenuSeparator />
+                  </>
+                )}
+                {sessionTrashed ? (
+                  <DropdownMenuItem
+                    disabled={busy || Boolean(run)}
+                    className="text-danger"
+                    onSelect={() => {
+                      menuAction.current = askToDelete;
+                    }}
+                  >
+                    <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                    {t("assistant.deletePermanently")}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem
+                    disabled={busy}
+                    className="text-danger"
+                    onSelect={() => {
+                      menuAction.current = moveToTrash;
+                    }}
+                  >
+                    <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                    {t("assistant.moveToTrash")}
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </header>
-        {exported && (
-          <p
-            role="status"
-            className="shrink-0 px-4 py-2 text-note text-ink-muted"
-          >
-            {t("assistant.markdownSaved")}
-          </p>
-        )}
         {bootstrap?.modelUnavailableReason && (
           <p
             role="status"
@@ -606,29 +676,29 @@ function AssistantWorkspace() {
           ) : (
             <>
               {emptyTranscript && (
-                <div className="mx-auto flex min-h-full max-w-md flex-col items-center justify-center py-8 text-center">
+                <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
                   <div className="mb-4 grid h-10 w-10 place-items-center rounded-card bg-brand-soft text-brand-ink">
                     <MessageSquare aria-hidden className="h-5 w-5" />
                   </div>
                   <h2 className="text-title font-semibold">
                     {t(trashed ? "assistant.trash" : "assistant.welcome")}
                   </h2>
-                  <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
-                    {t(
-                      trashed
-                        ? session
+                  {trashed && (
+                    <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
+                      {t(
+                        session
                           ? "assistant.trashHint"
-                          : "assistant.trashSelect"
-                        : "assistant.description",
-                    )}
-                  </p>
+                          : "assistant.trashSelect",
+                      )}
+                    </p>
+                  )}
                   {writable && !assistant.draft.trim() && (
-                    <div className="mt-5 grid w-full max-w-[300px] gap-2">
+                    <div className="mt-5 flex flex-wrap justify-center gap-2">
                       {STARTERS.map((id) => (
                         <Button
                           key={id}
-                          variant="secondary"
-                          className="h-auto min-h-9 justify-between whitespace-normal px-3 py-2 text-left font-normal"
+                          variant="pill"
+                          className="h-8 px-3.5 text-ctl"
                           onClick={() => {
                             focusStarter.current = true;
                             assistant.setDraft(
@@ -636,18 +706,19 @@ function AssistantWorkspace() {
                             );
                           }}
                         >
-                          <span>{t(`assistant.starters.${id}.label`)}</span>
-                          <ArrowUpRight
-                            aria-hidden
-                            className="h-3.5 w-3.5 shrink-0 text-ink-faint"
-                          />
+                          {t(`assistant.starters.${id}.label`)}
                         </Button>
                       ))}
                     </div>
                   )}
-                  {available && !trashed && (
+                  {!trashed && (
                     <p className="mt-4 text-note text-ink-muted">
-                      {t("assistant.startHint")}
+                      {t("assistant.emptyBoundary")}
+                    </p>
+                  )}
+                  {!trashed && keyMissing && (
+                    <p className="mt-2 text-note text-ink-muted">
+                      {t("assistant.keyMissingHint")}
                     </p>
                   )}
                 </div>
@@ -786,67 +857,74 @@ function AssistantWorkspace() {
                   >
                     <Paperclip aria-hidden className="h-3.5 w-3.5" />
                   </Button>
-                  <Button
-                    variant="ghost"
-                    aria-pressed={assistant.webSearch}
-                    title={searchNote ?? undefined}
-                    disabled={searchLocked}
-                    onClick={() => assistant.setWebSearch(!assistant.webSearch)}
-                    className={cn(
-                      "shrink-0 px-2",
-                      searchLit &&
-                        "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
-                    )}
-                  >
-                    <Globe aria-hidden className="h-3.5 w-3.5" />
-                    {t("assistant.webSearch")}
-                  </Button>
-                  <span className="min-w-0 truncate text-note text-ink-muted">
-                    {run ? t("assistant.running") : t("assistant.sendHint")}
-                  </span>
+                  {showSearchNote ? (
+                    <Tooltip>
+                      {/* The wrapper takes the hover while the switch is off. */}
+                      <TooltipTrigger asChild>
+                        <span className="inline-flex shrink-0">
+                          {webSearchToggle}
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top">{searchNote}</TooltipContent>
+                    </Tooltip>
+                  ) : (
+                    webSearchToggle
+                  )}
+                  {showSearchNote && (
+                    <span id={searchNoteId} className="sr-only">
+                      {searchNote}
+                    </span>
+                  )}
                 </div>
                 {run ? (
-                  <Button variant="secondary" onClick={stop}>
-                    <Square aria-hidden className="h-3.5 w-3.5" />
-                    {t("assistant.stop")}
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="secondary"
+                        size="icon"
+                        className="h-7 w-7 rounded-full"
+                        aria-label={t("assistant.stop")}
+                        onClick={stop}
+                      >
+                        <Square aria-hidden className="h-3 w-3 fill-current" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      {t("assistant.stop")}
+                    </TooltipContent>
+                  </Tooltip>
                 ) : (
-                  <Button
-                    aria-label={t("assistant.send")}
-                    aria-describedby={sendHints}
-                    disabled={
-                      !writable ||
-                      blockedFiles ||
-                      (!assistant.draft.trim() && !files.length)
-                    }
-                    onClick={send}
-                  >
-                    <ArrowUp aria-hidden className="h-3.5 w-3.5" />
-                    {t("assistant.send")}
-                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size="icon"
+                        className="h-7 w-7 rounded-full"
+                        aria-label={t("assistant.send")}
+                        aria-describedby={sendHints}
+                        disabled={
+                          !writable ||
+                          blockedFiles ||
+                          (!assistant.draft.trim() && !files.length)
+                        }
+                        onClick={send}
+                      >
+                        <ArrowUp aria-hidden className="h-3.5 w-3.5" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="top">
+                      {t("assistant.sendTooltip")}
+                    </TooltipContent>
+                  </Tooltip>
                 )}
               </div>
             </div>
-            {(keyMissing ||
-              usage ||
-              showSearchNote ||
-              assistant.webSearchWaits) && (
-              <div className="mt-2 flex shrink-0 flex-wrap items-start justify-between gap-x-3 gap-y-1 text-note text-ink-muted">
-                {keyMissing && <p>{t("assistant.keyMissingHint")}</p>}
-                {showSearchNote && <p>{searchNote}</p>}
-                {assistant.webSearchWaits && (
-                  <p role="status">{t("assistant.webSearchNextMessage")}</p>
-                )}
-                {usage && (
-                  <div
-                    role="group"
-                    aria-label={t("assistant.conversationUsage")}
-                    className="ml-auto text-right"
-                  >
-                    <p>{usage}</p>
-                  </div>
-                )}
-              </div>
+            {assistant.webSearchWaits && (
+              <p
+                role="status"
+                className="mt-2 shrink-0 text-note text-ink-muted"
+              >
+                {t("assistant.webSearchNextMessage")}
+              </p>
             )}
           </div>
         </footer>
@@ -865,7 +943,8 @@ function AssistantWorkspace() {
         }
         onCloseAutoFocus={(event) => {
           event.preventDefault();
-          (deleteButton.current ?? trashBack.current)?.focus();
+          // Cancelled, the conversation is still open; deleted, it is gone.
+          (menuTrigger.current ?? landOnSidebar(trashBack).current)?.focus();
         }}
         onConfirm={() =>
           void assistant.deleteSession().then((deleted) => {
@@ -878,47 +957,6 @@ function AssistantWorkspace() {
           assistant.setError(null);
         }}
       />
-      <Dialog
-        open={rename !== null}
-        onOpenChange={(open) => {
-          if (!open) setRename(null);
-        }}
-      >
-        <DialogContent
-          className="max-w-sm"
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            (renameButton.current ?? newConversationButton.current)?.focus();
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>{t("assistant.rename")}</DialogTitle>
-            <DialogDescription>
-              {t("assistant.renameDescription")}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="px-[18px] py-3">
-            <Input
-              autoFocus
-              aria-label={t("assistant.conversationTitle")}
-              value={rename ?? ""}
-              maxLength={120}
-              onChange={(event) => setRename(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") saveTitle();
-              }}
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setRename(null)}>
-              {t("common.cancel")}
-            </Button>
-            <Button disabled={!rename?.trim()} onClick={saveTitle}>
-              {t("common.save")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

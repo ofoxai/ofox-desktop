@@ -1,14 +1,77 @@
 import { useLayoutEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
-import { FileImage, FileText, X } from "lucide-react";
+import { AlertTriangle, FileImage, FileText, X } from "lucide-react";
 import type { AssistantAttachment } from "@/lib/api/assistant";
-import { describeAttachmentOutcome } from "@/utils/assistantAttachmentOutcome";
+import {
+  describeAttachmentOutcome,
+  type AttachmentNoteTone,
+} from "@/utils/assistantAttachmentOutcome";
 import { fmtBinaryBytes } from "@/lib/format";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-/** Outcomes that still let a file be sent, shown as warnings. */
-const WARNINGS = new Set<string>(["partial", "model_unsupported"]);
+/** The notes of one tone, each on a line of its own. */
+function NoteLines({ notes }: { notes: string[] }) {
+  return (
+    <div className="space-y-1">
+      {notes.map((note) => (
+        <p key={note}>{note}</p>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * A file's notes: what to know about a file that was read is a quiet badge,
+ * what was left unread a warning icon, both with the words in a tooltip that
+ * keyboard focus opens too. Only a file that can't be used says so in red
+ * text, as that explains why Send is disabled.
+ */
+function AttachmentNotes({ info, warn }: { info: string[]; warn: string[] }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {info.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge
+              variant="outline"
+              tabIndex={0}
+              className="shrink-0 cursor-default border-line bg-pill px-1.5 py-0 text-note font-normal text-ink-muted focus:ring-brand focus:ring-offset-0"
+            >
+              {t("assistant.attachmentOutcome.textOnlyBadge")}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipContent>
+            <NoteLines notes={info} />
+          </TooltipContent>
+        </Tooltip>
+      )}
+      {warn.length > 0 && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              variant="icon"
+              aria-label={t("assistant.attachmentOutcome.warnLabel")}
+              className="-my-1 h-6 w-6 shrink-0 text-warn hover:text-warn"
+            >
+              <AlertTriangle aria-hidden className="h-3.5 w-3.5" />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>
+            <NoteLines notes={warn} />
+          </TooltipContent>
+        </Tooltip>
+      )}
+    </>
+  );
+}
 
 function AttachmentChip({
   file,
@@ -21,6 +84,9 @@ function AttachmentChip({
 }) {
   const { t, i18n } = useTranslation();
   const notes = describeAttachmentOutcome(file, t, i18n.language);
+  const of = (tone: AttachmentNoteTone) =>
+    notes.filter((note) => note.tone === tone).map((note) => note.text);
+  const errors = of("error");
   const Icon = file.mimeType.startsWith("image/") ? FileImage : FileText;
   return (
     <li className="flex min-w-0 max-w-full flex-col rounded-ctl border border-line bg-card-2 px-2 py-1 text-ctl">
@@ -32,6 +98,7 @@ function AttachmentChip({
         <span className="shrink-0 text-note text-ink-muted">
           {fmtBinaryBytes(file.sizeBytes)}
         </span>
+        <AttachmentNotes info={of("info")} warn={of("warn")} />
         {onRemove && (
           <Button
             variant="icon"
@@ -46,14 +113,9 @@ function AttachmentChip({
           </Button>
         )}
       </div>
-      {notes.length > 0 && (
-        <p
-          className={cn(
-            "mt-0.5 max-w-[360px] text-note leading-snug",
-            WARNINGS.has(file.status) ? "text-warn" : "text-danger",
-          )}
-        >
-          {notes.join(" ")}
+      {errors.length > 0 && (
+        <p className="mt-0.5 max-w-[360px] text-note leading-snug text-danger">
+          {errors.join(" ")}
         </p>
       )}
     </li>
