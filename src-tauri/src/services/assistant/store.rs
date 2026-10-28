@@ -261,11 +261,28 @@ impl AssistantStore {
         request: &UpdateRequest,
         precondition: impl FnOnce() -> Result<(), String>,
     ) -> Result<Session, String> {
+        self.update_checked(request, None, precondition)
+    }
+
+    /// [`Self::update`]; with `levels` the session's thinking level is also
+    /// checked, under the same lock, against the model the saved session has
+    /// once the update applies: a level the update sets must be one that
+    /// model offers, and one a model change leaves behind goes back to the
+    /// default.
+    pub fn update_checked(
+        &self,
+        request: &UpdateRequest,
+        levels: Option<&ThinkingLevels>,
+        precondition: impl FnOnce() -> Result<(), String>,
+    ) -> Result<Session, String> {
         self.with_attachment_lock(&request.session_id, || {
             let (mut session, shrank) = self.mutate(&request.session_id, |record| {
                 precondition()?;
                 let previous = record.session.draft_attachment_ids.clone();
                 apply_update(record, request)?;
+                if let Some(levels) = levels {
+                    check_thinking_level(&mut record.session, request, levels)?;
+                }
                 let shrank = previous
                     .iter()
                     .any(|id| !record.session.draft_attachment_ids.contains(id));
@@ -507,6 +524,34 @@ pub fn consume_draft(session: &mut Session, request: &SendRequest) {
     }
 }
 
+/// Each conversation model's thinking levels, by model id, as the host's
+/// catalog lists them.
+pub type ThinkingLevels = HashMap<String, Vec<String>>;
+
+/// The level `session` has after an update must be one its model offers: a
+/// level the update set is refused otherwise, one a model change left behind
+/// goes back to the default.
+fn check_thinking_level(
+    session: &mut Session,
+    request: &UpdateRequest,
+    levels: &ThinkingLevels,
+) -> Result<(), String> {
+    let Some(level) = session.thinking_level.as_deref() else {
+        return Ok(());
+    };
+    let offered = levels
+        .get(&session.model_id)
+        .is_some_and(|offered| offered.iter().any(|known| known == level));
+    if offered {
+        return Ok(());
+    }
+    if request.thinking_level.is_some() {
+        return Err("assistant_invalid_thinking_level".into());
+    }
+    session.thinking_level = None;
+    Ok(())
+}
+
 fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(), String> {
     if let Some(title) = &request.title {
         if title.len() > MAX_TITLE_BYTES {
@@ -520,7 +565,7 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     if let Some(web) = request.web_search {
         record.session.web_search = web;
     }
-    // The host checked the level against the session's model.
+    // Checked against the model by `update_checked`.
     if let Some(level) = &request.thinking_level {
         record.session.thinking_level = (level != thinking::DEFAULT).then(|| level.clone());
     }
@@ -1915,6 +1960,74 @@ mod tests {
             .session
             .thinking_level
             .is_none());
+    }
+
+    #[test]
+    fn a_level_is_checked_against_the_model_the_saved_session_has() {
+        let (_config, store) = fixture();
+        let sid = store.create("test/a", false).unwrap().session.id;
+        let levels: ThinkingLevels = [
+            (
+                "test/a".to_string(),
+                vec!["low".to_string(), "high".to_string()],
+            ),
+            ("test/b".to_string(), vec!["low".to_string()]),
+        ]
+        .into();
+        let change = |value: Value| -> UpdateRequest {
+            let mut request = json!({ "sessionId": sid });
+            request
+                .as_object_mut()
+                .unwrap()
+                .extend(value.as_object().unwrap().clone());
+            serde_json::from_value(request).unwrap()
+        };
+        let checked =
+            |value: Value| store.update_checked(&change(value), Some(&levels), no_precondition);
+        let saved = || store.load_record(&sid).unwrap().session;
+        const INVALID: &str = "assistant_invalid_thinking_level";
+
+        assert_eq!(
+            checked(json!({"thinkingLevel": "high"}))
+                .unwrap()
+                .thinking_level
+                .as_deref(),
+            Some("high")
+        );
+        // Another update switched the model after the host looked: the level
+        // is checked against the model saved now, under the same lock.
+        store
+            .update(
+                &change(json!({"modelId": "test/b", "thinkingLevel": "default"})),
+                no_precondition,
+            )
+            .unwrap();
+        assert_eq!(
+            checked(json!({"thinkingLevel": "high"})).unwrap_err(),
+            INVALID
+        );
+        assert!(saved().thinking_level.is_none());
+        // A refused update changes nothing, the model included.
+        assert_eq!(
+            checked(json!({"modelId": "test/a", "thinkingLevel": "max"})).unwrap_err(),
+            INVALID
+        );
+        assert_eq!(saved().model_id, "test/b");
+        // A model and its level together; a model change keeps a level the
+        // new model offers and drops one it lacks.
+        checked(json!({"modelId": "test/a", "thinkingLevel": "high"})).unwrap();
+        let dropped = checked(json!({"modelId": "test/b"})).unwrap();
+        assert!(dropped.thinking_level.is_none());
+        checked(json!({"thinkingLevel": "low"})).unwrap();
+        let kept = checked(json!({"modelId": "test/a"})).unwrap();
+        assert_eq!(kept.thinking_level.as_deref(), Some("low"));
+        // A model the catalog no longer offers has no level.
+        let gone = store.update(&change(json!({"modelId": "test/gone"})), no_precondition);
+        assert_eq!(gone.unwrap().thinking_level.as_deref(), Some("low"));
+        assert_eq!(
+            checked(json!({"thinkingLevel": "low"})).unwrap_err(),
+            INVALID
+        );
     }
 
     #[test]

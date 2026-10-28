@@ -242,7 +242,11 @@ export interface AssistantMessage {
   content: string;
   createdAt: number;
   reasoning?: string | null;
-  /** How long the reply streamed reasoning, in ms; null when it streamed none. */
+  /**
+   * How long the reply streamed reasoning, in ms: each span from
+   * `thinking_start` to the next text, tool call or end of message. At least
+   * 1 whenever reasoning streamed; null when none did.
+   */
   reasoningMs?: number | null;
   status?: "completed" | "streaming" | "stopped" | "error";
   /** Stable failure code saved with the reply; older messages may omit it. */
@@ -356,7 +360,9 @@ export type AssistantRunEvent =
    * `messageId` is the run's reply. `webSearch` is whether the run got web
    * search: false with the conversation's switch on means search was
    * unavailable when it was sent (or the model takes no tools).
-   * `thinkingLevel` is the level the run was sent; null for the default.
+   * `thinkingLevel` is the level the host sent the run, null for the
+   * default. It is one the model's `thinkingLevels` lists, which are Pi's
+   * own levels for it, so Pi runs it as sent rather than clamping it.
    */
   | {
       type: "run_start";
@@ -366,6 +372,13 @@ export type AssistantRunEvent =
         thinkingLevel?: AssistantThinkingLevel | null;
       };
     }
+  /**
+   * The reply began streaming reasoning, as soon as its first reasoning
+   * arrived: the reasoning text itself can follow a little later. It lasts
+   * until the next text, tool call or the end of the message (a live timer
+   * runs from here). Hidden reasoning sends none.
+   */
+  | { type: "thinking_start"; data: { messageId: string } }
   | {
       type: "text_delta" | "thinking_delta";
       data: { delta: string; messageId: string };

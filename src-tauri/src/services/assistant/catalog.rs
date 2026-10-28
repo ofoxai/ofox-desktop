@@ -1574,6 +1574,11 @@ mod tests {
             levels(find("google/gemini-3.1-flash-lite")),
             ["minimal", "low", "medium", "high"]
         );
+        // Over Chat Completions Pi sends nothing for an unmapped "off".
+        assert_eq!(
+            levels(find("minimax/minimax-m3")),
+            ["minimal", "low", "medium", "high"]
+        );
         // Pi has no entry for it: the plain three.
         let glm = find("z-ai/glm-5");
         assert_eq!(levels(glm), ["low", "medium", "high"]);

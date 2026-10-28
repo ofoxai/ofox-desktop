@@ -2801,6 +2801,11 @@ fn claude_model() -> Model {
     parse_models(fixture["catalog"].clone(), Source::Anthropic).remove(0)
 }
 
+/// The reply a run wrote (its `run_start` names it).
+fn end_message(env: &TestEnv, run: &str) -> Value {
+    of_type(env, run, "run_start")[0]["messageId"].clone()
+}
+
 /// Reasoning long enough that the runtime streams it before it ends.
 fn reasoning_text() -> String {
     "Weighing the options one by one before answering. ".repeat(6)
@@ -2878,6 +2883,23 @@ fn claude_runs_with_messages_and_thinks_only_at_a_chosen_level() {
             "the context goes too"
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["thinkingLevel"], "high");
+        // The start is published before the reasoning text.
+        let kinds: Vec<String> = env.events(&run).into_iter().map(|e| e.r#type).collect();
+        let started = kinds
+            .iter()
+            .position(|kind| kind == "thinking_start")
+            .unwrap();
+        assert!(
+            started
+                < kinds
+                    .iter()
+                    .position(|kind| kind == "thinking_delta")
+                    .unwrap()
+        );
+        assert_eq!(
+            of_type(&env, &run, "thinking_start"),
+            [json!({"messageId": end_message(&env, &run)})]
+        );
         let streamed: String = of_type(&env, &run, "thinking_delta")
             .iter()
             .map(|data| data["delta"].as_str().unwrap().to_owned())

@@ -15,7 +15,6 @@ use std::sync::Arc;
 
 const MAX_MESSAGE_BYTES: usize = 128_000;
 const TITLE_CHARS: usize = 48;
-const INVALID_THINKING_LEVEL: &str = "assistant_invalid_thinking_level";
 
 impl AssistantHost {
     /// Everything the assistant page needs to open. Never mints a key.
@@ -169,7 +168,8 @@ impl AssistantHost {
             Some(model) => Some(self.model(&identity.apex, model).await?),
             None => None,
         };
-        self.check_thinking_level(&identity, &mut request, new_model)
+        let levels = self
+            .update_thinking_levels(&identity, &request, new_model)
             .await?;
         // The user's own words: only a key this process handed out goes.
         let keys = self.known_keys();
@@ -186,7 +186,7 @@ impl AssistantHost {
             let store = self.store(&identity.owner)?;
             let host = self.clone();
             move || {
-                let session = store.update(&request, || {
+                let session = store.update_checked(&request, levels.as_ref(), || {
                     if host.generation() != generation {
                         return Err(super::host::IDENTITY_CHANGED.into());
                     }
@@ -210,52 +210,34 @@ impl AssistantHost {
         Ok(session)
     }
 
-    /// A level an update sets must be one the session's model offers (the new
-    /// model's, when it changes too). A new model that does not offer the
-    /// level already chosen goes back to the default.
-    async fn check_thinking_level(
+    /// The thinking levels an update's level is checked against, under the
+    /// lock that saves it (see [`store::AssistantStore::update_checked`]):
+    /// needed when the update sets a level or changes the model. The new
+    /// model's come from the row just checked; the others from the catalog.
+    async fn update_thinking_levels(
         &self,
         identity: &Identity,
-        request: &mut UpdateRequest,
+        request: &UpdateRequest,
         new_model: Option<catalog::Model>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<store::ThinkingLevels>, String> {
         let sets_level = request
             .thinking_level
             .as_deref()
             .is_some_and(|level| level != thinking::DEFAULT);
-        let model_change_only = request.thinking_level.is_none() && new_model.is_some();
-        if !sets_level && !model_change_only {
-            return Ok(());
+        if !sets_level && new_model.is_none() {
+            return Ok(None);
         }
-        let session = blocking({
-            let store = self.store(&identity.owner)?;
-            let sid = request.session_id.clone();
-            move || store.load_record(&sid)
-        })
-        .await?
-        .session;
-        let model = match new_model {
-            Some(model) => model,
-            None => self.model(&identity.apex, &session.model_id).await?,
-        };
-        match request.thinking_level.as_deref() {
-            Some(level) if level != thinking::DEFAULT => {
-                if !model.offers_thinking_level(level) {
-                    return Err(INVALID_THINKING_LEVEL.into());
-                }
-            }
-            // A model change that sets no level.
-            _ => {
-                if session
-                    .thinking_level
-                    .as_deref()
-                    .is_some_and(|level| !model.offers_thinking_level(level))
-                {
-                    request.thinking_level = Some(thinking::DEFAULT.into());
-                }
-            }
+        let mut levels: store::ThinkingLevels = self
+            .models(&identity.apex)
+            .await?
+            .conversation_models()
+            .into_iter()
+            .map(|model| (model.id, model.thinking_levels))
+            .collect();
+        if let Some(model) = new_model {
+            levels.insert(model.id, model.thinking_levels);
         }
-        Ok(())
+        Ok(Some(levels))
     }
 
     pub async fn delete_session(self: &Arc<Self>, request: DeleteRequest) -> Result<(), String> {

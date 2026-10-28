@@ -1248,6 +1248,13 @@ impl AssistantHost {
                 }
                 self.emit(control, kind, data);
             }
+            // Reasoning began; its text may follow a little later (the runtime
+            // holds back a tail while it scrubs keys).
+            "thinking_start" => {
+                attempt.progressed = true;
+                attempt.projection.start_thinking();
+                self.emit(control, kind, json!({"messageId": control.message_id}));
+            }
             "usage" => {
                 attempt.progressed |= counts_tokens(&data);
                 let usage = self.save_usage(control, data).await?;

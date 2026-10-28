@@ -991,6 +991,8 @@ export class AssistantRuntime {
       });
       let pendingText = "";
       let pendingThinking = "";
+      // Whether this thinking block has said it started.
+      let thinkingStarted = false;
       // Hold back a tail long enough to hold any credential split across
       // deltas until the rest of it arrives and it can be replaced whole.
       const retain = Math.max(
@@ -1013,17 +1015,26 @@ export class AssistantRuntime {
             pendingText += update.delta;
             flush("text_delta");
           } else if (update.type === "thinking_delta") {
+            // Said with the block's first reasoning, before its text is held
+            // back for key scrubbing, so the host can time it from here.
+            if (!thinkingStarted && update.delta) {
+              thinkingStarted = true;
+              this.notify(context, "thinking_start");
+            }
             pendingThinking += update.delta;
             flush("thinking_delta");
           } else if (update.type === "text_end") flush("text_delta", true);
-          else if (update.type === "thinking_end")
+          else if (update.type === "thinking_end") {
             flush("thinking_delta", true);
+            thinkingStarted = false;
+          }
         } else if (
           event.type === "message_end" &&
           event.message.role === "assistant"
         ) {
           flush("text_delta", true);
           flush("thinking_delta", true);
+          thinkingStarted = false;
           this.notify(context, "message_end", {
             role: "assistant",
             content: contentText(event.message.content),

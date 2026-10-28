@@ -126,8 +126,11 @@ tokens) and pricingKnown; `tools: false` only for a model that takes no tools
 `anthropicCompat` (`forceAdaptiveThinking`, `supportsTemperature`). The model
 reasons only with both `reasoning` and a level; without a level Pi sends no
 thinking parameter and the provider's default applies, so such a run sends
-exactly the request it sent before levels existed. `run_start`'s data names
-the level that ran (`thinkingLevel`, null without one). Endpoint paths such as
+exactly the request it sent before levels existed. The runtime's
+`run_start` data names the level Pi runs (`thinkingLevel`, after Pi's clamp;
+null without one). The host publishes its own `run_start` to the renderer,
+whose `thinkingLevel` is the level the host sent: the host offers only the
+levels Pi lists for the model, so the two agree. Endpoint paths such as
 `/v1/responses` are accepted.
 Only advertised OpenAI Chat Completions, Responses and Anthropic routes are
 enabled; Google-only models are unavailable. SDK and provider automatic retries
@@ -160,11 +163,13 @@ replaying and (in a non-context `ofox-desktop-attachments` entry) its
 attachment selection, and can be retried explicitly.
 
 Events are `{method:"event",params:{sessionId,runId,operationId,type,data}}`.
-Types include run_start/attachment/text_delta/thinking_delta/tool_start/
-tool_end/message_end/usage/compaction_start/compaction_end/error/run_end
-(`tool_start`/`tool_end` of the web tools: see [Web search](#web-search)).
-Streamed text holds back a tail long enough to replace a key split across
-deltas.
+Types include run_start/attachment/thinking_start/text_delta/thinking_delta/
+tool_start/tool_end/message_end/usage/compaction_start/compaction_end/error/
+run_end (`tool_start`/`tool_end` of the web tools: see
+[Web search](#web-search)). Streamed text holds back a tail long enough to
+replace a key split across deltas. `thinking_start` (no data) goes out with a
+thinking block's first reasoning, before that hold-back, so the host can time
+the reasoning from when it really began; hidden reasoning sends none.
 The host must persist the final RPC projection **before** publishing its UI
 run_end. message_end is a runtime summary, not the application's message object.
 
