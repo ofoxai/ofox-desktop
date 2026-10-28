@@ -42,6 +42,10 @@ pub struct Session {
     /// Attachments (S2) picked in the composer but not sent yet.
     #[serde(default)]
     pub draft_attachment_ids: Vec<String>,
+    /// A committed update succeeded, but unused disk copies need a retry.
+    /// Transient response only; never restored from a saved session.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub cleanup_warning: Option<String>,
 }
 
 /// A file imported into a conversation, as saved in its folder. On the
@@ -96,6 +100,8 @@ pub struct Message {
     pub created_at: i64,
     pub reasoning: Option<String>,
     pub status: String,
+    #[serde(default)]
+    pub error_code: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
     #[serde(default)]
@@ -170,6 +176,30 @@ pub struct UpdateRequest {
     pub draft_attachment_ids: Option<Vec<String>>,
 }
 
+/// Destructive requests must name the authority shown by their confirmation.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRequest {
+    pub session_id: String,
+    pub expected_owner: String,
+    pub expected_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferRequest {
+    pub expected_owner: String,
+    pub expected_generation: u64,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportMarkdownRequest {
+    #[serde(flatten)]
+    pub authority: DeleteRequest,
+    pub markdown: String,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
@@ -179,6 +209,10 @@ pub struct SendRequest {
     pub text: String,
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// Explicit edit selection, including an empty list. Old clients that
+    /// omit this flag keep the original files when their list is empty.
+    #[serde(default)]
+    pub replace_attachments: bool,
     pub edit_message_id: Option<String>,
     pub regenerate_message_id: Option<String>,
 }

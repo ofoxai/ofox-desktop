@@ -1191,6 +1191,14 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
                 assert_eq!(error.data["code"], code);
                 let detail = host.get_session(&sid_of(&host).await).await.unwrap();
                 assert_eq!(detail.messages.last().unwrap().status, "error", "{code}");
+                let saved = serde_json::to_value(detail.messages.last().unwrap()).unwrap();
+                assert_eq!(saved["errorCode"], code, "the reason must survive reload");
+                let published = wait_for(&env, &run, "message").await;
+                assert_eq!(published.data["message"]["errorCode"], code);
+                let restarted = AssistantHost::new(env.clone());
+                let reloaded = restarted.get_session(&detail.session.id).await.unwrap();
+                let restored = serde_json::to_value(reloaded.messages.last().unwrap()).unwrap();
+                assert_eq!(restored["errorCode"], code, "a fresh host keeps the reason");
                 detail.usage
             }
         };
@@ -1652,6 +1660,132 @@ fn user_message<'a>(detail: &'a Detail, run: &str) -> &'a Message {
         .iter()
         .find(|m| m.role == "user" && m.run_id.as_deref() == Some(run))
         .unwrap()
+}
+
+#[test]
+fn editing_without_attachments_removes_their_text_from_the_model_and_keeps_the_original_and_draft()
+{
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &runtime_dir, &[(apex, &gateway)]);
+        env.signed_in(apex);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let file = attach(&host, config.path(), &sid, "notes.txt", b"Attachment-only sentinel 987654").await;
+            gateway.reply(Reply::Stream("Read the file".into()));
+            let (first_run, _) = turn(&host, &env, request(&sid, "Read it", json!({"attachmentIds": [file]}))).await;
+            let first = host.get_session(&sid).await.unwrap();
+            let original = user_message(&first, &first_run);
+            host.update_session(serde_json::from_value(json!({"sessionId": sid, "draft": "Unsent draft", "draftAttachmentIds": [file]})).unwrap()).await.unwrap();
+            gateway.reply(Reply::Stream("Text-only answer".into()));
+            let (edit_run, end) = turn(&host, &env, request(&sid, "Text only now", json!({
+                "editMessageId": original.id, "attachmentIds": [], "replaceAttachments": true,
+            }))).await;
+            assert_eq!(end.data["status"], "completed");
+            let sent = gateway.requests().last().unwrap().text();
+            assert!(sent.contains("Text only now"));
+            assert!(!sent.contains("Attachment-only sentinel"), "{sent}");
+            let edited = host.get_session(&sid).await.unwrap();
+            assert!(user_message(&edited, &edit_run).attachments.is_empty());
+            let old = user_message(&edited, &first_run);
+            assert!(old.superseded);
+            assert_eq!(old.attachments[0].id, file);
+            assert_eq!(edited.session.draft, "Unsent draft");
+            assert_eq!(edited.session.draft_attachment_ids, [file]);
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+    }
+}
+
+#[test]
+fn chinese_office_files_reach_the_model_across_region_switch_and_restart() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for start_apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let first = Gateway::start();
+        let second = Gateway::start();
+        let next_apex = if start_apex == "ofox.ai" {
+            "ofox.io"
+        } else {
+            "ofox.ai"
+        };
+        let env = TestEnv::new(
+            config.path(),
+            &runtime_dir,
+            &[(start_apex, &first), (next_apex, &second)],
+        );
+        env.signed_in(start_apex);
+        runtime().block_on(async {
+            let host = AssistantHost::new(env.clone());
+            let sid = create(&host).await;
+            let mut ids = vec![];
+            for (name, bytes) in [
+                (
+                    "中文.docx",
+                    include_bytes!("../../assistant-runtime/test/fixtures/office/chinese.docx")
+                        .as_slice(),
+                ),
+                (
+                    "中文.xlsx",
+                    include_bytes!("../../assistant-runtime/test/fixtures/office/chinese.xlsx")
+                        .as_slice(),
+                ),
+                (
+                    "中文.pptx",
+                    include_bytes!("../../assistant-runtime/test/fixtures/office/chinese.pptx")
+                        .as_slice(),
+                ),
+            ] {
+                ids.push(attach(&host, config.path(), &sid, name, bytes).await);
+            }
+            first.reply(Reply::Stream("Read Office text".into()));
+            let (_, end) = turn(
+                &host,
+                &env,
+                request(&sid, "总结三个附件", json!({"attachmentIds": ids})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed", "{end:?}");
+            let check = |text: String| {
+                for marker in [
+                    "星河项目季度报告",
+                    "中文收入",
+                    "12345.67",
+                    "中文第一页",
+                    "中文第二页",
+                    "讲者备注",
+                    "深圳",
+                ] {
+                    assert!(text.contains(marker), "missing {marker}: {text}");
+                }
+                assert!(text.contains("Embedded images"));
+            };
+            check(first.requests()[0].text());
+            assert!(second.requests().is_empty());
+            drop(host);
+            env.signed_in(next_apex);
+            let restarted = AssistantHost::new(env.clone());
+            let detail = restarted.get_session(&sid).await.unwrap();
+            assert_eq!(detail.attachments.len(), 3);
+            for file in &detail.attachments {
+                assert_eq!(file.status, "partial");
+                assert_eq!(file.details.as_ref().unwrap()["textOnly"], true);
+            }
+            second.reply(Reply::Stream("Continue with the files".into()));
+            let (_, end) = turn(&restarted, &env, request(&sid, "继续总结", json!({}))).await;
+            assert_eq!(end.data["status"], "completed");
+            check(second.requests()[0].text());
+            assert_eq!(first.requests().len(), 1);
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+    }
 }
 
 #[test]
@@ -2448,4 +2582,111 @@ fn a_search_then_a_stop_or_a_billed_failure_leaves_both_costs_unknown() {
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn restored_backup_continues_native_history_with_saved_search_prices_on_both_apexes() {
+    use cc_switch_lib::assistant::store::AssistantStore;
+    let Some(prepared) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let source = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(source.path(), &prepared, &[(apex, &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = searching(&host, &env).await;
+            let aid = attach(
+                &host,
+                source.path(),
+                &sid,
+                "中文材料.txt",
+                "备份后还要读取的附件".as_bytes(),
+            )
+            .await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "web_search",
+                json!({"query":"backup fixture"}),
+            )]));
+            gateway.reply(Reply::Json(
+                200,
+                search_answer(&["https://example.com/reference"]),
+            ));
+            gateway.reply(Reply::Stream("Original answer with a source.".into()));
+            let (_, end) = turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Read this attachment and search.",
+                    json!({"attachmentIds":[aid]}),
+                ),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let before = host.get_session(&sid).await.unwrap();
+            let store = AssistantStore::for_owner(source.path(), &owner()).unwrap();
+            let operations = store.load_record(&sid).unwrap().operations;
+            assert_eq!(operations.len(), 1);
+            assert!(operations[0].search_price.is_some());
+            let archive_dir = tempfile::tempdir().unwrap();
+            let archive = archive_dir.path().join("完整备份.zip");
+            store.backup(&archive, &[KEY.into()], || Ok(())).unwrap();
+            host.shutdown().await;
+            drop(host);
+            drop(env);
+            drop(store);
+            // The original absolute cwd and attachments no longer exist.
+            source.close().unwrap();
+            let target = tempfile::tempdir().unwrap();
+            let restored = AssistantStore::for_owner(target.path(), &owner()).unwrap();
+            assert_eq!(
+                restored
+                    .restore(&archive, &[KEY.into()], || Ok(()))
+                    .unwrap()
+                    .imported,
+                1
+            );
+            let fresh_env = TestEnv::new(target.path(), &prepared, &[(apex, &gateway)]);
+            let mut price = search_model();
+            price.pricing["web_search"] = json!("0.999");
+            fresh_env.catalog.lock().unwrap().push(price);
+            let fresh = AssistantHost::new(fresh_env.clone());
+            fresh.recover_all().await;
+            let reloaded = fresh.get_session(&sid).await.unwrap();
+            assert_eq!(
+                reloaded.usage, before.usage,
+                "restore must keep historical prices"
+            );
+            assert_eq!(restored.load_record(&sid).unwrap().operations, operations);
+            assert_eq!(reloaded.messages.len(), before.messages.len());
+            gateway.reply(Reply::Stream("Continued after restore.".into()));
+            let (_, end) = turn(
+                &fresh,
+                &fresh_env,
+                request(
+                    &sid,
+                    "Continue and reread the attachment.",
+                    json!({"attachmentIds":[aid]}),
+                ),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let last = gateway.requests().last().unwrap().text();
+            assert!(last.contains("Original answer with a source."));
+            assert!(last.contains("备份后还要读取的附件"));
+            let continued = fresh.get_session(&sid).await.unwrap();
+            assert_eq!(
+                continued.usage["searchCostUsd"],
+                before.usage["searchCostUsd"]
+            );
+            assert!(continued
+                .messages
+                .iter()
+                .any(|message| message.content == "Continued after restore."));
+            assert_no_secret_on_disk(target.path(), &[KEY, NEW_KEY]);
+            fresh.shutdown().await;
+        });
+    }
 }

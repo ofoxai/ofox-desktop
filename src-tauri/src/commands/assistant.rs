@@ -7,10 +7,10 @@ use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
     attachments, catalog,
     host::{Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
-    store::{self, SessionList},
+    store::{self, RestoreReport, SessionList},
     types::{
-        Attachment, CreateRequest, Detail, Event, RunProxy, RunRef, SendRequest, Session,
-        UpdateRequest,
+        Attachment, CreateRequest, DeleteRequest, Detail, Event, ExportMarkdownRequest, RunProxy,
+        RunRef, SendRequest, Session, TransferRequest, UpdateRequest,
     },
     AssistantHost,
 };
@@ -41,6 +41,11 @@ pub async fn assistant_list_sessions(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_usage_summary(host: Host<'_>) -> Result<Value, String> {
+    host.usage_summary().await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_create_session(
     host: Host<'_>,
     request: CreateRequest,
@@ -59,6 +64,80 @@ pub async fn assistant_update_session(
     request: UpdateRequest,
 ) -> Result<Session, String> {
     host.update_session(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_delete_session(
+    host: Host<'_>,
+    request: DeleteRequest,
+) -> Result<(), String> {
+    host.delete_session(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_backup(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    request: TransferRequest,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    host.backup(request, move || {
+        app.dialog()
+            .file()
+            .set_file_name("ofox-assistant-backup.zip")
+            .add_filter("ZIP", &["zip"])
+            .blocking_save_file()
+            .map(|file| {
+                file.into_path()
+                    .map_err(|_| "assistant_backup_failed".to_string())
+            })
+            .transpose()
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_restore(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    request: TransferRequest,
+) -> Result<Option<RestoreReport>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    host.restore(request, move || {
+        app.dialog()
+            .file()
+            .add_filter("ZIP", &["zip"])
+            .blocking_pick_file()
+            .map(|file| {
+                file.into_path()
+                    .map_err(|_| "assistant_backup_failed".to_string())
+            })
+            .transpose()
+    })
+    .await
+}
+
+/// Export only after the native save dialog confirms a destination.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_export_markdown(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    request: ExportMarkdownRequest,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    host.export_markdown(request, move || {
+        app.dialog()
+            .file()
+            .set_file_name("ofox-conversation.md")
+            .add_filter("Markdown", &["md"])
+            .blocking_save_file()
+            .map(|file| {
+                file.into_path()
+                    .map_err(|_| "assistant_export_destination_invalid".to_string())
+            })
+            .transpose()
+    })
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -215,7 +215,10 @@ describe("assistant error messages", () => {
     ["attachmentTooMany", /up to 10 at a time/i],
     ["attachmentTooLarge", /up to 25 MB/i],
     ["attachmentTotalTooLarge", /new conversation/i],
-    ["attachmentUnsupported", /images.*PDFs.*text files/i],
+    [
+      "attachmentUnsupported",
+      /images.*PDFs.*docx.*xlsx.*pptx.*UTF-8 text.*docx or PDF/i,
+    ],
     ["attachmentUnreadable", /attach it again/i],
     // Also the alert for a sent turn's file, which can't be removed.
     [
@@ -229,4 +232,36 @@ describe("assistant error messages", () => {
       en.assistant.errors[message as keyof typeof en.assistant.errors],
     ).toMatch(action);
   });
+});
+
+it("exports Markdown with the confirmed authority and returns native cancellation", async () => {
+  invoke.mockResolvedValue(false);
+  const request = {
+    sessionId: "s",
+    expectedOwner: "owner",
+    expectedGeneration: 2,
+    markdown: "# Chat",
+  };
+  expect(await assistantApi.exportMarkdown(request)).toBe(false);
+  expect(invoke).toHaveBeenCalledWith("assistant_export_markdown", { request });
+});
+
+it("reads aggregate assistant usage through the native host", async () => {
+  invoke.mockResolvedValue({
+    estimatedCostUsd: "1.25",
+    usageCoverage: "complete",
+  });
+  expect(await assistantApi.usageSummary()).toMatchObject({
+    estimatedCostUsd: "1.25",
+  });
+  expect(invoke).toHaveBeenCalledWith("assistant_usage_summary");
+});
+
+it("binds backup and restore native dialogs to the confirmed account", async () => {
+  const request = { expectedOwner: "owner", expectedGeneration: 3 };
+  invoke.mockResolvedValueOnce(false).mockResolvedValueOnce(null);
+  expect(await assistantApi.backup(request)).toBe(false);
+  expect(await assistantApi.restore(request)).toBeNull();
+  expect(invoke).toHaveBeenNthCalledWith(1, "assistant_backup", { request });
+  expect(invoke).toHaveBeenNthCalledWith(2, "assistant_restore", { request });
 });

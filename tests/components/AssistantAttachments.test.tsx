@@ -57,6 +57,41 @@ describe("attachment chips", () => {
     expect(items[0].textContent).toBe("report.pdf2.0 KB");
   });
 
+  it.each([
+    [
+      "partial",
+      { textOnly: true, structureCoverage: "partial", format: "xlsx" },
+      "Only text was read",
+      "Sheet names or slide order",
+    ],
+    [
+      "unreadable",
+      { reason: "encrypted_office" },
+      "password-protected",
+      "Office",
+    ],
+    ["unreadable", { reason: "invalid_office" }, "damaged", "Office"],
+    ["unreadable", { reason: "empty_office" }, "No readable text", "PDF"],
+    [
+      "too_large",
+      { limit: "office_expansion" },
+      "safe extraction limits",
+      "smaller",
+    ],
+  ] as const)(
+    "explains Office %s outcomes",
+    (status, details, first, second) => {
+      render(
+        <AttachmentList
+          files={[file({ name: "文档.xlsx", status, details })]}
+        />,
+      );
+      const item = within(list()).getByRole("listitem");
+      expect(item).toHaveTextContent(first);
+      expect(item).toHaveTextContent(second);
+    },
+  );
+
   it("measures a file as its limits do, so a file at the limit reads as it", () => {
     render(<AttachmentList files={[file({ sizeBytes: 26_214_400 })]} />);
     expect(within(list()).getByRole("listitem")).toHaveTextContent("25 MB");
@@ -223,7 +258,7 @@ describe("attachment chips", () => {
       "unsupported",
       "assistant_attachment_unsupported",
       { extension: "heic", mimeType: "image/heic" },
-      "This file type can't be read. Attach images, PDFs or text files.",
+      "This file type can't be read. Attach images, PDFs, docx, xlsx, pptx or UTF-8 text. For .doc, save it as docx or PDF.",
     ],
   ])(
     "explains a %s in words, with what to do next",

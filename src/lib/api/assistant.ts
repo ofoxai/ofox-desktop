@@ -87,6 +87,8 @@ export interface AssistantSession {
   deletedAt: number | null;
   /** The live run only; null once it ended. */
   activeRun: AssistantRunRef | null;
+  /** This update committed; only unused disk-copy cleanup needs retrying. */
+  cleanupWarning?: string;
 }
 
 /** A saved conversation the backend could not read: nothing but its id is known. */
@@ -149,6 +151,8 @@ export interface AssistantMessage {
   createdAt: number;
   reasoning?: string | null;
   status?: "completed" | "streaming" | "stopped" | "error";
+  /** Stable failure code saved with the reply; older messages may omit it. */
+  errorCode?: string | null;
   attachments?: AssistantAttachment[];
   /** The pages the reply's web searches found; `[]` on every other message. */
   sources?: AssistantSource[];
@@ -181,7 +185,18 @@ export interface AssistantUsage {
    * whenever that is, and while a run goes on.
    */
   searchCostUsd?: string | null;
-  usageCoverage?: "incomplete";
+  usageCoverage?: "complete" | "incomplete";
+}
+
+export interface AssistantTransferRequest {
+  expectedOwner: string;
+  expectedGeneration: number;
+}
+
+export interface AssistantRestoreReport {
+  imported: number;
+  skipped: number;
+  warning: string | null;
 }
 
 export interface AssistantSessionDetail {
@@ -210,10 +225,11 @@ export interface AssistantSendRequest extends AssistantRunRef {
   text: string;
   /**
    * The files sent with a new turn, in order. Ignored by a regenerate (its
-   * turn's own files are read again); for an edit `[]` keeps the edited
-   * message's files and a non-empty list replaces them.
+   * turn's own files are read again). For an edit, an empty list removes
+   * every file when `replaceAttachments` is true; older callers keep them.
    */
   attachmentIds: string[];
+  replaceAttachments?: boolean;
   editMessageId?: string;
   regenerateMessageId?: string;
 }
@@ -308,6 +324,11 @@ export const ASSISTANT_EVENT = "assistant:event";
 /** The backend derives account, organization and region; callers never supply owner IDs. */
 export const assistantApi = {
   bootstrap: () => invoke<AssistantBootstrap>("assistant_bootstrap"),
+  usageSummary: () => invoke<AssistantUsage>("assistant_usage_summary"),
+  backup: (request: AssistantTransferRequest) =>
+    invoke<boolean>("assistant_backup", { request }),
+  restore: (request: AssistantTransferRequest) =>
+    invoke<AssistantRestoreReport | null>("assistant_restore", { request }),
   listSessions: (deleted = false, search = "") =>
     invoke<AssistantSessionList>("assistant_list_sessions", {
       deleted,
@@ -319,6 +340,17 @@ export const assistantApi = {
     invoke<AssistantSessionDetail>("assistant_get_session", { sessionId }),
   updateSession: (request: AssistantUpdateRequest) =>
     invoke<AssistantSession>("assistant_update_session", { request }),
+  deleteSession: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<null>("assistant_delete_session", { request }),
+  exportMarkdown: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+    markdown: string;
+  }) => invoke<boolean>("assistant_export_markdown", { request }),
   /**
    * Opens the native file dialog and imports the chosen files into the
    * conversation, all or nothing. Returns them in pick order; `[]` when the
@@ -388,6 +420,17 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",
   assistant_session_deleted: "sessionMissing",
+  assistant_session_not_trashed: "sessionNotTrashed",
+  assistant_delete_pending: "deletePending",
+  assistant_backup_invalid: "backupInvalid",
+  assistant_backup_too_large: "backupTooLarge",
+  assistant_backup_conflict: "backupConflict",
+  assistant_backup_failed: "backupFailed",
+  assistant_backup_contains_key: "backupContainsKey",
+  assistant_backup_owner_mismatch: "backupOwnerMismatch",
+  assistant_export_failed: "exportFailed",
+  assistant_export_destination_invalid: "exportDestinationInvalid",
+  assistant_export_too_large: "exportTooLarge",
   assistant_invalid_identifier: "sessionMissing",
   assistant_invalid_session: "sessionUnreadable",
   assistant_message_not_found: "messageMissing",
@@ -402,6 +445,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_attachment_unsupported: "attachmentUnsupported",
   assistant_attachment_unreadable: "attachmentUnreadable",
   assistant_attachment_write_failed: "attachmentWriteFailed",
+  assistant_attachment_cleanup_failed: "attachmentCleanupFailed",
   assistant_attachment_dialog_failed: "attachmentDialogFailed",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",

@@ -122,6 +122,29 @@ function transcript(partial: string) {
 }
 
 describe("assistant transcript rendering", () => {
+  it.each([
+    ["assistant_insufficient_balance", en.assistant.errors.insufficientBalance],
+    [
+      "assistant_search_outcome_unknown",
+      en.assistant.errors.searchOutcomeUnknown,
+    ],
+    ["untrusted provider text with a credential", en.assistant.errors.generic],
+  ])(
+    "shows the saved failure %s without a live error event",
+    (errorCode, reason) => {
+      const saved = { status: "error" as const, errorCode };
+      render(view(saved));
+      expect(screen.getByRole("alert")).toHaveTextContent(reason);
+      expect(screen.queryByText(errorCode)).not.toBeInTheDocument();
+    },
+  );
+
+  it("keeps old failed messages readable when they have no saved reason", () => {
+    render(view({ status: "error" }));
+    expect(screen.getByText(en.assistant.failed)).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("keeps completed Markdown parsed once while another reply streams", () => {
     const rendered = render(transcript("First fragment"));
     for (let index = 0; index < 20; index++)
@@ -165,7 +188,7 @@ describe("assistant transcript rendering", () => {
     await userEvent.clear(editor);
     await userEvent.type(editor, "Better question");
     await userEvent.click(screen.getByRole("button", { name: "Resend" }));
-    expect(onEdit).toHaveBeenCalledWith("Better question");
+    expect(onEdit).toHaveBeenCalledWith("Better question", []);
     expect(
       screen.queryByRole("textbox", { name: "Edit and resend" }),
     ).not.toBeInTheDocument();
@@ -216,6 +239,32 @@ describe("assistant transcript rendering", () => {
 });
 
 describe("files sent with a question", () => {
+  it("can remove every file from an edit without changing the original", async () => {
+    const onEdit = vi.fn(async () => false);
+    render(
+      view(
+        { role: "user", content: "Read it", attachments: [file()] },
+        { onEdit },
+      ),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove notes.txt" }),
+    );
+    const editor = screen.getByRole("textbox", { name: "Edit and resend" });
+    expect(editor).toHaveFocus();
+    await userEvent.click(screen.getByRole("button", { name: "Resend" }));
+    expect(onEdit).toHaveBeenCalledWith("Read it", []);
+    await userEvent.clear(editor);
+    expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(
+      screen.getByRole("list", { name: "Attached files" }),
+    ).toHaveTextContent("notes.txt");
+  });
+
   it("shows the files a question was sent with, and that turn's outcome", () => {
     render(
       view({
@@ -253,15 +302,13 @@ describe("files sent with a question", () => {
     );
     const files = screen.getByRole("list", { name: "Attached files" });
     expect(files).toHaveTextContent("notes.txt");
-    expect(
-      screen.getByText("These files are sent again with your edit."),
-    ).toBeVisible();
+    expect(screen.getByText(en.assistant.editKeepsFiles)).toBeVisible();
     await userEvent.clear(
       screen.getByRole("textbox", { name: "Edit and resend" }),
     );
     // The files alone can be sent again.
     await userEvent.click(screen.getByRole("button", { name: "Resend" }));
-    expect(onEdit).toHaveBeenCalledWith("");
+    expect(onEdit).toHaveBeenCalledWith("", [file()]);
   });
 
   it("says an edit leaves out the files that can't be read", async () => {
@@ -277,26 +324,29 @@ describe("files sent with a question", () => {
     );
     expect(
       screen.getByText(
-        "These files are sent again with your edit. Files that can't be read are left out.",
+        `${en.assistant.editKeepsFiles} ${en.assistant.editDropsFiles}`,
       ),
     ).toBeVisible();
     expect(
       screen.getByRole("list", { name: "Attached files" }),
-    ).toHaveTextContent("This PDF is password-protected.");
+    ).not.toHaveTextContent("locked.pdf");
     expect(screen.getByRole("button", { name: "Resend" })).toBeEnabled();
   });
 
-  it("cannot resend an edit when none of its files can be read", async () => {
-    render(view({ role: "user", content: "Read it", attachments: [locked] }));
+  it("can resend only the text when none of its files can be read", async () => {
+    const onEdit = vi.fn(async () => true);
+    render(
+      view(
+        { role: "user", content: "Read it", attachments: [locked] },
+        { onEdit },
+      ),
+    );
     await userEvent.click(
       screen.getByRole("button", { name: "Edit and resend" }),
     );
-    expect(
-      screen.getByText(
-        "None of this message's files can be read, so it can't be resent. Send a new message instead.",
-      ),
-    ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Resend" })).toBeDisabled();
+    expect(screen.getByText(en.assistant.editDropsFiles)).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Resend" }));
+    expect(onEdit).toHaveBeenCalledWith("Read it", []);
   });
 });
 

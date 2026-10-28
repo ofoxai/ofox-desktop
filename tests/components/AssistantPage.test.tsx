@@ -34,6 +34,11 @@ const mocks = vi.hoisted(() => ({
   createSession: vi.fn(),
   getSession: vi.fn(),
   updateSession: vi.fn(),
+  deleteSession: vi.fn(),
+  exportMarkdown: vi.fn(),
+  usageSummary: vi.fn(),
+  backup: vi.fn(),
+  restore: vi.fn(),
   pickAttachments: vi.fn(),
   send: vi.fn(),
   stop: vi.fn(),
@@ -135,6 +140,17 @@ beforeEach(async () => {
   mocks.updateSession.mockImplementation(async (patch) => {
     current = { ...current, session: { ...current.session, ...patch } };
     return current.session;
+  });
+  mocks.deleteSession.mockResolvedValue(undefined);
+  mocks.exportMarkdown.mockResolvedValue(true);
+  mocks.backup.mockResolvedValue(true);
+  mocks.restore.mockResolvedValue({ imported: 1, skipped: 0, warning: null });
+  mocks.usageSummary.mockResolvedValue({
+    inputTokens: 0,
+    outputTokens: 0,
+    estimatedCostUsd: "0",
+    usageCoverage: "complete",
+    searchCount: 0,
   });
   mocks.pickAttachments.mockResolvedValue([]);
   mocks.send.mockResolvedValue({ runId: "unused", operationId: "unused" });
@@ -401,6 +417,11 @@ describe("history", () => {
         expectedOwner: capabilities.owner,
         expectedGeneration: capabilities.authorityGeneration,
       }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Rename conversation" }),
+      ).toHaveFocus(),
     );
   });
 
@@ -1722,9 +1743,310 @@ describe("attachments", () => {
       ),
     );
   });
+
+  it("sends an explicit empty attachment selection when every file is removed from an edit", async () => {
+    current.messages = [
+      {
+        id: "original",
+        role: "user",
+        content: "Text only now",
+        createdAt: 1,
+        nativeEntryId: "entry-original",
+        runId: "run-original",
+        attachments: [pdf],
+      },
+    ];
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Edit and resend" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: `Remove ${pdf.name}` }),
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Resend" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          editMessageId: "original",
+          text: "Text only now",
+          attachmentIds: [],
+          replaceAttachments: true,
+        }),
+      ),
+    );
+  });
 });
 
 describe("drafts and fencing", () => {
+  it("does not revive a finished run when returning during its final draft save", async () => {
+    current.session = { ...session, draft: "Question" };
+    let release!: () => void;
+    const waiting = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.updateSession.mockImplementation(async (patch) => {
+      if (patch.draft === "") await waiting;
+      current.session = { ...current.session, ...patch };
+      return current.session;
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    let sent!: Promise<boolean>;
+    act(() => {
+      sent = hook.result.current.send();
+    });
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({ draft: "" }),
+      ),
+    );
+    // The backend has already finished while a post-admission write waits.
+    current.session.activeRun = null;
+    act(() => hook.result.current.select(null));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    await act(async () => {
+      release();
+      await sent;
+    });
+    expect(hook.result.current.run).toBeNull();
+    expect(hook.result.current.busy).toBe(false);
+  });
+
+  it("applies a committed setting and reports its separate cleanup warning", async () => {
+    mocks.updateSession.mockImplementation(async (patch) => ({
+      ...session,
+      ...patch,
+      cleanupWarning: "assistant_attachment_cleanup_failed",
+    }));
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    await act(async () => {
+      await hook.result.current.update({ webSearch: true });
+    });
+    expect(hook.result.current.webSearch).toBe(true);
+    expect(hook.result.current.error).toBe(
+      "assistant_attachment_cleanup_failed",
+    );
+  });
+
+  const draftFile: AssistantAttachment = {
+    id: "draft-file",
+    name: "notes.txt",
+    mimeType: "text/plain",
+    sizeBytes: 12,
+    status: "ready",
+    reason: null,
+    details: null,
+  };
+
+  it.each([false, true])(
+    "flushes a newer draft after a held send fails (cancelled=%s)",
+    async (cancelled) => {
+      current.session = {
+        ...session,
+        draft: "Original",
+        draftAttachmentIds: [draftFile.id],
+      };
+      current.attachments = [draftFile];
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.send.mockImplementation(async () => {
+        await waiting;
+        throw new Error("assistant_cancelled");
+      });
+      const hook = renderHook(() => useAssistant(true));
+      await waitFor(() => expect(hook.result.current.connected).toBe(true));
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() =>
+        expect(hook.result.current.attachments).toHaveLength(1),
+      );
+      let sent!: Promise<boolean>;
+      act(() => {
+        sent = hook.result.current.send();
+      });
+      await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+      act(() => hook.result.current.setDraft("Newer draft"));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      });
+      if (cancelled) await act(async () => hook.result.current.stop());
+      await act(async () => {
+        release();
+        await sent;
+      });
+      expect(current.session.draft).toBe("Newer draft");
+      expect(current.session.draftAttachmentIds).toEqual([draftFile.id]);
+    },
+  );
+
+  it.each(["import", "failed send"])(
+    "restores the displayed draft after leaving and returning during %s",
+    async (operation) => {
+      current.session = {
+        ...session,
+        draft: "Question",
+        draftAttachmentIds: [draftFile.id],
+      };
+      current.attachments = [draftFile];
+      const added = { ...draftFile, id: "added-file", name: "added.txt" };
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.pickAttachments.mockImplementation(async () => {
+        await waiting;
+        return [added];
+      });
+      mocks.send.mockImplementation(async () => {
+        await waiting;
+        throw new Error("assistant_key_unavailable");
+      });
+      const hook = renderHook(() => useAssistant(true));
+      await waitFor(() => expect(hook.result.current.connected).toBe(true));
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() =>
+        expect(hook.result.current.attachments).toHaveLength(1),
+      );
+      let operationDone!: Promise<unknown>;
+      act(() => {
+        operationDone =
+          operation === "import"
+            ? hook.result.current.pickAttachments()
+            : hook.result.current.send();
+      });
+      await waitFor(() =>
+        expect(
+          operation === "import" ? mocks.pickAttachments : mocks.send,
+        ).toHaveBeenCalledOnce(),
+      );
+      act(() => hook.result.current.select(null));
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() => expect(hook.result.current.loading).toBe(false));
+      expect(hook.result.current.busy).toBe(true);
+      await act(async () => {
+        release();
+        await operationDone;
+      });
+      const expected =
+        operation === "import" ? [draftFile.id, added.id] : [draftFile.id];
+      expect(hook.result.current.attachments.map((file) => file.id)).toEqual(
+        expected,
+      );
+      expect(hook.result.current.busy).toBe(false);
+      act(() => hook.result.current.setDraft("Next question"));
+      await waitFor(() => expect(current.session.draft).toBe("Next question"));
+      expect(current.session.draftAttachmentIds).toEqual(expected);
+    },
+  );
+
+  it.each([false, true])(
+    "keeps a sending file while admission waits (leave=%s)",
+    async (leave) => {
+      current.session = {
+        ...session,
+        draft: "Question",
+        draftAttachmentIds: [draftFile.id],
+      };
+      current.attachments = [draftFile];
+      let release!: () => void;
+      const admission = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let exists = true;
+      let published = false;
+      mocks.updateSession.mockImplementation(async (patch) => {
+        if (patch.draftAttachmentIds?.length === 0 && !published)
+          exists = false;
+        current.session = { ...current.session, ...patch };
+        return current.session;
+      });
+      mocks.send.mockImplementation(async () => {
+        await admission;
+        if (!exists) throw new Error("assistant_attachment_not_found");
+        published = true;
+        return { runId: "accepted", operationId: "accepted" };
+      });
+      const hook = renderHook(() => useAssistant(true));
+      await waitFor(() => expect(hook.result.current.connected).toBe(true));
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() =>
+        expect(hook.result.current.attachments).toHaveLength(1),
+      );
+      let submission!: Promise<boolean>;
+      act(() => {
+        submission = hook.result.current.send();
+      });
+      await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+      if (leave) act(() => hook.result.current.select(null));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      });
+      const survived = exists;
+      let sent = false;
+      await act(async () => {
+        release();
+        sent = await submission;
+      });
+      expect(survived).toBe(true);
+      expect(sent).toBe(true);
+    },
+  );
+
+  it("flushes the removed draft before import and never reapplies it to a new file", async () => {
+    current.session = { ...session, draftAttachmentIds: [draftFile.id] };
+    current.attachments = [draftFile];
+    const added = { ...draftFile, id: "new-file", name: "new.txt" };
+    let release!: () => void;
+    const importing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let copying = false;
+    let exists = false;
+    mocks.pickAttachments.mockImplementation(async () => {
+      copying = true;
+      await importing;
+      exists = true;
+      current.session.draftAttachmentIds = [added.id];
+      return [added];
+    });
+    mocks.updateSession.mockImplementation(async (patch) => {
+      if (copying) await importing;
+      if (patch.draftAttachmentIds?.length === 0) exists = false;
+      current.session = { ...current.session, ...patch };
+      return current.session;
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() =>
+      expect(hook.result.current.attachments).toHaveLength(1),
+    );
+    act(() => hook.result.current.removeAttachment(draftFile.id));
+    let pick!: Promise<void>;
+    act(() => {
+      pick = hook.result.current.pickAttachments();
+    });
+    await waitFor(() => expect(mocks.pickAttachments).toHaveBeenCalledOnce());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    });
+    await act(async () => {
+      release();
+      await pick;
+    });
+    expect(exists).toBe(true);
+    expect(hook.result.current.attachments.map((file) => file.id)).toEqual([
+      added.id,
+    ]);
+  });
+
   it("stops a pending send before a delayed draft write can dispatch a paid request", async () => {
     let release!: () => void;
     const pending = new Promise<void>((resolve) => {
@@ -2269,8 +2591,8 @@ describe("run edges", () => {
 });
 
 describe("conversation cost", () => {
-  // Not the search price beside it, which mentions tokens too.
-  const usageLine = () => screen.queryByText(/^(Input|Cost|Estimated cost)/);
+  // Scope the assertion to this conversation, apart from the new all-conversation card.
+  const usageLine = () => screen.queryByLabelText("This conversation");
 
   it("shows a saved conversation's tokens and estimated cost", async () => {
     current.usage = {
@@ -3373,5 +3695,559 @@ describe("sign-in changes", () => {
     );
     await waitFor(() => expect(composer()).toBeEnabled());
     expect(files()).toBeNull();
+  });
+});
+
+describe("conversation trash", () => {
+  it("explains an empty trash view without presenting it as an active conversation", async () => {
+    render(page());
+    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
+    expect(
+      await screen.findByText(
+        "Choose a conversation from the trash to view or restore it.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByText(
+        "This conversation is in the trash. Restore it to continue chatting.",
+      ),
+    ).toBeNull();
+    expect(screen.queryByText("How can I help?")).toBeNull();
+  });
+
+  beforeEach(() => {
+    mocks.listSessions.mockImplementation(async (deleted = false) =>
+      listOf(
+        Boolean(current.session.deletedAt) === deleted ? [current.session] : [],
+      ),
+    );
+    mocks.updateSession.mockImplementation(async (patch) => {
+      current.session = {
+        ...current.session,
+        ...patch,
+        ...(patch.deleted === undefined
+          ? {}
+          : { deletedAt: patch.deleted ? 10 : null }),
+      };
+      return current.session;
+    });
+  });
+
+  it.each([true, false])(
+    "refreshes the currently selected list after a delayed trash update (deleted=%s)",
+    async (deleted) => {
+      current.session.deletedAt = deleted ? null : 10;
+      let release!: () => void;
+      const waiting = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.updateSession.mockImplementation(async (patch) => {
+        if (patch.deleted !== undefined) await waiting;
+        current.session = {
+          ...current.session,
+          ...patch,
+          ...(patch.deleted === undefined
+            ? {}
+            : { deletedAt: patch.deleted ? 10 : null }),
+        };
+        return current.session;
+      });
+      const hook = renderHook(() => useAssistant(true));
+      await waitFor(() => expect(hook.result.current.connected).toBe(true));
+      if (!deleted) act(() => hook.result.current.viewTrash(true));
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() => expect(hook.result.current.loading).toBe(false));
+      let saving!: Promise<boolean>;
+      act(() => {
+        saving = hook.result.current.setDeleted(deleted);
+      });
+      await waitFor(() =>
+        expect(mocks.updateSession).toHaveBeenCalledWith(
+          expect.objectContaining({ deleted }),
+        ),
+      );
+      act(() => hook.result.current.viewTrash(deleted));
+      await waitFor(() =>
+        expect(mocks.listSessions).toHaveBeenLastCalledWith(deleted, ""),
+      );
+      await act(async () => {
+        release();
+        await saving;
+      });
+      await waitFor(() => expect(hook.result.current.sessions).toHaveLength(1));
+      expect(hook.result.current.showTrash).toBe(deleted);
+      expect(mocks.listSessions).toHaveBeenLastCalledWith(deleted, "");
+    },
+  );
+
+  it("saves the draft before trashing, shows it read-only, and restores the conversation", async () => {
+    await openConversation();
+    fireEvent.change(composer(), { target: { value: "Keep this draft" } });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Move to trash" }),
+    );
+    await waitFor(() => expect(current.session.deletedAt).toBe(10));
+    expect(current.session.draft).toBe("Keep this draft");
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() => expect(composer()).toHaveValue("Keep this draft"));
+    expect(composer()).toHaveAttribute("readonly");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Restore conversation" }),
+    );
+    await waitFor(() => expect(current.session.deletedAt).toBeNull());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await waitFor(() => expect(composer()).not.toHaveAttribute("readonly"));
+    expect(composer()).toHaveValue("Keep this draft");
+  });
+
+  it("requires an explicit confirmation before deleting files and history permanently", async () => {
+    current.session.deletedAt = 10;
+    mocks.deleteSession.mockImplementation(async () => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+    });
+    render(page());
+    await userEvent.click(await screen.findByRole("button", { name: "Trash" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Delete permanently" }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: "Delete conversation permanently?",
+    });
+    expect(
+      within(dialog).getByText(/attachments and conversation history/),
+    ).toBeVisible();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+    expect(mocks.deleteSession).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Delete permanently" }),
+      ).toHaveFocus(),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Delete permanently" }),
+    );
+    await userEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Delete permanently",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.deleteSession).toHaveBeenCalledWith({
+        sessionId: session.id,
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: /My conversation/ }),
+      ).toBeNull(),
+    );
+  });
+});
+
+describe("Markdown export", () => {
+  it.each(["selection", "account"])(
+    "does not export a snapshot that arrived after the %s changed",
+    async (change) => {
+      await openConversation();
+      let resolve!: (detail: AssistantSessionDetail) => void;
+      mocks.getSession.mockImplementationOnce(
+        () =>
+          new Promise<AssistantSessionDetail>((done) => {
+            resolve = done;
+          }),
+      );
+      const reads = mocks.getSession.mock.calls.length;
+      await userEvent.click(
+        screen.getByRole("button", { name: "Export Markdown" }),
+      );
+      await waitFor(() =>
+        expect(mocks.getSession).toHaveBeenCalledTimes(reads + 1),
+      );
+      if (change === "account") act(() => mocks.auth?.("expired"));
+      else await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+      await act(async () => resolve(current));
+      expect(mocks.exportMarkdown).not.toHaveBeenCalled();
+      expect(screen.queryByText("Markdown saved")).not.toBeInTheDocument();
+    },
+  );
+
+  it("flushes the current draft and exports a fresh snapshot with confirmed account authority", async () => {
+    await openConversation();
+    fireEvent.change(composer(), { target: { value: "latest unsent draft" } });
+    current = {
+      ...current,
+      messages: [
+        {
+          id: "fresh",
+          role: "assistant",
+          content: "Saved response from disk",
+          status: "completed",
+          createdAt: 2,
+        },
+      ],
+    };
+    await userEvent.click(
+      screen.getByRole("button", { name: "Export Markdown" }),
+    );
+    await waitFor(() => expect(mocks.exportMarkdown).toHaveBeenCalledTimes(1));
+    const request = mocks.exportMarkdown.mock.calls[0][0];
+    expect(request).toMatchObject({
+      sessionId: session.id,
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    });
+    expect(request.markdown).toContain("latest unsent draft");
+    expect(request.markdown).toContain("Saved response from disk");
+    expect(await screen.findByText("Markdown saved")).toHaveAttribute(
+      "role",
+      "status",
+    );
+  });
+
+  it("keeps cancellation quiet and the draft editable", async () => {
+    mocks.exportMarkdown.mockResolvedValue(false);
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Export Markdown" }),
+    );
+    await waitFor(() => expect(mocks.exportMarkdown).toHaveBeenCalled());
+    await waitFor(() => expect(composer()).toBeEnabled());
+    expect(screen.queryByText("Markdown saved")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("does not open the native dialog when saving the draft fails", async () => {
+    await openConversation();
+    mocks.updateSession.mockRejectedValue("assistant_storage_unavailable");
+    fireEvent.change(composer(), { target: { value: "keep this" } });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Export Markdown" }),
+    );
+    await screen.findByRole("alert");
+    expect(mocks.exportMarkdown).not.toHaveBeenCalled();
+    expect(composer()).toHaveValue("keep this");
+  });
+});
+
+describe("all conversation usage", () => {
+  it("hides the saved total price while a background run starts and refreshes after it ends", async () => {
+    mocks.usageSummary.mockResolvedValue({
+      estimatedCostUsd: "1.25",
+      usageCoverage: "complete",
+    });
+    render(page());
+    const totals = await screen.findByRole("region", {
+      name: "All conversations",
+    });
+    await within(totals).findByText(/1.25/);
+    let resolve!: (usage: object) => void;
+    mocks.usageSummary.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    act(() =>
+      mocks.listener?.({
+        sessionId: "background",
+        runId: "run",
+        operationId: "operation",
+        type: "run_start",
+        data: { messageId: "background-reply", webSearch: false },
+      }),
+    );
+    expect(totals).not.toHaveTextContent("1.25");
+    await act(async () =>
+      resolve({ estimatedCostUsd: null, usageCoverage: "incomplete" }),
+    );
+    await within(totals).findByText("Cost unavailable");
+    mocks.usageSummary.mockResolvedValue({
+      estimatedCostUsd: "1.50",
+      usageCoverage: "complete",
+    });
+    act(() =>
+      mocks.listener?.({
+        sessionId: "background",
+        runId: "run",
+        operationId: "operation",
+        type: "run_end",
+        data: { stopped: false, status: "completed" },
+      }),
+    );
+    await within(totals).findByText(/1.50/);
+  });
+
+  it("keeps the latest total when an older refresh arrives later", async () => {
+    let resolve!: (usage: object) => void;
+    mocks.usageSummary.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    render(page());
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalledTimes(1));
+    mocks.usageSummary.mockResolvedValue({
+      estimatedCostUsd: "2.50",
+      usageCoverage: "complete",
+    });
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    const totals = screen.getByRole("region", { name: "All conversations" });
+    await within(totals).findByText(/2.50/);
+    await act(async () =>
+      resolve({ estimatedCostUsd: "1.25", usageCoverage: "complete" }),
+    );
+    expect(totals).toHaveTextContent("2.50");
+    expect(totals).not.toHaveTextContent("1.25");
+  });
+
+  it("drops totals that arrive after sign-in expires", async () => {
+    let resolve!: (usage: object) => void;
+    mocks.usageSummary.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    render(page());
+    await waitFor(() => expect(mocks.usageSummary).toHaveBeenCalled());
+    act(() => mocks.auth?.("expired"));
+    await act(async () =>
+      resolve({ estimatedCostUsd: "987.65", usageCoverage: "complete" }),
+    );
+    expect(
+      screen.getByRole("region", { name: "All conversations" }),
+    ).not.toHaveTextContent("987.65");
+    expect(
+      screen.queryByRole("button", { name: "My conversation" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows saved totals across active and trashed conversations, independently of the list search", async () => {
+    mocks.usageSummary.mockResolvedValue({
+      inputTokens: 1200,
+      outputTokens: 400,
+      estimatedCostUsd: "1.25",
+      searchCount: 3,
+      usageCoverage: "complete",
+    });
+    render(page());
+    const totals = await screen.findByRole("region", {
+      name: "All conversations",
+    });
+    await within(totals).findByText(/Input 1.2K/);
+    expect(totals).toHaveTextContent("$1.25");
+    expect(totals).toHaveTextContent("3 search");
+    expect(totals).toHaveTextContent("Includes conversations in the trash.");
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    expect(totals).toHaveTextContent("$1.25");
+  });
+  it("does not present incomplete or failed totals as a zero cost", async () => {
+    mocks.usageSummary.mockResolvedValue({
+      inputTokens: 800,
+      estimatedCostUsd: null,
+      searchCount: 0,
+      usageCoverage: "incomplete",
+    });
+    render(page());
+    const totals = await screen.findByRole("region", {
+      name: "All conversations",
+    });
+    await within(totals).findByText(/Cost unavailable/);
+    expect(totals).not.toHaveTextContent("$0");
+    expect(totals).not.toHaveTextContent("0 search");
+    mocks.usageSummary.mockRejectedValue("assistant_storage_unavailable");
+    await userEvent.click(screen.getByRole("button", { name: "Trash" }));
+    await within(totals).findByText(
+      "Usage could not be loaded. Refresh to try again.",
+    );
+  });
+});
+
+describe("complete conversation backups", () => {
+  it("does not rewrite an untouched conversation before restoring an identical backup", async () => {
+    await openConversation();
+    mocks.restore.mockResolvedValue({ imported: 0, skipped: 1, warning: null });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Restore conversations from backup" }),
+    );
+    await screen.findByText(
+      "Restored 0 conversations; 1 identical conversation skipped.",
+    );
+    expect(mocks.updateSession).not.toHaveBeenCalled();
+  });
+
+  it("preserves a new unsent draft when selection is attempted during backup creation", async () => {
+    let resolve!: (value: AssistantSession) => void;
+    mocks.createSession.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    act(() => hook.result.current.setDraft("New unsent backup draft"));
+    let transfer!: Promise<void>;
+    act(() => {
+      transfer = hook.result.current.transfer("backup");
+    });
+    await waitFor(() => expect(mocks.createSession).toHaveBeenCalled());
+    act(() => hook.result.current.select(session.id));
+    expect(hook.result.current.selectedId).toBeNull();
+    expect(hook.result.current.draft).toBe("New unsent backup draft");
+    await act(async () => {
+      resolve({ ...session, id: "created-for-backup" });
+      await transfer;
+    });
+    expect(mocks.updateSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "created-for-backup",
+        draft: "New unsent backup draft",
+      }),
+    );
+    expect(mocks.backup).toHaveBeenCalled();
+    expect(hook.result.current.error).toBeNull();
+  });
+
+  it("uses the restored default model for the next new conversation", async () => {
+    mocks.restore.mockImplementation(async () => {
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        defaultModelId: "fast",
+      });
+      return { imported: 1, skipped: 0, warning: null };
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    await act(async () => {
+      await hook.result.current.transfer("restore");
+    });
+    await act(async () => {
+      await hook.result.current.create();
+    });
+    expect(mocks.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: "fast" }),
+    );
+  });
+
+  it("does not overwrite restored preferences when their bootstrap reload fails", async () => {
+    mocks.restore.mockImplementation(async () => {
+      mocks.bootstrap.mockRejectedValue("assistant_network_error");
+      return { imported: 1, skipped: 0, warning: null };
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    await act(async () => {
+      await hook.result.current.transfer("restore");
+    });
+    expect(hook.result.current.bootstrap).toBeNull();
+    expect(hook.result.current.error).not.toBeNull();
+    await act(async () => {
+      await hook.result.current.create();
+    });
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      defaultModelId: "fast",
+    });
+    await act(async () => {
+      await hook.result.current.loadBootstrap();
+    });
+    await act(async () => {
+      await hook.result.current.create();
+    });
+    expect(mocks.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ modelId: "fast" }),
+    );
+  });
+
+  it("flushes unsent draft before opening the account backup save dialog", async () => {
+    await openConversation();
+    fireEvent.change(composer(), {
+      target: { value: "Draft in complete backup" },
+    });
+    mocks.backup.mockImplementation(async () => {
+      expect(current.session.draft).toBe("Draft in complete backup");
+      return true;
+    });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Back up all conversations" }),
+    );
+    await waitFor(() =>
+      expect(mocks.backup).toHaveBeenCalledWith({
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
+      }),
+    );
+    expect(await screen.findByText("Backup saved")).toHaveAttribute(
+      "role",
+      "status",
+    );
+  });
+  it("keeps native backup cancellation quiet", async () => {
+    mocks.backup.mockResolvedValue(false);
+    render(page());
+    const button = await screen.findByRole("button", {
+      name: "Back up all conversations",
+    });
+    await waitFor(() => expect(button).toBeEnabled());
+    await userEvent.click(button);
+    await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
+    expect(screen.queryByText("Backup saved")).not.toBeInTheDocument();
+  });
+  it("reports partial restore counts and its warning without discarding the current conversation", async () => {
+    mocks.restore.mockResolvedValue({
+      imported: 2,
+      skipped: 1,
+      warning: "assistant_backup_conflict",
+    });
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Restore conversations from backup" }),
+    );
+    await waitFor(() =>
+      expect(mocks.restore).toHaveBeenCalledWith({
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
+      }),
+    );
+    expect(
+      await screen.findByText(
+        "Restored 2 conversations; 1 identical conversation skipped.",
+      ),
+    ).toHaveAttribute("role", "status");
+    expect(await screen.findByRole("alert")).toHaveTextContent("same ID");
+    expect(screen.getByRole("heading", { name: session.title })).toBeVisible();
+  });
+  it("does not report an old account's completed backup after sign-in expires", async () => {
+    let resolve!: (saved: boolean) => void;
+    mocks.backup.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Back up all conversations" }),
+    );
+    await waitFor(() => expect(mocks.backup).toHaveBeenCalled());
+    act(() => mocks.auth?.("expired"));
+    await act(async () => resolve(true));
+    expect(screen.queryByText("Backup saved")).not.toBeInTheDocument();
   });
 });

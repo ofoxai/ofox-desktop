@@ -667,6 +667,12 @@ impl AssistantHost {
         let listed = match self.store(&identity.owner) {
             Ok(store) => {
                 blocking(move || {
+                    if let Err(error) = store.cleanup_restore_staging() {
+                        log::warn!("[Assistant] restore staging cleanup failed: {error}");
+                    }
+                    if let Err(error) = store.cleanup_deleted() {
+                        log::warn!("[Assistant] permanent deletion cleanup failed: {error}");
+                    }
                     let mut sessions = store.list(false, "")?.sessions;
                     sessions.extend(store.list(true, "")?.sessions);
                     Ok(sessions)
@@ -688,6 +694,17 @@ impl AssistantHost {
                     "[Assistant] could not recover session {}: {error}",
                     session.id
                 );
+            }
+        }
+        // Imports share this file lock, so their unpublished copies cannot be
+        // mistaken for crash leftovers even if startup overlaps the UI.
+        for session in sessions {
+            let Ok(store) = self.store(&identity.owner) else {
+                continue;
+            };
+            let sid = session.id;
+            if let Err(error) = blocking(move || store.cleanup_orphan_attachments(&sid)).await {
+                log::warn!("[Assistant] orphan attachment cleanup failed: {error}");
             }
         }
     }
@@ -1384,6 +1401,7 @@ impl AssistantHost {
         let completed = matches!(outcome, Ok(Finish::Completed));
         // A failure that cost nothing leaves the session's cost known.
         let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);
+        let error_code = outcome.as_ref().err().map(|failure| failure.code.clone());
         if let Err(failure) = &outcome {
             if failure.code == MODEL_UNAVAILABLE {
                 self.forget_models(&control.identity.apex);
@@ -1400,7 +1418,14 @@ impl AssistantHost {
                 let sid = control.session_id.clone();
                 blocking(move || {
                     store.mutate(&sid, |record| {
-                        settle_run(record, &control, completed, stopped, unbilled)
+                        settle_run(
+                            record,
+                            &control,
+                            completed,
+                            stopped,
+                            unbilled,
+                            error_code.as_deref(),
+                        )
                     })
                 })
                 .await
@@ -2520,6 +2545,257 @@ mod tests {
         host.forget_models("ofox.ai");
         host.models("ofox.ai").await.unwrap();
         assert_eq!(env.fetches.load(Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn aggregate_usage_keeps_trash_and_other_accounts_separate_without_getting_a_key() {
+        let (config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store.mutate(&sid, |record| {
+            record.session.deleted_at = Some(1);
+            record.usage = json!({"modelRequests":1,"inputTokens":40,"searchCount":2,"estimatedCostUsd":"0.123456789123456789"});
+            Ok(())
+        }).unwrap();
+        let other = AssistantStore::for_owner(config.path(), &"b".repeat(64)).unwrap();
+        let other_sid = other.create("test/model", false).unwrap().session.id;
+        other
+            .mutate(&other_sid, |record| {
+                record.usage = json!({"inputTokens":999,"estimatedCostUsd":"9"});
+                Ok(())
+            })
+            .unwrap();
+        let summary = host.usage_summary().await.unwrap();
+        assert_eq!(summary["inputTokens"], 40);
+        assert_eq!(summary["searchCount"], 2);
+        assert_eq!(summary["estimatedCostUsd"], "0.123456789123456789");
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn backup_and_restore_dialogs_recheck_authority_and_keep_cancel_quiet() {
+        let (_config, host) = fixture();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let authority = TransferRequest {
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        assert!(!host.backup(authority.clone(), || Ok(None)).await.unwrap());
+        let wrong = TransferRequest {
+            expected_owner: "b".repeat(64),
+            ..authority.clone()
+        };
+        assert_eq!(
+            host.backup(wrong, || panic!("stale owner must not open picker"))
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("backup.zip");
+        let selected = archive.clone();
+        assert!(host
+            .backup(authority, move || Ok(Some(selected)))
+            .await
+            .unwrap());
+        let (_target_config, target) = fixture();
+        let request = TransferRequest {
+            expected_owner: identity().owner,
+            expected_generation: target.generation(),
+        };
+        assert!(target
+            .restore(request.clone(), || Ok(None))
+            .await
+            .unwrap()
+            .is_none());
+        let changed = target.clone();
+        let selected = archive.clone();
+        assert_eq!(
+            target
+                .restore(request, move || {
+                    changed.generation.fetch_add(1, Ordering::SeqCst);
+                    Ok(Some(selected))
+                })
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        assert!(target
+            .list_sessions(false, "")
+            .await
+            .unwrap()
+            .sessions
+            .is_empty());
+        let request = TransferRequest {
+            expected_owner: identity().owner,
+            expected_generation: target.generation(),
+        };
+        let report = target
+            .restore(request, move || Ok(Some(archive)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.imported, 1);
+        assert!(report.warning.is_none());
+        assert_eq!(
+            target.get_session(&sid).await.unwrap().session.model_id,
+            "test/model"
+        );
+    }
+
+    fn export_request(host: &AssistantHost, sid: &str, markdown: &str) -> ExportMarkdownRequest {
+        ExportMarkdownRequest {
+            authority: DeleteRequest {
+                session_id: sid.into(),
+                expected_owner: identity().owner,
+                expected_generation: host.generation(),
+            },
+            markdown: markdown.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn markdown_export_saves_privately_without_the_managed_key_and_can_be_cancelled() {
+        let (_config, host) = fixture();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let destination = tempfile::tempdir().unwrap();
+        let path = destination.path().join("会話.md");
+        let selected = path.clone();
+        host.remember_key("synthetic-export-key-1234567890");
+        let request = export_request(&host, &sid, "# 会話\n\nsynthetic-export-key-1234567890");
+        assert!(host
+            .export_markdown(request.clone(), move || Ok(Some(selected)))
+            .await
+            .unwrap());
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("# 会話"));
+        assert!(!saved.contains("synthetic-export-key-1234567890"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        assert!(!host.export_markdown(request, || Ok(None)).await.unwrap());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), saved);
+    }
+
+    #[tokio::test]
+    async fn markdown_export_refuses_stale_authority_and_unsafe_destinations() {
+        let (config, host) = fixture();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let stale = export_request(&host, &sid, "private");
+        let destination = tempfile::tempdir().unwrap();
+        let path = destination.path().join("export.md");
+        let selected = path.clone();
+        let changed = host.clone();
+        assert_eq!(
+            host.export_markdown(stale.clone(), move || {
+                changed.generation.fetch_add(1, Ordering::SeqCst);
+                Ok(Some(selected))
+            })
+            .await
+            .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        assert!(!path.exists());
+        assert_eq!(
+            host.export_markdown(stale, || panic!("no dialog for stale authority"))
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        let protected = config.path().join("settings.md");
+        std::fs::write(&protected, "keep").unwrap();
+        let selected = protected.clone();
+        assert_eq!(
+            host.export_markdown(export_request(&host, &sid, "replace"), move || Ok(Some(
+                selected
+            )))
+            .await
+            .unwrap_err(),
+            "assistant_export_destination_invalid"
+        );
+        assert_eq!(std::fs::read_to_string(protected).unwrap(), "keep");
+        #[cfg(unix)]
+        {
+            let target = destination.path().join("keep.md");
+            std::fs::write(&target, "keep").unwrap();
+            let linked = destination.path().join("link.md");
+            std::os::unix::fs::symlink(&target, &linked).unwrap();
+            assert_eq!(
+                host.export_markdown(export_request(&host, &sid, "replace"), move || Ok(Some(
+                    linked
+                )))
+                .await
+                .unwrap_err(),
+                "assistant_export_destination_invalid"
+            );
+            assert_eq!(std::fs::read_to_string(target).unwrap(), "keep");
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_deletion_checks_the_confirmed_account_and_generation() {
+        let (_config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .update(
+                &serde_json::from_value(json!({"sessionId":sid,"deleted":true})).unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        let request = DeleteRequest {
+            session_id: sid.clone(),
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        let wrong_owner = DeleteRequest {
+            expected_owner: "b".repeat(64),
+            ..request.clone()
+        };
+        assert_eq!(
+            host.delete_session(wrong_owner).await.unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        let stale = DeleteRequest {
+            expected_generation: request.expected_generation + 1,
+            ..request.clone()
+        };
+        assert_eq!(
+            host.delete_session(stale).await.unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        assert!(store.load_record(&sid).is_ok());
+        host.delete_session(request).await.unwrap();
+        assert!(store.load_record(&sid).is_err());
+        assert!(host
+            .list_sessions(true, "")
+            .await
+            .unwrap()
+            .sessions
+            .is_empty());
     }
 
     #[tokio::test]

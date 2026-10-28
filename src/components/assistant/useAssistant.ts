@@ -7,10 +7,12 @@ import {
   type AssistantEvent,
   type AssistantMessage,
   type AssistantRunRef,
+  type AssistantRestoreReport,
   type AssistantSession,
   type AssistantSessionDetail,
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
+  type AssistantUsage,
 } from "@/lib/api/assistant";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 
@@ -46,6 +48,15 @@ interface RunSearch {
 }
 
 /** A conversation's draft as last saved; `files` unknown until read or written. */
+interface DraftWriteScope {
+  held: boolean;
+}
+
+interface PendingSend extends AssistantRunRef {
+  sessionId: string;
+  cancelled: boolean;
+}
+
 interface SavedDraft {
   text: string;
   files?: string[];
@@ -76,10 +87,13 @@ export function useAssistant(enabled: boolean) {
   const newWebSearchRef = useRef(newWebSearch);
   const lastWebSearch = useRef(false);
   const [search, setSearch] = useState("");
+  const [showTrash, setShowTrash] = useState(false);
   const [sessions, setSessions] = useState<AssistantSession[]>([]);
   const [unreadable, setUnreadable] = useState<AssistantUnreadableSession[]>(
     [],
   );
+  const [totalUsage, setTotalUsage] = useState<AssistantUsage | null>(null);
+  const [usageUnavailable, setUsageUnavailable] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AssistantSessionDetail | null>(null);
   const [draft, setDraftState] = useState("");
@@ -105,7 +119,13 @@ export function useAssistant(enabled: boolean) {
   const [compacting, setCompacting] = useState(false);
   const [error, setError] = useState<AssistantError | null>(null);
   const [loading, setLoading] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [operationBusy, setBusy] = useState(false);
+  const [transferring, setTransferring] = useState(false);
+  const transferInFlight = useRef(false);
+  const [transferResult, setTransferResult] = useState<
+    { kind: "backup" } | ({ kind: "restore" } & AssistantRestoreReport) | null
+  >(null);
+  const busy = operationBusy || transferring;
   const [connected, setConnected] = useState(false);
   const mounted = useRef(false);
   const epoch = useRef(0);
@@ -122,11 +142,14 @@ export function useAssistant(enabled: boolean) {
   // The files of each conversation's draft, kept like its text.
   const attachmentsRef = useRef(attachments);
   const attachmentDrafts = useRef(new Map<string, AssistantAttachment[]>());
-  const draftWrites = useRef(new Map<string, Promise<void>>());
+  const draftWrites = useRef(new Map<string, Promise<boolean>>());
+  // Import and send admission own the draft until their files are durable.
+  // Replacing the scope also invalidates saves queued before that operation.
+  const draftScopes = useRef(new Map<string, DraftWriteScope>());
   const draftAuthority = useRef(0);
   const savedDrafts = useRef(new Map<string, SavedDraft>());
   const bootstrapRef = useRef<AssistantBootstrap | null>(null);
-  const pendingSends = useRef(new Map<string, { cancelled: boolean }>());
+  const pendingSends = useRef(new Map<string, PendingSend>());
   const refreshSessionsRef = useRef<(generation?: number) => Promise<void>>(
     async () => undefined,
   );
@@ -203,18 +226,29 @@ export function useAssistant(enabled: boolean) {
    * Writes to one conversation run in order.
    */
   const persistDraft = useCallback(
-    (sessionId: string, text: string, files?: string[]) => {
+    (
+      sessionId: string,
+      text: string,
+      files?: string[],
+      held?: DraftWriteScope,
+    ) => {
       const generation = draftAuthority.current;
+      const scope = draftScopes.current.get(sessionId);
+      if (scope?.held && scope !== held) return Promise.resolve(false);
       const task = (draftWrites.current.get(sessionId) ?? Promise.resolve())
         .catch(() => undefined)
         .then(async () => {
-          if (generation !== draftAuthority.current) return;
+          if (
+            generation !== draftAuthority.current ||
+            draftScopes.current.get(sessionId) !== scope
+          )
+            return false;
           const saved = savedDrafts.current.get(sessionId);
           const newFiles =
             files && !(saved?.files && sameIds(saved.files, files))
               ? files
               : undefined;
-          if (saved?.text === text && !newFiles) return;
+          if (saved?.text === text && !newFiles) return true;
           const write = () =>
             assistantApi.updateSession({
               sessionId,
@@ -222,8 +256,9 @@ export function useAssistant(enabled: boolean) {
               ...(newFiles ? { draftAttachmentIds: newFiles } : {}),
               ...expectedIdentity(bootstrapRef.current),
             });
+          let result: AssistantSession;
           try {
-            await write();
+            result = await write();
           } catch (reason) {
             if (assistantErrorCode(reason) !== IDENTITY_CHANGED) throw reason;
             // The authority moved on (a sign-in or region change completed).
@@ -236,18 +271,37 @@ export function useAssistant(enabled: boolean) {
               generation !== draftAuthority.current
             )
               throw reason;
-            await write();
+            result = await write();
           }
-          if (generation === draftAuthority.current)
-            savedDrafts.current.set(sessionId, {
-              text,
-              files: newFiles ?? saved?.files,
-            });
+          if (generation !== draftAuthority.current) return false;
+          savedDrafts.current.set(sessionId, {
+            text,
+            files: newFiles ?? saved?.files,
+          });
+          if (result.cleanupWarning) showError(result.cleanupWarning);
+          return true;
         });
       draftWrites.current.set(sessionId, task);
       return task;
     },
-    [loadBootstrap],
+    [loadBootstrap, showError],
+  );
+
+  const releaseDraft = useCallback(
+    async (sessionId: string, scope: DraftWriteScope, generation: number) => {
+      if (draftScopes.current.get(sessionId) !== scope) return;
+      draftScopes.current.set(sessionId, { held: false });
+      if (generation !== epoch.current || !drafts.current.has(sessionId))
+        return;
+      // Autosaves blocked by the operation may have contained newer text.
+      // Flush the current cache even when this conversation is now hidden.
+      await persistDraft(
+        sessionId,
+        drafts.current.get(sessionId) ?? "",
+        attachmentDrafts.current.get(sessionId)?.map((file) => file.id),
+      ).catch(showError);
+    },
+    [persistDraft, showError],
   );
 
   useEffect(
@@ -263,21 +317,27 @@ export function useAssistant(enabled: boolean) {
       if (signedOut.current || generation !== epoch.current) return;
       const sequence = ++listSequence.current;
       try {
-        const list = await assistantApi.listSessions(false, search);
+        const [listed, usage] = await Promise.allSettled([
+          assistantApi.listSessions(showTrash, search),
+          assistantApi.usageSummary(),
+        ]);
         if (
           !mounted.current ||
           generation !== epoch.current ||
           sequence !== listSequence.current
         )
           return;
-        setSessions(list.sessions);
-        setUnreadable(list.unreadable);
+        setTotalUsage(usage.status === "fulfilled" ? usage.value : null);
+        setUsageUnavailable(usage.status === "rejected");
+        if (listed.status === "rejected") throw listed.reason;
+        setSessions(listed.value.sessions);
+        setUnreadable(listed.value.unreadable);
       } catch (reason) {
         if (sequence === listSequence.current && generation === epoch.current)
           showError(reason);
       }
     },
-    [search, showError],
+    [search, showTrash, showError],
   );
   refreshSessionsRef.current = refreshSessions;
 
@@ -389,9 +449,16 @@ export function useAssistant(enabled: boolean) {
       drafts.current.clear();
       attachmentDrafts.current.clear();
       savedDrafts.current.clear();
+      draftScopes.current.clear();
       setSelectedId(null);
       setDetail(null);
       setSessions([]);
+      setShowTrash(false);
+      setTotalUsage(null);
+      setUsageUnavailable(false);
+      transferInFlight.current = false;
+      setTransferring(false);
+      setTransferResult(null);
       setUnreadable([]);
       setStream(null);
       setCompacting(false);
@@ -481,8 +548,9 @@ export function useAssistant(enabled: boolean) {
     const files = fileKey ? fileKey.split("\n") : [];
     const timer = setTimeout(() => {
       void persistDraft(selectedId, draft, files)
-        .then(() => {
+        .then((saved) => {
           if (
+            saved &&
             generation === epoch.current &&
             sequence === draftSequence.current &&
             selectedRef.current === selectedId
@@ -540,6 +608,10 @@ export function useAssistant(enabled: boolean) {
         // The identity generation this event arrived under: a list read it
         // asks for is fenced on it.
         const generation = epoch.current;
+        if (event.type === "run_start") {
+          setTotalUsage(null);
+          void refreshSessionsRef.current(generation);
+        }
         const current = runRef.current;
         if (
           !current ||
@@ -711,6 +783,9 @@ export function useAssistant(enabled: boolean) {
 
   const select = useCallback(
     (id: string | null) => {
+      // Creating a record for a new backup draft must finish before another
+      // selection can replace the composer that ensureSession carries over.
+      if (transferInFlight.current) return;
       const previous = selectedRef.current;
       // Already showing or loading it: reloading here would leave the pane on
       // "Loading…", and leaving "no conversation" for itself would drop the
@@ -734,13 +809,20 @@ export function useAssistant(enabled: boolean) {
       createdSession.current = null;
       setNewWebSearch(lastWebSearch.current);
       detailSequence.current += 1;
-      setBusy(false);
+      setBusy(Boolean(id && draftScopes.current.get(id)?.held));
       setSelectedId(id);
       setLoading(Boolean(id));
       setDetail(null);
       setStream(null);
       setCompacting(false);
-      setRun(null);
+      const pending = [...pendingSends.current.values()].find(
+        (item) => item.sessionId === id,
+      );
+      setRun(
+        pending
+          ? { runId: pending.runId, operationId: pending.operationId }
+          : null,
+      );
       draftRef.current = id ? (drafts.current.get(id) ?? "") : "";
       setDraftState(draftRef.current);
       attachmentsRef.current = id
@@ -758,6 +840,17 @@ export function useAssistant(enabled: boolean) {
       persistDraft,
       showError,
     ],
+  );
+
+  const viewTrash = useCallback(
+    (deleted: boolean) => {
+      if (transferInFlight.current || deleted === showTrash) return;
+      select(null);
+      listSequence.current += 1;
+      setSessions([]);
+      setShowTrash(deleted);
+    },
+    [select, showTrash],
   );
 
   const ensureSession = useCallback(async () => {
@@ -784,13 +877,14 @@ export function useAssistant(enabled: boolean) {
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
-    void refreshSessions();
+    void refreshSessionsRef.current();
     return value;
   }, [detail, newModelId, refreshSessions, setNewWebSearch]);
 
   const create = useCallback(async () => {
     if (busy) return;
     // From "no conversation" this keeps the unsent draft; ensureSession carries it over.
+    setShowTrash(false);
     select(null);
     setError(null);
     if (!newModelId) return;
@@ -836,7 +930,8 @@ export function useAssistant(enabled: boolean) {
           return;
         setDetail((old) => (old ? { ...old, session: value } : old));
         if (patch.modelId) setChosenModel(value.modelId);
-        void refreshSessions();
+        if (value.cleanupWarning) showError(value.cleanupWarning);
+        void refreshSessionsRef.current();
         return value;
       } catch (reason) {
         if (generation === epoch.current && sequence === updateSequence.current)
@@ -844,6 +939,238 @@ export function useAssistant(enabled: boolean) {
       }
     },
     [refreshSessions, showError],
+  );
+
+  const setDeleted = useCallback(
+    async (deleted: boolean) => {
+      const sid = selectedRef.current;
+      if (!sid || busy || loading) return false;
+      const generation = epoch.current;
+      setBusy(true);
+      setError(null);
+      try {
+        await persistDraft(
+          sid,
+          draftRef.current,
+          attachmentsRef.current.map((file) => file.id),
+        );
+        if (generation !== epoch.current || selectedRef.current !== sid)
+          return false;
+        const saved = await assistantApi.updateSession({
+          sessionId: sid,
+          deleted,
+          ...expectedIdentity(bootstrapRef.current),
+        });
+        if (generation !== epoch.current) return false;
+        if (selectedRef.current === sid) select(null);
+        if (!deleted) setShowTrash(false);
+        void refreshSessionsRef.current();
+        if (saved.cleanupWarning) showError(saved.cleanupWarning);
+        return true;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        return false;
+      } finally {
+        if (
+          generation === epoch.current &&
+          (!selectedRef.current || selectedRef.current === sid)
+        )
+          setBusy(false);
+      }
+    },
+    [busy, loading, persistDraft, select, refreshSessions, showError],
+  );
+
+  const deleteSession = useCallback(async () => {
+    const sid = selectedRef.current;
+    const identity = bootstrapRef.current;
+    if (
+      !sid ||
+      busy ||
+      loading ||
+      !identity?.owner ||
+      identity.authorityGeneration === undefined
+    )
+      return false;
+    const generation = epoch.current;
+    setBusy(true);
+    setError(null);
+    // Invalidate queued saves, then wait for a write already in progress.
+    draftScopes.current.set(sid, { held: true });
+    const forget = () => {
+      drafts.current.delete(sid);
+      attachmentDrafts.current.delete(sid);
+      savedDrafts.current.delete(sid);
+      if (selectedRef.current === sid) select(null);
+    };
+    try {
+      await draftWrites.current.get(sid)?.catch(() => undefined);
+      if (generation !== epoch.current) return false;
+      await assistantApi.deleteSession({
+        sessionId: sid,
+        expectedOwner: identity.owner,
+        expectedGeneration: identity.authorityGeneration,
+      });
+      if (generation !== epoch.current) return false;
+      forget();
+      void refreshSessionsRef.current();
+      return true;
+    } catch (reason) {
+      if (generation === epoch.current) {
+        // The namespace move succeeded; only disk removal needs a retry.
+        if (assistantErrorCode(reason) === "assistant_delete_pending") forget();
+        void refreshSessionsRef.current();
+        showError(reason);
+      }
+      return false;
+    } finally {
+      if (generation === epoch.current) {
+        draftScopes.current.set(sid, { held: false });
+        if (!selectedRef.current || selectedRef.current === sid) setBusy(false);
+      }
+    }
+  }, [busy, loading, select, refreshSessions, showError]);
+
+  const transfer = useCallback(
+    async (kind: "backup" | "restore") => {
+      const identity = bootstrapRef.current;
+      if (
+        busy ||
+        transferInFlight.current ||
+        loading ||
+        !identity?.owner ||
+        identity.authorityGeneration === undefined
+      )
+        return;
+      const generation = epoch.current;
+      const current = () =>
+        mounted.current &&
+        generation === epoch.current &&
+        bootstrapRef.current?.owner === identity.owner;
+      transferInFlight.current = true;
+      setTransferring(true);
+      setTransferResult(null);
+      setError(null);
+      try {
+        if ([...draftScopes.current.values()].some((scope) => scope.held))
+          throw new Error("assistant_session_busy");
+        // A new unsent composer has no store record yet. Preserve it too, even
+        // when the user subsequently cancels the file dialog.
+        if (
+          !selectedRef.current &&
+          (draftRef.current.trim() || attachmentsRef.current.length)
+        )
+          await ensureSession();
+        for (const [sid, text] of drafts.current) {
+          if (!current()) return;
+          if (
+            !(await persistDraft(
+              sid,
+              text,
+              attachmentDrafts.current.get(sid)?.map((file) => file.id),
+            ))
+          )
+            throw new Error("assistant_session_busy");
+        }
+        if (!current()) return;
+        const request = {
+          expectedOwner: identity.owner,
+          expectedGeneration: identity.authorityGeneration,
+        };
+        if (kind === "backup") {
+          const saved = await assistantApi.backup(request);
+          if (current() && saved) setTransferResult({ kind });
+        } else {
+          const report = await assistantApi.restore(request);
+          if (!current() || !report) return;
+          setTransferResult({ kind, ...report });
+          // An empty profile may have acquired its model preference from the
+          // archive. Read it before the next create can overwrite it.
+          const restored = await loadBootstrap();
+          if (!current()) return;
+          setChosenModel(null);
+          if (!restored) {
+            // Do not let an old default overwrite the restored preference
+            // while its refresh is unavailable. A refresh can retry the read.
+            bootstrapRef.current = null;
+            setBootstrap(null);
+            return;
+          }
+          await refreshSessionsRef.current();
+          if (!current()) return;
+          if (selectedRef.current) await refreshDetail(selectedRef.current);
+          if (current() && report.warning) showError(report.warning);
+        }
+      } catch (reason) {
+        if (current()) showError(reason);
+      } finally {
+        if (generation === epoch.current && mounted.current) {
+          transferInFlight.current = false;
+          setTransferring(false);
+        }
+      }
+    },
+    [
+      busy,
+      loading,
+      ensureSession,
+      persistDraft,
+      loadBootstrap,
+      refreshDetail,
+      showError,
+    ],
+  );
+
+  /** Save the draft before reading the export snapshot; native cancellation is quiet. */
+  const exportMarkdown = useCallback(
+    async (format: (snapshot: AssistantSessionDetail) => string) => {
+      const sid = selectedRef.current;
+      const identity = bootstrapRef.current;
+      if (
+        !sid ||
+        busy ||
+        loading ||
+        runRef.current ||
+        !identity?.owner ||
+        identity.authorityGeneration === undefined
+      )
+        return false;
+      const generation = epoch.current;
+      const selection = selectionSequence.current;
+      const current = () =>
+        mounted.current &&
+        generation === epoch.current &&
+        selection === selectionSequence.current &&
+        selectedRef.current === sid;
+      setBusy(true);
+      setError(null);
+      try {
+        if (
+          !(await persistDraft(
+            sid,
+            draftRef.current,
+            attachmentsRef.current.map((file) => file.id),
+          ))
+        )
+          return false;
+        if (!current()) return false;
+        const snapshot = await assistantApi.getSession(sid);
+        if (!current()) return false;
+        const saved = await assistantApi.exportMarkdown({
+          sessionId: sid,
+          expectedOwner: identity.owner,
+          expectedGeneration: identity.authorityGeneration,
+          markdown: format(snapshot),
+        });
+        return current() && saved;
+      } catch (reason) {
+        if (current()) showError(reason);
+        return false;
+      } finally {
+        if (current()) setBusy(false);
+      }
+    },
+    [busy, loading, persistDraft, showError],
   );
 
   /**
@@ -888,8 +1215,10 @@ export function useAssistant(enabled: boolean) {
       const chosen = regenerateMessageId
         ? []
         : editMessageId
-          ? (detail?.messages.find((message) => message.id === editMessageId)
-              ?.attachments ?? [])
+          ? (options?.attachments ??
+            detail?.messages.find((message) => message.id === editMessageId)
+              ?.attachments ??
+            [])
           : fromComposer
             ? attachmentsRef.current
             : (options?.attachments ?? []);
@@ -909,10 +1238,10 @@ export function useAssistant(enabled: boolean) {
       if (
         busy ||
         loading ||
+        showTrash ||
+        detail?.session.deletedAt != null ||
         runRef.current ||
         files.some((file) => !isSendable(file)) ||
-        // An edit sent without files keeps all of its original's.
-        (editMessageId && chosen.length > 0 && !files.length) ||
         (!text.trim() && !files.length && !regenerateMessageId)
       )
         return false;
@@ -922,16 +1251,23 @@ export function useAssistant(enabled: boolean) {
       const originalFiles = attachmentsRef.current;
       let sessionId: string | undefined;
       let preparingRunId: string | undefined;
-      let preparation: { cancelled: boolean } | undefined;
+      let draftScope: DraftWriteScope | undefined;
+      let preparation: PendingSend | undefined;
       const generation = epoch.current;
       const selection = selectionSequence.current;
       try {
         const session = await ensureSession();
         sessionId = session.id;
         if (selectedRef.current !== sessionId) return false;
+        if (fromComposer) {
+          if (draftScopes.current.get(sessionId)?.held)
+            throw new Error("assistant_session_busy");
+          draftScope = { held: true };
+          draftScopes.current.set(sessionId, draftScope);
+        }
         const reference = { runId: freshId(), operationId: freshId() };
         preparingRunId = reference.runId;
-        preparation = { cancelled: false };
+        preparation = { ...reference, sessionId, cancelled: false };
         pendingSends.current.set(reference.runId, preparation);
         detailSequence.current += 1;
         setRun(reference);
@@ -979,6 +1315,7 @@ export function useAssistant(enabled: boolean) {
             sessionId,
             originalDraft,
             originalFiles.map((file) => file.id),
+            draftScope,
           );
         if (generation !== epoch.current)
           throw new Error("assistant_request_expired");
@@ -988,9 +1325,16 @@ export function useAssistant(enabled: boolean) {
           ...reference,
           text,
           attachmentIds: files.map((file) => file.id),
-          ...(editMessageId ? { editMessageId } : {}),
+          ...(editMessageId ? { editMessageId, replaceAttachments: true } : {}),
           ...(regenerateMessageId ? { regenerateMessageId } : {}),
         });
+        // Admission is over even if saving the next draft still takes time.
+        // A return to this conversation must trust the backend's run state.
+        pendingSends.current.delete(reference.runId);
+        if (draftScope && draftScopes.current.get(sessionId) === draftScope) {
+          draftScopes.current.set(sessionId, { held: false });
+          draftScope = undefined;
+        }
         // The backend has registered the run: a conversation read that began
         // before then may still answer without it, and must not end it here.
         // (Unless its run_end came first and already cleared it.)
@@ -1015,13 +1359,26 @@ export function useAssistant(enabled: boolean) {
             ),
           ).catch(showError);
         }
+        if (
+          generation === epoch.current &&
+          selectedRef.current === sessionId &&
+          selection !== selectionSequence.current
+        )
+          await refreshDetail(sessionId);
         return true;
       } catch (reason) {
+        if (fromComposer && sessionId && generation === epoch.current) {
+          if (!drafts.current.get(sessionId))
+            drafts.current.set(sessionId, originalDraft);
+          if (!attachmentDrafts.current.get(sessionId)?.length)
+            attachmentDrafts.current.set(sessionId, originalFiles);
+        }
         if (
           mounted.current &&
           generation === epoch.current &&
-          selection === selectionSequence.current &&
-          (!sessionId || selectedRef.current === sessionId)
+          (sessionId
+            ? selectedRef.current === sessionId
+            : selection === selectionSequence.current)
         ) {
           setRun(null);
           setStream(null);
@@ -1043,10 +1400,14 @@ export function useAssistant(enabled: boolean) {
         return false;
       } finally {
         if (preparingRunId) pendingSends.current.delete(preparingRunId);
+        if (sessionId && draftScope)
+          await releaseDraft(sessionId, draftScope, generation);
         if (
           mounted.current &&
           generation === epoch.current &&
-          selection === selectionSequence.current
+          (sessionId
+            ? selectedRef.current === sessionId
+            : selection === selectionSequence.current)
         )
           setBusy(false);
       }
@@ -1055,6 +1416,7 @@ export function useAssistant(enabled: boolean) {
       detail,
       busy,
       loading,
+      showTrash,
       ensureSession,
       setAttachments,
       setDraft,
@@ -1062,6 +1424,8 @@ export function useAssistant(enabled: boolean) {
       setRunSearch,
       showError,
       persistDraft,
+      releaseDraft,
+      refreshDetail,
     ],
   );
 
@@ -1083,7 +1447,7 @@ export function useAssistant(enabled: boolean) {
         deleted: true,
         ...expectedIdentity(bootstrapRef.current),
       });
-      void refreshSessions();
+      void refreshSessionsRef.current();
     },
     [select, setDraft, refreshSessions],
   );
@@ -1094,96 +1458,129 @@ export function useAssistant(enabled: boolean) {
    * when the pick imports nothing.
    */
   const pickAttachments = useCallback(async () => {
-    if (busy || loading || runRef.current) return;
+    if (
+      busy ||
+      loading ||
+      runRef.current ||
+      showTrash ||
+      detail?.session.deletedAt != null
+    )
+      return;
     setBusy(true);
     setError(null);
     const generation = epoch.current;
     const selection = selectionSequence.current;
     const creates = !selectedRef.current;
     let sessionId: string | undefined;
-    // Still showing the conversation this pick was for.
+    let scope: DraftWriteScope | undefined;
     const current = () =>
       mounted.current &&
       generation === epoch.current &&
-      selection === selectionSequence.current &&
       selectedRef.current === sessionId;
     try {
       const id = (await ensureSession()).id;
       sessionId = id;
-      const added = await assistantApi.pickAttachments(id);
       if (!current()) return;
+      if (draftScopes.current.get(id)?.held)
+        throw new Error("assistant_session_busy");
+      scope = { held: true };
+      draftScopes.current.set(id, scope);
+      // Drain earlier writes and commit removals before the native import can
+      // add its own saved references. Autosave/leave writes cannot pass it.
+      await persistDraft(
+        id,
+        draftRef.current,
+        attachmentsRef.current.map((file) => file.id),
+        scope,
+      );
+      if (!current()) return;
+      const added = await assistantApi.pickAttachments(id);
+      if (generation !== epoch.current) return;
       if (!added.length) {
-        if (creates) await discardCreated(id).catch(showError);
+        if (creates && current()) await discardCreated(id).catch(showError);
         return;
       }
-      const fresh = (list: AssistantAttachment[]) =>
-        added.filter((file) => !list.some((item) => item.id === file.id));
-      setDetail((old) =>
-        old?.session.id === id
-          ? {
-              ...old,
-              attachments: [...old.attachments, ...fresh(old.attachments)],
-            }
-          : old,
-      );
+      const existing = attachmentDrafts.current.get(id) ?? [];
       const files = [
-        ...attachmentsRef.current,
-        ...fresh(attachmentsRef.current),
+        ...existing,
+        ...added.filter(
+          (file) => !existing.some((item) => item.id === file.id),
+        ),
       ];
-      setAttachments(files);
-      // Saved now, not after the draft's pause: imported files that no saved
-      // draft names would be lost to a quick leave.
-      const text = draftRef.current;
+      attachmentDrafts.current.set(id, files);
+      if (current()) {
+        setAttachments(files);
+        setDetail((old) =>
+          old?.session.id === id
+            ? {
+                ...old,
+                attachments: [
+                  ...old.attachments,
+                  ...added.filter(
+                    (file) =>
+                      !old.attachments.some((item) => item.id === file.id),
+                  ),
+                ],
+              }
+            : old,
+        );
+      }
+      const text = drafts.current.get(id) ?? "";
       const ids = files.map((file) => file.id);
-      void persistDraft(id, text, ids)
-        .then(() => {
-          if (generation === epoch.current && selectedRef.current === id)
-            setDetail((old) =>
-              old?.session.id === id
-                ? {
-                    ...old,
-                    session: {
-                      ...old.session,
-                      draft: text,
-                      draftAttachmentIds: ids,
-                    },
-                  }
-                : old,
-            );
-        })
-        .catch((reason) => {
-          if (generation === epoch.current) showError(reason);
-        });
+      // Import already committed these files. Forget the pre-import snapshot
+      // so a local removal or an unchanged empty text cannot skip this write.
+      savedDrafts.current.delete(id);
+      await persistDraft(id, text, ids, scope);
+      if (current())
+        setDetail((old) =>
+          old?.session.id === id
+            ? {
+                ...old,
+                session: {
+                  ...old.session,
+                  draft: text,
+                  draftAttachmentIds: ids,
+                },
+              }
+            : old,
+        );
     } catch (reason) {
       if (
         generation !== epoch.current ||
-        selection !== selectionSequence.current
+        (sessionId
+          ? selectedRef.current !== sessionId
+          : selection !== selectionSequence.current)
       )
         return;
       const created = creates && sessionId && current() ? sessionId : null;
-      // Leaving the conversation clears the page's error: say why after.
       const discarding = created ? discardCreated(created) : null;
       showError(reason);
       await discarding?.catch(showError);
     } finally {
+      if (sessionId && scope) await releaseDraft(sessionId, scope, generation);
       if (
         mounted.current &&
         generation === epoch.current &&
-        selection === selectionSequence.current
+        (sessionId
+          ? selectedRef.current === sessionId
+          : selection === selectionSequence.current)
       )
         setBusy(false);
     }
   }, [
     busy,
     loading,
+    showTrash,
+    detail?.session.deletedAt,
     ensureSession,
     discardCreated,
     persistDraft,
+    releaseDraft,
     setAttachments,
     showError,
   ]);
 
-  /** Take a file out of the draft; it stays in the conversation's files. */
+  /** Saving the new draft removes unused copies; files in message history stay. */
   const removeAttachment = useCallback(
     (id: string) =>
       setAttachments(attachmentsRef.current.filter((file) => file.id !== id)),
@@ -1236,8 +1633,18 @@ export function useAssistant(enabled: boolean) {
     searchSkipped,
     search,
     setSearch,
+    showTrash,
+    viewTrash,
+    setDeleted,
+    deleteSession,
+    exportMarkdown,
+    transfer,
+    transferring,
+    transferResult,
     sessions,
     unreadable,
+    totalUsage,
+    usageUnavailable,
     selectedId,
     detail,
     draft,

@@ -6,6 +6,7 @@ import { ASSISTANT_ERROR_MESSAGES } from "@/lib/api/assistant";
 const SOURCES = [
   ...readdirSync(
     new URL("../../src-tauri/src/services/assistant/", import.meta.url),
+    { recursive: true, encoding: "utf8" },
   )
     .filter((name) => name.endsWith(".rs"))
     .map((name) => `../../src-tauri/src/services/assistant/${name}`),

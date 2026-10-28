@@ -71,6 +71,16 @@ impl AssistantHost {
         Ok(list)
     }
 
+    /// Every saved conversation of this account, including the trash.
+    pub async fn usage_summary(&self) -> Result<Value, String> {
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        let store = self.store(&identity.owner)?;
+        let summary = blocking(move || store.usage_summary()).await?;
+        self.ensure_current(&identity, generation).await?;
+        Ok(summary)
+    }
+
     pub async fn create_session(&self, request: CreateRequest) -> Result<Session, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
@@ -185,6 +195,36 @@ impl AssistantHost {
         remembered?;
         self.decorate(&identity.owner, &mut session);
         Ok(session)
+    }
+
+    pub async fn delete_session(self: &Arc<Self>, request: DeleteRequest) -> Result<(), String> {
+        validate_id(&request.session_id)?;
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if request.expected_owner != identity.owner || request.expected_generation != generation {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        // A previous process may have died while stopping this trashed run.
+        // A missing session can be a tombstone whose disk cleanup is retried.
+        if let Err(error) = self.recover(&identity, &request.session_id).await {
+            if error != "assistant_session_not_found" {
+                return Err(error);
+            }
+        }
+        self.ensure_current(&identity, generation).await?;
+        blocking({
+            let store = self.store(&identity.owner)?;
+            let host = self.clone();
+            move || {
+                store.delete_trashed(&request.session_id, || {
+                    if host.generation() != generation {
+                        return Err(super::host::IDENTITY_CHANGED.into());
+                    }
+                    Ok(())
+                })
+            }
+        })
+        .await
     }
 
     /// Send a message, or edit / regenerate an earlier turn. Returns once the
@@ -445,7 +485,9 @@ fn selection(
     branch: &Branch,
 ) -> Result<Vec<Attachment>, String> {
     let keeps_turn = request.regenerate_message_id.is_some()
-        || (request.edit_message_id.is_some() && request.attachment_ids.is_empty());
+        || (request.edit_message_id.is_some()
+            && request.attachment_ids.is_empty()
+            && !request.replace_attachments);
     let ids = if keeps_turn {
         &branch.replaced_attachments
     } else {
@@ -556,6 +598,17 @@ fn publish_turn(
     search_price: Option<catalog::SearchPrice>,
 ) -> Result<(), String> {
     store::ensure_new_operation(record, &request.operation_id)?;
+    // Admission may have waited on a Key while the user trashed the session
+    // or removed an unsent file. Recheck under the same lock that saves it.
+    if record.session.deleted_at.is_some() {
+        return Err("assistant_session_deleted".into());
+    }
+    if selected
+        .iter()
+        .any(|chosen| !record.attachments.iter().any(|a| a.id == chosen.id))
+    {
+        return Err("assistant_attachment_not_found".into());
+    }
     if let Some(mid) = &branch.revision_of {
         if let Some(index) = record.messages.iter().position(|m| &m.id == mid) {
             for message in &mut record.messages[index..] {
@@ -572,6 +625,7 @@ fn publish_turn(
         created_at: at,
         reasoning: None,
         status: "completed".into(),
+        error_code: None,
         attachments: selected.to_vec(),
         sources: vec![],
         superseded: false,
@@ -586,6 +640,7 @@ fn publish_turn(
         created_at: at,
         reasoning: None,
         status: "streaming".into(),
+        error_code: None,
         attachments: vec![],
         sources: vec![],
         superseded: false,
@@ -726,6 +781,28 @@ mod tests {
     }
 
     #[test]
+    fn an_edit_can_explicitly_remove_all_attachments_without_changing_the_original() {
+        let (record, [a, _, _], user, reply) = fixture();
+        let edit = send(
+            &record,
+            "Text only",
+            json!({
+                "editMessageId": user.id, "attachmentIds": [], "replaceAttachments": true
+            }),
+        );
+        assert!(select(&record, &edit).unwrap().is_empty());
+        assert_eq!(ids(&user.attachments), [a.id.as_str()]);
+        let regenerate = send(
+            &record,
+            "",
+            json!({
+                "regenerateMessageId": reply.id, "attachmentIds": [], "replaceAttachments": true
+            }),
+        );
+        assert_eq!(ids(&select(&record, &regenerate).unwrap()), [a.id.as_str()]);
+    }
+
+    #[test]
     fn the_runtime_gets_every_file_of_the_conversation_and_the_turns_selection() {
         let (record, [a, b, _], _, reply) = fixture();
         let root = Path::new("/config/assistant/owner/sid/attachments");
@@ -792,6 +869,48 @@ mod tests {
         assert_eq!(record.session.title, "b.md");
         // The conversation's own list keeps the last outcomes.
         assert_eq!(record.attachments[0].status, "partial");
+    }
+
+    #[test]
+    fn publishing_a_turn_rechecks_trash_and_removed_attachments_after_admission() {
+        for trashed in [false, true] {
+            let (mut record, [file, _, _], _, _) = fixture();
+            let request = send(&record, "question", json!({"attachmentIds": [file.id]}));
+            let branch = Branch::resolve(&record, &request).unwrap();
+            let selected = selection(&record, &request, &branch).unwrap();
+            let control = RunControl::new(
+                Identity {
+                    owner: "ab".repeat(32),
+                    apex: "ofox.ai".into(),
+                },
+                &request,
+                "test-key-0123".into(),
+            );
+            if trashed {
+                record.session.deleted_at = Some(now());
+            } else {
+                record.attachments.retain(|item| item.id != file.id);
+            }
+            let before = serde_json::to_value(&record).unwrap();
+            let result = publish_turn(
+                &mut record,
+                &control,
+                &request,
+                &branch,
+                "question",
+                &selected,
+                None,
+            );
+            assert_eq!(
+                result.unwrap_err(),
+                if trashed {
+                    "assistant_session_deleted"
+                } else {
+                    "assistant_attachment_not_found"
+                }
+            );
+            assert_eq!(serde_json::to_value(&record).unwrap(), before);
+        }
     }
 
     fn sourced(message: &mut Message, urls: &[&str]) {

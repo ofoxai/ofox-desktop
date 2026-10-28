@@ -13,12 +13,16 @@ import {
   ArrowUp,
   ArrowUpRight,
   Globe,
+  Download,
+  Upload,
   Loader2,
   MessageSquare,
   Paperclip,
   Pencil,
   Plus,
   Square,
+  Trash2,
+  RotateCcw,
   X,
 } from "lucide-react";
 import { assistantErrorKey, type AssistantUsage } from "@/lib/api/assistant";
@@ -26,6 +30,7 @@ import { fmtCost, fmtTokens } from "@/lib/format";
 import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
+import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { isSendable } from "@/utils/assistantAttachments";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -154,11 +159,17 @@ function AssistantWorkspace() {
   const assistant = useAssistant(true);
   const { detail, bootstrap, run, busy } = assistant;
   const [rename, setRename] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [exported, setExported] = useState(false);
   const blockedHint = useId();
   const visionHint = useId();
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const conversationsButton = useRef<HTMLButtonElement>(null);
+  const trashButton = useRef<HTMLButtonElement>(null);
+  const deleteButton = useRef<HTMLButtonElement>(null);
+  const renameButton = useRef<HTMLButtonElement>(null);
   const focusStarter = useRef(false);
   const session = detail?.session;
   const available = Boolean(
@@ -166,7 +177,8 @@ function AssistantWorkspace() {
       bootstrap.models.length > 0 &&
       assistant.connected,
   );
-  const writable = available && !run && !busy && !assistant.loading;
+  const trashed = assistant.showTrash || session?.deletedAt != null;
+  const writable = available && !run && !busy && !assistant.loading && !trashed;
   // While a run goes on, or until its saved outcome is read back, the totals
   // are running ones and no cost is claimed.
   const usage = usageSummary(
@@ -193,6 +205,7 @@ function AssistantWorkspace() {
   // change yet.
   const searchLocked =
     !available ||
+    trashed ||
     busy ||
     assistant.loading ||
     Boolean(assistant.selectedId && session?.id !== assistant.selectedId) ||
@@ -251,6 +264,8 @@ function AssistantWorkspace() {
 
   useEffect(() => {
     setRename(null);
+    setConfirmDelete(false);
+    setExported(false);
     follow.current = true;
   }, [assistant.selectedId]);
   useEffect(() => {
@@ -297,6 +312,72 @@ function AssistantWorkspace() {
           <Plus aria-hidden className="h-3.5 w-3.5" />
           {t("assistant.newConversation")}
         </Button>
+        <div className="grid shrink-0 grid-cols-2 gap-1">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={busy || assistant.loading || !bootstrap?.owner}
+            aria-label={t("assistant.backupTitle")}
+            title={t("assistant.backupHint")}
+            onClick={() => void assistant.transfer("backup")}
+          >
+            <Download aria-hidden className="h-3.5 w-3.5" />
+            {t("assistant.backupShort")}
+          </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={busy || assistant.loading || !bootstrap?.owner}
+            aria-label={t("assistant.restoreBackupTitle")}
+            title={t("assistant.backupHint")}
+            onClick={() => void assistant.transfer("restore")}
+          >
+            <Upload aria-hidden className="h-3.5 w-3.5" />
+            {t("assistant.restoreBackupShort")}
+          </Button>
+        </div>
+        {assistant.transferResult && (
+          <p
+            role="status"
+            className="px-1 text-note leading-relaxed text-ink-muted"
+          >
+            {assistant.transferResult.kind === "backup"
+              ? t("assistant.backupSaved")
+              : t("assistant.restoreSaved", {
+                  imported: assistant.transferResult.imported,
+                  count: assistant.transferResult.skipped,
+                })}
+          </p>
+        )}
+        <div
+          className="grid grid-cols-2 gap-1"
+          aria-label={t("assistant.historyView")}
+        >
+          <Button
+            variant="ghost"
+            ref={conversationsButton}
+            disabled={assistant.transferring}
+            className={cn(
+              !assistant.showTrash && "bg-brand-soft text-brand-ink",
+            )}
+            aria-pressed={!assistant.showTrash}
+            onClick={() => assistant.viewTrash(false)}
+          >
+            {t("assistant.conversations")}
+          </Button>
+          <Button
+            variant="ghost"
+            ref={trashButton}
+            disabled={assistant.transferring}
+            className={cn(
+              assistant.showTrash && "bg-brand-soft text-brand-ink",
+            )}
+            aria-pressed={assistant.showTrash}
+            onClick={() => assistant.viewTrash(true)}
+          >
+            {t("assistant.trash")}
+          </Button>
+        </div>
         <SearchInput
           className="w-full"
           aria-label={t("assistant.search")}
@@ -310,12 +391,13 @@ function AssistantWorkspace() {
               <li key={item.id}>
                 <button
                   type="button"
+                  disabled={assistant.transferring}
                   aria-current={
                     assistant.selectedId === item.id ? "page" : undefined
                   }
                   onClick={() => assistant.select(item.id)}
                   className={cn(
-                    "w-full rounded-ctl px-2 py-2 text-left text-ctl transition-colors hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand",
+                    "w-full rounded-ctl px-2 py-2 text-left text-ctl transition-colors hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-50",
                     assistant.selectedId === item.id &&
                       "bg-brand-soft text-brand-ink",
                   )}
@@ -353,11 +435,29 @@ function AssistantWorkspace() {
               {t(
                 assistant.search
                   ? "assistant.noMatches"
-                  : "assistant.noConversations",
+                  : assistant.showTrash
+                    ? "assistant.trashEmpty"
+                    : "assistant.noConversations",
               )}
             </p>
           )}
         </div>
+        <section
+          aria-label={t("assistant.allUsage")}
+          className="shrink-0 border-t border-line px-1 pt-2 text-note text-ink-muted"
+        >
+          <h2 className="font-medium text-ink">{t("assistant.allUsage")}</h2>
+          <p className="mt-1 leading-relaxed">
+            {assistant.usageUnavailable
+              ? t("assistant.usageUnavailable")
+              : assistant.totalUsage
+                ? usageSummary(assistant.totalUsage, true, t)
+                : t("common.loading")}
+          </p>
+          <p className="mt-1 leading-relaxed">
+            {t("assistant.usageIncludesTrash")}
+          </p>
+        </section>
         <p className="border-t border-line px-1 pt-2 text-note leading-relaxed text-ink-muted">
           {t("assistant.boundary")}
         </p>
@@ -374,6 +474,7 @@ function AssistantWorkspace() {
             {session && (
               <Button
                 variant="icon"
+                ref={renameButton}
                 title={t("assistant.rename")}
                 aria-label={t("assistant.rename")}
                 onClick={() => setRename(session.title)}
@@ -382,6 +483,67 @@ function AssistantWorkspace() {
               </Button>
             )}
           </div>
+          {session && (
+            <div className="flex shrink-0 items-center gap-1">
+              <Button
+                variant="icon"
+                aria-label={t("assistant.exportMarkdown")}
+                title={t("assistant.exportMarkdown")}
+                disabled={busy || Boolean(run) || assistant.loading}
+                onClick={() => {
+                  setExported(false);
+                  void assistant
+                    .exportMarkdown((snapshot) =>
+                      assistantMarkdown(snapshot, t, i18n.language),
+                    )
+                    .then(setExported);
+                }}
+              >
+                <Download aria-hidden className="h-3.5 w-3.5" />
+              </Button>
+              {session.deletedAt != null ? (
+                <>
+                  <Button
+                    variant="icon"
+                    aria-label={t("assistant.restore")}
+                    title={t("assistant.restore")}
+                    disabled={busy || Boolean(run)}
+                    onClick={() =>
+                      void assistant.setDeleted(false).then((saved) => {
+                        if (saved) conversationsButton.current?.focus();
+                      })
+                    }
+                  >
+                    <RotateCcw aria-hidden className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="icon"
+                    ref={deleteButton}
+                    aria-label={t("assistant.deletePermanently")}
+                    title={t("assistant.deletePermanently")}
+                    disabled={busy || Boolean(run)}
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    <Trash2 aria-hidden className="h-3.5 w-3.5 text-danger" />
+                  </Button>
+                </>
+              ) : (
+                <Button
+                  variant="icon"
+                  aria-label={t("assistant.moveToTrash")}
+                  title={t("assistant.moveToTrash")}
+                  disabled={busy}
+                  onClick={() =>
+                    void assistant.setDeleted(true).then((saved) => {
+                      if (saved) conversationsButton.current?.focus();
+                    })
+                  }
+                >
+                  <Trash2 aria-hidden className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          )}
           {Boolean(session || bootstrap?.models.length) && (
             <MenuSelect
               aria-label={t("assistant.model")}
@@ -421,6 +583,14 @@ function AssistantWorkspace() {
             />
           )}
         </header>
+        {exported && (
+          <p
+            role="status"
+            className="shrink-0 px-4 py-2 text-note text-ink-muted"
+          >
+            {t("assistant.markdownSaved")}
+          </p>
+        )}
         {bootstrap?.modelUnavailableReason && (
           <p
             role="status"
@@ -494,10 +664,16 @@ function AssistantWorkspace() {
                     <MessageSquare aria-hidden className="h-5 w-5" />
                   </div>
                   <h2 className="text-title font-semibold">
-                    {t("assistant.welcome")}
+                    {t(trashed ? "assistant.trash" : "assistant.welcome")}
                   </h2>
                   <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
-                    {t("assistant.description")}
+                    {t(
+                      trashed
+                        ? session
+                          ? "assistant.trashHint"
+                          : "assistant.trashSelect"
+                        : "assistant.description",
+                    )}
                   </p>
                   {writable && !assistant.draft.trim() && (
                     <div className="mt-5 grid w-full max-w-[300px] gap-2">
@@ -522,7 +698,7 @@ function AssistantWorkspace() {
                       ))}
                     </div>
                   )}
-                  {available && (
+                  {available && !trashed && (
                     <p className="mt-4 text-note text-ink-muted">
                       {t("assistant.startHint")}
                     </p>
@@ -536,8 +712,12 @@ function AssistantWorkspace() {
                     message={message}
                     searchUnavailable={assistant.searchSkipped.has(message.id)}
                     disabled={!writable}
-                    onEdit={(text) =>
-                      assistant.send({ text, editMessageId: message.id })
+                    onEdit={(text, attachments) =>
+                      assistant.send({
+                        text,
+                        attachments,
+                        editMessageId: message.id,
+                      })
                     }
                     onRegenerate={() =>
                       void assistant.send({
@@ -579,15 +759,24 @@ function AssistantWorkspace() {
             </>
           )}
         </div>
-        <footer className="shrink-0 bg-card px-4 pb-3 pt-2">
-          <div className="mx-auto w-full max-w-[760px]">
-            <div className="rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
+        {session?.deletedAt != null && (
+          <p
+            role="status"
+            className="border-t border-line px-4 py-2 text-note text-ink-muted"
+          >
+            {t("assistant.trashHint")}
+          </p>
+        )}
+        <footer className="flex max-h-[50%] min-h-0 shrink-0 flex-col bg-card px-4 pb-3 pt-2">
+          <div className="mx-auto flex min-h-0 w-full max-w-[760px] flex-col">
+            <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
               {/* Kept mounted: its live region announces the warnings, and
                   the list hands focus back once its last file is removed.
                   Only the list scrolls: the warnings that explain why Send
                   is disabled stay in view below it. */}
               <div
                 className={cn(
+                  "min-h-0",
                   files.length > 0 && "max-h-36 overflow-y-auto px-3 pt-3",
                 )}
               >
@@ -595,10 +784,10 @@ function AssistantWorkspace() {
                   files={files}
                   onRemove={assistant.removeAttachment}
                   onAllRemoved={focusComposer}
-                  removeDisabled={busy || Boolean(run)}
+                  removeDisabled={busy || Boolean(run) || trashed}
                 />
               </div>
-              <div aria-live="polite" className="px-3">
+              <div aria-live="polite" className="shrink-0 px-3">
                 {blockedFiles && (
                   <p id={blockedHint} className="mt-1.5 text-note text-danger">
                     {t("assistant.attachmentsBlocked")}
@@ -613,12 +802,12 @@ function AssistantWorkspace() {
               <Textarea
                 ref={composer}
                 rows={3}
-                className="max-h-40 min-h-[76px] resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0"
+                className="max-h-40 min-h-[76px] shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0"
                 aria-label={t("assistant.message")}
                 placeholder={t("assistant.composerPlaceholder")}
                 value={assistant.draft}
                 disabled={!available}
-                readOnly={busy}
+                readOnly={busy || trashed}
                 onChange={(event) => assistant.setDraft(event.target.value)}
                 onKeyDown={(event) => {
                   // WKWebView reports the Enter that confirms an IME candidate
@@ -634,7 +823,7 @@ function AssistantWorkspace() {
                   }
                 }}
               />
-              <div className="flex items-center justify-between gap-2 pb-2 pl-2 pr-3">
+              <div className="flex shrink-0 items-center justify-between gap-2 pb-2 pl-2 pr-3">
                 <div className="flex min-w-0 items-center gap-1.5">
                   <Button
                     variant="icon"
@@ -694,25 +883,80 @@ function AssistantWorkspace() {
               usage ||
               showSearchNote ||
               assistant.webSearchWaits) && (
-              <div className="mt-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-1 text-note text-ink-muted">
+              <div className="mt-2 flex shrink-0 flex-wrap items-start justify-between gap-x-3 gap-y-1 text-note text-ink-muted">
                 {keyMissing && <p>{t("assistant.keyMissingHint")}</p>}
                 {showSearchNote && <p>{searchNote}</p>}
                 {assistant.webSearchWaits && (
                   <p role="status">{t("assistant.webSearchNextMessage")}</p>
                 )}
-                {usage && <p className="ml-auto text-right">{usage}</p>}
+                {usage && (
+                  <p
+                    aria-label={t("assistant.conversationUsage")}
+                    className="ml-auto text-right"
+                  >
+                    {usage}
+                  </p>
+                )}
               </div>
             )}
           </div>
         </footer>
       </section>
       <Dialog
+        open={confirmDelete}
+        onOpenChange={(open) => {
+          if (!busy) setConfirmDelete(open);
+        }}
+      >
+        <DialogContent
+          className="max-w-sm"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            (deleteButton.current ?? trashButton.current)?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{t("assistant.deleteTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("assistant.deleteDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              autoFocus
+              variant="ghost"
+              disabled={busy}
+              onClick={() => setConfirmDelete(false)}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              variant="danger"
+              disabled={busy}
+              onClick={() =>
+                void assistant.deleteSession().then((deleted) => {
+                  if (deleted) setConfirmDelete(false);
+                })
+              }
+            >
+              {t("assistant.deletePermanently")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
         open={rename !== null}
         onOpenChange={(open) => {
           if (!open) setRename(null);
         }}
       >
-        <DialogContent className="max-w-sm">
+        <DialogContent
+          className="max-w-sm"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            (renameButton.current ?? conversationsButton.current)?.focus();
+          }}
+        >
           <DialogHeader>
             <DialogTitle>{t("assistant.rename")}</DialogTitle>
             <DialogDescription>

@@ -1,4 +1,4 @@
-import { memo, useId, useState } from "react";
+import { memo, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -10,7 +10,12 @@ import {
   RotateCw,
   UserRound,
 } from "lucide-react";
-import type { AssistantMessage, AssistantSource } from "@/lib/api/assistant";
+import type {
+  AssistantAttachment,
+  AssistantMessage,
+  AssistantSource,
+} from "@/lib/api/assistant";
+import { assistantErrorKey } from "@/lib/api/assistant";
 import { settingsApi } from "@/lib/api/settings";
 import { splitUrlTail } from "@/lib/urlTail";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
@@ -183,13 +188,18 @@ export function AssistantMessageView({
   activity?: AssistantActivity | null;
   searchUnavailable?: boolean;
   disabled: boolean;
-  onEdit: (text: string) => Promise<boolean>;
+  onEdit: (
+    text: string,
+    attachments: AssistantAttachment[],
+  ) => Promise<boolean>;
   onRegenerate: () => void;
   onRetry?: () => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(message.content);
+  const [editFiles, setEditFiles] = useState<AssistantAttachment[]>([]);
+  const editor = useRef<HTMLTextAreaElement>(null);
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
   const files = message.attachments ?? [];
@@ -217,9 +227,6 @@ export function AssistantMessageView({
     </p>
   );
   const resendable = files.filter(isSendable);
-  // An edit with no files of its own keeps all of the original's, so one
-  // whose files all fail to read could only fail the same way again.
-  const noReadableFiles = files.length > 0 && resendable.length === 0;
   // Edit and regenerate branch from the model's own history: a turn that
   // never reached it (it failed first) has no entry there to branch from.
   const branchable =
@@ -268,6 +275,7 @@ export function AssistantMessageView({
       {editing ? (
         <div className="space-y-2">
           <Textarea
+            ref={editor}
             autoFocus
             aria-label={t("assistant.editMessage")}
             value={text}
@@ -275,22 +283,24 @@ export function AssistantMessageView({
           />
           {files.length > 0 && (
             <>
-              <AttachmentList files={files} />
-              <p
-                className={cn(
-                  "text-note",
-                  noReadableFiles ? "text-danger" : "text-ink-muted",
-                )}
-              >
-                {noReadableFiles
-                  ? t("assistant.editNoReadableFiles")
-                  : [
-                      t("assistant.editKeepsFiles"),
-                      resendable.length < files.length &&
-                        t("assistant.editDropsFiles"),
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
+              <AttachmentList
+                files={editFiles}
+                onRemove={(id) =>
+                  setEditFiles((current) =>
+                    current.filter((file) => file.id !== id),
+                  )
+                }
+                onAllRemoved={() => editor.current?.focus()}
+                removeDisabled={disabled}
+              />
+              <p className="text-note text-ink-muted">
+                {[
+                  editFiles.length > 0 && t("assistant.editKeepsFiles"),
+                  resendable.length < files.length &&
+                    t("assistant.editDropsFiles"),
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
               </p>
             </>
           )}
@@ -299,13 +309,9 @@ export function AssistantMessageView({
           </p>
           <div className="flex gap-2">
             <Button
-              disabled={
-                disabled ||
-                noReadableFiles ||
-                (!text.trim() && !resendable.length)
-              }
+              disabled={disabled || (!text.trim() && !editFiles.length)}
               onClick={() => {
-                void onEdit(text).then((sent) => {
+                void onEdit(text, editFiles).then((sent) => {
                   if (sent) setEditing(false);
                 });
               }}
@@ -341,6 +347,11 @@ export function AssistantMessageView({
           {progress && statusLine(progress, "mt-2")}
         </>
       )}
+      {message.status === "error" && message.errorCode && (
+        <p role="alert" className="mt-2 text-ctl text-danger">
+          {t(assistantErrorKey(message.errorCode))}
+        </p>
+      )}
       {searchUnavailable && !isUser && (
         <p className="mt-2 text-note text-ink-muted">
           {t("assistant.searchSkipped")}
@@ -360,6 +371,7 @@ export function AssistantMessageView({
               disabled={disabled}
               onClick={() => {
                 setText(message.content);
+                setEditFiles(resendable);
                 setEditing(true);
               }}
             >

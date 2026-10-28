@@ -11,13 +11,13 @@ use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
 
 /// The formats the runtime reads (assistant-runtime README, "Attachments"):
-/// images, PDF and UTF-8 text. Office documents are not among them.
+/// images, PDF, UTF-8 text and text-only OOXML Office documents.
 pub const EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "webp", "gif", "pdf", "txt", "md", "csv", "json", "log", "yaml", "yml",
-    "toml", "xml", "html", "js", "ts", "py", "rs", "go",
+    "toml", "xml", "html", "js", "ts", "py", "rs", "go", "docx", "xlsx", "pptx",
 ];
 /// The name of the dialog's file filter: format names, not a sentence.
-pub const FILTER_NAME: &str = "Images, PDF, Text";
+pub const FILTER_NAME: &str = "PNG, JPG, WebP, GIF, PDF, DOCX, XLSX, PPTX, TXT";
 
 pub const MAX_PER_PICK: usize = 10;
 pub const MAX_PER_SESSION: usize = 200;
@@ -48,6 +48,9 @@ pub fn mime_type(extension: &str) -> Option<&'static str> {
         "webp" => "image/webp",
         "gif" => "image/gif",
         "pdf" => "application/pdf",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         "txt" | "log" => "text/plain",
         "md" => "text/markdown",
         "csv" => "text/csv",
@@ -80,7 +83,10 @@ pub fn import(
     if sources.is_empty() {
         return Ok(vec![]);
     }
-    stage(store, sid, sources)?.commit(store, sid, precondition)
+    store.with_attachment_lock(sid, || {
+        store.cleanup_orphans_locked(sid)?;
+        stage(store, sid, sources)?.commit(store, sid, precondition)
+    })
 }
 
 /// Files copied into the attachments folder but not yet in the record. Until
@@ -166,6 +172,10 @@ impl Staged {
         let saved = store.mutate(sid, |record| {
             precondition()?;
             check_room(record, self.items.len(), bytes)?;
+            record
+                .session
+                .draft_attachment_ids
+                .extend(self.items.iter().map(|item| item.id.clone()));
             record.attachments.extend(self.items.iter().cloned());
             Ok(())
         });
@@ -191,6 +201,9 @@ impl Staged {
 fn check_room(record: &SessionRecord, count: usize, bytes: u64) -> Result<(), String> {
     if record.session.deleted_at.is_some() {
         return Err("assistant_session_deleted".into());
+    }
+    if record.session.active_run.is_some() {
+        return Err("assistant_session_busy".into());
     }
     if record.attachments.len().saturating_add(count) > MAX_PER_SESSION {
         return Err(TOO_MANY.into());
@@ -304,6 +317,8 @@ mod tests {
     fn seed(store: &AssistantStore, sid: &str, attachments: Vec<Attachment>) {
         store
             .mutate(sid, |record| {
+                record.session.draft_attachment_ids =
+                    attachments.iter().map(|a| a.id.clone()).collect();
                 record.attachments = attachments;
                 Ok(())
             })
@@ -311,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn every_format_the_runtime_reads_has_its_type_and_office_files_have_none() {
+    fn every_readable_format_has_its_type_and_legacy_office_is_unsupported() {
         for extension in EXTENSIONS {
             assert!(mime_type(extension).is_some(), "{extension}");
         }
@@ -331,8 +346,41 @@ mod tests {
         ] {
             assert_eq!(mime_type(extension), Some(mime), "{extension}");
         }
-        for extension in ["docx", "xlsx", "pptx", "doc", "exe", "zip", "", "PNG"] {
+        for extension in ["doc", "xls", "ppt", "exe", "zip", "", "PNG"] {
             assert_eq!(mime_type(extension), None, "{extension}");
+        }
+    }
+
+    #[test]
+    fn imported_copies_and_their_draft_references_are_committed_together() {
+        let (config, store, sid) = fixture();
+        let source = file(config.path(), "new.txt", b"unsent");
+        let imported = import(&store, &sid, &[source], ok).unwrap();
+        let saved = store.load_record(&sid).unwrap();
+        assert_eq!(saved.session.draft_attachment_ids, [imported[0].id.clone()]);
+        store.cleanup_orphan_attachments(&sid).unwrap();
+        assert!(store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(&imported[0].id)
+            .is_file());
+    }
+
+    #[test]
+    fn office_files_can_be_imported_with_official_mime_types() {
+        let (config, store, sid) = fixture();
+        for (extension, suffix) in [
+            ("docx", "wordprocessingml.document"),
+            ("xlsx", "spreadsheetml.sheet"),
+            ("pptx", "presentationml.presentation"),
+        ] {
+            let source = file(config.path(), &format!("中文.{extension}"), b"PK");
+            let imported = import(&store, &sid, &[source], ok).unwrap();
+            assert_eq!(
+                imported[0].mime_type,
+                format!("application/vnd.openxmlformats-officedocument.{suffix}")
+            );
+            assert!(EXTENSIONS.contains(&extension));
         }
     }
 
@@ -451,9 +499,7 @@ mod tests {
         let (config, store, sid) = fixture();
         let fine = file(config.path(), "fine.txt", b"x");
         for (source, code) in [
-            (file(config.path(), "report.docx", b"PK"), UNSUPPORTED),
-            (file(config.path(), "sheet.xlsx", b"PK"), UNSUPPORTED),
-            (file(config.path(), "deck.pptx", b"PK"), UNSUPPORTED),
+            (file(config.path(), "old.doc", b"binary"), UNSUPPORTED),
             (file(config.path(), "README", b"x"), UNSUPPORTED),
             (config.path().join("missing.txt"), UNREADABLE),
             (

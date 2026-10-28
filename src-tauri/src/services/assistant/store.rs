@@ -12,12 +12,16 @@
 //! Every write replaces the whole file atomically (temp file + rename), and
 //! writers to one file are serialized in this process. A damaged file is an
 //! error for that session; it is never read as, or overwritten by, an empty one.
+mod backup;
+mod lifecycle;
+pub use backup::RestoreReport;
+
 use super::types::*;
 use crate::settings::KeyOwner;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -158,6 +162,7 @@ impl AssistantStore {
                 active_run: None,
                 draft: String::new(),
                 draft_attachment_ids: vec![],
+                cleanup_warning: None,
             },
             messages: vec![],
             attachments: vec![],
@@ -250,11 +255,115 @@ impl AssistantStore {
         request: &UpdateRequest,
         precondition: impl FnOnce() -> Result<(), String>,
     ) -> Result<Session, String> {
-        self.mutate(&request.session_id, |record| {
-            precondition()?;
-            apply_update(record, request)?;
-            Ok(record.session.clone())
+        self.with_attachment_lock(&request.session_id, || {
+            let mut session = self.mutate(&request.session_id, |record| {
+                precondition()?;
+                let previous = record.session.draft_attachment_ids.clone();
+                apply_update(record, request)?;
+                let removed: HashSet<_> = previous
+                    .into_iter()
+                    .filter(|id| !record.session.draft_attachment_ids.contains(id))
+                    .filter(|id| {
+                        !record
+                            .messages
+                            .iter()
+                            .any(|m| m.attachments.iter().any(|a| &a.id == id))
+                    })
+                    .collect();
+                if !removed.is_empty() {
+                    // A live reader can access any file of its conversation.
+                    if record.session.active_run.is_some() {
+                        return Err("assistant_session_busy".into());
+                    }
+                    record
+                        .attachments
+                        .retain(|item| !removed.contains(&item.id));
+                }
+                Ok(record.session.clone())
+            })?;
+            // Persist removed references first. A crash can then leave only
+            // an unreferenced copy, never a saved draft pointing at a lost file.
+            if self.cleanup_orphans_locked(&request.session_id).is_err() {
+                // The update is durable. Return it so host side effects and
+                // renderer state still follow the committed settings.
+                session.cleanup_warning = Some("assistant_attachment_cleanup_failed".into());
+            }
+            Ok(session)
         })
+    }
+
+    /// Serializes file imports and cleanup before taking the session record
+    /// lock. An in-flight import must not look like a crash orphan to cleanup.
+    pub(super) fn with_attachment_lock<T>(
+        &self,
+        sid: &str,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        validate_id(sid)?;
+        let lock = file_lock(&self.root.join(sid).join(ATTACHMENTS_DIR));
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        action()
+    }
+
+    /// Remove copies a crashed import never published. Unknown filenames and
+    /// directories are left alone; symlinks are removed, never followed.
+    pub fn cleanup_orphan_attachments(&self, sid: &str) -> Result<usize, String> {
+        self.with_attachment_lock(sid, || self.cleanup_orphans_locked(sid))
+    }
+
+    /// Requires the attachment IO lock. Readers publish their active run under
+    /// the record lock before opening files, so cleanup never races a reader.
+    pub(super) fn cleanup_orphans_locked(&self, sid: &str) -> Result<usize, String> {
+        let lock = file_lock(&self.root.join(sid).join(SESSION_FILE));
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut record = read_record(&self.root, sid)?;
+        if record.session.active_run.is_some() {
+            return Ok(0);
+        }
+        let known: HashSet<String> = record
+            .session
+            .draft_attachment_ids
+            .iter()
+            .cloned()
+            .chain(
+                record
+                    .messages
+                    .iter()
+                    .flat_map(|m| &m.attachments)
+                    .map(|a| a.id.clone()),
+            )
+            .collect();
+        let before = record.attachments.len();
+        record.attachments.retain(|a| known.contains(&a.id));
+        if record.attachments.len() != before {
+            // Older versions could publish import metadata before saving the
+            // draft. Reclaim those unused entries before touching their bytes.
+            check_record(&record, sid)?;
+            write_record(&self.root.join(sid).join(SESSION_FILE), &record)?;
+        }
+        let dir = self.attachment_root(sid)?;
+        if !real_dir(&dir)? {
+            return Ok(0);
+        }
+        let mut removed = 0;
+        for entry in fs::read_dir(dir).map_err(|_| "assistant_attachment_cleanup_failed")? {
+            let entry = entry.map_err(|_| "assistant_attachment_cleanup_failed")?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if validate_id(name).is_err() || known.contains(name) {
+                continue;
+            }
+            let kind = entry
+                .file_type()
+                .map_err(|_| "assistant_attachment_cleanup_failed")?;
+            if kind.is_file() || kind.is_symlink() {
+                fs::remove_file(entry.path()).map_err(|_| "assistant_attachment_cleanup_failed")?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
     }
 
     /// Blocking file IO: async callers run it in `spawn_blocking`.
@@ -734,9 +843,235 @@ mod tests {
             operation_id: id(),
             text: "New text".into(),
             attachment_ids: vec![],
+            replace_attachments: false,
             edit_message_id: edit.map(str::to_owned),
             regenerate_message_id: regenerate.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn removing_draft_attachments_deletes_only_unreferenced_copies_and_frees_quota() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let unused = attachment("ready");
+        let kept = attachment("ready");
+        let dir = store.attachment_dir(&sid).unwrap();
+        for item in [&unused, &kept] {
+            fs::write(dir.join(&item.id), b"x").unwrap();
+        }
+        store
+            .mutate(&sid, |record| {
+                record.attachments = vec![unused.clone(), kept.clone()];
+                record.session.draft_attachment_ids = vec![unused.id.clone(), kept.id.clone()];
+                let mut original = message("Previous version");
+                original.superseded = true;
+                original.attachments = vec![kept.clone()];
+                record.messages.push(original);
+                Ok(())
+            })
+            .unwrap();
+        let mut remove = request(&sid);
+        remove.draft_attachment_ids = Some(vec![]);
+        store.update(&remove, no_precondition).unwrap();
+        let saved = store.load_record(&sid).unwrap();
+        assert_eq!(saved.attachments.len(), 1);
+        assert_eq!(saved.attachments[0].id, kept.id);
+        assert!(!dir.join(&unused.id).exists());
+        assert_eq!(fs::read(dir.join(&kept.id)).unwrap(), b"x");
+        assert_eq!(saved.messages[0].attachments[0].id, kept.id);
+    }
+
+    #[test]
+    fn removing_draft_attachments_cannot_race_a_running_reader() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let file = attachment("ready");
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(file.clone());
+                record.session.draft_attachment_ids.push(file.id.clone());
+                record.session.active_run = Some(RunRef {
+                    run_id: id(),
+                    operation_id: id(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        let mut remove = request(&sid);
+        remove.draft_attachment_ids = Some(vec![]);
+        assert_eq!(
+            store.update(&remove, no_precondition).unwrap_err(),
+            "assistant_session_busy"
+        );
+        assert_eq!(
+            store
+                .load_record(&sid)
+                .unwrap()
+                .session
+                .draft_attachment_ids,
+            [file.id]
+        );
+    }
+
+    #[test]
+    fn cleanup_reclaims_legacy_unreferenced_metadata_and_crash_orphans() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let lost = attachment("ready");
+        let kept = attachment("ready");
+        let orphan = id();
+        let dir = store.attachment_dir(&sid).unwrap();
+        for id in [&lost.id, &kept.id, &orphan] {
+            fs::write(dir.join(id), b"x").unwrap();
+        }
+        fs::write(dir.join("unrelated.txt"), b"keep").unwrap();
+        store
+            .mutate(&sid, |record| {
+                record.attachments = vec![lost.clone(), kept.clone()];
+                record.session.draft_attachment_ids = vec![kept.id.clone()];
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.cleanup_orphan_attachments(&sid).unwrap(), 2);
+        assert_eq!(store.load_record(&sid).unwrap().attachments.len(), 1);
+        assert!(dir.join(&kept.id).exists());
+        assert!(dir.join("unrelated.txt").exists());
+        assert!(!dir.join(&lost.id).exists());
+        assert!(!dir.join(orphan).exists());
+    }
+
+    #[test]
+    fn failed_metadata_save_never_deletes_the_old_draft_file() {
+        let (config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let item = attachment("ready");
+        let copy = store.attachment_dir(&sid).unwrap().join(&item.id);
+        fs::write(&copy, b"original").unwrap();
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(item.clone());
+                record.session.draft_attachment_ids.push(item.id.clone());
+                Ok(())
+            })
+            .unwrap();
+        let file = session_file(config.path(), &store, &sid);
+        let original = fs::read(&file).unwrap();
+        let mut remove = request(&sid);
+        remove.draft_attachment_ids = Some(vec![]);
+        // Fault injected after reading the record, before its atomic save.
+        assert!(store
+            .update(&remove, || {
+                fs::remove_file(&file).unwrap();
+                fs::create_dir(&file).unwrap();
+                Ok(())
+            })
+            .is_err());
+        assert_eq!(fs::read(copy).unwrap(), b"original");
+        fs::remove_dir(&file).unwrap();
+        fs::write(&file, original).unwrap();
+        assert_eq!(
+            store
+                .load_record(&sid)
+                .unwrap()
+                .session
+                .draft_attachment_ids,
+            [item.id]
+        );
+    }
+
+    #[test]
+    fn a_fresh_store_finishes_cleanup_after_metadata_was_committed_before_a_crash() {
+        let (config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let copy = store.attachment_dir(&sid).unwrap().join(id());
+        // The record has already removed references, but unlink never ran.
+        fs::write(&copy, b"left behind after commit").unwrap();
+        let restarted = store_for(config.path(), "user", "org");
+        assert_eq!(restarted.cleanup_orphan_attachments(&sid).unwrap(), 1);
+        assert!(!copy.exists());
+        assert_eq!(restarted.cleanup_orphan_attachments(&sid).unwrap(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_unlinks_an_orphan_symlink_without_touching_its_target() {
+        let (config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let outside = config.path().join("keep.txt");
+        fs::write(&outside, b"not an attachment").unwrap();
+        let link = store.attachment_dir(&sid).unwrap().join(id());
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert_eq!(store.cleanup_orphan_attachments(&sid).unwrap(), 1);
+        assert_eq!(fs::read(outside).unwrap(), b"not an attachment");
+        assert!(fs::symlink_metadata(link).is_err());
+    }
+
+    #[test]
+    fn a_committed_update_returns_success_even_when_orphan_cleanup_fails() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let dir = store.attachment_dir(&sid).unwrap();
+        fs::remove_dir(&dir).unwrap();
+        fs::write(&dir, b"blocked attachment directory").unwrap();
+        let request: UpdateRequest = serde_json::from_value(json!({
+            "sessionId": sid, "webSearch": true, "modelId": "another-model"
+        }))
+        .unwrap();
+        let session = store.update(&request, || Ok(())).unwrap();
+        assert!(session.web_search);
+        assert_eq!(session.model_id, "another-model");
+        assert_eq!(
+            serde_json::to_value(session).unwrap()["cleanupWarning"],
+            "assistant_attachment_cleanup_failed"
+        );
+        let saved = store.load_record(&sid).unwrap();
+        assert!(saved.session.web_search);
+        assert_eq!(saved.session.model_id, "another-model");
+        assert!(serde_json::to_value(saved).unwrap()["session"]
+            .get("cleanupWarning")
+            .is_none());
+    }
+
+    #[test]
+    fn cleanup_waits_for_an_import_to_publish_its_draft_reference() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let item = attachment("ready");
+        let copy = store.attachment_dir(&sid).unwrap().join(&item.id);
+        let (copied_tx, copied_rx) = std::sync::mpsc::channel();
+        let (commit_tx, commit_rx) = std::sync::mpsc::channel();
+        let (cleanup_tx, cleanup_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let store = &store;
+            let sid = &sid;
+            let copy = &copy;
+            scope.spawn(move || {
+                store
+                    .with_attachment_lock(sid, || {
+                        fs::write(copy, b"staged").unwrap();
+                        copied_tx.send(()).unwrap();
+                        commit_rx.recv().unwrap();
+                        store.mutate(sid, |record| {
+                            record.attachments.push(item.clone());
+                            record.session.draft_attachment_ids.push(item.id.clone());
+                            Ok(())
+                        })
+                    })
+                    .unwrap()
+            });
+            copied_rx.recv().unwrap();
+            scope.spawn(move || {
+                cleanup_tx
+                    .send(store.cleanup_orphan_attachments(sid))
+                    .unwrap();
+            });
+            assert!(cleanup_rx
+                .recv_timeout(std::time::Duration::from_millis(30))
+                .is_err());
+            commit_tx.send(()).unwrap();
+        });
+        assert_eq!(cleanup_rx.recv().unwrap().unwrap(), 0);
+        assert_eq!(fs::read(copy).unwrap(), b"staged");
     }
 
     // ── owner identity → directory ───────────────────────────────────────
@@ -1260,6 +1595,7 @@ mod tests {
                 active_run: None,
                 draft: String::new(),
                 draft_attachment_ids: vec![],
+                cleanup_warning: None,
             },
             messages: vec![],
             attachments: vec![],

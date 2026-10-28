@@ -21,6 +21,7 @@ pub(super) fn settle_run(
     completed: bool,
     stopped: bool,
     unbilled: bool,
+    error_code: Option<&str>,
 ) -> Result<(Option<Message>, Session), String> {
     let message = record
         .messages
@@ -35,6 +36,10 @@ pub(super) fn settle_run(
                 "error"
             }
             .into();
+            // Only the host's stable code is saved; never provider error text.
+            message.error_code = error_code
+                .filter(|_| !completed && !stopped)
+                .map(str::to_owned);
             message.clone()
         });
     if record
@@ -281,7 +286,14 @@ pub(super) fn merge_native(
                 m.content = content;
             }
             m.reasoning = thinking;
-            m.status = status.into();
+            // A tool or transport failure can follow the last native model
+            // entry. Replaying history must not erase that saved outcome.
+            m.status = if m.error_code.is_some() {
+                "error"
+            } else {
+                status
+            }
+            .into();
             if let Some(timestamp) = entry["timestamp"].as_i64() {
                 m.created_at = timestamp;
             }
@@ -293,6 +305,7 @@ pub(super) fn merge_native(
                 created_at: entry["timestamp"].as_i64().unwrap_or_else(now),
                 reasoning: thinking,
                 status: status.into(),
+                error_code: None,
                 attachments: vec![],
                 sources: vec![],
                 superseded: entry["active"] == false,
@@ -829,6 +842,48 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_failure_survives_native_replay_but_success_and_stop_clear_it() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages = vec![message(&run.message_id, "assistant", &run.run_id, 1)];
+        settle_run(
+            &mut record,
+            &run,
+            false,
+            false,
+            false,
+            Some("assistant_search_outcome_unknown"),
+        )
+        .unwrap();
+        let native = json!([{
+            "id": "native-reply", "role": "assistant", "runId": run.run_id,
+            "content": "Partial answer", "stopReason": "stop", "final": true,
+        }]);
+        merge_native(&mut record, &native, &[]).unwrap();
+        assert_eq!(record.messages[0].status, "error");
+        assert_eq!(
+            record.messages[0].error_code.as_deref(),
+            Some("assistant_search_outcome_unknown")
+        );
+        for (completed, stopped, status) in [(true, false, "completed"), (false, true, "stopped")] {
+            let mut settled = record.clone();
+            settle_run(
+                &mut settled,
+                &run,
+                completed,
+                stopped,
+                false,
+                Some("assistant_network_error"),
+            )
+            .unwrap();
+            assert_eq!(settled.messages[0].status, status);
+            assert!(settled.messages[0].error_code.is_none());
+        }
+    }
+
+    #[test]
     fn a_billed_run_that_did_not_complete_leaves_both_costs_unknown() {
         let (_config, store) = store();
         let sid = store.create("test/model", false).unwrap().session.id;
@@ -841,7 +896,7 @@ mod tests {
         // Stopped, or failed after it may have been billed.
         for (stopped, unbilled) in [(true, false), (false, false)] {
             let mut settled = record.clone();
-            settle_run(&mut settled, &run, false, stopped, unbilled).unwrap();
+            settle_run(&mut settled, &run, false, stopped, unbilled, None).unwrap();
             assert_eq!(settled.usage["usageCoverage"], "incomplete");
             assert!(settled.usage["estimatedCostUsd"].is_null());
             assert!(settled.usage["searchCostUsd"].is_null());
@@ -849,7 +904,7 @@ mod tests {
         }
         // Refused before anything was billed: both stay known.
         let mut settled = record.clone();
-        settle_run(&mut settled, &run, false, false, true).unwrap();
+        settle_run(&mut settled, &run, false, false, true, None).unwrap();
         assert_eq!(settled.usage, known);
         // A run of a process that went away, without its native history.
         let mut settled = record.clone();

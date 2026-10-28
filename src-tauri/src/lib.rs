@@ -139,14 +139,19 @@ mod assistant_wiring_tests {
         assert_eq!(
             registered,
             [
+                "assistant_backup",
                 "assistant_bootstrap",
                 "assistant_create_session",
+                "assistant_delete_session",
+                "assistant_export_markdown",
                 "assistant_get_session",
                 "assistant_list_sessions",
                 "assistant_pick_attachments",
+                "assistant_restore",
                 "assistant_send",
                 "assistant_stop",
                 "assistant_update_session",
+                "assistant_usage_summary",
             ]
         );
     }
@@ -1828,11 +1833,16 @@ pub fn run() {
             commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,
             tray_popover::fit_tray_popover,
+            commands::assistant_backup,
+            commands::assistant_restore,
             commands::assistant_bootstrap,
             commands::assistant_list_sessions,
             commands::assistant_create_session,
             commands::assistant_get_session,
             commands::assistant_update_session,
+            commands::assistant_usage_summary,
+            commands::assistant_delete_session,
+            commands::assistant_export_markdown,
             commands::assistant_send,
             commands::assistant_stop,
             commands::assistant_pick_attachments,
