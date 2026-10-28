@@ -2,7 +2,15 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import i18n from "i18next";
 import { useState } from "react";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
 import {
   MenuSelect,
@@ -130,15 +138,27 @@ describe("MenuSelect", () => {
     );
   });
 
-  it("truncates an option's note to one line, or lets it wrap when asked to", async () => {
-    const { unmount } = render(<Harness />);
+  it("truncates an option's note to one line", async () => {
+    render(<Harness />);
     await openMenu();
     expect(screen.getByText("Anthropic")).toHaveClass("truncate");
-    unmount();
-    render(<Harness wrapNotes />);
-    await openMenu();
-    expect(screen.getByText("Anthropic")).toHaveClass("break-words");
-    expect(screen.getByText("Anthropic")).not.toHaveClass("truncate");
+  });
+
+  it("takes a taller menu and a trigger tooltip when asked", async () => {
+    render(
+      <Harness
+        menuClassName="max-h-[min(480px,70vh)]"
+        triggerTitle="OpenAI: Codex"
+      />,
+    );
+    expect(screen.getByRole("combobox", { name: "Agent" })).toHaveAttribute(
+      "title",
+      "OpenAI: Codex",
+    );
+    const { listbox } = await openMenu();
+    const pop = listbox.closest("[data-radix-popper-content-wrapper] > *");
+    expect(pop).toHaveClass("max-h-[min(480px,70vh)]");
+    expect(pop).not.toHaveClass("max-h-[min(360px,70vh)]");
   });
 
   it("ticks the chosen option and highlights it when the menu opens", async () => {
@@ -463,15 +483,99 @@ describe("MenuSelect groups", () => {
     expect(onChange).toHaveBeenCalledWith("o3");
   });
 
-  it("shows an option's tags after its label", async () => {
+  it("keeps an option with a meta to one line: the label cut short, the meta at its right, the detail in its tooltip", async () => {
     renderGrouped({
       options: [
-        { value: "a", label: "Model A", tags: ["Reasoning", "Vision"] },
+        {
+          value: "a",
+          label: "Model A",
+          meta: "1M · $2 / $10",
+          title: "Model A\nContext 1M tokens",
+        },
       ],
       value: "a",
     });
     await open();
     const item = screen.getByRole("option", { name: /Model A/ });
-    expect(item).toHaveTextContent("Model AReasoningVision");
+    expect(item).toHaveTextContent("Model A1M · $2 / $10");
+    expect(item).toHaveAttribute("title", "Model A\nContext 1M tokens");
+    expect(within(item).getByText("Model A")).toHaveClass("truncate");
+    expect(within(item).getByText("1M · $2 / $10")).toHaveClass("flex-none");
+  });
+});
+
+describe("MenuSelect scrolling", () => {
+  // jsdom lays nothing out: each option is 28px tall and 30px below the one
+  // before it, in a list 120px tall.
+  const MANY: MenuSelectOption<string>[] = Array.from(
+    { length: 20 },
+    (_, index) => ({
+      value: `o${index}`,
+      label: `Option ${index}`,
+      group: index < 10 ? "first" : "second",
+      groupLabel: index < 10 ? "First" : "Second",
+    }),
+  );
+  const optionIndex = (element: HTMLElement) =>
+    element.getAttribute("role") === "option"
+      ? Array.from(document.querySelectorAll('[role="option"]')).indexOf(
+          element,
+        )
+      : -1;
+  beforeEach(() => {
+    vi.spyOn(HTMLElement.prototype, "offsetTop", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return Math.max(0, optionIndex(this)) * 30;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(
+      function (this: HTMLElement) {
+        return optionIndex(this) >= 0 ? 28 : 0;
+      },
+    );
+    vi.spyOn(Element.prototype, "clientHeight", "get").mockImplementation(
+      function (this: Element) {
+        return this.hasAttribute("cmdk-list") ? 120 : 0;
+      },
+    );
+  });
+  afterEach(() => vi.restoreAllMocks());
+  const renderMany = () =>
+    render(
+      <MenuSelect
+        aria-label="Model"
+        value="o12"
+        onChange={vi.fn()}
+        options={MANY}
+        searchable
+        searchPlaceholder="Filter models"
+      />,
+    );
+
+  it("opens with the chosen option in the middle of the list", async () => {
+    renderMany();
+    const listbox = await (async () => {
+      await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+      return screen.getByRole("listbox");
+    })();
+    // Option 12 sits at 360px: 360 - (120 - 28) / 2.
+    await waitFor(() => expect(listbox.scrollTop).toBe(314));
+  });
+
+  it("goes back to the top as the user types, where the first match is", async () => {
+    renderMany();
+    await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+    const listbox = screen.getByRole("listbox");
+    // Scrolled down the list, as the user may have left it.
+    listbox.scrollTop = 314;
+    await userEvent.type(
+      screen.getByRole("combobox", { name: "Filter models" }),
+      "1",
+    );
+    expect(listbox.scrollTop).toBe(0);
+    const input = screen.getByRole("combobox", { name: "Filter models" });
+    expect(
+      document.getElementById(input.getAttribute("aria-activedescendant")!),
+    ).toHaveTextContent("Option 1");
   });
 });

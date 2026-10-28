@@ -173,39 +173,78 @@ describe("the assistant's model picker", () => {
     expect(within(listbox).getAllByRole("option")).toHaveLength(2);
   });
 
-  it("shows context, price and what the model can do under its name", async () => {
+  it("keeps each model to one line: its name, then its context and prices", async () => {
     render(picker());
     const listbox = await open();
     const mini = within(listbox).getByRole("option", { name: /GPT-5 mini/ });
-    expect(mini).toHaveTextContent(
-      "Context 128K tokens · Input $0.25 / output $2 per million tokens",
-    );
-    expect(within(mini).getByText("Reasoning")).toBeVisible();
-    expect(within(mini).queryByText("Vision")).toBeNull();
-    const sonnet = within(listbox).getByRole("option", {
-      name: /Claude Sonnet 5/,
-    });
-    expect(within(sonnet).getByText("Reasoning")).toBeVisible();
-    expect(within(sonnet).getByText("Vision")).toBeVisible();
-    const gpt = within(listbox).getByRole("option", { name: /GPT-5\.4/ });
-    expect(within(gpt).queryByText("Reasoning")).toBeNull();
-    expect(within(gpt).getByText("Vision")).toBeVisible();
+    expect(mini).toHaveTextContent(/^GPT-5 mini128K · \$0\.25 \/ \$2$/);
+    // No price known: the context alone.
+    expect(
+      within(listbox).getByRole("option", { name: /GPT-5\.4/ }),
+    ).toHaveTextContent(/^GPT-5\.4128K$/);
+    // What a model can do is no row badge: nearly every model reasons.
+    expect(within(listbox).queryByText("Reasoning")).toBeNull();
+    expect(within(listbox).queryByText("Vision")).toBeNull();
   });
 
-  it("words the badges in the interface language", async () => {
+  it("tells everything about a model in its tooltip", async () => {
+    render(picker());
+    const listbox = await open();
+    expect(
+      within(listbox).getByRole("option", { name: /GPT-5 mini/ }),
+    ).toHaveAttribute(
+      "title",
+      "OpenAI: GPT-5 mini\nContext 128K tokens · Input $0.25 / output $2 per million tokens · Reasoning",
+    );
+    expect(
+      within(listbox).getByRole("option", { name: /Claude Sonnet 5/ }),
+    ).toHaveAttribute(
+      "title",
+      "Claude Sonnet 5\nContext 128K tokens · Reasoning · Vision",
+    );
+  });
+
+  it("words the tooltip in the interface language", async () => {
     await i18n.changeLanguage("zh");
     render(picker({ placeholder: i18n.t("assistant.model") }));
     await userEvent.click(
       screen.getByRole("combobox", { name: i18n.t("assistant.model") }),
     );
-    const sonnet = screen.getByRole("option", { name: /Claude Sonnet 5/ });
-    expect(within(sonnet).getByText("推理")).toBeVisible();
-    expect(within(sonnet).getByText("识图")).toBeVisible();
+    expect(
+      screen.getByRole("option", { name: /Claude Sonnet 5/ }),
+    ).toHaveAttribute(
+      "title",
+      "Claude Sonnet 5\n上下文 128K Token · 推理 · 识图",
+    );
   });
 
-  it("names the chosen model in full on its trigger", () => {
+  it("names a model whose short name is empty by its full name", async () => {
+    render(
+      picker({
+        models: [
+          ...CATALOG,
+          model("x-ai/grok-9", "xAI: Grok 9", { shortName: "", created: 1 }),
+        ],
+      }),
+    );
+    const listbox = await open();
+    expect(
+      within(listbox).getByRole("option", { name: /Grok 9/ }),
+    ).toHaveTextContent(/^xAI: Grok 9/);
+  });
+
+  it("opens a menu tall and wide enough for many models", async () => {
     render(picker());
-    expect(trigger()).toHaveTextContent("OpenAI: GPT-5.4");
+    const listbox = await open();
+    const pop = listbox.closest("[data-radix-popper-content-wrapper] > *");
+    expect(pop).toHaveClass("max-h-[min(480px,70vh)]");
+    expect(pop).toHaveStyle({ width: "410px" });
+  });
+
+  it("names the chosen model on its trigger without the vendor, in full in its tooltip", () => {
+    render(picker());
+    expect(trigger()).toHaveTextContent(/^GPT-5\.4$/);
+    expect(trigger()).toHaveAttribute("title", "OpenAI: GPT-5.4");
   });
 
   it("picks a model", async () => {
@@ -217,19 +256,14 @@ describe("the assistant's model picker", () => {
   });
 
   describe("the kind switch", () => {
-    it("offers chat models only for now, with their count", async () => {
+    it("is not shown while chat is the only kind offered", async () => {
       render(picker());
       await open();
-      const kinds = screen.getByRole("radiogroup", { name: "Model type" });
-      const radios = within(kinds).getAllByRole("radio");
-      expect(radios).toHaveLength(1);
-      expect(radios[0]).toHaveAccessibleName("Chat 8");
-      expect(radios[0]).toBeChecked();
-      expect(within(kinds).queryByRole("radio", { name: /Image/ })).toBeNull();
-      expect(within(kinds).queryByRole("radio", { name: /Video/ })).toBeNull();
+      expect(screen.queryByRole("radiogroup")).toBeNull();
+      expect(screen.queryByRole("radio")).toBeNull();
     });
 
-    it("lists only chat models, and counts them alone", async () => {
+    it("lists only chat models", async () => {
       render(
         picker({
           models: [
@@ -249,32 +283,7 @@ describe("the assistant's model picker", () => {
       expect(
         within(listbox).queryByRole("option", { name: /Sora/ }),
       ).toBeNull();
-      expect(
-        within(
-          screen.getByRole("radiogroup", { name: "Model type" }),
-        ).getByRole("radio"),
-      ).toHaveAccessibleName("Chat 8");
-    });
-
-    it("words the switch in the interface language", async () => {
-      await i18n.changeLanguage("zh");
-      render(picker({ placeholder: i18n.t("assistant.model") }));
-      await userEvent.click(
-        screen.getByRole("combobox", { name: i18n.t("assistant.model") }),
-      );
-      expect(
-        within(screen.getByRole("radiogroup", { name: "模型类型" })).getByRole(
-          "radio",
-        ),
-      ).toHaveAccessibleName("对话 8");
-    });
-
-    it("does not take the focus off the search field when it is clicked", async () => {
-      render(picker());
-      await open();
-      const field = screen.getByRole("combobox", { name: "Search models" });
-      await userEvent.click(screen.getByRole("radio", { name: /Chat/ }));
-      expect(field).toHaveFocus();
+      expect(within(listbox).getAllByRole("option")).toHaveLength(8);
     });
   });
 
@@ -293,11 +302,23 @@ describe("the assistant's model picker", () => {
       expect(screen.queryByText(/temporarily unavailable/)).toBeNull();
     });
 
+    it("does not take the focus off the search field when the notice is clicked", async () => {
+      render(picker({ partial: true }));
+      await open();
+      const field = screen.getByRole("combobox", { name: "Search models" });
+      await userEvent.click(
+        screen.getByText("Some models are temporarily unavailable"),
+      );
+      expect(field).toHaveFocus();
+    });
+
     it("words the notice in zh and ja", () => {
       expect(i18n.getFixedT("zh")("assistant.modelsPartial")).toBe(
         "部分模型暂不可用",
       );
-      expect(i18n.getFixedT("ja")("assistant.modelsPartial")).not.toBe("");
+      expect(i18n.getFixedT("ja")("assistant.modelsPartial")).toBe(
+        "一部のモデルは現在利用できません",
+      );
     });
   });
 

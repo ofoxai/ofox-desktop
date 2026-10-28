@@ -899,7 +899,7 @@ describe("a reply's thinking", () => {
 
   it("shows the live caption in place of the plain Thinking… line while it thinks", () => {
     render(reply({ status: "streaming" }, { doneMs: 0, since: Date.now() }));
-    expect(screen.getByText("Thinking for 0 seconds")).toBeVisible();
+    expect(screen.getByText("Thinking for 1 second")).toBeVisible();
     // The plain line would say the same twice.
     expect(screen.queryByText("Thinking…", { selector: "p" })).toBeNull();
   });

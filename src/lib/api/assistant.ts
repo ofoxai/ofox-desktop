@@ -244,8 +244,9 @@ export interface AssistantMessage {
   reasoning?: string | null;
   /**
    * How long the reply streamed reasoning, in ms: each span from
-   * `thinking_start` to the next text, tool call or end of message. At least
-   * 1 whenever reasoning streamed; null when none did.
+   * `thinking_start` to its `thinking_end` (or the next text, tool call or
+   * end of message). At least 1 whenever reasoning streamed; null when none
+   * did.
    */
   reasoningMs?: number | null;
   status?: "completed" | "streaming" | "stopped" | "error";
@@ -375,10 +376,16 @@ export type AssistantRunEvent =
   /**
    * The reply began streaming reasoning, as soon as its first reasoning
    * arrived: the reasoning text itself can follow a little later. It lasts
-   * until the next text, tool call or the end of the message (a live timer
-   * runs from here). Hidden reasoning sends none.
+   * until `thinking_end` (a live timer runs from here). Hidden reasoning
+   * sends neither.
    */
   | { type: "thinking_start"; data: { messageId: string } }
+  /**
+   * The reasoning stopped: the model began its text or a tool call, or the
+   * message ended. Its last reasoning came first; the text that follows can
+   * come a little later.
+   */
+  | { type: "thinking_end"; data: { messageId: string } }
   | {
       type: "text_delta" | "thinking_delta";
       data: { delta: string; messageId: string };
@@ -467,8 +474,12 @@ export const assistantApi = {
       deleted,
       search,
     }),
-  createSession: (request: { modelId?: string; webSearch: boolean }) =>
-    invoke<AssistantSession>("assistant_create_session", { request }),
+  createSession: (request: {
+    modelId?: string;
+    /** The user picked `modelId`: it is remembered even while some models are missing. */
+    modelPicked?: boolean;
+    webSearch: boolean;
+  }) => invoke<AssistantSession>("assistant_create_session", { request }),
   getSession: (sessionId: string) =>
     invoke<AssistantSessionDetail>("assistant_get_session", { sessionId }),
   updateSession: (request: AssistantUpdateRequest) =>

@@ -58,8 +58,8 @@ interface RunSearch {
 
 /**
  * How long the followed run's reply has thought: the spans that are over, and
- * the one under way. A span runs from the host's `thinking_start` to the
- * reply's next text, tool call or end.
+ * the one under way. A span runs from the host's `thinking_start` to its
+ * `thinking_end` (or the reply's next text, tool call or end).
  */
 export interface AssistantThinking {
   runId: string;
@@ -118,6 +118,8 @@ export function useAssistant(enabled: boolean) {
   const [bootstrap, setBootstrap] = useState<AssistantBootstrap | null>(null);
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const newModelId = chosenModel ?? bootstrap?.defaultModelId ?? "";
+  // The user picked the model rather than taking the default shown.
+  const newModelPicked = chosenModel !== null;
   // Web search for the conversation the first message creates. A new
   // conversation starts with the last choice made on the switch for this
   // account in this window (off until one is made), like the model picker.
@@ -230,7 +232,10 @@ export function useAssistant(enabled: boolean) {
     [writeThinking],
   );
 
-  /** Its reply spoke, called a tool or ended: the span under way is over. */
+  /**
+   * Its reply stopped thinking, spoke, called a tool or ended: the span under
+   * way is over.
+   */
   const endThinking = useCallback(
     (runId: string) => {
       const old = thinkingRef.current;
@@ -779,6 +784,9 @@ export function useAssistant(enabled: boolean) {
             doneReading(event.runId);
             startThinking(event.runId);
             return;
+          case "thinking_end":
+            endThinking(event.runId);
+            return;
           case "text_delta":
           case "thinking_delta": {
             const { delta } = event.data;
@@ -1030,6 +1038,8 @@ export function useAssistant(enabled: boolean) {
     const selection = selectionSequence.current;
     let value = await assistantApi.createSession({
       modelId: newModelId || undefined,
+      // Remembered even while some models are missing; a default is not.
+      ...(newModelPicked ? { modelPicked: true } : {}),
       webSearch: newWebSearchRef.current,
     });
     // A new conversation takes no thinking level when it is created: the one
@@ -1067,7 +1077,14 @@ export function useAssistant(enabled: boolean) {
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessionsRef.current();
     return value;
-  }, [detail, newModelId, setNewThinking, setNewWebSearch, showError]);
+  }, [
+    detail,
+    newModelId,
+    newModelPicked,
+    setNewThinking,
+    setNewWebSearch,
+    showError,
+  ]);
 
   const create = useCallback(async () => {
     if (busy) return;

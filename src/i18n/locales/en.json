@@ -4955,6 +4955,7 @@
     "searchModels": "Search models",
     "contextWindow": "Context {{tokens}} tokens",
     "modelPrice": "Input ${{input}} / output ${{output}} per million tokens",
+    "modelPriceShort": "${{input}} / ${{output}}",
     "modelUnavailable": "Models are unavailable right now. You can still read your conversations.",
     "runtimeUnavailable": "Assistant runtime unavailable",
     "runtimeUnavailableHint": "Check that the app is installed correctly, then retry.",

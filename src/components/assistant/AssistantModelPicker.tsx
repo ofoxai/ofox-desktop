@@ -17,9 +17,9 @@ const kindOf = (model: AssistantModel): AssistantModelKind =>
   model.kind ?? "chat";
 
 /**
- * The header's model picker: the models of one kind, grouped by vendor, with
- * what each costs and can do. `partial` says a catalog could not be read, so
- * the list may lack some models.
+ * The header's model picker: the models of one kind, grouped by vendor, one
+ * line each (name, context and prices; the rest in its tooltip). `partial`
+ * says a catalog could not be read, so the list may lack some models.
  */
 export function AssistantModelPicker({
   models,
@@ -49,31 +49,34 @@ export function AssistantModelPicker({
       vendorLabel,
       i18n.language,
     ).flatMap(({ vendor, label, models: members }) =>
-      members.map((model) => ({
-        value: model.id,
-        label: model.shortName ?? model.name,
-        note: [
-          model.contextWindow
-            ? t("assistant.contextWindow", {
-                tokens: fmtTokens(model.contextWindow),
-              })
-            : "",
-          model.inputPricePerMillion
-            ? t("assistant.modelPrice", {
-                input: model.inputPricePerMillion,
-                output: model.outputPricePerMillion ?? "—",
-              })
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" · "),
-        tags: [
+      members.map((model) => {
+        const tokens = model.contextWindow
+          ? fmtTokens(model.contextWindow)
+          : "";
+        const prices = model.inputPricePerMillion
+          ? {
+              input: model.inputPricePerMillion,
+              output: model.outputPricePerMillion ?? "—",
+            }
+          : null;
+        const detail = [
+          tokens ? t("assistant.contextWindow", { tokens }) : "",
+          prices ? t("assistant.modelPrice", prices) : "",
           model.reasoning ? t("assistant.modelTags.reasoning") : "",
           model.supportsImages ? t("assistant.modelTags.vision") : "",
-        ].filter(Boolean),
-        group: vendor,
-        groupLabel: label,
-      })),
+        ].filter(Boolean);
+        return {
+          value: model.id,
+          label: model.shortName || model.name,
+          meta:
+            [tokens, prices ? t("assistant.modelPriceShort", prices) : ""]
+              .filter(Boolean)
+              .join(" · ") || undefined,
+          title: [model.name, detail.join(" · ")].filter(Boolean).join("\n"),
+          group: vendor,
+          groupLabel: label,
+        };
+      }),
     );
     // `t` changes with the language, which is all `i18n.language` adds.
   }, [models, kind, t, i18n.language]);
@@ -81,6 +84,8 @@ export function AssistantModelPicker({
   const count = (of: AssistantModelKind) =>
     models.filter((model) => kindOf(model) === of).length;
   const chosen = models.find((model) => model.id === value);
+  // A switch with one segment is no choice: it shows once there are more.
+  const switchable = KINDS.length > 1;
 
   return (
     <MenuSelect
@@ -91,38 +96,44 @@ export function AssistantModelPicker({
       searchable
       searchPlaceholder={t("assistant.searchModels")}
       placeholder={placeholder}
-      // The trigger names the model in full, vendor included.
-      valueLabel={chosen?.name}
-      width={310}
-      wrapNotes
+      // The trigger names the model as its row does (the vendor is its
+      // group's); the tooltip names it in full.
+      valueLabel={chosen ? chosen.shortName || chosen.name : undefined}
+      triggerTitle={chosen?.name}
+      width={410}
+      menuClassName="max-h-[min(480px,70vh)]"
       align="end"
       triggerClassName="!max-w-[min(250px,100%)]"
       options={options}
       head={
-        // A click here must not take the focus off the search field or the
-        // highlighted option, where the keyboard works the list.
-        <div
-          className="grid gap-1.5"
-          onMouseDown={(event) => event.preventDefault()}
-        >
-          <SegmentedControl
-            aria-label={t("assistant.modelKind")}
-            value={kind}
-            onChange={setKind}
-            options={KINDS.map((item) => ({
-              value: item,
-              label: (
-                <>
-                  {t(`assistant.kinds.${item}`)}{" "}
-                  <span className="tabular-nums text-ink-faint">
-                    {count(item)}
-                  </span>
-                </>
-              ),
-            }))}
-          />
-          {partial && <p>{t("assistant.modelsPartial")}</p>}
-        </div>
+        (switchable || partial) && (
+          // A click here must not take the focus off the search field or the
+          // highlighted option, where the keyboard works the list.
+          <div
+            className="grid gap-1.5"
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            {switchable && (
+              <SegmentedControl
+                aria-label={t("assistant.modelKind")}
+                value={kind}
+                onChange={setKind}
+                options={KINDS.map((item) => ({
+                  value: item,
+                  label: (
+                    <>
+                      {t(`assistant.kinds.${item}`)}{" "}
+                      <span className="tabular-nums text-ink-faint">
+                        {count(item)}
+                      </span>
+                    </>
+                  ),
+                }))}
+              />
+            )}
+            {partial && <p>{t("assistant.modelsPartial")}</p>}
+          </div>
+        )
       }
     />
   );

@@ -117,6 +117,20 @@ describe("the thinking menu", () => {
     expect(screen.queryByRole("combobox")).toBeNull();
   });
 
+  it("looks like the Web search toggle beside it, even with a level chosen", () => {
+    render(menu({ level: "high" }));
+    expect(trigger()).toHaveClass(
+      "h-[27px]",
+      "px-2",
+      "border-transparent",
+      "bg-transparent",
+      "text-ink-ctl",
+      "hover:bg-pill",
+      "hover:text-ink",
+    );
+    expect(trigger()).not.toHaveClass("text-ink");
+  });
+
   it("can be disabled", () => {
     render(menu({ disabled: true }));
     expect(trigger()).toBeDisabled();

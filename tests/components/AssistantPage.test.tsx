@@ -341,9 +341,12 @@ describe("starting a conversation", () => {
     );
     await userEvent.type(composer(), "First question");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    // Picked, not the default shown: the host remembers it even while some
+    // models are missing.
     await waitFor(() =>
       expect(mocks.createSession).toHaveBeenCalledWith({
         modelId: "other/model",
+        modelPicked: true,
         webSearch: false,
       }),
     );
@@ -756,7 +759,7 @@ describe("history", () => {
 });
 
 describe("the model picker", () => {
-  it("says a model's context window in compact units and shows its whole note, which may wrap", async () => {
+  it("says a model's context window in compact units beside its prices, and both in full in its tooltip", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
       models: [
@@ -776,15 +779,14 @@ describe("the model picker", () => {
     const balanced = await screen.findByRole("option", {
       name: /Balanced model/,
     });
-    const note = within(balanced).getByText(/^Context /);
-    expect(note).toHaveTextContent(
-      "Context 128K tokens · Input $0.28 / output $0.42 per million tokens",
+    expect(within(balanced).getByText("128K · $0.28 / $0.42")).toBeVisible();
+    expect(balanced).toHaveAttribute(
+      "title",
+      "Balanced model\nContext 128K tokens · Input $0.28 / output $0.42 per million tokens",
     );
-    expect(note).toHaveClass("break-words");
-    expect(note).not.toHaveClass("truncate");
     expect(
       within(screen.getByRole("option", { name: /Fast model/ })).getByText(
-        "Context 1M tokens",
+        "1M",
       ),
     ).toBeVisible();
     expect(document.body).not.toHaveTextContent("128000");
@@ -6075,13 +6077,13 @@ describe("the model picker in the header", () => {
     );
   });
 
-  it("names the chosen model in full on the header's button", async () => {
+  it("names the chosen model on the header's button as its row does, in full in its tooltip", async () => {
     vendorModels();
     current.session.modelId = "openai/gpt-5";
     await openConversation();
-    expect(
-      screen.getByRole("combobox", { name: "Choose model" }),
-    ).toHaveTextContent("OpenAI: GPT-5");
+    const button = screen.getByRole("combobox", { name: "Choose model" });
+    expect(button).toHaveTextContent(/^GPT-5$/);
+    expect(button).toHaveAttribute("title", "OpenAI: GPT-5");
   });
 
   it("says some models are unavailable when the backend could not read a catalog", async () => {
@@ -6328,7 +6330,8 @@ describe("thinking", () => {
       // The caption takes the place of the plain "Thinking…" line: that is
       // said once, to assistive tech only.
       expect(within(reply()).getByRole("status")).toHaveClass("sr-only");
-      expect(screen.getByText("Thinking for 0 seconds")).toBeVisible();
+      // Never less than a second, as the finished reply says it.
+      expect(screen.getByText("Thinking for 1 second")).toBeVisible();
       act(() => void vi.advanceTimersByTime(3000));
       expect(screen.getByText("Thinking for 3 seconds")).toBeVisible();
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
@@ -6338,6 +6341,36 @@ describe("thinking", () => {
       act(() => void vi.advanceTimersByTime(10_000));
       expect(screen.getByText("Thought for 4 seconds")).toBeVisible();
       expect(screen.queryByText(/Thinking for/)).toBeNull();
+    });
+
+    it("rounds the live seconds as the finished caption does", async () => {
+      await openConversation();
+      const emit = emitFor(await startRun());
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+      emit("thinking_start", { messageId: "reply" });
+      emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
+      act(() => void vi.advanceTimersByTime(4600));
+      expect(screen.getByText("Thinking for 5 seconds")).toBeVisible();
+      emit("thinking_end", { messageId: "reply" });
+      act(() => void vi.advanceTimersByTime(10_000));
+      expect(screen.getByText("Thought for 5 seconds")).toBeVisible();
+    });
+
+    it("draws the live caption in the box the finished reasoning keeps", async () => {
+      await openConversation();
+      const emit = emitFor(await startRun());
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+      emit("thinking_start", { messageId: "reply" });
+      const box = () =>
+        screen
+          .getByText(/Thinking for|Thought for/)
+          .closest("[data-reasoning]");
+      const before = box();
+      expect(before).not.toBeNull();
+      emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
+      expect(box()?.className).toBe(before?.className);
+      emit("thinking_end", { messageId: "reply" });
+      expect(box()?.className).toBe(before?.className);
     });
 
     it("keeps the saved duration once the reply is saved and the transcript is read again", async () => {
@@ -6464,6 +6497,20 @@ describe("the followed reply's thinking", () => {
     clock(5000);
     emit("text_delta", { delta: " more", messageId: "reply" });
     expect(thinking()?.doneMs).toBe(2500);
+  });
+
+  it("ends the span at thinking_end, not at the text the runtime holds back", () => {
+    emit("thinking_start", { messageId: "reply" });
+    clock(1500);
+    emit("thinking_end", { messageId: "reply" });
+    expect(thinking()).toEqual({
+      runId: sent.runId,
+      doneMs: 1500,
+      since: null,
+    });
+    clock(2000);
+    emit("text_delta", { delta: "Answer", messageId: "reply" });
+    expect(thinking()?.doneMs).toBe(1500);
   });
 
   it("ends the span at a tool call, and adds the next span to it", () => {

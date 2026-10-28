@@ -43,10 +43,11 @@ describe("a reply's reasoning block", () => {
 
     it("counts the seconds from the start of thinking, once a second", () => {
       render(<ReasoningBlock thinking={live()} />);
-      expect(screen.getByText("Thinking for 0 seconds")).toBeVisible();
-      after(1000);
+      // Rounded and never below one, as the finished caption says it.
       expect(screen.getByText("Thinking for 1 second")).toBeVisible();
-      after(2000);
+      after(1600);
+      expect(screen.getByText("Thinking for 2 seconds")).toBeVisible();
+      after(1400);
       expect(screen.getByText("Thinking for 3 seconds")).toBeVisible();
     });
 
@@ -66,7 +67,7 @@ describe("a reply's reasoning block", () => {
     it("keeps the reasoning behind the caption while it streams", () => {
       render(<ReasoningBlock thinking={live()} reasoning="Let me think" />);
       expect(
-        screen.getByText("Thinking for 0 seconds").closest("summary"),
+        screen.getByText("Thinking for 1 second").closest("summary"),
       ).not.toBeNull();
       expect(screen.getByText("Let me think")).toBeInTheDocument();
     });
@@ -155,8 +156,8 @@ describe("a reply's reasoning block", () => {
   });
 
   it.each([
-    ["zh", "已思考 3 秒", "思考中 0 秒"],
-    ["ja", "3 秒間思考しました", "0 秒間思考中"],
+    ["zh", "已思考 3 秒", "思考中 1 秒"],
+    ["ja", "3 秒間思考しました", "1 秒間思考中"],
   ])("is worded in %s", async (language, done, liveText) => {
     await i18n.changeLanguage(language);
     const { rerender } = render(<ReasoningBlock reasoningMs={3000} />);

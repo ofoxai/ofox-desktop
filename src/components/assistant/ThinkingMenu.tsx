@@ -44,10 +44,10 @@ export function ThinkingMenu({
       }))}
       valueLabel={t("assistant.thinking.trigger", { level: name(current) })}
       head={t("assistant.thinking.costNote")}
-      wrapNotes
       width={260}
       align="start"
-      triggerClassName="border-transparent bg-transparent hover:bg-pill data-[state=open]:bg-pill"
+      // As quiet as the Web search toggle beside it (a ghost Button).
+      triggerClassName="h-[27px] border-transparent bg-transparent px-2 text-ink-ctl hover:bg-pill hover:text-ink data-[state=open]:bg-pill data-[state=open]:text-ink"
     />
   );
 }

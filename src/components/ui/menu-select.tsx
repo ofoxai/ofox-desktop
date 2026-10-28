@@ -19,8 +19,13 @@ export interface MenuSelectOption<T extends string = string> {
   count?: React.ReactNode;
   /** Drawn at 13px before the label, in the menu and on the trigger. */
   icon?: React.ReactNode;
-  /** Small pills after the label in the menu, such as what a model can do. */
-  tags?: ReadonlyArray<string>;
+  /**
+   * Compact detail at the right of the label, such as a model's context and
+   * prices. The option then keeps to one line: the label is cut short first.
+   */
+  meta?: string;
+  /** The option's tooltip, for the detail its row leaves out. */
+  title?: string;
   /**
    * Options that share a `group` sit under one heading, `groupLabel`, in the
    * order the groups first appear; options with none stay where they are.
@@ -51,8 +56,10 @@ export interface MenuSelectProps<T extends string> {
   disabled?: boolean;
   /** Replaces the chosen option's label on the trigger. */
   valueLabel?: string;
-  /** Lets a long note wrap onto more lines instead of cutting it short. */
-  wrapNotes?: boolean;
+  /** The trigger's tooltip, such as the full name `valueLabel` shortens. */
+  triggerTitle?: string;
+  /** Classes for the menu, such as a larger `max-h-*`. */
+  menuClassName?: string;
 }
 
 /**
@@ -138,6 +145,27 @@ function toSections<T extends string>(items: Indexed<T>[]): Section<T>[] {
   return sections;
 }
 
+/**
+ * Scroll `list` so `item` is in its middle (`center`) or just inside it
+ * (`nearest`). From offsets, so the menu's opening animation (a scale) does
+ * not skew it; the list is the items' offset parent.
+ */
+function scrollIntoList(
+  list: HTMLElement,
+  item: HTMLElement,
+  block: "center" | "nearest",
+) {
+  const top = item.offsetTop;
+  const bottom = top + item.offsetHeight;
+  if (block === "center") {
+    list.scrollTop = top - (list.clientHeight - item.offsetHeight) / 2;
+  } else if (top < list.scrollTop) {
+    list.scrollTop = top;
+  } else if (bottom > list.scrollTop + list.clientHeight) {
+    list.scrollTop = bottom - list.clientHeight;
+  }
+}
+
 /** What a query leaves, in the order the menu draws it (and arrows through it). */
 function inMenuOrder<T extends string>(
   options: ReadonlyArray<MenuSelectOption<T>>,
@@ -169,7 +197,8 @@ export function MenuSelect<T extends string>({
   id,
   disabled = false,
   valueLabel,
-  wrapNotes = false,
+  triggerTitle,
+  menuClassName,
 }: MenuSelectProps<T>) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
@@ -184,6 +213,11 @@ export function MenuSelect<T extends string>({
   const listRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
   const itemRefs = React.useRef(new Map<string, HTMLDivElement>());
+  // Where the list goes the next time the highlight is followed: the chosen
+  // option to the middle when the menu opens; back to the top, where the
+  // first match is, after the query changes. Otherwise cmdk keeps the
+  // highlighted option in view as the arrows move it.
+  const pendingScroll = React.useRef<"center" | "top" | null>(null);
 
   const chosen = options.find((option) => option.value === value);
   const sections = React.useMemo(
@@ -193,6 +227,7 @@ export function MenuSelect<T extends string>({
 
   const handleOpenChange = (next: boolean) => {
     if (next) {
+      pendingScroll.current = "center";
       setQuery("");
       // Both searchable and plain menus open on the current selection.
       const at = options.findIndex(
@@ -204,6 +239,7 @@ export function MenuSelect<T extends string>({
   };
 
   const handleQuery = (next: string) => {
+    pendingScroll.current = "top";
     setQuery(next);
     setActive(firstKey(inMenuOrder(options, next)));
   };
@@ -214,11 +250,20 @@ export function MenuSelect<T extends string>({
   // stays in the field, which points at the option instead.
   const followHighlight = React.useCallback(() => {
     const item = itemRefs.current.get(active);
-    setListId(listRef.current?.id);
+    const list = listRef.current;
+    setListId(list?.id);
+    // The list mounts a render after the menu opens: until then the scroll
+    // waits.
+    if (list && pendingScroll.current) {
+      const block = pendingScroll.current === "center" ? "center" : "nearest";
+      if (pendingScroll.current === "top") list.scrollTop = 0;
+      pendingScroll.current = null;
+      if (item) scrollIntoList(list, item, block);
+    }
     if (searchable) {
       setActiveId(item?.id);
     } else {
-      (item ?? listRef.current)?.focus({ preventScroll: true });
+      (item ?? list)?.focus({ preventScroll: true });
     }
   }, [active, searchable]);
 
@@ -252,6 +297,7 @@ export function MenuSelect<T extends string>({
         disabled={option.disabled}
         onSelect={() => choose(option)}
         data-checked={checked || undefined}
+        title={option.title}
         className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 focus-visible:outline-none data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
       >
         <span
@@ -266,28 +312,18 @@ export function MenuSelect<T extends string>({
           </span>
         )}
         <span className="grid min-w-0 flex-1 gap-px">
-          {option.tags?.length ? (
-            <span className="flex min-w-0 items-center gap-1.5">
+          {option.meta ? (
+            <span className="flex min-w-0 items-baseline gap-2">
               {title}
-              {option.tags.map((tag) => (
-                <span
-                  key={tag}
-                  className="flex-none rounded-[4px] bg-pill px-1 text-micro leading-4 text-ink-ctl"
-                >
-                  {tag}
-                </span>
-              ))}
+              <span className="ml-auto flex-none text-note leading-4 tabular-nums text-ink-ctl">
+                {option.meta}
+              </span>
             </span>
           ) : (
             title
           )}
           {option.note && (
-            <span
-              className={cn(
-                "text-note leading-[15px] text-ink-muted",
-                wrapNotes ? "break-words" : "truncate",
-              )}
-            >
+            <span className="truncate text-note leading-[15px] text-ink-muted">
               {option.note}
             </span>
           )}
@@ -313,6 +349,7 @@ export function MenuSelect<T extends string>({
           aria-label={ariaLabel}
           aria-expanded={open}
           aria-haspopup="listbox"
+          title={triggerTitle}
           disabled={disabled}
           onKeyDown={(event) => {
             if (
@@ -356,7 +393,10 @@ export function MenuSelect<T extends string>({
         sideOffset={5}
         collisionPadding={8}
         style={{ width }}
-        className="flex max-h-[min(360px,70vh)] max-w-[calc(100vw-16px)] flex-col overflow-hidden border border-line"
+        className={cn(
+          "flex max-h-[min(360px,70vh)] max-w-[calc(100vw-16px)] flex-col overflow-hidden border border-line",
+          menuClassName,
+        )}
         onOpenAutoFocus={(event) => {
           // cmdk listens for keys on its root, so focus has to start inside
           // it: on the filter, else on the highlighted option.
@@ -403,7 +443,7 @@ export function MenuSelect<T extends string>({
           <CommandPrimitive.List
             ref={listRef}
             label={ariaLabel}
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none focus-visible:outline-none [&_[cmdk-list-sizer]]:grid [&_[cmdk-list-sizer]]:gap-px"
+            className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none focus-visible:outline-none [&_[cmdk-list-sizer]]:grid [&_[cmdk-list-sizer]]:gap-px"
           >
             <CommandPrimitive.Empty className="px-2 pb-1.5 pt-2 text-note text-ink-muted">
               {t("common.noMatches")}
@@ -415,7 +455,7 @@ export function MenuSelect<T extends string>({
                 <CommandPrimitive.Group
                   key={`group-${section.group}`}
                   heading={section.label}
-                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-0.5 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-note [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-faint [&_[cmdk-group-items]]:grid [&_[cmdk-group-items]]:gap-px"
+                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-0.5 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-note [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-ctl [&_[cmdk-group-items]]:grid [&_[cmdk-group-items]]:gap-px"
                 >
                   {section.items.map(renderItem)}
                 </CommandPrimitive.Group>

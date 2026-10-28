@@ -4955,6 +4955,7 @@
     "searchModels": "搜索模型",
     "contextWindow": "上下文 {{tokens}} Token",
     "modelPrice": "每百万 Token：输入 ${{input}} / 输出 ${{output}}",
+    "modelPriceShort": "${{input}} / ${{output}}",
     "modelUnavailable": "模型暂时不可用，仍可查看已有对话。",
     "runtimeUnavailable": "助手运行环境不可用",
     "runtimeUnavailableHint": "请确认应用安装完整，然后重试。",
