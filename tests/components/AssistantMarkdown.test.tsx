@@ -153,3 +153,97 @@ describe("assistant code blocks", () => {
     );
   });
 });
+
+describe("auto-linked URLs in text without spaces", () => {
+  const paragraph = (container: HTMLElement) =>
+    container.querySelector("p") as HTMLElement;
+  const link = (container: HTMLElement) =>
+    container.querySelector("a") as HTMLAnchorElement;
+
+  it("ends the link before a full-width full stop and keeps the rest as text", () => {
+    const { container } = render(message("见 https://a.example/x。然后"));
+    expect(container.querySelectorAll("a")).toHaveLength(1);
+    expect(link(container)).toHaveAttribute("href", "https://a.example/x");
+    expect(link(container)).toHaveTextContent("https://a.example/x");
+    expect(link(container).nextSibling?.textContent).toBe("。然后");
+    expect(paragraph(container)).toHaveTextContent(
+      "见 https://a.example/x。然后",
+    );
+  });
+
+  it.each(["，", "）", "」", "、", "；", "…", "！"])(
+    "ends the link before %s",
+    (mark) => {
+      const { container } = render(message(`见 https://a.example/x${mark}好`));
+      expect(link(container)).toHaveAttribute("href", "https://a.example/x");
+      expect(link(container).nextSibling?.textContent).toBe(`${mark}好`);
+    },
+  );
+
+  it("ends a www link the same way", () => {
+    const { container } = render(message("见 www.a.example/x，好"));
+    expect(link(container)).toHaveAttribute("href", "http://www.a.example/x");
+    expect(link(container)).toHaveTextContent(/^www\.a\.example\/x$/);
+    expect(link(container).nextSibling?.textContent).toBe("，好");
+  });
+
+  it("links a URL inside a list, a table cell and emphasis the same way", () => {
+    const { container } = render(
+      message(
+        "- 第一 https://a.example/x。\n\n| 链接 |\n| --- |\n| https://b.example/y， |\n\n**https://c.example/z。**",
+      ),
+    );
+    expect(
+      Array.from(container.querySelectorAll("a"), (a) =>
+        a.getAttribute("href"),
+      ),
+    ).toEqual([
+      "https://a.example/x",
+      "https://b.example/y",
+      "https://c.example/z",
+    ]);
+  });
+
+  it("keeps an address with ideographs whole", () => {
+    const { container } = render(
+      message(
+        "见 https://zh.wikipedia.org/wiki/东京 和 https://ja.wikipedia.org/wiki/佐々木。",
+      ),
+    );
+    const links = Array.from(container.querySelectorAll("a"));
+    expect(links.map((a) => a.textContent)).toEqual([
+      "https://zh.wikipedia.org/wiki/东京",
+      "https://ja.wikipedia.org/wiki/佐々木",
+    ]);
+  });
+
+  it("leaves a link written in markdown as written", () => {
+    const { container } = render(
+      message(
+        "[t](https://a.example/x。) <https://b.example/y。> [https://c.example/z。](https://c.example/z。)",
+      ),
+    );
+    const links = Array.from(container.querySelectorAll("a"));
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([
+      "https://a.example/x%E3%80%82",
+      "https://b.example/y%E3%80%82",
+      "https://c.example/z%E3%80%82",
+    ]);
+    expect(links.map((a) => a.textContent)).toEqual([
+      "t",
+      "https://b.example/y。",
+      "https://c.example/z。",
+    ]);
+  });
+
+  it("leaves a URL with no full-width mark and one ending in ASCII punctuation as before", () => {
+    const { container } = render(
+      message("见 https://a.example/x 和 https://b.example/y."),
+    );
+    const links = Array.from(container.querySelectorAll("a"));
+    expect(links.map((a) => a.getAttribute("href"))).toEqual([
+      "https://a.example/x",
+      "https://b.example/y",
+    ]);
+  });
+});

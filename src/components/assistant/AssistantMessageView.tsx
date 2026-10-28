@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import type { AssistantMessage, AssistantSource } from "@/lib/api/assistant";
 import { settingsApi } from "@/lib/api/settings";
+import { splitUrlTail } from "@/lib/urlTail";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
@@ -61,7 +62,7 @@ function citationKey(value: string) {
 function splitCited(sources: ShownSource[], content: string) {
   const linked = new Set(
     [...content.matchAll(/https:\/\/[^\s<>"'`()[\]]+/g)].flatMap(
-      ([url]) => citationKey(url.replace(/[.,;:!?]+$/, "")) ?? [],
+      ([found]) => citationKey(splitUrlTail(found).url) ?? [],
     ),
   );
   const isCited = (source: ShownSource) =>

@@ -370,6 +370,26 @@ describe("a reply's sources", () => {
     expect(screen.queryByText(/Pi release notes/)).toBeNull();
   });
 
+  it.each([
+    ["，", "见 https://docs.example.com/ofox，然后"],
+    ["）", "见（https://docs.example.com/ofox）。"],
+    ["。", "详见https://docs.example.com/ofox。"],
+  ])("counts a page cited in running text before %s as cited", (_, content) => {
+    // The saved source carries tracking, so only the cleaned URLs match.
+    const tracked = source(
+      "s2",
+      "Ofox docs",
+      "https://docs.example.com/ofox?utm_source=openai",
+    );
+    render(view({ content, sources: [found[0], tracked] }));
+    expect(titles(screen.getByRole("list", { name: "Sources" }))).toEqual([
+      "1. Ofox docs docs.example.com",
+    ]);
+    expect(
+      screen.getByRole("button", { name: "1 more source" }),
+    ).toBeInTheDocument();
+  });
+
   it("offers every source behind the disclosure when the answer cites none, by keyboard too", async () => {
     render(view({ content: "Answer", sources: found }));
     expect(screen.queryByRole("list", { name: "Sources" })).toBeNull();
