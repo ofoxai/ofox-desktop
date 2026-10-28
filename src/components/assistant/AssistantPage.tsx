@@ -197,6 +197,10 @@ function AssistantWorkspace() {
     assistant.loading ||
     Boolean(assistant.selectedId && session?.id !== assistant.selectedId) ||
     (!assistant.webSearch && searchPrice === null);
+  // The switch is lit only for a search that will happen: a conversation
+  // saved with search on while it is unavailable still says "on" to
+  // assistive tech (and can be turned off), but doesn't look on.
+  const searchLit = assistant.webSearch && searchPrice !== null;
   // Tool, system and other internal records stay out of the transcript.
   const messages = (detail?.messages ?? []).filter(
     (message) => message.role === "user" || message.role === "assistant",
@@ -651,7 +655,7 @@ function AssistantWorkspace() {
                     onClick={() => assistant.setWebSearch(!assistant.webSearch)}
                     className={cn(
                       "shrink-0 px-2",
-                      assistant.webSearch &&
+                      searchLit &&
                         "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
                     )}
                   >

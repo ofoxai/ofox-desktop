@@ -3013,6 +3013,52 @@ describe("web search", () => {
     },
   );
 
+  describe("the switch's look", () => {
+    const lit = () => expect(toggle()).toHaveClass("bg-brand-soft");
+    const unlit = () => expect(toggle()).not.toHaveClass("bg-brand-soft");
+
+    it("is lit while search is on and offered, and plain while it is off", async () => {
+      await openConversation();
+      unlit();
+      await userEvent.click(toggle());
+      await waitFor(() =>
+        expect(toggle()).toHaveAttribute("aria-pressed", "true"),
+      );
+      lit();
+    });
+
+    it.each([
+      [
+        "is unavailable",
+        { available: false, unitPriceUsd: null, model: "openai/gpt-5-nano" },
+      ],
+      ["is unknown to the backend", undefined],
+    ])(
+      "is not lit while search %s, though the saved setting is on and can be turned off",
+      async (_, search) => {
+        mocks.bootstrap.mockResolvedValue({ ...capabilities, search });
+        current.session.webSearch = true;
+        await openConversation();
+        expect(toggle()).toHaveAttribute("aria-pressed", "true");
+        expect(toggle()).toBeEnabled();
+        unlit();
+        await userEvent.click(toggle());
+        await waitFor(() =>
+          expect(toggle()).toHaveAttribute("aria-pressed", "false"),
+        );
+        expect(mocks.updateSession).toHaveBeenLastCalledWith(
+          expect.objectContaining({ webSearch: false }),
+        );
+      },
+    );
+
+    it("is lit for a conversation saved with search on while search is offered", async () => {
+      current.session.webSearch = true;
+      await openConversation();
+      lit();
+    });
+  });
+
   it("can be turned off before the first message while search is unavailable", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     function Refresh() {
