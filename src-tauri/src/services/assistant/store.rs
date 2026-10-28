@@ -16,6 +16,7 @@ mod backup;
 mod lifecycle;
 pub use backup::{BackupReport, RestoreReport, TRANSFER_BUSY};
 
+use super::thinking;
 use super::types::*;
 use crate::settings::KeyOwner;
 use serde::{Deserialize, Serialize};
@@ -158,6 +159,7 @@ impl AssistantStore {
                 title: String::new(),
                 model_id: model_id.into(),
                 web_search,
+                thinking_level: None,
                 created_at: at,
                 updated_at: at,
                 deleted_at: None,
@@ -517,6 +519,10 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     }
     if let Some(web) = request.web_search {
         record.session.web_search = web;
+    }
+    // The host checked the level against the session's model.
+    if let Some(level) = &request.thinking_level {
+        record.session.thinking_level = (level != thinking::DEFAULT).then(|| level.clone());
     }
     if let Some(deleted) = request.deleted {
         record.session.deleted_at = deleted.then(now);
@@ -1737,6 +1743,7 @@ mod tests {
                 title: String::new(),
                 model_id: "test/model".into(),
                 web_search: false,
+                thinking_level: None,
                 created_at: 1,
                 updated_at: 1,
                 deleted_at: None,
@@ -1868,6 +1875,46 @@ mod tests {
             store.load_detail(&created.id).unwrap().session.draft,
             "unsent"
         );
+    }
+
+    #[test]
+    fn a_thinking_level_is_kept_until_default_clears_it() {
+        let (_config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut change = request(&sid);
+        change.thinking_level = Some("high".into());
+        assert_eq!(
+            store
+                .update(&change, no_precondition)
+                .unwrap()
+                .thinking_level
+                .as_deref(),
+            Some("high")
+        );
+        let mut other = request(&sid);
+        other.title = Some("Renamed".into());
+        store.update(&other, no_precondition).unwrap();
+        assert_eq!(
+            store
+                .load_detail(&sid)
+                .unwrap()
+                .session
+                .thinking_level
+                .as_deref(),
+            Some("high")
+        );
+        change.thinking_level = Some(thinking::DEFAULT.into());
+        assert!(store
+            .update(&change, no_precondition)
+            .unwrap()
+            .thinking_level
+            .is_none());
+        assert!(store
+            .load_detail(&sid)
+            .unwrap()
+            .session
+            .thinking_level
+            .is_none());
     }
 
     #[test]

@@ -471,9 +471,11 @@ export class AssistantRuntime {
   // Model tools for this run, built with wrapTool so they share the call
   // budget and the unknown-outcome gate. Attachments are readable only when
   // the conversation has some; the web only when the run enables web search
-  // (its server starts on the first call and stops with the run).
+  // (its server starts on the first call and stops with the run). A model
+  // the catalog says takes no tools gets none.
   tools(context, model) {
     const tools = [];
+    if (context.params.model?.tools === false) return tools;
     if (context.attachments.size)
       tools.push(
         readAttachmentTool(this, context, {
@@ -636,6 +638,7 @@ export class AssistantRuntime {
     const model = modelForOfox(params.model, params.apex, {
       baseUrl: params.baseUrl,
       allowLocalGateway: params.allowLocalGateway,
+      thinkingLevel: params.thinkingLevel,
     });
     const attachments = new AttachmentStore(
       params.attachmentRoot,
@@ -1042,7 +1045,11 @@ export class AssistantRuntime {
             willRetry: event.willRetry,
           });
       });
-      this.notify(context, "run_start");
+      // The level that runs (Pi clamps to what the model supports); null when
+      // no thinking parameter is sent.
+      this.notify(context, "run_start", {
+        thinkingLevel: model.reasoning ? session.thinkingLevel : null,
+      });
       context.abort.signal.throwIfAborted();
       if (compactOnly)
         await session.compact(

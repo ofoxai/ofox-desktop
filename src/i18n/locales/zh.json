@@ -4904,6 +4904,7 @@
       "invalidMessage": "这条消息无法发送，请检查后重试。",
       "messageTooLarge": "消息太长了，请缩短后重试。",
       "titleTooLong": "标题太长了，请换一个短一些的。",
+      "thinkingLevelUnavailable": "这个模型不支持该思考程度，请换一个。",
       "attachmentUnavailable": "有附件已不可用。请重新附加该文件，然后重新发送消息。",
       "attachmentTooMany": "文件太多。每次最多附加 10 个，每个对话最多 200 个。",
       "attachmentTooLarge": "文件太大。单个文件最大 25 MB，图片最大 10 MB，PDF 最多 100 页，一条消息最多附带 10 张图片。",

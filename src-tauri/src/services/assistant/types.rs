@@ -30,6 +30,11 @@ pub struct Session {
     /// Web search (S3) stays off until the user turns it on.
     #[serde(default)]
     pub web_search: bool,
+    /// The thinking level chosen for the model; `None` is the default, which
+    /// sends no thinking parameter. A level the model no longer offers is
+    /// not sent.
+    #[serde(default)]
+    pub thinking_level: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     /// Set while the session sits in the trash (S4).
@@ -99,6 +104,10 @@ pub struct Message {
     pub content: String,
     pub created_at: i64,
     pub reasoning: Option<String>,
+    /// How long the reply streamed its reasoning, in milliseconds: each span
+    /// from a thinking delta to the next text, tool call or end of message.
+    #[serde(default)]
+    pub reasoning_ms: Option<u64>,
     pub status: String,
     #[serde(default)]
     pub error_code: Option<String>,
@@ -171,6 +180,8 @@ pub struct UpdateRequest {
     pub title: Option<String>,
     pub model_id: Option<String>,
     pub web_search: Option<bool>,
+    /// One of the model's thinking levels, or `"default"` to clear the choice.
+    pub thinking_level: Option<String>,
     pub deleted: Option<bool>,
     pub draft: Option<String>,
     pub draft_attachment_ids: Option<Vec<String>>,
@@ -272,6 +283,21 @@ mod tests {
         assert!(session.active_run.is_none());
         assert!(session.draft.is_empty());
         assert!(session.draft_attachment_ids.is_empty());
+        assert!(session.thinking_level.is_none());
+    }
+
+    #[test]
+    fn a_saved_message_without_a_reasoning_time_reads_without_one() {
+        let saved = json!({
+            "id": id(), "role": "assistant", "content": "a", "createdAt": 1, "reasoning": null,
+            "status": "completed", "revisionOf": null, "nativeEntryId": null,
+        });
+        let message: Message = serde_json::from_value(saved).unwrap();
+        assert!(message.reasoning_ms.is_none());
+        let mut value = serde_json::to_value(message).unwrap();
+        value["reasoningMs"] = json!(8200);
+        let message: Message = serde_json::from_value(value).unwrap();
+        assert_eq!(message.reasoning_ms, Some(8200));
     }
 
     #[test]

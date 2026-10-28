@@ -79,7 +79,54 @@ function isLocalGateway(gateway) {
   return port !== undefined && Number(port) <= 65535;
 }
 
-export function modelForOfox(input, apex, { baseUrl, allowLocalGateway } = {}) {
+/** Pi's thinking levels, lowest first. */
+export const THINKING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+function thinkingLevelOf(value) {
+  if (value === undefined || value === null) return undefined;
+  if (!THINKING_LEVELS.includes(value))
+    throw new Error("Unsupported thinking level");
+  return value;
+}
+
+// Pi's map from a level to what the provider is sent; null: not offered.
+function levelMap(map) {
+  if (map === undefined || map === null) return undefined;
+  if (
+    typeof map !== "object" ||
+    Array.isArray(map) ||
+    Object.entries(map).some(
+      ([level, sent]) =>
+        !THINKING_LEVELS.includes(level) ||
+        (sent !== null &&
+          (typeof sent !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(sent))),
+    )
+  )
+    throw new Error("Invalid thinking level map");
+  return { ...map };
+}
+
+// The Anthropic compat fields Pi's Messages adapter reads for thinking.
+function anthropicCompat(value) {
+  const compat = {};
+  for (const field of ["forceAdaptiveThinking", "supportsTemperature"])
+    if (typeof value?.[field] === "boolean") compat[field] = value[field];
+  return Object.keys(compat).length ? compat : undefined;
+}
+
+export function modelForOfox(
+  input,
+  apex,
+  { baseUrl, allowLocalGateway, thinkingLevel } = {},
+) {
   if (apex !== "ofox.ai" && apex !== "ofox.io")
     throw new Error("Unsupported Ofox apex");
   const gateway = baseUrl ?? `https://api.${apex}`;
@@ -136,13 +183,22 @@ export function modelForOfox(input, apex, { baseUrl, allowLocalGateway } = {}) {
   )
     throw new Error("Model context capacity or output limit is unavailable");
   const price = input.cost ?? {};
+  // A run thinks only at a level the host chose for a model the catalog says
+  // reasons. Otherwise Pi sends no thinking parameter at all and the
+  // provider's default applies, exactly as before levels existed.
+  const thinks =
+    thinkingLevelOf(thinkingLevel) !== undefined && input.reasoning === true;
+  const thinkingLevelMap = thinks
+    ? levelMap(input.thinkingLevelMap)
+    : undefined;
   return {
     id: input.id,
     name: input.name || input.id,
     provider: "ofox-desktop",
     api,
     baseUrl: `${gateway}${api === "anthropic-messages" ? "/anthropic" : "/v1"}`,
-    reasoning: input.reasoning === true,
+    reasoning: thinks,
+    ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
     input:
       input.supportsImages ||
       input.inputModalities?.includes("image") ||
@@ -167,6 +223,8 @@ export function modelForOfox(input, apex, { baseUrl, allowLocalGateway } = {}) {
             supportsUsageInStreaming: true,
             maxTokensField: "max_tokens",
           }
-        : undefined,
+        : api === "anthropic-messages" && thinks
+          ? anthropicCompat(input.anthropicCompat)
+          : undefined,
   };
 }

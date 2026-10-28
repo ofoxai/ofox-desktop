@@ -119,16 +119,22 @@ fn mark_cost_unknown(usage: &mut Value) {
 }
 
 /// Streamed text, saved in batches: UI events go out at once, `session.json`
-/// is rewritten at most every 500 ms (or each 64 KiB) and at the end.
+/// is rewritten at most every 500 ms (or each 64 KiB) and at the end. It also
+/// times the reasoning: each span from a thinking delta to the next text, tool
+/// call or end of message counts.
 pub(super) struct ProjectionBuffer {
     pending: Pending,
     last_flush: std::time::Instant,
+    /// When the reasoning streaming now began; `None` outside reasoning.
+    thinking_since: Option<std::time::Instant>,
 }
 
 #[derive(Default)]
 pub(super) struct Pending {
     text: String,
     thinking: String,
+    /// Reasoning spans that ended since the last batch, in milliseconds.
+    reasoning_ms: u64,
 }
 
 impl Default for ProjectionBuffer {
@@ -136,6 +142,7 @@ impl Default for ProjectionBuffer {
         Self {
             pending: Pending::default(),
             last_flush: std::time::Instant::now(),
+            thinking_since: None,
         }
     }
 }
@@ -151,10 +158,27 @@ impl ProjectionBuffer {
                 self.pending.thinking.push_str(delta);
             }
         }
+        if kind == "text_delta" {
+            self.end_thinking();
+        } else {
+            self.thinking_since
+                .get_or_insert_with(std::time::Instant::now);
+        }
+    }
+
+    /// The reasoning streaming now, if any, ended: a tool call, the end of
+    /// the message or of the run.
+    pub(super) fn end_thinking(&mut self) {
+        if let Some(since) = self.thinking_since.take() {
+            let spent = u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX);
+            self.pending.reasoning_ms = self.pending.reasoning_ms.saturating_add(spent);
+        }
     }
 
     fn is_empty(&self) -> bool {
-        self.pending.text.is_empty() && self.pending.thinking.is_empty()
+        self.pending.text.is_empty()
+            && self.pending.thinking.is_empty()
+            && self.pending.reasoning_ms == 0
     }
 
     pub(super) fn due(&self) -> bool {
@@ -193,6 +217,10 @@ pub(super) fn save_projection(
             let reasoning = message.reasoning.get_or_insert_default();
             reasoning.push_str(&pending.thinking);
             *reasoning = scrub_secrets(reasoning, secrets);
+        }
+        if pending.reasoning_ms > 0 {
+            let total = message.reasoning_ms.unwrap_or(0);
+            message.reasoning_ms = Some(total.saturating_add(pending.reasoning_ms));
         }
         record.session.updated_at = now();
         Ok(())
@@ -305,6 +333,7 @@ pub(super) fn merge_native(
                 content,
                 created_at: entry["timestamp"].as_i64().unwrap_or_else(now),
                 reasoning: thinking,
+                reasoning_ms: None,
                 status: status.into(),
                 error_code: None,
                 attachments: vec![],
@@ -635,6 +664,71 @@ mod tests {
         assert!(content.starts_with(&"x".repeat(10_000)));
         assert!(content.ends_with(crate::redact::REDACTED), "{content}");
         assert_eq!(saved.messages[0].reasoning.as_deref(), Some("reasoning"));
+    }
+
+    #[test]
+    fn reasoning_time_sums_each_span_from_a_thinking_delta_to_what_follows_it() {
+        let (_config, store) = store();
+        let sid = store.create("test", false).unwrap().session.id;
+        let run = control(&sid);
+        store
+            .mutate(&sid, |record| {
+                record
+                    .messages
+                    .push(message(&run.message_id, "assistant", &run.run_id, 1));
+                Ok(())
+            })
+            .unwrap();
+        let ago = |ms: u64| Some(std::time::Instant::now() - Duration::from_millis(ms));
+        let delta = || json!({"delta": "x"});
+        let mut buffer = ProjectionBuffer::default();
+        // 1.5 s of reasoning, ended by the reply's text.
+        buffer.push(&run, "thinking_delta", &mut delta());
+        buffer.thinking_since = ago(1500);
+        buffer.push(&run, "thinking_delta", &mut delta());
+        buffer.push(&run, "text_delta", &mut delta());
+        buffer.push(&run, "text_delta", &mut delta());
+        // Then 0.5 s more, ended by a tool call.
+        buffer.push(&run, "thinking_delta", &mut delta());
+        buffer.thinking_since = ago(500);
+        buffer.end_thinking();
+        buffer.end_thinking();
+        let pending = buffer.take().unwrap();
+        assert!(
+            (2000..10_000).contains(&pending.reasoning_ms),
+            "{}",
+            pending.reasoning_ms
+        );
+        save_projection(&store, &sid, &run.message_id, &pending, &run.secrets()).unwrap();
+
+        // A span still open when a batch is saved goes on into the next one.
+        buffer.push(&run, "thinking_delta", &mut delta());
+        buffer.thinking_since = ago(300);
+        assert_eq!(buffer.take().unwrap().reasoning_ms, 0);
+        buffer.end_thinking();
+        let pending = buffer.take().expect("the time alone is saved");
+        assert!(pending.reasoning_ms >= 300);
+        save_projection(&store, &sid, &run.message_id, &pending, &run.secrets()).unwrap();
+        let total = store.load_detail(&sid).unwrap().messages[0]
+            .reasoning_ms
+            .unwrap();
+        assert!((2300..20_000).contains(&total), "{total}");
+
+        // Native history replaces the text, never the time.
+        let mut record = store.load_record(&sid).unwrap();
+        let entries = json!([{
+            "id": "n1", "role": "assistant", "runId": run.run_id, "content": "answer",
+            "thinking": "why", "active": true, "final": true, "timestamp": 2,
+        }]);
+        merge_native(&mut record, &entries, &[]).unwrap();
+        assert_eq!(record.messages[0].reasoning_ms, Some(total));
+        assert!(record.messages[0].native_entry_id.is_some());
+
+        // No reasoning, no time.
+        let mut plain = ProjectionBuffer::default();
+        plain.push(&run, "text_delta", &mut delta());
+        plain.end_thinking();
+        assert_eq!(plain.take().unwrap().reasoning_ms, 0);
     }
 
     #[test]

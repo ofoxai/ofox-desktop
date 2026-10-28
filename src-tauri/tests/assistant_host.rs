@@ -1,8 +1,9 @@
 //! The assistant host and its commands end to end: the real prepared runtime
-//! (Node + Pi SDK) against a local OpenAI-compatible mock gateway, with the
-//! conversation files in a temp dir.
+//! (Node + Pi SDK) against a local mock gateway that speaks the OpenAI APIs
+//! and, under `/anthropic/`, Anthropic Messages, with the conversation files
+//! in a temp dir.
 use cc_switch_lib::assistant::{
-    catalog::{Model, Source},
+    catalog::{parse_models, Model, Source},
     host::{Admit, AssistantHost, BoxFuture, Environment, Identity},
     types::{self, CreateRequest, Detail, Event, Message, RunProxy, SendRequest},
 };
@@ -46,6 +47,8 @@ fn runtime_dir() -> Option<PathBuf> {
 enum Reply {
     /// A complete streamed answer.
     Stream(String),
+    /// Streamed reasoning (taking a while), then this answer.
+    Thinking(String, String),
     /// Starts streaming, then holds the connection open until the client goes.
     Hang(String),
     /// An HTTP error with this body.
@@ -69,6 +72,7 @@ fn invalid_key() -> Value {
 struct Request {
     path: String,
     authorization: String,
+    headers: HashMap<String, String>,
     body: Value,
 }
 
@@ -155,8 +159,9 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
         read_chunked(&mut reader)
     };
     requests.lock().unwrap().push(Request {
-        path,
+        path: path.clone(),
         authorization: headers.get("authorization").cloned().unwrap_or_default(),
+        headers,
         body: serde_json::from_slice(&body).unwrap(),
     });
     let reply = script
@@ -165,7 +170,32 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
         .pop_front()
         .expect("the gateway got a request the test did not script");
     let mut out = stream;
+    // Pi's Anthropic client asks for `/anthropic/v1/messages?beta=true`.
+    let messages_api = path.split('?').next() == Some("/anthropic/v1/messages");
     match reply {
+        Reply::Stream(text) if messages_api => anthropic_stream(&mut out, None, &text),
+        Reply::Thinking(thinking, text) if messages_api => {
+            anthropic_stream(&mut out, Some(&thinking), &text)
+        }
+        Reply::Thinking(thinking, text) => {
+            start_stream(&mut out);
+            for part in split_in_three(&thinking) {
+                let chunk = json!({"id":"mock","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":part},"finish_reason":null}]});
+                let _ = out.write_all(format!("data: {chunk}\n\n").as_bytes());
+                let _ = out.flush();
+                std::thread::sleep(THINKING_PAUSE);
+            }
+            for part in split_in_three(&text) {
+                write_delta(&mut out, &part);
+            }
+            let _ = out.write_all(
+                format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}})
+                )
+                .as_bytes(),
+            );
+        }
         Reply::Stream(text) => {
             start_stream(&mut out);
             for part in split_in_three(&text) {
@@ -262,6 +292,62 @@ fn write_delta(out: &mut TcpStream, text: &str) {
     let _ = out.flush();
 }
 
+/// Between two parts of streamed reasoning, so it takes measurable time.
+const THINKING_PAUSE: Duration = Duration::from_millis(80);
+
+fn write_event(out: &mut TcpStream, event: Value) {
+    let kind = event["type"].as_str().unwrap_or_default();
+    let _ = out.write_all(format!("event: {kind}\ndata: {event}\n\n").as_bytes());
+    let _ = out.flush();
+}
+
+/// A Messages API answer as `/anthropic/v1/messages` streams it: reasoning in
+/// a thinking block when given, then the text.
+fn anthropic_stream(out: &mut TcpStream, thinking: Option<&str>, text: &str) {
+    start_stream(out);
+    write_event(
+        out,
+        json!({"type":"message_start","message":{"id":"msg_mock","type":"message","role":"assistant","model":"mock","content":[],"stop_reason":null,"usage":{"input_tokens":10,"output_tokens":0}}}),
+    );
+    let mut index = 0;
+    if let Some(thinking) = thinking {
+        write_event(
+            out,
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+        );
+        for part in split_in_three(thinking) {
+            write_event(
+                out,
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":part}}),
+            );
+            std::thread::sleep(THINKING_PAUSE);
+        }
+        write_event(
+            out,
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"mock-signature"}}),
+        );
+        write_event(out, json!({"type":"content_block_stop","index":0}));
+        index = 1;
+    }
+    write_event(
+        out,
+        json!({"type":"content_block_start","index":index,"content_block":{"type":"text","text":""}}),
+    );
+    for part in split_in_three(text) {
+        write_event(
+            out,
+            json!({"type":"content_block_delta","index":index,"delta":{"type":"text_delta","text":part}}),
+        );
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    write_event(out, json!({"type":"content_block_stop","index":index}));
+    write_event(
+        out,
+        json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}),
+    );
+    write_event(out, json!({"type":"message_stop"}));
+}
+
 fn split_in_three(text: &str) -> Vec<String> {
     let chars: Vec<char> = text.chars().collect();
     let third = chars.len().div_ceil(3).max(1);
@@ -282,6 +368,8 @@ struct TestEnv {
     proxy: Mutex<Option<RunProxy>>,
     /// The models the catalog offers.
     catalog: Mutex<Vec<Model>>,
+    /// The rows `/anthropic/v1/models` gives.
+    anthropic: Mutex<Vec<Model>>,
 }
 
 struct EnvState {
@@ -324,6 +412,7 @@ impl TestEnv {
             key_waiting: std::sync::atomic::AtomicBool::new(false),
             proxy: Mutex::new(None),
             catalog: Mutex::new(vec![test_model()]),
+            anthropic: Mutex::default(),
         })
     }
 
@@ -410,7 +499,7 @@ impl Environment for TestEnv {
         Box::pin(async move {
             Ok(match source {
                 Source::V1 => self.catalog.lock().unwrap().clone(),
-                Source::Anthropic => vec![],
+                Source::Anthropic => self.anthropic.lock().unwrap().clone(),
             })
         })
     }
@@ -2698,4 +2787,225 @@ fn restored_backup_continues_native_history_with_saved_search_prices_on_both_ape
             fresh.shutdown().await;
         });
     }
+}
+
+// ── thinking levels and Claude ───────────────────────────────────────────
+
+/// Claude Haiku as `/anthropic/v1/models` lists it (the runtime's fixture),
+/// with the thinking levels the host's table gives it.
+fn claude_model() -> Model {
+    let fixture: Value = serde_json::from_str(include_str!(
+        "../../assistant-runtime/test/fixtures/catalog-claude-model.json"
+    ))
+    .unwrap();
+    parse_models(fixture["catalog"].clone(), Source::Anthropic).remove(0)
+}
+
+/// Reasoning long enough that the runtime streams it before it ends.
+fn reasoning_text() -> String {
+    "Weighing the options one by one before answering. ".repeat(6)
+}
+
+async fn set_level(host: &Arc<AssistantHost>, sid: &str, level: &str) -> Option<String> {
+    let update = serde_json::from_value(json!({"sessionId": sid, "thinkingLevel": level})).unwrap();
+    host.update_session(update).await.unwrap().thinking_level
+}
+
+/// What the model was sent about thinking, whatever the protocol.
+fn thinking_fields(request: &Request) -> Vec<&str> {
+    ["thinking", "output_config", "reasoning", "reasoning_effort"]
+        .into_iter()
+        .filter(|field| request.body.get(*field).is_some())
+        .collect()
+}
+
+#[test]
+fn claude_runs_with_messages_and_thinks_only_at_a_chosen_level() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let claude = claude_model();
+    assert_eq!(
+        claude.thinking_levels,
+        ["off", "low", "medium", "high", "xhigh", "max"]
+    );
+    env.anthropic.lock().unwrap().push(claude.clone());
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let boot = host.bootstrap().await.unwrap();
+        let offered = boot["models"].as_array().unwrap();
+        let listed = offered.iter().find(|m| m["id"] == claude.id).unwrap();
+        assert_eq!(listed["thinkingLevels"], json!(claude.thinking_levels));
+        let create: CreateRequest = serde_json::from_value(json!({"modelId": claude.id})).unwrap();
+        let sid = host.create_session(create).await.unwrap().id;
+
+        // The default: Messages, the key as a Bearer token to the gateway
+        // only, and no thinking field.
+        gateway.reply(Reply::Stream("Claude answers".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "Hello Claude", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let sent = &gateway.requests()[0];
+        assert_eq!(sent.path, "/anthropic/v1/messages?beta=true");
+        assert_eq!(sent.authorization, format!("Bearer {KEY}"));
+        assert!(!sent.headers.contains_key("x-api-key"));
+        assert_eq!(sent.body["model"], claude.id);
+        assert!(thinking_fields(sent).is_empty(), "{:?}", sent.body);
+        let start = &of_type(&env, &run, "run_start")[0];
+        assert_eq!(start["thinkingLevel"], Value::Null);
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.messages[1].content, "Claude answers");
+        assert!(detail.messages[1].reasoning_ms.is_none());
+        assert_eq!(detail.usage["inputTokens"], 10);
+
+        // At a level: adaptive thinking at that effort; the reasoning
+        // streams, is kept, and its time is counted.
+        assert_eq!(
+            set_level(&host, &sid, "high").await.as_deref(),
+            Some("high")
+        );
+        gateway.reply(Reply::Thinking(reasoning_text(), "Thought it over".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "Think first", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let sent = &gateway.requests()[1];
+        assert_eq!(sent.body["thinking"]["type"], "adaptive");
+        assert_eq!(sent.body["output_config"], json!({"effort": "high"}));
+        assert!(sent.body.get("temperature").is_none());
+        assert!(
+            sent.text().contains("Claude answers"),
+            "the context goes too"
+        );
+        assert_eq!(of_type(&env, &run, "run_start")[0]["thinkingLevel"], "high");
+        let streamed: String = of_type(&env, &run, "thinking_delta")
+            .iter()
+            .map(|data| data["delta"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(streamed, reasoning_text());
+        let detail = host.get_session(&sid).await.unwrap();
+        let reply = detail.messages.last().unwrap();
+        assert_eq!(reply.content, "Thought it over");
+        assert_eq!(reply.reasoning.as_deref(), Some(reasoning_text().as_str()));
+        let spent = reply.reasoning_ms.expect("the reasoning was timed");
+        assert!(spent >= 100, "{spent} ms");
+        assert_eq!(
+            saved(config.path(), &sid)["messages"][3]["reasoningMs"],
+            spent
+        );
+
+        // "off" turns Claude's thinking off; "default" sends nothing again.
+        set_level(&host, &sid, "off").await;
+        gateway.reply(Reply::Stream("No thinking".into()));
+        turn(&host, &env, request(&sid, "Quick one", json!({}))).await;
+        assert_eq!(
+            gateway.requests()[2].body["thinking"],
+            json!({"type": "disabled"})
+        );
+        assert!(set_level(&host, &sid, "default").await.is_none());
+        gateway.reply(Reply::Stream("Default again".into()));
+        let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
+        assert!(thinking_fields(&gateway.requests()[3]).is_empty());
+        assert_eq!(
+            of_type(&env, &run, "run_start")[0]["thinkingLevel"],
+            Value::Null
+        );
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+/// The test model, reasoning with these levels and no Pi data.
+fn reasoning_model(levels: &[&str]) -> Model {
+    let mut model = test_model();
+    model.reasoning = true;
+    model.thinking_levels = levels.iter().map(|level| level.to_string()).collect();
+    model
+}
+
+#[test]
+fn a_chat_completions_level_is_sent_only_while_chosen_and_offered() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    *env.catalog.lock().unwrap() = vec![reasoning_model(&["low", "medium", "high"])];
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Plain".into()));
+        turn(&host, &env, request(&sid, "One", json!({}))).await;
+        assert!(thinking_fields(&gateway.requests()[0]).is_empty());
+
+        assert_eq!(
+            set_level(&host, &sid, "medium").await.as_deref(),
+            Some("medium")
+        );
+        gateway.reply(Reply::Thinking(reasoning_text(), "Considered".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "Two", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        assert_eq!(gateway.requests()[1].body["reasoning_effort"], "medium");
+        assert_eq!(
+            of_type(&env, &run, "run_start")[0]["thinkingLevel"],
+            "medium"
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        let reply = detail.messages.last().unwrap();
+        assert_eq!(reply.reasoning.as_deref(), Some(reasoning_text().as_str()));
+        assert!(reply.reasoning_ms.is_some_and(|ms| ms >= 100));
+
+        // The catalog no longer offers the level: the run goes at the default.
+        *env.catalog.lock().unwrap() = vec![reasoning_model(&["high"])];
+        let host = AssistantHost::new(env.clone());
+        gateway.reply(Reply::Stream("Default".into()));
+        let (run, _) = turn(&host, &env, request(&sid, "Three", json!({}))).await;
+        assert!(thinking_fields(&gateway.requests()[2]).is_empty());
+        assert_eq!(
+            of_type(&env, &run, "run_start")[0]["thinkingLevel"],
+            Value::Null
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.session.thinking_level.as_deref(), Some("medium"));
+    });
+}
+
+#[test]
+fn a_model_without_tools_runs_without_search_or_any_tool() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let mut toolless = test_model();
+    toolless.tools = false;
+    *env.catalog.lock().unwrap() = vec![toolless];
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        // Search is priced and on, and the conversation has a file.
+        let sid = searching(&host, &env).await;
+        let file = attach(&host, config.path(), &sid, "notes.txt", b"kept for later").await;
+        gateway.reply(Reply::Stream("First".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Read it", json!({"attachmentIds": [file]})),
+        )
+        .await;
+        gateway.reply(Reply::Stream("Second".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "Search the web", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
+        for sent in gateway.requests() {
+            assert!(sent.body.get("tools").is_none(), "{:?}", sent.body["tools"]);
+        }
+        let detail = host.get_session(&sid).await.unwrap();
+        assert!(
+            detail.session.web_search,
+            "the switch stays as the user set it"
+        );
+        assert_eq!(detail.usage["searchCount"], 0);
+    });
 }

@@ -4904,6 +4904,7 @@
       "invalidMessage": "This message can't be sent. Check it and try again.",
       "messageTooLarge": "This message is too long. Shorten it and try again.",
       "titleTooLong": "The title is too long. Use a shorter one.",
+      "thinkingLevelUnavailable": "This model doesn't offer that thinking level. Choose another one.",
       "attachmentUnavailable": "An attached file is no longer available. Attach the file again, then send your message again.",
       "attachmentTooMany": "Too many files. Attach up to 10 at a time and up to 200 per conversation.",
       "attachmentTooLarge": "A file is too large. Files can be up to 25 MB and images up to 10 MB, PDFs can have up to 100 pages, and a message can carry up to 10 images.",

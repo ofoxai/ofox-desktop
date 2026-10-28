@@ -2,6 +2,7 @@
 //! `/anthropic/v1/models`, every row classified by kind, with the capacity,
 //! prices and capabilities the runtime and the model picker need.
 //! Conversations use the chat models only (see [`Catalog::conversation_models`]).
+use super::thinking::{self, AnthropicCompat, LevelMap};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -91,6 +92,16 @@ pub struct Model {
     /// The model takes tools; assumed when the catalog lists no parameters.
     #[serde(default = "assumed_tools")]
     pub tools: bool,
+    /// The thinking levels a conversation may choose, in Pi's order; empty
+    /// when the model does not reason. No level (the default) sends nothing.
+    #[serde(default)]
+    pub thinking_levels: Vec<String>,
+    /// Pi's map from a level to what the provider is sent, when Pi has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level_map: Option<LevelMap>,
+    /// Pi's thinking compat for a Claude model run with Messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_compat: Option<AnthropicCompat>,
     /// When the model was added, in Unix seconds.
     #[serde(default)]
     pub created: Option<i64>,
@@ -154,10 +165,11 @@ pub struct VideoCapabilities {
     pub from_price_per_second: Option<String>,
 }
 
-/// A model as a run receives it: exactly the fields the runtime read before
-/// the catalog learned kinds, so today's run parameters stay byte for byte.
-/// New catalog fields reach the runtime only when a task wires them on
-/// purpose (`reasoning` would switch Pi's thinking parameters on).
+/// A model as a run receives it: the fields the runtime read before the
+/// catalog learned kinds, so a run at the defaults gets them byte for byte.
+/// The fields after `api` appear only when they change the run: thinking
+/// only for a run at a level (`reasoning` switches Pi's thinking parameters
+/// on), `tools` only for a model that takes none.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeModel<'a> {
@@ -177,6 +189,15 @@ pub struct RuntimeModel<'a> {
     /// the runtime picks that one by itself.
     #[serde(skip_serializing_if = "Option::is_none")]
     api: Option<Protocol>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_level_map: Option<&'a LevelMap>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anthropic_compat: Option<&'a AnthropicCompat>,
+    /// `false` only: the runtime then registers no tools.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<bool>,
 }
 
 impl Model {
@@ -186,7 +207,14 @@ impl Model {
         self.kind == Kind::Chat
     }
 
-    pub fn for_runtime(&self) -> RuntimeModel<'_> {
+    /// Whether a conversation may run this model at `level`.
+    pub fn offers_thinking_level(&self, level: &str) -> bool {
+        self.thinking_levels.iter().any(|offered| offered == level)
+    }
+
+    /// The model for a run; `thinks` when the run has a thinking level (one
+    /// of [`Self::thinking_levels`]).
+    pub fn for_runtime(&self, thinks: bool) -> RuntimeModel<'_> {
         let first = self
             .supported_endpoints
             .iter()
@@ -205,6 +233,10 @@ impl Model {
             cost: &self.cost,
             pricing_known: self.pricing_known,
             api: self.protocol.filter(|protocol| Some(*protocol) != first),
+            reasoning: thinks.then_some(true),
+            thinking_level_map: self.thinking_level_map.as_ref().filter(|_| thinks),
+            anthropic_compat: self.anthropic_compat.as_ref().filter(|_| thinks),
+            tools: (!self.tools).then_some(false),
         }
     }
 }
@@ -473,6 +505,15 @@ fn parse_model(item: &Value, source: Source) -> Option<Model> {
             .map(|list| list.iter().any(|p| p == parameter))
     };
     let inputs = inputs.unwrap_or_default();
+    let reasoning = lists("reasoning").unwrap_or(false);
+    let protocol = match kind {
+        Kind::Chat => chat_protocol(vendor, &endpoints),
+        _ => None,
+    };
+    let thinking = match kind {
+        Kind::Chat => thinking::for_model(id, reasoning, protocol),
+        _ => thinking::Thinking::default(),
+    };
     let pricing = &item["pricing"];
     let cache_write = pricing
         .get("input_cache_write_5m")
@@ -502,12 +543,12 @@ fn parse_model(item: &Value, source: Source) -> Option<Model> {
         kind,
         vendor: vendor.into(),
         short_name: short_name(name).into(),
-        protocol: match kind {
-            Kind::Chat => chat_protocol(vendor, &endpoints),
-            _ => None,
-        },
-        reasoning: lists("reasoning").unwrap_or(false),
+        protocol,
+        reasoning,
         tools: lists("tools").unwrap_or(true),
+        thinking_levels: thinking.levels,
+        thinking_level_map: thinking.thinking_level_map,
+        anthropic_compat: thinking.anthropic_compat,
         created: created(item),
         image: (kind == Kind::Image).then(|| image_capabilities(item, &endpoints)),
         video: (kind == Kind::Video).then(|| video_capabilities(item)),
@@ -716,7 +757,8 @@ mod tests {
             "../../../../assistant-runtime/test/fixtures/catalog-model.json"
         ))
         .unwrap();
-        let model = serde_json::to_value(v1(fixture["catalog"].clone())[0].for_runtime()).unwrap();
+        let model =
+            serde_json::to_value(v1(fixture["catalog"].clone())[0].for_runtime(false)).unwrap();
         for field in [
             "id",
             "contextWindow",
@@ -738,7 +780,7 @@ mod tests {
         .unwrap();
         let models = parse_models(fixture["catalog"].clone(), Source::Anthropic);
         assert_eq!(
-            serde_json::to_value(models[0].for_runtime()).unwrap(),
+            serde_json::to_value(models[0].for_runtime(false)).unwrap(),
             fixture["runtime"]
         );
     }
@@ -1076,7 +1118,7 @@ mod tests {
         assert_eq!(models[1].protocol, Some(Protocol::OpenAiCompletions));
         // The runtime picks the first protocol by itself; it is told only
         // when the catalog's choice differs.
-        let runtime = |model: &Model| serde_json::to_value(model.for_runtime()).unwrap();
+        let runtime = |model: &Model| serde_json::to_value(model.for_runtime(false)).unwrap();
         assert_eq!(runtime(&models[0])["api"], "anthropic-messages");
         assert!(runtime(&models[1]).get("api").is_none());
     }
@@ -1364,7 +1406,7 @@ mod tests {
             // Every live chat model runs with the protocol the runtime picks
             // by itself: no run is told one.
             for model in merged.conversation_models() {
-                assert!(model.for_runtime().api.is_none(), "{}", model.id);
+                assert!(model.for_runtime(false).api.is_none(), "{}", model.id);
             }
         }
     }
@@ -1476,7 +1518,7 @@ mod tests {
             .find(|m| m.id == "openai/gpt-6.1-sol")
             .unwrap();
         assert_eq!(
-            serde_json::to_string(&model.for_runtime()).unwrap(),
+            serde_json::to_string(&model.for_runtime(false)).unwrap(),
             TODAY_RUNTIME_MODEL
         );
         // No model of today's catalog hands the runtime a field it did not
@@ -1487,7 +1529,7 @@ mod tests {
             .iter()
             .filter(|m| TODAY_CHAT_IDS.contains(&m.id.as_str()))
         {
-            let runtime = serde_json::to_value(model.for_runtime()).unwrap();
+            let runtime = serde_json::to_value(model.for_runtime(false)).unwrap();
             assert_eq!(
                 runtime.as_object().unwrap().keys().collect::<Vec<_>>(),
                 fields,
@@ -1495,6 +1537,105 @@ mod tests {
                 model.id
             );
         }
+    }
+
+    fn levels(model: &Model) -> Vec<&str> {
+        model.thinking_levels.iter().map(String::as_str).collect()
+    }
+
+    #[test]
+    fn chat_models_that_reason_offer_thinking_levels() {
+        let merged = real_catalog();
+        let find = |id: &str| merged.models.iter().find(|m| m.id == id).unwrap();
+        let haiku = find("anthropic/claude-haiku-5.5");
+        assert_eq!(
+            levels(haiku),
+            ["off", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            haiku.anthropic_compat,
+            Some(thinking::AnthropicCompat {
+                force_adaptive_thinking: Some(true),
+                supports_temperature: Some(false),
+            })
+        );
+        assert_eq!(
+            levels(find("openai/gpt-6.1-sol")),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+        let sol = find("openai/gpt-6-sol");
+        assert_eq!(levels(sol)[0], "off");
+        assert_eq!(
+            sol.thinking_level_map.as_ref().unwrap()["off"].as_deref(),
+            Some("none")
+        );
+        assert!(sol.anthropic_compat.is_none());
+        assert_eq!(
+            levels(find("google/gemini-3.1-flash-lite")),
+            ["minimal", "low", "medium", "high"]
+        );
+        // Pi has no entry for it: the plain three.
+        let glm = find("z-ai/glm-5");
+        assert_eq!(levels(glm), ["low", "medium", "high"]);
+        assert!(glm.thinking_level_map.is_none());
+        // No `reasoning` in the catalog, or not a chat model: no level.
+        for id in [
+            "deepseek/deepseek-v4-flash-0423",
+            "openai/gpt-5-nano",
+            "openai/gpt-image-2",
+        ] {
+            let model = find(id);
+            assert!(model.thinking_levels.is_empty(), "{id}");
+            assert!(model.thinking_level_map.is_none() && model.anthropic_compat.is_none());
+        }
+    }
+
+    #[test]
+    fn a_run_at_a_level_also_gets_reasoning_the_map_and_claudes_compat() {
+        let merged = real_catalog();
+        let find = |id: &str| merged.models.iter().find(|m| m.id == id).unwrap();
+        let runtime =
+            |model: &Model, thinks: bool| serde_json::to_value(model.for_runtime(thinks)).unwrap();
+        let haiku = find("anthropic/claude-haiku-5.5");
+        let plain = runtime(haiku, false);
+        let thinking = runtime(haiku, true);
+        let mut keys: Vec<&String> = thinking.as_object().unwrap().keys().collect();
+        let added = keys.split_off(plain.as_object().unwrap().len());
+        assert_eq!(
+            keys,
+            plain.as_object().unwrap().keys().collect::<Vec<_>>(),
+            "the new fields come after today's"
+        );
+        assert_eq!(added, ["reasoning", "thinkingLevelMap", "anthropicCompat"]);
+        assert_eq!(thinking["reasoning"], true);
+        assert_eq!(thinking["thinkingLevelMap"]["minimal"], Value::Null);
+        assert_eq!(
+            thinking["anthropicCompat"],
+            json!({"forceAdaptiveThinking": true, "supportsTemperature": false})
+        );
+        let sol = runtime(find("openai/gpt-6-sol"), true);
+        assert_eq!(sol["thinkingLevelMap"]["off"], "none");
+        assert!(sol.get("anthropicCompat").is_none());
+        // A model Pi does not know runs its level unmapped.
+        let glm = runtime(find("z-ai/glm-5"), true);
+        assert_eq!(glm["reasoning"], true);
+        assert!(glm.get("thinkingLevelMap").is_none());
+    }
+
+    #[test]
+    fn a_model_without_tools_says_so_to_the_runtime() {
+        let mut row = entry(
+            "plain/chat",
+            &["/v1/chat/completions"],
+            &["text"],
+            &["text"],
+        );
+        row["supported_parameters"] = json!(["max_tokens"]);
+        let models = v1(json!({"data": [row]}));
+        assert!(!models[0].tools);
+        let runtime = serde_json::to_value(models[0].for_runtime(false)).unwrap();
+        assert_eq!(runtime["tools"], false);
+        assert!(runtime.get("reasoning").is_none());
     }
 
     #[test]

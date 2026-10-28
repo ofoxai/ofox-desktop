@@ -124,6 +124,98 @@ test("a Claude model of the merged catalog runs with Anthropic Messages", async 
   );
 });
 
+test("the Pi model reasons only for a run at a level, with the map and Claude's compat", async () => {
+  const fixture = JSON.parse(
+    await readFile(
+      new URL("./fixtures/catalog-claude-model.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  // What the host adds for a run at a level (catalog.rs for_runtime).
+  const thinkingLevelMap = {
+    high: "high",
+    low: "low",
+    max: "max",
+    medium: "medium",
+    minimal: null,
+    xhigh: "xhigh",
+  };
+  const claude = {
+    ...fixture.runtime,
+    reasoning: true,
+    thinkingLevelMap,
+    anthropicCompat: {
+      forceAdaptiveThinking: true,
+      supportsTemperature: false,
+    },
+  };
+  const plain = modelForOfox(fixture.runtime, "ofox.io");
+  // Without a level the catalog's fields change nothing.
+  assert.deepEqual(modelForOfox(claude, "ofox.io"), plain);
+  const thinking = modelForOfox(claude, "ofox.io", { thinkingLevel: "high" });
+  assert.deepEqual(thinking, {
+    ...plain,
+    reasoning: true,
+    thinkingLevelMap,
+    compat: { forceAdaptiveThinking: true, supportsTemperature: false },
+  });
+  // A model the catalog says cannot reason never thinks.
+  const { reasoning: _, ...unlisted } = claude;
+  assert.deepEqual(
+    modelForOfox(unlisted, "ofox.io", { thinkingLevel: "high" }),
+    plain,
+  );
+  // Chat Completions keeps its own compat; Claude's is for Messages only.
+  const completions = modelForOfox(
+    {
+      ...claude,
+      id: "openai/gpt-6-luna",
+      supportedEndpoints: ["/v1/chat/completions"],
+    },
+    "ofox.io",
+    { thinkingLevel: "low" },
+  );
+  assert.equal(completions.reasoning, true);
+  assert.deepEqual(completions.thinkingLevelMap, thinkingLevelMap);
+  assert.equal(completions.compat.maxTokensField, "max_tokens");
+  assert.equal(completions.compat.forceAdaptiveThinking, undefined);
+  // A level without Pi data runs unmapped.
+  const { thinkingLevelMap: __, ...unmapped } = claude;
+  assert.equal(
+    "thinkingLevelMap" in
+      modelForOfox(unmapped, "ofox.io", { thinkingLevel: "low" }),
+    false,
+  );
+});
+
+test("an unknown thinking level or a malformed level map is refused", () => {
+  const input = {
+    id: "test/chat",
+    supportedEndpoints: ["/v1/chat/completions"],
+    contextWindow: 32000,
+    maxOutputTokens: 4096,
+    reasoning: true,
+  };
+  for (const thinkingLevel of ["extreme", "", 3, "default"])
+    assert.throws(
+      () => modelForOfox(input, "ofox.ai", { thinkingLevel }),
+      /thinking level/i,
+    );
+  for (const thinkingLevelMap of [
+    { turbo: "turbo" },
+    { high: 3 },
+    { high: "x".repeat(65) },
+    ["high"],
+  ])
+    assert.throws(
+      () =>
+        modelForOfox({ ...input, thinkingLevelMap }, "ofox.ai", {
+          thinkingLevel: "high",
+        }),
+      /thinking level map/i,
+    );
+});
+
 test("the host names the protocol only when it is not the first advertised", () => {
   const input = {
     id: "anthropic/claude-test",

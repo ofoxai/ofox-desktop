@@ -1940,3 +1940,326 @@ test("malformed attachment parameters are rejected before any request", async (t
     );
   assert.equal(requests, 0);
 });
+
+// ── thinking levels ──────────────────────────────────────────────────────
+
+// Pi's data for gpt-6-luna and claude-haiku-5-5, as the host's table has it.
+const lunaLevels = {
+  high: "high",
+  low: "low",
+  max: "max",
+  medium: "medium",
+  minimal: null,
+  off: "none",
+  xhigh: "xhigh",
+};
+const haikuLevels = {
+  high: "high",
+  low: "low",
+  max: "max",
+  medium: "medium",
+  minimal: null,
+  xhigh: "xhigh",
+};
+
+/** The models of default-requests.json, as the host sends them at the default. */
+async function thinkingModels() {
+  const claude = JSON.parse(
+    await readFile(
+      new URL("./fixtures/catalog-claude-model.json", import.meta.url),
+      "utf8",
+    ),
+  ).runtime;
+  const luna = { ...model, id: "openai/gpt-6-luna" };
+  return {
+    completions: {
+      ...luna,
+      supportedEndpoints: ["/v1/chat/completions", "/v1/responses"],
+    },
+    responses: { ...luna, supportedEndpoints: ["/v1/responses"] },
+    anthropic: claude,
+  };
+}
+
+/** What the host adds to a model for a run at a level (catalog.rs). */
+function atLevel(name, input) {
+  return name === "anthropic"
+    ? {
+        ...input,
+        reasoning: true,
+        thinkingLevelMap: haikuLevels,
+        anthropicCompat: {
+          forceAdaptiveThinking: true,
+          supportsTemperature: false,
+        },
+      }
+    : { ...input, reasoning: true, thinkingLevelMap: lunaLevels };
+}
+
+/** A reply in `name`'s protocol: some reasoning, then the text. */
+function thinkingReply(name) {
+  if (name === "completions")
+    return new Response(
+      [
+        {
+          choices: [
+            {
+              index: 0,
+              delta: { role: "assistant", reasoning_content: "Weighing it" },
+              finish_reason: null,
+            },
+          ],
+        },
+        {
+          choices: [
+            { index: 0, delta: { content: "Answer" }, finish_reason: null },
+          ],
+        },
+        {
+          choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        },
+      ]
+        .map((chunk) => `data: ${JSON.stringify({ id: "t", ...chunk })}\n\n`)
+        .join("") + "data: [DONE]\n\n",
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  if (name === "responses")
+    return eventsResponse([
+      { type: "response.created", response: { id: "r" } },
+      {
+        type: "response.output_item.added",
+        output_index: 0,
+        item: { id: "rs", type: "reasoning", summary: [] },
+      },
+      {
+        type: "response.reasoning_summary_part.added",
+        output_index: 0,
+        summary_index: 0,
+        part: { type: "summary_text", text: "" },
+      },
+      {
+        type: "response.reasoning_summary_text.delta",
+        output_index: 0,
+        summary_index: 0,
+        delta: "Weighing it",
+      },
+      {
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          id: "rs",
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "Weighing it" }],
+        },
+      },
+      {
+        type: "response.output_item.added",
+        output_index: 1,
+        item: { id: "m", type: "message", role: "assistant", content: [] },
+      },
+      { type: "response.output_text.delta", output_index: 1, delta: "Answer" },
+      {
+        type: "response.output_item.done",
+        output_index: 1,
+        item: {
+          id: "m",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Answer", annotations: [] }],
+        },
+      },
+      {
+        type: "response.completed",
+        response: {
+          id: "r",
+          status: "completed",
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        },
+      },
+    ]);
+  return eventsResponse([
+    {
+      type: "message_start",
+      message: {
+        id: "m",
+        type: "message",
+        role: "assistant",
+        model: "anthropic/claude-haiku-5.5",
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 0 },
+      },
+    },
+    {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "thinking_delta", thinking: "Weighing it" },
+    },
+    {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "signature_delta", signature: "sig" },
+    },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "content_block_start",
+      index: 1,
+      content_block: { type: "text", text: "" },
+    },
+    {
+      type: "content_block_delta",
+      index: 1,
+      delta: { type: "text_delta", text: "Answer" },
+    },
+    { type: "content_block_stop", index: 1 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ]);
+}
+
+/** One run of `input`; its raw request body and events. */
+async function thinkingRun(t, name, input, extra = {}) {
+  const params = await sandbox(t);
+  const events = [];
+  const bodies = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      bodies.push(init.body);
+      return thinkingReply(name);
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({ ...params, model: input, ...extra });
+  assert.equal(result.status, "completed", name);
+  assert.equal(bodies.length, 1, name);
+  const dir = JSON.stringify(path.dirname(params.sessionFile)).slice(1, -1);
+  return {
+    raw: bodies[0]
+      .split(dir)
+      .join("<dir>")
+      .replace(/"prompt_cache_key":"[^"]+"/, '"prompt_cache_key":"<session>"'),
+    body: JSON.parse(bodies[0]),
+    events,
+    result,
+  };
+}
+
+test("a run without a thinking level sends exactly the request it sent before levels existed", async (t) => {
+  const pinned = JSON.parse(
+    await readFile(
+      new URL("./fixtures/default-requests.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const [name, input] of Object.entries(await thinkingModels())) {
+    const plain = await thinkingRun(t, name, input);
+    assert.equal(plain.raw, pinned[name], name);
+    assert.deepEqual(
+      plain.events.find((event) => event.type === "run_start").data,
+      { thinkingLevel: null },
+    );
+    // The catalog's thinking fields alone change nothing either.
+    assert.equal(
+      (await thinkingRun(t, name, atLevel(name, input))).raw,
+      pinned[name],
+      name,
+    );
+  }
+});
+
+test("a thinking level reaches each provider in its own form and its reasoning streams", async (t) => {
+  const models = await thinkingModels();
+  const level = async (name, thinkingLevel) => {
+    const run = await thinkingRun(t, name, atLevel(name, models[name]), {
+      thinkingLevel,
+    });
+    assert.deepEqual(
+      run.events.find((event) => event.type === "run_start").data,
+      { thinkingLevel },
+      name,
+    );
+    assert.equal(
+      run.events
+        .filter((event) => event.type === "thinking_delta")
+        .map((event) => event.data.delta)
+        .join(""),
+      "Weighing it",
+      name,
+    );
+    const reply = run.result.entries.find((item) => item.role === "assistant");
+    assert.equal(reply.content, "Answer", name);
+    assert.equal(reply.thinking, "Weighing it", name);
+    return run.body;
+  };
+  assert.equal((await level("completions", "high")).reasoning_effort, "high");
+  // gpt-6-luna turns reasoning off with "none".
+  assert.equal((await level("completions", "off")).reasoning_effort, "none");
+  const responses = await level("responses", "low");
+  assert.deepEqual(responses.reasoning, { effort: "low", summary: "auto" });
+  assert.deepEqual((await level("responses", "off")).reasoning, {
+    effort: "none",
+  });
+  const claude = await level("anthropic", "high");
+  assert.equal(claude.thinking.type, "adaptive");
+  assert.deepEqual(claude.output_config, { effort: "high" });
+  assert.equal(claude.temperature, undefined);
+  assert.deepEqual((await level("anthropic", "off")).thinking, {
+    type: "disabled",
+  });
+});
+
+test("an unknown thinking level is refused before any request", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => {
+      requests++;
+      return stream("must not send");
+    },
+  });
+  t.after(() => runtime.close());
+  await assert.rejects(
+    () =>
+      runtime.run({
+        ...params,
+        model: { ...model, reasoning: true },
+        thinkingLevel: "extreme",
+      }),
+    /thinking level/i,
+  );
+  assert.equal(requests, 0);
+});
+
+test("a model that takes no tools gets none, even with files and web search", async (t) => {
+  const params = await withAttachments(await sandbox(t), [
+    ["notes.txt", "kept for later", "text/plain"],
+  ]);
+  let body;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      body = JSON.parse(init.body);
+      return stream("ok");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...params,
+    model: { ...model, tools: false },
+    webSearch: true,
+    allowedWebUrls: [],
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(body.tools, undefined);
+  assert.doesNotMatch(body.messages[0].content, /read_attachment|web_search/);
+});

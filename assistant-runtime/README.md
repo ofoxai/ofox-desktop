@@ -118,8 +118,17 @@ diagnostics drop any `user:password@` part of a URL. The search server gets
 the same proxy (see [Web search](#web-search)).
 
 `model` contains id, advertised supportedEndpoints, contextWindow,
-maxOutputTokens, inputModalities/supportsImages, reasoning, cost (USD per million
-tokens) and pricingKnown. Endpoint paths such as `/v1/responses` are accepted.
+maxOutputTokens, inputModalities/supportsImages, cost (USD per million
+tokens) and pricingKnown; `tools: false` only for a model that takes no tools
+(the run then registers none). For a run at a `thinkingLevel` (`off`,
+`minimal`, `low`, `medium`, `high`, `xhigh` or `max`) the host adds
+`reasoning: true`, Pi's `thinkingLevelMap` when it has one and, for Claude,
+`anthropicCompat` (`forceAdaptiveThinking`, `supportsTemperature`). The model
+reasons only with both `reasoning` and a level; without a level Pi sends no
+thinking parameter and the provider's default applies, so such a run sends
+exactly the request it sent before levels existed. `run_start`'s data names
+the level that ran (`thinkingLevel`, null without one). Endpoint paths such as
+`/v1/responses` are accepted.
 Only advertised OpenAI Chat Completions, Responses and Anthropic routes are
 enabled; Google-only models are unavailable. SDK and provider automatic retries
 are disabled.

@@ -1008,12 +1008,23 @@ impl AssistantHost {
     }
 
     /// `web_search`: whether the run was given web search (the session's
-    /// switch may be on while the catalog cannot price it).
-    pub(super) fn emit_start(&self, run: &RunControl, web_search: bool) {
+    /// switch may be on while the catalog cannot price it or the model takes
+    /// no tools). `thinking_level`: the level the run was sent, `None` for
+    /// the default.
+    pub(super) fn emit_start(
+        &self,
+        run: &RunControl,
+        web_search: bool,
+        thinking_level: Option<&str>,
+    ) {
         self.emit(
             run,
             "run_start",
-            json!({"messageId": run.message_id, "webSearch": web_search}),
+            json!({
+                "messageId": run.message_id,
+                "webSearch": web_search,
+                "thinkingLevel": thinking_level,
+            }),
         );
     }
 
@@ -1131,6 +1142,7 @@ impl AssistantHost {
                 unbilled: failure.unbilled || !attempt.sent,
                 ..failure
             });
+        attempt.projection.end_thinking();
         let flushed = self.flush(control, &mut attempt.projection).await;
         let result = match (result, flushed) {
             (Ok(_), Err(error)) => Err(error.into()),
@@ -1246,6 +1258,7 @@ impl AssistantHost {
                 // The model's tool call has been answered with tokens, and the
                 // tool may cost something: never repeat this attempt.
                 attempt.progressed = true;
+                attempt.projection.end_thinking();
                 // As for text: the query is the model's, the keys are not.
                 scrub_secrets_in(&mut data, &control.secrets());
                 let mut shown = web::tool_start_event(&data)?;
@@ -1279,8 +1292,9 @@ impl AssistantHost {
                     log::warn!("[Assistant] ignored an outcome for a file this turn did not send");
                 }
             }
-            // run_start, message_end, error and run_end: the host publishes its
-            // own once the turn is saved.
+            // The host publishes its own message once the turn is saved.
+            "message_end" => attempt.projection.end_thinking(),
+            // run_start, error and run_end: the host publishes its own.
             _ => {}
         }
         Ok(())
@@ -1300,6 +1314,7 @@ impl AssistantHost {
                 ..Failure::from("assistant_runtime_failed")
             });
         }
+        attempt.projection.end_thinking();
         self.flush(control, &mut attempt.projection).await?;
         let result = &value["result"];
         match result["status"].as_str() {
@@ -3308,6 +3323,80 @@ mod tests {
             "assistant_invalid_storage_path"
         );
         assert!(run.cancelled());
+    }
+
+    /// A chat model that offers these thinking levels.
+    fn thinker(id: &str, levels: &[&str]) -> catalog::Model {
+        let mut row = model(id);
+        row.reasoning = true;
+        row.thinking_levels = levels.iter().map(|level| level.to_string()).collect();
+        row
+    }
+
+    #[tokio::test]
+    async fn a_thinking_level_must_be_one_the_model_offers_and_never_stops_the_run() {
+        let (_config, env, host) = fixture_with_env();
+        // Extra `/v1` rows: two chat models that reason.
+        env.media.lock().unwrap().extend([
+            thinker("test/thinker", &["off", "low", "high"]),
+            thinker("test/low-only", &["low"]),
+        ]);
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let update = |change: Value| -> UpdateRequest {
+            let mut value = json!({ "sessionId": sid });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(change.as_object().unwrap().clone());
+            serde_json::from_value(value).unwrap()
+        };
+        let saved_level = || store.load_record(&sid).unwrap().session.thinking_level;
+        const INVALID: &str = "assistant_invalid_thinking_level";
+
+        // test/model does not reason: only the default.
+        let refused = host.update_session(update(json!({"thinkingLevel": "high"})));
+        assert_eq!(refused.await.unwrap_err(), INVALID);
+        let cleared = host.update_session(update(json!({"thinkingLevel": "default"})));
+        assert!(cleared.await.unwrap().thinking_level.is_none());
+
+        // A model and one of its levels in one update.
+        let both = json!({"modelId": "test/thinker", "thinkingLevel": "high"});
+        let session = host.update_session(update(both)).await.unwrap();
+        assert_eq!(session.thinking_level.as_deref(), Some("high"));
+
+        // A level change leaves the reply running.
+        let run = control(&sid);
+        host.runs.lock().unwrap().insert(sid.clone(), run.clone());
+        let session = host
+            .update_session(update(json!({"thinkingLevel": "off"})))
+            .await
+            .unwrap();
+        assert_eq!(session.thinking_level.as_deref(), Some("off"));
+        assert!(!run.cancelled());
+        let unknown = host.update_session(update(json!({"thinkingLevel": "max"})));
+        assert_eq!(unknown.await.unwrap_err(), INVALID);
+        assert_eq!(saved_level().as_deref(), Some("off"));
+
+        // A new model keeps the level it offers too, else goes back to the default.
+        let switched = host.update_session(update(json!({"modelId": "test/low-only"})));
+        assert!(switched.await.unwrap().thinking_level.is_none());
+        host.update_session(update(json!({"thinkingLevel": "low"})))
+            .await
+            .unwrap();
+        let back = host.update_session(update(json!({"modelId": "test/thinker"})));
+        assert_eq!(back.await.unwrap().thinking_level.as_deref(), Some("low"));
+        let wrong = json!({"modelId": "test/low-only", "thinkingLevel": "high"});
+        assert_eq!(
+            host.update_session(update(wrong)).await.unwrap_err(),
+            INVALID
+        );
+        assert_eq!(saved_level().as_deref(), Some("low"));
+        assert_eq!(
+            store.load_record(&sid).unwrap().session.model_id,
+            "test/thinker",
+            "a refused update changes nothing"
+        );
     }
 
     #[test]

@@ -4,6 +4,7 @@ use super::{
     attachments, catalog,
     host::{blocking, local_gateway_allowed, AssistantHost, Identity, RunControl},
     store::{self, SessionList, SessionRecord},
+    thinking,
     types::*,
     web,
 };
@@ -14,6 +15,7 @@ use std::sync::Arc;
 
 const MAX_MESSAGE_BYTES: usize = 128_000;
 const TITLE_CHARS: usize = 48;
+const INVALID_THINKING_LEVEL: &str = "assistant_invalid_thinking_level";
 
 impl AssistantHost {
     /// Everything the assistant page needs to open. Never mints a key.
@@ -143,8 +145,9 @@ impl AssistantHost {
         Ok(detail)
     }
 
-    /// Title, model, draft, web search and trash state. Changing the model or
-    /// trashing the session stops its run, once the change is saved.
+    /// Title, model, thinking level, draft, web search and trash state.
+    /// Changing the model or trashing the session stops its run, once the
+    /// change is saved; changing the thinking level does not.
     pub async fn update_session(
         self: &Arc<Self>,
         mut request: UpdateRequest,
@@ -162,9 +165,12 @@ impl AssistantHost {
         {
             return Err(super::host::IDENTITY_CHANGED.into());
         }
-        if let Some(model) = &request.model_id {
-            self.model(&identity.apex, model).await?;
-        }
+        let new_model = match &request.model_id {
+            Some(model) => Some(self.model(&identity.apex, model).await?),
+            None => None,
+        };
+        self.check_thinking_level(&identity, &mut request, new_model)
+            .await?;
         // The user's own words: only a key this process handed out goes.
         let keys = self.known_keys();
         for text in [&mut request.title, &mut request.draft]
@@ -202,6 +208,54 @@ impl AssistantHost {
         remembered?;
         self.decorate(&identity.owner, &mut session);
         Ok(session)
+    }
+
+    /// A level an update sets must be one the session's model offers (the new
+    /// model's, when it changes too). A new model that does not offer the
+    /// level already chosen goes back to the default.
+    async fn check_thinking_level(
+        &self,
+        identity: &Identity,
+        request: &mut UpdateRequest,
+        new_model: Option<catalog::Model>,
+    ) -> Result<(), String> {
+        let sets_level = request
+            .thinking_level
+            .as_deref()
+            .is_some_and(|level| level != thinking::DEFAULT);
+        let model_change_only = request.thinking_level.is_none() && new_model.is_some();
+        if !sets_level && !model_change_only {
+            return Ok(());
+        }
+        let session = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = request.session_id.clone();
+            move || store.load_record(&sid)
+        })
+        .await?
+        .session;
+        let model = match new_model {
+            Some(model) => model,
+            None => self.model(&identity.apex, &session.model_id).await?,
+        };
+        match request.thinking_level.as_deref() {
+            Some(level) if level != thinking::DEFAULT => {
+                if !model.offers_thinking_level(level) {
+                    return Err(INVALID_THINKING_LEVEL.into());
+                }
+            }
+            // A model change that sets no level.
+            _ => {
+                if session
+                    .thinking_level
+                    .as_deref()
+                    .is_some_and(|level| !model.offers_thinking_level(level))
+                {
+                    request.thinking_level = Some(thinking::DEFAULT.into());
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn delete_session(self: &Arc<Self>, request: DeleteRequest) -> Result<(), String> {
@@ -269,8 +323,9 @@ impl AssistantHost {
         }
         let branch = Branch::resolve(&record, &request)?;
         let selected = selection(&record, &request, &branch)?;
-        // Search only at a price the catalog gives; the run keeps it.
-        let search_price = if record.session.web_search {
+        // Search only at a price the catalog gives, for a model that takes
+        // tools; the run keeps the price.
+        let search_price = if record.session.web_search && model.tools {
             catalog::search_price(&self.models(&identity.apex).await?.models)
         } else {
             None
@@ -318,12 +373,13 @@ impl AssistantHost {
         })
         .await?;
 
+        let thinking_level = run_thinking_level(&record.session, &model);
         let mut params = json!({
             "sessionId": request.session_id,
             "runId": request.run_id,
             "operationId": request.operation_id,
             "sessionFile": native_file,
-            "model": model.for_runtime(),
+            "model": model.for_runtime(thinking_level.is_some()),
             "apiKey": key,
             "apex": identity.apex,
             "baseUrl": base_url,
@@ -342,8 +398,13 @@ impl AssistantHost {
             ));
             let prompt = branch.resent_text.as_deref().unwrap_or(&text);
             params.extend(web_params(&record, &branch, prompt, search_price.as_ref()));
+            // At the default a run's parameters stay as they were before
+            // thinking levels existed.
+            if let Some(level) = thinking_level {
+                params.insert("thinkingLevel".into(), json!(level));
+            }
         }
-        self.emit_start(&control, search_price.is_some());
+        self.emit_start(&control, search_price.is_some(), thinking_level);
         self.spawn_run(control, params);
         Ok(RunRef {
             run_id: request.run_id,
@@ -580,6 +641,16 @@ fn web_params(
     params
 }
 
+/// The thinking level a run gets: the conversation's choice while its model
+/// offers it (the catalog may have changed since), else none, and the
+/// provider's default applies.
+fn run_thinking_level<'a>(session: &'a Session, model: &catalog::Model) -> Option<&'a str> {
+    session
+        .thinking_level
+        .as_deref()
+        .filter(|level| model.offers_thinking_level(level))
+}
+
 /// Bootstrap's `search`: whether runs can search, and the price of one
 /// search (the search model's tokens come on top).
 fn search_status(models: &[catalog::Model]) -> Value {
@@ -631,6 +702,7 @@ fn publish_turn(
         content: user_text.into(),
         created_at: at,
         reasoning: None,
+        reasoning_ms: None,
         status: "completed".into(),
         error_code: None,
         attachments: selected.to_vec(),
@@ -646,6 +718,7 @@ fn publish_turn(
         content: String::new(),
         created_at: at,
         reasoning: None,
+        reasoning_ms: None,
         status: "streaming".into(),
         error_code: None,
         attachments: vec![],
@@ -1074,6 +1147,25 @@ mod tests {
             json!({"available": false, "unitPriceUsd": null, "model": "openai/gpt-5-nano"})
         );
         assert_eq!(search_status(&[])["available"], false);
+    }
+
+    #[test]
+    fn a_run_gets_the_chosen_level_only_while_its_model_offers_it() {
+        let (mut record, _, _, _) = fixture();
+        let mut model: catalog::Model = serde_json::from_value(json!({
+            "id": "m", "name": "M", "contextWindow": 128000, "maxOutputTokens": 8192,
+            "supportsImages": false, "inputModalities": ["text"],
+            "supportedEndpoints": ["/v1/chat/completions"], "inputPricePerMillion": null,
+            "outputPricePerMillion": null, "pricing": {}, "cost": {}, "pricingKnown": false,
+            "reasoning": true, "thinkingLevels": ["low", "high"],
+        }))
+        .unwrap();
+        assert_eq!(run_thinking_level(&record.session, &model), None);
+        record.session.thinking_level = Some("high".into());
+        assert_eq!(run_thinking_level(&record.session, &model), Some("high"));
+        // The catalog changed since: the run goes at the default.
+        model.thinking_levels = vec!["low".into()];
+        assert_eq!(run_thinking_level(&record.session, &model), None);
     }
 
     #[test]

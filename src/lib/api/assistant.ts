@@ -34,8 +34,20 @@ export interface AssistantModel {
   protocol?: AssistantModelProtocol | null;
   /** The catalog lists a `reasoning` parameter. */
   reasoning?: boolean;
-  /** The model takes tools. */
+  /** The model takes tools; without them a run gets no web search. */
   tools?: boolean;
+  /**
+   * The thinking levels a conversation may choose, in Pi's order; empty when
+   * the model does not reason. No level (the default) sends nothing.
+   */
+  thinkingLevels?: AssistantThinkingLevel[];
+  /** Pi's map from a level to what the provider is sent; null: not offered. */
+  thinkingLevelMap?: Partial<Record<AssistantThinkingLevel, string | null>>;
+  /** Pi's thinking compat for a Claude model run with Messages. */
+  anthropicCompat?: {
+    forceAdaptiveThinking?: boolean;
+    supportsTemperature?: boolean;
+  };
   /** When the model was added, in Unix seconds. */
   created?: number | null;
   /** Image models only. */
@@ -50,6 +62,16 @@ export type AssistantModelKind =
   | "video"
   | "speech"
   | "transcription";
+
+/** Pi's thinking levels, lowest first. */
+export type AssistantThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
 
 export type AssistantModelProtocol =
   | "openai-completions"
@@ -143,6 +165,11 @@ export interface AssistantSession {
   title: string;
   modelId: string;
   webSearch: boolean;
+  /**
+   * The chosen thinking level; null is the default (no thinking parameter).
+   * A level the model no longer offers is not sent.
+   */
+  thinkingLevel?: AssistantThinkingLevel | null;
   draft: string;
   draftAttachmentIds: string[];
   createdAt: number;
@@ -215,6 +242,8 @@ export interface AssistantMessage {
   content: string;
   createdAt: number;
   reasoning?: string | null;
+  /** How long the reply streamed reasoning, in ms; null when it streamed none. */
+  reasoningMs?: number | null;
   status?: "completed" | "streaming" | "stopped" | "error";
   /** Stable failure code saved with the reply; older messages may omit it. */
   errorCode?: string | null;
@@ -291,6 +320,11 @@ export interface AssistantUpdateRequest {
   /** Changing the model stops a running reply. */
   modelId?: string;
   webSearch?: boolean;
+  /**
+   * One of the model's `thinkingLevels`, or "default" to clear the choice.
+   * Never stops a running reply.
+   */
+  thinkingLevel?: AssistantThinkingLevel | "default";
   draft?: string;
   draftAttachmentIds?: string[];
   deleted?: boolean;
@@ -321,9 +355,17 @@ export type AssistantRunEvent =
   /**
    * `messageId` is the run's reply. `webSearch` is whether the run got web
    * search: false with the conversation's switch on means search was
-   * unavailable when it was sent.
+   * unavailable when it was sent (or the model takes no tools).
+   * `thinkingLevel` is the level the run was sent; null for the default.
    */
-  | { type: "run_start"; data: { messageId: string; webSearch: boolean } }
+  | {
+      type: "run_start";
+      data: {
+        messageId: string;
+        webSearch: boolean;
+        thinkingLevel?: AssistantThinkingLevel | null;
+      };
+    }
   | {
       type: "text_delta" | "thinking_delta";
       data: { delta: string; messageId: string };
@@ -519,6 +561,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_invalid_message: "invalidMessage",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",
+  assistant_invalid_thinking_level: "thinkingLevelUnavailable",
   assistant_attachment_not_found: "attachmentUnavailable",
   assistant_attachment_too_many: "attachmentTooMany",
   assistant_attachment_too_large: "attachmentTooLarge",
