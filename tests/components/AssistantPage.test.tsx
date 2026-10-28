@@ -1120,6 +1120,61 @@ describe("attachments", () => {
     expect(composer()).toHaveFocus();
   });
 
+  describe("the files and the warnings about them", () => {
+    // jsdom has no layout: what scrolls is the element with overflow-y-auto.
+    const scrollBox = () =>
+      composerFiles()!.closest<HTMLElement>(".overflow-y-auto");
+    const many = ["a", "b", "c", "d", "e"].map((letter) => ({
+      ...pdf,
+      id: `file-${letter}`,
+      name: `${letter}.pdf`,
+    }));
+
+    it("keeps the reason Send is disabled outside the scrolling list of files", async () => {
+      current = withDraftFiles([...many, locked], "Read these");
+      await openConversation();
+      const hint = screen.getByText(
+        "Remove the files that can't be read, then send.",
+      );
+      expect(scrollBox()).not.toBeNull();
+      expect(scrollBox()).toContainElement(composerFiles());
+      expect(scrollBox()).not.toContainElement(hint);
+      expect(footer()).toContainElement(hint);
+    });
+
+    it("keeps the warning about images outside the scrolling list of files", async () => {
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        models: [
+          ...capabilities.models,
+          { ...model("vision", "Vision model"), supportsImages: true },
+        ],
+      });
+      current = withDraftFiles([...many, photo]);
+      await openConversation();
+      const warning = screen.getByText(
+        "This model can't read images. Choose a model that can, or remove the image.",
+      );
+      expect(scrollBox()).not.toContainElement(warning);
+      expect(warning).toBeVisible();
+    });
+
+    it("still announces a warning politely, and describes Send by it", async () => {
+      current = withDraftFiles([...many, locked], "Read these");
+      await openConversation();
+      const hint = screen.getByText(
+        "Remove the files that can't be read, then send.",
+      );
+      expect(hint.closest("[aria-live]")).toHaveAttribute(
+        "aria-live",
+        "polite",
+      );
+      expect(sendButton()).toHaveAccessibleDescription(
+        "Remove the files that can't be read, then send.",
+      );
+    });
+  });
+
   it("describes Send by the warning about images a model can't read", async () => {
     await openConversation();
     await pick([photo]);

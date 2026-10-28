@@ -576,7 +576,9 @@ function AssistantWorkspace() {
           <div className="mx-auto w-full max-w-[760px]">
             <div className="rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
               {/* Kept mounted: its live region announces the warnings, and
-                  the list hands focus back once its last file is removed. */}
+                  the list hands focus back once its last file is removed.
+                  Only the list scrolls: the warnings that explain why Send
+                  is disabled stay in view below it. */}
               <div
                 className={cn(
                   files.length > 0 && "max-h-36 overflow-y-auto px-3 pt-3",
@@ -588,21 +590,18 @@ function AssistantWorkspace() {
                   onAllRemoved={focusComposer}
                   removeDisabled={busy || Boolean(run)}
                 />
-                <div aria-live="polite">
-                  {blockedFiles && (
-                    <p
-                      id={blockedHint}
-                      className="mt-1.5 text-note text-danger"
-                    >
-                      {t("assistant.attachmentsBlocked")}
-                    </p>
-                  )}
-                  {imagesNeedVision && (
-                    <p id={visionHint} className="mt-1.5 text-note text-warn">
-                      {t("assistant.imagesNeedVision")}
-                    </p>
-                  )}
-                </div>
+              </div>
+              <div aria-live="polite" className="px-3">
+                {blockedFiles && (
+                  <p id={blockedHint} className="mt-1.5 text-note text-danger">
+                    {t("assistant.attachmentsBlocked")}
+                  </p>
+                )}
+                {imagesNeedVision && (
+                  <p id={visionHint} className="mt-1.5 text-note text-warn">
+                    {t("assistant.imagesNeedVision")}
+                  </p>
+                )}
               </div>
               <Textarea
                 ref={composer}
