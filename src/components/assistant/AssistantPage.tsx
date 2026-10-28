@@ -522,9 +522,11 @@ function AssistantWorkspace() {
                       ))}
                     </div>
                   )}
-                  <p className="mt-4 text-note text-ink-muted">
-                    {t("assistant.startHint")}
-                  </p>
+                  {available && (
+                    <p className="mt-4 text-note text-ink-muted">
+                      {t("assistant.startHint")}
+                    </p>
+                  )}
                 </div>
               )}
               <div className="mx-auto max-w-[760px]">

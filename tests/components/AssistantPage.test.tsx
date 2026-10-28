@@ -293,6 +293,51 @@ describe("starting a conversation", () => {
   });
 });
 
+describe("the empty state", () => {
+  const invitation = "Start a new conversation, or type your question below.";
+
+  it("invites a question while the composer can take one", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(await screen.findByText(invitation)).toBeVisible();
+    await waitFor(() => expect(composer()).toBeEnabled());
+  });
+
+  it.each([
+    [
+      "there are no models",
+      () =>
+        mocks.bootstrap.mockResolvedValue({
+          ...capabilities,
+          models: [],
+          defaultModelId: null,
+        }),
+    ],
+    [
+      "the runtime is unavailable",
+      () =>
+        mocks.bootstrap.mockResolvedValue({
+          ...capabilities,
+          runtime: { available: false, reason: null, version: null },
+        }),
+    ],
+    [
+      "the page can't follow runs",
+      () => mocks.subscribe.mockRejectedValue("assistant_storage_unavailable"),
+    ],
+  ])("doesn't, when %s and the composer is disabled", async (_, setUp) => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    setUp();
+    render(page());
+    expect(await screen.findByText("How can I help?")).toBeVisible();
+    // Let the capabilities and the event subscription settle.
+    await waitFor(() => expect(mocks.bootstrap).toHaveBeenCalled());
+    await act(async () => undefined);
+    expect(composer()).toBeDisabled();
+    expect(screen.queryByText(invitation)).toBeNull();
+  });
+});
+
 describe("history", () => {
   it("searches conversations through the backend filter", async () => {
     render(page());
