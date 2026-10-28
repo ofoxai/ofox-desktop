@@ -2241,6 +2241,67 @@ test("an unknown thinking level is refused before any request", async (t) => {
   assert.equal(requests, 0);
 });
 
+test("reasoning end is signalled when the text begins, before its held-back text", async (t) => {
+  const params = await sandbox(t);
+  const events = [];
+  const encoder = new TextEncoder();
+  const chunk = (delta, finish = null) =>
+    encoder.encode(
+      `data: ${JSON.stringify({ id: "t", choices: [{ index: 0, delta, finish_reason: finish }], ...(finish ? { usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } } : {}) })}\n\n`,
+    );
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push({ ...event, at: Date.now() }),
+    fetch: async () =>
+      new Response(
+        new ReadableStream({
+          async start(controller) {
+            controller.enqueue(
+              chunk({ role: "assistant", reasoning_content: "Short thought" }),
+            );
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            // Shorter than the tail the runtime holds back for key scrubbing:
+            // it is forwarded only when the text ends.
+            controller.enqueue(chunk({ content: "Answer" }));
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            controller.enqueue(chunk({}, "stop"));
+            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            controller.close();
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...params,
+    model: { ...model, reasoning: true },
+    thinkingLevel: "high",
+  });
+  assert.equal(result.status, "completed");
+  const types = events.map((event) => event.type);
+  const end = types.indexOf("thinking_end");
+  const text = types.indexOf("text_delta");
+  assert.ok(end !== -1, types.join(","));
+  assert.equal(types.filter((type) => type === "thinking_end").length, 1);
+  assert.deepEqual(events[end].data, {});
+  // After the last of the reasoning, before the reply's first words.
+  assert.ok(end > types.lastIndexOf("thinking_delta"), types.join(","));
+  assert.ok(end < text, types.join(","));
+  assert.ok(events[text].at - events[end].at >= 250);
+  // No reasoning, no end.
+  events.length = 0;
+  const plain = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () => stream("No thinking"),
+  });
+  t.after(() => plain.close());
+  await plain.run({ ...(await sandbox(t)) });
+  assert.equal(
+    events.some((event) => event.type === "thinking_end"),
+    false,
+  );
+});
+
 test("a model that takes no tools gets none, even with files and web search", async (t) => {
   const params = await withAttachments(await sandbox(t), [
     ["notes.txt", "kept for later", "text/plain"],

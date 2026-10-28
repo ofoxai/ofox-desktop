@@ -78,6 +78,10 @@ fn key(id: &str) -> Option<String> {
 /// Where Pi maps nothing, Chat Completions would send exactly the default
 /// request and Responses a guessed `none` the model may refuse, so such a
 /// model does not offer `off`.
+///
+/// `minimal` only where it differs from `low`: adaptive thinking over
+/// Messages sends an effort, and Pi sends `low` for a `minimal` it has no
+/// mapping for.
 pub fn for_model(id: &str, reasoning: bool, protocol: Option<Protocol>) -> Thinking {
     if !reasoning {
         return Thinking::default();
@@ -85,15 +89,26 @@ pub fn for_model(id: &str, reasoning: bool, protocol: Option<Protocol>) -> Think
     let messages = protocol == Some(Protocol::AnthropicMessages);
     match key(id).and_then(|key| table().get(&key)) {
         Some(known) => {
-            let maps_off = known
-                .thinking_level_map
-                .as_ref()
-                .is_some_and(|map| matches!(map.get("off"), Some(Some(_))));
+            let maps = |level: &str| {
+                known
+                    .thinking_level_map
+                    .as_ref()
+                    .is_some_and(|map| matches!(map.get(level), Some(Some(_))))
+            };
+            let adaptive = messages
+                && known
+                    .anthropic_compat
+                    .as_ref()
+                    .is_some_and(|compat| compat.force_adaptive_thinking == Some(true));
             Thinking {
                 levels: known
                     .levels
                     .iter()
-                    .filter(|level| *level != "off" || messages || maps_off)
+                    .filter(|level| match level.as_str() {
+                        "off" => messages || maps("off"),
+                        "minimal" => !adaptive || maps("minimal"),
+                        _ => true,
+                    })
                     .cloned()
                     .collect(),
                 thinking_level_map: known.thinking_level_map.clone(),
@@ -206,6 +221,41 @@ mod tests {
             )),
             ["minimal", "low", "medium", "high"]
         );
+    }
+
+    #[test]
+    fn adaptive_claude_offers_minimal_only_where_it_differs_from_low() {
+        let offers_minimal = |id: &str, protocol: Protocol| {
+            for_model(id, true, Some(protocol))
+                .levels
+                .contains(&"minimal".to_string())
+        };
+        // Adaptive thinking sends an effort, and Pi sends "low" for an
+        // unmapped "minimal": the same request as "low".
+        for id in [
+            "anthropic/claude-fable-5",
+            "anthropic/claude-fable-5.1",
+            "anthropic/claude-opus-4.7",
+            "anthropic/claude-opus-4.8",
+            "anthropic/claude-opus-5",
+            "anthropic/claude-sonnet-5",
+        ] {
+            assert!(!offers_minimal(id, Protocol::AnthropicMessages), "{id}");
+            assert!(offers_minimal(id, Protocol::OpenAiCompletions), "{id}");
+        }
+        assert_eq!(
+            levels(&for_model(
+                "anthropic/claude-sonnet-5",
+                true,
+                Some(Protocol::AnthropicMessages)
+            )),
+            ["off", "low", "medium", "high", "xhigh", "max"]
+        );
+        // A token budget tells "minimal" apart from "low".
+        assert!(offers_minimal(
+            "anthropic/claude-haiku-4.5",
+            Protocol::AnthropicMessages
+        ));
     }
 
     #[test]

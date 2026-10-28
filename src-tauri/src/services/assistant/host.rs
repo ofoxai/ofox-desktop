@@ -50,9 +50,14 @@ const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
 /// How long a fetched model catalog is trusted.
 const MODELS_TTL: Duration = Duration::from_secs(600);
-/// How long a catalog source whose read failed is not asked again, unless a
-/// lookup misses: a hanging host would otherwise hold up every read.
+/// How long a send does not ask again a catalog source whose read failed: a
+/// hanging host would otherwise hold up every send. A lookup that misses asks
+/// at once, and so do the page's reads ([`AssistantHost::page_models`]).
 const FAILED_SOURCE_RETRY: Duration = Duration::from_secs(30);
+/// How long a page read waits for a source that failed before while its last
+/// copy can stand in: the page opens on the copy rather than wait out a
+/// hanging host's whole fetch timeout.
+const PAGE_RETRY_WITH_COPY: Duration = Duration::from_secs(4);
 const FRAME_LIMIT: usize = 8 * 1024 * 1024;
 
 /// The signed-in account (its [`super::store::owner_key`]) and the region a
@@ -185,6 +190,19 @@ pub struct AssistantHost {
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
+}
+
+/// How a catalog read uses what each source last returned.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CatalogRead {
+    /// A send: rows younger than [`MODELS_TTL`] stand, and a source that
+    /// failed is not asked again within [`FAILED_SOURCE_RETRY`].
+    Send,
+    /// The page: as a send, except that a failed source is asked again at
+    /// once (see [`PAGE_RETRY_WITH_COPY`]).
+    Page,
+    /// A lookup that missed: every source is asked.
+    Fresh,
 }
 
 /// What the host knows of one catalog source.
@@ -554,18 +572,27 @@ impl AssistantHost {
         Ok(())
     }
 
-    /// `apex`'s model catalog, both sources merged. Each source is fetched
-    /// again after [`MODELS_TTL`]; when that fetch fails, its last copy is
-    /// better than none, and a source with no copy is named in `partial`. A
-    /// failed source is asked again after [`FAILED_SOURCE_RETRY`].
+    /// `apex`'s model catalog, both sources merged, as a send reads it. Each
+    /// source is fetched again after [`MODELS_TTL`]; when that fetch fails,
+    /// its last copy is better than none, and a source with no copy is named
+    /// in `partial`. A failed source is asked again after
+    /// [`FAILED_SOURCE_RETRY`]; the page's reads bypass that pause
+    /// ([`Self::page_models`]).
     pub(super) async fn models(&self, apex: &str) -> Result<catalog::Catalog, String> {
-        self.catalog(apex, false).await
+        self.catalog(apex, CatalogRead::Send).await
     }
 
-    async fn catalog(&self, apex: &str, refresh: bool) -> Result<catalog::Catalog, String> {
+    /// [`Self::models`] for a read the user starts (opening the page, Retry,
+    /// a refresh): a source that failed is asked again at once, and waited
+    /// for only [`PAGE_RETRY_WITH_COPY`] while its last copy can stand in.
+    pub(super) async fn page_models(&self, apex: &str) -> Result<catalog::Catalog, String> {
+        self.catalog(apex, CatalogRead::Page).await
+    }
+
+    async fn catalog(&self, apex: &str, read: CatalogRead) -> Result<catalog::Catalog, String> {
         let (v1, anthropic) = tokio::join!(
-            self.catalog_source(apex, catalog::Source::V1, refresh),
-            self.catalog_source(apex, catalog::Source::Anthropic, refresh),
+            self.catalog_source(apex, catalog::Source::V1, read),
+            self.catalog_source(apex, catalog::Source::Anthropic, read),
         );
         catalog::merge(v1, anthropic)
     }
@@ -574,7 +601,7 @@ impl AssistantHost {
         &self,
         apex: &str,
         source: catalog::Source,
-        refresh: bool,
+        read: CatalogRead,
     ) -> Result<Vec<catalog::Model>, String> {
         let key = (apex.to_owned(), source);
         let cached = self
@@ -584,19 +611,27 @@ impl AssistantHost {
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        if !refresh {
+        if read != CatalogRead::Fresh {
             if let Some((fetched, models)) = &cached.rows {
                 if fetched.elapsed() < MODELS_TTL {
                     return Ok(models.clone());
                 }
             }
-            if let Some((failed, error)) = cached.failed {
-                if failed.elapsed() < FAILED_SOURCE_RETRY {
-                    return cached.rows.map(|(_, models)| models).ok_or(error);
-                }
+        }
+        if let (CatalogRead::Send, Some((failed, error))) = (read, &cached.failed) {
+            if failed.elapsed() < FAILED_SOURCE_RETRY {
+                return cached.rows.map(|(_, models)| models).ok_or(error.clone());
             }
         }
-        let fetched = self.env.models(apex, source).await;
+        let fetch = self.env.models(apex, source);
+        let copy_stands_in = cached.failed.is_some() && cached.rows.is_some();
+        let fetched = if read == CatalogRead::Page && copy_stands_in {
+            tokio::time::timeout(PAGE_RETRY_WITH_COPY, fetch)
+                .await
+                .unwrap_or_else(|_| Err("assistant_catalog_unavailable".into()))
+        } else {
+            fetch.await
+        };
         let now = std::time::Instant::now();
         let mut cache = self.models.lock().map_err(|_| STATE)?;
         let entry = cache.entry(key).or_default();
@@ -621,7 +656,7 @@ impl AssistantHost {
         if let Some(model) = self.models(apex).await?.conversation_model(id) {
             return Ok(model);
         }
-        self.catalog(apex, true)
+        self.catalog(apex, CatalogRead::Fresh)
             .await?
             .conversation_model(id)
             .ok_or_else(|| MODEL_UNAVAILABLE.into())
@@ -630,20 +665,6 @@ impl AssistantHost {
     fn forget_models(&self, apex: &str) {
         if let Ok(mut models) = self.models.lock() {
             models.retain(|(cached, _), _| cached != apex);
-        }
-    }
-
-    /// Lift the pause on `apex`'s failed catalog sources, keeping their last
-    /// rows: the next read asks them again, and a copy still stands in if
-    /// that read fails too. For reads the user starts (opening the page,
-    /// Retry, a refresh), never for those a send makes.
-    pub(super) fn retry_failed_catalog_sources(&self, apex: &str) {
-        if let Ok(mut models) = self.models.lock() {
-            for ((cached, _), source) in models.iter_mut() {
-                if cached == apex {
-                    source.failed = None;
-                }
-            }
         }
     }
 
@@ -1255,6 +1276,12 @@ impl AssistantHost {
                 attempt.projection.start_thinking();
                 self.emit(control, kind, json!({"messageId": control.message_id}));
             }
+            // Reasoning stopped. The reply's text may come in a little later:
+            // the runtime holds back its start the same way.
+            "thinking_end" => {
+                attempt.projection.end_thinking();
+                self.emit(control, kind, json!({"messageId": control.message_id}));
+            }
             "usage" => {
                 attempt.progressed |= counts_tokens(&data);
                 let usage = self.save_usage(control, data).await?;
@@ -1708,6 +1735,8 @@ mod tests {
         anthropic_fetches: AtomicU64,
         /// Sources whose fetch fails.
         down: Mutex<HashSet<catalog::Source>>,
+        /// Sources whose fetch fails only after the HTTP client's timeout.
+        hanging: Mutex<HashSet<catalog::Source>>,
         /// Rows of other kinds, after the `/v1` chat models.
         media: Mutex<Vec<catalog::Model>>,
         runtime: Mutex<Option<PathBuf>>,
@@ -1741,6 +1770,10 @@ mod tests {
                     catalog::Source::Anthropic => (&self.anthropic_fetches, &self.anthropic),
                 };
                 fetches.fetch_add(1, Ordering::SeqCst);
+                if self.hanging.lock().unwrap().contains(&source) {
+                    tokio::time::sleep(Duration::from_secs(15)).await;
+                    return Err("assistant_catalog_unavailable".to_string());
+                }
                 if self.down.lock().unwrap().contains(&source) {
                     return Err("assistant_catalog_unavailable".to_string());
                 }
@@ -1798,6 +1831,7 @@ mod tests {
             anthropic: Mutex::default(),
             anthropic_fetches: AtomicU64::new(0),
             down: Mutex::default(),
+            hanging: Mutex::default(),
             media: Mutex::default(),
             runtime: Mutex::new(None),
             events: Mutex::default(),
@@ -2519,6 +2553,77 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn the_runtimes_thinking_end_closes_the_reasoning_span_and_is_published() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(
+                    serde_json::from_value(json!({
+                        "id": run.message_id, "role": "assistant", "content": "",
+                        "createdAt": 1, "status": "streaming", "runId": run.run_id,
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+        let event = |kind: &str, data: Value| {
+            json!({
+                "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+                "type": kind, "data": data,
+            })
+        };
+        let mut attempt = Attempt::default();
+        for (kind, data) in [
+            ("thinking_start", json!({})),
+            ("thinking_delta", json!({"delta": "Hmm"})),
+            ("thinking_end", json!({})),
+        ] {
+            host.on_event(&run, &event(kind, data), &mut attempt)
+                .await
+                .unwrap();
+        }
+        // The reply's first words come in later (the runtime holds back the
+        // start of the text): that wait is not thinking.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        host.on_event(
+            &run,
+            &event("text_delta", json!({"delta": "Answer"})),
+            &mut attempt,
+        )
+        .await
+        .unwrap();
+        host.flush(&run, &mut attempt.projection).await.unwrap();
+        let spent = store.load_detail(&sid).unwrap().messages[0]
+            .reasoning_ms
+            .unwrap();
+        assert!(spent < 300, "{spent} ms");
+        let published: Vec<(String, Value)> = env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.r#type.clone(), e.data.clone()))
+            .collect();
+        assert_eq!(
+            published
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "thinking_start",
+                "thinking_delta",
+                "thinking_end",
+                "text_delta"
+            ]
+        );
+        assert_eq!(published[2].1, json!({"messageId": run.message_id}));
+    }
+
     /// Tool calls are shown as progress; a search's sources are saved on the
     /// run's reply before they are published.
     #[tokio::test]
@@ -2886,6 +2991,125 @@ mod tests {
         }
         host.models("ofox.ai").await.unwrap();
         assert_eq!(anthropic_reads(), 6, "send-time reads stay paused");
+    }
+
+    /// Claude as `/anthropic/v1/models` lists it: the priciest first.
+    const CLAUDE_IN_CATALOG_ORDER: [&str; 3] = [
+        "anthropic/claude-fable-5",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-haiku-5.5",
+    ];
+
+    fn create_request(value: Value) -> CreateRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    fn remembered_model(host: &AssistantHost) -> Option<String> {
+        host.store(&identity().owner)
+            .unwrap()
+            .remembered_model()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn with_v1_down_a_new_conversation_starts_on_the_cheapest_claude() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = CLAUDE_IN_CATALOG_ORDER.map(str::to_owned).to_vec();
+        env.down.lock().unwrap().insert(catalog::Source::V1);
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["partial"], json!(["v1"]));
+        assert_eq!(boot["defaultModelId"], "anthropic/claude-haiku-5.5");
+        let session = host
+            .create_session(create_request(json!({})))
+            .await
+            .unwrap();
+        assert_eq!(session.model_id, "anthropic/claude-haiku-5.5");
+    }
+
+    #[tokio::test]
+    async fn a_conversation_created_while_models_are_missing_keeps_the_remembered_model() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = CLAUDE_IN_CATALOG_ORDER.map(str::to_owned).to_vec();
+        host.store(&identity().owner)
+            .unwrap()
+            .remember_model("test/model")
+            .unwrap();
+        env.down.lock().unwrap().insert(catalog::Source::V1);
+        // What the renderer sends unless the user picked: the default it
+        // shows, or nothing.
+        for request in [json!({"modelId": "anthropic/claude-haiku-5.5"}), json!({})] {
+            let session = host.create_session(create_request(request)).await.unwrap();
+            assert_eq!(session.model_id, "anthropic/claude-haiku-5.5");
+            assert_eq!(remembered_model(&host).as_deref(), Some("test/model"));
+        }
+        // Once `/v1` is back, the remembered model is the default again.
+        env.down.lock().unwrap().clear();
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["partial"], json!([]));
+        assert_eq!(boot["defaultModelId"], "test/model");
+    }
+
+    #[tokio::test]
+    async fn a_model_the_user_picked_is_remembered_even_while_models_are_missing() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = CLAUDE_IN_CATALOG_ORDER.map(str::to_owned).to_vec();
+        host.store(&identity().owner)
+            .unwrap()
+            .remember_model("test/model")
+            .unwrap();
+        env.down.lock().unwrap().insert(catalog::Source::V1);
+        let picked = json!({"modelId": "anthropic/claude-opus-5", "modelPicked": true});
+        host.create_session(create_request(picked)).await.unwrap();
+        assert_eq!(
+            remembered_model(&host).as_deref(),
+            Some("anthropic/claude-opus-5")
+        );
+        // With every source read, the model a conversation starts on is
+        // remembered, picked or not, as before.
+        env.down.lock().unwrap().clear();
+        host.bootstrap().await.unwrap();
+        host.create_session(create_request(json!({"modelId": "test/model"})))
+            .await
+            .unwrap();
+        assert_eq!(remembered_model(&host).as_deref(), Some("test/model"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn opening_the_page_waits_only_briefly_for_a_hanging_source_whose_copy_stands_in() {
+        let (_config, env, host) = fixture_with_env();
+        let anthropic_reads = || env.anthropic_fetches.load(Ordering::SeqCst);
+        *env.anthropic.lock().unwrap() = vec!["anthropic/claude-test".into()];
+        host.models("ofox.ai").await.unwrap();
+        // The copy goes stale, then the source hangs until the client gives up.
+        age_catalogs(&host);
+        env.hanging
+            .lock()
+            .unwrap()
+            .insert(catalog::Source::Anthropic);
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 2);
+
+        // Opening the page asks again, but opens on the copy within seconds.
+        let opened = tokio::time::Instant::now();
+        let boot = host.bootstrap().await.unwrap();
+        assert!(
+            opened.elapsed() <= PAGE_RETRY_WITH_COPY,
+            "{:?}",
+            opened.elapsed()
+        );
+        assert_eq!(anthropic_reads(), 3);
+        assert_eq!(boot["models"][1]["id"], "anthropic/claude-test");
+        assert_eq!(boot["partial"], json!([]));
+        // Giving up counts as a failure: sends do not ask again at once.
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 3);
+
+        // With no copy to show, the page waits for the read to end.
+        host.forget_models("ofox.ai");
+        let opened = tokio::time::Instant::now();
+        let boot = host.bootstrap().await.unwrap();
+        assert!(opened.elapsed() >= Duration::from_secs(15));
+        assert_eq!(boot["partial"], json!(["anthropic"]));
     }
 
     #[tokio::test]

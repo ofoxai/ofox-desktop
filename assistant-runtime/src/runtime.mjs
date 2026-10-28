@@ -991,7 +991,7 @@ export class AssistantRuntime {
       });
       let pendingText = "";
       let pendingThinking = "";
-      // Whether this thinking block has said it started.
+      // Whether reasoning is under way and has said it started.
       let thinkingStarted = false;
       // Hold back a tail long enough to hold any credential split across
       // deltas until the rest of it arrives and it can be replaced whole.
@@ -1008,13 +1008,26 @@ export class AssistantRuntime {
         if (type === "text_delta") pendingText = safe.slice(length);
         else pendingThinking = safe.slice(length);
       };
+      // Reasoning stopped: the model began its text or a tool call, or the
+      // block or message ended (Chat Completions ends its blocks only with
+      // the stream). The last reasoning goes out, then the end is said, so
+      // the host stops the clock here rather than at the reply's first text,
+      // which is held back the same way.
+      const endThinking = () => {
+        if (!thinkingStarted) return;
+        thinkingStarted = false;
+        flush("thinking_delta", true);
+        this.notify(context, "thinking_end");
+      };
       unsubscribe = session.subscribe((event) => {
         if (event.type === "message_update") {
           const update = event.assistantMessageEvent;
           if (update.type === "text_delta") {
+            endThinking();
             pendingText += update.delta;
             flush("text_delta");
-          } else if (update.type === "thinking_delta") {
+          } else if (update.type === "toolcall_start") endThinking();
+          else if (update.type === "thinking_delta") {
             // Said with the block's first reasoning, before its text is held
             // back for key scrubbing, so the host can time it from here.
             if (!thinkingStarted && update.delta) {
@@ -1024,17 +1037,13 @@ export class AssistantRuntime {
             pendingThinking += update.delta;
             flush("thinking_delta");
           } else if (update.type === "text_end") flush("text_delta", true);
-          else if (update.type === "thinking_end") {
-            flush("thinking_delta", true);
-            thinkingStarted = false;
-          }
+          else if (update.type === "thinking_end") endThinking();
         } else if (
           event.type === "message_end" &&
           event.message.role === "assistant"
         ) {
           flush("text_delta", true);
-          flush("thinking_delta", true);
-          thinkingStarted = false;
+          endThinking();
           this.notify(context, "message_end", {
             role: "assistant",
             content: contentText(event.message.content),

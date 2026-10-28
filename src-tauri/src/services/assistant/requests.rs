@@ -23,21 +23,13 @@ impl AssistantHost {
         let generation = self.generation();
         // The user opened the page, retried or refreshed: a source that
         // failed moments ago is asked again (its last rows still stand in).
-        self.retry_failed_catalog_sources(&identity.apex);
-        let (merged, model_error) = match self.models(&identity.apex).await {
+        let (merged, model_error) = match self.page_models(&identity.apex).await {
             Ok(merged) => (merged, None),
             Err(error) => (catalog::Catalog::default(), Some(error)),
         };
         // Conversations use chat models only, until media generation lands.
         let models = merged.conversation_models();
-        // A damaged preferences file only loses the remembered choice.
-        let remembered = blocking({
-            let store = self.store(&identity.owner)?;
-            move || store.remembered_model()
-        })
-        .await
-        .unwrap_or_default();
-        let default_model_id = catalog::default_model_id(&models, remembered.as_deref());
+        let default_model_id = self.default_model(&identity.owner, &merged).await?;
         let search = search_status(&merged.models);
         let runtime = match self.runtime() {
             Ok(runtime) => json!({"available": true, "reason": null, "version": runtime.version}),
@@ -89,28 +81,48 @@ impl AssistantHost {
         Ok(summary)
     }
 
+    /// The model a new conversation of `owner` starts with in `merged` (see
+    /// [`catalog::default_model_id`]): what the page shows, and what a create
+    /// without a model takes.
+    async fn default_model(
+        &self,
+        owner: &str,
+        merged: &catalog::Catalog,
+    ) -> Result<Option<String>, String> {
+        // A damaged preferences file only loses the remembered choice.
+        let remembered = blocking({
+            let store = self.store(owner)?;
+            move || store.remembered_model()
+        })
+        .await
+        .unwrap_or_default();
+        Ok(catalog::default_model_id(
+            &merged.models,
+            remembered.as_deref(),
+        ))
+    }
+
     pub async fn create_session(&self, request: CreateRequest) -> Result<Session, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
         let store = self.store(&identity.owner)?;
+        let merged = self.models(&identity.apex).await?;
         let selected = match request.model_id {
             Some(model) => self.model(&identity.apex, &model).await?.id,
-            None => {
-                let merged = self.models(&identity.apex).await?;
-                let remembered = blocking({
-                    let store = self.store(&identity.owner)?;
-                    move || store.remembered_model()
-                })
-                .await
-                .unwrap_or_default();
-                catalog::default_model_id(&merged.models, remembered.as_deref())
-                    .ok_or("assistant_choose_model")?
-            }
+            None => self
+                .default_model(&identity.owner, &merged)
+                .await?
+                .ok_or("assistant_choose_model")?,
         };
+        // While a source cannot be read the default is a stand-in for what
+        // is missing: only a model the user picked replaces the remembered one.
+        let remember = request.model_picked || merged.partial.is_empty();
         self.ensure_current(&identity, generation).await?;
         let detail = blocking(move || {
             let detail = store.create(&selected, request.web_search)?;
-            store.remember_model(&selected)?;
+            if remember {
+                store.remember_model(&selected)?;
+            }
             Ok(detail)
         })
         .await?;

@@ -2900,6 +2900,11 @@ fn claude_runs_with_messages_and_thinks_only_at_a_chosen_level() {
             of_type(&env, &run, "thinking_start"),
             [json!({"messageId": end_message(&env, &run)})]
         );
+        assert_reasoning_ends_before_the_text(&kinds);
+        assert_eq!(
+            of_type(&env, &run, "thinking_end"),
+            [json!({"messageId": end_message(&env, &run)})]
+        );
         let streamed: String = of_type(&env, &run, "thinking_delta")
             .iter()
             .map(|data| data["delta"].as_str().unwrap().to_owned())
@@ -2935,6 +2940,19 @@ fn claude_runs_with_messages_and_thinks_only_at_a_chosen_level() {
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
+}
+
+/// One `thinking_end` among a run's event kinds: after its last reasoning,
+/// before the reply's first words.
+fn assert_reasoning_ends_before_the_text(kinds: &[String]) {
+    let ends: Vec<usize> = (0..kinds.len())
+        .filter(|at| kinds[*at] == "thinking_end")
+        .collect();
+    assert_eq!(ends.len(), 1, "{kinds:?}");
+    let last_reasoning = kinds.iter().rposition(|kind| kind == "thinking_delta");
+    let first_text = kinds.iter().position(|kind| kind == "text_delta");
+    assert!(last_reasoning.unwrap() < ends[0], "{kinds:?}");
+    assert!(ends[0] < first_text.unwrap(), "{kinds:?}");
 }
 
 /// The test model, reasoning with these levels and no Pi data.
@@ -2973,6 +2991,10 @@ fn a_chat_completions_level_is_sent_only_while_chosen_and_offered() {
             of_type(&env, &run, "run_start")[0]["thinkingLevel"],
             "medium"
         );
+        // Chat Completions ends its blocks only with the stream: the
+        // reasoning ends where the text begins.
+        let kinds: Vec<String> = env.events(&run).into_iter().map(|e| e.r#type).collect();
+        assert_reasoning_ends_before_the_text(&kinds);
         let detail = host.get_session(&sid).await.unwrap();
         let reply = detail.messages.last().unwrap();
         assert_eq!(reply.reasoning.as_deref(), Some(reasoning_text().as_str()));

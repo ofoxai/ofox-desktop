@@ -242,12 +242,15 @@ impl Model {
 }
 
 /// Defaults tried in order when nothing remembered is still offered. Every
-/// entry was a chat model in the live `/v1/models` catalog of both apexes when
-/// chosen; one that disappears is skipped, never offered.
+/// entry was a chat model in the live catalogs of both apexes when chosen; one
+/// that disappears is skipped, never offered. The last is the cheapest Claude,
+/// for when `/v1` cannot be read: the first Claude row would otherwise be the
+/// default, and it is the priciest.
 pub const PREFERRED_MODEL_IDS: &[&str] = &[
     "openai/gpt-6.1-sol",
     "openai/gpt-6-sol",
     "openai/gpt-5.4-mini",
+    "anthropic/claude-haiku-5.5",
 ];
 
 /// The model the bundled search server searches with (search-mcp's

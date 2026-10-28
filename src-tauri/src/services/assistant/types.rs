@@ -165,6 +165,10 @@ pub struct Detail {
 pub struct CreateRequest {
     /// The catalog's default (or the remembered choice) when absent.
     pub model_id: Option<String>,
+    /// The user picked `model_id` rather than taking the default shown: it is
+    /// remembered even while some catalog source cannot be read.
+    #[serde(default)]
+    pub model_picked: bool,
     #[serde(default)]
     pub web_search: bool,
 }

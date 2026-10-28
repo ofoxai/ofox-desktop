@@ -121,8 +121,8 @@ fn mark_cost_unknown(usage: &mut Value) {
 /// Streamed text, saved in batches: UI events go out at once, `session.json`
 /// is rewritten at most every 500 ms (or each 64 KiB) and at the end. It also
 /// times the reasoning: each span from the runtime's `thinking_start` (or a
-/// thinking delta) to the next text, tool call or end of message counts, at
-/// least 1 ms.
+/// thinking delta) to its `thinking_end` (or the next text, tool call or end
+/// of message) counts, at least 1 ms.
 pub(super) struct ProjectionBuffer {
     pending: Pending,
     last_flush: std::time::Instant,
@@ -172,8 +172,8 @@ impl ProjectionBuffer {
             .get_or_insert_with(std::time::Instant::now);
     }
 
-    /// The reasoning streaming now, if any, ended: a tool call, the end of
-    /// the message or of the run. Reasoning that streamed counts at least
+    /// The reasoning streaming now, if any, ended: the runtime said so, or a
+    /// tool call, the end of the message or of the run came. Reasoning that streamed counts at least
     /// 1 ms, so a reply with reasoning always has a time.
     pub(super) fn end_thinking(&mut self) {
         if let Some(since) = self.thinking_since.take() {
