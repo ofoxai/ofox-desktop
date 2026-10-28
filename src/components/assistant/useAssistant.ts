@@ -11,10 +11,12 @@ import {
   type AssistantRestoreReport,
   type AssistantSession,
   type AssistantSessionDetail,
+  type AssistantThinkingLevel,
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
 } from "@/lib/api/assistant";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
+import { currentThinking, type ThinkingChoice } from "@/utils/assistantModels";
 
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
@@ -52,6 +54,19 @@ interface RunSearch {
   runId: string;
   requested: boolean;
   got: boolean | null;
+}
+
+/**
+ * How long the followed run's reply has thought: the spans that are over, and
+ * the one under way. A span runs from the host's `thinking_start` to the
+ * reply's next text, tool call or end.
+ */
+export interface AssistantThinking {
+  runId: string;
+  /** Milliseconds of the spans that are over. */
+  doneMs: number;
+  /** When the span under way began (epoch ms); null between spans. */
+  since: number | null;
 }
 
 /** A reply with nothing in it yet, for the run that is writing it. */
@@ -109,6 +124,11 @@ export function useAssistant(enabled: boolean) {
   const [newWebSearch, setNewWebSearchState] = useState(false);
   const newWebSearchRef = useRef(newWebSearch);
   const lastWebSearch = useRef(false);
+  // Thinking for the conversation the first message creates: it belongs to
+  // the model chosen for it, so choosing another model clears it.
+  const [newThinkingLevel, setNewThinkingState] =
+    useState<AssistantThinkingLevel | null>(null);
+  const newThinkingRef = useRef(newThinkingLevel);
   const [search, setSearch] = useState("");
   const [showTrash, setShowTrash] = useState(false);
   const [sessions, setSessions] = useState<AssistantSession[]>([]);
@@ -123,6 +143,8 @@ export function useAssistant(enabled: boolean) {
     [],
   );
   const [stream, setStream] = useState<AssistantMessage | null>(null);
+  const [thinking, setThinking] = useState<AssistantThinking | null>(null);
+  const thinkingRef = useRef<AssistantThinking | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
   const [tools, setTools] = useState<RunningTool[]>([]);
   // The files a run this window sent reads before its model request: those
@@ -186,6 +208,41 @@ export function useAssistant(enabled: boolean) {
     newWebSearchRef.current = value;
     setNewWebSearchState(value);
   }, []);
+
+  const setNewThinking = useCallback((value: AssistantThinkingLevel | null) => {
+    newThinkingRef.current = value;
+    setNewThinkingState(value);
+  }, []);
+
+  const writeThinking = useCallback((value: AssistantThinking | null) => {
+    thinkingRef.current = value;
+    setThinking(value);
+  }, []);
+
+  /** The followed run's reply starts a span of thinking (or goes on with one). */
+  const startThinking = useCallback(
+    (runId: string) => {
+      const old = thinkingRef.current;
+      const base =
+        old?.runId === runId ? old : { runId, doneMs: 0, since: null };
+      if (base.since === null) writeThinking({ ...base, since: Date.now() });
+    },
+    [writeThinking],
+  );
+
+  /** Its reply spoke, called a tool or ended: the span under way is over. */
+  const endThinking = useCallback(
+    (runId: string) => {
+      const old = thinkingRef.current;
+      if (old?.runId !== runId || old.since === null) return;
+      writeThinking({
+        ...old,
+        doneMs: old.doneMs + Math.max(0, Date.now() - old.since),
+        since: null,
+      });
+    },
+    [writeThinking],
+  );
 
   const setRunSearch = useCallback((value: RunSearch | null) => {
     runSearchRef.current = value;
@@ -533,6 +590,7 @@ export function useAssistant(enabled: boolean) {
       setUnreadable([]);
       dropDeltas();
       setStream(null);
+      writeThinking(null);
       setCompacting(false);
       setBusy(false);
       setLoading(false);
@@ -544,6 +602,7 @@ export function useAssistant(enabled: boolean) {
       setChosenModel(null);
       lastWebSearch.current = false;
       setNewWebSearch(false);
+      setNewThinking(null);
       setRunSearch(null);
       setSearchSkipped(new Set());
       setError(null);
@@ -575,10 +634,12 @@ export function useAssistant(enabled: boolean) {
     loadBootstrap,
     setAttachments,
     setDraft,
+    setNewThinking,
     setNewWebSearch,
     setRun,
     setRunSearch,
     showError,
+    writeThinking,
   ]); // List refresh uses its current request fencing separately.
 
   useEffect(() => {
@@ -714,11 +775,16 @@ export function useAssistant(enabled: boolean) {
             }));
             return;
           }
+          case "thinking_start":
+            doneReading(event.runId);
+            startThinking(event.runId);
+            return;
           case "text_delta":
           case "thinking_delta": {
             const { delta } = event.data;
             if (typeof delta !== "string") return;
             doneReading(event.runId);
+            if (event.type === "text_delta") endThinking(event.runId);
             queueDelta(
               event.runId,
               event.type === "thinking_delta" ? "thinking" : "text",
@@ -773,6 +839,7 @@ export function useAssistant(enabled: boolean) {
           case "tool_start": {
             const { name, toolCallId } = event.data;
             doneReading(event.runId);
+            endThinking(event.runId);
             const activity =
               typeof name === "string" ? TOOL_ACTIVITY.get(name) : undefined;
             if (!activity || typeof toolCallId !== "string") return;
@@ -812,15 +879,20 @@ export function useAssistant(enabled: boolean) {
               message?.role === "assistant" &&
               typeof message.id === "string" &&
               typeof message.content === "string"
-            )
+            ) {
+              // The saved reply carries how long it thought.
+              writeThinking(null);
               setStream(message);
+            }
             return;
           }
           case "error":
             // A stop sends no error; a failure is shown by its code alone.
+            endThinking(event.runId);
             showError(event.data);
             return;
           case "run_end":
+            writeThinking(null);
             setRun(null);
             setCompacting(false);
             // Keep the streamed reply until the canonical saved transcript is available.
@@ -849,12 +921,15 @@ export function useAssistant(enabled: boolean) {
     };
   }, [
     enabled,
+    endThinking,
     flushDeltas,
     queueDelta,
     refreshDetail,
     setRun,
     setRunSearch,
     showError,
+    startThinking,
+    writeThinking,
   ]);
 
   const select = useCallback(
@@ -891,6 +966,8 @@ export function useAssistant(enabled: boolean) {
       setDetail(null);
       dropDeltas();
       setStream(null);
+      writeThinking(null);
+      setNewThinking(null);
       setCompacting(false);
       const pending = [...pendingSends.current.values()].find(
         (item) => item.sessionId === id,
@@ -914,9 +991,11 @@ export function useAssistant(enabled: boolean) {
       loadSelected,
       dropDeltas,
       setRun,
+      setNewThinking,
       setNewWebSearch,
       persistDraft,
       showError,
+      writeThinking,
     ],
   );
 
@@ -949,16 +1028,36 @@ export function useAssistant(enabled: boolean) {
     }
     const generation = epoch.current;
     const selection = selectionSequence.current;
-    const value = await assistantApi.createSession({
+    let value = await assistantApi.createSession({
       modelId: newModelId || undefined,
       webSearch: newWebSearchRef.current,
     });
+    // A new conversation takes no thinking level when it is created: the one
+    // chosen for it is saved right after, if its model still offers it.
+    const level = newThinkingRef.current;
+    const createdModel = bootstrapRef.current?.models.find(
+      (item) => item.id === value.modelId,
+    );
+    let thinkingFailure: unknown;
+    if (level && currentThinking(createdModel, level) === level) {
+      try {
+        value = await assistantApi.updateSession({
+          sessionId: value.id,
+          thinkingLevel: level,
+          ...expectedIdentity(bootstrapRef.current),
+        });
+      } catch (reason) {
+        thinkingFailure = reason;
+      }
+    }
     if (
       !mounted.current ||
       generation !== epoch.current ||
       selection !== selectionSequence.current
     )
       throw new Error("assistant_request_expired");
+    if (thinkingFailure !== undefined) showError(thinkingFailure);
+    setNewThinking(null);
     selectedRef.current = value.id;
     createdSession.current = value.id;
     setNewWebSearch(lastWebSearch.current);
@@ -968,7 +1067,7 @@ export function useAssistant(enabled: boolean) {
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
     void refreshSessionsRef.current();
     return value;
-  }, [detail, newModelId, setNewWebSearch]);
+  }, [detail, newModelId, setNewThinking, setNewWebSearch, showError]);
 
   const create = useCallback(async () => {
     if (busy) return;
@@ -1293,6 +1392,30 @@ export function useAssistant(enabled: boolean) {
       });
     },
     [update, setNewWebSearch],
+  );
+
+  /**
+   * Thinking for the open conversation, or for the one the first message
+   * creates. It never stops a running reply: the next send uses it.
+   */
+  const setThinkingLevel = useCallback(
+    (choice: ThinkingChoice) => {
+      if (!selectedRef.current) {
+        setNewThinking(choice === "default" ? null : choice);
+        return;
+      }
+      void update({ thinkingLevel: choice });
+    },
+    [update, setNewThinking],
+  );
+
+  /** A model chosen for the next new conversation; its thinking choice starts over. */
+  const chooseNewModel = useCallback(
+    (modelId: string) => {
+      setChosenModel(modelId);
+      setNewThinking(null);
+    },
+    [setNewThinking],
   );
 
   /**
@@ -1727,10 +1850,22 @@ export function useAssistant(enabled: boolean) {
       webSearch !== (followedSearch.got ?? followedSearch.requested),
   );
 
+  // The followed run's reply, while it goes on.
+  const liveThinking = run && thinking?.runId === run.runId ? thinking : null;
+  // The open conversation's saved level; off while it loads.
+  const thinkingLevel = selectedId
+    ? detail?.session.id === selectedId
+      ? (detail.session.thinkingLevel ?? null)
+      : null
+    : newThinkingLevel;
+
   return {
     bootstrap,
     newModelId,
-    chooseNewModel: setChosenModel,
+    chooseNewModel,
+    thinkingLevel,
+    setThinkingLevel,
+    thinking: liveThinking,
     webSearch,
     setWebSearch,
     webSearchWaits,

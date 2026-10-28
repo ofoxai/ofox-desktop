@@ -24,7 +24,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { isSendable } from "@/utils/assistantAttachments";
 import { AttachmentList } from "./AssistantAttachments";
-import type { AssistantActivity } from "./useAssistant";
+import { ReasoningBlock } from "./ReasoningBlock";
+import type { AssistantActivity, AssistantThinking } from "./useAssistant";
 
 const MessageMarkdown = memo(SessionMarkdown);
 
@@ -176,14 +177,16 @@ function SourceList({
  * that can't be read. A reply uses the full width. `onRetry` is given for a
  * question whose turn failed before the model kept it: it can only be sent
  * again, as a new turn. `activity` says what a streaming reply is doing while
- * one of its tools runs. `searchUnavailable` marks a reply whose run went
- * without the web search its conversation asked for. `latest` marks the
- * newest reply, whose actions stay in view; the others show theirs while the
- * pointer or keyboard focus is on the message.
+ * one of its tools runs; `thinking` times the reasoning it is streaming.
+ * `searchUnavailable` marks a reply whose run went without the web search its
+ * conversation asked for. `latest` marks the newest reply, whose actions stay
+ * in view; the others show theirs while the pointer or keyboard focus is on
+ * the message.
  */
 export const AssistantMessageView = memo(function AssistantMessageView({
   message,
   activity = null,
+  thinking = null,
   searchUnavailable = false,
   latest = false,
   disabled,
@@ -194,6 +197,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
 }: {
   message: AssistantMessage;
   activity?: AssistantActivity | null;
+  /** A streaming reply's thinking so far, for its live timer. */
+  thinking?: AssistantThinking | null;
   searchUnavailable?: boolean;
   latest?: boolean;
   disabled: boolean;
@@ -264,16 +269,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       aria-label={role}
     >
       <h2 className="sr-only">{role}</h2>
-      {message.reasoning && (
-        <details className="mb-3 rounded-ctl bg-card-2 px-3 py-2 text-ctl text-ink-muted">
-          <summary className="cursor-pointer">
-            {t("assistant.reasoning")}
-          </summary>
-          <div className="mt-2 whitespace-pre-wrap break-words">
-            {message.reasoning}
-          </div>
-        </details>
-      )}
+      <ReasoningBlock
+        reasoning={message.reasoning}
+        reasoningMs={message.reasoningMs}
+        thinking={thinking}
+      />
       {editing ? (
         <div className="w-full space-y-2">
           <Textarea
@@ -326,7 +326,10 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           </div>
         </div>
       ) : streaming && !message.content ? (
-        statusLine(progress || t("assistant.typing"))
+        // The thinking caption above already says so, with its timer.
+        thinking?.since != null && !progress ? null : (
+          statusLine(progress || t("assistant.typing"))
+        )
       ) : (
         <>
           {/* A question sent with files alone has no words to show. */}

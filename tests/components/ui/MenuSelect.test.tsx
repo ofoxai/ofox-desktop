@@ -367,3 +367,111 @@ it("Shift+Tab returns to the previous control without selecting", async () => {
   expect(screen.getByRole("button", { name: "Before menu" })).toHaveFocus();
   expect(picked).not.toHaveBeenCalled();
 });
+
+describe("MenuSelect groups", () => {
+  const GROUPED: MenuSelectOption<string>[] = [
+    { value: "gpt", label: "GPT", group: "openai", groupLabel: "OpenAI" },
+    {
+      value: "claude",
+      label: "Claude",
+      group: "anthropic",
+      groupLabel: "Anthropic",
+    },
+    { value: "o3", label: "o3", group: "openai", groupLabel: "OpenAI" },
+    { value: "solo", label: "Solo" },
+  ];
+  const renderGrouped = (props: Partial<MenuSelectProps<string>> = {}) =>
+    render(
+      <MenuSelect
+        aria-label="Model"
+        value="claude"
+        onChange={vi.fn()}
+        options={GROUPED}
+        {...props}
+      />,
+    );
+  const open = async () => {
+    await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+    return screen.getByRole("listbox");
+  };
+
+  it("draws each group once, named by its label, at the place of its first option", async () => {
+    renderGrouped();
+    const listbox = await open();
+    const groups = within(listbox).getAllByRole("group");
+    expect(groups).toHaveLength(2);
+    expect(groups[0]).toHaveAccessibleName("OpenAI");
+    expect(groups[1]).toHaveAccessibleName("Anthropic");
+    expect(
+      within(groups[0])
+        .getAllByRole("option")
+        .map((item) => item.textContent),
+    ).toEqual(["GPT", "o3"]);
+    // The arrows follow what is drawn: GPT, o3, Claude, Solo.
+    expect(
+      within(listbox)
+        .getAllByRole("option")
+        .map((item) => item.textContent),
+    ).toEqual(["GPT", "o3", "Claude", "Solo"]);
+  });
+
+  it("leaves an option without a group outside every group", async () => {
+    renderGrouped();
+    const listbox = await open();
+    const solo = within(listbox).getByRole("option", { name: "Solo" });
+    expect(solo.closest('[role="group"]')).toBeNull();
+  });
+
+  it("filters across the groups, and drops a group with no match", async () => {
+    renderGrouped({ searchable: true, searchPlaceholder: "Filter models" });
+    await open();
+    await userEvent.type(
+      screen.getByRole("combobox", { name: "Filter models" }),
+      "o3",
+    );
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getByRole("group", { name: "OpenAI" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Anthropic" })).toBeNull();
+  });
+
+  it("matches a group's label too", async () => {
+    renderGrouped({ searchable: true, searchPlaceholder: "Filter models" });
+    await open();
+    await userEvent.type(
+      screen.getByRole("combobox", { name: "Filter models" }),
+      "anthropic",
+    );
+    expect(
+      screen.getAllByRole("option").map((item) => item.textContent),
+    ).toEqual(["Claude"]);
+  });
+
+  it("starts on the first option as drawn when none is chosen", async () => {
+    renderGrouped({ value: "", searchable: true });
+    await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+    const input = screen.getAllByRole("combobox")[1];
+    expect(
+      document.getElementById(input.getAttribute("aria-activedescendant")!),
+    ).toHaveTextContent("GPT");
+  });
+
+  it("picks an option inside a group", async () => {
+    const onChange = vi.fn();
+    renderGrouped({ onChange });
+    await open();
+    await userEvent.click(screen.getByRole("option", { name: "o3" }));
+    expect(onChange).toHaveBeenCalledWith("o3");
+  });
+
+  it("shows an option's tags after its label", async () => {
+    renderGrouped({
+      options: [
+        { value: "a", label: "Model A", tags: ["Reasoning", "Vision"] },
+      ],
+      value: "a",
+    });
+    await open();
+    const item = screen.getByRole("option", { name: /Model A/ });
+    expect(item).toHaveTextContent("Model AReasoningVision");
+  });
+});

@@ -852,3 +852,81 @@ describe("drawing a message again", () => {
     expect(onEdit).toHaveBeenCalledWith("q1", "First", []);
   });
 });
+
+describe("a reply's thinking", () => {
+  const reply = (
+    over: Partial<AssistantMessage> = {},
+    thinking: { doneMs: number; since: number | null } | null = null,
+  ) => (
+    <AssistantMessageView
+      message={{
+        id: "m",
+        role: "assistant",
+        content: "",
+        createdAt: 1,
+        ...over,
+      }}
+      thinking={thinking && { runId: "run", ...thinking }}
+      disabled
+      onEdit={async () => false}
+      onRegenerate={() => undefined}
+    />
+  );
+
+  it("says how long a saved reply thought, with its reasoning behind it", () => {
+    render(
+      reply({
+        content: "Answer",
+        reasoning: "Because",
+        reasoningMs: 7600,
+        status: "completed",
+      }),
+    );
+    const caption = screen.getByText("Thought for 8 seconds");
+    expect(caption.closest("details")).toHaveTextContent("Because");
+    expect(screen.queryByText("Reasoning")).toBeNull();
+  });
+
+  it("says nothing of thinking for a reply that has no reasoning", () => {
+    render(reply({ content: "Answer", status: "completed" }));
+    expect(screen.queryByText(/Thought for|Thinking for|Reasoning/)).toBeNull();
+  });
+
+  it("says nothing of thinking on a question", () => {
+    render(reply({ role: "user", content: "Hello", status: "completed" }));
+    expect(screen.queryByText(/Thought for|Thinking for/)).toBeNull();
+  });
+
+  it("shows the live caption in place of the plain Thinking… line while it thinks", () => {
+    render(reply({ status: "streaming" }, { doneMs: 0, since: Date.now() }));
+    expect(screen.getByText("Thinking for 0 seconds")).toBeVisible();
+    // The plain line would say the same twice.
+    expect(screen.queryByText("Thinking…", { selector: "p" })).toBeNull();
+  });
+
+  it("goes back to the plain Thinking… line once the thinking is over and nothing was said", () => {
+    render(reply({ status: "streaming" }, { doneMs: 3000, since: null }));
+    expect(screen.getByText("Thought for 3 seconds")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+  });
+
+  it("keeps the activity line while a tool runs, even though it was thinking before", () => {
+    render(
+      <AssistantMessageView
+        message={{
+          id: "m",
+          role: "assistant",
+          content: "",
+          createdAt: 1,
+          status: "streaming",
+        }}
+        activity="searching"
+        thinking={{ runId: "run", doneMs: 2000, since: null }}
+        disabled
+        onEdit={async () => false}
+        onRegenerate={() => undefined}
+      />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("Searching the web…");
+  });
+});

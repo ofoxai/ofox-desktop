@@ -5038,6 +5038,42 @@
       "warnLabel": "文件提示"
     },
     "reasoning": "思考过程",
+    "vendors": {
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "google": "Google",
+      "deepseek": "深度求索 (DeepSeek)",
+      "qwen": "通义千问 (Qwen)",
+      "alibaba": "阿里巴巴",
+      "z-ai": "智谱 (Z.ai)",
+      "moonshotai": "月之暗面 (Kimi)",
+      "volcengine": "火山引擎 (豆包)",
+      "bytedance": "字节跳动",
+      "minimax": "MiniMax",
+      "x-ai": "xAI",
+      "microsoft": "Microsoft"
+    },
+    "vendorOther": "其他",
+    "modelKind": "模型类型",
+    "kinds": {
+      "chat": "对话",
+      "image": "图像",
+      "video": "视频"
+    },
+    "modelTags": {
+      "reasoning": "推理",
+      "vision": "识图"
+    },
+    "modelsPartial": "部分模型暂不可用",
+    "thinking": {
+      "label": "思考",
+      "trigger": "思考：{{level}}",
+      "costNote": "思考越深输出 token 越多，按输出单价计费，回复更慢",
+      "live_one": "思考中 {{count}} 秒",
+      "live_other": "思考中 {{count}} 秒",
+      "done_one": "已思考 {{count}} 秒",
+      "done_other": "已思考 {{count}} 秒"
+    },
     "sources": "来源",
     "sourcesMore_one": "另外 {{count}} 个来源",
     "sourcesMore_other": "另外 {{count}} 个来源",

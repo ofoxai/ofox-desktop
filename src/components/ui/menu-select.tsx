@@ -19,6 +19,14 @@ export interface MenuSelectOption<T extends string = string> {
   count?: React.ReactNode;
   /** Drawn at 13px before the label, in the menu and on the trigger. */
   icon?: React.ReactNode;
+  /** Small pills after the label in the menu, such as what a model can do. */
+  tags?: ReadonlyArray<string>;
+  /**
+   * Options that share a `group` sit under one heading, `groupLabel`, in the
+   * order the groups first appear; options with none stay where they are.
+   */
+  group?: string;
+  groupLabel?: string;
   disabled?: boolean;
 }
 
@@ -87,7 +95,7 @@ function filterOptions<T extends string>(
     .filter(
       ({ option }) =>
         !q ||
-        `${option.label} ${option.note ?? ""} ${option.value}`
+        `${option.label} ${option.note ?? ""} ${option.value} ${option.groupLabel ?? ""}`
           .toLocaleLowerCase()
           .includes(q),
     );
@@ -97,6 +105,47 @@ function filterOptions<T extends string>(
 function firstKey<T extends string>(items: Indexed<T>[]): string {
   const first = items.find(({ option }) => !option.disabled);
   return first ? itemKey(first.index) : "";
+}
+
+interface Section<T extends string> {
+  /** Undefined for options outside any group. */
+  group?: string;
+  label?: string;
+  items: Indexed<T>[];
+}
+
+/**
+ * The options as the menu draws them: each group once, at the place of its
+ * first option, and every ungrouped option on its own.
+ */
+function toSections<T extends string>(items: Indexed<T>[]): Section<T>[] {
+  const sections: Section<T>[] = [];
+  const byGroup = new Map<string, Section<T>>();
+  for (const item of items) {
+    const { group, groupLabel } = item.option;
+    if (group === undefined) {
+      sections.push({ items: [item] });
+      continue;
+    }
+    let section = byGroup.get(group);
+    if (!section) {
+      section = { group, label: groupLabel ?? group, items: [] };
+      byGroup.set(group, section);
+      sections.push(section);
+    }
+    section.items.push(item);
+  }
+  return sections;
+}
+
+/** What a query leaves, in the order the menu draws it (and arrows through it). */
+function inMenuOrder<T extends string>(
+  options: ReadonlyArray<MenuSelectOption<T>>,
+  query: string,
+): Indexed<T>[] {
+  return toSections(filterOptions(options, query)).flatMap(
+    (section) => section.items,
+  );
 }
 
 /**
@@ -137,8 +186,8 @@ export function MenuSelect<T extends string>({
   const itemRefs = React.useRef(new Map<string, HTMLDivElement>());
 
   const chosen = options.find((option) => option.value === value);
-  const shown = React.useMemo(
-    () => filterOptions(options, query),
+  const sections = React.useMemo(
+    () => toSections(filterOptions(options, query)),
     [options, query],
   );
 
@@ -149,15 +198,14 @@ export function MenuSelect<T extends string>({
       const at = options.findIndex(
         (option) => option.value === value && !option.disabled,
       );
-      const all = filterOptions(options, "");
-      setActive(at >= 0 ? itemKey(at) : firstKey(all));
+      setActive(at >= 0 ? itemKey(at) : firstKey(inMenuOrder(options, "")));
     }
     setOpen(next);
   };
 
   const handleQuery = (next: string) => {
     setQuery(next);
-    setActive(firstKey(filterOptions(options, next)));
+    setActive(firstKey(inMenuOrder(options, next)));
   };
 
   // Without a filter, focus rides on the highlighted option itself, as in
@@ -183,6 +231,74 @@ export function MenuSelect<T extends string>({
   const choose = (option: MenuSelectOption<T>) => {
     setOpen(false);
     if (option.value !== value) onChange(option.value);
+  };
+
+  const renderItem = ({ option, index }: Indexed<T>) => {
+    const checked = option.value === value;
+    const title = (
+      <span className="truncate text-nav font-medium leading-4">
+        {option.label}
+      </span>
+    );
+    return (
+      <CommandPrimitive.Item
+        key={option.value}
+        ref={(node) => {
+          if (node) itemRefs.current.set(itemKey(index), node);
+          else itemRefs.current.delete(itemKey(index));
+        }}
+        tabIndex={-1}
+        value={itemKey(index)}
+        disabled={option.disabled}
+        onSelect={() => choose(option)}
+        data-checked={checked || undefined}
+        className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 focus-visible:outline-none data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
+      >
+        <span
+          aria-hidden
+          className="grid h-4 w-3.5 flex-none place-items-center text-ink"
+        >
+          {checked && <Check className="h-3 w-3" strokeWidth={1.9} />}
+        </span>
+        {option.icon && (
+          <span aria-hidden className={ICON_BOX}>
+            {option.icon}
+          </span>
+        )}
+        <span className="grid min-w-0 flex-1 gap-px">
+          {option.tags?.length ? (
+            <span className="flex min-w-0 items-center gap-1.5">
+              {title}
+              {option.tags.map((tag) => (
+                <span
+                  key={tag}
+                  className="flex-none rounded-[4px] bg-pill px-1 text-micro leading-4 text-ink-ctl"
+                >
+                  {tag}
+                </span>
+              ))}
+            </span>
+          ) : (
+            title
+          )}
+          {option.note && (
+            <span
+              className={cn(
+                "text-note leading-[15px] text-ink-muted",
+                wrapNotes ? "break-words" : "truncate",
+              )}
+            >
+              {option.note}
+            </span>
+          )}
+        </span>
+        {option.count != null && (
+          <span className="flex-none pl-2 text-note leading-4 tabular-nums text-ink-faint">
+            {option.count}
+          </span>
+        )}
+      </CommandPrimitive.Item>
+    );
   };
 
   return (
@@ -292,54 +408,17 @@ export function MenuSelect<T extends string>({
             <CommandPrimitive.Empty className="px-2 pb-1.5 pt-2 text-note text-ink-muted">
               {t("common.noMatches")}
             </CommandPrimitive.Empty>
-            {shown.map(({ option, index }) => {
-              const checked = option.value === value;
+            {sections.map((section) => {
+              if (section.group === undefined)
+                return renderItem(section.items[0]);
               return (
-                <CommandPrimitive.Item
-                  key={option.value}
-                  ref={(node) => {
-                    if (node) itemRefs.current.set(itemKey(index), node);
-                    else itemRefs.current.delete(itemKey(index));
-                  }}
-                  tabIndex={-1}
-                  value={itemKey(index)}
-                  disabled={option.disabled}
-                  onSelect={() => choose(option)}
-                  data-checked={checked || undefined}
-                  className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 focus-visible:outline-none data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
+                <CommandPrimitive.Group
+                  key={`group-${section.group}`}
+                  heading={section.label}
+                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-0.5 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-note [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-faint [&_[cmdk-group-items]]:grid [&_[cmdk-group-items]]:gap-px"
                 >
-                  <span
-                    aria-hidden
-                    className="grid h-4 w-3.5 flex-none place-items-center text-ink"
-                  >
-                    {checked && <Check className="h-3 w-3" strokeWidth={1.9} />}
-                  </span>
-                  {option.icon && (
-                    <span aria-hidden className={ICON_BOX}>
-                      {option.icon}
-                    </span>
-                  )}
-                  <span className="grid min-w-0 flex-1 gap-px">
-                    <span className="truncate text-nav font-medium leading-4">
-                      {option.label}
-                    </span>
-                    {option.note && (
-                      <span
-                        className={cn(
-                          "text-note leading-[15px] text-ink-muted",
-                          wrapNotes ? "break-words" : "truncate",
-                        )}
-                      >
-                        {option.note}
-                      </span>
-                    )}
-                  </span>
-                  {option.count != null && (
-                    <span className="flex-none pl-2 text-note leading-4 tabular-nums text-ink-faint">
-                      {option.count}
-                    </span>
-                  )}
-                </CommandPrimitive.Item>
+                  {section.items.map(renderItem)}
+                </CommandPrimitive.Group>
               );
             })}
           </CommandPrimitive.List>

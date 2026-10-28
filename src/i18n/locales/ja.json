@@ -5038,6 +5038,42 @@
       "warnLabel": "ファイルの注意"
     },
     "reasoning": "思考過程",
+    "vendors": {
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "google": "Google",
+      "deepseek": "DeepSeek",
+      "qwen": "Qwen",
+      "alibaba": "アリババ",
+      "z-ai": "Z.ai",
+      "moonshotai": "Moonshot AI (Kimi)",
+      "volcengine": "Volcengine (Doubao)",
+      "bytedance": "ByteDance",
+      "minimax": "MiniMax",
+      "x-ai": "xAI",
+      "microsoft": "Microsoft"
+    },
+    "vendorOther": "その他",
+    "modelKind": "モデルの種類",
+    "kinds": {
+      "chat": "チャット",
+      "image": "画像",
+      "video": "動画"
+    },
+    "modelTags": {
+      "reasoning": "推論",
+      "vision": "画像入力"
+    },
+    "modelsPartial": "一部のモデルは現在利用できません",
+    "thinking": {
+      "label": "思考",
+      "trigger": "思考：{{level}}",
+      "costNote": "深く考えるほど出力トークンが増え、出力単価で課金され、返信も遅くなります",
+      "live_one": "{{count}} 秒間思考中",
+      "live_other": "{{count}} 秒間思考中",
+      "done_one": "{{count}} 秒間思考しました",
+      "done_other": "{{count}} 秒間思考しました"
+    },
     "sources": "出典",
     "sourcesMore_one": "ほかの出典 {{count}} 件",
     "sourcesMore_other": "ほかの出典 {{count}} 件",

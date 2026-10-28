@@ -5038,6 +5038,42 @@
       "warnLabel": "File notes"
     },
     "reasoning": "Reasoning",
+    "vendors": {
+      "openai": "OpenAI",
+      "anthropic": "Anthropic",
+      "google": "Google",
+      "deepseek": "DeepSeek",
+      "qwen": "Qwen",
+      "alibaba": "Alibaba",
+      "z-ai": "Z.ai",
+      "moonshotai": "Moonshot AI (Kimi)",
+      "volcengine": "Volcengine (Doubao)",
+      "bytedance": "ByteDance",
+      "minimax": "MiniMax",
+      "x-ai": "xAI",
+      "microsoft": "Microsoft"
+    },
+    "vendorOther": "Other",
+    "modelKind": "Model type",
+    "kinds": {
+      "chat": "Chat",
+      "image": "Image",
+      "video": "Video"
+    },
+    "modelTags": {
+      "reasoning": "Reasoning",
+      "vision": "Vision"
+    },
+    "modelsPartial": "Some models are temporarily unavailable",
+    "thinking": {
+      "label": "Thinking",
+      "trigger": "Thinking: {{level}}",
+      "costNote": "Deeper thinking uses more output tokens, billed at the output price, and replies take longer.",
+      "live_one": "Thinking for {{count}} second",
+      "live_other": "Thinking for {{count}} seconds",
+      "done_one": "Thought for {{count}} second",
+      "done_other": "Thought for {{count}} seconds"
+    },
     "sources": "Sources",
     "sourcesMore_one": "{{count}} more source",
     "sourcesMore_other": "{{count}} more sources",

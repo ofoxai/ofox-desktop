@@ -39,8 +39,10 @@ import { isMac } from "@/lib/platform";
 import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
+import { AssistantModelPicker } from "./AssistantModelPicker";
 import { AssistantSidebar } from "./AssistantSidebar";
 import { InlineRename } from "./InlineRename";
+import { ThinkingMenu } from "./ThinkingMenu";
 import { usePendingFocus } from "./usePendingFocus";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { isSendable } from "@/utils/assistantAttachments";
@@ -56,7 +58,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useInteractionActive } from "@/components/ui/interaction-scope";
-import { MenuSelect } from "@/components/ui/menu-select";
 import {
   Tooltip,
   TooltipContent,
@@ -278,17 +279,18 @@ function AssistantWorkspace() {
       : t("assistant.webSearchUnavailable");
   // What a search costs, or why there is none, whether search is on or not.
   const showSearchNote = available && searchNote !== null;
-  // Search can be turned on only while it is offered, and always off, so a
-  // conversation never keeps it on when it can't be seen to work. A
-  // conversation still loading (or whose load failed) has no setting to
-  // change yet.
-  const searchLocked =
+  // A conversation still loading (or whose load failed) has no setting to
+  // change yet; none is changed in the trash.
+  const settingsLocked =
     !available ||
     trashed ||
     busy ||
     assistant.loading ||
-    Boolean(assistant.selectedId && session?.id !== assistant.selectedId) ||
-    (!assistant.webSearch && searchPrice === null);
+    Boolean(assistant.selectedId && session?.id !== assistant.selectedId);
+  // Search can be turned on only while it is offered, and always off, so a
+  // conversation never keeps it on when it can't be seen to work.
+  const searchLocked =
+    settingsLocked || (!assistant.webSearch && searchPrice === null);
   // The switch is lit only for a search that will happen: a conversation
   // saved with search on while it is unavailable still says "on" to
   // assistive tech (and can be turned off), but doesn't look on.
@@ -656,53 +658,18 @@ function AssistantWorkspace() {
             )}
           </div>
           {Boolean(session || bootstrap?.models.length) && (
-            <MenuSelect
-              aria-label={t("assistant.model")}
+            <AssistantModelPicker
+              models={bootstrap?.models ?? []}
               value={session?.modelId ?? assistant.newModelId}
               onChange={(modelId) =>
                 session
                   ? void assistant.update({ modelId })
                   : assistant.chooseNewModel(modelId)
               }
+              partial={Boolean(bootstrap?.partial?.length)}
               disabled={!writable}
-              searchable
-              searchPlaceholder={t("assistant.searchModels")}
               placeholder={session?.modelId || t("assistant.model")}
-              width={310}
-              wrapNotes
-              align="end"
-              triggerClassName="!max-w-[min(250px,100%)]"
-              options={(bootstrap?.models ?? []).map((model) => ({
-                value: model.id,
-                label: model.name,
-                note: [
-                  model.contextWindow
-                    ? t("assistant.contextWindow", {
-                        tokens: fmtTokens(model.contextWindow),
-                      })
-                    : "",
-                  model.inputPricePerMillion
-                    ? t("assistant.modelPrice", {
-                        input: model.inputPricePerMillion,
-                        output: model.outputPricePerMillion ?? "—",
-                      })
-                    : "",
-                ]
-                  .filter(Boolean)
-                  .join(" · "),
-              }))}
             />
-          )}
-          {session && sessionTrashed && (
-            <Button
-              variant="secondary"
-              className="shrink-0"
-              disabled={busy || Boolean(run)}
-              onClick={(event) => restore(event.currentTarget)}
-            >
-              <RotateCcw aria-hidden className="h-3.5 w-3.5" />
-              {t("assistant.restore")}
-            </Button>
           )}
           {session && (
             <DropdownMenu modal={false}>
@@ -920,6 +887,7 @@ function AssistantWorkspace() {
                     <AssistantMessageView
                       message={assistant.stream}
                       activity={assistant.activity}
+                      thinking={assistant.thinking}
                       searchUnavailable={assistant.searchSkipped.has(
                         assistant.stream.id,
                       )}
@@ -1085,6 +1053,14 @@ function AssistantWorkspace() {
                         {searchNote}
                       </span>
                     )}
+                    {/* A reply under way goes on as it began: the choice is
+                      for the next message. */}
+                    <ThinkingMenu
+                      model={composerModel}
+                      level={assistant.thinkingLevel}
+                      disabled={settingsLocked}
+                      onChange={assistant.setThinkingLevel}
+                    />
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     {showLength && (

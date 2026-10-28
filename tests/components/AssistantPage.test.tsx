@@ -149,10 +149,8 @@ async function chooseFromMenu(name: string) {
   );
   await userEvent.click(item);
 }
-/** A trashed conversation can be restored from its header and from where the composer was. */
-const restoreButtons = () => screen.getAllByRole("button", { name: "Restore" });
-const headerRestore = () => restoreButtons()[0];
-const noticeRestore = () => restoreButtons()[1];
+/** A trashed conversation is restored from the centred notice where the composer was. */
+const restoreButton = () => screen.getByRole("button", { name: "Restore" });
 const conversationMenuButton = () =>
   screen.getByRole("button", { name: "Conversation actions" });
 /** Open the header's menu for the conversation, unless it already is. */
@@ -2718,7 +2716,10 @@ describe("selection and history edges", () => {
     const row = await screen.findByRole("button", { name: "My conversation" });
     // One line: the title, with the full time on hover.
     expect(row).toHaveTextContent(/^My conversation$/);
-    expect(row).toHaveAttribute("title", "My conversation\n2026年10月16日 04:00");
+    expect(row).toHaveAttribute(
+      "title",
+      "My conversation\n2026年10月16日 04:00",
+    );
   });
 
   it("marks a conversation that is replying with a spinner that says so", async () => {
@@ -4157,7 +4158,7 @@ describe("conversation trash", () => {
     );
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
-    await userEvent.click(headerRestore());
+    await userEvent.click(restoreButton());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
@@ -4636,7 +4637,7 @@ describe("conversation trash, in detail", () => {
     expect(
       screen.queryByRole("textbox", { name: "Conversation title" }),
     ).toBeNull();
-    await userEvent.click(headerRestore());
+    await userEvent.click(restoreButton());
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
@@ -4648,9 +4649,16 @@ describe("conversation trash, in detail", () => {
     );
   });
 
-  it("restores with a visible secondary button, and keeps permanent deletion in the menu", async () => {
+  it("has no Restore button in the header, only in the notice, and keeps permanent deletion in the menu", async () => {
     await openTrashed();
-    expect(headerRestore()).toHaveClass("border");
+    const header = screen
+      .getByRole("heading", { level: 1 })
+      .closest("header") as HTMLElement;
+    expect(
+      within(header).queryByRole("button", { name: "Restore" }),
+    ).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Restore" })).toHaveLength(1);
+    expect(restoreButton().closest("footer")).not.toBeNull();
     await openConversationMenu();
     expect(
       screen.getByRole("menuitem", { name: "Delete permanently" }),
@@ -4669,13 +4677,13 @@ describe("conversation trash, in detail", () => {
     expect(screen.queryByRole("button", { name: "Attach files" })).toBeNull();
     const notice = screen.getByText(hint).closest("footer") as HTMLElement;
     expect(notice).not.toBeNull();
-    expect(notice).toContainElement(noticeRestore());
+    expect(notice).toContainElement(restoreButton());
     expect(screen.getByText(hint)).toHaveClass("text-center");
   });
 
-  it("restores from the notice's button as from the header's", async () => {
+  it("restores from the notice's button", async () => {
     await openTrashed();
-    await userEvent.click(noticeRestore());
+    await userEvent.click(restoreButton());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
@@ -4688,10 +4696,10 @@ describe("conversation trash, in detail", () => {
   it("gives the focus back to the button that was pressed when the restore fails", async () => {
     await openTrashed();
     mocks.updateSession.mockRejectedValueOnce(new Error("assistant_failed"));
-    noticeRestore().focus();
-    await userEvent.click(noticeRestore());
+    restoreButton().focus();
+    await userEvent.click(restoreButton());
     await waitFor(() => expect(mocks.updateSession).toHaveBeenCalled());
-    await waitFor(() => expect(noticeRestore()).toHaveFocus());
+    await waitFor(() => expect(restoreButton()).toHaveFocus());
   });
 
   it("says it is in the trash once when it has no messages", async () => {
@@ -4711,7 +4719,7 @@ describe("conversation trash, in detail", () => {
   it("goes back to the conversations without listing the trash again for it", async () => {
     await openTrashed();
     const reads = mocks.listSessions.mock.calls.length;
-    await userEvent.click(headerRestore());
+    await userEvent.click(restoreButton());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await waitFor(() =>
       expect(mocks.listSessions).toHaveBeenLastCalledWith(false, ""),
@@ -5073,21 +5081,27 @@ describe("the sidebar", () => {
   it.each([
     ["Ctrl+N", "Windows NT 10.0", "Win32"],
     ["⌘N", "Macintosh", "MacIntel"],
-  ])("tells the shortcut of its icon button: %s", async (shortcut, agent, platform) => {
-    const spies = [
-      vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent),
-      vi.spyOn(navigator, "platform", "get").mockReturnValue(platform),
-    ];
-    try {
-      render(page());
-      const create = await screen.findByRole("button", {
-        name: "New conversation",
-      });
-      expect(create).toHaveAttribute("title", `New conversation (${shortcut})`);
-    } finally {
-      for (const spy of spies) spy.mockRestore();
-    }
-  });
+  ])(
+    "tells the shortcut of its icon button: %s",
+    async (shortcut, agent, platform) => {
+      const spies = [
+        vi.spyOn(navigator, "userAgent", "get").mockReturnValue(agent),
+        vi.spyOn(navigator, "platform", "get").mockReturnValue(platform),
+      ];
+      try {
+        render(page());
+        const create = await screen.findByRole("button", {
+          name: "New conversation",
+        });
+        expect(create).toHaveAttribute(
+          "title",
+          `New conversation (${shortcut})`,
+        );
+      } finally {
+        for (const spy of spies) spy.mockRestore();
+      }
+    },
+  );
 
   it("shows the whole title on hover, above its time, so a truncated title can be read", async () => {
     const stamp = Date.UTC(2026, 9, 15, 20);
@@ -5177,9 +5191,9 @@ describe("the sidebar", () => {
       expect(fireEvent.keyDown(field, { key: "Escape", keyCode: 229 })).toBe(
         true,
       );
-      expect(fireEvent.keyDown(field, { key: "Escape", isComposing: true })).toBe(
-        true,
-      );
+      expect(
+        fireEvent.keyDown(field, { key: "Escape", isComposing: true }),
+      ).toBe(true);
       expect(field).toBeVisible();
       expect(field).toHaveValue("にほん");
       expect(fireEvent.keyDown(field, { key: "Escape" })).toBe(false);
@@ -5300,7 +5314,7 @@ describe("the sidebar", () => {
         await screen.findByRole("button", { name: "My conversation" }),
       );
       await screen.findAllByRole("button", { name: "Restore" });
-      await userEvent.click(headerRestore());
+      await userEvent.click(restoreButton());
       await waitFor(() =>
         expect(screen.getByRole("button", { name: "Trash" })).toHaveFocus(),
       );
@@ -5409,7 +5423,7 @@ describe("focus when the conversation list is collapsed", () => {
 
   it("lands on the toggle once a trashed conversation is restored", async () => {
     await openTrashedAndCollapse();
-    await userEvent.click(headerRestore());
+    await userEvent.click(restoreButton());
     await waitFor(() => expect(current.session.deletedAt).toBeNull());
     await waitFor(() => expect(toggle()).toHaveFocus());
   });
@@ -5656,7 +5670,9 @@ describe("the length of a message", () => {
       await screen.findByRole("button", { name: /My conversation/ }),
     );
     await waitFor(() =>
-      expect(screen.getByRole("textbox", { name: i18n.t("assistant.message") })).toBeEnabled(),
+      expect(
+        screen.getByRole("textbox", { name: i18n.t("assistant.message") }),
+      ).toBeEnabled(),
     );
     const field = screen.getByRole("textbox", {
       name: i18n.t("assistant.message"),
@@ -5671,7 +5687,8 @@ describe("the length of a message", () => {
 describe("scrolling to the end of a conversation", () => {
   const geometry = { height: 3000, view: 500, top: 0 };
   const scrollTo = vi.fn();
-  const toEnd = () => screen.queryByRole("button", { name: /Jump to the latest/ });
+  const toEnd = () =>
+    screen.queryByRole("button", { name: /Jump to the latest/ });
   /** The transcript's scroll area, with a size jsdom does not compute. */
   function scrollArea() {
     const area = screen
@@ -5773,7 +5790,9 @@ describe("scrolling to the end of a conversation", () => {
     scrollToTop(area, 2450);
     expect(toEnd()).toBeNull();
     scrollToTop(area, 1000);
-    expect(screen.getByRole("button", { name: "Jump to the latest" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Jump to the latest" }),
+    ).toBeVisible();
   });
 
   it("scrolls smoothly to the end on click and goes on following the reply", async () => {
@@ -5802,7 +5821,9 @@ describe("scrolling to the end of a conversation", () => {
   it("lets the reader leave while a jump is under way", async () => {
     const area = await openRunning();
     scrollToTop(area, 1000);
-    await userEvent.click(screen.getByRole("button", { name: "Jump to the latest" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Jump to the latest" }),
+    );
     fireEvent.wheel(area);
     scrollToTop(area, 900);
     expect(
@@ -5813,7 +5834,9 @@ describe("scrolling to the end of a conversation", () => {
   it("lets the reader leave with a key that scrolls while a jump is under way", async () => {
     const area = await openRunning();
     scrollToTop(area, 1000);
-    await userEvent.click(screen.getByRole("button", { name: "Jump to the latest" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Jump to the latest" }),
+    );
     fireEvent.keyDown(area, { key: "PageUp" });
     scrollToTop(area, 900);
     expect(
@@ -5854,7 +5877,9 @@ describe("scrolling to the end of a conversation", () => {
   it("starts at the end again in another conversation", async () => {
     const area = await openRunning();
     scrollToTop(area, 1000);
-    expect(screen.getByRole("button", { name: "Jump to the latest" })).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Jump to the latest" }),
+    ).toBeVisible();
     await userEvent.click(
       screen.getByRole("button", { name: "New conversation" }),
     );
@@ -5865,7 +5890,9 @@ describe("scrolling to the end of a conversation", () => {
 describe("streamed words", () => {
   const frame = () => act(() => void vi.advanceTimersByTime(20));
   let sent: AssistantRunRef & { sessionId: string };
-  let hook: ReturnType<typeof renderHook<ReturnType<typeof useAssistant>, void>>;
+  let hook: ReturnType<
+    typeof renderHook<ReturnType<typeof useAssistant>, void>
+  >;
   let renders = 0;
   const emit = (type: string, data: Record<string, unknown>) =>
     act(() =>
@@ -5990,5 +6017,514 @@ describe("streamed words", () => {
     frame();
     expect(hook.result.current.stream).toBeNull();
     await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  });
+});
+
+describe("the model picker in the header", () => {
+  const vendorModels = (extra: Partial<AssistantBootstrap> = {}) =>
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [
+        {
+          ...model("openai/gpt-5", "OpenAI: GPT-5"),
+          vendor: "openai",
+          shortName: "GPT-5",
+          created: 20,
+        },
+        {
+          ...model("anthropic/claude-sonnet-5", "Claude Sonnet 5"),
+          vendor: "anthropic",
+          created: 10,
+        },
+        {
+          ...model("balanced", "Balanced model"),
+          created: 30,
+        },
+      ],
+      defaultModelId: "openai/gpt-5",
+      ...extra,
+    });
+  const openPicker = async () => {
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "Choose model" }),
+    );
+    return screen.findByRole("listbox");
+  };
+
+  it("lists the catalog's models by vendor, and picks across the groups", async () => {
+    vendorModels();
+    current.session.modelId = "openai/gpt-5";
+    await openConversation();
+    const listbox = await openPicker();
+    expect(
+      within(listbox)
+        .getAllByRole("group")
+        .map(
+          (group) =>
+            document.getElementById(group.getAttribute("aria-labelledby") ?? "")
+              ?.textContent,
+        ),
+    ).toEqual(["OpenAI", "Anthropic", "Other"]);
+    await userEvent.click(
+      within(listbox).getByRole("option", { name: /Claude Sonnet 5/ }),
+    );
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({ modelId: "anthropic/claude-sonnet-5" }),
+      ),
+    );
+  });
+
+  it("names the chosen model in full on the header's button", async () => {
+    vendorModels();
+    current.session.modelId = "openai/gpt-5";
+    await openConversation();
+    expect(
+      screen.getByRole("combobox", { name: "Choose model" }),
+    ).toHaveTextContent("OpenAI: GPT-5");
+  });
+
+  it("says some models are unavailable when the backend could not read a catalog", async () => {
+    vendorModels({ partial: ["anthropic"] });
+    await openConversation();
+    await openPicker();
+    expect(
+      screen.getByText("Some models are temporarily unavailable"),
+    ).toBeVisible();
+  });
+
+  it("says nothing of it when the catalogs were read, or the backend sends no list", async () => {
+    vendorModels({ partial: [] });
+    await openConversation();
+    await openPicker();
+    expect(screen.queryByText(/temporarily unavailable/)).toBeNull();
+  });
+});
+
+describe("thinking", () => {
+  const thinker = {
+    ...model("balanced", "Balanced model"),
+    reasoning: true,
+    thinkingLevels: [
+      "low",
+      "medium",
+      "high",
+    ] as AssistantModel["thinkingLevels"],
+  };
+  const withThinker = () =>
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [thinker, model("fast", "Fast model")],
+    });
+  const menu = () => screen.getByRole("combobox", { name: "Thinking" });
+  const choose = async (name: string) => {
+    await userEvent.click(menu());
+    await userEvent.click(await screen.findByRole("option", { name }));
+  };
+  const startRun = async () => {
+    await userEvent.type(composer(), "Hello");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    return mocks.send.mock.calls[0][0];
+  };
+  const emitFor =
+    (sent: AssistantRunRef & { sessionId: string }) =>
+    (type: string, data: Record<string, unknown>) =>
+      act(() =>
+        mocks.listener?.({ ...sent, type, data } as unknown as AssistantEvent),
+      );
+
+  describe("the control in the composer", () => {
+    it("sits in the composer, saying the default until a level is chosen", async () => {
+      withThinker();
+      await openConversation();
+      const control = menu();
+      expect(control).toHaveTextContent("Thinking: Default");
+      expect(control.closest("footer")).toBe(composer().closest("footer"));
+    });
+
+    it("is hidden for a model that offers no levels, and follows the model", async () => {
+      withThinker();
+      await openConversation();
+      expect(menu()).toBeVisible();
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Choose model" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /Fast model/ }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull(),
+      );
+    });
+
+    it("is not offered at all when no model has levels", async () => {
+      await openConversation();
+      expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
+    });
+
+    it("saves the level in the conversation, naming it on the control", async () => {
+      withThinker();
+      await openConversation();
+      await choose("Medium");
+      await waitFor(() =>
+        expect(mocks.updateSession).toHaveBeenCalledWith({
+          sessionId: "session-a",
+          thinkingLevel: "medium",
+          expectedOwner: capabilities.owner,
+          expectedGeneration: capabilities.authorityGeneration,
+        }),
+      );
+      await waitFor(() => expect(menu()).toHaveTextContent("Thinking: Medium"));
+    });
+
+    it("clears the level with the default", async () => {
+      withThinker();
+      current.session.thinkingLevel = "high";
+      await openConversation();
+      expect(menu()).toHaveTextContent("Thinking: High");
+      await choose("Default");
+      await waitFor(() =>
+        expect(mocks.updateSession).toHaveBeenCalledWith(
+          expect.objectContaining({ thinkingLevel: "default" }),
+        ),
+      );
+    });
+
+    it("reads a saved level the model does not offer as the default", async () => {
+      withThinker();
+      current.session.thinkingLevel = "xhigh";
+      await openConversation();
+      expect(menu()).toHaveTextContent("Thinking: Default");
+    });
+
+    it("never stops a running reply", async () => {
+      withThinker();
+      await openConversation();
+      await startRun();
+      expect(menu()).toBeEnabled();
+      await choose("High");
+      await waitFor(() =>
+        expect(mocks.updateSession).toHaveBeenCalledWith(
+          expect.objectContaining({ thinkingLevel: "high" }),
+        ),
+      );
+      expect(mocks.stop).not.toHaveBeenCalled();
+      expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
+    });
+
+    it("goes with the composer when the conversation is in the trash", async () => {
+      withThinker();
+      current.session.deletedAt = 10;
+      render(page());
+      await userEvent.click(
+        await screen.findByRole("button", { name: "Trash" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("button", { name: /My conversation/ }),
+      );
+      await screen.findByRole("button", { name: "Restore" });
+      expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
+    });
+  });
+
+  describe("before the first message", () => {
+    beforeEach(() => {
+      mocks.listSessions.mockResolvedValue(listOf([]));
+      withThinker();
+    });
+
+    it("keeps the choice and saves it on the conversation the first message creates, before it is sent", async () => {
+      render(page());
+      await waitFor(() => expect(menu()).toBeEnabled());
+      await choose("Medium");
+      expect(menu()).toHaveTextContent("Thinking: Medium");
+      expect(mocks.createSession).not.toHaveBeenCalled();
+      await userEvent.type(composer(), "First question");
+      await userEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+      expect(mocks.createSession).toHaveBeenCalledWith({
+        modelId: "balanced",
+        webSearch: false,
+      });
+      expect(mocks.updateSession).toHaveBeenCalledWith({
+        sessionId: "session-a",
+        thinkingLevel: "medium",
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
+      });
+      // Drafts are saved with updates too: find the one that carries the level.
+      const saved = mocks.updateSession.mock.calls.findIndex(
+        ([patch]) => patch.thinkingLevel,
+      );
+      expect(saved).toBeGreaterThanOrEqual(0);
+      const at = mocks.updateSession.mock.invocationCallOrder[saved];
+      expect(mocks.createSession.mock.invocationCallOrder[0]).toBeLessThan(at);
+      expect(at).toBeLessThan(mocks.send.mock.invocationCallOrder[0]);
+    });
+
+    it("saves nothing extra when the default was kept", async () => {
+      render(page());
+      await waitFor(() => expect(composer()).toBeEnabled());
+      await userEvent.type(composer(), "First question");
+      await userEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+      // Only drafts are saved.
+      expect(
+        mocks.updateSession.mock.calls.some(
+          ([patch]) => "thinkingLevel" in patch,
+        ),
+      ).toBe(false);
+    });
+
+    it("starts over when another model is chosen for it", async () => {
+      render(page());
+      await waitFor(() => expect(menu()).toBeEnabled());
+      await choose("High");
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Choose model" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /Fast model/ }),
+      );
+      expect(screen.queryByRole("combobox", { name: "Thinking" })).toBeNull();
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Choose model" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /Balanced model/ }),
+      );
+      expect(menu()).toHaveTextContent("Thinking: Default");
+    });
+
+    it("tells a failure to save the level, and still sends the message", async () => {
+      mocks.updateSession.mockRejectedValueOnce(
+        "assistant_invalid_thinking_level",
+      );
+      render(page());
+      await waitFor(() => expect(menu()).toBeEnabled());
+      await choose("Low");
+      await userEvent.type(composer(), "First question");
+      await userEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        "This model doesn't offer that thinking level. Choose another one.",
+      );
+    });
+  });
+
+  describe("the live timer", () => {
+    afterEach(() => vi.useRealTimers());
+
+    it("counts from the first sign of thinking to the first text, then says how long it thought", async () => {
+      await openConversation();
+      const emit = emitFor(await startRun());
+      const reply = () => screen.getByRole("article", { name: "Assistant" });
+      expect(within(reply()).getByRole("status")).toHaveTextContent(
+        "Thinking…",
+      );
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
+      emit("thinking_start", { messageId: "reply" });
+      // The caption takes the place of the plain "Thinking…" line: that is
+      // said once, to assistive tech only.
+      expect(within(reply()).getByRole("status")).toHaveClass("sr-only");
+      expect(screen.getByText("Thinking for 0 seconds")).toBeVisible();
+      act(() => void vi.advanceTimersByTime(3000));
+      expect(screen.getByText("Thinking for 3 seconds")).toBeVisible();
+      emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
+      act(() => void vi.advanceTimersByTime(1000));
+      expect(screen.getByText("Thinking for 4 seconds")).toBeVisible();
+      emit("text_delta", { messageId: "reply", delta: "Answer" });
+      act(() => void vi.advanceTimersByTime(10_000));
+      expect(screen.getByText("Thought for 4 seconds")).toBeVisible();
+      expect(screen.queryByText(/Thinking for/)).toBeNull();
+    });
+
+    it("keeps the saved duration once the reply is saved and the transcript is read again", async () => {
+      await openConversation();
+      const sent = await startRun();
+      const emit = emitFor(sent);
+      emit("thinking_start", { messageId: "reply" });
+      emit("text_delta", { messageId: "reply", delta: "Answer" });
+      current = {
+        ...current,
+        messages: [
+          { id: "u", role: "user", content: "Hello", createdAt: 1 },
+          {
+            id: "reply",
+            role: "assistant",
+            content: "Answer",
+            reasoning: "Because",
+            reasoningMs: 7600,
+            status: "completed",
+            createdAt: 2,
+          },
+        ],
+      };
+      emit("run_end", { stopped: false, status: "completed" });
+      expect(await screen.findByText("Thought for 8 seconds")).toBeVisible();
+      expect(screen.getByText("Because")).toBeInTheDocument();
+    });
+
+    it("shows no thinking caption for a reply whose provider hides its reasoning", async () => {
+      await openConversation();
+      const sent = await startRun();
+      const emit = emitFor(sent);
+      emit("text_delta", { messageId: "reply", delta: "Answer" });
+      current = {
+        ...current,
+        messages: [
+          { id: "u", role: "user", content: "Hello", createdAt: 1 },
+          {
+            id: "reply",
+            role: "assistant",
+            content: "Answer",
+            reasoningMs: null,
+            status: "completed",
+            createdAt: 2,
+          },
+        ],
+      };
+      emit("run_end", { stopped: false, status: "completed" });
+      await screen.findByRole("button", { name: "Send" });
+      await waitFor(() =>
+        expect(screen.getByText("Answer")).toBeInTheDocument(),
+      );
+      expect(screen.queryByText(/Thought for|Thinking for/)).toBeNull();
+    });
+  });
+});
+
+describe("the followed reply's thinking", () => {
+  let sent: AssistantRunRef & { sessionId: string };
+  let hook: ReturnType<
+    typeof renderHook<ReturnType<typeof useAssistant>, void>
+  >;
+  const emit = (
+    type: string,
+    data: Record<string, unknown>,
+    over: Partial<AssistantRunRef> = {},
+  ) =>
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        ...over,
+        type,
+        data,
+      } as unknown as AssistantEvent),
+    );
+  const clock = (ms: number) => act(() => void vi.advanceTimersByTime(ms));
+  const thinking = () => hook.result.current.thinking;
+
+  beforeEach(async () => {
+    hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("Question"));
+    mocks.send.mockReturnValue(new Promise(() => undefined));
+    act(() => void hook.result.current.send());
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    sent = mocks.send.mock.calls[0][0];
+    vi.useFakeTimers({
+      toFake: ["Date", "requestAnimationFrame", "cancelAnimationFrame"],
+    });
+    vi.setSystemTime(1_000_000);
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it("is nothing until the host says the reply began to think", () => {
+    expect(thinking()).toBeNull();
+    emit("text_delta", { delta: "Hello", messageId: "reply" });
+    expect(thinking()).toBeNull();
+  });
+
+  it("starts a span at thinking_start", () => {
+    emit("thinking_start", { messageId: "reply" });
+    expect(thinking()).toEqual({
+      runId: sent.runId,
+      doneMs: 0,
+      since: 1_000_000,
+    });
+  });
+
+  it("goes on through the reasoning, and ends the span at the first text", () => {
+    emit("thinking_start", { messageId: "reply" });
+    clock(1500);
+    emit("thinking_delta", { delta: "Hmm", messageId: "reply" });
+    expect(thinking()?.since).toBe(1_000_000);
+    clock(1000);
+    emit("text_delta", { delta: "Answer", messageId: "reply" });
+    expect(thinking()).toEqual({
+      runId: sent.runId,
+      doneMs: 2500,
+      since: null,
+    });
+    // More text changes nothing.
+    clock(5000);
+    emit("text_delta", { delta: " more", messageId: "reply" });
+    expect(thinking()?.doneMs).toBe(2500);
+  });
+
+  it("ends the span at a tool call, and adds the next span to it", () => {
+    emit("thinking_start", { messageId: "reply" });
+    clock(2000);
+    emit("tool_start", {
+      messageId: "reply",
+      name: "web_search",
+      toolCallId: "c1",
+      args: { query: "x" },
+    });
+    expect(thinking()).toMatchObject({ doneMs: 2000, since: null });
+    clock(4000);
+    emit("thinking_start", { messageId: "reply" });
+    clock(3000);
+    emit("text_delta", { delta: "Answer", messageId: "reply" });
+    expect(thinking()).toMatchObject({ doneMs: 5000, since: null });
+  });
+
+  it("ends the span when the reply fails", () => {
+    emit("thinking_start", { messageId: "reply" });
+    clock(2000);
+    emit("error", { code: "assistant_provider_failed" });
+    expect(thinking()).toMatchObject({ doneMs: 2000, since: null });
+  });
+
+  it("gives way to the saved reply's own duration once it is saved", () => {
+    emit("thinking_start", { messageId: "reply" });
+    clock(2000);
+    emit("message", {
+      message: {
+        id: "reply",
+        role: "assistant",
+        content: "Saved",
+        reasoning: "Because",
+        reasoningMs: 2100,
+        status: "completed",
+        createdAt: 1,
+      },
+    });
+    expect(thinking()).toBeNull();
+    expect(hook.result.current.stream?.reasoningMs).toBe(2100);
+  });
+
+  it("is gone when the run ends", async () => {
+    emit("thinking_start", { messageId: "reply" });
+    emit("run_end", { stopped: false, status: "completed" });
+    expect(thinking()).toBeNull();
+    await act(async () => undefined);
+  });
+
+  it("is dropped with the conversation it belongs to", async () => {
+    emit("thinking_start", { messageId: "reply" });
+    act(() => hook.result.current.select(null));
+    act(() => hook.result.current.select(session.id));
+    expect(thinking()).toBeNull();
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  });
+
+  it("ignores a run it does not follow", () => {
+    emit("thinking_start", { messageId: "reply" }, { runId: "another-run" });
+    expect(thinking()).toBeNull();
   });
 });
