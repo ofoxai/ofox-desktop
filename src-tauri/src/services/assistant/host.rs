@@ -50,6 +50,9 @@ const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
 /// How long a fetched model catalog is trusted.
 const MODELS_TTL: Duration = Duration::from_secs(600);
+/// How long a catalog source whose read failed is not asked again, unless a
+/// lookup misses: a hanging host would otherwise hold up every read.
+const FAILED_SOURCE_RETRY: Duration = Duration::from_secs(30);
 const FRAME_LIMIT: usize = 8 * 1024 * 1024;
 
 /// The signed-in account (its [`super::store::owner_key`]) and the region a
@@ -184,8 +187,14 @@ pub struct AssistantHost {
     keys: Mutex<Vec<String>>,
 }
 
-/// One catalog source's rows and when they were read.
-type CachedSource = (std::time::Instant, Vec<catalog::Model>);
+/// What the host knows of one catalog source.
+#[derive(Clone, Default)]
+struct CachedSource {
+    /// The rows last read, and when.
+    rows: Option<(std::time::Instant, Vec<catalog::Model>)>,
+    /// When a read last failed since then, and its error.
+    failed: Option<(std::time::Instant, String)>,
+}
 
 fn session_key(owner: &str, sid: &str) -> String {
     format!("{owner}:{sid}")
@@ -547,7 +556,8 @@ impl AssistantHost {
 
     /// `apex`'s model catalog, both sources merged. Each source is fetched
     /// again after [`MODELS_TTL`]; when that fetch fails, its last copy is
-    /// better than none, and a source with no copy is named in `partial`.
+    /// better than none, and a source with no copy is named in `partial`. A
+    /// failed source is asked again after [`FAILED_SOURCE_RETRY`].
     pub(super) async fn models(&self, apex: &str) -> Result<catalog::Catalog, String> {
         self.catalog(apex, false).await
     }
@@ -567,37 +577,54 @@ impl AssistantHost {
         refresh: bool,
     ) -> Result<Vec<catalog::Model>, String> {
         let key = (apex.to_owned(), source);
-        let cached = self.models.lock().map_err(|_| STATE)?.get(&key).cloned();
-        if let Some((fetched, models)) = &cached {
-            if !refresh && fetched.elapsed() < MODELS_TTL {
-                return Ok(models.clone());
+        let cached = self
+            .models
+            .lock()
+            .map_err(|_| STATE)?
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if !refresh {
+            if let Some((fetched, models)) = &cached.rows {
+                if fetched.elapsed() < MODELS_TTL {
+                    return Ok(models.clone());
+                }
+            }
+            if let Some((failed, error)) = cached.failed {
+                if failed.elapsed() < FAILED_SOURCE_RETRY {
+                    return cached.rows.map(|(_, models)| models).ok_or(error);
+                }
             }
         }
-        match self.env.models(apex, source).await {
+        let fetched = self.env.models(apex, source).await;
+        let now = std::time::Instant::now();
+        let mut cache = self.models.lock().map_err(|_| STATE)?;
+        let entry = cache.entry(key).or_default();
+        match fetched {
             Ok(models) => {
-                self.models
-                    .lock()
-                    .map_err(|_| STATE)?
-                    .insert(key, (std::time::Instant::now(), models.clone()));
+                *entry = CachedSource {
+                    rows: Some((now, models.clone())),
+                    failed: None,
+                };
                 Ok(models)
             }
-            Err(error) => cached.map(|(_, models)| models).ok_or(error),
+            Err(error) => {
+                entry.failed = Some((now, error.clone()));
+                entry.rows.clone().map(|(_, models)| models).ok_or(error)
+            }
         }
     }
 
     /// One conversation model of `apex`'s catalog; a model the cached catalog
     /// lacks is looked up once more in a fresh one.
     pub(super) async fn model(&self, apex: &str, id: &str) -> Result<catalog::Model, String> {
-        let find = |merged: catalog::Catalog| {
-            merged
-                .conversation_models()
-                .into_iter()
-                .find(|m| m.id == id)
-        };
-        if let Some(model) = find(self.models(apex).await?) {
+        if let Some(model) = self.models(apex).await?.conversation_model(id) {
             return Ok(model);
         }
-        find(self.catalog(apex, true).await?).ok_or_else(|| MODEL_UNAVAILABLE.into())
+        self.catalog(apex, true)
+            .await?
+            .conversation_model(id)
+            .ok_or_else(|| MODEL_UNAVAILABLE.into())
     }
 
     fn forget_models(&self, apex: &str) {
@@ -2617,10 +2644,16 @@ mod tests {
         assert_eq!(env.anthropic_fetches.load(Ordering::SeqCst), 5);
     }
 
-    /// Make every cached catalog source older than [`MODELS_TTL`].
+    /// Make every cached catalog source older than [`MODELS_TTL`], and every
+    /// failed read older than [`FAILED_SOURCE_RETRY`].
     fn age_catalogs(host: &AssistantHost) {
-        for (fetched, _) in host.models.lock().unwrap().values_mut() {
-            *fetched -= MODELS_TTL;
+        for cached in host.models.lock().unwrap().values_mut() {
+            if let Some((fetched, _)) = &mut cached.rows {
+                *fetched -= MODELS_TTL;
+            }
+            if let Some((failed, _)) = &mut cached.failed {
+                *failed -= FAILED_SOURCE_RETRY;
+            }
         }
     }
 
@@ -2693,6 +2726,63 @@ mod tests {
         assert_eq!(boot["models"], json!([]));
         assert_eq!(boot["partial"], json!([]));
         assert_eq!(boot["defaultModelId"], Value::Null);
+    }
+
+    #[tokio::test]
+    async fn a_failed_catalog_source_is_not_asked_again_at_once() {
+        let (_config, env, host) = fixture_with_env();
+        let anthropic_reads = || env.anthropic_fetches.load(Ordering::SeqCst);
+        env.down.lock().unwrap().insert(catalog::Source::Anthropic);
+        assert_eq!(
+            host.models("ofox.ai").await.unwrap().partial,
+            [catalog::Source::Anthropic]
+        );
+        // What one send reads: the model, then the search price.
+        host.model("ofox.ai", "test/model").await.unwrap();
+        assert_eq!(
+            host.models("ofox.ai").await.unwrap().partial,
+            [catalog::Source::Anthropic]
+        );
+        host.bootstrap().await.unwrap();
+        assert_eq!(
+            anthropic_reads(),
+            1,
+            "a failed read is not repeated at once"
+        );
+
+        // A lookup that misses asks every source again.
+        assert_eq!(
+            host.model("ofox.ai", "gone/model").await.unwrap_err(),
+            MODEL_UNAVAILABLE
+        );
+        assert_eq!(anthropic_reads(), 2);
+
+        // Back up, but asked again only after the interval.
+        env.down.lock().unwrap().clear();
+        *env.anthropic.lock().unwrap() = vec!["anthropic/claude-test".into()];
+        host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 2);
+        age_catalogs(&host);
+        let merged = host.models("ofox.ai").await.unwrap();
+        assert_eq!(anthropic_reads(), 3);
+        assert_eq!(
+            catalog_ids(&merged),
+            ["test/model", "anthropic/claude-test"]
+        );
+        assert!(merged.partial.is_empty());
+
+        // Down again with a copy: the copy is served, the host not asked
+        // again until the interval is over.
+        age_catalogs(&host);
+        env.down.lock().unwrap().insert(catalog::Source::Anthropic);
+        for _ in 0..3 {
+            let merged = host.models("ofox.ai").await.unwrap();
+            assert_eq!(
+                catalog_ids(&merged),
+                ["test/model", "anthropic/claude-test"]
+            );
+        }
+        assert_eq!(anthropic_reads(), 4);
     }
 
     #[tokio::test]

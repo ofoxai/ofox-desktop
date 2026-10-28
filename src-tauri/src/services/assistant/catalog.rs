@@ -42,6 +42,7 @@ pub enum Source {
     /// `/v1/models`: every vendor and kind except Claude.
     V1,
     /// `/anthropic/v1/models`: Messages-API models, the only home of Claude.
+    /// Only its Claude rows are used (see [`parse_models`]).
     Anthropic,
 }
 
@@ -179,6 +180,12 @@ pub struct RuntimeModel<'a> {
 }
 
 impl Model {
+    /// Whether a conversation can use this model: chat only, until media
+    /// generation is offered.
+    pub fn for_conversations(&self) -> bool {
+        self.kind == Kind::Chat
+    }
+
     pub fn for_runtime(&self) -> RuntimeModel<'_> {
         let first = self
             .supported_endpoints
@@ -426,7 +433,10 @@ fn video_capabilities(item: &Value) -> VideoCapabilities {
     }
 }
 
-/// The rows of one catalog the assistant can use, each with its kind.
+/// The rows of one catalog the assistant can use, each with its kind. The
+/// Anthropic catalog also lists other vendors' models, which `/v1` serves with
+/// their own protocol: only its Claude rows are taken, so no model changes
+/// protocol when `/v1` cannot be read.
 pub fn parse_models(value: Value, source: Source) -> Vec<Model> {
     let Some(items) = value["data"].as_array() else {
         return vec![];
@@ -447,8 +457,11 @@ fn parse_model(item: &Value, source: Source) -> Option<Model> {
     let context = item["context_length"].as_u64().unwrap_or(0);
     let inputs = strings(&item["architecture"]["input_modalities"]);
     let outputs = strings(&item["architecture"]["output_modalities"]);
-    let kind = kind_of(&endpoints, &inputs, &outputs, context)?;
     let vendor = id.split_once('/').map_or("", |(vendor, _)| vendor);
+    if source == Source::Anthropic && vendor != "anthropic" {
+        return None;
+    }
+    let kind = kind_of(&endpoints, &inputs, &outputs, context)?;
     let name = item["name"]
         .as_str()
         .or_else(|| item["display_name"].as_str())
@@ -506,26 +519,32 @@ fn parse_model(item: &Value, source: Source) -> Option<Model> {
 /// read (shown as "some models are unavailable").
 #[derive(Clone, Debug, Default)]
 pub struct Catalog {
-    /// `/v1` rows in catalog order, then the Anthropic rows `/v1` lacks.
+    /// `/v1` rows in catalog order, then the Claude rows `/v1` lacks.
     pub models: Vec<Model>,
     pub partial: Vec<Source>,
 }
 
 impl Catalog {
-    /// The models a conversation can use: chat only, until media generation
-    /// is offered.
+    /// The models a conversation can use (see [`Model::for_conversations`]).
     pub fn conversation_models(&self) -> Vec<Model> {
         self.models
             .iter()
-            .filter(|m| m.kind == Kind::Chat)
+            .filter(|m| m.for_conversations())
             .cloned()
             .collect()
+    }
+
+    /// The conversation model `id`, if the catalog offers it.
+    pub fn conversation_model(self, id: &str) -> Option<Model> {
+        self.models
+            .into_iter()
+            .find(|m| m.id == id && m.for_conversations())
     }
 }
 
 /// One catalog from both sources. A row whose id `/v1` also lists is the
 /// `/v1` row. A source that failed is named in `partial`; with both failed
-/// the `/v1` error stands, and a catalog without any chat model is
+/// the `/v1` error stands, and a catalog without any conversation model is
 /// `assistant_no_compatible_models`.
 pub fn merge(
     v1: Result<Vec<Model>, String>,
@@ -545,7 +564,7 @@ pub fn merge(
         Ok(rows) => models.extend(rows.into_iter().filter(|m| !listed.contains(&m.id))),
         Err(_) => partial.push(Source::Anthropic),
     }
-    if !models.iter().any(|m| m.kind == Kind::Chat) {
+    if !models.iter().any(Model::for_conversations) {
         return Err(NO_COMPATIBLE_MODELS.into());
     }
     Ok(Catalog { models, partial })
@@ -559,14 +578,14 @@ const NO_COMPATIBLE_MODELS: &str = "assistant_no_compatible_models";
 /// model `models` does not contain, never one of another kind; `None` only
 /// when there is no chat model.
 pub fn default_model_id(models: &[Model], remembered: Option<&str>) -> Option<String> {
-    let offered = |id: &str| models.iter().any(|m| m.id == id && m.kind == Kind::Chat);
+    let offered = |id: &str| models.iter().any(|m| m.id == id && m.for_conversations());
     remembered
         .filter(|id| offered(id))
         .or_else(|| PREFERRED_MODEL_IDS.iter().copied().find(|id| offered(id)))
         .or_else(|| {
             models
                 .iter()
-                .find(|m| m.kind == Kind::Chat)
+                .find(|m| m.for_conversations())
                 .map(|m| m.id.as_str())
         })
         .map(str::to_owned)
@@ -614,8 +633,9 @@ async fn fetch_models_at(url: &str, source: Source) -> Result<Vec<Model>, String
         log::warn!("[Assistant] {source:?} model catalog has more pages than the first");
     }
     let models = parse_models(catalog, source);
-    // An empty answer never replaces a catalog read before.
-    if models.is_empty() {
+    // An answer without a conversation model (empty, or media only) is no
+    // catalog: it fails, so it never replaces one read before.
+    if !models.iter().any(Model::for_conversations) {
         return Err(NO_COMPATIBLE_MODELS.into());
     }
     Ok(models)
@@ -665,7 +685,7 @@ mod tests {
     }
 
     /// Rows trimmed from the live `/anthropic/v1/models`: Claude, which only
-    /// this catalog lists, and two ids `/v1` lists too.
+    /// this catalog lists, and two other vendors' ids `/v1` lists too.
     fn anthropic_fixture() -> Value {
         serde_json::from_str(include_str!(
             "../../../tests/fixtures/assistant-catalog/anthropic-models.json"
@@ -816,7 +836,8 @@ mod tests {
     #[test]
     fn claude_comes_from_the_anthropic_catalog_and_runs_with_messages() {
         let models = parse_models(anthropic_fixture(), Source::Anthropic);
-        assert_eq!(models.len(), 6, "every row of the Anthropic fixture");
+        // The DeepSeek and OpenAI rows of that catalog are left to `/v1`.
+        assert_eq!(ids(&models), CLAUDE_IDS);
         let haiku = &models[0];
         assert_eq!(haiku.id, "anthropic/claude-haiku-5.5");
         assert_eq!(haiku.name, "Anthropic: Claude Haiku 5.5");
@@ -836,7 +857,55 @@ mod tests {
     }
 
     #[test]
+    fn other_vendors_never_run_with_messages_when_v1_is_down() {
+        // The Anthropic catalog lists them too; `/v1` alone offers them.
+        let only_anthropic = merge(
+            Err("assistant_catalog_unavailable".into()),
+            Ok(parse_models(anthropic_fixture(), Source::Anthropic)),
+        )
+        .unwrap();
+        assert_eq!(ids(&only_anthropic.models), CLAUDE_IDS);
+        assert_eq!(
+            default_model_id(&only_anthropic.models, None).as_deref(),
+            Some(CLAUDE_IDS[0])
+        );
+        for id in ["deepseek/deepseek-v4-flash-0423", "openai/gpt-5.4-mini"] {
+            assert!(
+                only_anthropic.clone().conversation_model(id).is_none(),
+                "{id}"
+            );
+        }
+        assert!(only_anthropic
+            .conversation_model(CLAUDE_IDS[0])
+            .is_some_and(|m| m.protocol == Some(Protocol::AnthropicMessages)));
+    }
+
+    #[test]
     fn an_id_both_catalogs_list_is_the_v1_row() {
+        let both = ["/v1/chat/completions", "/v1/responses"];
+        let listed = v1(json!({"data": [
+            entry("anthropic/claude-both", &both, &["text"], &["text"]),
+        ]}));
+        let claude = parse_models(
+            json!({"data": [
+                {"id": "anthropic/claude-both", "display_name": "Anthropic: Claude Both",
+                 "context_length": 200000, "pricing": {}},
+                {"id": "anthropic/claude-only", "display_name": "Anthropic: Claude Only",
+                 "context_length": 200000, "pricing": {}},
+            ]}),
+            Source::Anthropic,
+        );
+        let merged = merge(Ok(listed), Ok(claude)).unwrap();
+        assert_eq!(
+            ids(&merged.models),
+            ["anthropic/claude-both", "anthropic/claude-only"]
+        );
+        assert_eq!(merged.models[0].supported_endpoints, both);
+        assert_eq!(
+            merged.models[0].name, "anthropic/claude-both",
+            "the /v1 row"
+        );
+
         let merged = real_catalog();
         let mut unique = ids(&merged.models);
         unique.sort_unstable();
@@ -873,7 +942,7 @@ mod tests {
 
         let only_anthropic = merge(down(), claude()).unwrap();
         assert_eq!(only_anthropic.partial, [Source::V1]);
-        assert_eq!(only_anthropic.models.len(), 6);
+        assert_eq!(ids(&only_anthropic.models), CLAUDE_IDS);
         assert_eq!(
             serde_json::to_value(&only_anthropic.partial).unwrap(),
             json!(["v1"])
@@ -1161,7 +1230,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(&ids(&models)[..CLAUDE_IDS.len()], CLAUDE_IDS);
+        assert_eq!(ids(&models), CLAUDE_IDS);
         assert!(models
             .iter()
             .all(|m| m.protocol == Some(Protocol::AnthropicMessages)));
@@ -1173,6 +1242,11 @@ mod tests {
         let only_embeddings = json!({"data": [
             entry("embed/model", &["/v1/embeddings"], &["text"], &["text"]),
         ]});
+        // Media alone fails too, so it never replaces a copy with chat models.
+        let only_media = json!({"data": [
+            entry("image/model", &["/v1/images/generations"], &["text"], &["image"]),
+            entry("video/model", &["/v1/videos"], &["text"], &["video"]),
+        ]});
         for (response, code) in [
             (ResponseTemplate::new(503), "assistant_catalog_unavailable"),
             (
@@ -1181,6 +1255,10 @@ mod tests {
             ),
             (
                 ResponseTemplate::new(200).set_body_json(only_embeddings),
+                "assistant_no_compatible_models",
+            ),
+            (
+                ResponseTemplate::new(200).set_body_json(only_media),
                 "assistant_no_compatible_models",
             ),
         ] {
