@@ -315,7 +315,7 @@ export type AssistantRunEvent =
       data: { messageId: string; sources: AssistantSource[] };
     }
   | { type: "compaction_start"; data: Record<string, never> }
-  | { type: "compaction_end"; data: { success: boolean } }
+  | { type: "compaction_end"; data: { success: boolean; willRetry?: boolean } }
   /** The run's saved assistant message. */
   | { type: "message"; data: { message: AssistantMessage } }
   /** The saved session; its `activeRun` is null. */

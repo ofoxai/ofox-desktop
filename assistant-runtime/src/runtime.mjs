@@ -1033,11 +1033,13 @@ export class AssistantRuntime {
           });
           if (event.message.usage)
             this.notify(context, "usage", { usage: event.message.usage });
-        } else if (event.type === "auto_compaction_start")
+        } else if (event.type === "compaction_start")
           this.notify(context, "compaction_start");
-        else if (event.type === "auto_compaction_end")
+        else if (event.type === "compaction_end")
           this.notify(context, "compaction_end", {
-            success: !event.errorMessage,
+            success:
+              !event.errorMessage && !event.aborted && Boolean(event.result),
+            willRetry: event.willRetry,
           });
       });
       this.notify(context, "run_start");

@@ -879,6 +879,46 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_run_keeps_the_text_it_had_streamed() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let mut record = store.load_record(&sid).unwrap();
+        let mut reply = message(&run.message_id, "assistant", &run.run_id, 1);
+        reply.content = "Half of the answer".into();
+        record.messages = vec![reply];
+        let (settled, _) = settle_run(&mut record, &run, false, true, false, None).unwrap();
+        let settled = settled.unwrap();
+        assert_eq!(settled.status, "stopped");
+        assert_eq!(settled.content, "Half of the answer");
+        assert_eq!(record.messages[0].content, "Half of the answer");
+    }
+
+    #[test]
+    fn native_history_keeps_the_text_of_a_stopped_reply() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let mut record = store.load_record(&sid).unwrap();
+        let mut reply = message(&run.message_id, "assistant", &run.run_id, 1);
+        reply.content = "Half of the answer".into();
+        record.messages = vec![reply];
+        settle_run(&mut record, &run, false, true, false, None).unwrap();
+        // The model's own record of the stopped turn holds the same words.
+        let native = json!([{
+            "id": "native-reply", "role": "assistant", "runId": run.run_id,
+            "content": "Half of the answer", "stopReason": "aborted", "final": true,
+        }]);
+        merge_native(&mut record, &native, &[]).unwrap();
+        assert_eq!(record.messages[0].status, "stopped");
+        assert_eq!(record.messages[0].content, "Half of the answer");
+        // A history that never saw the reply (the stop beat it) changes nothing.
+        merge_native(&mut record, &json!([]), &[]).unwrap();
+        assert_eq!(record.messages[0].status, "stopped");
+        assert_eq!(record.messages[0].content, "Half of the answer");
+    }
+
+    #[test]
     fn a_billed_run_that_did_not_complete_leaves_both_costs_unknown() {
         let (_config, store) = store();
         let sid = store.create("test/model", false).unwrap().session.id;

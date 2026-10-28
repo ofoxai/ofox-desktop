@@ -241,6 +241,12 @@ describe("assistant transcript rendering", () => {
     rendered.rerender(view({ content: "", status: "error" }));
     expect(screen.getByText("Failed")).toBeVisible();
   });
+
+  it("keeps the words of a stopped reply on screen", () => {
+    render(view({ content: "Half of the answer", status: "stopped" }));
+    expect(screen.getByText("Half of the answer")).toBeVisible();
+    expect(screen.getByText("Stopped")).toBeVisible();
+  });
 });
 
 describe("files sent with a question", () => {

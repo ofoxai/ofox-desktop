@@ -954,6 +954,74 @@ test("manual compaction persists a native summary and keeps future turns resumab
   await runtime.close();
 });
 
+test("manual compaction tells the host when it starts and that it succeeded", async (t) => {
+  const params = {
+    ...(await sandbox(t)),
+    model: { ...model, contextWindow: 1024, maxOutputTokens: 128 },
+    prompt: "long context ".repeat(500),
+  };
+  const events = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () => stream("reply or summary"),
+  });
+  t.after(() => runtime.close());
+  await runtime.run(params);
+  await runtime.run({ ...params, runId: "second", operationId: "second" });
+  events.length = 0;
+  const result = await runtime.run(
+    { ...params, runId: "compact", operationId: "compact" },
+    true,
+  );
+  assert.equal(result.status, "completed");
+  const compaction = events.filter((event) =>
+    event.type.startsWith("compaction_"),
+  );
+  assert.deepEqual(
+    compaction.map(({ type, runId, data }) => ({ type, runId, data })),
+    [
+      { type: "compaction_start", runId: "compact", data: {} },
+      {
+        type: "compaction_end",
+        runId: "compact",
+        data: { success: true, willRetry: false },
+      },
+    ],
+  );
+});
+
+test("a compaction the provider rejects is reported to the host as unsuccessful", async (t) => {
+  const params = {
+    ...(await sandbox(t)),
+    model: { ...model, contextWindow: 1024, maxOutputTokens: 128 },
+    prompt: "long context ".repeat(500),
+  };
+  const events = [];
+  let compacting = false;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async () =>
+      compacting
+        ? new Response(JSON.stringify({ error: { message: "unavailable" } }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          })
+        : stream("reply"),
+  });
+  t.after(() => runtime.close());
+  await runtime.run(params);
+  await runtime.run({ ...params, runId: "second", operationId: "second" });
+  events.length = 0;
+  compacting = true;
+  await assert.rejects(
+    runtime.run({ ...params, runId: "compact", operationId: "compact" }, true),
+    /summarization failed/,
+  );
+  const ends = events.filter((event) => event.type === "compaction_end");
+  assert.equal(ends.length, 1);
+  assert.deepEqual(ends[0].data, { success: false, willRetry: false });
+});
+
 test("compaction without provider usage is explicitly incomplete after native reload", async (t) => {
   const params = {
     ...(await sandbox(t)),
