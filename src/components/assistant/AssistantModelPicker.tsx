@@ -1,16 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AssistantModel, AssistantModelKind } from "@/lib/api/assistant";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { SegmentedControl } from "@/components/ui/segmented";
 import { useModelOptions } from "./useModelOptions";
 
-/**
- * The kinds the picker's switch offers. Stage 9 adds "image" and "video"
- * here: their labels (`assistant.kinds.*`) are in place, and the options
- * below already follow the chosen kind.
- */
-const KINDS: AssistantModelKind[] = ["chat"];
+const KINDS: AssistantModelKind[] = ["chat", "image"];
 
 const kindOf = (model: AssistantModel): AssistantModelKind =>
   model.kind ?? "chat";
@@ -27,8 +22,10 @@ export function AssistantModelPicker({
   partial,
   disabled,
   placeholder,
+  rememberedModels,
 }: {
   models: ReadonlyArray<AssistantModel>;
+  rememberedModels?: Partial<Record<"chat" | "image" | "video", string | null>>;
   value: string;
   onChange: (modelId: string) => void;
   partial: boolean;
@@ -36,7 +33,12 @@ export function AssistantModelPicker({
   placeholder: string;
 }) {
   const { t } = useTranslation();
-  const [kind, setKind] = useState<AssistantModelKind>("chat");
+  const selectedKind = kindOf(
+    models.find((model) => model.id === value) ??
+      ({ kind: "chat" } as AssistantModel),
+  );
+  const [kind, setKind] = useState<AssistantModelKind>(selectedKind);
+  useEffect(() => setKind(selectedKind), [selectedKind, value]);
 
   const options = useModelOptions(models, kind);
 
@@ -44,12 +46,18 @@ export function AssistantModelPicker({
     models.filter((model) => kindOf(model) === of).length;
   const chosen = models.find((model) => model.id === value);
   // A switch with one segment is no choice: it shows once there are more.
-  const switchable = KINDS.length > 1;
+  const kinds = KINDS.filter((item) => count(item) > 0);
+  const switchable = kinds.length > 1;
 
   return (
     <MenuSelect
       aria-label={t("assistant.model")}
       value={value}
+      highlightValue={
+        kind === "chat" || kind === "image" || kind === "video"
+          ? (rememberedModels?.[kind] ?? undefined)
+          : undefined
+      }
       onChange={onChange}
       disabled={disabled}
       searchable
@@ -70,14 +78,21 @@ export function AssistantModelPicker({
           // highlighted option, where the keyboard works the list.
           <div
             className="grid gap-1.5"
-            onMouseDown={(event) => event.preventDefault()}
+            onMouseDown={(event) => {
+              if (!(event.target as HTMLElement).closest("button"))
+                event.preventDefault();
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape" && event.key !== "Tab")
+                event.stopPropagation();
+            }}
           >
             {switchable && (
               <SegmentedControl
                 aria-label={t("assistant.modelKind")}
                 value={kind}
                 onChange={setKind}
-                options={KINDS.map((item) => ({
+                options={kinds.map((item) => ({
                   value: item,
                   label: (
                     <>

@@ -3,6 +3,7 @@ import {
   assistantApi,
   assistantErrorCode,
   type AssistantAttachment,
+  type AssistantImageRequest,
   type AssistantBackupReport,
   type AssistantBootstrap,
   type AssistantEvent,
@@ -189,7 +190,12 @@ export function useAssistant(enabled: boolean) {
     () => new Set(),
   );
   const [compacting, setCompacting] = useState(false);
-  const [error, setError] = useState<AssistantError | null>(null);
+  const [error, setErrorCode] = useState<AssistantError | null>(null);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+  const setError = useCallback((value: AssistantError | null) => {
+    setErrorCode(value);
+    setErrorDetail(null);
+  }, []);
   const [loading, setLoading] = useState(false);
   const [operationBusy, setBusy] = useState(false);
   const [transferring, setTransferring] = useState(false);
@@ -365,6 +371,16 @@ export function useAssistant(enabled: boolean) {
     if (!mounted.current) return;
     const code = assistantErrorCode(value);
     setError(code);
+    // Only media diagnostics supplied by the host have this explicit contract:
+    // Rust scrubs credentials and caps their length before emitting them.
+    if (
+      code.startsWith("assistant_media_") &&
+      value &&
+      typeof value === "object"
+    ) {
+      const detail = (value as { detail?: unknown }).detail;
+      if (typeof detail === "string") setErrorDetail(detail.slice(0, 2000));
+    }
     // A sign-in, sign-out or region change moved the backend's authority on:
     // the owner and generation every write carries must be read again.
     if (code === IDENTITY_CHANGED) reloadAuthority.current();
@@ -578,7 +594,8 @@ export function useAssistant(enabled: boolean) {
         const resumed = value.session.activeRun
           ? value.messages.find(
               (message) =>
-                message.role === "assistant" && message.status === "streaming",
+                ["assistant", "media"].includes(message.role) &&
+                message.status === "streaming",
             )
           : undefined;
         savedDrafts.current.set(sessionId, {
@@ -1003,7 +1020,7 @@ export function useAssistant(enabled: boolean) {
             // The saved reply; anything but an assistant message is internal.
             const { message } = event.data;
             if (
-              message?.role === "assistant" &&
+              ["assistant", "media"].includes(message?.role) &&
               typeof message.id === "string" &&
               typeof message.content === "string"
             ) {
@@ -1235,6 +1252,20 @@ export function useAssistant(enabled: boolean) {
     }
   }, [busy, newModelId, ensureSession, select, showError]);
 
+  const rememberModel = useCallback((modelId: string) => {
+    setBootstrap((old) => {
+      if (!old) return old;
+      const model = old.models.find((item) => item.id === modelId);
+      if (!model) return old;
+      const kind = model.kind ?? "chat";
+      if (!["chat", "image", "video"].includes(kind)) return old;
+      return {
+        ...old,
+        rememberedModels: { ...old.rememberedModels, [kind]: modelId },
+      };
+    });
+  }, []);
+
   const update = useCallback(
     async (patch: Omit<AssistantUpdateRequest, "sessionId">) => {
       const sessionId = selectedRef.current;
@@ -1255,7 +1286,10 @@ export function useAssistant(enabled: boolean) {
         )
           return;
         setDetail((old) => (old ? { ...old, session: value } : old));
-        if (patch.modelId) setChosenModel(value.modelId);
+        if (patch.modelId) {
+          setChosenModel(value.modelId);
+          rememberModel(value.modelId);
+        }
         if (value.cleanupWarning) showError(value.cleanupWarning);
         void refreshSessionsRef.current();
         return value;
@@ -1264,7 +1298,7 @@ export function useAssistant(enabled: boolean) {
           showError(reason);
       }
     },
-    [showError],
+    [showError, rememberModel],
   );
 
   /**
@@ -1641,9 +1675,10 @@ export function useAssistant(enabled: boolean) {
   const chooseNewModel = useCallback(
     (modelId: string) => {
       setChosenModel(modelId);
+      rememberModel(modelId);
       setNewThinking(null);
     },
-    [setNewThinking],
+    [setNewThinking, rememberModel],
   );
 
   /**
@@ -1659,6 +1694,7 @@ export function useAssistant(enabled: boolean) {
       retryMessageId?: string;
       text?: string;
       attachments?: AssistantAttachment[];
+      media?: AssistantImageRequest;
     }) => {
       const { editMessageId, regenerateMessageId, retryMessageId } =
         options ?? {};
@@ -1738,6 +1774,19 @@ export function useAssistant(enabled: boolean) {
           content: "",
           createdAt: Date.now(),
           status: "streaming",
+          ...(options?.media
+            ? {
+                media: {
+                  kind: "image" as const,
+                  model: session.modelId,
+                  params: options.media,
+                  inputIds: files.map((file) => file.id),
+                  status: "submitting" as const,
+                  outputs: [],
+                  cost: null,
+                },
+              }
+            : {}),
         });
         if (fromComposer) {
           setDraft("");
@@ -1777,6 +1826,7 @@ export function useAssistant(enabled: boolean) {
           ...reference,
           text,
           attachmentIds: files.map((file) => file.id),
+          ...(options?.media ? { media: options.media } : {}),
           ...(editMessageId ? { editMessageId, replaceAttachments: true } : {}),
           ...(regenerateMessageId ? { regenerateMessageId } : {}),
           ...(retryMessageId ? { retryMessageId } : {}),
@@ -2245,6 +2295,32 @@ export function useAssistant(enabled: boolean) {
     draft,
     setDraft,
     attachments,
+    useMediaInput: async (file: AssistantAttachment, modelId: string) => {
+      if (
+        busy ||
+        runRef.current ||
+        !detail ||
+        detail.session.deletedAt != null ||
+        !detail.attachments.some((item) => item.id === file.id)
+      )
+        return false;
+      const sid = selectedRef.current,
+        generation = epoch.current;
+      const target = bootstrapRef.current?.models.find(
+        (model) => model.id === modelId,
+      );
+      if (target?.kind !== "image" || !target.image?.edits) return false;
+      if (detail.session.modelId !== modelId && !(await update({ modelId })))
+        return false;
+      if (
+        selectedRef.current !== sid ||
+        epoch.current !== generation ||
+        runRef.current
+      )
+        return false;
+      setAttachments([asDraftFile(file)]);
+      return true;
+    },
     pickAttachments,
     dropAttachments,
     pasteAttachments,
@@ -2254,6 +2330,7 @@ export function useAssistant(enabled: boolean) {
     run,
     compacting,
     error,
+    errorDetail,
     setError,
     loading,
     busy,

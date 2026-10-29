@@ -443,12 +443,26 @@ fn image_capabilities(item: &Value, endpoints: &[String]) -> ImageCapabilities {
         .or_else(|| strings(&item["supported_parameters"]))
         .unwrap_or_default();
     let pricing = &item["pricing"];
+    // The GPT Image 2 catalog advertises these fields without enumerations.
+    // Safe documented presets only; explicit catalog lists always win.
+    // https://ofox.ai/docs/develop/models/gpt-image/text-to-image
+    let listed = |field: &str, parameter: &str, fallback: &[&str]| {
+        let values = strings(&attributes[field]).unwrap_or_default();
+        if values.is_empty()
+            && item["id"] == "openai/gpt-image-2"
+            && params.iter().any(|p| p == parameter)
+        {
+            fallback.iter().map(|v| v.to_string()).collect()
+        } else {
+            values
+        }
+    };
     ImageCapabilities {
         generations: serves("images/generations"),
         edits: serves("images/edits"),
         n: params.iter().any(|p| p == "n"),
-        sizes: strings(&attributes["sizes"]).unwrap_or_default(),
-        qualities: strings(&attributes["qualities"]).unwrap_or_default(),
+        sizes: listed("sizes", "size", &["1024x1024", "1536x1024", "1024x1536"]),
+        qualities: listed("qualities", "quality", &["auto", "low", "medium", "high"]),
         per_image_price: unit_price(&pricing["output_image_per_num"]),
         token_pricing: million(&pricing["output_image"]).map(|output_image| ImageTokenPricing {
             input: million(&pricing["prompt"]),
@@ -1028,6 +1042,24 @@ mod tests {
     }
 
     #[test]
+    fn gpt_image_two_only_fills_missing_advertised_parameter_enumerations() {
+        let endpoints = vec!["images/generations".into()];
+        let mut row = json!({"id":"openai/gpt-image-2","image_attributes":{"supported_params":["size","quality"]}});
+        let caps = image_capabilities(&row, &endpoints);
+        assert!(caps.sizes.contains(&"1024x1024".into()));
+        assert_eq!(caps.qualities, vec!["auto", "low", "medium", "high"]);
+        row["image_attributes"]["sizes"] = json!(["512x512"]);
+        assert_eq!(image_capabilities(&row, &endpoints).sizes, vec!["512x512"]);
+        row["image_attributes"]["supported_params"] = json!([]);
+        assert!(image_capabilities(&row, &endpoints).qualities.is_empty());
+        row["id"] = json!("other/image");
+        row["image_attributes"]["sizes"] = json!([]);
+        row["image_attributes"]["supported_params"] = json!(["size", "quality"]);
+        assert!(image_capabilities(&row, &endpoints).sizes.is_empty());
+        assert!(image_capabilities(&row, &endpoints).qualities.is_empty());
+    }
+
+    #[test]
     fn image_and_video_capabilities_come_from_the_catalog() {
         let merged = real_catalog();
         let find = |id: &str| merged.models.iter().find(|m| m.id == id).unwrap();
@@ -1037,8 +1069,10 @@ mod tests {
                 generations: true,
                 edits: true,
                 n: true,
-                sizes: vec![],
-                qualities: vec![],
+                sizes: ["1024x1024", "1536x1024", "1024x1536"]
+                    .map(String::from)
+                    .to_vec(),
+                qualities: ["auto", "low", "medium", "high"].map(String::from).to_vec(),
                 per_image_price: None,
                 token_pricing: Some(ImageTokenPricing {
                     input: Some("5".into()),

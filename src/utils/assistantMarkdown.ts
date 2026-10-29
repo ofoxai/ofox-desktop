@@ -52,9 +52,27 @@ export function assistantMarkdown(
     );
   };
   for (const message of detail.messages) {
-    if (message.superseded || !["user", "assistant"].includes(message.role))
+    if (
+      message.superseded ||
+      !["user", "assistant", "media"].includes(message.role)
+    )
       continue;
-    parts.push(`## ${t(`assistant.roles.${message.role}`)}`);
+    parts.push(
+      `## ${t(`assistant.roles.${message.role === "media" ? "assistant" : message.role}`)}`,
+    );
+    if (message.media) {
+      parts.push(
+        [
+          inline(message.media.model),
+          message.media.params.size,
+          message.media.params.quality,
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      );
+      if (message.media.cost !== null)
+        parts.push(t("assistant.media.cost", { cost: message.media.cost }));
+    }
     if (message.content) parts.push(message.content.trimEnd());
     if (message.status === "error")
       parts.push(

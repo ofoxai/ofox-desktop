@@ -4946,7 +4946,8 @@
       "backupConflict": "A conversation with the same ID has different content. Existing conversations were kept.",
       "backupFailed": "Could not read or write the backup. Check the file and available disk space.",
       "backupContainsKey": "A file contains a managed assistant API key. Remove the key from the file before backing up or restoring.",
-      "backupOwnerMismatch": "This backup belongs to a different account or organization. Sign in to the original account to restore it."
+      "backupOwnerMismatch": "This backup belongs to a different account or organization. Sign in to the original account to restore it.",
+      "mediaReadFailed": "The generated file could not be read."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5200,6 +5201,27 @@
     "emptyTrashDescription_other": "This permanently deletes all {{count}} conversations in the trash, with their attachments and history, from this device. This cannot be undone.",
     "emptyTrashDone_one": "Permanently deleted {{count}} conversation.",
     "emptyTrashDone_other": "Permanently deleted {{count}} conversations.",
-    "emptyTrashPartial": "Deleted {{deleted}}; {{failed}} couldn't be deleted. Try again later."
+    "emptyTrashPartial": "Deleted {{deleted}}; {{failed}} couldn't be deleted. Try again later.",
+    "media": {
+      "perImage": "${{price}}/image",
+      "imageTokenPrice": "Images ${{price}}/M tokens",
+      "canEdit": "Image editing",
+      "size": "Size",
+      "quality": "Quality",
+      "count": "Images",
+      "default": "Default",
+      "estimate": "Estimated ${{cost}}",
+      "tokenCost": "Cost depends on actual token usage",
+      "view": "View image",
+      "save": "Save…",
+      "useInput": "Use as input",
+      "again": "Generate again",
+      "cost": "Cost ${{cost}}",
+      "generating": "Generating image…",
+      "unknown": "The result is unknown and may have been charged. Check your activity before starting another generation.",
+      "inputHint": "Choose one PNG or JPEG up to 15 MiB for editing.",
+      "noInput": "This model generates images from text only.",
+      "activity": "View activity"
+    }
   }
 }

@@ -1,3 +1,4 @@
+import { isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -694,6 +695,12 @@ export const assistantApi = {
     expectedOwner: string;
     expectedGeneration: number;
   }) => invoke<AssistantEmptyTrashReport>("assistant_empty_trash", { request }),
+  saveMedia: (request: {
+    sessionId: string;
+    attachmentId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<boolean>("assistant_save_media", { request }),
   exportMarkdown: (request: {
     sessionId: string;
     expectedOwner: string;
@@ -850,6 +857,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_attachment_too_large: "attachmentTooLarge",
   assistant_attachment_total_too_large: "attachmentTotalTooLarge",
   assistant_attachment_unsupported: "attachmentUnsupported",
+  assistant_attachment_read_failed: "mediaReadFailed",
   assistant_attachment_unreadable: "attachmentUnreadable",
   assistant_attachment_write_failed: "attachmentWriteFailed",
   assistant_attachment_cleanup_failed: "attachmentCleanupFailed",
@@ -914,4 +922,17 @@ export function assistantErrorKey(error: unknown): string {
     code,
   );
   return `assistant.errors.${known ? ASSISTANT_ERROR_MESSAGES[code] : "generic"}`;
+}
+
+/** Account-scoped custom URI; never a filesystem path or an authenticated URL. */
+export function assistantMediaUrl(
+  sessionId: string,
+  attachmentId: string,
+  owner: string,
+  generation: number,
+): string {
+  const base = isWindows()
+    ? "http://assistant-media.localhost"
+    : "assistant-media://localhost";
+  return `${base}/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachmentId)}?owner=${encodeURIComponent(owner)}&generation=${generation}`;
 }

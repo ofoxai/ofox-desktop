@@ -806,3 +806,25 @@ mod tests {
         );
     }
 }
+
+/// The destination comes only from the native save dialog, never IPC.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_save_media(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    request: crate::services::assistant::media_protocol::SaveMediaRequest,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+    host.save_media(request, move |name| {
+        app.dialog()
+            .file()
+            .set_file_name(name)
+            .blocking_save_file()
+            .map(|file| {
+                file.into_path()
+                    .map_err(|_| "assistant_export_destination_invalid".to_string())
+            })
+            .transpose()
+    })
+    .await
+}

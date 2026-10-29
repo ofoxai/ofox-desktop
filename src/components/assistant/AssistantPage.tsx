@@ -33,11 +33,15 @@ import {
   X,
 } from "lucide-react";
 import {
+  assistantApi,
   assistantErrorKey,
+  type AssistantImageRequest,
   type AssistantAttachment,
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
 import { useAssistant } from "./useAssistant";
+import { ImageParams } from "./ImageParams";
+import { MediaBlock } from "./MediaBlock";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
 import { AssistantModelPicker } from "./AssistantModelPicker";
@@ -272,7 +276,10 @@ function AssistantWorkspace() {
   const turns = useMemo(
     () =>
       (detailMessages ?? []).filter(
-        (message) => message.role === "user" || message.role === "assistant",
+        (message) =>
+          message.role === "user" ||
+          message.role === "assistant" ||
+          message.role === "media",
       ),
     [detailMessages],
   );
@@ -284,7 +291,10 @@ function AssistantWorkspace() {
     assistant.stream?.role === "assistant"
       ? assistant.stream
       : messages[messages.length - 1];
-  const latestReplyId = newest?.role === "assistant" ? newest.id : undefined;
+  const latestReplyId =
+    newest && ["assistant", "media"].includes(newest.role)
+      ? newest.id
+      : undefined;
   // A failed or stopped reply can be asked for again when its question is
   // still there to send: with its words, or with files that can be read.
   const retryable = (message: (typeof messages)[number]) => {
@@ -310,7 +320,21 @@ function AssistantWorkspace() {
   const composerModel = bootstrap?.models.find(
     (item) => item.id === (session?.modelId ?? assistant.newModelId),
   );
+  const imageMode = composerModel?.kind === "image";
+  const [imageParams, setImageParams] = useState<AssistantImageRequest>({});
+  useEffect(() => setImageParams({}), [session?.id, composerModel?.id]);
+  const invalidImageInput =
+    imageMode &&
+    files.length > 0 &&
+    (!composerModel.image?.edits ||
+      files.length > 1 ||
+      files.some(
+        (file) =>
+          !["image/png", "image/jpeg"].includes(file.mimeType) ||
+          file.sizeBytes > 15 * 1024 * 1024,
+      ));
   const imagesNeedVision =
+    !imageMode &&
     composerModel?.supportsImages === false &&
     files.some((file) => file.mimeType.startsWith("image/"));
   // The backend refuses a message of more than MAX_MESSAGE_BYTES of text.
@@ -409,8 +433,15 @@ function AssistantWorkspace() {
   }, [assistant.draft]);
 
   const send = () => {
+    if (invalidImageInput) return;
     follow.current = true;
-    void assistant.send().then((sent) => {
+    const media = imageMode
+      ? {
+          ...imageParams,
+          ...(files[0] ? { inputAttachmentId: files[0].id } : {}),
+        }
+      : undefined;
+    void assistant.send(media ? { media } : undefined).then((sent) => {
       if (sent) composer.current?.focus();
     });
   };
@@ -723,6 +754,7 @@ function AssistantWorkspace() {
           {Boolean(session || bootstrap?.models.length) && (
             <AssistantModelPicker
               models={bootstrap?.models ?? []}
+              rememberedModels={bootstrap?.rememberedModels}
               value={session?.modelId ?? assistant.newModelId}
               onChange={(modelId) =>
                 session
@@ -876,6 +908,11 @@ function AssistantWorkspace() {
           >
             <p className="break-words">
               {t(assistantErrorKey(assistant.error))}
+              {assistant.errorDetail && (
+                <span className="mt-1 block max-h-24 overflow-y-auto whitespace-pre-wrap text-note">
+                  {assistant.errorDetail}
+                </span>
+              )}
             </p>
             <Button
               variant="icon"
@@ -963,6 +1000,82 @@ function AssistantWorkspace() {
                           // focus on the switcher with it.
                           key={turn ? `versions:${turn.group}` : message.id}
                           message={message}
+                          immutable={Boolean(
+                            message.runId &&
+                              messages.some(
+                                (item) =>
+                                  item.runId === message.runId && item.media,
+                              ),
+                          )}
+                          mediaBlock={
+                            message.media && session && bootstrap?.owner ? (
+                              <MediaBlock
+                                message={message}
+                                sessionId={session.id}
+                                owner={bootstrap.owner}
+                                generation={bootstrap.authorityGeneration}
+                                disabled={!writable}
+                                onSave={(file) =>
+                                  assistantApi.saveMedia({
+                                    sessionId: session.id,
+                                    attachmentId: file.id,
+                                    expectedOwner: bootstrap.owner!,
+                                    expectedGeneration:
+                                      bootstrap.authorityGeneration,
+                                  })
+                                }
+                                onUseInput={(file) => {
+                                  const target =
+                                    (composerModel?.kind === "image" &&
+                                    composerModel.image?.edits
+                                      ? composerModel
+                                      : bootstrap.models.find(
+                                          (model) =>
+                                            model.id === message.media?.model &&
+                                            model.image?.edits,
+                                        )) ??
+                                    bootstrap.models.find(
+                                      (model) =>
+                                        model.kind === "image" &&
+                                        model.image?.edits,
+                                    );
+                                  if (target)
+                                    void assistant
+                                      .useMediaInput(file, target.id)
+                                      .then((ok) => {
+                                        if (ok) focusComposer();
+                                      });
+                                }}
+                                onRegenerate={() =>
+                                  void (async () => {
+                                    const media = message.media!;
+                                    const question = messages.find(
+                                      (item) =>
+                                        item.role === "user" &&
+                                        item.runId === message.runId,
+                                    );
+                                    if (!question) return;
+                                    if (
+                                      session.modelId !== media.model &&
+                                      !(await actions.current.update({
+                                        modelId: media.model,
+                                      }))
+                                    )
+                                      return;
+                                    await actions.current.send({
+                                      text: question.content,
+                                      attachments:
+                                        assistant.detail?.attachments.filter(
+                                          (file) =>
+                                            media.inputIds.includes(file.id),
+                                        ),
+                                      media: media.params,
+                                    });
+                                  })()
+                                }
+                              />
+                            ) : undefined
+                          }
                           models={bootstrap?.models}
                           currentModelId={session?.modelId}
                           versions={turn}
@@ -980,20 +1093,39 @@ function AssistantWorkspace() {
                         />
                       );
                     })}
-                    {assistant.stream?.role === "assistant" && (
-                      <AssistantMessageView
-                        message={assistant.stream}
-                        activity={assistant.activity}
-                        thinking={assistant.thinking}
-                        searchUnavailable={assistant.searchSkipped.has(
-                          assistant.stream.id,
-                        )}
-                        latest={assistant.stream.id === latestReplyId}
-                        disabled
-                        onEdit={noEdit}
-                        onRegenerate={noRegenerate}
-                      />
-                    )}
+                    {assistant.stream &&
+                      ["assistant", "media"].includes(
+                        assistant.stream.role,
+                      ) && (
+                        <AssistantMessageView
+                          message={assistant.stream}
+                          mediaBlock={
+                            assistant.stream.media &&
+                            session &&
+                            bootstrap?.owner ? (
+                              <MediaBlock
+                                message={assistant.stream}
+                                sessionId={session.id}
+                                owner={bootstrap.owner}
+                                generation={bootstrap.authorityGeneration}
+                                disabled
+                                onSave={async () => false}
+                                onUseInput={() => {}}
+                                onRegenerate={() => {}}
+                              />
+                            ) : undefined
+                          }
+                          activity={assistant.activity}
+                          thinking={assistant.thinking}
+                          searchUnavailable={assistant.searchSkipped.has(
+                            assistant.stream.id,
+                          )}
+                          latest={assistant.stream.id === latestReplyId}
+                          disabled
+                          onEdit={noEdit}
+                          onRegenerate={noRegenerate}
+                        />
+                      )}
                     {assistant.compacting && (
                       <p
                         role="status"
@@ -1073,7 +1205,24 @@ function AssistantWorkspace() {
                       removeDisabled={busy || Boolean(run) || trashed}
                     />
                   </div>
+                  {imageMode && composerModel && (
+                    <ImageParams
+                      model={composerModel}
+                      value={imageParams}
+                      onChange={setImageParams}
+                      disabled={!writable}
+                    />
+                  )}
                   <div aria-live="polite" className="shrink-0 px-3">
+                    {invalidImageInput && (
+                      <p className="text-note text-danger">
+                        {t(
+                          composerModel?.image?.edits
+                            ? "assistant.media.inputHint"
+                            : "assistant.media.noInput",
+                        )}
+                      </p>
+                    )}
                     {blockedFiles && (
                       <p
                         id={blockedHint}
@@ -1148,7 +1297,11 @@ function AssistantWorkspace() {
                         variant="icon"
                         aria-label={t("assistant.attach")}
                         title={t("assistant.attach")}
-                        disabled={!writable}
+                        disabled={
+                          !writable ||
+                          (imageMode &&
+                            (!composerModel?.image?.edits || files.length > 0))
+                        }
                         onClick={() =>
                           // The dialog leaves focus on a button disabled while
                           // it was open: the message takes it back.
@@ -1157,34 +1310,37 @@ function AssistantWorkspace() {
                       >
                         <Paperclip aria-hidden className="h-3.5 w-3.5" />
                       </Button>
-                      {showSearchNote ? (
-                        <Tooltip>
-                          {/* The wrapper takes the hover while the switch is off. */}
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex shrink-0">
-                              {webSearchToggle}
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent side="top">
-                            {searchNote}
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : (
-                        webSearchToggle
-                      )}
-                      {showSearchNote && (
+                      {!imageMode &&
+                        (showSearchNote ? (
+                          <Tooltip>
+                            {/* The wrapper takes the hover while the switch is off. */}
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex shrink-0">
+                                {webSearchToggle}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              {searchNote}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          webSearchToggle
+                        ))}
+                      {!imageMode && showSearchNote && (
                         <span id={searchNoteId} className="sr-only">
                           {searchNote}
                         </span>
                       )}
                       {/* A reply under way goes on as it began: the choice is
                       for the next message. */}
-                      <ThinkingMenu
-                        model={composerModel}
-                        level={assistant.thinkingLevel}
-                        disabled={settingsLocked}
-                        onChange={assistant.setThinkingLevel}
-                      />
+                      {!imageMode && (
+                        <ThinkingMenu
+                          model={composerModel}
+                          level={assistant.thinkingLevel}
+                          disabled={settingsLocked}
+                          onChange={assistant.setThinkingLevel}
+                        />
+                      )}
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       {showLength && (
@@ -1232,6 +1388,7 @@ function AssistantWorkspace() {
                                 disabled={
                                   !writable ||
                                   blockedFiles ||
+                                  invalidImageInput ||
                                   overLength ||
                                   (!assistant.draft.trim() && !files.length)
                                 }

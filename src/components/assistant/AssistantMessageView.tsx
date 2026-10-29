@@ -207,8 +207,12 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onRegenerate,
   onRetry,
   onSwitchVersion,
+  immutable = false,
+  mediaBlock,
 }: {
   message: AssistantMessage;
+  immutable?: boolean;
+  mediaBlock?: React.ReactNode;
   activity?: AssistantActivity | null;
   /** A streaming reply's thinking so far, for its live timer. */
   thinking?: AssistantThinking | null;
@@ -287,6 +291,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   // Edit and regenerate branch from the model's own history: a turn that
   // never reached it (it failed first) has no entry there to branch from.
   const branchable =
+    !immutable &&
+    !message.media &&
     !message.superseded &&
     Boolean(message.nativeEntryId) &&
     (isUser || Boolean(message.runId));
@@ -294,6 +300,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   // A failed or stopped reply carries the card that asks again; that does
   // what Regenerate would, so only the card is offered.
   const retryCard =
+    !message.media &&
     !isUser &&
     Boolean(onRetry) &&
     !message.superseded &&
@@ -320,7 +327,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         reasoningMs={message.reasoningMs}
         thinking={thinking}
       />
-      {editing ? (
+      {message.media && mediaBlock ? (
+        mediaBlock
+      ) : editing ? (
         <div className="w-full space-y-2">
           <Textarea
             ref={editor}

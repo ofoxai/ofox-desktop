@@ -29,6 +29,30 @@ export function useModelOptions(
       i18n.language,
     ).flatMap(({ vendor, label, models: members }) =>
       members.map((model) => {
+        if (kind === "image") {
+          const caps = model.image;
+          const price = caps?.perImagePrice
+            ? t("assistant.media.perImage", { price: caps.perImagePrice })
+            : caps?.tokenPricing
+              ? t("assistant.media.imageTokenPrice", {
+                  price: caps.tokenPricing.outputImage,
+                })
+              : "";
+          return {
+            value: model.id,
+            label: model.shortName || model.name,
+            meta: price || undefined,
+            title: [
+              model.name,
+              price,
+              caps?.edits ? t("assistant.media.canEdit") : "",
+            ]
+              .filter(Boolean)
+              .join(" · "),
+            group: vendor,
+            groupLabel: label,
+          };
+        }
         const tokens = model.contextWindow
           ? fmtTokens(model.contextWindow)
           : "";

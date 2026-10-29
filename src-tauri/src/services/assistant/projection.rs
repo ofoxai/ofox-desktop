@@ -417,8 +417,9 @@ pub(super) fn merge_native(
             message.status = "stopped".into();
         }
     }
-    // A reply the native history does not hold (its stream was cut) keeps
-    // its place after its question, which now carries the native time.
+    // Local replies keep their place after their question, which now carries
+    // the native time. Media timestamps are also local: their native entries
+    // may only be appended after generation or repaired when reopening.
     let asked: HashMap<String, i64> = record
         .messages
         .iter()
@@ -426,9 +427,11 @@ pub(super) fn merge_native(
         .filter_map(|m| Some((m.run_id.clone()?, m.created_at)))
         .collect();
     for message in &mut record.messages {
-        if message.role == "assistant" && message.native_entry_id.is_none() {
+        if message.media.is_some()
+            || (message.role == "assistant" && message.native_entry_id.is_none())
+        {
             if let Some(asked) = message.run_id.as_ref().and_then(|run| asked.get(run)) {
-                message.created_at = message.created_at.max(asked + 1);
+                message.created_at = message.created_at.max(asked.saturating_add(1));
             }
         }
     }
@@ -815,6 +818,48 @@ mod tests {
             &request,
             "test-opaque-credential".into(),
         )
+    }
+
+    #[test]
+    fn media_results_follow_their_questions_after_late_native_history_repair() {
+        let (_config, store) = store();
+        let sid = store.create("image/test", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        let mut entries = vec![];
+        for (run, at) in [("first", 100), ("second", 200)] {
+            let mut question = message(&format!("q-{run}"), "user", run, 1);
+            question.status = "completed".into();
+            let mut reply = message(&format!("m-{run}"), "media", run, 2);
+            reply.status = "completed".into();
+            reply.media = Some(
+                serde_json::from_value(json!({
+                    "kind":"image","model":"image/test","params":{},
+                    "status":"completed","outputs":["file"],"cost":"0.02"
+                }))
+                .unwrap(),
+            );
+            record.messages.extend([question, reply]);
+            entries.extend([
+                json!({"id":format!("native-q-{run}"),"role":"user","runId":run,"timestamp":at,"active":true,"content":"prompt"}),
+                json!({"id":format!("native-m-{run}"),"role":"media","runId":run,"timestamp":at+1,"active":true,"content":"media"}),
+            ]);
+        }
+        let entries = json!(entries);
+        for _ in 0..2 {
+            merge_native(&mut record, &entries, &[]).unwrap();
+            assert_eq!(
+                record
+                    .messages
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["q-first", "m-first", "q-second", "m-second"]
+            );
+            assert_eq!(
+                record.messages[1].media.as_ref().unwrap().cost.as_deref(),
+                Some("0.02")
+            );
+        }
     }
 
     #[test]

@@ -4808,3 +4808,28 @@ fn image_requests_retry_only_a_refused_key_and_never_replay_unknown_outcomes() {
         }
     });
 }
+
+#[test]
+fn media_save_checks_file_and_owner_before_dialog_and_rechecks_after_it() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        use cc_switch_lib::assistant::{store::AssistantStore,media_protocol::SaveMediaRequest};
+        let config=tempfile::tempdir().unwrap();let output=tempfile::tempdir().unwrap();let gateway=Gateway::start();
+        let env=TestEnv::new(config.path(),&bundle,&[("ofox.ai",&gateway)]);let host=AssistantHost::new(env.clone());
+        let sid=host.create_session(serde_json::from_value(json!({})).unwrap()).await.unwrap().id;
+        let request=|aid:String|->SaveMediaRequest {serde_json::from_value(json!({"sessionId":sid,"attachmentId":aid,"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()};
+        let opened=Arc::new(AtomicBool::new(false));let marker=opened.clone();
+        assert!(host.save_media(request(types::id()),move |_name|{marker.store(true,Ordering::SeqCst);Ok(None)}).await.is_err());
+        assert!(!opened.load(Ordering::SeqCst),"unavailable file must not open a save dialog");
+        let aid=types::id();let bytes=b"\x89PNG\r\n\x1a\nfixture";
+        let store=AssistantStore::for_owner(config.path(),&owner()).unwrap();
+        store.mutate(&sid,|record| {record.attachments.push(serde_json::from_value(json!({"id":aid,"name":"result.png","mimeType":"image/png","sizeBytes":bytes.len(),"status":"ready","origin":"generated"})).unwrap());Ok(())}).unwrap();
+        std::fs::write(store.attachment_dir(&sid).unwrap().join(&aid),bytes).unwrap();
+        let dest=output.path().join("saved.png");let picked=dest.clone();
+        assert!(host.save_media(request(aid.clone()),move |_name|Ok(Some(picked))).await.unwrap());assert_eq!(std::fs::read(&dest).unwrap(),bytes);
+        #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600); }
+        let private=output.path().join("must-not-exist.png");let picked=private.clone();let auth=env.clone();
+        assert!(host.save_media(request(aid),move |_name|{auth.set_identity(Err("assistant_sign_in_required".into()));Ok(Some(picked))}).await.is_err());
+        assert!(!private.exists());assert!(gateway.requests().is_empty());host.shutdown().await;
+    });
+}

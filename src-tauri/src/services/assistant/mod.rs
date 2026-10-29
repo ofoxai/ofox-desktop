@@ -7,6 +7,7 @@ pub mod host;
 mod media;
 mod media_host;
 mod media_http;
+pub mod media_protocol;
 pub mod process;
 mod projection;
 mod requests;

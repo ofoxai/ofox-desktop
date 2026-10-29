@@ -145,3 +145,38 @@ describe("assistant Markdown export", () => {
     },
   );
 });
+
+it("exports generated media metadata and files without private resource URLs", async () => {
+  const detail = fixture();
+  detail.messages.push({
+    id: "media",
+    role: "media",
+    content: "",
+    createdAt: 3,
+    attachments: [
+      {
+        ...file,
+        id: "image",
+        name: "generated.png",
+        mimeType: "image/png",
+        status: "ready",
+        reason: null,
+        details: null,
+      },
+    ],
+    media: {
+      kind: "image",
+      model: "image/test",
+      params: { size: "1024x1024", quality: "low" },
+      inputIds: [],
+      outputs: ["image"],
+      status: "completed",
+      cost: "0.02",
+    },
+  });
+  const text = await render(detail);
+  expect(text).toContain("generated.png");
+  expect(text).toContain("image/test");
+  expect(text).toContain("0.02");
+  expect(text).not.toContain("assistant-media:");
+});

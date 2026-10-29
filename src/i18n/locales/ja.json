@@ -4946,7 +4946,8 @@
       "backupConflict": "同じ ID で内容の異なる会話があります。既存の会話は保持されています。",
       "backupFailed": "バックアップを読み書きできませんでした。ファイルとディスクの空き容量を確認してください。",
       "backupContainsKey": "ファイルにアシスタント専用の API キーが含まれています。キーを削除してからバックアップまたは復元してください。",
-      "backupOwnerMismatch": "このバックアップは別のアカウントまたは組織のものです。元のアカウントでログインして復元してください。"
+      "backupOwnerMismatch": "このバックアップは別のアカウントまたは組織のものです。元のアカウントでログインして復元してください。",
+      "mediaReadFailed": "生成されたファイルを読み込めませんでした。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
@@ -5200,6 +5201,27 @@
     "emptyTrashDescription_other": "ゴミ箱にあるすべての会話（{{count}} 件）を、添付ファイルと履歴ごとこの端末から完全に削除します。この操作は取り消せません。",
     "emptyTrashDone_one": "{{count}} 件の会話を完全に削除しました。",
     "emptyTrashDone_other": "{{count}} 件の会話を完全に削除しました。",
-    "emptyTrashPartial": "{{deleted}} 件を削除しました。{{failed}} 件は削除できませんでした。後でもう一度お試しください。"
+    "emptyTrashPartial": "{{deleted}} 件を削除しました。{{failed}} 件は削除できませんでした。後でもう一度お試しください。",
+    "media": {
+      "perImage": "${{price}}/枚",
+      "imageTokenPrice": "画像 ${{price}}/百万トークン",
+      "canEdit": "画像編集対応",
+      "size": "サイズ",
+      "quality": "画質",
+      "count": "枚数",
+      "default": "デフォルト",
+      "estimate": "推定 ${{cost}}",
+      "tokenCost": "実際のトークン使用量で課金",
+      "view": "画像を拡大",
+      "save": "保存…",
+      "useInput": "入力に使用",
+      "again": "再生成",
+      "cost": "料金 ${{cost}}",
+      "generating": "画像を生成中…",
+      "unknown": "結果は不明で、課金済みの可能性があります。再生成の前に利用履歴を確認してください。",
+      "inputHint": "編集には 15 MiB 以下の PNG または JPEG を 1 枚選択してください。",
+      "noInput": "このモデルはテキストからの画像生成のみ対応しています。",
+      "activity": "利用履歴を表示"
+    }
   }
 }

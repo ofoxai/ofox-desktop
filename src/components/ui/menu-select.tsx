@@ -37,6 +37,8 @@ export interface MenuSelectOption<T extends string = string> {
 
 export interface MenuSelectProps<T extends string> {
   value: T;
+  /** Preferred highlight when the current value belongs to a different group. */
+  highlightValue?: T;
   /** Called only when the user picks an option other than `value`. */
   onChange: (value: T) => void;
   options: ReadonlyArray<MenuSelectOption<T>>;
@@ -184,6 +186,7 @@ function inMenuOrder<T extends string>(
  */
 export function MenuSelect<T extends string>({
   value,
+  highlightValue,
   onChange,
   options,
   placeholder,
@@ -212,6 +215,7 @@ export function MenuSelect<T extends string>({
   const [listId, setListId] = React.useState<string>();
   const listRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const headRef = React.useRef<HTMLDivElement>(null);
   const itemRefs = React.useRef(new Map<string, HTMLDivElement>());
   // Where the list goes the next time the highlight is followed: the chosen
   // option to the middle when the menu opens; back to the top, where the
@@ -272,6 +276,33 @@ export function MenuSelect<T extends string>({
   React.useLayoutEffect(() => {
     if (open) followHighlight();
   }, [open, followHighlight, query]);
+
+  React.useLayoutEffect(() => {
+    if (
+      open &&
+      !inMenuOrder(options, query).some(
+        ({ index }) => itemKey(index) === active,
+      )
+    ) {
+      setActive(firstKey(inMenuOrder(options, query)));
+    }
+    if (open) followHighlight();
+  }, [open, options, query, active, followHighlight]);
+
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const preferred = options.findIndex(
+      (option) =>
+        !option.disabled &&
+        option.value ===
+          (options.some((o) => o.value === value) ? value : highlightValue),
+    );
+    setActive(
+      preferred >= 0 ? itemKey(preferred) : firstKey(inMenuOrder(options, "")),
+    );
+    // A different kind or refreshed catalog starts its own search/highlight.
+  }, [options, highlightValue]);
 
   const choose = (option: MenuSelectOption<T>) => {
     setOpen(false);
@@ -383,7 +414,29 @@ export function MenuSelect<T extends string>({
         </button>
       </PopoverTrigger>
       <PopoverContent
-        onKeyDown={menuTab.onKeyDown}
+        onKeyDownCapture={(event) => {
+          const headStop = headRef.current?.querySelector<HTMLElement>(
+            'button[tabindex="0"]:not(:disabled), input:not(:disabled)',
+          );
+          if (event.key === "Tab" && searchable && headStop) {
+            if (event.shiftKey && event.target === inputRef.current) {
+              event.preventDefault();
+              event.stopPropagation();
+              headStop.focus();
+              return;
+            }
+            if (
+              !event.shiftKey &&
+              headRef.current?.contains(event.target as Node)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              inputRef.current?.focus();
+              return;
+            }
+          }
+          menuTab.onKeyDown(event);
+        }}
         onCloseAutoFocus={menuTab.onCloseAutoFocus}
         // A listbox popup, not a dialog: the trigger says so with
         // aria-haspopup, and the list inside carries the options.
@@ -413,7 +466,10 @@ export function MenuSelect<T extends string>({
           className="flex min-h-0 flex-1 flex-col outline-none"
         >
           {head && (
-            <div className="px-2 pb-[5px] pt-1.5 text-note text-ink-muted">
+            <div
+              ref={headRef}
+              className="px-2 pb-[5px] pt-1.5 text-note text-ink-muted"
+            >
               {head}
             </div>
           )}

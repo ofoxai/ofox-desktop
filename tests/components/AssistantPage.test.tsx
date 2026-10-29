@@ -6776,3 +6776,154 @@ describe("the followed reply's thinking", () => {
     expect(thinking()).toBeNull();
   });
 });
+
+describe("image conversations", () => {
+  const imageModel: AssistantModel = {
+    ...model("image/test", "Image Test"),
+    kind: "image",
+    image: {
+      generations: true,
+      edits: true,
+      n: true,
+      sizes: ["1024x1024"],
+      qualities: ["low"],
+      perImagePrice: "0.02",
+      tokenPricing: null,
+    },
+  };
+  function images() {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [...capabilities.models, imageModel],
+    });
+    current.session = { ...current.session, modelId: "image/test" };
+  }
+  it("updates remembered kinds immediately after a successful model change", async () => {
+    images();
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.detail).not.toBeNull());
+    await act(async () => {
+      await hook.result.current.update({ modelId: imageModel.id });
+    });
+    expect(hook.result.current.bootstrap?.rememberedModels?.image).toBe(
+      imageModel.id,
+    );
+    const chat = capabilities.models[0].id;
+    await act(async () => {
+      await hook.result.current.update({ modelId: chat });
+    });
+    expect(hook.result.current.bootstrap?.rememberedModels).toMatchObject({
+      image: imageModel.id,
+      chat,
+    });
+  });
+  it("sends explicit image parameters and hides chat controls", async () => {
+    images();
+    await openConversation();
+    expect(screen.queryByRole("switch", { name: /Web search/ })).toBeNull();
+    await userEvent.click(screen.getByRole("combobox", { name: "Quality" }));
+    await userEvent.click(screen.getByRole("option", { name: "low" }));
+    await userEvent.type(composer(), "blue square");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "blue square",
+          media: { quality: "low" },
+        }),
+      ),
+    );
+  });
+  it("blocks non-image attachments in image mode before sending", async () => {
+    images();
+    current.attachments = [
+      {
+        id: "text",
+        name: "notes.txt",
+        mimeType: "text/plain",
+        sizeBytes: 5,
+        status: "ready",
+        reason: null,
+        details: null,
+      },
+    ];
+    current.session.draftAttachmentIds = ["text"];
+    await openConversation();
+    await userEvent.type(composer(), "blue square");
+    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+    await userEvent.keyboard("{Enter}");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(screen.getByText(/one PNG or JPEG/)).toBeVisible();
+  });
+  it("media inputs cannot be edited and generated images can become a draft input", async () => {
+    images();
+    const output: AssistantAttachment = {
+      id: "output",
+      name: "result.png",
+      mimeType: "image/png",
+      sizeBytes: 100,
+      status: "ready",
+      reason: null,
+      details: null,
+      origin: "generated",
+    };
+    current.attachments = [output];
+    current.messages = [
+      {
+        id: "question",
+        role: "user",
+        runId: "run-image",
+        nativeEntryId: "entry",
+        content: "blue square",
+        createdAt: 1,
+        status: "completed",
+      },
+      {
+        id: "image",
+        role: "media",
+        runId: "run-image",
+        content: "",
+        createdAt: 2,
+        status: "completed",
+        attachments: [output],
+        media: {
+          kind: "image",
+          model: "image/test",
+          params: { quality: "low" },
+          inputIds: [],
+          outputs: [output.id],
+          cost: "0.02",
+          status: "completed",
+        },
+      },
+    ];
+    await openConversation();
+    expect(screen.queryByRole("button", { name: /Edit message/ })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Use as input" }));
+    await userEvent.type(composer(), "red square");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachmentIds: ["output"],
+          media: { inputAttachmentId: "output" },
+        }),
+      ),
+    );
+  });
+  it("shows the host-scrubbed image refusal diagnostic as plain text", async () => {
+    images();
+    mocks.send.mockRejectedValueOnce({
+      code: "assistant_media_safety_rejected",
+      detail: "Provider refused this prompt <b>safely</b>",
+    });
+    await openConversation();
+    await userEvent.type(composer(), "blue square");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(
+      await screen.findByText("Provider refused this prompt <b>safely</b>"),
+    ).toBeVisible();
+  });
+});

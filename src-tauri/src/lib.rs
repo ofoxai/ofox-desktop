@@ -153,6 +153,7 @@ mod assistant_wiring_tests {
                 "assistant_list_sessions",
                 "assistant_pick_attachments",
                 "assistant_restore",
+                "assistant_save_media",
                 "assistant_send",
                 "assistant_set_preferences",
                 "assistant_stop",
@@ -336,6 +337,16 @@ pub fn run() {
     }
 
     let builder = builder
+        .register_asynchronous_uri_scheme_protocol("assistant-media", |ctx,request,responder| {
+            let host=ctx.app_handle().try_state::<Arc<services::assistant::AssistantHost>>().map(|host|host.inner().clone());
+            tauri::async_runtime::spawn(async move {
+                let response=match host {
+                    Some(host)=>host.media_response(request).await,
+                    None=>tauri::http::Response::builder().status(403).body(Vec::<u8>::new()).unwrap(),
+                };
+                responder.respond(response);
+            });
+        })
         // 注册 deep-link 插件（处理 macOS AppleEvent 和其他平台的深链接）
         .plugin(tauri_plugin_deep_link::init())
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
@@ -1856,6 +1867,7 @@ pub fn run() {
             commands::assistant_delete_session,
             commands::assistant_empty_trash,
             commands::assistant_export_markdown,
+            commands::assistant_save_media,
             commands::assistant_send,
             commands::assistant_stop,
             commands::assistant_switch_version,

@@ -4946,7 +4946,8 @@
       "backupConflict": "已有一个 ID 相同但内容不同的对话，现有对话已保留。",
       "backupFailed": "无法读取或写入备份，请检查文件及可用磁盘空间。",
       "backupContainsKey": "文件中包含助手专用的 API Key，请先将其移除，再进行备份或恢复。",
-      "backupOwnerMismatch": "此备份属于其他账号或组织，请登录原账号后恢复。"
+      "backupOwnerMismatch": "此备份属于其他账号或组织，请登录原账号后恢复。",
+      "mediaReadFailed": "无法读取生成的文件。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5200,6 +5201,27 @@
     "emptyTrashDescription_other": "这会从此设备永久删除回收站中的全部 {{count}} 个对话及其附件和历史记录，且无法撤销。",
     "emptyTrashDone_one": "已永久删除 {{count}} 个对话。",
     "emptyTrashDone_other": "已永久删除 {{count}} 个对话。",
-    "emptyTrashPartial": "已删除 {{deleted}} 个；{{failed}} 个未能删除，请稍后再试。"
+    "emptyTrashPartial": "已删除 {{deleted}} 个；{{failed}} 个未能删除，请稍后再试。",
+    "media": {
+      "perImage": "${{price}}/张",
+      "imageTokenPrice": "图片 ${{price}}/百万 Token",
+      "canEdit": "可改图",
+      "size": "尺寸",
+      "quality": "质量",
+      "count": "张数",
+      "default": "默认",
+      "estimate": "预计 ${{cost}}",
+      "tokenCost": "按实际 Token 用量计费",
+      "view": "查看大图",
+      "save": "保存…",
+      "useInput": "用作输入",
+      "again": "再生成",
+      "cost": "费用 ${{cost}}",
+      "generating": "正在生成图像…",
+      "unknown": "结果不明，可能已计费。再次生成前请先查看用量记录。",
+      "inputHint": "改图仅支持一张不超过 15 MiB 的 PNG 或 JPEG。",
+      "noInput": "此模型仅支持文字生成图像。",
+      "activity": "查看用量记录"
+    }
   }
 }

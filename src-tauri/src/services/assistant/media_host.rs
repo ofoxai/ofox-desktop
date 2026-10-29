@@ -374,6 +374,13 @@ impl AssistantHost {
 
 fn read_input(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
     const LIMIT: u64 = 15 * 1024 * 1024;
+    if !std::fs::symlink_metadata(&root)
+        .map_err(|_| attachments::UNREADABLE)?
+        .file_type()
+        .is_dir()
+    {
+        return Err(attachments::UNREADABLE.into());
+    }
     let path = root.join(&file.id);
     let meta = std::fs::symlink_metadata(&path).map_err(|_| attachments::UNREADABLE)?;
     if !meta.is_file() || meta.file_type().is_symlink() {
@@ -422,4 +429,28 @@ fn history_text(media: &MediaRecord, prompt: &str, files: &[Attachment]) -> Stri
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_input_refuses_a_linked_attachment_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let aid = id();
+        let bytes = b"\x89PNG\r\n\x1a\nfixture";
+        std::fs::write(outside.join(&aid), bytes).unwrap();
+        let file: Attachment = serde_json::from_value(json!({
+            "id":aid,"name":"input.png","mimeType":"image/png",
+            "sizeBytes":bytes.len(),"status":"ready"
+        }))
+        .unwrap();
+        assert!(read_input(outside.clone(), &file).is_ok());
+        let linked = root.path().join("attachments");
+        std::os::unix::fs::symlink(outside, &linked).unwrap();
+        assert!(read_input(linked, &file).is_err());
+    }
 }

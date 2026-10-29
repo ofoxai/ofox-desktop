@@ -329,3 +329,79 @@ describe("the assistant's model picker", () => {
     ).toHaveTextContent("gone/model");
   });
 });
+
+it("switches model kinds with Shift+Tab and arrow keys, then picks an image", async () => {
+  const onChange = vi.fn();
+  render(
+    picker({
+      models: [
+        ...CATALOG,
+        model("openai/gpt-image-2", "GPT Image 2", { kind: "image" }),
+      ],
+      onChange,
+    }),
+  );
+  await open();
+  expect(screen.getByRole("combobox", { name: "Search models" })).toHaveFocus();
+  await userEvent.tab({ shift: true });
+  expect(screen.getByRole("radio", { name: /Chat/ })).toHaveFocus();
+  await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("radio", { name: /Image/ })).toHaveFocus();
+  expect(screen.getByRole("radio", { name: /Image/ })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await userEvent.tab();
+  expect(screen.getByRole("combobox", { name: "Search models" })).toHaveFocus();
+  await userEvent.keyboard("{ArrowDown}{Enter}");
+  expect(onChange).toHaveBeenCalledWith("openai/gpt-image-2");
+});
+
+it("opens on the current image kind and shows no chat token context", async () => {
+  render(
+    picker({
+      models: [
+        ...CATALOG,
+        model("image/test", "Image Test", {
+          kind: "image",
+          image: {
+            generations: true,
+            edits: true,
+            n: false,
+            sizes: [],
+            qualities: [],
+            perImagePrice: "0.02",
+            tokenPricing: null,
+          },
+        }),
+      ],
+      value: "image/test",
+    }),
+  );
+  const list = await open();
+  expect(within(list).getAllByRole("option")).toHaveLength(1);
+  expect(within(list).getByRole("option")).not.toHaveTextContent("128K");
+  expect(within(list).getByRole("option")).toHaveTextContent("$0.02");
+});
+
+it("highlights the remembered image model when changing kinds without changing the current model", async () => {
+  const onChange = vi.fn();
+  render(
+    picker({
+      models: [
+        ...CATALOG,
+        model("image/a", "Image A", { kind: "image" }),
+        model("image/b", "Image B", { kind: "image" }),
+      ],
+      rememberedModels: { image: "image/b" },
+      onChange,
+    }),
+  );
+  await open();
+  await userEvent.tab({ shift: true });
+  await userEvent.keyboard("{ArrowRight}");
+  await userEvent.tab();
+  expect(onChange).not.toHaveBeenCalled();
+  await userEvent.keyboard("{Enter}");
+  expect(onChange).toHaveBeenCalledWith("image/b");
+});
