@@ -2,11 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   assistantApi,
   assistantErrorCode,
+  DEFAULT_ASSISTANT_PREFERENCES,
   type AssistantAttachment,
   type AssistantBackupReport,
   type AssistantBootstrap,
   type AssistantEvent,
   type AssistantMessage,
+  type AssistantPreferences,
   type AssistantRunRef,
   type AssistantRestoreReport,
   type AssistantSession,
@@ -18,6 +20,7 @@ import {
 } from "@/lib/api/assistant";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 import { currentThinking, type ThinkingChoice } from "@/utils/assistantModels";
+import { useFinishNotice } from "./useFinishNotice";
 
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
@@ -196,6 +199,11 @@ export function useAssistant(enabled: boolean) {
     useState<AssistantTransferResult | null>(null);
   const busy = operationBusy || transferring;
   const [connected, setConnected] = useState(false);
+  // The account's assistant settings; null until read, and the defaults
+  // apply meanwhile.
+  const [preferences, setPreferences] = useState<AssistantPreferences | null>(
+    null,
+  );
   const mounted = useRef(false);
   const epoch = useRef(0);
   const listSequence = useRef(0);
@@ -385,6 +393,48 @@ export function useAssistant(enabled: boolean) {
     }
   }, []);
   reloadAuthority.current = () => void loadBootstrap();
+
+  /**
+   * Read the account's settings again. Rejects when they cannot be read;
+   * the page keeps what it had.
+   */
+  const reloadPreferences = useCallback(async () => {
+    const generation = epoch.current;
+    const value = await assistantApi.getPreferences();
+    if (mounted.current && generation === epoch.current) setPreferences(value);
+    return value;
+  }, []);
+
+  /** Without the settings the page goes on with the defaults. */
+  const loadPreferences = useCallback(
+    () =>
+      void reloadPreferences().catch((reason) =>
+        console.warn("[Assistant] could not read the settings", reason),
+      ),
+    [reloadPreferences],
+  );
+
+  /**
+   * Save every setting for the account and authority the page shows;
+   * resolves with them as saved. The instructions apply from the next
+   * message on.
+   */
+  const savePreferences = useCallback(async (next: AssistantPreferences) => {
+    const generation = epoch.current;
+    try {
+      const saved = await assistantApi.setPreferences({
+        ...next,
+        ...expectedIdentity(bootstrapRef.current),
+      });
+      if (mounted.current && generation === epoch.current)
+        setPreferences(saved);
+      return saved;
+    } catch (reason) {
+      if (assistantErrorCode(reason) === IDENTITY_CHANGED)
+        reloadAuthority.current();
+      throw reason;
+    }
+  }, []);
 
   /**
    * Save a conversation's draft text and, when given and changed, its files.
@@ -637,6 +687,7 @@ export function useAssistant(enabled: boolean) {
       setNewThinking(null);
       setRunSearch(null);
       setSearchSkipped(new Set());
+      setPreferences(null);
       setError(null);
     };
     if (!enabled) {
@@ -644,12 +695,14 @@ export function useAssistant(enabled: boolean) {
       return;
     }
     void loadBootstrap();
+    loadPreferences();
     void assistantApi
       .onAuthChange((state) => {
         reset();
         signedOut.current = state === "expired";
         if (state === "restored") {
           void loadBootstrap();
+          loadPreferences();
           void refreshSessionsRef.current();
         }
       })
@@ -664,6 +717,7 @@ export function useAssistant(enabled: boolean) {
     dropDeltas,
     enabled,
     loadBootstrap,
+    loadPreferences,
     setAttachments,
     setDraft,
     setNewThinking,
@@ -753,6 +807,17 @@ export function useAssistant(enabled: boolean) {
     showError,
   ]);
 
+  // A reply that finished out of the user's sight is told (see
+  // useFinishNotice); `select` is only called once the page is rendered.
+  const notifyFinish = useFinishNotice({
+    enabled: (preferences ?? DEFAULT_ASSISTANT_PREFERENCES).notifyOnFinish,
+    openSessionId: selectedId,
+    titleOf: (id) =>
+      sessions.find((item) => item.id === id)?.title ??
+      (detail?.session.id === id ? detail.session.title : ""),
+    open: (id) => select(id),
+  });
+
   useEffect(() => {
     if (!enabled) return;
     let disposed = false;
@@ -784,6 +849,12 @@ export function useAssistant(enabled: boolean) {
         const generation = epoch.current;
         if (event.type === "run_start")
           void refreshSessionsRef.current(generation);
+        // Any conversation's reply, followed or not.
+        if (event.type === "run_end")
+          notifyFinish({
+            sessionId: event.sessionId,
+            status: event.data.status,
+          });
         const current = runRef.current;
         if (
           !current ||
@@ -978,6 +1049,7 @@ export function useAssistant(enabled: boolean) {
     enabled,
     endThinking,
     flushDeltas,
+    notifyFinish,
     queueDelta,
     refreshDetail,
     setRun,
@@ -1433,6 +1505,8 @@ export function useAssistant(enabled: boolean) {
           const report = await assistantApi.restore(request);
           if (!current() || !report) return;
           setTransferResult({ kind, ...report });
+          // The archive may have filled in settings this profile never saved.
+          loadPreferences();
           // An empty profile may have acquired its model preference from the
           // archive. Read it before the next create can overwrite it; a
           // restore that imported nothing leaves the user's own choice alone.
@@ -1468,6 +1542,7 @@ export function useAssistant(enabled: boolean) {
       ensureSession,
       persistDraft,
       loadBootstrap,
+      loadPreferences,
       refreshDetail,
       switchList,
       showError,
@@ -2192,5 +2267,8 @@ export function useAssistant(enabled: boolean) {
     refreshDetail,
     loadBootstrap,
     showError,
+    preferences,
+    reloadPreferences,
+    savePreferences,
   };
 }

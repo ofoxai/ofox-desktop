@@ -257,6 +257,11 @@ export function useShell(): ShellContextValue {
   return shell;
 }
 
+/** The console's frame, or null outside one (a page rendered on its own). */
+export function useOptionalShell(): ShellContextValue | null {
+  return useContext(ShellContext);
+}
+
 /**
  * Offer `fn` as `page`'s refresh while the calling component is mounted.
  * The latest `fn` runs, so it need not be memoised.

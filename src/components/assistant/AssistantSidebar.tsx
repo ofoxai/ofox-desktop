@@ -20,6 +20,7 @@ import {
   Pin,
   PinOff,
   Search,
+  Settings2,
   SquarePen,
   Trash2,
   Upload,
@@ -40,6 +41,7 @@ import { searchHighlight } from "@/utils/assistantSearch";
 import { groupSessions } from "@/utils/assistantSessionGroups";
 import { cn } from "@/lib/utils";
 import type { AssistantTransferResult, useAssistant } from "./useAssistant";
+import { AssistantSettingsDialog } from "./AssistantSettingsDialog";
 import { usePendingFocus } from "./usePendingFocus";
 import { useStartOfToday } from "./useStartOfToday";
 
@@ -177,6 +179,9 @@ export const AssistantSidebar = forwardRef<
   const menuTrigger = useRef<HTMLButtonElement>(null);
   // What the chosen item of a row's menu does, once the menu has closed.
   const rowAction = useRef<(() => void) | null>(null);
+  // The same for the footer's menu.
+  const footerAction = useRef<(() => void) | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const backupHint = useId();
   const rowIds = useId();
   const focusSoon = usePendingFocus();
@@ -528,6 +533,13 @@ export const AssistantSidebar = forwardRef<
             align="end"
             side="top"
             className="min-w-[160px] max-w-[280px]"
+            // The settings open once the menu has given focus back to its
+            // button, which the dialog returns it to when it closes.
+            onCloseAutoFocus={() => {
+              const action = footerAction.current;
+              footerAction.current = null;
+              action?.();
+            }}
           >
             <DropdownMenuItem
               disabled={transferLocked}
@@ -547,11 +559,26 @@ export const AssistantSidebar = forwardRef<
               <Upload aria-hidden className="h-3.5 w-3.5 shrink-0" />
               {t("assistant.restoreMenu")}
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onSelect={() => {
+                footerAction.current = () => setSettingsOpen(true);
+              }}
+            >
+              <Settings2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+              {t("assistant.settingsMenu")}
+            </DropdownMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
         <span id={backupHint} hidden>
           {t("assistant.backupHint")}
         </span>
+        <AssistantSettingsDialog
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          load={assistant.reloadPreferences}
+          save={assistant.savePreferences}
+        />
       </div>
     </aside>
   );

@@ -43,6 +43,8 @@ const mocks = vi.hoisted(() => ({
   pickAttachments: vi.fn(),
   send: vi.fn(),
   stop: vi.fn(),
+  getPreferences: vi.fn(),
+  setPreferences: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
   onDrag: vi.fn(),
@@ -214,6 +216,11 @@ beforeEach(async () => {
     usage: {},
   };
   mocks.bootstrap.mockResolvedValue(capabilities);
+  mocks.getPreferences.mockResolvedValue({
+    instructions: "",
+    autoTitle: true,
+    notifyOnFinish: true,
+  });
   mocks.listSessions.mockImplementation(async () => listOf([current.session]));
   mocks.createSession.mockImplementation(async () => current.session);
   mocks.getSession.mockImplementation(async () => current);

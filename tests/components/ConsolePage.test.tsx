@@ -460,6 +460,8 @@ describe("Console assistant", () => {
         };
       if (command === "assistant_list_sessions")
         return { sessions: [], unreadable: [] };
+      if (command === "assistant_get_preferences")
+        return { instructions: "", autoTitle: true, notifyOnFinish: true };
       return tauri(command, args);
     });
     render(<ConsolePage boundTools={[]} localSignedIn />);

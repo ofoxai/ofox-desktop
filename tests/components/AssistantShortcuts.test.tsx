@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   updateSession: vi.fn(),
   send: vi.fn(),
   stop: vi.fn(),
+  getPreferences: vi.fn(),
+  setPreferences: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
   onDrag: vi.fn(),
@@ -35,8 +37,13 @@ vi.mock("@/lib/api/assistant", async (importOriginal) => ({
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
 }));
+// `toast(...)` itself is the notice of a reply that finished elsewhere.
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), warning: vi.fn(), error: vi.fn() },
+  toast: Object.assign(vi.fn(), {
+    success: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  }),
 }));
 
 const session: AssistantSession = {
@@ -141,6 +148,11 @@ beforeEach(async () => {
     usage: {},
   };
   mocks.bootstrap.mockResolvedValue(capabilities);
+  mocks.getPreferences.mockResolvedValue({
+    instructions: "",
+    autoTitle: true,
+    notifyOnFinish: true,
+  });
   mocks.listSessions.mockImplementation(async () => ({
     sessions: [current.session],
     unreadable: [],

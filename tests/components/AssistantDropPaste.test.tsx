@@ -43,6 +43,8 @@ const api = vi.hoisted(() => ({
   importPasted: vi.fn(),
   send: vi.fn(),
   stop: vi.fn(),
+  getPreferences: vi.fn(),
+  setPreferences: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
   onDrag: vi.fn(),
@@ -242,6 +244,11 @@ beforeEach(async () => {
     usage: {},
   };
   api.bootstrap.mockResolvedValue(capabilities);
+  api.getPreferences.mockResolvedValue({
+    instructions: "",
+    autoTitle: true,
+    notifyOnFinish: true,
+  });
   api.listSessions.mockImplementation(async () => listOf([current.session]));
   api.createSession.mockImplementation(async () => current.session);
   api.getSession.mockImplementation(async () => current);

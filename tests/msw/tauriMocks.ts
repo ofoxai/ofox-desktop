@@ -63,3 +63,11 @@ vi.mock("@tauri-apps/api/path", () => ({
   homeDir: async () => "/home/mock",
   join: async (...segments: string[]) => segments.join("/"),
 }));
+
+// No system notifications from tests: permission is not granted unless a
+// test grants it, and nothing is ever shown.
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: vi.fn(async () => false),
+  requestPermission: vi.fn(async () => "denied"),
+  sendNotification: vi.fn(),
+}));
