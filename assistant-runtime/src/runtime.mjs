@@ -208,6 +208,125 @@ function knownPrice(value) {
   );
 }
 
+// Native history's record of a request made outside the conversation (a
+// compaction summary, a title), kept under the run it belongs to: what it
+// used, whether that is all of it, and whether its price was known.
+function usageEntry(params, target, type, usage, secrets) {
+  const coverage = usageCoverage(usage);
+  return scrubSecrets(
+    {
+      runId: params.runId,
+      operationId: params.operationId,
+      type,
+      usage: usage ?? null,
+      usageCoverage: coverage,
+      pricingKnown:
+        coverage === "complete" &&
+        params.model.pricingKnown === true &&
+        (!usage?.cacheRead || knownPrice(params.model.cost?.cacheRead)) &&
+        (!usage?.cacheWrite || knownPrice(params.model.cost?.cacheWrite)),
+      priceSnapshot: {
+        modelId: target.id,
+        api: target.api,
+        cost: params.model.cost ?? null,
+        pricingKnown: params.model.pricingKnown === true,
+      },
+    },
+    secrets,
+  );
+}
+
+// The only way a model request leaves the runtime: to the model's own Ofox
+// origin, never redirected, with the key only in the Authorization header.
+// `outcome` learns that the request was made, then the HTTP status of a
+// refused one or why no answer came.
+function credentialFetch({ baseUrl, apiKey, providerFetch, signal }) {
+  return async (input, options, outcome = {}) => {
+    signal.throwIfAborted();
+    const url = new URL(
+      typeof input === "string" || input instanceof URL ? input : input.url,
+    );
+    if (
+      url.origin !== new URL(baseUrl).origin ||
+      url.href.includes(apiKey) ||
+      [...url.searchParams.keys()].some((key) => /key|token|auth/i.test(key))
+    )
+      throw new Error(
+        "Model request URL violates the Ofox credential boundary",
+      );
+    const headers = new Headers(
+      options?.headers ??
+        (input instanceof Request ? input.headers : undefined),
+    );
+    for (const name of ["x-api-key", "api-key", "x-goog-api-key", "cookie"])
+      headers.delete(name);
+    headers.set("Authorization", `Bearer ${apiKey}`);
+    outcome.requested = true;
+    let response;
+    try {
+      response = await providerFetch(input, {
+        ...options,
+        headers,
+        redirect: "error",
+      });
+    } catch (error) {
+      if (!signal.aborted) outcome.network = networkFailure(error);
+      throw error;
+    }
+    if (response.status >= 400) outcome.status = response.status;
+    return response;
+  };
+}
+
+// A Pi model runtime that knows only `model`, at the Ofox gateway, with the
+// key held in memory.
+async function ofoxModelRuntime(model, apiKey) {
+  const { ModelRuntime } = await import("@earendil-works/pi-coding-agent");
+  const { InMemoryCredentialStore, InMemoryModelsStore } = await import(
+    "@earendil-works/pi-ai"
+  );
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new InMemoryCredentialStore(),
+    modelsStore: new InMemoryModelsStore(),
+    modelsPath: null,
+    refreshOnCreate: false,
+    allowModelNetwork: false,
+  });
+  modelRuntime.registerProvider(model.provider, {
+    name: "Ofox Desktop",
+    api: model.api,
+    baseUrl: model.baseUrl,
+    authHeader: true,
+    models: [model],
+  });
+  await modelRuntime.setRuntimeApiKey(model.provider, apiKey);
+  return modelRuntime;
+}
+
+// Generated titles: one short request after a conversation's first answer.
+export const TITLE_TIMEOUT_MS = 8000;
+const TITLE_MAX_TOKENS = 32;
+// Of the question and of the reply, at most this many characters are sent.
+const TITLE_INPUT_CHARS = 1500;
+const TITLE_PROMPTS = {
+  en: "Name this conversation. Reply with its title only, in the language of the user's message: at most 6 words, no quotes or trailing punctuation.",
+  zh: "为这段对话起一个标题。只回复标题，使用用户所用的语言：不超过 12 个字，不要引号，不要结尾标点。",
+  ja: "この会話にタイトルを付けてください。ユーザーと同じ言語で、タイトルだけを返してください。12文字以内で、引用符や末尾の句読点は付けないでください。",
+};
+
+// The title instruction in the user's language: Japanese when the question
+// has kana, Chinese when it has Han characters, else English.
+function titlePrompt(question) {
+  if (/[\p{Script=Hiragana}\p{Script=Katakana}]/u.test(question))
+    return TITLE_PROMPTS.ja;
+  if (/\p{Script=Han}/u.test(question)) return TITLE_PROMPTS.zh;
+  return TITLE_PROMPTS.en;
+}
+
+function clip(text) {
+  return [...text].slice(0, TITLE_INPUT_CHARS).join("");
+}
+
 // Kept before the user turn of a run that failed before its model request:
 // the attachments selected for it, which a replay of that turn reads again.
 const FAILED_SELECTION = "ofox-desktop-attachments";
@@ -384,6 +503,26 @@ function projection(manager, secrets = []) {
   };
 }
 
+// The parameters only the host can give an operation: who it is for, its
+// native history and its credentials.
+function checkTrusted(params) {
+  for (const key of [
+    "sessionId",
+    "runId",
+    "operationId",
+    "sessionFile",
+    "apiKey",
+    "apex",
+  ])
+    if (typeof params[key] !== "string" || !params[key])
+      throw new Error(`Missing trusted run parameter: ${key}`);
+  if (
+    !path.isAbsolute(params.sessionFile) ||
+    path.extname(params.sessionFile) !== ".jsonl"
+  )
+    throw new Error("Native session path must be absolute JSONL");
+}
+
 // Describe only what this run can do. Without tools nothing is claimed; each
 // tool enables its capability by carrying its own Pi-style promptGuidelines.
 function systemPrompt(tools) {
@@ -408,6 +547,7 @@ export class AssistantRuntime {
     fetch: providerFetch,
     searchServer = SEARCH_SERVER,
     searchTimeoutMs = SEARCH_TIMEOUT_MS,
+    titleTimeoutMs = TITLE_TIMEOUT_MS,
   } = {}) {
     this.hostCall =
       hostCall ??
@@ -418,6 +558,7 @@ export class AssistantRuntime {
     this.providerFetch = providerFetch;
     this.searchServer = searchServer;
     this.searchTimeoutMs = searchTimeoutMs;
+    this.titleTimeoutMs = titleTimeoutMs;
     this.runs = new Map();
     this.secrets = new Set();
   }
@@ -466,6 +607,123 @@ export class AssistantRuntime {
       }),
     );
     this.secrets.clear();
+  }
+
+  // A title for a conversation, from its first turn (the host's `userText`
+  // and `replyText`): one request of at most TITLE_MAX_TOKENS with the
+  // run's credential boundary, no retry, given up after `titleTimeoutMs`.
+  // What it may have cost is kept in native history as an
+  // `ofox-desktop-usage` entry of type "title" under the turn's run, and
+  // then the projection is returned with the title. A request that fails
+  // gives no title and never throws; one refused or never sent cost nothing
+  // and leaves native history as it was.
+  async title(params) {
+    checkTrusted(params);
+    if (
+      typeof params.userText !== "string" ||
+      typeof params.replyText !== "string"
+    )
+      throw new Error("Missing title input");
+    if (this.runs.size)
+      throw new Error("This sidecar already owns an active run");
+    const model = modelForOfox(params.model, params.apex, {
+      baseUrl: params.baseUrl,
+      allowLocalGateway: params.allowLocalGateway,
+      thinkingLevel: params.thinkingLevel,
+    });
+    // A title follows a saved turn.
+    await stat(params.sessionFile);
+    const apiKey = params.apiKey;
+    const secrets = [apiKey];
+    this.secrets.add(apiKey);
+    const context = { params, abort: new AbortController() };
+    this.runs.set(params.runId, context);
+    let proxy;
+    try {
+      const modelRuntime = await ofoxModelRuntime(model, apiKey);
+      proxy = await proxiedFetch(params.proxy);
+      const signal = AbortSignal.any([
+        context.abort.signal,
+        AbortSignal.timeout(this.titleTimeoutMs),
+      ]);
+      const outcome = {};
+      const safeFetch = credentialFetch({
+        baseUrl: model.baseUrl,
+        apiKey,
+        providerFetch: this.providerFetch ?? proxy?.fetch ?? globalThis.fetch,
+        signal,
+      });
+      const question = clip(params.userText);
+      let message;
+      try {
+        message = await modelRuntime.completeSimple(
+          model,
+          scrubSecrets(
+            {
+              systemPrompt: titlePrompt(question),
+              messages: [
+                {
+                  role: "user",
+                  content: `User:\n${question}\n\nAssistant:\n${clip(params.replyText)}`,
+                  timestamp: Date.now(),
+                },
+              ],
+            },
+            secrets,
+          ),
+          {
+            maxTokens: TITLE_MAX_TOKENS,
+            ...(model.reasoning ? { reasoning: params.thinkingLevel } : {}),
+            maxRetries: 0,
+            timeoutMs: this.titleTimeoutMs,
+            signal,
+            fetch: (input, init) => safeFetch(input, init, outcome),
+            env: {},
+            headers: { Authorization: `Bearer ${apiKey}` },
+            identity: { attribution: { name: "Ofox Desktop" } },
+          },
+        );
+      } catch (error) {
+        message = {
+          role: "assistant",
+          content: [],
+          stopReason: signal.aborted ? "aborted" : "error",
+          errorMessage: errorMessage(error, secrets),
+        };
+      }
+      message = markFailure(safeMessage(message, secrets), outcome);
+      const answered = !["error", "aborted"].includes(message.stopReason);
+      const title = answered ? contentText(message.content).trim() : "";
+      // An answer costs its usage; a request refused or never sent cost
+      // nothing; any other may have been billed at an unknown cost.
+      if (!answered && (unbilled(message) || !outcome.requested))
+        return { title: null };
+      // Deleted meanwhile: there is no history left to record it in.
+      await stat(params.sessionFile);
+      const { SessionManager } = await import(
+        "@earendil-works/pi-coding-agent"
+      );
+      const directory = path.dirname(params.sessionFile);
+      const manager = SessionManager.open(
+        params.sessionFile,
+        directory,
+        directory,
+      );
+      manager.appendCustomEntry(
+        "ofox-desktop-usage",
+        usageEntry(
+          params,
+          model,
+          "title",
+          answered ? message.usage : null,
+          secrets,
+        ),
+      );
+      return { title: title || null, ...projection(manager, secrets) };
+    } finally {
+      void proxy?.close();
+      this.runs.delete(params.runId);
+    }
   }
 
   // Model tools for this run, built with wrapTool so they share the call
@@ -618,21 +876,7 @@ export class AssistantRuntime {
   }
 
   async run(params, compactOnly = false) {
-    for (const key of [
-      "sessionId",
-      "runId",
-      "operationId",
-      "sessionFile",
-      "apiKey",
-      "apex",
-    ])
-      if (typeof params[key] !== "string" || !params[key])
-        throw new Error(`Missing trusted run parameter: ${key}`);
-    if (
-      !path.isAbsolute(params.sessionFile) ||
-      path.extname(params.sessionFile) !== ".jsonl"
-    )
-      throw new Error("Native session path must be absolute JSONL");
+    checkTrusted(params);
     if (this.runs.size)
       throw new Error("This sidecar already owns an active run");
     const model = modelForOfox(params.model, params.apex, {
@@ -676,15 +920,12 @@ export class AssistantRuntime {
       const {
         createAgentSession,
         DefaultResourceLoader,
-        ModelRuntime,
         SessionManager,
         SettingsManager,
       } = await import("@earendil-works/pi-coding-agent");
-      const {
-        InMemoryCredentialStore,
-        InMemoryModelsStore,
-        AssistantMessageEventStream,
-      } = await import("@earendil-works/pi-ai");
+      const { AssistantMessageEventStream } = await import(
+        "@earendil-works/pi-ai"
+      );
       const directory = path.dirname(params.sessionFile);
       const workspace = path.join(directory, "workspace");
       const agentDir = path.join(directory, "runtime-settings");
@@ -765,91 +1006,22 @@ export class AssistantRuntime {
         enableInstallTelemetry: false,
         enableAnalytics: false,
       });
-      const modelRuntime = await ModelRuntime.create({
-        credentials: new InMemoryCredentialStore(),
-        modelsStore: new InMemoryModelsStore(),
-        modelsPath: null,
-        refreshOnCreate: false,
-        allowModelNetwork: false,
-      });
-      modelRuntime.registerProvider(model.provider, {
-        name: "Ofox Desktop",
-        api: model.api,
-        baseUrl: model.baseUrl,
-        authHeader: true,
-        models: [model],
-      });
-      await modelRuntime.setRuntimeApiKey(model.provider, apiKey);
+      const modelRuntime = await ofoxModelRuntime(model, apiKey);
       const originalStream = modelRuntime.streamSimple.bind(modelRuntime);
       proxy = await proxiedFetch(params.proxy);
       const providerFetch =
         this.providerFetch ?? proxy?.fetch ?? globalThis.fetch;
-      const recordSummaryUsage = (target, usage) => {
-        const coverage = usageCoverage(usage);
+      const recordSummaryUsage = (target, usage) =>
         manager.appendCustomEntry(
           "ofox-desktop-usage",
-          scrubSecrets(
-            {
-              runId: params.runId,
-              operationId: params.operationId,
-              type: "compaction",
-              usage: usage ?? null,
-              usageCoverage: coverage,
-              pricingKnown:
-                coverage === "complete" &&
-                params.model.pricingKnown === true &&
-                (!usage?.cacheRead ||
-                  knownPrice(params.model.cost?.cacheRead)) &&
-                (!usage?.cacheWrite ||
-                  knownPrice(params.model.cost?.cacheWrite)),
-              priceSnapshot: {
-                modelId: target.id,
-                api: target.api,
-                cost: params.model.cost ?? null,
-                pricingKnown: params.model.pricingKnown === true,
-              },
-            },
-            secrets,
-          ),
+          usageEntry(params, target, "compaction", usage, secrets),
         );
-      };
-      const safeFetch = async (input, options, outcome = {}) => {
-        context.abort.signal.throwIfAborted();
-        const url = new URL(
-          typeof input === "string" || input instanceof URL ? input : input.url,
-        );
-        if (
-          url.origin !== new URL(model.baseUrl).origin ||
-          url.href.includes(apiKey) ||
-          [...url.searchParams.keys()].some((key) =>
-            /key|token|auth/i.test(key),
-          )
-        )
-          throw new Error(
-            "Model request URL violates the Ofox credential boundary",
-          );
-        const headers = new Headers(
-          options?.headers ??
-            (input instanceof Request ? input.headers : undefined),
-        );
-        for (const name of ["x-api-key", "api-key", "x-goog-api-key", "cookie"])
-          headers.delete(name);
-        headers.set("Authorization", `Bearer ${apiKey}`);
-        let response;
-        try {
-          response = await providerFetch(input, {
-            ...options,
-            headers,
-            redirect: "error",
-          });
-        } catch (error) {
-          if (!context.abort.signal.aborted)
-            outcome.network = networkFailure(error);
-          throw error;
-        }
-        if (response.status >= 400) outcome.status = response.status;
-        return response;
-      };
+      const safeFetch = credentialFetch({
+        baseUrl: model.baseUrl,
+        apiKey,
+        providerFetch,
+        signal: context.abort.signal,
+      });
       modelRuntime.streamSimple = (target, transcript, options) => {
         const summaryRequest = options?.sessionId !== manager.getSessionId();
         const outcome = {};

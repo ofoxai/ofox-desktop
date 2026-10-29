@@ -447,3 +447,49 @@ test(
     await fixture.assertClean([token]);
   },
 );
+
+test(
+  "private stdio names a conversation from its first turn without the key",
+  { timeout: 20000 },
+  async (t) => {
+    const token = "synthetic-stdio-title-credential";
+    const fixture = await createStdioAcceptance(
+      t,
+      (_request, response, number) =>
+        writeModelStream(
+          response,
+          number === 1 ? "Day one: Nara." : "Nara Day Trip",
+        ),
+    );
+    const wire = fixture.spawnSidecar();
+    const params = fixture.params("title", token, {
+      prompt: "Plan a day in Nara",
+    });
+    assert.equal((await wire.start("run", params)).status, "completed");
+    const named = await wire.start("title", {
+      ...params,
+      userText: "Plan a day in Nara",
+      replyText: "Day one: Nara.",
+    });
+    assert.equal(named.title, "Nara Day Trip");
+    assert.deepEqual(
+      named.entries
+        .filter((entry) => entry.role === "usage")
+        .map(({ type, runId }) => ({ type, runId })),
+      [{ type: "title", runId: params.runId }],
+    );
+    assert.equal(fixture.requests.length, 2);
+    assert.equal(fixture.requests[1].body.max_tokens, 32);
+    assert.equal(fixture.requests[1].authorization, "Bearer " + token);
+    // A title publishes nothing while it runs.
+    assert.equal(
+      wire.messages.filter(
+        (message) =>
+          message.method === "event" && message.params.type === "run_start",
+      ).length,
+      1,
+    );
+    await wire.close();
+    await fixture.assertClean([token]);
+  },
+);

@@ -136,6 +136,22 @@ Only advertised OpenAI Chat Completions, Responses and Anthropic routes are
 enabled; Google-only models are unavailable. SDK and provider automatic retries
 are disabled.
 
+`title` names a conversation after its first answer. It takes the trusted
+fields of `run` (sessionId, the turn's runId and operationId, sessionFile,
+model, apiKey, apex, baseUrl?, allowLocalGateway?, proxy?, thinkingLevel?)
+plus `userText` (the question) and `replyText` (the reply). It sends one
+request of at most 32 output tokens with the first 1,500 characters of each,
+under an instruction in the question's language (Japanese with kana, Chinese
+with Han characters, else English: at most 12 characters or 6 words, title
+only), with the same credential boundary as a run, no retry, and gives up
+after 8 seconds. It publishes no events. The result is `{title}` (null when
+the request failed); when the request may have cost something, its usage is
+first appended to native history as an `ofox-desktop-usage` entry of type
+`title` under the turn's run (no context, incomplete when the request got no
+answer) and the result also carries the projection. A request refused with a
+4xx or never sent leaves native history untouched. A failed request never
+throws; invalid parameters or a missing `sessionFile` do.
+
 `stop` matches sessionId/runId/operationId. The host owns one sidecar process
 per operation and the stable native session file, and ends the process after
 the response. Pi native JSONL is the context authority. Edit and regenerate
