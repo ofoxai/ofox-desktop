@@ -107,16 +107,18 @@ impl AssistantHost {
         let generation = self.generation();
         let store = self.store(&identity.owner)?;
         let merged = self.models(&identity.apex).await?;
+        let default = self.default_model(&identity.owner, &merged).await?;
         let selected = match request.model_id {
             Some(model) => self.model(&identity.apex, &model).await?.id,
-            None => self
-                .default_model(&identity.owner, &merged)
-                .await?
-                .ok_or("assistant_choose_model")?,
+            None => default.clone().ok_or("assistant_choose_model")?,
         };
-        // While a source cannot be read the default is a stand-in for what
-        // is missing: only a model the user picked replaces the remembered one.
-        let remember = request.model_picked || merged.partial.is_empty();
+        // A model the user picked is remembered. One they did not pick is
+        // only what the page showed: it replaces the remembered model only if
+        // it is still the default, and every source was read (while one
+        // cannot be, the default stands in for what is missing). A page that
+        // opened during an outage may show a default that is stale by now.
+        let remember = request.model_picked
+            || (merged.partial.is_empty() && default.as_deref() == Some(selected.as_str()));
         self.ensure_current(&identity, generation).await?;
         let detail = blocking(move || {
             let detail = store.create(&selected, request.web_search)?;

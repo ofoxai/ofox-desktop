@@ -3064,14 +3064,61 @@ mod tests {
             remembered_model(&host).as_deref(),
             Some("anthropic/claude-opus-5")
         );
-        // With every source read, the model a conversation starts on is
-        // remembered, picked or not, as before.
+        // With every source read, the default a conversation starts on is
+        // remembered, picked or not, as before. Here the remembered model
+        // is gone from the catalog, so the default is the first preferred one.
         env.down.lock().unwrap().clear();
         host.bootstrap().await.unwrap();
-        host.create_session(create_request(json!({"modelId": "test/model"})))
+        host.store(&identity().owner)
+            .unwrap()
+            .remember_model("gone/model")
+            .unwrap();
+        let session = host
+            .create_session(create_request(json!({})))
             .await
             .unwrap();
+        assert_eq!(session.model_id, "anthropic/claude-haiku-5.5");
+        assert_eq!(
+            remembered_model(&host).as_deref(),
+            Some("anthropic/claude-haiku-5.5")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stale_default_from_an_earlier_outage_does_not_replace_the_remembered_model() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = CLAUDE_IN_CATALOG_ORDER.map(str::to_owned).to_vec();
+        host.store(&identity().owner)
+            .unwrap()
+            .remember_model("test/model")
+            .unwrap();
+        // The page opened while `/v1` was down and showed the Claude default.
+        env.down.lock().unwrap().insert(catalog::Source::V1);
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["defaultModelId"], "anthropic/claude-haiku-5.5");
+        // `/v1` is back, but the page still sends what it showed, unpicked.
+        env.down.lock().unwrap().clear();
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["partial"], json!([]));
+        assert_eq!(boot["defaultModelId"], "test/model");
+        let session = host
+            .create_session(create_request(
+                json!({"modelId": "anthropic/claude-haiku-5.5"}),
+            ))
+            .await
+            .unwrap();
+        // The conversation uses what the user was shown ...
+        assert_eq!(session.model_id, "anthropic/claude-haiku-5.5");
+        // ... and the remembered choice is the user's, not the stand-in.
         assert_eq!(remembered_model(&host).as_deref(), Some("test/model"));
+
+        // A pick is still remembered.
+        let picked = json!({"modelId": "anthropic/claude-haiku-5.5", "modelPicked": true});
+        host.create_session(create_request(picked)).await.unwrap();
+        assert_eq!(
+            remembered_model(&host).as_deref(),
+            Some("anthropic/claude-haiku-5.5")
+        );
     }
 
     #[tokio::test(start_paused = true)]
