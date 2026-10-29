@@ -1025,6 +1025,7 @@ mod tests {
             replace_attachments: false,
             edit_message_id: edit.map(str::to_owned),
             regenerate_message_id: regenerate.map(str::to_owned),
+            retry_message_id: None,
         }
     }
 

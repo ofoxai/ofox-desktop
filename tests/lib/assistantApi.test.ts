@@ -79,6 +79,45 @@ describe("assistant commands", () => {
     expect(report).toEqual({ deleted: 3, failed: 1 });
   });
 
+  it("switches versions with the confirmed authority and returns the conversation", async () => {
+    const detail = {
+      session: { id: "s" },
+      messages: [],
+      attachments: [],
+      usage: {},
+    };
+    invoke.mockResolvedValue(detail);
+    const shown = await assistantApi.switchVersion({
+      sessionId: "s",
+      messageId: "m",
+      expectedOwner: "owner",
+      expectedGeneration: 2,
+    });
+    expect(invoke).toHaveBeenCalledWith("assistant_switch_version", {
+      request: {
+        sessionId: "s",
+        messageId: "m",
+        expectedOwner: "owner",
+        expectedGeneration: 2,
+      },
+    });
+    expect(shown).toBe(detail);
+  });
+
+  it("retries a reply with its own text, files and the reply it retries", async () => {
+    invoke.mockResolvedValue({ runId: "r", operationId: "o" });
+    const request = {
+      sessionId: "s",
+      runId: "r",
+      operationId: "o",
+      text: "Asked again",
+      attachmentIds: [],
+      retryMessageId: "failed",
+    };
+    await assistantApi.send(request);
+    expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
+  });
+
   it("creates a chat session with only a model and the web search flag", async () => {
     invoke.mockResolvedValue({ id: "new" });
     await assistantApi.createSession({ modelId: "m", webSearch: false });

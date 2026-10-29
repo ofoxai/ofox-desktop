@@ -151,6 +151,7 @@ mod assistant_wiring_tests {
                 "assistant_restore",
                 "assistant_send",
                 "assistant_stop",
+                "assistant_switch_version",
                 "assistant_update_session",
                 "assistant_usage_summary",
             ]
@@ -1847,6 +1848,7 @@ pub fn run() {
             commands::assistant_export_markdown,
             commands::assistant_send,
             commands::assistant_stop,
+            commands::assistant_switch_version,
             commands::assistant_pick_attachments,
         ]);
 

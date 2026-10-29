@@ -4901,6 +4901,8 @@
       "sessionMissing": "这个对话已不存在，请刷新列表后重试。",
       "sessionUnreadable": "这个对话的保存文件已损坏，无法打开。",
       "messageMissing": "这条消息已无法编辑或重新生成，请刷新对话。",
+      "versionUnavailable": "该版本已不可用，请刷新对话。",
+      "versionSwitchFailed": "无法切换到该版本，请重试。",
       "invalidMessage": "这条消息无法发送，请检查后重试。",
       "messageTooLarge": "消息太长了，请缩短后重试。",
       "titleTooLong": "标题太长了，请换一个短一些的。",

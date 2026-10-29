@@ -1023,6 +1023,54 @@ mod tests {
         );
     }
 
+    /// A version switch's leaf entry, and what each message says of its
+    /// model, usage, end and the turn it follows, come back as they were.
+    #[test]
+    fn a_version_switch_and_the_message_meta_are_backed_up_and_restored() {
+        let (_source, store, sid, _) = seeded();
+        let native = store.native_history_path(&sid).unwrap();
+        let mut history = fs::read_to_string(&native).unwrap();
+        history.push_str(
+            &json!({
+                "type": "custom", "customType": "ofox-desktop-leaf", "id": "5b2c7e10",
+                "parentId": "a005630a", "timestamp": "2026-10-29T09:00:00.000Z",
+                "data": {"entryId": "8ed73709"},
+            })
+            .to_string(),
+        );
+        history.push('\n');
+        fs::write(&native, &history).unwrap();
+        store
+            .mutate(&sid, |record| {
+                record.messages[0].branch_from = Some(None);
+                let reply = &mut record.messages[1];
+                reply.model_id = Some("test/model".into());
+                reply.completed_at = Some(3);
+                reply.usage = Some(json!({
+                    "inputTokens": 10, "outputTokens": 5, "modelRequests": 1,
+                    "estimatedCostUsd": "0.00007", "searchCount": 0,
+                }));
+                Ok(())
+            })
+            .unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("backup.zip");
+        let report = store.backup(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((report.sessions, report.skipped), (1, 0));
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        let report = restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(
+            fs::read_to_string(restored.native_history_path(&sid).unwrap()).unwrap(),
+            history
+        );
+        assert_eq!(
+            serde_json::to_value(restored.load_record(&sid).unwrap().messages).unwrap(),
+            serde_json::to_value(store.load_record(&sid).unwrap().messages).unwrap()
+        );
+    }
+
     #[test]
     fn backup_restore_refuses_other_owner_and_stale_authority_and_never_overwrites() {
         let (_tmp, store, sid, _) = seeded();

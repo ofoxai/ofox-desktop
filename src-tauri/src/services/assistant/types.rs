@@ -1,7 +1,7 @@
 //! Data model shared by the assistant store, host and commands. Field names are
 //! the renderer's camelCase contract.
 use super::catalog::SearchPrice;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
 /// The proxy a run's model requests go through. `url` may carry the proxy's
@@ -151,6 +151,37 @@ pub struct Message {
     pub native_entry_id: Option<String>,
     #[serde(default)]
     pub run_id: Option<String>,
+    /// The model a reply was asked of; `None` on a user turn and on a reply
+    /// saved before replies named it.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// What a reply's run used and cost, shaped like [`Detail::usage`]:
+    /// counted from native history like the conversation's, without its
+    /// title. With the title's, the replies' usage adds up to the
+    /// conversation's. `None` on a user turn and until native history counts
+    /// the run.
+    #[serde(default)]
+    pub usage: Option<Value>,
+    /// When a reply's run ended, however it ended.
+    #[serde(default)]
+    pub completed_at: Option<i64>,
+    /// For a user turn native history holds: the native message it follows
+    /// (`Some(None)` when it starts the conversation). Every version of a
+    /// turn (edited, regenerated) follows the same one, so the turns that
+    /// share it are the versions to switch between. `None` (left out of the
+    /// JSON) when not known: not a native turn, or saved before this existed.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub branch_from: Option<Option<String>>,
+}
+
+/// A field that is there, `null` included (`Some(None)`); one left out is
+/// `None` through `#[serde(default)]`.
+fn present<'de, D: Deserializer<'de>>(value: D) -> Result<Option<Option<String>>, D::Error> {
+    Option::<String>::deserialize(value).map(Some)
 }
 
 /// One row of a session's internal run ledger: an assistant request keyed by
@@ -281,6 +312,21 @@ pub struct SendRequest {
     pub replace_attachments: bool,
     pub edit_message_id: Option<String>,
     pub regenerate_message_id: Option<String>,
+    /// A failed or stopped reply whose turn never reached native history
+    /// (nothing to regenerate from): this send asks again, and that turn is
+    /// superseded, so it is hidden. Text and files are this send's own.
+    #[serde(default)]
+    pub retry_message_id: Option<String>,
+}
+
+/// Show another version of a turn: `message_id` is the user turn to show.
+/// Names the authority the page showed, like a deletion.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchVersionRequest {
+    #[serde(flatten)]
+    pub authority: DeleteRequest,
+    pub message_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -386,6 +432,54 @@ mod tests {
         value["reasoningMs"] = json!(8200);
         let message: Message = serde_json::from_value(value).unwrap();
         assert_eq!(message.reasoning_ms, Some(8200));
+    }
+
+    #[test]
+    fn a_message_saved_before_per_message_meta_reads_without_it() {
+        let saved = json!({
+            "id": id(), "role": "user", "content": "q", "createdAt": 1, "reasoning": null,
+            "status": "completed", "revisionOf": null, "nativeEntryId": "n1",
+        });
+        let message: Message = serde_json::from_value(saved).unwrap();
+        assert!(message.model_id.is_none());
+        assert!(message.usage.is_none());
+        assert!(message.completed_at.is_none());
+        assert!(message.branch_from.is_none());
+        let value = serde_json::to_value(&message).unwrap();
+        assert_eq!(value["modelId"], Value::Null);
+        assert_eq!(value["completedAt"], Value::Null);
+        // Not known is left out; a turn that starts the conversation is null.
+        assert!(value.get("branchFrom").is_none());
+        for (branch_from, expected) in [
+            (json!(null), Some(None)),
+            (json!("a1"), Some(Some("a1".to_string()))),
+        ] {
+            let mut saved = value.clone();
+            saved["branchFrom"] = branch_from.clone();
+            let message: Message = serde_json::from_value(saved).unwrap();
+            assert_eq!(message.branch_from, expected);
+            assert_eq!(
+                serde_json::to_value(&message).unwrap()["branchFrom"],
+                branch_from
+            );
+        }
+    }
+
+    #[test]
+    fn a_send_without_a_retry_reads_as_none_and_a_switch_names_its_authority() {
+        let send: SendRequest = serde_json::from_value(json!({
+            "sessionId": id(), "runId": id(), "operationId": id(), "text": "hi",
+        }))
+        .unwrap();
+        assert!(send.retry_message_id.is_none());
+        let switch: SwitchVersionRequest = serde_json::from_value(json!({
+            "sessionId": "s", "messageId": "m", "expectedOwner": "o", "expectedGeneration": 4,
+        }))
+        .unwrap();
+        assert_eq!(switch.authority.session_id, "s");
+        assert_eq!(switch.authority.expected_owner, "o");
+        assert_eq!(switch.authority.expected_generation, 4);
+        assert_eq!(switch.message_id, "m");
     }
 
     #[test]

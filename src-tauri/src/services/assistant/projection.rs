@@ -9,12 +9,13 @@ use super::{
 };
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-/// The run's message, session and ledger row as the run ended. A run that
-/// did not complete makes the session's cost unknown, unless it failed
-/// without being billed (`unbilled`).
+/// The run's message, session and ledger row as the run ended: the message
+/// gets its end time. A run that did not complete makes its message's cost
+/// and the session's unknown, unless it failed without being billed
+/// (`unbilled`).
 pub(super) fn settle_run(
     record: &mut SessionRecord,
     control: &RunControl,
@@ -41,6 +42,10 @@ pub(super) fn settle_run(
             message.error_code = error_code
                 .filter(|code| !completed && !stopped && is_assistant_code(code))
                 .map(str::to_owned);
+            message.completed_at = Some(now());
+            if !completed && !unbilled {
+                mark_cost_unknown(message.usage.get_or_insert_with(|| json!({})));
+            }
             message.clone()
         });
     if record
@@ -80,14 +85,35 @@ pub(super) fn is_dangling(record: &SessionRecord) -> bool {
 }
 
 /// A run of a previous process: take what its native history kept, then mark
-/// it interrupted.
+/// it interrupted. What it cost is unknown, on its reply as on the session.
 pub(super) fn settle_interrupted(
     record: &mut SessionRecord,
     entries: Option<&Value>,
 ) -> Result<(), String> {
     mark_cost_unknown(&mut record.usage);
+    let interrupted: HashSet<String> = record
+        .operations
+        .iter()
+        .filter(|op| op.status == OperationStatus::Running)
+        .map(|op| op.run_id.clone())
+        .chain(record.session.active_run.iter().map(|r| r.run_id.clone()))
+        .collect();
     if let Some(entries) = entries {
         merge_native(record, entries, &[])?;
+    }
+    let finals = entries
+        .and_then(Value::as_array)
+        .map(|entries| final_entries(entries))
+        .unwrap_or_default();
+    for run in &interrupted {
+        let last = finals.get(run.as_str()).copied();
+        if let Some(index) = reply_index(&record.messages, run, last) {
+            mark_cost_unknown(
+                record.messages[index]
+                    .usage
+                    .get_or_insert_with(|| json!({})),
+            );
+        }
     }
     for message in &mut record.messages {
         if message.status == "streaming" {
@@ -314,12 +340,20 @@ pub(super) fn merge_native(
         } else {
             "completed"
         };
+        let follows = if role == "user" {
+            branch_from(entry)
+        } else {
+            None
+        };
         if let Some(index) = target {
             let m = &mut record.messages[index];
             m.native_entry_id = Some(native_id.into());
             m.superseded = entry["active"] == false;
             if role == "assistant" {
                 m.content = content;
+            }
+            if follows.is_some() {
+                m.branch_from = follows;
             }
             m.reasoning = thinking;
             // A tool or transport failure can follow the last native model
@@ -349,6 +383,10 @@ pub(super) fn merge_native(
                 revision_of: None,
                 native_entry_id: Some(native_id.into()),
                 run_id: Some(run_id.into()),
+                model_id: None,
+                usage: None,
+                completed_at: None,
+                branch_from: follows,
             });
         }
     }
@@ -375,7 +413,71 @@ pub(super) fn merge_native(
     }
     record.messages.sort_by_key(|m| m.created_at);
     recount_usage(record, entries);
+    count_reply_usage(record, entries);
     Ok(())
+}
+
+/// The message a native user entry follows (the runtime's `branchFrom`):
+/// `Some(None)` when it starts the conversation, `None` when not said.
+fn branch_from(entry: &Value) -> Option<Option<String>> {
+    match entry.get("branchFrom")? {
+        Value::String(native) => Some(Some(native.clone())),
+        Value::Null => Some(None),
+        _ => None,
+    }
+}
+
+/// Each run's last assistant entry (the runtime's `final`), by run id.
+fn final_entries(entries: &[Value]) -> HashMap<&str, &str> {
+    entries
+        .iter()
+        .filter(|e| e["role"] == "assistant" && e["final"] != false)
+        .filter_map(|e| Some((e["runId"].as_str()?, e["id"].as_str()?)))
+        .collect()
+}
+
+/// The message showing `run`'s reply: the one bound to its last native
+/// entry (`last`), else its reply native history does not hold (cut, or
+/// never sent).
+fn reply_index(messages: &[Message], run: &str, last: Option<&str>) -> Option<usize> {
+    let of_run = |m: &Message| m.role == "assistant" && m.run_id.as_deref() == Some(run);
+    last.and_then(|native| {
+        messages
+            .iter()
+            .position(|m| of_run(m) && m.native_entry_id.as_deref() == Some(native))
+    })
+    .or_else(|| {
+        messages
+            .iter()
+            .position(|m| of_run(m) && m.native_entry_id.is_none())
+    })
+}
+
+/// Count each run's native entries onto its reply, as the conversation's
+/// are counted, but without its title: a generated title belongs to the
+/// conversation, though its entry is kept under the turn it named. An
+/// unknown cost stays unknown.
+fn count_reply_usage(record: &mut SessionRecord, entries: &[Value]) {
+    let mut runs: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for entry in entries {
+        if entry["role"] == "usage" && entry["type"] == "title" {
+            continue;
+        }
+        if let Some(run) = entry["runId"].as_str() {
+            runs.entry(run).or_default().push(entry);
+        }
+    }
+    let finals = final_entries(entries);
+    let prices = search_prices(&record.operations);
+    for (run, of_run) in runs {
+        let Some(index) = reply_index(&record.messages, run, finals.get(run).copied()) else {
+            continue;
+        };
+        let usage = record.messages[index]
+            .usage
+            .get_or_insert_with(|| json!({}));
+        project_usage(usage, of_run.iter().copied(), &prices);
+    }
 }
 
 /// Recount the conversation's usage from the whole of its native history,
@@ -524,9 +626,9 @@ fn search_entry_cost(entry: &Value, prices: &HashMap<&str, &SearchPrice>) -> Sea
 /// (the runtime's `web_search` tool entries) are priced with the price their
 /// run was given (`search_prices`, by run id): `searchCount` paid searches
 /// cost `searchCostUsd`, which `estimatedCostUsd` includes.
-pub(super) fn project_usage(
+pub(super) fn project_usage<'a>(
     totals: &mut Value,
-    entries: &[Value],
+    entries: impl IntoIterator<Item = &'a Value> + Clone,
     search_prices: &HashMap<&str, &SearchPrice>,
 ) {
     ensure_object(totals);
@@ -536,7 +638,8 @@ pub(super) fn project_usage(
     let mut count = 0u64;
     let (mut searches, mut search_cost) = (0u64, Some(Decimal::ZERO));
     for entry in entries
-        .iter()
+        .clone()
+        .into_iter()
         .filter(|e| e["role"] == "tool" && e["toolName"] == "web_search")
     {
         match search_entry_cost(entry, search_prices) {
@@ -554,7 +657,7 @@ pub(super) fn project_usage(
         }
     }
     for entry in entries
-        .iter()
+        .into_iter()
         .filter(|e| e["role"] == "assistant" || e["role"] == "usage")
     {
         let usage = &entry["usage"];
@@ -1363,5 +1466,216 @@ mod tests {
         }
         let bare = AttachmentOutcome::parse(&json!({"id": id, "status": "unsupported"})).unwrap();
         assert_eq!((bare.code, bare.details), (None, None));
+    }
+
+    /// A model entry of `run`; `last` as the runtime marks its run's last.
+    fn native_reply(native: &str, run: &str, input: u64, cost: f64, last: bool) -> Value {
+        json!({
+            "id": native, "role": "assistant", "runId": run, "content": format!("{native} text"),
+            "active": true, "final": last, "timestamp": 10, "pricingKnown": true,
+            "usage": {"input": input, "output": input / 10, "cacheRead": 0, "cacheWrite": 0,
+                      "cost": {"total": cost}},
+        })
+    }
+
+    /// A request outside the conversation (a title, a compaction) of `run`.
+    fn usage_entry(native: &str, run: &str, kind: &str, input: u64, cost: f64) -> Value {
+        json!({
+            "id": native, "role": "usage", "type": kind, "runId": run, "active": true,
+            "usageCoverage": "complete", "pricingKnown": true,
+            "usage": {"input": input, "output": input / 10, "cacheRead": 0, "cacheWrite": 0,
+                      "cost": {"total": cost}},
+        })
+    }
+
+    fn cost(usage: &Value) -> Decimal {
+        usage["estimatedCostUsd"].as_str().unwrap().parse().unwrap()
+    }
+
+    #[test]
+    fn each_reply_counts_its_own_run_and_with_the_title_they_add_up_to_the_conversation() {
+        let (_config, store) = store();
+        let sid = store.create("test", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        let (first, second) = (id(), id());
+        record.messages = vec![
+            message(&id(), "user", &first, 1),
+            message(&id(), "assistant", &first, 1),
+            message(&id(), "user", &second, 2),
+            message(&id(), "assistant", &second, 2),
+        ];
+        // The first run could search, at the price it was given.
+        record.operations.push(Operation {
+            id: id(),
+            run_id: first.clone(),
+            status: OperationStatus::Completed,
+            search_price: Some(search_price()),
+        });
+        // Costs a float sums exactly, so the totals can be compared exactly.
+        let mut step = native_reply("s1", &first, 100, 0.25, false);
+        step["content"] = json!("Let me look that up.");
+        let title = usage_entry("t1", &first, "title", 40, 0.125);
+        let entries = json!([
+            {"id": "u1", "role": "user", "runId": first, "content": "q1", "active": true,
+             "timestamp": 3, "branchFrom": null},
+            step,
+            search_entry(&first, searched(1, 1000, 100), "complete", false),
+            native_reply("a1", &first, 200, 0.5, true),
+            title,
+            {"id": "u2", "role": "user", "runId": second, "content": "q2", "active": true,
+             "timestamp": 11, "branchFrom": "a1"},
+            usage_entry("c1", &second, "compaction", 30, 0.0625),
+            native_reply("a2", &second, 300, 1.0, true),
+        ]);
+        merge_native(&mut record, &entries, &[]).unwrap();
+        let usage_of = |native: &str| {
+            record
+                .messages
+                .iter()
+                .find(|m| m.native_entry_id.as_deref() == Some(native))
+                .unwrap()
+                .usage
+                .clone()
+        };
+        // A run's usage is on its reply alone: not on its question, nor on
+        // a step of it that showed text.
+        for native in ["u1", "u2", "s1"] {
+            assert!(usage_of(native).is_none(), "{native}");
+        }
+        let (one, two) = (usage_of("a1").unwrap(), usage_of("a2").unwrap());
+        assert_eq!(one["inputTokens"], 300, "its steps, not the title");
+        assert_eq!(one["modelRequests"], 2);
+        assert_eq!(one["searchCount"], 1);
+        assert_eq!(one["searchCostUsd"], "0.01409");
+        assert_eq!(cost(&one), "0.76409".parse::<Decimal>().unwrap());
+        assert_eq!(two["inputTokens"], 330, "its compaction is its own");
+        assert_eq!(two["searchCount"], 0);
+        let mut titled = json!({});
+        project_usage(&mut titled, &[title], &HashMap::new());
+        for key in [
+            "inputTokens",
+            "outputTokens",
+            "modelRequests",
+            "searchCount",
+        ] {
+            let sum = [&one, &two, &titled]
+                .iter()
+                .map(|usage| usage[key].as_u64().unwrap())
+                .sum::<u64>();
+            assert_eq!(json!(sum), record.usage[key], "{key}");
+        }
+        assert_eq!(cost(&one) + cost(&two) + cost(&titled), cost(&record.usage));
+    }
+
+    #[test]
+    fn a_native_user_turn_keeps_the_message_it_follows() {
+        let (_config, store) = store();
+        let sid = store.create("test", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        let (first, second) = (id(), id());
+        record.messages = vec![
+            message(&id(), "user", &first, 1),
+            message(&id(), "assistant", &first, 1),
+            message(&id(), "user", &second, 2),
+            message(&id(), "assistant", &second, 2),
+        ];
+        let entries = json!([
+            {"id": "u1", "role": "user", "runId": first, "active": true, "timestamp": 3,
+             "branchFrom": null},
+            native_reply("a1", &first, 1, 0.0, true),
+            {"id": "u2", "role": "user", "runId": second, "active": true, "timestamp": 11,
+             "branchFrom": "a1"},
+            native_reply("a2", &second, 1, 0.0, true),
+        ]);
+        merge_native(&mut record, &entries, &[]).unwrap();
+        let follows = |record: &SessionRecord, native: &str| {
+            record
+                .messages
+                .iter()
+                .find(|m| m.native_entry_id.as_deref() == Some(native))
+                .unwrap()
+                .branch_from
+                .clone()
+        };
+        assert_eq!(
+            follows(&record, "u1"),
+            Some(None),
+            "it starts the conversation"
+        );
+        assert_eq!(follows(&record, "u2"), Some(Some("a1".into())));
+        assert_eq!(follows(&record, "a1"), None, "only user turns are versions");
+        // A history that does not say leaves what is known.
+        let mut silent = entries.clone();
+        silent[2].as_object_mut().unwrap().remove("branchFrom");
+        merge_native(&mut record, &silent, &[]).unwrap();
+        assert_eq!(follows(&record, "u2"), Some(Some("a1".into())));
+    }
+
+    #[test]
+    fn a_settled_reply_has_its_end_time_and_a_billed_failure_leaves_its_cost_unknown() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let native = json!([native_reply("n1", &run.run_id, 100, 0.5, true)]);
+        // completed, stopped, unbilled -> its cost stays known
+        for (completed, stopped, unbilled, known) in [
+            (true, false, false, true),
+            (false, true, false, false),
+            (false, false, false, false),
+            (false, false, true, true),
+        ] {
+            let mut record = store.load_record(&sid).unwrap();
+            record.messages = vec![message(&run.message_id, "assistant", &run.run_id, 1)];
+            merge_native(&mut record, &native, &[]).unwrap();
+            let before = now();
+            let (settled, _) =
+                settle_run(&mut record, &run, completed, stopped, unbilled, None).unwrap();
+            let settled = settled.unwrap();
+            assert!(settled.completed_at.is_some_and(|at| at >= before));
+            assert_eq!(record.messages[0].completed_at, settled.completed_at);
+            let usage = settled.usage.unwrap();
+            assert_eq!(usage["inputTokens"], 100);
+            assert_eq!(usage["usageCoverage"] == "incomplete", !known, "{usage}");
+            assert_eq!(usage["estimatedCostUsd"].is_string(), known, "{usage}");
+            // Counted again from native history, an unknown cost stays unknown.
+            merge_native(&mut record, &native, &[]).unwrap();
+            let usage = record.messages[0].usage.as_ref().unwrap();
+            assert_eq!(usage["estimatedCostUsd"].is_string(), known, "{usage}");
+        }
+    }
+
+    #[test]
+    fn an_interrupted_reply_keeps_what_it_used_at_an_unknown_cost_and_no_end_time() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages = vec![
+            message(&id(), "user", &run.run_id, 1),
+            message(&run.message_id, "assistant", &run.run_id, 1),
+        ];
+        record.operations.push(Operation {
+            id: run.operation_id.clone(),
+            run_id: run.run_id.clone(),
+            status: OperationStatus::Running,
+            search_price: None,
+        });
+        record.session.active_run = Some(RunRef {
+            run_id: run.run_id.clone(),
+            operation_id: run.operation_id.clone(),
+        });
+        let native = json!([
+            {"id": "u1", "role": "user", "runId": run.run_id, "active": true, "timestamp": 3},
+            native_reply("n1", &run.run_id, 100, 0.5, true),
+        ]);
+        settle_interrupted(&mut record, Some(&native)).unwrap();
+        let reply = &record.messages[1];
+        assert_eq!(reply.id, run.message_id);
+        let usage = reply.usage.as_ref().unwrap();
+        assert_eq!(usage["inputTokens"], 100);
+        assert_eq!(usage["usageCoverage"], "incomplete");
+        assert!(usage["estimatedCostUsd"].is_null());
+        assert!(reply.completed_at.is_none());
+        assert!(record.messages[0].usage.is_none());
     }
 }

@@ -4901,6 +4901,8 @@
       "sessionMissing": "This conversation no longer exists. Refresh the list and try again.",
       "sessionUnreadable": "This conversation's saved file is damaged and can't be opened.",
       "messageMissing": "That message can no longer be edited or regenerated. Refresh the conversation.",
+      "versionUnavailable": "That version is no longer available. Refresh the conversation.",
+      "versionSwitchFailed": "Couldn't switch to that version. Please try again.",
       "invalidMessage": "This message can't be sent. Check it and try again.",
       "messageTooLarge": "This message is too long. Shorten it and try again.",
       "titleTooLong": "The title is too long. Use a shorter one.",

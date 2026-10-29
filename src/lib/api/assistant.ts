@@ -283,11 +283,33 @@ export interface AssistantMessage {
   attachments?: AssistantAttachment[];
   /** The pages the reply's web searches found; `[]` on every other message. */
   sources?: AssistantSource[];
-  /** Old branches remain readable when editing or regenerating. */
+  /**
+   * Not on the version of the conversation shown: an edited, regenerated or
+   * retried turn, or another version after a switch. Shown messages are those
+   * without it.
+   */
   superseded?: boolean;
   revisionOf?: string | null;
   nativeEntryId?: string | null;
   runId?: string | null;
+  /** The model a reply was asked of; null on a user turn and on older replies. */
+  modelId?: string | null;
+  /**
+   * What a reply's run used and cost, counted like the conversation's usage
+   * but without its generated title (the replies' usage plus the title's is
+   * the conversation's). Null on a user turn and until the run is counted.
+   */
+  usage?: AssistantUsage | null;
+  /** When a reply's run ended (ms), however it ended. */
+  completedAt?: number | null;
+  /**
+   * For a user turn the model's history holds: the message it follows, null
+   * when it starts the conversation. User turns with the same `branchFrom`
+   * are versions of one turn (`assistantApi.switchVersion` shows another).
+   * Left out when not known: not such a turn, or saved before versions
+   * existed — the one field the backend may omit.
+   */
+  branchFrom?: string | null;
 }
 
 /**
@@ -381,6 +403,21 @@ export interface AssistantSendRequest extends AssistantRunRef {
   replaceAttachments?: boolean;
   editMessageId?: string;
   regenerateMessageId?: string;
+  /**
+   * A failed or stopped reply whose turn never reached the model's history
+   * (it has no `nativeEntryId`, so it cannot be regenerated): this send asks
+   * again with its own text and files, and that turn becomes superseded.
+   * One of edit, regenerate and retry at most.
+   */
+  retryMessageId?: string;
+}
+
+export interface AssistantSwitchVersionRequest {
+  sessionId: string;
+  /** The user turn to show: one with a `nativeEntryId`. */
+  messageId: string;
+  expectedOwner: string;
+  expectedGeneration: number;
 }
 
 /**
@@ -553,6 +590,14 @@ export const assistantApi = {
     invoke<AssistantRunRef>("assistant_send", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
     invoke<null>("assistant_stop", { sessionId, runId, operationId }),
+  /**
+   * Shows another version of a turn, with the latest of what followed it,
+   * and returns the conversation as it shows now: messages' `superseded`
+   * says which are shown. Refused with `assistant_session_busy` while it
+   * replies; the version shown already changes nothing.
+   */
+  switchVersion: (request: AssistantSwitchVersionRequest) =>
+    invoke<AssistantSessionDetail>("assistant_switch_version", { request }),
   subscribe: (callback: (event: AssistantEvent) => void): Promise<UnlistenFn> =>
     listen<AssistantEvent>(ASSISTANT_EVENT, ({ payload }) => callback(payload)),
   /**
@@ -629,6 +674,8 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_invalid_session: "sessionUnreadable",
   assistant_message_not_found: "messageMissing",
   assistant_branch_unavailable: "messageMissing",
+  assistant_version_unavailable: "versionUnavailable",
+  assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",

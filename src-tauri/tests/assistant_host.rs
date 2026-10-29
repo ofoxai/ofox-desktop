@@ -5,7 +5,9 @@
 use cc_switch_lib::assistant::{
     catalog::{parse_models, Model, Source},
     host::{Admit, AssistantHost, BoxFuture, Environment, Identity},
-    types::{self, CreateRequest, Detail, Event, Message, RunProxy, SendRequest},
+    types::{
+        self, CreateRequest, Detail, Event, Message, RunProxy, SendRequest, SwitchVersionRequest,
+    },
 };
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
@@ -3566,5 +3568,325 @@ fn quitting_lets_a_title_answer_until_shortly_before_the_end_of_shutdown() {
         assert_eq!(record["usage"]["modelRequests"], 2);
         assert_ne!(record["usage"]["usageCoverage"], "incomplete");
         assert!((decimal(&record["usage"]["estimatedCostUsd"]) - 0.00014).abs() < 1e-12);
+    });
+}
+
+// ── versions, retries and per-message meta ───────────────────────────────
+
+fn pairs(expected: &[(&str, &str)]) -> Vec<(String, String)> {
+    expected
+        .iter()
+        .map(|(role, content)| (role.to_string(), content.to_string()))
+        .collect()
+}
+
+fn switch(host: &AssistantHost, sid: &str, message: &str) -> SwitchVersionRequest {
+    serde_json::from_value(json!({
+        "sessionId": sid, "expectedOwner": owner(),
+        "expectedGeneration": host.generation(), "messageId": message,
+    }))
+    .unwrap()
+}
+
+fn native_of(config: &Path, sid: &str) -> Vec<u8> {
+    std::fs::read(session_dir(config, sid).join("session.jsonl")).unwrap()
+}
+
+fn find<'a>(detail: &'a Detail, content: &str) -> &'a Message {
+    detail
+        .messages
+        .iter()
+        .find(|m| m.content == content)
+        .unwrap()
+}
+
+const VERSION_A: [(&str, &str); 4] = [
+    ("user", "Question A"),
+    ("assistant", "Answer A"),
+    ("user", "Follow-up"),
+    ("assistant", "Answer A2"),
+];
+const VERSION_B: [(&str, &str); 2] = [("user", "Question B"), ("assistant", "Answer B")];
+
+/// Question A, its follow-up, then Question A edited into Question B.
+async fn two_versions(host: &Arc<AssistantHost>, env: &TestEnv, gateway: &Gateway) -> String {
+    let sid = create(host).await;
+    gateway.reply(Reply::Stream("Answer A".into()));
+    turn(host, env, request(&sid, "Question A", json!({}))).await;
+    gateway.reply(Reply::Stream("Answer A2".into()));
+    turn(host, env, request(&sid, "Follow-up", json!({}))).await;
+    let question = host.get_session(&sid).await.unwrap().messages[0].id.clone();
+    gateway.reply(Reply::Stream("Answer B".into()));
+    turn(
+        host,
+        env,
+        request(&sid, "Question B", json!({ "editMessageId": question })),
+    )
+    .await;
+    sid
+}
+
+#[test]
+fn switching_versions_shows_the_chosen_turn_and_keeps_it_after_a_restart() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    let (sid, question_a, question_b) = runtime().block_on(async {
+        let sid = two_versions(&host, &env, &gateway).await;
+        let edited = host.get_session(&sid).await.unwrap();
+        assert_eq!(active(&edited), pairs(&VERSION_B));
+        // Both versions start the conversation; the follow-up follows answer A.
+        let versions: Vec<&str> = edited
+            .messages
+            .iter()
+            .filter(|m| m.role == "user" && m.branch_from == Some(None))
+            .map(|m| m.content.as_str())
+            .collect();
+        assert_eq!(versions, ["Question A", "Question B"]);
+        assert_eq!(
+            find(&edited, "Follow-up").branch_from,
+            Some(find(&edited, "Answer A").native_entry_id.clone())
+        );
+        let question_a = find(&edited, "Question A").id.clone();
+        let question_b = find(&edited, "Question B").id.clone();
+        let titles = gateway.title_requests().len();
+
+        let shown = host
+            .switch_version(switch(&host, &sid, &question_a))
+            .await
+            .unwrap();
+        assert_eq!(active(&shown), pairs(&VERSION_A));
+        assert_eq!(find(&shown, "Answer B").superseded, true);
+        assert_eq!(
+            active(&host.get_session(&sid).await.unwrap()),
+            pairs(&VERSION_A)
+        );
+        // Not a new message: the conversation keeps its place in the list.
+        assert_eq!(shown.session.updated_at, edited.session.updated_at);
+        // The version shown already: nothing is written.
+        let native = native_of(config.path(), &sid);
+        let again = host
+            .switch_version(switch(&host, &sid, &question_a))
+            .await
+            .unwrap();
+        assert_eq!(active(&again), pairs(&VERSION_A));
+        // Refused: another authority, or no user turn of native history.
+        let mut stale = switch(&host, &sid, &question_b);
+        stale.authority.expected_generation += 1;
+        assert_eq!(
+            host.switch_version(stale).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        let reply = find(&shown, "Answer B").id.clone();
+        for message in [types::id(), reply] {
+            assert_eq!(
+                host.switch_version(switch(&host, &sid, &message))
+                    .await
+                    .unwrap_err(),
+                "assistant_version_unavailable"
+            );
+        }
+        assert_eq!(native_of(config.path(), &sid), native);
+        // A switch never names the conversation.
+        no_more_title_requests(&gateway, titles).await;
+        (sid, question_a, question_b)
+    });
+    drop(host);
+
+    // A restarted app shows the same version, and the next turn continues it.
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        assert_eq!(
+            active(&host.get_session(&sid).await.unwrap()),
+            pairs(&VERSION_A)
+        );
+        gateway.reply(Reply::Stream("Answer C".into()));
+        turn(&host, &env, request(&sid, "Question C", json!({}))).await;
+        let context = gateway.requests().last().unwrap().text();
+        assert!(context.contains("Question A") && context.contains("Answer A2"));
+        assert!(!context.contains("Question B") && !context.contains("Answer B"));
+        let back = host
+            .switch_version(switch(&host, &sid, &question_b))
+            .await
+            .unwrap();
+        assert_eq!(active(&back), pairs(&VERSION_B));
+        let forth = host
+            .switch_version(switch(&host, &sid, &question_a))
+            .await
+            .unwrap();
+        let mut continued = pairs(&VERSION_A);
+        continued.extend(pairs(&[("user", "Question C"), ("assistant", "Answer C")]));
+        assert_eq!(active(&forth), continued);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn a_version_switch_is_refused_while_the_conversation_replies() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = two_versions(&host, &env, &gateway).await;
+        let question_a = find(&host.get_session(&sid).await.unwrap(), "Question A")
+            .id
+            .clone();
+        let open = gate();
+        gateway.reply(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Answer C".into())),
+        ));
+        let run = host
+            .send(request(&sid, "Question C", json!({})))
+            .await
+            .unwrap();
+        let native = native_of(config.path(), &sid);
+        assert_eq!(
+            host.switch_version(switch(&host, &sid, &question_a))
+                .await
+                .unwrap_err(),
+            "assistant_session_busy"
+        );
+        open.store(true, Ordering::SeqCst);
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(native_of(config.path(), &sid).starts_with(&native));
+        // Once the reply has ended, the switch goes ahead.
+        let shown = host
+            .switch_version(switch(&host, &sid, &question_a))
+            .await
+            .unwrap();
+        assert_eq!(active(&shown), pairs(&VERSION_A));
+    });
+}
+
+#[test]
+fn retrying_a_turn_native_history_never_got_hides_it_and_asks_once() {
+    use cc_switch_lib::assistant::store::AssistantStore;
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Answer A".into()));
+        turn(&host, &env, request(&sid, "Question A", json!({}))).await;
+        // A turn whose runtime never started, as the host saves one.
+        let (run, failed) = (types::id(), types::id());
+        let store = AssistantStore::for_owner(config.path(), &owner()).unwrap();
+        store
+            .mutate(&sid, |record| {
+                let at = types::now();
+                record.messages.extend([
+                    serde_json::from_value(json!({
+                        "id": types::id(), "role": "user", "content": "Question B",
+                        "createdAt": at, "reasoning": null, "status": "completed",
+                        "revisionOf": null, "nativeEntryId": null, "runId": run,
+                    }))
+                    .unwrap(),
+                    serde_json::from_value(json!({
+                        "id": failed, "role": "assistant", "content": "", "createdAt": at,
+                        "reasoning": null, "status": "error",
+                        "errorCode": "assistant_runtime_exited", "revisionOf": null,
+                        "nativeEntryId": null, "runId": run, "modelId": MODEL, "completedAt": at,
+                    }))
+                    .unwrap(),
+                ]);
+                record.operations.push(
+                    serde_json::from_value(json!({
+                        "id": types::id(), "runId": run, "status": "failed",
+                    }))
+                    .unwrap(),
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        gateway.reply(Reply::Stream("Answer B".into()));
+        let retry = request(&sid, "Question B", json!({ "retryMessageId": failed }));
+        let (_, end) = turn(&host, &env, retry).await;
+        assert_eq!(end.data["status"], "completed");
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            active(&detail),
+            pairs(&[
+                ("user", "Question A"),
+                ("assistant", "Answer A"),
+                ("user", "Question B"),
+                ("assistant", "Answer B"),
+            ])
+        );
+        let hidden: Vec<&str> = superseded(&detail).iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(hidden.len(), 2);
+        assert!(hidden.contains(&failed.as_str()));
+        // The model was asked the question once.
+        let context = gateway.requests().last().unwrap().text();
+        assert_eq!(context.matches("Question B").count(), 1, "{context}");
+        // A retried turn cannot be retried again.
+        let again = request(&sid, "Question B", json!({ "retryMessageId": failed }));
+        assert_eq!(
+            host.send(again).await.unwrap_err(),
+            "assistant_branch_unavailable"
+        );
+    });
+}
+
+#[test]
+fn each_reply_names_its_model_and_with_the_title_the_replies_add_up_to_the_cost() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.title(Reply::Stream("Two Questions".into()));
+        gateway.reply(Reply::Stream("Answer one".into()));
+        let (first, _) = turn(&host, &env, request(&sid, "Question one", json!({}))).await;
+        title_event(&env, &sid, &[&first]).await;
+        gateway.reply(Reply::Stream("Answer two".into()));
+        let (second, _) = turn(&host, &env, request(&sid, "Question two", json!({}))).await;
+        let detail = host.get_session(&sid).await.unwrap();
+        let replies: Vec<&Message> = detail
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .collect();
+        assert_eq!(replies.len(), 2);
+        // Every request is 10 + 5 tokens at $2 / $10 per million.
+        for reply in &replies {
+            assert_eq!(reply.model_id.as_deref(), Some(MODEL));
+            assert!(reply.completed_at.is_some_and(|at| at >= reply.created_at));
+            let usage = reply.usage.as_ref().unwrap();
+            assert_eq!(usage["modelRequests"], 1, "{usage}");
+            assert_eq!(usage["inputTokens"], 10);
+            assert_eq!(usage["outputTokens"], 5);
+            assert!((decimal(&usage["estimatedCostUsd"]) - 0.00007).abs() < 1e-12);
+        }
+        for message in detail.messages.iter().filter(|m| m.role == "user") {
+            assert!(message.usage.is_none() && message.model_id.is_none());
+        }
+        // The title is the conversation's third request, on no reply.
+        assert_eq!(detail.usage["modelRequests"], 3);
+        assert_eq!(detail.usage["inputTokens"], 30);
+        assert!((decimal(&detail.usage["estimatedCostUsd"]) - 0.00021).abs() < 1e-12);
+        // The reply event carries the meta too.
+        let published = wait_for(&env, &second, "message").await;
+        assert_eq!(published.data["message"]["modelId"], MODEL);
+        assert!(published.data["message"]["completedAt"].is_i64());
+        assert_eq!(published.data["message"]["usage"]["inputTokens"], 10);
     });
 }

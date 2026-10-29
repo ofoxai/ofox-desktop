@@ -33,6 +33,7 @@ pub(super) const STATE: &str = "assistant_state_unavailable";
 pub const SIGN_IN_REQUIRED: &str = "assistant_sign_in_required";
 pub(super) const IDENTITY_CHANGED: &str = "assistant_identity_changed";
 pub(super) const CANCELLED: &str = "assistant_cancelled";
+const SESSION_BUSY: &str = "assistant_session_busy";
 pub const KEY_REJECTED: &str = "assistant_key_rejected";
 const INSUFFICIENT_BALANCE: &str = "assistant_insufficient_balance";
 const RATE_LIMITED: &str = "assistant_rate_limited";
@@ -186,6 +187,9 @@ pub struct AssistantHost {
     recovered: Mutex<HashSet<String>>,
     /// The live run of each session, by session id.
     runs: Mutex<HashMap<String, Arc<RunControl>>>,
+    /// Sessions whose native history a host operation other than a run is
+    /// changing (a version switch), by session id. See [`Navigation`].
+    navigating: Arc<Mutex<HashSet<String>>>,
     /// Each catalog source of each apex, as last read.
     models: Mutex<HashMap<(String, catalog::Source), CachedSource>>,
     /// Every assistant key this process handed to a run: a draft or a title
@@ -217,6 +221,21 @@ struct CachedSource {
     rows: Option<(std::time::Instant, Vec<catalog::Model>)>,
     /// When a read last failed since then, and its error.
     failed: Option<(std::time::Instant, String)>,
+}
+
+/// A session held by [`AssistantHost::begin_navigation`] until this drops.
+pub(super) struct Navigation {
+    sessions: Arc<Mutex<HashSet<String>>>,
+    sid: String,
+}
+
+impl Drop for Navigation {
+    fn drop(&mut self) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.sid);
+    }
 }
 
 pub(super) fn session_key(owner: &str, sid: &str) -> String {
@@ -520,6 +539,7 @@ impl AssistantHost {
             admission: Mutex::default(),
             tasks: Mutex::default(),
             native_locks: Mutex::default(),
+            navigating: Arc::default(),
             recovered: Mutex::default(),
             runs: Mutex::default(),
             models: Mutex::default(),
@@ -897,12 +917,36 @@ impl AssistantHost {
         if self.generation() != generation {
             return Err(IDENTITY_CHANGED.into());
         }
-        if runs.contains_key(&run.session_id) {
-            return Err("assistant_session_busy".into());
+        if runs.contains_key(&run.session_id)
+            || self
+                .navigating
+                .lock()
+                .map_err(|_| STATE)?
+                .contains(&run.session_id)
+        {
+            return Err(SESSION_BUSY.into());
         }
         publish()?;
         runs.insert(run.session_id.clone(), run);
         Ok(())
+    }
+
+    /// Hold a session's native history for a host operation that changes it
+    /// outside a run, such as a version switch: refused while the session
+    /// has a live run or is already held, and while it is held no run of it
+    /// registers ([`Self::register_run`]). Released when the [`Navigation`]
+    /// drops. The holder still takes the session's native lock to write.
+    pub(super) fn begin_navigation(&self, sid: &str) -> Result<Navigation, String> {
+        // The runs lock first, as registration takes them.
+        let runs = self.runs.lock().map_err(|_| STATE)?;
+        let mut navigating = self.navigating.lock().map_err(|_| STATE)?;
+        if runs.contains_key(sid) || !navigating.insert(sid.to_owned()) {
+            return Err(SESSION_BUSY.into());
+        }
+        Ok(Navigation {
+            sessions: self.navigating.clone(),
+            sid: sid.to_owned(),
+        })
     }
 
     pub fn ensure_accepting_runs(&self) -> Result<(), String> {
@@ -1732,6 +1776,45 @@ pub(super) async fn read_frame<R: AsyncBufRead + Unpin>(
 
 /// The native entries of `file`, read by a short-lived runtime process.
 async fn load_native(runtime: &Runtime, file: &Path) -> Result<Value, String> {
+    native_entries(
+        runtime,
+        "load",
+        json!({ "sessionFile": file }),
+        (
+            "assistant_history_recovery_failed",
+            "assistant_history_recovery_timeout",
+        ),
+    )
+    .await
+}
+
+/// The native entries of `file` once the runtime's `navigate` showed the
+/// version of message `entry` (assistant-runtime README), from a short-lived
+/// runtime process. The caller holds the session's native lock.
+pub(super) async fn navigate_native(
+    runtime: &Runtime,
+    file: &Path,
+    entry: &str,
+) -> Result<Value, String> {
+    const FAILED: &str = "assistant_version_switch_failed";
+    native_entries(
+        runtime,
+        "navigate",
+        json!({ "sessionFile": file, "entryId": entry }),
+        (FAILED, FAILED),
+    )
+    .await
+}
+
+/// The projection's entries from one `method` request to a short-lived
+/// runtime process; `(failed, timeout)` are the codes when it refuses, or
+/// gives no answer within 15 seconds.
+async fn native_entries(
+    runtime: &Runtime,
+    method: &str,
+    params: Value,
+    (failed, timeout): (&str, &str),
+) -> Result<Value, String> {
     use tokio::io::BufReader;
     let mut child = process::Child::spawn(runtime_command(runtime))?;
     let mut input = child.take_stdin().ok_or(STDIO)?;
@@ -1740,27 +1823,26 @@ async fn load_native(runtime: &Runtime, file: &Path) -> Result<Value, String> {
     let drain = tokio::spawn(async move {
         let _ = process::bounded_output(stderr, 64 * 1024).await;
     });
-    let request =
-        frame(&json!({"jsonrpc":"2.0","id":"load","method":"load","params":{"sessionFile":file}}))?;
+    let request = frame(&json!({"jsonrpc":"2.0","id":method,"method":method,"params":params}))?;
     let result = tokio::time::timeout(Duration::from_secs(15), async {
         write_line(&mut input, &request).await?;
         let mut bytes = vec![];
         read_frame(&mut output, &mut bytes).await?;
         let response: Value = serde_json::from_slice(&bytes).map_err(|_| PROTOCOL)?;
-        if response["id"] != "load" || response.get("error").is_some() {
-            return Err("assistant_history_recovery_failed".to_string());
+        if response["id"] != method || response.get("error").is_some() {
+            return Err(failed.to_string());
         }
         Ok(response["result"]["entries"].clone())
     })
     .await
-    .map_err(|_| "assistant_history_recovery_timeout".to_string())
+    .map_err(|_| timeout.to_string())
     .and_then(|v| v);
     child.stop().await;
     drain.abort();
     result
 }
 
-fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
+pub(super) fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(bytes)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1768,8 +1850,9 @@ fn read_optional(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-/// Put the native history back as it was before a refused attempt.
-fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String> {
+/// Put the native history back as it was before a refused attempt, or a
+/// version switch that was not saved.
+pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String> {
     let restored = match before {
         Some(bytes) => crate::config::atomic_write_with(
             path,
@@ -2097,6 +2180,34 @@ mod tests {
             "reading a running conversation must not wait for its native writer"
         );
         assert!(result.unwrap().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_version_switch_and_a_run_of_the_same_conversation_exclude_each_other() {
+        let (_config, host) = fixture();
+        let (sid, other) = (id(), id());
+        let held = host.begin_navigation(&sid).unwrap();
+        assert_eq!(
+            host.begin_navigation(&sid).err().unwrap(),
+            "assistant_session_busy"
+        );
+        let run = control(&sid);
+        assert_eq!(
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap_err(),
+            "assistant_session_busy"
+        );
+        // Another conversation is not held.
+        drop(host.begin_navigation(&other).unwrap());
+        drop(held);
+        host.register_run(run, host.generation(), || Ok(()))
+            .unwrap();
+        // A conversation that replies cannot be held.
+        assert_eq!(
+            host.begin_navigation(&sid).err().unwrap(),
+            "assistant_session_busy"
+        );
+        assert!(host.begin_navigation(&other).is_ok());
     }
 
     #[test]

@@ -10,8 +10,8 @@ use crate::services::assistant::{
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
         Attachment, CreateRequest, DeleteRequest, Detail, EmptyTrashReport, EmptyTrashRequest,
-        Event, ExportMarkdownRequest, RunProxy, RunRef, SendRequest, Session, TransferRequest,
-        UpdateRequest,
+        Event, ExportMarkdownRequest, RunProxy, RunRef, SendRequest, Session, SwitchVersionRequest,
+        TransferRequest, UpdateRequest,
     },
     AssistantHost,
 };
@@ -154,6 +154,15 @@ pub async fn assistant_export_markdown(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_send(host: Host<'_>, request: SendRequest) -> Result<RunRef, String> {
     host.send(request).await
+}
+
+/// Show another version of a turn; returns the conversation as it shows now.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_switch_version(
+    host: Host<'_>,
+    request: SwitchVersionRequest,
+) -> Result<Detail, String> {
+    host.switch_version(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

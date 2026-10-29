@@ -2,7 +2,11 @@
 //! call these, so tests drive exactly what the renderer drives.
 use super::{
     attachments, catalog,
-    host::{blocking, local_gateway_allowed, AssistantHost, Identity, RunControl},
+    host::{
+        blocking, local_gateway_allowed, navigate_native, read_optional, restore, session_key,
+        AssistantHost, Identity, RunControl,
+    },
+    projection::merge_native,
     store::{self, SessionList, SessionRecord},
     thinking,
     types::*,
@@ -14,6 +18,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAX_MESSAGE_BYTES: usize = 128_000;
+/// The turn to show is not a user turn of the conversation's native history.
+const VERSION_UNAVAILABLE: &str = "assistant_version_unavailable";
 
 impl AssistantHost {
     /// Everything the assistant page needs to open. Never mints a key.
@@ -410,6 +416,7 @@ impl AssistantHost {
             let text = text.clone();
             let selected = selected.clone();
             let search_price = search_price.clone();
+            let model_id = model.id.clone();
             move || {
                 host.register_run(control.clone(), generation, || {
                     store.mutate(&request.session_id, |record| {
@@ -421,6 +428,7 @@ impl AssistantHost {
                             &text,
                             &selected,
                             search_price,
+                            &model_id,
                         )
                     })
                 })
@@ -511,6 +519,106 @@ impl AssistantHost {
         .await
     }
 
+    /// Show another version of a turn: the user turn `message_id` and the
+    /// latest of what followed it become the conversation's branch, first in
+    /// its native history (backed up, and put back if the switch is not
+    /// saved), then in its messages' `superseded`. Refused while the
+    /// conversation replies, and no reply starts until it is done. The
+    /// version shown already changes nothing; no switch names the
+    /// conversation or moves it in the list.
+    pub async fn switch_version(
+        self: &Arc<Self>,
+        request: SwitchVersionRequest,
+    ) -> Result<Detail, String> {
+        let SwitchVersionRequest {
+            authority,
+            message_id,
+        } = request;
+        let sid = authority.session_id;
+        validate_id(&sid)?;
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if authority.expected_owner != identity.owner || authority.expected_generation != generation
+        {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        self.recover(&identity, &sid).await?;
+        let _navigation = self.begin_navigation(&sid)?;
+        let _history = self
+            .native_lock(&session_key(&identity.owner, &sid))?
+            .lock_owned()
+            .await;
+        self.ensure_current(&identity, generation).await?;
+        let (record, native) = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = sid.clone();
+            move || Ok((store.load_record(&sid)?, store.native_history_path(&sid)?))
+        })
+        .await?;
+        if record.session.deleted_at.is_some() {
+            return Err("assistant_session_deleted".into());
+        }
+        let (entry, shown) = record
+            .messages
+            .iter()
+            .find(|m| m.id == message_id && m.role == "user")
+            .and_then(|m| Some((m.native_entry_id.clone()?, !m.superseded)))
+            .ok_or(VERSION_UNAVAILABLE)?;
+        let mut detail = if shown {
+            record.into_detail()
+        } else {
+            if !native.is_file() {
+                return Err("assistant_native_history_missing".into());
+            }
+            let before = blocking({
+                let native = native.clone();
+                move || read_optional(&native)
+            })
+            .await?;
+            let switched = self
+                .navigate(&identity, generation, &sid, &native, &entry)
+                .await;
+            // Unless the conversation was deleted for good meanwhile: putting
+            // its history back would bring its folder back.
+            if switched.is_err() && native.is_file() {
+                if let Err(error) = blocking(move || restore(&native, before)).await {
+                    log::warn!("[Assistant] could not put back a native history: {error}");
+                }
+            }
+            switched?
+        };
+        self.decorate(&identity.owner, &mut detail.session);
+        Ok(detail)
+    }
+
+    /// The runtime's `navigate` to native `entry`, then its projection saved
+    /// into the conversation, unless the authority changed meanwhile.
+    async fn navigate(
+        self: &Arc<Self>,
+        identity: &Identity,
+        generation: u64,
+        sid: &str,
+        native: &Path,
+        entry: &str,
+    ) -> Result<Detail, String> {
+        let entries = navigate_native(&self.runtime()?, native, entry).await?;
+        self.ensure_current(identity, generation).await?;
+        let host = self.clone();
+        let store = self.store(&identity.owner)?;
+        let sid = sid.to_owned();
+        let keys = self.known_keys();
+        blocking(move || {
+            store.mutate(&sid, |record| {
+                if host.generation() != generation {
+                    return Err(super::host::IDENTITY_CHANGED.into());
+                }
+                merge_native(record, &entries, &keys)?;
+                Ok(record.clone().into_detail())
+            })
+        })
+        .await
+    }
+
     pub async fn stop(self: &Arc<Self>, sid: &str, rid: &str, op: &str) -> Result<(), String> {
         validate_id(sid)?;
         validate_id(rid)?;
@@ -529,10 +637,18 @@ fn check_message(request: &SendRequest) -> Result<(), String> {
     if request.text.len() > MAX_MESSAGE_BYTES {
         return Err("assistant_message_too_large".into());
     }
+    let rewrites = [
+        &request.edit_message_id,
+        &request.regenerate_message_id,
+        &request.retry_message_id,
+    ]
+    .into_iter()
+    .filter(|mid| mid.is_some())
+    .count();
     if (request.text.trim().is_empty()
         && request.attachment_ids.is_empty()
         && request.regenerate_message_id.is_none())
-        || (request.edit_message_id.is_some() && request.regenerate_message_id.is_some())
+        || rewrites > 1
     {
         return Err("assistant_invalid_message".into());
     }
@@ -546,8 +662,12 @@ fn check_message(request: &SendRequest) -> Result<(), String> {
 /// Which earlier turn a send rewrites, if any.
 #[derive(Clone, Default)]
 struct Branch {
-    /// The user message an edit or a regenerate replaces from.
+    /// The user message an edit, a regenerate or a retry replaces.
     revision_of: Option<String>,
+    /// For a retry: the run of the turn it asks again. Native history never
+    /// got that turn, so the send goes on from the end of the conversation
+    /// and only that turn is superseded.
+    retried_run: Option<String>,
     /// For a regenerate: the user text it sends again.
     resent_text: Option<String>,
     /// The files the replaced user message sent.
@@ -589,6 +709,33 @@ impl Branch {
                 resent_text: Some(user.content.clone()),
                 replaced_attachments: sent(user),
                 regenerate_entry: Some(entry),
+                ..Self::default()
+            });
+        }
+        if let Some(mid) = &request.retry_message_id {
+            let reply = find(mid, "assistant")
+                .filter(|m| matches!(m.status.as_str(), "error" | "stopped") && !m.superseded)
+                .ok_or(UNAVAILABLE)?;
+            let run = reply.run_id.as_deref().ok_or(UNAVAILABLE)?;
+            let of_run = |m: &&Message| m.run_id.as_deref() == Some(run);
+            // A turn native history holds is regenerated or edited instead.
+            if record
+                .messages
+                .iter()
+                .filter(of_run)
+                .any(|m| m.native_entry_id.is_some())
+            {
+                return Err(UNAVAILABLE.into());
+            }
+            let user = record
+                .messages
+                .iter()
+                .filter(of_run)
+                .find(|m| m.role == "user")
+                .ok_or(UNAVAILABLE)?;
+            return Ok(Self {
+                revision_of: Some(user.id.clone()),
+                retried_run: Some(run.into()),
                 ..Self::default()
             });
         }
@@ -681,10 +828,12 @@ fn web_params(
     if search.is_none() {
         return params;
     }
-    // An edit or regenerate starts again from the turn it replaces.
+    // An edit or regenerate starts again from the turn it replaces; a retry
+    // goes on from the end, like a new turn.
     let end = branch
         .revision_of
         .as_ref()
+        .filter(|_| branch.retried_run.is_none())
         .and_then(|mid| record.messages.iter().position(|m| &m.id == mid))
         .unwrap_or(record.messages.len());
     let earlier = record.messages[..end]
@@ -718,9 +867,11 @@ fn search_status(models: &[catalog::Model]) -> Value {
 }
 
 /// Save the new turn as the run registers: the user message with the files
-/// it sends, the empty assistant message the stream fills, the title, and
-/// the running operation with the search price the run was given. An edit or
-/// regenerate marks the replaced turns superseded.
+/// it sends, the empty assistant message the stream fills with the model
+/// the run asks (`model_id`), the title, and the running operation with the
+/// search price the run was given. An edit or regenerate marks the replaced
+/// turns superseded, a retry the turn it asks again.
+#[allow(clippy::too_many_arguments)]
 fn publish_turn(
     record: &mut SessionRecord,
     control: &RunControl,
@@ -729,6 +880,7 @@ fn publish_turn(
     text: &str,
     selected: &[Attachment],
     search_price: Option<catalog::SearchPrice>,
+    model_id: &str,
 ) -> Result<(), String> {
     store::ensure_new_operation(record, &request.operation_id)?;
     // Admission may have waited on a Key while the user trashed the session
@@ -742,7 +894,20 @@ fn publish_turn(
     {
         return Err("assistant_attachment_not_found".into());
     }
-    if let Some(mid) = &branch.revision_of {
+    if let Some(run) = &branch.retried_run {
+        let mut retried = record
+            .messages
+            .iter_mut()
+            .filter(|m| m.run_id.as_ref() == Some(run))
+            .peekable();
+        // Asked again meanwhile (by a send that was resolved alongside).
+        if retried.peek().is_none_or(|m| m.superseded) {
+            return Err("assistant_branch_unavailable".into());
+        }
+        for message in retried {
+            message.superseded = true;
+        }
+    } else if let Some(mid) = &branch.revision_of {
         if let Some(index) = record.messages.iter().position(|m| &m.id == mid) {
             for message in &mut record.messages[index..] {
                 message.superseded = true;
@@ -766,6 +931,10 @@ fn publish_turn(
         revision_of: branch.revision_of.clone(),
         native_entry_id: None,
         run_id: Some(request.run_id.clone()),
+        model_id: None,
+        usage: None,
+        completed_at: None,
+        branch_from: None,
     });
     record.messages.push(Message {
         id: control.message_id.clone(),
@@ -779,9 +948,16 @@ fn publish_turn(
         attachments: vec![],
         sources: vec![],
         superseded: false,
-        revision_of: request.regenerate_message_id.clone(),
+        revision_of: request
+            .regenerate_message_id
+            .clone()
+            .or_else(|| request.retry_message_id.clone()),
         native_entry_id: None,
         run_id: Some(request.run_id.clone()),
+        model_id: Some(model_id.into()),
+        usage: None,
+        completed_at: None,
+        branch_from: None,
     });
     if record.session.title.is_empty() {
         // A file sent alone names the conversation.
@@ -991,6 +1167,7 @@ mod tests {
             "  ",
             &selected,
             None,
+            "m",
         )
         .unwrap();
 
@@ -1017,7 +1194,7 @@ mod tests {
                 &request,
                 "test-key-0123".into(),
             );
-            publish_turn(record, &control, &request, &branch, text, &[], None).unwrap();
+            publish_turn(record, &control, &request, &branch, text, &[], None, "m").unwrap();
             record.session.active_run = None;
         };
         publish(&mut record, "First question");
@@ -1066,6 +1243,7 @@ mod tests {
                 "question",
                 &selected,
                 None,
+                "m",
             );
             assert_eq!(
                 result.unwrap_err(),
@@ -1202,6 +1380,7 @@ mod tests {
             "Search this",
             &[],
             Some(price()),
+            "m",
         )
         .unwrap();
         let row = record.operations.last().unwrap();
@@ -1267,5 +1446,176 @@ mod tests {
             check_message(&send(&record, "x", json!({ "attachmentIds": too_many }))).unwrap_err(),
             "assistant_attachment_not_found"
         );
+    }
+
+    /// Publish `request`'s turn as the run `model` registers.
+    fn publish(
+        record: &mut SessionRecord,
+        request: &SendRequest,
+        model: &str,
+    ) -> Result<RunControl, String> {
+        let branch = Branch::resolve(record, request)?;
+        let identity = Identity {
+            owner: "ab".repeat(32),
+            apex: "ofox.ai".into(),
+        };
+        let control = RunControl::new(identity, request, "test-key-0123".into());
+        publish_turn(
+            record,
+            &control,
+            request,
+            &branch,
+            &request.text,
+            &[],
+            None,
+            model,
+        )?;
+        Ok(control)
+    }
+
+    fn turn_of<'a>(record: &'a SessionRecord, request: &SendRequest) -> &'a Message {
+        record
+            .messages
+            .iter()
+            .find(|m| m.role == "user" && m.run_id.as_deref() == Some(request.run_id.as_str()))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_reply_names_the_model_its_run_asks() {
+        let (mut record, _, _, _) = fixture();
+        let request = send(&record, "Which model?", json!({}));
+        let control = publish(&mut record, &request, "test/run-model").unwrap();
+        let reply = record
+            .messages
+            .iter()
+            .find(|m| m.id == control.message_id)
+            .unwrap();
+        assert_eq!(reply.model_id.as_deref(), Some("test/run-model"));
+        assert!(reply.usage.is_none() && reply.completed_at.is_none());
+        assert!(turn_of(&record, &request).model_id.is_none());
+    }
+
+    /// The fixture's turn, a turn native history never got (its reply
+    /// `status`), then a later native turn that asked for a page.
+    fn with_unkept_turn(status: &str) -> (SessionRecord, Message, Message) {
+        let (mut record, _, _, _) = fixture();
+        let run = id();
+        let mut question = message("user", &run, &[]);
+        let mut reply = message("assistant", &run, &[]);
+        question.native_entry_id = None;
+        reply.native_entry_id = None;
+        reply.status = status.into();
+        let later = id();
+        let mut later_question = message("user", &later, &[]);
+        later_question.content = "Read https://later.example.com/".into();
+        record.messages.extend([
+            question.clone(),
+            reply.clone(),
+            later_question,
+            message("assistant", &later, &[]),
+        ]);
+        (record, question, reply)
+    }
+
+    #[test]
+    fn a_retry_asks_again_and_supersedes_only_the_turn_it_retries() {
+        let (mut record, question, failed) = with_unkept_turn("error");
+        let request = send(&record, "Asked again", json!({"retryMessageId": failed.id}));
+        let branch = Branch::resolve(&record, &request).unwrap();
+        // It continues native history: nothing to branch from or resend.
+        assert!(branch.edit_entry.is_none() && branch.regenerate_entry.is_none());
+        assert!(branch.resent_text.is_none());
+        // The turns after the retried one stay in its context, pages too.
+        let params = web_params(&record, &branch, "Again", Some(&price()));
+        assert_eq!(
+            params["allowedWebUrls"],
+            json!(["https://later.example.com/"])
+        );
+
+        let pristine = record.clone();
+        let control = publish(&mut record, &request, "m").unwrap();
+        let hidden: Vec<&str> = record
+            .messages
+            .iter()
+            .filter(|m| m.superseded)
+            .map(|m| m.id.as_str())
+            .collect();
+        assert_eq!(hidden, [question.id.as_str(), failed.id.as_str()]);
+        let asked = turn_of(&record, &request);
+        assert_eq!(asked.content, "Asked again");
+        assert_eq!(asked.revision_of.as_deref(), Some(question.id.as_str()));
+        let reply = record
+            .messages
+            .iter()
+            .find(|m| m.id == control.message_id)
+            .unwrap();
+        assert_eq!(reply.revision_of.as_deref(), Some(failed.id.as_str()));
+        // A second retry resolved alongside the first is refused as it saves.
+        let mut twice = request.clone();
+        twice.run_id = id();
+        twice.operation_id = id();
+        let branch = Branch::resolve(&pristine, &twice).unwrap();
+        let identity = Identity {
+            owner: "ab".repeat(32),
+            apex: "ofox.ai".into(),
+        };
+        let control = RunControl::new(identity, &twice, "test-key-0123".into());
+        let before = serde_json::to_value(&record).unwrap();
+        assert_eq!(
+            publish_turn(
+                &mut record,
+                &control,
+                &twice,
+                &branch,
+                "Again",
+                &[],
+                None,
+                "m"
+            )
+            .unwrap_err(),
+            "assistant_branch_unavailable"
+        );
+        assert_eq!(serde_json::to_value(&record).unwrap(), before);
+    }
+
+    #[test]
+    fn only_a_failed_or_stopped_reply_native_history_never_kept_can_be_retried() {
+        let (record, question, stopped) = with_unkept_turn("stopped");
+        let retry = |record: &SessionRecord, mid: &str| {
+            let request = send(record, "x", json!({ "retryMessageId": mid }));
+            Branch::resolve(record, &request).map(|_| ())
+        };
+        assert!(retry(&record, &stopped.id).is_ok());
+        let unavailable = Err("assistant_branch_unavailable".to_string());
+        // Not a reply, or no reply of this conversation.
+        assert_eq!(retry(&record, &question.id), unavailable);
+        assert_eq!(retry(&record, &id()), unavailable);
+        // A completed reply has nothing to retry.
+        let mut answered = record.clone();
+        answered.messages[3].status = "completed".into();
+        assert_eq!(retry(&answered, &stopped.id), unavailable);
+        // One native history kept is regenerated, or its question edited.
+        let mut kept = record.clone();
+        kept.messages[1].status = "error".into();
+        let kept_reply = kept.messages[1].id.clone();
+        assert_eq!(retry(&kept, &kept_reply), unavailable);
+        let mut asked = record.clone();
+        asked.messages[2].native_entry_id = Some(id());
+        assert_eq!(retry(&asked, &stopped.id), unavailable);
+        // A hidden turn was already asked again.
+        let mut hidden = record.clone();
+        hidden.messages[3].superseded = true;
+        assert_eq!(retry(&hidden, &stopped.id), unavailable);
+        // One rewrite at a time.
+        for other in [
+            json!({"retryMessageId": stopped.id, "editMessageId": question.id}),
+            json!({"retryMessageId": stopped.id, "regenerateMessageId": stopped.id}),
+        ] {
+            assert_eq!(
+                check_message(&send(&record, "x", other)).unwrap_err(),
+                "assistant_invalid_message"
+            );
+        }
     }
 }
