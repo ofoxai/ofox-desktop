@@ -32,9 +32,11 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { highlightText } from "@/components/sessions/utils";
+import { searchHighlight } from "@/utils/assistantSearch";
 import { groupSessions } from "@/utils/assistantSessionGroups";
 import { cn } from "@/lib/utils";
 import type { AssistantTransferResult, useAssistant } from "./useAssistant";
@@ -115,6 +117,8 @@ interface AssistantSidebarProps {
    * the page scrolls to; none for a conversation found by its title.
    */
   onOpen: (id: string, messageId?: string) => void;
+  /** Move a conversation to the trash: the page tells it and offers Undo. */
+  onMoveToTrash: (item: AssistantSession) => void;
   /** Ask to empty the trash (the page confirms it). */
   onEmptyTrash: () => void;
   newConversationRef: RefObject<HTMLButtonElement>;
@@ -157,6 +161,7 @@ export const AssistantSidebar = forwardRef<
     canCreate,
     onCreate,
     onOpen,
+    onMoveToTrash,
     onEmptyTrash,
     newConversationRef,
     trashEntryRef,
@@ -181,6 +186,7 @@ export const AssistantSidebar = forwardRef<
   } | null>(null);
   const today = useStartOfToday();
   const { showTrash, transferring, trashCount } = assistant;
+  const highlight = searchHighlight(assistant.search);
   // A search with text stays open: its filter is in force.
   const searchShown = searchOpen || assistant.search !== "";
   const transferLocked =
@@ -260,17 +266,15 @@ export const AssistantSidebar = forwardRef<
           aria-current={selected ? "page" : undefined}
           onClick={() => onOpen(item.id, assistant.matches[item.id])}
           className={cn(
-            "flex w-full items-center gap-1.5 rounded-ctl px-2 py-1.5 text-left text-ctl transition-colors hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-50",
+            // The room the menu button takes while it shows: the title (and
+            // the spinner) end before it, not under it.
+            "flex w-full items-center gap-1.5 rounded-ctl px-2 py-1.5 text-left text-ctl transition-colors hover:bg-pill group-hover:pr-8 group-focus-within:pr-8 group-has-[[data-state=open]]:pr-8 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-50",
             selected && "bg-brand-soft text-brand-ink",
           )}
         >
           <span className="min-w-0 flex-1 truncate">
-            {highlightText(title, assistant.search)}
+            {highlightText(title, highlight)}
           </span>
-          {/* Pins are told by their group's heading: the icon is for the eye. */}
-          {item.pinnedAt !== null && !showTrash && (
-            <Pin aria-hidden className="h-3 w-3 shrink-0 text-ink-faint" />
-          )}
           {item.activeRun && (
             <>
               <Loader2
@@ -309,6 +313,15 @@ export const AssistantSidebar = forwardRef<
                 {t(
                   item.pinnedAt === null ? "assistant.pin" : "assistant.unpin",
                 )}
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                disabled={assistant.busy}
+                className="text-danger"
+                onSelect={() => onMoveToTrash(item)}
+              >
+                <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                {t("assistant.moveToTrash")}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -439,12 +452,12 @@ export const AssistantSidebar = forwardRef<
           <ul aria-label={t("assistant.conversations")}>
             {groups.map((group) => (
               <li key={group.id}>
-                <h3
+                <h2
                   id={`${rowIds}-group-${group.id}`}
                   className="px-2 pb-0.5 pt-2 text-note font-medium text-ink-ctl"
                 >
                   {t(`assistant.groups.${group.id}`)}
-                </h3>
+                </h2>
                 <ul
                   className="space-y-0.5"
                   aria-labelledby={`${rowIds}-group-${group.id}`}

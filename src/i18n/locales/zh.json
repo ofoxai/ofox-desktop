@@ -5153,7 +5153,7 @@
     },
     "pin": "置顶",
     "unpin": "取消置顶",
-    "rowActions": "对话选项",
+    "rowActions": "选项",
     "trashed": "已将「{{title}}」移入回收站",
     "undo": "撤销",
     "emptyTrash": "清空",

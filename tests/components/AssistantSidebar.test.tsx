@@ -42,6 +42,7 @@ type Assistant = ReturnType<typeof useAssistant>;
 const setPinned = vi.fn(async () => true);
 const onOpen = vi.fn();
 const onEmptyTrash = vi.fn();
+const onMoveToTrash = vi.fn();
 
 function fakeAssistant(overrides: Partial<Assistant> = {}) {
   return {
@@ -75,6 +76,7 @@ function renderSidebar(
     onCreate: vi.fn(),
     onOpen,
     onEmptyTrash,
+    onMoveToTrash,
     onTransfer: vi.fn(),
     newConversationRef: createRef<HTMLButtonElement>(),
     trashEntryRef: createRef<HTMLButtonElement>(),
@@ -146,6 +148,19 @@ describe("date groups", () => {
       ["Yesterday", ["Yesterday one"]],
       ["Past 7 days", ["Week one"]],
       ["Earlier", ["Old one"]],
+    ]);
+  });
+
+  it("makes the group headings second-level headings", () => {
+    renderSidebar({
+      sessions: [
+        conversation("p", "Pinned one", at(1), at(28)),
+        conversation("t", "Today one", at(29, 9)),
+      ],
+    });
+    expect(screen.getAllByRole("heading").map((h) => h.tagName)).toEqual([
+      "H2",
+      "H2",
     ]);
   });
 
@@ -228,20 +243,23 @@ describe("pins", () => {
     conversation("t", "Plain one", at(29, 9)),
   ];
 
-  it("marks only pinned rows with a pin icon", () => {
+  it("leaves the pin icon off the rows: the group heading says it", () => {
     vi.useFakeTimers();
     vi.setSystemTime(at(29, 12));
     renderSidebar({ sessions });
-    const pinned = screen.getByRole("button", { name: "Pinned one" });
-    const plain = screen.getByRole("button", { name: "Plain one" });
-    expect(pinned.querySelector(".lucide-pin")).not.toBeNull();
-    expect(plain.querySelector(".lucide-pin")).toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "Pinned" }).closest("li"),
+    ).toHaveTextContent("Pinned one");
+    for (const name of ["Pinned one", "Plain one"])
+      expect(
+        screen.getByRole("button", { name }).querySelector(".lucide-pin"),
+      ).toBeNull();
   });
 
   it("pins from the row's menu, and unpins a pinned row", async () => {
     renderSidebar({ sessions });
     const [pinnedMenu, plainMenu] = screen.getAllByRole("button", {
-      name: "Conversation options",
+      name: "Options",
     });
     await userEvent.click(plainMenu);
     await userEvent.click(await screen.findByRole("menuitem", { name: "Pin" }));
@@ -255,15 +273,54 @@ describe("pins", () => {
 
   it("offers no row menu in the trash", () => {
     renderSidebar({ sessions, showTrash: true, trashCount: 2 });
+    expect(screen.queryByRole("button", { name: "Options" })).toBeNull();
+  });
+
+  it("moves a conversation to the trash from the row's menu", async () => {
+    renderSidebar({ sessions });
+    const [pinnedMenu] = screen.getAllByRole("button", { name: "Options" });
+    await userEvent.click(pinnedMenu);
+    const items = await screen.findAllByRole("menuitem");
+    expect(items.map((item) => item.textContent)).toEqual([
+      "Unpin",
+      "Move to trash",
+    ]);
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: "Move to trash" }),
+    );
+    expect(onMoveToTrash).toHaveBeenCalledWith(sessions[0]);
+    expect(setPinned).not.toHaveBeenCalled();
+  });
+
+  it("does not offer the trash while another operation is running", async () => {
+    renderSidebar({ sessions, busy: true });
+    await userEvent.click(
+      screen.getAllByRole("button", { name: "Options" })[1],
+    );
     expect(
-      screen.queryByRole("button", { name: "Conversation options" }),
-    ).toBeNull();
+      await screen.findByRole("menuitem", { name: "Move to trash" }),
+    ).toHaveAttribute("aria-disabled", "true");
+    expect(screen.getByRole("menuitem", { name: "Pin" })).not.toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
+  it("makes room for the row's menu button while it shows, so the title ends before it", () => {
+    renderSidebar({ sessions });
+    const row = screen.getByRole("button", { name: "Plain one" });
+    for (const reserved of [
+      "group-hover:pr-8",
+      "group-focus-within:pr-8",
+      "group-has-[[data-state=open]]:pr-8",
+    ])
+      expect(row).toHaveClass(reserved);
   });
 
   it("gives focus to a pinned row once it is listed in its new place", async () => {
     const { rerenderWith } = renderSidebar({ sessions });
     const [, plainMenu] = screen.getAllByRole("button", {
-      name: "Conversation options",
+      name: "Options",
     });
     await userEvent.click(plainMenu);
     await userEvent.click(await screen.findByRole("menuitem", { name: "Pin" }));
@@ -291,6 +348,16 @@ describe("search", () => {
     // The title attribute is the row's whole title: its name is split by the marks.
     const marks = screen.getByTitle(/^Trip planning/).querySelectorAll("mark");
     expect([...marks].map((mark) => mark.textContent)).toEqual(["plan"]);
+  });
+
+  it("marks nothing for a search that is only spaces", () => {
+    renderSidebar({
+      search: " ",
+      sessions: [conversation("a", "Trip planning", at(29, 9))],
+    });
+    expect(
+      screen.getByTitle(/^Trip planning/).querySelectorAll("mark"),
+    ).toHaveLength(0);
   });
 
   it("opens a conversation with the message its search found, if any", async () => {

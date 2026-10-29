@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantPage } from "@/components/assistant/AssistantPage";
-import { ShellProvider } from "@/components/shell/ShellContext";
+import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import {
   assistantErrorKey,
   type AssistantBootstrap,
@@ -165,7 +165,7 @@ const row = (title: string) =>
   screen.getByTitle(new RegExp(`^${title}`)) as HTMLButtonElement;
 const rowMenu = (title: string) =>
   within(row(title).closest("li") as HTMLElement).getByRole("button", {
-    name: "Conversation options",
+    name: "Options",
   });
 const composer = () =>
   screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
@@ -292,9 +292,6 @@ describe("pins", () => {
     await waitFor(() => expect(group("Pinned")).toEqual(["Weekly report"]));
     expect(group("Today")).toEqual(["Trip plan"]);
     await waitFor(() => expect(row("Weekly report")).toHaveFocus());
-    // Pinned rows carry the icon, the others don't.
-    expect(row("Weekly report").querySelector(".lucide-pin")).not.toBeNull();
-    expect(row("Trip plan").querySelector(".lucide-pin")).toBeNull();
   });
 
   it("unpins a pinned row back to its date", async () => {
@@ -482,6 +479,107 @@ describe("undo after moving to the trash", () => {
       i18n.t(assistantErrorKey("assistant_storage_unavailable")),
     );
     expect(sessionOf("a").deletedAt).not.toBeNull();
+  });
+});
+
+describe("moving a conversation to the trash from its row", () => {
+  const undoNotice = () => {
+    const [text, options] = toasts.mock.calls[toasts.mock.calls.length - 1];
+    return { text, options };
+  };
+  const trashFromRow = async (title: string) => {
+    await userEvent.click(rowMenu(title));
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Move to trash" }),
+    );
+  };
+
+  it("trashes the row's conversation, not the open one, and offers Undo for it", async () => {
+    render(page());
+    await open("Trip plan");
+    await trashFromRow("Weekly report");
+    expect(mocks.updateSession).toHaveBeenCalledWith({
+      sessionId: "b",
+      deleted: true,
+      expectedOwner: owner,
+      expectedGeneration: 1,
+    });
+    await waitFor(() => expect(toasts).toHaveBeenCalledTimes(1));
+    expect(undoNotice().text).toBe("Moved “Weekly report” to trash");
+    expect(undoNotice().options.action.label).toBe("Undo");
+    // The open conversation stays open; the other is gone from the list.
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Trip plan" }),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(screen.queryByTitle(/^Weekly report/)).toBeNull(),
+    );
+    expect(sessionOf("a").deletedAt).toBeNull();
+    // Focus goes to the trash, where it went.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Trash/ })).toHaveFocus(),
+    );
+  });
+
+  it("undoes it from the notice, back in the list with focus, the open conversation untouched", async () => {
+    render(page());
+    await open("Trip plan");
+    await trashFromRow("Weekly report");
+    await waitFor(() => expect(toasts).toHaveBeenCalled());
+    await act(async () => {
+      undoNotice().options.action.onClick();
+    });
+    expect(sessionOf("b").deletedAt).toBeNull();
+    await waitFor(() => expect(row("Weekly report")).toHaveFocus());
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Trip plan" }),
+    ).toBeVisible();
+  });
+
+  it("closes the conversation when it is the open one's row", async () => {
+    render(page());
+    await open("Trip plan");
+    await trashFromRow("Trip plan");
+    await waitFor(() => expect(toasts).toHaveBeenCalledTimes(1));
+    expect(undoNotice().text).toBe("Moved “Trip plan” to trash");
+    await waitFor(() => expect(screen.queryByTitle(/^Trip plan/)).toBeNull());
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Trip plan" }),
+    ).toBeNull();
+  });
+
+  it("says why and offers no Undo when it could not be moved", async () => {
+    render(page());
+    await screen.findByTitle(/^Weekly report/);
+    mocks.updateSession.mockRejectedValueOnce("assistant_storage_unavailable");
+    await trashFromRow("Weekly report");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      i18n.t(assistantErrorKey("assistant_storage_unavailable")),
+    );
+    expect(toasts).not.toHaveBeenCalled();
+    expect(screen.getByTitle(/^Weekly report/)).toBeVisible();
+  });
+});
+
+describe("undo when something unsent is in the composer", () => {
+  it("restores the conversation but keeps the text, without reopening it", async () => {
+    render(page());
+    await open("Trip plan");
+    await chooseFromHeaderMenu("Move to trash");
+    await waitFor(() => expect(toasts).toHaveBeenCalled());
+    // Nothing is open: this is the new-conversation composer.
+    await userEvent.type(composer(), "words not sent yet");
+    const [, options] = toasts.mock.calls[toasts.mock.calls.length - 1];
+    await act(async () => {
+      options.action.onClick();
+    });
+    expect(sessionOf("a").deletedAt).toBeNull();
+    await waitFor(() => expect(row("Trip plan")).toHaveFocus());
+    expect(composer()).toHaveValue("words not sent yet");
+    expect(row("Trip plan")).not.toHaveAttribute("aria-current");
+    expect(
+      screen.queryByRole("heading", { level: 1, name: "Trip plan" }),
+    ).toBeNull();
   });
 });
 
@@ -708,6 +806,59 @@ describe("opening a search result", () => {
     await waitFor(() =>
       expect(scrolled()).toEqual([["b-1", { block: "center" }]]),
     );
+  });
+
+  it("marks nothing for a search that is only spaces", async () => {
+    render(page());
+    await screen.findByTitle(/^Trip plan/);
+    await searchFor(" ");
+    await userEvent.click(await screen.findByTitle(/^Trip plan/));
+    await screen.findByRole("heading", { level: 1, name: "Trip plan" });
+    await waitFor(() =>
+      expect(document.querySelector('[data-message-id="a-1"]')).not.toBeNull(),
+    );
+    expect(document.querySelectorAll("mark")).toHaveLength(0);
+  });
+
+  it("forgets the jump when the conversation could not be loaded, so a later load does not scroll", async () => {
+    function RefreshControl() {
+      const shell = useShell();
+      return (
+        <>
+          <button onClick={() => shell.setActive("assistant")}>
+            Open assistant
+          </button>
+          <button
+            disabled={!shell.canRefresh}
+            onClick={() => void shell.refresh()}
+          >
+            Refresh assistant
+          </button>
+        </>
+      );
+    }
+    render(
+      <ShellProvider openSettings={() => undefined}>
+        <RefreshControl />
+        <AssistantPage enabled />
+      </ShellProvider>,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Open assistant" }),
+    );
+    await screen.findByTitle(/^Trip plan/);
+    await searchFor("plan");
+    mocks.getSession.mockRejectedValueOnce("assistant_storage_unavailable");
+    await userEvent.click(await screen.findByTitle(/^Trip plan/));
+    await screen.findByRole("alert");
+    // The header's refresh reads the open conversation again.
+    await userEvent.click(
+      screen.getByRole("button", { name: "Refresh assistant" }),
+    );
+    await waitFor(() =>
+      expect(document.querySelector('[data-message-id="a-1"]')).not.toBeNull(),
+    );
+    expect(scrolled()).toEqual([]);
   });
 
   it("takes the marks away with the search", async () => {

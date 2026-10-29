@@ -5153,7 +5153,7 @@
     },
     "pin": "固定",
     "unpin": "固定を解除",
-    "rowActions": "会話のオプション",
+    "rowActions": "オプション",
     "trashed": "「{{title}}」をゴミ箱に移動しました",
     "undo": "元に戻す",
     "emptyTrash": "空にする",

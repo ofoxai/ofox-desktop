@@ -5153,7 +5153,7 @@
     },
     "pin": "Pin",
     "unpin": "Unpin",
-    "rowActions": "Conversation options",
+    "rowActions": "Options",
     "trashed": "Moved “{{title}}” to trash",
     "undo": "Undo",
     "emptyTrash": "Empty",
