@@ -10,6 +10,7 @@ use super::{
         settle_interrupted, settle_run, AttachmentOutcome, ProjectionBuffer,
     },
     store::AssistantStore,
+    title,
     types::*,
     web,
 };
@@ -31,7 +32,7 @@ pub type Admit<'a> = dyn Fn() -> Result<(), String> + Send + Sync + 'a;
 pub(super) const STATE: &str = "assistant_state_unavailable";
 pub const SIGN_IN_REQUIRED: &str = "assistant_sign_in_required";
 pub(super) const IDENTITY_CHANGED: &str = "assistant_identity_changed";
-const CANCELLED: &str = "assistant_cancelled";
+pub(super) const CANCELLED: &str = "assistant_cancelled";
 pub const KEY_REJECTED: &str = "assistant_key_rejected";
 const INSUFFICIENT_BALANCE: &str = "assistant_insufficient_balance";
 const RATE_LIMITED: &str = "assistant_rate_limited";
@@ -44,7 +45,7 @@ const MODEL_REQUEST_FAILED: &str = "assistant_model_request_failed";
 /// A web search may or may not have run (and been billed); the runtime ended
 /// the run rather than repeat it.
 const SEARCH_OUTCOME_UNKNOWN: &str = "assistant_search_outcome_unknown";
-const STDIO: &str = "assistant_runtime_stdio";
+pub(super) const STDIO: &str = "assistant_runtime_stdio";
 pub(super) const PROTOCOL: &str = "assistant_runtime_protocol";
 const RUNTIME_UNAVAILABLE: &str = "assistant_runtime_unavailable";
 const RUN_DEADLINE: Duration = Duration::from_secs(900);
@@ -190,6 +191,8 @@ pub struct AssistantHost {
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
+    /// Background work at it (see [`Self::track`]), such as a title.
+    background: AtomicU64,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -214,7 +217,7 @@ struct CachedSource {
     failed: Option<(std::time::Instant, String)>,
 }
 
-fn session_key(owner: &str, sid: &str) -> String {
+pub(super) fn session_key(owner: &str, sid: &str) -> String {
     format!("{owner}:{sid}")
 }
 
@@ -432,7 +435,7 @@ pub(super) fn runtime_at(base: &Path) -> Result<Runtime, String> {
     })
 }
 
-fn runtime_command(runtime: &Runtime) -> tokio::process::Command {
+pub(super) fn runtime_command(runtime: &Runtime) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&runtime.node);
     command.arg("--max-old-space-size=512").arg(&runtime.entry);
     process::clean_environment(&mut command);
@@ -519,6 +522,7 @@ impl AssistantHost {
             runs: Mutex::default(),
             models: Mutex::default(),
             keys: Mutex::default(),
+            background: AtomicU64::new(0),
         })
     }
 
@@ -681,7 +685,9 @@ impl AssistantHost {
         runtime_at(&self.env.runtime_dir()?)
     }
 
-    fn native_lock(&self, key: &str) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
+    /// The lock over one conversation's native history (see [`session_key`]):
+    /// its runs, its recovery and its titles take turns.
+    pub(super) fn native_lock(&self, key: &str) -> Result<Arc<tokio::sync::Mutex<()>>, String> {
         Ok(self
             .native_locks
             .lock()
@@ -963,12 +969,14 @@ impl AssistantHost {
         true
     }
 
-    /// Cancel every run, give each a moment to save, then abort what is left;
-    /// aborting drops the owned process, which kills its process group or Job.
+    /// Cancel every run, give each (and background work) a moment to save,
+    /// then abort what is left; aborting drops the owned process, which kills
+    /// its process group or Job.
     pub async fn shutdown(&self) {
         self.begin_shutdown();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
-        while self.runs.lock().is_ok_and(|runs| !runs.is_empty())
+        while (self.runs.lock().is_ok_and(|runs| !runs.is_empty())
+            || self.background.load(Ordering::SeqCst) > 0)
             && tokio::time::Instant::now() < deadline
         {
             tokio::time::sleep(Duration::from_millis(25)).await;
@@ -1015,6 +1023,28 @@ impl AssistantHost {
         let run_id = control.run_id.clone();
         let task = tokio::spawn(self.clone().run(control, params));
         tasks.insert(run_id, task);
+    }
+
+    /// Run `work` in the background like a run's task: shutdown gives it the
+    /// time it gives runs to end, then aborts it, which ends any process it
+    /// owns. `key` must be unique among tasks.
+    pub(super) fn track(
+        self: &Arc<Self>,
+        key: String,
+        work: impl Future<Output = ()> + Send + 'static,
+    ) {
+        let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
+        let host = self.clone();
+        let done = key.clone();
+        self.background.fetch_add(1, Ordering::SeqCst);
+        let task = tokio::spawn(async move {
+            work.await;
+            host.background.fetch_sub(1, Ordering::SeqCst);
+            if let Ok(mut tasks) = host.tasks.lock() {
+                tasks.remove(&done);
+            }
+        });
+        tasks.insert(key, task);
     }
 
     fn emit(&self, run: &RunControl, kind: &str, mut data: Value) {
@@ -1527,7 +1557,8 @@ impl AssistantHost {
 
     /// Save how the run ended, release the session, then publish: the saved
     /// message and session, an error when it failed, and `run_end` last.
-    async fn finish(&self, control: &Arc<RunControl>, outcome: Result<Finish, Failure>) {
+    /// The conversation's first answer then has it named in the background.
+    async fn finish(self: &Arc<Self>, control: &Arc<RunControl>, outcome: Result<Finish, Failure>) {
         let stopped = match &outcome {
             Ok(finish) => *finish == Finish::Stopped,
             Err(_) => control.cancelled(),
@@ -1551,16 +1582,23 @@ impl AssistantHost {
                 let control = control.clone();
                 let sid = control.session_id.clone();
                 blocking(move || {
-                    store.mutate(&sid, |record| {
-                        settle_run(
+                    let (settled, first_answer) = store.mutate(&sid, |record| {
+                        let settled = settle_run(
                             record,
                             &control,
                             completed,
                             stopped,
                             unbilled,
                             error_code.as_deref(),
-                        )
-                    })
+                        )?;
+                        let first_answer = completed
+                            .then(|| {
+                                title::first_answer(record, &control.run_id, &control.message_id)
+                            })
+                            .flatten();
+                        Ok((settled, first_answer))
+                    })?;
+                    Ok((settled, first_answer.filter(|_| store.auto_title_enabled())))
                 })
                 .await
             }
@@ -1574,15 +1612,19 @@ impl AssistantHost {
                 runs.remove(&control.session_id);
             }
         }
-        match saved {
-            Ok((message, session)) => {
+        let first_answer = match saved {
+            Ok(((message, session), first_answer)) => {
                 if let Some(message) = message {
                     self.emit(control, "message", json!({ "message": message }));
                 }
                 self.emit(control, "session", json!({ "session": session }));
+                first_answer
             }
-            Err(error) => log::warn!("[Assistant] could not save the end of a run: {error}"),
-        }
+            Err(error) => {
+                log::warn!("[Assistant] could not save the end of a run: {error}");
+                None
+            }
+        };
         let status = if completed {
             "completed"
         } else if stopped {
@@ -1604,6 +1646,9 @@ impl AssistantHost {
             "run_end",
             json!({ "stopped": stopped, "status": status }),
         );
+        if let Some(input) = first_answer {
+            self.spawn_title(control, input);
+        }
         if let Ok(mut tasks) = self.tasks.lock() {
             tasks.remove(&control.run_id);
         }
@@ -1620,20 +1665,23 @@ fn ensure_same_run(control: &RunControl, params: &Value) -> Result<(), String> {
     Ok(())
 }
 
-fn frame(value: &Value) -> Result<Vec<u8>, String> {
+pub(super) fn frame(value: &Value) -> Result<Vec<u8>, String> {
     let mut line = serde_json::to_vec(value).map_err(|_| PROTOCOL)?;
     line.push(b'\n');
     Ok(line)
 }
 
-async fn write_line<W: AsyncWrite + Unpin>(input: &mut W, line: &[u8]) -> Result<(), String> {
+pub(super) async fn write_line<W: AsyncWrite + Unpin>(
+    input: &mut W,
+    line: &[u8],
+) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
     input.write_all(line).await.map_err(|_| STDIO)?;
     input.flush().await.map_err(|_| STDIO.to_string())
 }
 
 /// One newline-terminated frame into `buffer`; `Ok(0)` at end of stream.
-async fn read_frame<R: AsyncBufRead + Unpin>(
+pub(super) async fn read_frame<R: AsyncBufRead + Unpin>(
     reader: &mut R,
     buffer: &mut Vec<u8>,
 ) -> Result<usize, String> {

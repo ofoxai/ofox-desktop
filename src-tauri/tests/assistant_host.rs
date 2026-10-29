@@ -12,6 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,8 @@ enum Reply {
     ToolCalls(Vec<(&'static str, Value)>),
     /// A JSON answer, as the Responses API gives one to the search server.
     Json(u16, Value),
+    /// This reply, once the gate opens.
+    Wait(Arc<AtomicBool>, Box<Reply>),
 }
 
 /// Tool-call ids are unique, as a provider's are.
@@ -82,37 +85,42 @@ impl Request {
     }
 }
 
+/// What the gateway answers and what it was asked. Title requests (at most
+/// 32 output tokens) have a script of their own; unscripted ones are refused
+/// with a 400, which costs nothing and changes no conversation.
+#[derive(Clone, Default)]
+struct Script {
+    replies: Arc<Mutex<VecDeque<Reply>>>,
+    requests: Arc<Mutex<Vec<Request>>>,
+    titles: Arc<Mutex<VecDeque<Reply>>>,
+    title_requests: Arc<Mutex<Vec<Request>>>,
+}
+
 struct Gateway {
     port: u16,
-    script: Arc<Mutex<VecDeque<Reply>>>,
-    requests: Arc<Mutex<Vec<Request>>>,
+    script: Script,
 }
 
 impl Gateway {
     fn start() -> Self {
         let v4 = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = v4.local_addr().unwrap().port();
-        let script = Arc::new(Mutex::new(VecDeque::new()));
-        let requests = Arc::new(Mutex::new(Vec::new()));
+        let script = Script::default();
         let mut listeners = vec![v4];
         // `localhost` may resolve to ::1 first.
         if let Ok(v6) = TcpListener::bind(("::1", port)) {
             listeners.push(v6);
         }
         for listener in listeners {
-            let (script, requests) = (script.clone(), requests.clone());
+            let script = script.clone();
             std::thread::spawn(move || {
                 for stream in listener.incoming().flatten() {
-                    let (script, requests) = (script.clone(), requests.clone());
-                    std::thread::spawn(move || serve(stream, &script, &requests));
+                    let script = script.clone();
+                    std::thread::spawn(move || serve(stream, &script));
                 }
             });
         }
-        Self {
-            port,
-            script,
-            requests,
-        }
+        Self { port, script }
     }
 
     fn base_url(&self) -> String {
@@ -120,15 +128,30 @@ impl Gateway {
     }
 
     fn reply(&self, reply: Reply) {
-        self.script.lock().unwrap().push_back(reply);
+        self.script.replies.lock().unwrap().push_back(reply);
     }
 
+    /// The answer to the next title request.
+    fn title(&self, reply: Reply) {
+        self.script.titles.lock().unwrap().push_back(reply);
+    }
+
+    /// Every request but titles.
     fn requests(&self) -> Vec<Request> {
-        self.requests.lock().unwrap().clone()
+        self.script.requests.lock().unwrap().clone()
+    }
+
+    fn title_requests(&self) -> Vec<Request> {
+        self.script.title_requests.lock().unwrap().clone()
     }
 }
 
-fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Vec<Request>>) {
+/// A request for a generated title: it asks for at most 32 output tokens.
+fn is_title_request(body: &Value) -> bool {
+    body["max_tokens"] == 32 || body["max_output_tokens"] == 32
+}
+
+fn serve(stream: TcpStream, script: &Script) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut headers = HashMap::new();
     let mut line = String::new();
@@ -158,17 +181,31 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
     } else {
         read_chunked(&mut reader)
     };
-    requests.lock().unwrap().push(Request {
+    let request = Request {
         path: path.clone(),
         authorization: headers.get("authorization").cloned().unwrap_or_default(),
         headers,
         body: serde_json::from_slice(&body).unwrap(),
-    });
-    let reply = script
-        .lock()
-        .unwrap()
-        .pop_front()
-        .expect("the gateway got a request the test did not script");
+    };
+    let mut reply = if is_title_request(&request.body) {
+        script.title_requests.lock().unwrap().push(request);
+        let scripted = script.titles.lock().unwrap().pop_front();
+        scripted.unwrap_or_else(|| Reply::Error(400, json!({"error": {"message": "unscripted"}})))
+    } else {
+        script.requests.lock().unwrap().push(request);
+        script
+            .replies
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("the gateway got a request the test did not script")
+    };
+    while let Reply::Wait(gate, inner) = reply {
+        while !gate.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        reply = *inner;
+    }
     let mut out = stream;
     // Pi's Anthropic client asks for `/anthropic/v1/messages?beta=true`.
     let messages_api = path.split('?').next() == Some("/anthropic/v1/messages");
@@ -250,6 +287,7 @@ fn serve(stream: TcpStream, script: &Mutex<VecDeque<Reply>>, requests: &Mutex<Ve
                 .as_bytes(),
             );
         }
+        Reply::Wait(..) => unreachable!("opened above"),
         Reply::Json(code, body) => {
             let body = body.to_string();
             let _ = out.write_all(
@@ -3054,5 +3092,378 @@ fn a_model_without_tools_runs_without_search_or_any_tool() {
             "the switch stays as the user set it"
         );
         assert_eq!(detail.usage["searchCount"], 0);
+    });
+}
+
+// ── generated titles ─────────────────────────────────────────────────────
+
+fn gate() -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(false))
+}
+
+/// The title requests the gateway got, once there are `count` of them.
+async fn title_requests(gateway: &Gateway, count: usize) -> Vec<Request> {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let asked = gateway.title_requests();
+        if asked.len() >= count {
+            return asked;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} title requests, wanted {count}",
+            asked.len()
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// No further title request arrives for a while (a title is asked for
+/// within a second or two of the turn's end).
+async fn no_more_title_requests(gateway: &Gateway, count: usize) {
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(gateway.title_requests().len(), count);
+}
+
+/// The saved conversation, once `ready` holds for it.
+async fn saved_once(config: &Path, sid: &str, ready: impl Fn(&Value) -> bool) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let record = saved(config, sid);
+        if ready(&record) {
+            return record;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "never ready: {}",
+            record["usage"]
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The saved conversation, once it counts `count` model requests.
+async fn counting(config: &Path, sid: &str, count: u64) -> Value {
+    saved_once(config, sid, |record| {
+        record["usage"]["modelRequests"] == count
+    })
+    .await
+}
+
+/// The `session` events of `sid` that no run published: a title's.
+fn title_events(env: &TestEnv, sid: &str, runs: &[&str]) -> Vec<Value> {
+    env.events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.session_id == sid && e.r#type == "session")
+        .filter(|e| !runs.contains(&e.run_id.as_str()))
+        .map(|e| e.data.clone())
+        .collect()
+}
+
+#[test]
+fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.title(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("\"Kyoto Trip Plan.\"".into())),
+        ));
+        gateway.reply(Reply::Stream("Day one: Fushimi Inari.".into()));
+        // The turn ends while its title is still held at the gateway.
+        let (first, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        // A turn sent at once is not named again; it waits for the title,
+        // which is being written into the native history.
+        gateway.reply(Reply::Stream("Day two: Arashiyama.".into()));
+        let second = host
+            .send(request(&sid, "And day two?", json!({})))
+            .await
+            .unwrap();
+        let asked = title_requests(&gateway, 1).await;
+        assert_eq!(asked[0].authorization, format!("Bearer {KEY}"));
+        assert!(!asked[0].body.to_string().contains(KEY));
+        // No priced search model in this catalog: the conversation's model.
+        assert_eq!(asked[0].body["model"], MODEL);
+        assert!(asked[0].body.get("reasoning_effort").is_none());
+        let instruction = asked[0].body["messages"][0]["content"].as_str().unwrap();
+        assert!(instruction.contains("title only"), "{instruction}");
+        let question = asked[0].text();
+        assert!(question.contains("Plan a trip to Kyoto"), "{question}");
+        assert!(question.contains("Day one: Fushimi Inari."), "{question}");
+        open.store(true, Ordering::SeqCst);
+        let end = wait_for(&env, &second.run_id, "run_end").await;
+        assert_eq!(end.data["status"], "completed");
+
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.session.title, "Kyoto Trip Plan");
+        assert_eq!(detail.session.title_source, Some(types::TitleSource::Auto));
+        // The title is part of the conversation's cost: three requests of
+        // 10 + 5 tokens at $2 / $10 per million.
+        assert_eq!(detail.usage["modelRequests"], 3);
+        assert_eq!(detail.usage["inputTokens"], 30);
+        assert!((decimal(&detail.usage["estimatedCostUsd"]) - 0.00021).abs() < 1e-12);
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        assert!(native.contains("\"type\":\"title\""));
+        // Published as the conversation's session, apart from both turns.
+        let named = title_events(&env, &sid, &[&first, &second.run_id]);
+        assert_eq!(named.len(), 1);
+        assert_eq!(named[0]["session"]["title"], "Kyoto Trip Plan");
+        // The next turn's context is the conversation, not its title.
+        let requests = gateway.requests();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].text().contains("Fushimi Inari"));
+        assert!(!requests[1].text().contains("Kyoto Trip Plan"));
+
+        // Regenerating the first answer does not name the conversation again.
+        let reply = end_message(&env, &first);
+        gateway.reply(Reply::Stream("Day one: Kiyomizu-dera.".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "", json!({"regenerateMessageId": reply})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        no_more_title_requests(&gateway, 1).await;
+        assert_eq!(
+            host.get_session(&sid).await.unwrap().session.title,
+            "Kyoto Trip Plan"
+        );
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+fn a_rename_or_trash_while_the_title_is_written_wins_and_the_title_is_still_paid_for() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        for (change, title, source) in [
+            (
+                json!({"title": "My own name"}),
+                "My own name",
+                types::TitleSource::User,
+            ),
+            (
+                json!({"deleted": true}),
+                "Plan a trip to Kyoto",
+                types::TitleSource::Auto,
+            ),
+        ] {
+            let sid = create(&host).await;
+            let open = gate();
+            gateway.title(Reply::Wait(
+                open.clone(),
+                Box::new(Reply::Stream("Kyoto Trip Plan".into())),
+            ));
+            gateway.reply(Reply::Stream("Day one.".into()));
+            let asked = gateway.title_requests().len();
+            let (run, _) = turn(
+                &host,
+                &env,
+                request(&sid, "Plan a trip to Kyoto", json!({})),
+            )
+            .await;
+            title_requests(&gateway, asked + 1).await;
+            let mut update = json!({"sessionId": sid});
+            update
+                .as_object_mut()
+                .unwrap()
+                .extend(change.as_object().unwrap().clone());
+            host.update_session(serde_json::from_value(update).unwrap())
+                .await
+                .unwrap();
+            open.store(true, Ordering::SeqCst);
+            // The request was answered: its cost is counted all the same.
+            let record = counting(config.path(), &sid, 2).await;
+            assert_eq!(record["session"]["title"], title, "{change}");
+            assert_eq!(record["session"]["titleSource"], json!(source), "{change}");
+            assert!(title_events(&env, &sid, &[&run]).is_empty(), "{change}");
+        }
+    });
+}
+
+#[test]
+fn a_turn_that_got_no_answer_is_not_named_and_the_first_answer_is() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Error(
+            402,
+            json!({"error": {"message": "Insufficient credits"}}),
+        ));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "error");
+        no_more_title_requests(&gateway, 0).await;
+
+        gateway.title(Reply::Stream("Osaka Food Tour".into()));
+        gateway.reply(Reply::Stream("Start in Dotonbori.".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Then plan Osaka instead", json!({})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let asked = title_requests(&gateway, 1).await;
+        assert!(asked[0].text().contains("Then plan Osaka instead"));
+        let record = counting(config.path(), &sid, 3).await;
+        assert_eq!(record["session"]["title"], "Osaka Food Tour");
+        no_more_title_requests(&gateway, 1).await;
+    });
+}
+
+#[test]
+fn a_priced_search_model_writes_titles_with_the_least_reasoning() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let mut nano = search_model();
+    nano.reasoning = true;
+    nano.thinking_levels = ["minimal", "low", "medium", "high"]
+        .map(String::from)
+        .to_vec();
+    nano.thinking_level_map = Some(
+        serde_json::from_value(
+            json!({"high": "high", "low": "low", "max": null, "medium": "medium",
+                                      "minimal": "minimal", "off": null, "xhigh": null}),
+        )
+        .unwrap(),
+    );
+    env.catalog.lock().unwrap().push(nano);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.title(Reply::Stream("Kyoto".into()));
+        gateway.reply(Reply::Stream("Day one.".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        let asked = title_requests(&gateway, 1).await;
+        assert_eq!(asked[0].body["model"], SEARCH_MODEL);
+        assert_eq!(asked[0].body["reasoning_effort"], "minimal");
+        assert_eq!(asked[0].body["max_tokens"], 32);
+        // The conversation keeps its own model for its turns.
+        assert_eq!(gateway.requests()[0].body["model"], MODEL);
+        let record = counting(config.path(), &sid, 2).await;
+        assert_eq!(record["session"]["title"], "Kyoto");
+    });
+}
+
+#[test]
+fn a_logout_stops_a_title_on_its_way_and_its_cost_stays_unknown() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.title(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Kyoto Trip Plan".into())),
+        ));
+        gateway.reply(Reply::Stream("Day one.".into()));
+        let (run, _) = turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        title_requests(&gateway, 1).await;
+        let receipt = host.begin_logout();
+        // The request was sent and may have been billed: the conversation's
+        // cost becomes unknown, and it keeps its name.
+        let record = saved_once(config.path(), &sid, |record| {
+            record["usage"]["usageCoverage"] == "incomplete"
+        })
+        .await;
+        assert_eq!(record["session"]["title"], "Plan a trip to Kyoto");
+        assert!(record["usage"]["estimatedCostUsd"].is_null());
+        assert_eq!(record["usage"]["modelRequests"], 1, "no usage was reported");
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        assert!(native.contains("\"type\":\"title\""));
+        assert!(title_events(&env, &sid, &[&run]).is_empty());
+        open.store(true, Ordering::SeqCst);
+        host.finish_logout(receipt);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn quitting_while_a_title_is_on_its_way_waits_for_its_cost() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.title(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Kyoto Trip Plan".into())),
+        ));
+        gateway.reply(Reply::Stream("Day one.".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        title_requests(&gateway, 1).await;
+        host.shutdown().await;
+        // Shutdown is over: what the title may have cost is already saved.
+        let record = saved(config.path(), &sid);
+        assert_eq!(record["usage"]["usageCoverage"], "incomplete");
+        assert_eq!(record["session"]["title"], "Plan a trip to Kyoto");
+        open.store(true, Ordering::SeqCst);
     });
 }

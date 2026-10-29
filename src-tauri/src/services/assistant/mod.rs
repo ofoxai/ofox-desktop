@@ -8,6 +8,7 @@ mod projection;
 mod requests;
 pub mod store;
 pub mod thinking;
+mod title;
 mod transfers;
 pub mod types;
 mod web;

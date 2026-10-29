@@ -982,6 +982,47 @@ mod tests {
         assert_eq!((repeat.imported, repeat.skipped), (0, 1));
     }
 
+    /// A generated title's cost is kept under the turn it named.
+    #[test]
+    fn a_titles_usage_entry_is_backed_up_and_restored_with_its_history() {
+        let (_source, store, sid, _) = seeded();
+        let native = store.native_history_path(&sid).unwrap();
+        let mut history = fs::read_to_string(&native).unwrap();
+        history.push_str(
+            &json!({
+                "type": "custom", "customType": "ofox-desktop-usage", "id": "7d1e9a20",
+                "parentId": "a005630a", "timestamp": "2026-10-29T09:00:00.000Z",
+                "data": {
+                    "runId": "a48cac04-e861-4e76-92e8-6a73896a095c",
+                    "operationId": "79346d31-7f3c-48d5-b3ac-81a889060608",
+                    "type": "title", "usageCoverage": "complete", "pricingKnown": true,
+                    "usage": {"input": 168, "output": 17, "cacheRead": 0, "cacheWrite": 0,
+                              "totalTokens": 185, "cost": {"input": 0.0000084,
+                              "output": 0.0000068, "cacheRead": 0, "cacheWrite": 0,
+                              "total": 0.0000152}},
+                    "priceSnapshot": {"modelId": "openai/gpt-5-nano",
+                                      "api": "openai-completions", "pricingKnown": true,
+                                      "cost": {"input": 0.05, "output": 0.4}},
+                },
+            })
+            .to_string(),
+        );
+        history.push('\n');
+        fs::write(&native, &history).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("backup.zip");
+        let report = store.backup(&archive, &[], || Ok(())).unwrap();
+        assert_eq!((report.sessions, report.skipped), (1, 0));
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        let report = restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(
+            fs::read_to_string(restored.native_history_path(&sid).unwrap()).unwrap(),
+            history
+        );
+    }
+
     #[test]
     fn backup_restore_refuses_other_owner_and_stale_authority_and_never_overwrites() {
         let (_tmp, store, sid, _) = seeded();

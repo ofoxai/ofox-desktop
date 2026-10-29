@@ -448,6 +448,12 @@ impl AssistantStore {
         Ok(prefs.model_id)
     }
 
+    /// Whether a conversation's first answer gets it a generated title. On:
+    /// the preference that turns it off is not stored yet.
+    pub fn auto_title_enabled(&self) -> bool {
+        true
+    }
+
     /// Token and cost totals over every session of this owner, trash included.
     /// A cost is only given when every session's usage is known and complete:
     /// an interrupted run, an unpriced request or an unreadable session turns

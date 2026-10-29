@@ -374,9 +374,15 @@ pub(super) fn merge_native(
         }
     }
     record.messages.sort_by_key(|m| m.created_at);
+    recount_usage(record, entries);
+    Ok(())
+}
+
+/// Recount the conversation's usage from the whole of its native history,
+/// each search at the price its run was given.
+pub(super) fn recount_usage(record: &mut SessionRecord, entries: &[Value]) {
     let prices = search_prices(&record.operations);
     project_usage(&mut record.usage, entries, &prices);
-    Ok(())
 }
 
 /// The search price each run was given, by run id.

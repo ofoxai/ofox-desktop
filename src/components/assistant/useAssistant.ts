@@ -734,6 +734,16 @@ export function useAssistant(enabled: boolean) {
     // its files first, even if an outcome never came in.
     const doneReading = (runId: string) =>
       setReading((old) => (old?.runId === runId ? null : old));
+    // Only the name: whatever else the session holds is read with the list
+    // and the transcript as usual.
+    const showTitle = ({ id, title, titleSource }: AssistantSession) => {
+      const named = <T extends AssistantSession>(item: T): T =>
+        item.id === id ? { ...item, title, titleSource } : item;
+      setSessions((old) => old.map(named));
+      setDetail((old) =>
+        old?.session.id === id ? { ...old, session: named(old.session) } : old,
+      );
+    };
     void assistantApi
       .subscribe((event: AssistantEvent) => {
         if (disposed) return;
@@ -754,6 +764,9 @@ export function useAssistant(enabled: boolean) {
           // `run_end` is always its last event, also after an `error`.
           if (event.type === "run_end")
             void refreshSessionsRef.current(generation);
+          // A saved session no followed run published, such as a title
+          // generated after a reply: the list and the header show its name.
+          else if (event.type === "session") showTitle(event.data.session);
           return;
         }
         // Anything but more words shows the words that came before it first,

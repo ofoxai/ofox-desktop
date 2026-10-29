@@ -617,6 +617,51 @@ describe("history", () => {
     await waitFor(() => expect(conversationMenuButton()).toHaveFocus());
   });
 
+  it("shows a title generated after the reply in the list and the header", async () => {
+    await openConversation();
+    const other: AssistantSession = {
+      ...session,
+      id: "session-b",
+      title: "Other conversation",
+    };
+    mocks.listSessions.mockResolvedValue(listOf([current.session, other]));
+    await searchFor("conversation");
+    await screen.findByRole("button", { name: /Other conversation/ });
+    // The title's own event: it follows the turn's run_end, under no run.
+    act(() =>
+      mocks.listener?.({
+        sessionId: "session-a",
+        runId: "title-job",
+        operationId: "title-job",
+        type: "session",
+        data: { session: { ...current.session, title: "Kyoto Trip Plan" } },
+      }),
+    );
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Kyoto Trip Plan" }),
+    ).toBeVisible();
+    const list = screen.getByRole("list", { name: "Conversations" });
+    expect(
+      within(list).getByRole("button", { name: /Kyoto Trip Plan/ }),
+    ).toBeVisible();
+    // Another conversation's title changes only its own row.
+    act(() =>
+      mocks.listener?.({
+        sessionId: "session-b",
+        runId: "other-title-job",
+        operationId: "other-title-job",
+        type: "session",
+        data: { session: { ...other, title: "Osaka Food Tour" } },
+      }),
+    );
+    expect(
+      await within(list).findByRole("button", { name: /Osaka Food Tour/ }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("heading", { level: 1, name: "Kyoto Trip Plan" }),
+    ).toBeVisible();
+  });
+
   it("renames from the conversation menu, with the title ready to be replaced", async () => {
     await openConversation();
     await chooseFromConversationMenu("Rename");
