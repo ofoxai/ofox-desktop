@@ -1,11 +1,13 @@
-//! Files the user imports into a conversation: which formats can be picked,
-//! the limits, and the all-or-nothing copy into the session's private
-//! attachments folder (see [`AssistantStore::attachment_dir`]).
+//! Files the user imports into a conversation, picked or dropped (paths on
+//! disk) or pasted (bytes): which formats can be imported, the limits, and
+//! the all-or-nothing copy into the session's private attachments folder
+//! (see [`AssistantStore::attachment_dir`]).
 use super::{
     store::{AssistantStore, SessionRecord},
     types::*,
 };
 use crate::config::FileTxn;
+use std::borrow::Cow;
 use std::fs;
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -68,16 +70,36 @@ pub fn mime_type(extension: &str) -> Option<&'static str> {
     })
 }
 
+/// Where a file to import comes from.
+pub enum Source {
+    /// A file the user picked or dropped, read from disk.
+    Path(PathBuf),
+    /// A file pasted from the clipboard. The name is only a hint: what the
+    /// file is comes from its content (see [`classify`]).
+    Bytes { name: String, bytes: Vec<u8> },
+}
+
+/// [`import_sources`] for files on disk.
+pub fn import(
+    store: &AssistantStore,
+    sid: &str,
+    sources: &[PathBuf],
+    precondition: impl FnOnce() -> Result<(), String>,
+) -> Result<Vec<Attachment>, String> {
+    let sources: Vec<_> = sources.iter().cloned().map(Source::Path).collect();
+    import_sources(store, sid, &sources, precondition)
+}
+
 /// Copy `sources` into the session's attachments folder and add them to its
 /// record, all or nothing. `precondition` runs under the session's write lock
 /// before the record changes (the host re-checks its authority there) and
 /// must not call back into the store. No sources: nothing happens.
 ///
 /// Blocking file IO: async callers run it in `spawn_blocking`.
-pub fn import(
+pub fn import_sources(
     store: &AssistantStore,
     sid: &str,
-    sources: &[PathBuf],
+    sources: &[Source],
     precondition: impl FnOnce() -> Result<(), String>,
 ) -> Result<Vec<Attachment>, String> {
     if sources.is_empty() {
@@ -100,19 +122,56 @@ struct Staged {
     txn: FileTxn,
 }
 
+/// A source that passed the format and size checks.
+struct Planned<'a> {
+    source: &'a Source,
+    name: String,
+    mime: &'static str,
+    size: u64,
+}
+
+impl<'a> Planned<'a> {
+    fn new(source: &'a Source) -> Result<Self, String> {
+        match source {
+            Source::Path(path) => Ok(Self {
+                source,
+                // As the file system reports them, before anything is copied.
+                mime: source_type(path)?,
+                size: source_size(path)?,
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "attachment".into()),
+            }),
+            Source::Bytes { name, bytes } => {
+                let size = bytes.len() as u64;
+                if size > MAX_FILE_BYTES {
+                    return Err(TOO_LARGE.into());
+                }
+                let (name, mime) = classify(name, bytes)?;
+                Ok(Self {
+                    source,
+                    name,
+                    mime,
+                    size,
+                })
+            }
+        }
+    }
+}
+
 /// Check every source against the formats and limits, then copy them.
-fn stage(store: &AssistantStore, sid: &str, sources: &[PathBuf]) -> Result<Staged, String> {
+fn stage(store: &AssistantStore, sid: &str, sources: &[Source]) -> Result<Staged, String> {
     if sources.len() > MAX_PER_PICK {
         return Err(TOO_MANY.into());
     }
     let record = store.load_record(sid)?;
-    // As the file system reports them, before anything is copied.
     let mut planned = Vec::with_capacity(sources.len());
     let mut bytes = 0u64;
     for source in sources {
-        let mime = source_type(source)?;
-        bytes = bytes.saturating_add(source_size(source)?);
-        planned.push((source, mime));
+        let item = Planned::new(source)?;
+        bytes = bytes.saturating_add(item.size);
+        planned.push(item);
     }
     check_room(&record, sources.len(), bytes)?;
     let dir = store.attachment_dir(sid)?;
@@ -120,8 +179,8 @@ fn stage(store: &AssistantStore, sid: &str, sources: &[PathBuf]) -> Result<Stage
         items: Vec::with_capacity(planned.len()),
         txn: FileTxn::new(),
     };
-    for (source, mime) in planned {
-        if let Err(error) = staged.copy(&dir, source, mime) {
+    for item in &planned {
+        if let Err(error) = staged.copy(&dir, item) {
             staged.rollback();
             return Err(error);
         }
@@ -130,15 +189,15 @@ fn stage(store: &AssistantStore, sid: &str, sources: &[PathBuf]) -> Result<Stage
 }
 
 impl Staged {
-    fn copy(&mut self, dir: &Path, source: &Path, mime: &str) -> Result<(), String> {
-        let bytes = read_source(source)?;
+    fn copy(&mut self, dir: &Path, planned: &Planned) -> Result<(), String> {
+        let bytes: Cow<[u8]> = match planned.source {
+            Source::Path(path) => Cow::Owned(read_source(path)?),
+            Source::Bytes { bytes, .. } => Cow::Borrowed(bytes),
+        };
         let item = Attachment {
             id: id(),
-            name: source
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "attachment".into()),
-            mime_type: mime.into(),
+            name: planned.name.clone(),
+            mime_type: planned.mime.into(),
             size_bytes: bytes.len() as u64,
             status: "ready".into(),
             reason: None,
@@ -229,6 +288,86 @@ fn source_type(source: &Path) -> Result<&'static str, String> {
         .and_then(|extension| extension.to_str())
         .and_then(|extension| mime_type(&extension.to_ascii_lowercase()))
         .ok_or_else(|| UNSUPPORTED.into())
+}
+
+/// The formats whose bytes must say what they are: a name alone is not
+/// enough for these.
+const BINARY_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "webp", "gif", "pdf", "docx", "xlsx", "pptx",
+];
+
+/// The longest stem a pasted file keeps in its name, in characters.
+const MAX_PASTED_STEM: usize = 100;
+
+/// A pasted file's name and MIME type. The content decides first: what its
+/// first bytes say it is (an image or PDF) wins over its name, and a name
+/// that is wrong gets the right extension. A zip is only a format the
+/// runtime reads when its name says which Office file it is. Content with no
+/// signature (text) is typed by its name; a name that claims a binary format
+/// the bytes are not is unreadable, and one with no readable extension is
+/// unsupported. A file without a usable name gets one made from its type.
+fn classify(name: &str, bytes: &[u8]) -> Result<(String, &'static str), String> {
+    let clean = clean_name(name);
+    let (stem, name_extension) = clean.rsplit_once('.').unwrap_or((&clean, ""));
+    let name_type = name_extension.to_ascii_lowercase();
+    let extension = match sniff(bytes) {
+        Some("zip") if matches!(name_type.as_str(), "docx" | "xlsx" | "pptx") => name_type.clone(),
+        Some("zip") => return Err(UNSUPPORTED.into()),
+        Some(kind) => kind.to_owned(),
+        None if mime_type(&name_type).is_none() => return Err(UNSUPPORTED.into()),
+        None if BINARY_EXTENSIONS.contains(&name_type.as_str()) => return Err(UNREADABLE.into()),
+        None => name_type.clone(),
+    };
+    let mime = mime_type(&extension).ok_or(UNSUPPORTED)?;
+    let same_type = name_type == extension || (name_type == "jpeg" && extension == "jpg");
+    // An extension of the right type stays as the user wrote it.
+    let shown_extension = if same_type {
+        name_extension
+    } else {
+        &extension
+    };
+    let name = if stem.is_empty() {
+        let kind = if mime.starts_with("image/") {
+            "image"
+        } else {
+            "file"
+        };
+        format!(
+            "pasted-{kind}-{}.{shown_extension}",
+            chrono::Local::now().format("%Y%m%d-%H%M%S")
+        )
+    } else {
+        let stem: String = stem.chars().take(MAX_PASTED_STEM).collect();
+        format!("{stem}.{shown_extension}")
+    };
+    Ok((name, mime))
+}
+
+/// The last part of a name the renderer sent, without path separators or
+/// control characters: it is shown, never used as a path.
+fn clean_name(raw: &str) -> String {
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or_default();
+    let printable: String = last.chars().filter(|c| !c.is_control()).collect();
+    printable.trim().trim_end_matches('.').trim_end().to_owned()
+}
+
+/// What the first bytes of a file say it is: a canonical extension, or "zip".
+fn sniff(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else if bytes.starts_with(b"%PDF-") {
+        Some("pdf")
+    } else if bytes.starts_with(b"PK\x03\x04") {
+        Some("zip")
+    } else {
+        None
+    }
 }
 
 /// `source` opened for reading, with its size, if it is a regular file within
@@ -601,7 +740,7 @@ mod tests {
     fn the_limits_hold_against_a_pick_that_landed_meanwhile() {
         let (config, store, sid) = fixture();
         let source = file(config.path(), "a.txt", b"x");
-        let staged = stage(&store, &sid, &[source]).unwrap();
+        let staged = stage(&store, &sid, &[Source::Path(source)]).unwrap();
         assert_eq!(copies(&store, &sid).len(), 1);
         seed(&store, &sid, (0..200).map(|_| existing(1)).collect());
         assert_eq!(staged.commit(&store, &sid, ok).unwrap_err(), TOO_MANY);
@@ -610,7 +749,7 @@ mod tests {
 
         seed(&store, &sid, vec![]);
         let source = file(config.path(), "b.txt", b"xy");
-        let staged = stage(&store, &sid, &[source]).unwrap();
+        let staged = stage(&store, &sid, &[Source::Path(source)]).unwrap();
         seed(&store, &sid, vec![existing(MAX_SESSION_BYTES - 1)]);
         assert_eq!(
             staged.commit(&store, &sid, ok).unwrap_err(),
@@ -673,6 +812,281 @@ mod tests {
             "assistant_invalid_storage_path"
         );
         assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+    }
+
+    // ── bytes pasted into the window ─────────────────────────────────────
+
+    fn pasted(name: &str, bytes: &[u8]) -> Source {
+        Source::Bytes {
+            name: name.into(),
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+    const JPEG: &[u8] = &[0xff, 0xd8, 0xff, 0xe0, 0, 0x10];
+    const GIF: &[u8] = b"GIF89a\x01\0\x01\0";
+    const WEBP: &[u8] = b"RIFF\x24\0\0\0WEBPVP8 ";
+    const PDF: &[u8] = b"%PDF-1.7\n";
+    const ZIP: &[u8] = b"PK\x03\x04\x14\0";
+
+    fn import_one(store: &AssistantStore, sid: &str, source: Source) -> Result<Attachment, String> {
+        import_sources(store, sid, &[source], ok).map(|mut files| files.remove(0))
+    }
+
+    #[test]
+    fn pasted_bytes_become_a_private_copy_with_their_name_and_type() {
+        let (_config, store, sid) = fixture();
+        let imported = import_one(&store, &sid, pasted("notes.md", b"# Notes")).unwrap();
+        assert_eq!(
+            (
+                imported.name.as_str(),
+                imported.mime_type.as_str(),
+                imported.size_bytes,
+                imported.status.as_str()
+            ),
+            ("notes.md", "text/markdown", 7, "ready")
+        );
+        validate_id(&imported.id).unwrap();
+        let copy = store.attachment_root(&sid).unwrap().join(&imported.id);
+        assert_eq!(fs::read(&copy).unwrap(), b"# Notes");
+        #[cfg(unix)]
+        assert_eq!(crate::config::file_mode(&copy), Some(0o600));
+        assert_eq!(
+            store
+                .load_record(&sid)
+                .unwrap()
+                .session
+                .draft_attachment_ids,
+            [imported.id]
+        );
+    }
+
+    #[test]
+    fn what_the_bytes_are_beats_what_the_name_says() {
+        let (_config, store, sid) = fixture();
+        for (name, bytes, want_name, want_mime) in [
+            ("photo.txt", PNG, "photo.png", "image/png"),
+            ("shot.png", JPEG, "shot.jpg", "image/jpeg"),
+            ("anim", GIF, "anim.gif", "image/gif"),
+            ("pic.PDF", WEBP, "pic.webp", "image/webp"),
+            ("report.TXT", PDF, "report.pdf", "application/pdf"),
+            // The extension of the same type is left as the user wrote it.
+            ("photo.JPEG", JPEG, "photo.JPEG", "image/jpeg"),
+            ("scan.png", PNG, "scan.png", "image/png"),
+        ] {
+            let imported = import_one(&store, &sid, pasted(name, bytes)).unwrap();
+            assert_eq!(
+                (imported.name.as_str(), imported.mime_type.as_str()),
+                (want_name, want_mime),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn office_files_are_told_apart_by_name_because_all_of_them_are_zip() {
+        let (_config, store, sid) = fixture();
+        for (name, suffix) in [
+            ("a.docx", "wordprocessingml.document"),
+            ("b.XLSX", "spreadsheetml.sheet"),
+            ("c.pptx", "presentationml.presentation"),
+        ] {
+            let imported = import_one(&store, &sid, pasted(name, ZIP)).unwrap();
+            assert_eq!(
+                imported.mime_type,
+                format!("application/vnd.openxmlformats-officedocument.{suffix}")
+            );
+        }
+        // A zip that is not one of those is not a format the runtime reads.
+        for name in ["a.txt", "a.zip", "a"] {
+            assert_eq!(
+                import_one(&store, &sid, pasted(name, ZIP)).unwrap_err(),
+                UNSUPPORTED,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_name_that_claims_a_binary_format_the_bytes_are_not_is_unreadable() {
+        let (_config, store, sid) = fixture();
+        for name in ["fake.png", "fake.jpg", "fake.pdf", "fake.docx", "fake.gif"] {
+            assert_eq!(
+                import_one(&store, &sid, pasted(name, b"just some text")).unwrap_err(),
+                UNREADABLE,
+                "{name}"
+            );
+        }
+        // PNG bytes cut short are no PNG.
+        assert_eq!(
+            import_one(&store, &sid, pasted("a.png", &PNG[..7])).unwrap_err(),
+            UNREADABLE
+        );
+        assert!(copies(&store, &sid).is_empty());
+    }
+
+    #[test]
+    fn pasted_bytes_of_no_known_format_are_unsupported() {
+        let (_config, store, sid) = fixture();
+        for name in ["", "README", "tool.exe", "legacy.doc", "x.svg", ".hidden"] {
+            assert_eq!(
+                import_one(&store, &sid, pasted(name, b"MZ\x90\0")).unwrap_err(),
+                UNSUPPORTED,
+                "{name:?}"
+            );
+        }
+        assert!(copies(&store, &sid).is_empty());
+    }
+
+    #[test]
+    fn a_pasted_file_without_a_name_gets_one_from_its_type() {
+        let (_config, store, sid) = fixture();
+        for (name, bytes, prefix, extension) in [
+            ("", PNG, "pasted-image-", ".png"),
+            ("   ", JPEG, "pasted-image-", ".jpg"),
+            (".png", PNG, "pasted-image-", ".png"),
+            ("dir/", GIF, "pasted-image-", ".gif"),
+            ("", PDF, "pasted-file-", ".pdf"),
+            (".txt", b"hello", "pasted-file-", ".txt"),
+        ] {
+            let imported = import_one(&store, &sid, pasted(name, bytes)).unwrap();
+            assert!(
+                imported.name.starts_with(prefix) && imported.name.ends_with(extension),
+                "{name:?} -> {}",
+                imported.name
+            );
+            // prefix + YYYYMMDD-HHMMSS + extension
+            assert_eq!(
+                imported.name.len(),
+                prefix.len() + "20260101-120000".len() + extension.len(),
+                "{}",
+                imported.name
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_name_is_only_a_file_name() {
+        let (_config, store, sid) = fixture();
+        for (name, want) in [
+            ("../../etc/passwd.txt", "passwd.txt"),
+            ("C:\\Users\\me\\notes.md", "notes.md"),
+            ("a/b\\c.txt", "c.txt"),
+            ("tab\there\u{7}.txt", "tabhere.txt"),
+            ("中文 报告.csv", "中文 报告.csv"),
+        ] {
+            let imported = import_one(&store, &sid, pasted(name, b"x")).unwrap();
+            assert_eq!(imported.name, want, "{name:?}");
+        }
+        let long = format!("{}.txt", "a".repeat(500));
+        let imported = import_one(&store, &sid, pasted(&long, b"x")).unwrap();
+        assert!(imported.name.ends_with(".txt"));
+        assert!(imported.name.chars().count() <= 104, "{}", imported.name);
+    }
+
+    #[test]
+    fn pasted_files_obey_the_same_limits_as_picked_ones() {
+        let (config, store, sid) = fixture();
+        let big = vec![b'x'; MAX_FILE_BYTES as usize + 1];
+        assert_eq!(
+            import_one(&store, &sid, pasted("big.txt", &big)).unwrap_err(),
+            TOO_LARGE
+        );
+        // Whatever the name or content, a body that is too large is too large.
+        assert_eq!(
+            import_one(&store, &sid, pasted("big.exe", &big)).unwrap_err(),
+            TOO_LARGE
+        );
+        assert!(copies(&store, &sid).is_empty());
+        let limit = vec![b'x'; MAX_FILE_BYTES as usize];
+        assert_eq!(
+            import_one(&store, &sid, pasted("limit.txt", &limit))
+                .unwrap()
+                .size_bytes,
+            MAX_FILE_BYTES
+        );
+
+        let (_config, store, sid) = fixture();
+        let eleven: Vec<_> = (0..11).map(|i| pasted(&format!("{i}.txt"), b"x")).collect();
+        assert_eq!(
+            import_sources(&store, &sid, &eleven, ok).unwrap_err(),
+            TOO_MANY
+        );
+        seed(&store, &sid, (0..199).map(|_| existing(1)).collect());
+        assert_eq!(
+            import_sources(&store, &sid, &eleven[..2], ok).unwrap_err(),
+            TOO_MANY
+        );
+        assert_eq!(
+            import_sources(&store, &sid, &eleven[..1], ok)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        seed(&store, &sid, vec![existing(MAX_SESSION_BYTES - 2)]);
+        assert_eq!(
+            import_one(&store, &sid, pasted("three.txt", b"abc")).unwrap_err(),
+            TOTAL_TOO_LARGE
+        );
+        assert_eq!(
+            import_one(&store, &sid, pasted("two.txt", b"ab"))
+                .unwrap()
+                .size_bytes,
+            2
+        );
+        drop(config);
+    }
+
+    #[test]
+    fn picked_paths_and_pasted_bytes_are_staged_all_or_nothing_together() {
+        let (config, store, sid) = fixture();
+        let fine = file(config.path(), "fine.txt", b"x");
+        let both = [Source::Path(fine), pasted("ok.txt", b"y")];
+        let imported = import_sources(&store, &sid, &both, ok).unwrap();
+        assert_eq!(
+            imported.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["fine.txt", "ok.txt"]
+        );
+
+        let (config, store, sid) = fixture();
+        let fine = file(config.path(), "fine.txt", b"x");
+        let refused = [Source::Path(fine), pasted("bad.exe", b"MZ")];
+        assert_eq!(
+            import_sources(&store, &sid, &refused, ok).unwrap_err(),
+            UNSUPPORTED
+        );
+        assert!(copies(&store, &sid).is_empty());
+        assert!(store.load_record(&sid).unwrap().attachments.is_empty());
+    }
+
+    #[test]
+    fn a_refused_commit_removes_pasted_copies_too() {
+        let (_config, store, sid) = fixture();
+        let refused = || Err::<(), _>("assistant_identity_changed".to_string());
+        assert_eq!(
+            import_sources(&store, &sid, &[pasted("a.txt", b"x")], refused).unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert!(copies(&store, &sid).is_empty());
+        assert!(store.load_record(&sid).unwrap().attachments.is_empty());
+    }
+
+    #[test]
+    fn a_trashed_conversation_takes_no_pasted_files() {
+        let (_config, store, sid) = fixture();
+        store
+            .mutate(&sid, |record| {
+                record.session.deleted_at = Some(now());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            import_one(&store, &sid, pasted("a.txt", b"x")).unwrap_err(),
+            "assistant_session_deleted"
+        );
+        assert!(copies(&store, &sid).is_empty());
     }
 
     #[test]

@@ -4,7 +4,9 @@
 //! catalog, where files live, where events go) comes in through
 //! [`Environment`], so the host runs the same against the app and in tests.
 use super::{
-    catalog, process,
+    catalog,
+    drops::DropSlot,
+    process,
     projection::{
         add_usage, is_dangling, merge_native, record_attachment_outcome, save_projection,
         settle_interrupted, settle_run, AttachmentOutcome, ProjectionBuffer,
@@ -192,6 +194,9 @@ pub struct AssistantHost {
     navigating: Arc<Mutex<HashSet<String>>>,
     /// Each catalog source of each apex, as last read.
     models: Mutex<HashMap<(String, catalog::Source), CachedSource>>,
+    /// The files last dropped on the window, waiting for the renderer's
+    /// token (see [`super::drops`]).
+    pub(super) drops: Mutex<DropSlot>,
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
@@ -543,6 +548,7 @@ impl AssistantHost {
             recovered: Mutex::default(),
             runs: Mutex::default(),
             models: Mutex::default(),
+            drops: Mutex::default(),
             keys: Mutex::default(),
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
@@ -1099,6 +1105,11 @@ impl AssistantHost {
             .generation
             .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
+        // What was dropped belongs to the authority that just ended.
+        self.drops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         transition(
             &mut self
                 .admission

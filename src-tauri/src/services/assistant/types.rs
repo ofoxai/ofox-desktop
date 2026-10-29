@@ -341,6 +341,18 @@ pub struct SwitchVersionRequest {
     pub message_id: String,
 }
 
+/// Import the files last dropped on the window. It names the token the
+/// window's drop event gave the renderer, never a path (an unknown field is
+/// refused), and the authority the page showed.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImportDropRequest {
+    pub session_id: String,
+    pub token: String,
+    pub expected_owner: String,
+    pub expected_generation: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Event {

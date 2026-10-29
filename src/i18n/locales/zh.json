@@ -4915,6 +4915,7 @@
       "attachmentUnreadable": "无法读取文件。它可能已被移动、已损坏或受密码保护。请检查文件后重新附加。",
       "attachmentWriteFailed": "无法为此对话保存文件。请检查磁盘空间和权限后重试。",
       "attachmentDialogFailed": "无法打开文件选择窗口，请重试。",
+      "dropUnavailable": "拖入的文件已失效，请重新拖入。",
       "visionModelRequired": "此模型无法读取图片。请选择能读取图片的模型，然后再发一次这条消息。",
       "modelRequired": "请先选择模型。",
       "modelUnavailable": "这个模型暂时不可用，请换一个模型。",

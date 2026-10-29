@@ -421,6 +421,39 @@ export interface AssistantSendRequest extends AssistantRunRef {
   retryMessageId?: string;
 }
 
+/**
+ * Whether a file drag is over the window. A drop ends the drag: the backend
+ * announces `"leave"` first, then the `assistant:drop` event, and no other
+ * leave follows. Only the backend knows the dragged paths; the renderer
+ * never sees one.
+ */
+export type AssistantDragState = "enter" | "leave";
+
+/**
+ * Files dropped on the window: a single-use token for `importDrop` (valid for
+ * 60 seconds, for the account and authority generation of the drop, and
+ * replaced by the next drop) and how many files it stands for.
+ */
+export interface AssistantDrop {
+  token: string;
+  count: number;
+}
+
+export interface AssistantImportDropRequest {
+  sessionId: string;
+  /** The `token` of the `assistant:drop` event. */
+  token: string;
+  expectedOwner: string;
+  expectedGeneration: number;
+}
+
+/** The conversation and authority a pasted file is imported under. */
+export interface AssistantPasteTarget {
+  sessionId: string;
+  expectedOwner: string;
+  expectedGeneration: number;
+}
+
 export interface AssistantSwitchVersionRequest {
   sessionId: string;
   /** The user turn to show: one with a `nativeEntryId`. */
@@ -544,6 +577,10 @@ export type AssistantEvent = AssistantRunRef & {
 } & AssistantRunEvent;
 
 export const ASSISTANT_EVENT = "assistant:event";
+/** A file drag entered or left the window (`AssistantDragState`). */
+export const ASSISTANT_DRAG_EVENT = "assistant:drag";
+/** Files were dropped on the window (`AssistantDrop`). */
+export const ASSISTANT_DROP_EVENT = "assistant:drop";
 
 /** The backend derives account, organization and region; callers never supply owner IDs. */
 export const assistantApi = {
@@ -595,6 +632,45 @@ export const assistantApi = {
    */
   pickAttachments: (sessionId: string) =>
     invoke<AssistantAttachment[]>("assistant_pick_attachments", { sessionId }),
+  /**
+   * Imports the files last dropped on the window into the conversation, with
+   * a picked file's checks, all or nothing. Refused with
+   * `assistant_drop_unavailable` for a token that is unknown, used, replaced
+   * or older than 60 seconds; a token is spent once the import starts.
+   */
+  importDrop: (request: AssistantImportDropRequest) =>
+    invoke<AssistantAttachment[]>("assistant_import_drop", { request }),
+  /**
+   * Imports one pasted file (`clipboardData.files[i]`) into the conversation.
+   * One file per call; at most 10 per paste event, as in a pick. The bytes
+   * go as a raw body and the rest as headers. Its type is read by the backend
+   * from the bytes, never from `file.type`; a name that disagrees is fixed,
+   * and a missing name becomes `pasted-image-<time>.png`. The returned file
+   * is the attachment to add to the draft.
+   */
+  importPasted: async (file: File, target: AssistantPasteTarget) => {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return invoke<AssistantAttachment[]>("assistant_import_pasted", bytes, {
+      headers: {
+        "x-session-id": target.sessionId,
+        "x-expected-owner": target.expectedOwner,
+        "x-expected-generation": String(target.expectedGeneration),
+        "x-file-name": encodeURIComponent(file.name),
+      },
+    });
+  },
+  /** A file drag entered or left the window. */
+  onDrag: (
+    callback: (state: AssistantDragState) => void,
+  ): Promise<UnlistenFn> =>
+    listen<{ state: AssistantDragState }>(ASSISTANT_DRAG_EVENT, ({ payload }) =>
+      callback(payload.state),
+    ),
+  /** Files were dropped on the window; import them with `importDrop`. */
+  onDrop: (callback: (drop: AssistantDrop) => void): Promise<UnlistenFn> =>
+    listen<AssistantDrop>(ASSISTANT_DROP_EVENT, ({ payload }) =>
+      callback(payload),
+    ),
   send: (request: AssistantSendRequest) =>
     invoke<AssistantRunRef>("assistant_send", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
@@ -698,6 +774,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_attachment_write_failed: "attachmentWriteFailed",
   assistant_attachment_cleanup_failed: "attachmentCleanupFailed",
   assistant_attachment_dialog_failed: "attachmentDialogFailed",
+  assistant_drop_unavailable: "dropUnavailable",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",

@@ -116,8 +116,9 @@ fn deeplink_error_view(url_str: &str, _error: &crate::AppError) -> serde_json::V
 
 #[cfg(test)]
 mod assistant_wiring_tests {
-    /// Chat and its attachment picker (S2) only: no approval, memory, export,
-    /// purge, backup or usage command reaches the renderer.
+    /// Chat and its attachment intake (S2 picker, dropped and pasted files)
+    /// only: no approval, memory, export, purge, backup or usage command
+    /// reaches the renderer.
     #[test]
     fn only_the_chat_assistant_commands_are_registered() {
         let source = include_str!("lib.rs");
@@ -146,6 +147,8 @@ mod assistant_wiring_tests {
                 "assistant_empty_trash",
                 "assistant_export_markdown",
                 "assistant_get_session",
+                "assistant_import_drop",
+                "assistant_import_pasted",
                 "assistant_list_sessions",
                 "assistant_pick_attachments",
                 "assistant_restore",
@@ -335,6 +338,9 @@ pub fn run() {
         .plugin(tauri_plugin_deep_link::init())
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                commands::handle_assistant_drag_drop(window.app_handle(), drag);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let settings = crate::settings::get_settings();
 
@@ -1850,6 +1856,8 @@ pub fn run() {
             commands::assistant_stop,
             commands::assistant_switch_version,
             commands::assistant_pick_attachments,
+            commands::assistant_import_drop,
+            commands::assistant_import_pasted,
         ]);
 
     let app = builder

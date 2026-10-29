@@ -12,14 +12,16 @@ import {
 const invoke = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 const events = vi.hoisted(() => ({
-  handlers: new Map<string, () => void>(),
+  handlers: new Map<string, (event?: { payload: unknown }) => void>(),
   off: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (name: string, handler: () => void) => {
-    events.handlers.set(name, handler);
-    return events.off;
-  }),
+  listen: vi.fn(
+    async (name: string, handler: (event?: { payload: unknown }) => void) => {
+      events.handlers.set(name, handler);
+      return events.off;
+    },
+  ),
 }));
 
 const locales = { en, ja, zh } as Record<
@@ -30,6 +32,15 @@ const locales = { en, ja, zh } as Record<
 beforeEach(() => {
   invoke.mockReset();
 });
+
+/** jsdom's File has no `arrayBuffer()`, which every supported WebView has. */
+function fileOf(bytes: Uint8Array, name: string, type = ""): File {
+  const file = new File([bytes.slice().buffer as ArrayBuffer], name, { type });
+  Object.defineProperty(file, "arrayBuffer", {
+    value: async () => bytes.buffer.slice(0),
+  });
+  return file;
+}
 
 describe("assistant commands", () => {
   it("lists one filter of sessions with the damaged ones as the backend names them", async () => {
@@ -145,6 +156,75 @@ describe("assistant commands", () => {
     expect(files).toEqual([file]);
   });
 
+  it("imports the files dropped on the window by their token, never by a path", async () => {
+    const file = {
+      id: "f2",
+      name: "chart.png",
+      mimeType: "image/png",
+      sizeBytes: 12,
+      status: "ready",
+      reason: null,
+      previewUrl: null,
+      details: null,
+    };
+    invoke.mockResolvedValue([file]);
+    const files = await assistantApi.importDrop({
+      sessionId: "s",
+      token: "token-1",
+      expectedOwner: "owner",
+      expectedGeneration: 4,
+    });
+    expect(invoke).toHaveBeenCalledWith("assistant_import_drop", {
+      request: {
+        sessionId: "s",
+        token: "token-1",
+        expectedOwner: "owner",
+        expectedGeneration: 4,
+      },
+    });
+    expect(files).toEqual([file]);
+  });
+
+  it("sends a pasted file as raw bytes with its authority and encoded name in headers", async () => {
+    invoke.mockResolvedValue([]);
+    const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+    const pasted = fileOf(bytes, "中文 a+b.png", "image/png");
+    await assistantApi.importPasted(pasted, {
+      sessionId: "s",
+      expectedOwner: "owner",
+      expectedGeneration: 7,
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+    const [command, body, options] = invoke.mock.calls[0];
+    expect(command).toBe("assistant_import_pasted");
+    expect(body).toBeInstanceOf(Uint8Array);
+    expect(Array.from(body as Uint8Array)).toEqual([0x89, 0x50, 0x4e, 0x47]);
+    expect(options).toEqual({
+      headers: {
+        "x-session-id": "s",
+        "x-expected-owner": "owner",
+        "x-expected-generation": "7",
+        "x-file-name": "%E4%B8%AD%E6%96%87%20a%2Bb.png",
+      },
+    });
+  });
+
+  it("claims no type for a pasted file: the backend reads it from the bytes", async () => {
+    invoke.mockResolvedValue([]);
+    await assistantApi.importPasted(
+      fileOf(new Uint8Array([1]), "", "image/png"),
+      { sessionId: "s", expectedOwner: "o", expectedGeneration: 0 },
+    );
+    const headers = invoke.mock.calls[0][2].headers as Record<string, string>;
+    expect(Object.keys(headers).sort()).toEqual([
+      "x-expected-generation",
+      "x-expected-owner",
+      "x-file-name",
+      "x-session-id",
+    ]);
+    expect(headers["x-file-name"]).toBe("");
+  });
+
   it("stops one run by session, run and operation", async () => {
     invoke.mockResolvedValue(undefined);
     await assistantApi.stop("s", "r", "o");
@@ -153,6 +233,32 @@ describe("assistant commands", () => {
       runId: "r",
       operationId: "o",
     });
+  });
+});
+
+describe("file drag and drop events", () => {
+  beforeEach(() => {
+    events.handlers.clear();
+    events.off.mockClear();
+  });
+
+  it("reports whether a file drag is over the window", async () => {
+    const seen: string[] = [];
+    const off = await assistantApi.onDrag((state) => seen.push(state));
+    events.handlers.get("assistant:drag")?.({ payload: { state: "enter" } });
+    events.handlers.get("assistant:drag")?.({ payload: { state: "leave" } });
+    expect(seen).toEqual(["enter", "leave"]);
+    off();
+    expect(events.off).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a drop by its token and file count only", async () => {
+    const seen: unknown[] = [];
+    await assistantApi.onDrop((drop) => seen.push(drop));
+    events.handlers.get("assistant:drop")?.({
+      payload: { token: "t", count: 3 },
+    });
+    expect(seen).toEqual([{ token: "t", count: 3 }]);
   });
 });
 
@@ -233,6 +339,7 @@ describe("assistant error messages", () => {
       "assistant_attachment_dialog_failed",
       "assistant.errors.attachmentDialogFailed",
     ],
+    ["assistant_drop_unavailable", "assistant.errors.dropUnavailable"],
     [
       { code: "assistant_vision_model_required" },
       "assistant.errors.visionModelRequired",
@@ -290,6 +397,7 @@ describe("assistant error messages", () => {
       /images.*PDFs.*docx.*xlsx.*pptx.*UTF-8 text.*docx or PDF/i,
     ],
     ["attachmentUnreadable", /attach it again/i],
+    ["dropUnavailable", /drop them again/i],
     // Also the alert for a sent turn's file, which can't be removed.
     [
       "attachmentUnavailable",

@@ -524,6 +524,129 @@ impl AssistantHost {
         .await
     }
 
+    /// Hold the files the user dropped on the window until the renderer asks
+    /// for them with the returned token, and how many there are. The token is
+    /// the account's and the authority generation's as of now; only the
+    /// newest drop is kept. `None` when nothing was dropped. The paths stay
+    /// in the host: they are never logged and never sent to the renderer.
+    pub async fn accept_drop(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<Option<(String, usize)>, String> {
+        if paths.is_empty() {
+            return Ok(None);
+        }
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        self.ensure_current(&identity, generation).await?;
+        let held = self
+            .drops
+            .lock()
+            .map_err(|_| "assistant_state_unavailable")?
+            .put(
+                &identity.owner,
+                generation,
+                paths,
+                std::time::Instant::now(),
+            );
+        Ok(Some(held))
+    }
+
+    /// Import the files `request.token` stands for into a conversation, with
+    /// the checks of a picked file (the host reads the paths it kept; the
+    /// renderer names none). The token is single use: it is spent when the
+    /// import starts, but not by a request refused for its authority or its
+    /// conversation, which can be repeated.
+    pub async fn import_dropped(
+        self: &Arc<Self>,
+        request: ImportDropRequest,
+    ) -> Result<Vec<Attachment>, String> {
+        let authority = DeleteRequest {
+            session_id: request.session_id,
+            expected_owner: request.expected_owner,
+            expected_generation: request.expected_generation,
+        };
+        let (identity, generation) = self.begin_import(&authority).await?;
+        let paths = self
+            .drops
+            .lock()
+            .map_err(|_| "assistant_state_unavailable")?
+            .take(
+                &request.token,
+                &identity.owner,
+                generation,
+                std::time::Instant::now(),
+            )?;
+        let sources = paths.into_iter().map(attachments::Source::Path).collect();
+        self.import_checked(&identity, generation, &authority.session_id, sources)
+            .await
+    }
+
+    /// Import a file pasted into the conversation's page. Its type comes
+    /// from its bytes and its name only as a hint (see
+    /// [`attachments::Source::Bytes`]); the limits are a picked file's.
+    pub async fn import_pasted(
+        self: &Arc<Self>,
+        authority: DeleteRequest,
+        name: String,
+        bytes: Vec<u8>,
+    ) -> Result<Vec<Attachment>, String> {
+        let (identity, generation) = self.begin_import(&authority).await?;
+        let source = attachments::Source::Bytes { name, bytes };
+        self.import_checked(&identity, generation, &authority.session_id, vec![source])
+            .await
+    }
+
+    /// The account and generation an import runs under, once the page's
+    /// authority is the current one and the conversation can take files now:
+    /// it exists, is not in the trash and does not reply.
+    async fn begin_import(&self, authority: &DeleteRequest) -> Result<(Identity, u64), String> {
+        let sid = &authority.session_id;
+        validate_id(sid)?;
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if authority.expected_owner != identity.owner || authority.expected_generation != generation
+        {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        self.ensure_idle(sid)?;
+        let record = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = sid.to_owned();
+            move || store.load_record(&sid)
+        })
+        .await?;
+        if record.session.deleted_at.is_some() {
+            return Err("assistant_session_deleted".into());
+        }
+        self.ensure_current(&identity, generation).await?;
+        Ok((identity, generation))
+    }
+
+    /// Copy `sources` into the conversation, unless the authority they were
+    /// accepted under ended meanwhile (checked again before anything is saved).
+    async fn import_checked(
+        self: &Arc<Self>,
+        identity: &Identity,
+        generation: u64,
+        sid: &str,
+        sources: Vec<attachments::Source>,
+    ) -> Result<Vec<Attachment>, String> {
+        self.ensure_current(identity, generation).await?;
+        let store = self.store(&identity.owner)?;
+        let host = self.clone();
+        let sid = sid.to_owned();
+        blocking(move || {
+            attachments::import_sources(&store, &sid, &sources, || {
+                if host.generation() != generation {
+                    return Err(super::host::IDENTITY_CHANGED.into());
+                }
+                Ok(())
+            })
+        })
+        .await
+    }
+
     /// Show another version of a turn: the user turn `message_id` and the
     /// latest of what followed it become the conversation's branch, first in
     /// its native history (backed up, and put back if the switch is not

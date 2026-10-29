@@ -6,7 +6,8 @@ use cc_switch_lib::assistant::{
     catalog::{parse_models, Model, Source},
     host::{Admit, AssistantHost, BoxFuture, Environment, Identity},
     types::{
-        self, CreateRequest, Detail, Event, Message, RunProxy, SendRequest, SwitchVersionRequest,
+        self, CreateRequest, DeleteRequest, Detail, Event, ImportDropRequest, Message, RunProxy,
+        SendRequest, SwitchVersionRequest,
     },
 };
 use serde_json::{json, Value};
@@ -1731,6 +1732,571 @@ fn a_pick_lands_only_for_the_account_and_authority_that_opened_the_dialog() {
             "assistant_sign_in_required"
         );
     });
+}
+
+// ── dropped and pasted files ─────────────────────────────────────────────
+
+/// The authority the page shows for `sid`.
+fn page_authority(host: &AssistantHost, sid: &str) -> DeleteRequest {
+    serde_json::from_value(json!({
+        "sessionId": sid, "expectedOwner": owner(),
+        "expectedGeneration": host.generation(),
+    }))
+    .unwrap()
+}
+
+fn drop_request(host: &AssistantHost, sid: &str, token: &str) -> ImportDropRequest {
+    serde_json::from_value(json!({
+        "sessionId": sid, "token": token, "expectedOwner": owner(),
+        "expectedGeneration": host.generation(),
+    }))
+    .unwrap()
+}
+
+/// Drop `paths` on the window; the token the renderer is given.
+async fn dropped(host: &AssistantHost, paths: Vec<PathBuf>) -> String {
+    host.accept_drop(paths).await.unwrap().unwrap().0
+}
+
+fn saved_names(detail: &Detail) -> Vec<(&str, &str)> {
+    detail
+        .attachments
+        .iter()
+        .map(|a| (a.name.as_str(), a.mime_type.as_str()))
+        .collect()
+}
+
+#[test]
+fn dropped_files_are_imported_once_with_the_picked_files_checks() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let paths = vec![
+            picked(config.path(), "notes.md", b"# Notes"),
+            picked(config.path(), "chart.png", b"\x89PNG"),
+        ];
+        let (token, count) = host.accept_drop(paths).await.unwrap().unwrap();
+        assert_eq!(count, 2);
+
+        let imported = host
+            .import_dropped(drop_request(&host, &sid, &token))
+            .await
+            .unwrap();
+        assert_eq!(
+            imported
+                .iter()
+                .map(|a| (a.name.as_str(), a.mime_type.as_str(), a.status.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("notes.md", "text/markdown", "ready"),
+                ("chart.png", "image/png", "ready")
+            ]
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.attachments.len(), 2);
+        let copy = session_dir(config.path(), &sid)
+            .join("attachments")
+            .join(&imported[0].id);
+        assert_eq!(std::fs::read(copy).unwrap(), b"# Notes");
+
+        // The token is spent.
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_drop_unavailable"
+        );
+        assert_eq!(host.get_session(&sid).await.unwrap().attachments.len(), 2);
+    });
+}
+
+#[test]
+fn a_dropped_directory_or_unsupported_file_is_refused_like_a_picked_one() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let fine = picked(config.path(), "fine.txt", b"x");
+        let folder = config.path().join("picked").join("folder.txt");
+        std::fs::create_dir(&folder).unwrap();
+        for (bad, code) in [
+            (folder, "assistant_attachment_unreadable"),
+            (
+                picked(config.path(), "tool.exe", b"MZ"),
+                "assistant_attachment_unsupported",
+            ),
+            (
+                config.path().join("picked").join("missing.txt"),
+                "assistant_attachment_unreadable",
+            ),
+        ] {
+            let token = dropped(&host, vec![fine.clone(), bad.clone()]).await;
+            assert_eq!(
+                host.import_dropped(drop_request(&host, &sid, &token))
+                    .await
+                    .unwrap_err(),
+                code,
+                "{bad:?}"
+            );
+        }
+        // More than ten at once is refused as a whole, as in the dialog.
+        let eleven: Vec<_> = (0..11)
+            .map(|i| picked(config.path(), &format!("{i}.txt"), b"x"))
+            .collect();
+        let token = dropped(&host, eleven).await;
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_attachment_too_many"
+        );
+        assert!(host.get_session(&sid).await.unwrap().attachments.is_empty());
+    });
+}
+
+#[test]
+fn only_a_token_the_window_event_issued_imports_a_drop() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let secret = picked(config.path(), "secret.txt", b"not for the assistant");
+        let token = dropped(&host, vec![secret.clone()]).await;
+        let random = types::id();
+        // A path, or anything else the renderer makes up, is not a token.
+        for guess in [
+            secret.to_str().unwrap(),
+            "/etc/hosts",
+            "../../x",
+            "",
+            random.as_str(),
+        ] {
+            assert_eq!(
+                host.import_dropped(drop_request(&host, &sid, guess))
+                    .await
+                    .unwrap_err(),
+                "assistant_drop_unavailable",
+                "{guess:?}"
+            );
+        }
+        // Guesses do not use up the drop that waits.
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
+fn only_the_newest_drop_can_be_imported() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let old = dropped(&host, vec![picked(config.path(), "old.txt", b"1")]).await;
+        let new = dropped(&host, vec![picked(config.path(), "new.txt", b"2")]).await;
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &old))
+                .await
+                .unwrap_err(),
+            "assistant_drop_unavailable"
+        );
+        let imported = host
+            .import_dropped(drop_request(&host, &sid, &new))
+            .await
+            .unwrap();
+        assert_eq!(imported[0].name, "new.txt");
+        assert_eq!(host.get_session(&sid).await.unwrap().attachments.len(), 1);
+
+        // Nothing dropped, nothing to hold.
+        assert!(host.accept_drop(vec![]).await.unwrap().is_none());
+    });
+}
+
+#[test]
+fn a_drop_belongs_to_the_account_and_authority_it_was_dropped_under() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let file = picked(config.path(), "a.txt", b"x");
+
+        // A page that shows another authority is refused, and the drop that
+        // waits is not used up by it.
+        let token = dropped(&host, vec![file.clone()]).await;
+        let mut stale = drop_request(&host, &sid, &token);
+        stale.expected_generation += 1;
+        assert_eq!(
+            host.import_dropped(stale).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        let mut other = drop_request(&host, &sid, &token);
+        other.expected_owner = "cd".repeat(32);
+        assert_eq!(
+            host.import_dropped(other).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A logout or account switch revokes what was dropped before it.
+        let token = dropped(&host, vec![file.clone()]).await;
+        host.cancel_all();
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_drop_unavailable"
+        );
+
+        // Another account is never given what the first one dropped, even
+        // when it asks with its own authority.
+        let token = dropped(&host, vec![file.clone()]).await;
+        let other_account = || Identity {
+            owner: "cd".repeat(32),
+            apex: "ofox.ai".into(),
+        };
+        env.set_identity(Ok(other_account()));
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        let theirs_sid = create(&host).await;
+        let mut theirs = drop_request(&host, &theirs_sid, &token);
+        theirs.expected_owner = "cd".repeat(32);
+        assert_eq!(
+            host.import_dropped(theirs).await.unwrap_err(),
+            "assistant_identity_changed"
+        );
+        env.signed_in("ofox.ai");
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_drop_unavailable",
+            "a drop another account asked for is gone"
+        );
+        assert_eq!(host.get_session(&sid).await.unwrap().attachments.len(), 1);
+
+        // Signed out, nothing can be dropped.
+        env.set_identity(Err("assistant_sign_in_required".into()));
+        assert_eq!(
+            host.accept_drop(vec![file]).await.unwrap_err(),
+            "assistant_sign_in_required"
+        );
+    });
+}
+
+#[test]
+fn a_drop_is_refused_for_a_trashed_or_unknown_conversation_and_keeps_its_token() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let token = dropped(&host, vec![picked(config.path(), "a.txt", b"x")]).await;
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &types::id(), &token))
+                .await
+                .unwrap_err(),
+            "assistant_session_not_found"
+        );
+        assert_eq!(
+            host.import_dropped(drop_request(&host, "../x", &token))
+                .await
+                .unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+        let trash: types::UpdateRequest =
+            serde_json::from_value(json!({"sessionId": sid, "deleted": true})).unwrap();
+        host.update_session(trash).await.unwrap();
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_session_deleted"
+        );
+        let restore: types::UpdateRequest =
+            serde_json::from_value(json!({"sessionId": sid, "deleted": false})).unwrap();
+        host.update_session(restore).await.unwrap();
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
+fn a_drop_request_cannot_carry_a_path() {
+    let with_path = json!({
+        "sessionId": types::id(), "token": "t", "expectedOwner": owner(),
+        "expectedGeneration": 0, "paths": ["/etc/hosts"],
+    });
+    assert!(serde_json::from_value::<ImportDropRequest>(with_path).is_err());
+}
+
+#[test]
+fn pasted_files_are_typed_by_their_content_and_never_by_the_renderer() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, _env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let authority = || page_authority(&host, &sid);
+        let png = png();
+
+        let by_content = host
+            .import_pasted(authority(), "photo.txt".into(), png.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                by_content[0].name.as_str(),
+                by_content[0].mime_type.as_str()
+            ),
+            ("photo.png", "image/png")
+        );
+        let unnamed = host
+            .import_pasted(authority(), String::new(), png.clone())
+            .await
+            .unwrap();
+        assert!(unnamed[0].name.starts_with("pasted-image-") && unnamed[0].name.ends_with(".png"));
+        let text = host
+            .import_pasted(authority(), "../../notes.md".into(), b"# Notes".to_vec())
+            .await
+            .unwrap();
+        assert_eq!(
+            (text[0].name.as_str(), text[0].mime_type.as_str()),
+            ("notes.md", "text/markdown")
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.attachments.len(), 3);
+        // The copy is the pasted bytes, in the conversation's own folder.
+        let copy = session_dir(config.path(), &sid)
+            .join("attachments")
+            .join(&by_content[0].id);
+        assert_eq!(std::fs::read(copy).unwrap(), png);
+
+        // A name that claims what the bytes are not is refused.
+        for (name, code) in [
+            ("fake.png", "assistant_attachment_unreadable"),
+            ("fake.pdf", "assistant_attachment_unreadable"),
+            ("tool.exe", "assistant_attachment_unsupported"),
+            ("", "assistant_attachment_unsupported"),
+        ] {
+            assert_eq!(
+                host.import_pasted(authority(), name.into(), b"plain text".to_vec())
+                    .await
+                    .unwrap_err(),
+                code,
+                "{name:?}"
+            );
+        }
+        assert_eq!(
+            host.get_session(&sid).await.unwrap().attachments.len(),
+            3,
+            "{:?}",
+            saved_names(&detail)
+        );
+    });
+}
+
+#[test]
+fn a_pasted_file_obeys_the_size_and_count_limits_and_the_authority() {
+    let config = tempfile::tempdir().unwrap();
+    let (_gateway, env, host) = picking_host(config.path());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let authority = || page_authority(&host, &sid);
+        let big = vec![b'x'; 25 * 1024 * 1024 + 1];
+        assert_eq!(
+            host.import_pasted(authority(), "big.txt".into(), big)
+                .await
+                .unwrap_err(),
+            "assistant_attachment_too_large"
+        );
+
+        // Another authority than the page's.
+        let mut stale = authority();
+        stale.expected_generation += 1;
+        assert_eq!(
+            host.import_pasted(stale, "a.txt".into(), b"x".to_vec())
+                .await
+                .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        let mut other = authority();
+        other.expected_owner = "cd".repeat(32);
+        assert_eq!(
+            host.import_pasted(other, "a.txt".into(), b"x".to_vec())
+                .await
+                .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        // The page of an account that is no longer the signed-in one.
+        let page = authority();
+        env.set_identity(Ok(Identity {
+            owner: "cd".repeat(32),
+            apex: "ofox.ai".into(),
+        }));
+        assert_eq!(
+            host.import_pasted(page, "a.txt".into(), b"x".to_vec())
+                .await
+                .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        env.signed_in("ofox.ai");
+
+        // Unknown, malformed and trashed conversations.
+        assert_eq!(
+            host.import_pasted(
+                page_authority(&host, &types::id()),
+                "a.txt".into(),
+                b"x".to_vec()
+            )
+            .await
+            .unwrap_err(),
+            "assistant_session_not_found"
+        );
+        assert_eq!(
+            host.import_pasted(page_authority(&host, "../x"), "a.txt".into(), b"x".to_vec())
+                .await
+                .unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+        let trash: types::UpdateRequest =
+            serde_json::from_value(json!({"sessionId": sid, "deleted": true})).unwrap();
+        host.update_session(trash).await.unwrap();
+        assert_eq!(
+            host.import_pasted(authority(), "a.txt".into(), b"x".to_vec())
+                .await
+                .unwrap_err(),
+            "assistant_session_deleted"
+        );
+        assert!(host.get_session(&sid).await.unwrap().attachments.is_empty());
+    });
+}
+
+#[test]
+fn dropped_and_pasted_files_are_refused_while_the_conversation_replies() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.reply(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Done".into())),
+        ));
+        let run = host.send(request(&sid, "Hello", json!({}))).await.unwrap();
+
+        let token = dropped(&host, vec![picked(config.path(), "a.txt", b"x")]).await;
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap_err(),
+            "assistant_session_busy"
+        );
+        assert_eq!(
+            host.import_pasted(page_authority(&host, &sid), "b.txt".into(), b"y".to_vec())
+                .await
+                .unwrap_err(),
+            "assistant_session_busy"
+        );
+
+        open.store(true, Ordering::SeqCst);
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(host.get_session(&sid).await.unwrap().attachments.is_empty());
+        // The refused drop still waits: the reply is over.
+        assert_eq!(
+            host.import_dropped(drop_request(&host, &sid, &token))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    });
+}
+
+#[test]
+fn a_pasted_pdf_with_the_wrong_name_and_a_dropped_text_file_are_read_by_the_runtime() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let pasted = host
+            .import_pasted(
+                page_authority(&host, &sid),
+                "invoice.txt".into(),
+                pdf("Invoice total 1234"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            (pasted[0].name.as_str(), pasted[0].mime_type.as_str()),
+            ("invoice.pdf", "application/pdf")
+        );
+        let token = dropped(
+            &host,
+            vec![picked(config.path(), "notes.txt", b"Quarterly: 42 apples")],
+        )
+        .await;
+        let drop = host
+            .import_dropped(drop_request(&host, &sid, &token))
+            .await
+            .unwrap();
+
+        gateway.reply(Reply::Stream("1234 and 42".into()));
+        let (run, end) = turn(
+            &host,
+            &env,
+            request(
+                &sid,
+                "Read both",
+                json!({"attachmentIds": [pasted[0].id, drop[0].id]}),
+            ),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let sent = gateway.requests()[0].text();
+        assert!(sent.contains("Invoice total 1234"), "{sent}");
+        assert!(sent.contains("Quarterly: 42 apples"), "{sent}");
+        let outcome = outcomes(&env, &run);
+        assert_eq!(
+            outcome
+                .iter()
+                .map(|o| (
+                    o["status"].as_str().unwrap(),
+                    o["details"]["format"].clone()
+                ))
+                .collect::<Vec<_>>(),
+            [("ready", json!("pdf")), ("ready", json!("text"))]
+        );
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
 }
 
 /// A 1x1 PNG.

@@ -10,8 +10,8 @@ use crate::services::assistant::{
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
         Attachment, CreateRequest, DeleteRequest, Detail, EmptyTrashReport, EmptyTrashRequest,
-        Event, ExportMarkdownRequest, RunProxy, RunRef, SendRequest, Session, SwitchVersionRequest,
-        TransferRequest, UpdateRequest,
+        Event, ExportMarkdownRequest, ImportDropRequest, RunProxy, RunRef, SendRequest, Session,
+        SwitchVersionRequest, TransferRequest, UpdateRequest,
     },
     AssistantHost,
 };
@@ -19,11 +19,17 @@ use crate::settings::KeyOwner;
 use serde_json::Value;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, Manager, State};
+use tauri::http::HeaderMap;
+use tauri::ipc::{InvokeBody, Request};
+use tauri::{DragDropEvent, Emitter, Manager, State};
 use tokio::sync::RwLock;
 
 /// The renderer's event channel for runs.
 pub const ASSISTANT_EVENT: &str = "assistant:event";
+/// A file drag entered or left the window: `{state: "enter" | "leave"}`.
+pub const ASSISTANT_DRAG_EVENT: &str = "assistant:drag";
+/// Files were dropped on the window: `{token, count}`, never their paths.
+pub const ASSISTANT_DROP_EVENT: &str = "assistant:drop";
 
 type Host<'a> = State<'a, Arc<AssistantHost>>;
 
@@ -202,6 +208,117 @@ fn pick_files(app: &tauri::AppHandle) -> Result<Vec<PathBuf>, String> {
                 .map_err(|_| attachments::UNREADABLE.to_string())
         })
         .collect()
+}
+
+/// Import the files the user last dropped on the window, named by the token
+/// of the `assistant:drop` event. The host keeps the paths; the renderer
+/// names none.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_import_drop(
+    host: Host<'_>,
+    request: ImportDropRequest,
+) -> Result<Vec<Attachment>, String> {
+    host.import_dropped(request).await
+}
+
+/// Import one file pasted into the page. The body is the file's raw bytes;
+/// the rest travels in headers, as a raw body leaves no room for arguments:
+/// `x-session-id`, `x-expected-owner`, `x-expected-generation` and the
+/// percent-encoded `x-file-name` (a hint only, see `attachments::classify`).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_import_pasted(
+    host: Host<'_>,
+    request: Request<'_>,
+) -> Result<Vec<Attachment>, String> {
+    let (authority, name, bytes) = parse_paste(request.headers(), request.body())?;
+    host.import_pasted(authority, name, bytes).await
+}
+
+const PASTE_SESSION_HEADER: &str = "x-session-id";
+const PASTE_OWNER_HEADER: &str = "x-expected-owner";
+const PASTE_GENERATION_HEADER: &str = "x-expected-generation";
+const PASTE_NAME_HEADER: &str = "x-file-name";
+
+/// The authority, name hint and bytes of a paste request. Anything but a raw
+/// body with the headers is unreadable; a body over the file limit is refused
+/// before it is copied (Tauri has already received it, so this is the
+/// earliest point to stop it).
+fn parse_paste(
+    headers: &HeaderMap,
+    body: &InvokeBody,
+) -> Result<(DeleteRequest, String, Vec<u8>), String> {
+    let InvokeBody::Raw(bytes) = body else {
+        return Err(attachments::UNREADABLE.into());
+    };
+    if bytes.len() as u64 > attachments::MAX_FILE_BYTES {
+        return Err(attachments::TOO_LARGE.into());
+    }
+    let header = |name: &str| -> Result<&str, String> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| attachments::UNREADABLE.to_string())
+    };
+    let authority = DeleteRequest {
+        session_id: header(PASTE_SESSION_HEADER)?.to_owned(),
+        expected_owner: header(PASTE_OWNER_HEADER)?.to_owned(),
+        expected_generation: header(PASTE_GENERATION_HEADER)?
+            .parse()
+            .map_err(|_| attachments::UNREADABLE.to_string())?,
+    };
+    // No name at all is fine: one is made from what the file is.
+    let name = headers
+        .get(PASTE_NAME_HEADER)
+        .map(|value| {
+            percent_encoding::percent_decode(value.as_bytes())
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default();
+    Ok((authority, name, bytes.clone()))
+}
+
+/// What the renderer is told about a file drag: `Enter` and `Leave` only.
+/// `Over` repeats with every mouse move and `Drop` is announced by its token.
+fn drag_state(event: &DragDropEvent) -> Option<&'static str> {
+    match event {
+        DragDropEvent::Enter { .. } => Some("enter"),
+        DragDropEvent::Leave => Some("leave"),
+        _ => None,
+    }
+}
+
+/// The window's file drag and drop. The renderer is told that a drag entered
+/// or left, and for a drop a single-use token and the number of files, never
+/// a path (see [`AssistantHost::accept_drop`]). A drop ends the drag, so it
+/// is announced as a leave first. Nothing is logged but a failure's code.
+pub fn handle_assistant_drag_drop(app: &tauri::AppHandle, event: &DragDropEvent) {
+    if let Some(state) = drag_state(event) {
+        let _ = app.emit(ASSISTANT_DRAG_EVENT, serde_json::json!({ "state": state }));
+    }
+    let DragDropEvent::Drop { paths, .. } = event else {
+        return;
+    };
+    let _ = app.emit(
+        ASSISTANT_DRAG_EVENT,
+        serde_json::json!({ "state": "leave" }),
+    );
+    let Some(host) = app.try_state::<Arc<AssistantHost>>() else {
+        return;
+    };
+    let (host, app, paths) = (host.inner().clone(), app.clone(), paths.clone());
+    tauri::async_runtime::spawn(async move {
+        match host.accept_drop(paths).await {
+            Ok(Some((token, count))) => {
+                let _ = app.emit(
+                    ASSISTANT_DROP_EVENT,
+                    serde_json::json!({ "token": token, "count": count }),
+                );
+            }
+            Ok(None) => {}
+            Err(code) => log::info!("[Assistant] a drop was not accepted: {code}"),
+        }
+    });
 }
 
 /// The host's view of the running app.
@@ -425,6 +542,104 @@ impl Environment for AssistantEnvironment {
 mod tests {
     use super::*;
     use crate::ofox_auth::OfoxUserInfo;
+    use tauri::http::{HeaderName, HeaderValue};
+
+    fn paste_headers(extra: &[(&str, &str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            (PASTE_SESSION_HEADER, "session-1"),
+            (PASTE_OWNER_HEADER, "owner-1"),
+            (PASTE_GENERATION_HEADER, "7"),
+        ]
+        .iter()
+        .chain(extra)
+        {
+            headers.insert(
+                HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    fn raw(bytes: &[u8]) -> InvokeBody {
+        InvokeBody::Raw(bytes.to_vec())
+    }
+
+    #[test]
+    fn a_paste_is_a_raw_body_with_its_authority_and_name_in_headers() {
+        let headers = paste_headers(&[(PASTE_NAME_HEADER, "%E4%B8%AD%E6%96%87%20a%2Bb.png")]);
+        let (authority, name, bytes) = parse_paste(&headers, &raw(b"\x89PNG")).unwrap();
+        assert_eq!(authority.session_id, "session-1");
+        assert_eq!(authority.expected_owner, "owner-1");
+        assert_eq!(authority.expected_generation, 7);
+        assert_eq!(name, "中文 a+b.png");
+        assert_eq!(bytes, b"\x89PNG");
+    }
+
+    #[test]
+    fn a_paste_without_a_name_or_with_a_broken_one_still_parses() {
+        let (_, name, _) = parse_paste(&paste_headers(&[]), &raw(b"x")).unwrap();
+        assert_eq!(name, "");
+        // Invalid UTF-8 once decoded is replaced, not refused: it is a hint.
+        let headers = paste_headers(&[(PASTE_NAME_HEADER, "a%FFb.txt")]);
+        let (_, name, _) = parse_paste(&headers, &raw(b"x")).unwrap();
+        assert_eq!(name, "a\u{fffd}b.txt");
+    }
+
+    #[test]
+    fn a_paste_that_is_not_raw_bytes_with_the_headers_is_unreadable() {
+        let json = InvokeBody::Json(serde_json::json!({"sessionId": "s"}));
+        assert_eq!(
+            parse_paste(&paste_headers(&[]), &json).unwrap_err(),
+            attachments::UNREADABLE
+        );
+        for missing in [
+            PASTE_SESSION_HEADER,
+            PASTE_OWNER_HEADER,
+            PASTE_GENERATION_HEADER,
+        ] {
+            let mut headers = paste_headers(&[]);
+            headers.remove(missing);
+            assert_eq!(
+                parse_paste(&headers, &raw(b"x")).unwrap_err(),
+                attachments::UNREADABLE,
+                "{missing}"
+            );
+        }
+        let headers = paste_headers(&[(PASTE_GENERATION_HEADER, "seven")]);
+        assert_eq!(
+            parse_paste(&headers, &raw(b"x")).unwrap_err(),
+            attachments::UNREADABLE
+        );
+    }
+
+    #[test]
+    fn a_paste_over_the_file_limit_is_refused_before_anything_else() {
+        let big = raw(&vec![0u8; attachments::MAX_FILE_BYTES as usize + 1]);
+        assert_eq!(
+            parse_paste(&HeaderMap::new(), &big).unwrap_err(),
+            attachments::TOO_LARGE
+        );
+        let limit = raw(&vec![0u8; attachments::MAX_FILE_BYTES as usize]);
+        assert!(parse_paste(&paste_headers(&[]), &limit).is_ok());
+    }
+
+    #[test]
+    fn only_a_drag_entering_or_leaving_is_told_to_the_renderer() {
+        let position = tauri::PhysicalPosition::new(1.0, 2.0);
+        let paths = vec![PathBuf::from("/private/secret.txt")];
+        assert_eq!(
+            drag_state(&DragDropEvent::Enter {
+                paths: paths.clone(),
+                position
+            }),
+            Some("enter")
+        );
+        assert_eq!(drag_state(&DragDropEvent::Leave), Some("leave"));
+        assert_eq!(drag_state(&DragDropEvent::Over { position }), None);
+        assert_eq!(drag_state(&DragDropEvent::Drop { paths, position }), None);
+    }
 
     fn user(id: &str, org: &str) -> OfoxUserInfo {
         serde_json::from_value(serde_json::json!({
