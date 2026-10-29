@@ -2686,3 +2686,78 @@ test("reasoning start is signalled at once, before its held-back text", async (t
     false,
   );
 });
+
+test("live input prioritizes steering over follow-up and fences authority without replay", async (t) => {
+  const params = await sandbox(t);
+  const events = [];
+  const requests = [];
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, input) => {
+      requests.push(JSON.parse(input.body));
+      if (requests.length === 1) await blocked;
+      return stream(`answer ${requests.length}`);
+    },
+  });
+  t.after(() => {
+    release();
+    return runtime.close();
+  });
+  let early;
+  const running = runtime.run(params).then((result) => {
+    early = result;
+    return result;
+  });
+  const deadline = Date.now() + 10000;
+  while (!requests.length && !early && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(requests.length, JSON.stringify(early));
+  const input = (id, behavior, text) => ({
+    sessionId: params.sessionId,
+    runId: params.runId,
+    operationId: params.operationId,
+    id,
+    behavior,
+    text,
+  });
+  await assert.rejects(
+    runtime.steer({
+      ...input("wrong", "steer", "never sent"),
+      operationId: "stale",
+    }),
+    /active run/,
+  );
+  await runtime.steer(input("follow", "followUp", "later follow-up"));
+  await runtime.steer(input("steer", "steer", `urgent ${token}`));
+  // A repeated IPC action must not enqueue or bill the input twice.
+  await runtime.steer(input("steer", "steer", `urgent ${token}`));
+  release();
+  const result = await running;
+  assert.equal(requests.length, 3);
+  const users = result.entries.filter((entry) => entry.role === "user");
+  assert.equal(users.length, 3);
+  assert.equal(users[0].content, "hello");
+  assert.match(users[1].content, /urgent/);
+  assert.ok(!users[1].content.includes(token));
+  assert.equal(users[2].content, "later follow-up");
+  assert.deepEqual(
+    users.map((entry) => entry.runId),
+    [params.runId, "steer", "follow"],
+  );
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "steer_applied")
+      .map((event) => event.data.id),
+    ["steer", "follow"],
+  );
+  assert.ok(
+    events
+      .filter((event) => event.type === "steer_applied")
+      .every((event) => event.data.previousEntryId),
+  );
+  assert.ok(!JSON.stringify(result).includes(token));
+});

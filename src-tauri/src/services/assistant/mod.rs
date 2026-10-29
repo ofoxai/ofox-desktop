@@ -4,6 +4,7 @@ pub mod attachments;
 pub mod catalog;
 pub mod drops;
 pub mod host;
+mod live;
 mod media;
 mod media_host;
 mod media_http;

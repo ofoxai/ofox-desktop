@@ -129,6 +129,36 @@ describe("assistant commands", () => {
     expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
   });
 
+  it("writes an interruption to its existing run with frozen authority", async () => {
+    const request = {
+      sessionId: "s",
+      runId: "r",
+      operationId: "o",
+      id: "action",
+      text: "Change direction",
+      expectedOwner: "owner",
+      expectedGeneration: 7,
+    };
+    await assistantApi.steer(request);
+    expect(invoke).toHaveBeenCalledWith("assistant_steer", { request });
+    expect(invoke).toHaveBeenCalledOnce();
+  });
+
+  it("forwards a queued ordinary send's frozen authority without a special runtime operation", async () => {
+    const request = {
+      sessionId: "s",
+      runId: "queue-run",
+      operationId: "queue-operation",
+      text: "Next ordinary question",
+      attachmentIds: [],
+      expectedOwner: "owner",
+      expectedGeneration: 7,
+    };
+    await assistantApi.send(request);
+    expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
+    expect(invoke).toHaveBeenCalledOnce();
+  });
+
   it("creates a chat session with only a model and the web search flag", async () => {
     invoke.mockResolvedValue({ id: "new" });
     await assistantApi.createSession({ modelId: "m", webSearch: false });

@@ -11,8 +11,8 @@ use crate::services::assistant::{
     types::{
         Attachment, CreateRequest, DeleteRequest, Detail, EmptyTrashReport, EmptyTrashRequest,
         Event, ExportMarkdownRequest, ImportDropRequest, Preferences, RunProxy, RunRef,
-        SendRequest, Session, SetPreferencesRequest, SwitchVersionRequest, TransferRequest,
-        UpdateRequest,
+        SendRequest, Session, SetPreferencesRequest, SteerRequest, SwitchVersionRequest,
+        TransferRequest, UpdateRequest,
     },
     AssistantHost,
 };
@@ -175,6 +175,11 @@ pub async fn assistant_export_markdown(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_send(host: Host<'_>, request: SendRequest) -> Result<RunRef, String> {
     host.send(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_steer(host: Host<'_>, request: SteerRequest) -> Result<(), String> {
+    host.steer(request).await
 }
 
 /// Show another version of a turn; returns the conversation as it shows now.

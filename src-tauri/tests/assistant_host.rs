@@ -846,6 +846,222 @@ fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
     assert_no_secret_in_events(&env, &[KEY]);
 }
 
+#[test]
+fn ordinary_queue_sends_keep_distinct_runs_context_and_usage_on_both_apexes() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &runtime_dir, &[(apex, &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            host.set_preferences(
+                serde_json::from_value(json!({
+                    "instructions": "", "autoTitle": false, "notifyOnFinish": false,
+                    "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let sid = create(&host).await;
+            let boot = host.bootstrap().await.unwrap();
+            let mut refs = Vec::new();
+            for index in 1..=3 {
+                let question = format!("Queued question {index}");
+                let answer = format!("Ordinary answer {index}");
+                let request = request(
+                    &sid,
+                    &question,
+                    json!({
+                        "expectedOwner": boot["owner"],
+                        "expectedGeneration": boot["authorityGeneration"],
+                    }),
+                );
+                refs.push((request.run_id.clone(), request.operation_id.clone()));
+                gateway.reply(Reply::Stream(answer));
+                let (_, end) = turn(&host, &env, request).await;
+                assert_eq!(end.data["status"], "completed");
+            }
+            let requests = gateway.requests();
+            assert_eq!(requests.len(), 3);
+            for (index, request) in requests.iter().enumerate() {
+                let text = request.text();
+                for previous in 1..=index {
+                    assert!(text.contains(&format!("Queued question {previous}")));
+                    assert!(text.contains(&format!("Ordinary answer {previous}")));
+                }
+            }
+            let detail = host.get_session(&sid).await.unwrap();
+            assert_eq!(detail.messages.len(), 6);
+            assert_eq!(detail.usage["modelRequests"], 3);
+            let record = saved(config.path(), &sid);
+            let operations = record["operations"].as_array().unwrap();
+            assert_eq!(operations.len(), 3);
+            for (index, (run_id, operation_id)) in refs.iter().enumerate() {
+                assert_eq!(operations[index]["runId"], *run_id);
+                assert_eq!(operations[index]["id"], *operation_id);
+                assert_eq!(detail.messages[index * 2].run_id.as_ref(), Some(run_id));
+                assert_eq!(detail.messages[index * 2 + 1].run_id.as_ref(), Some(run_id));
+                assert_eq!(
+                    detail.messages[index * 2 + 1].usage.as_ref().unwrap()["modelRequests"],
+                    1
+                );
+                assert!(refs[..index]
+                    .iter()
+                    .all(|old| old.0 != *run_id && old.1 != *operation_id));
+            }
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+        assert_no_secret_in_events(&env, &[KEY]);
+    }
+}
+
+#[test]
+fn delayed_queue_send_is_refused_after_region_or_account_switch_before_minting_a_key() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for (from, to) in [("ofox.ai", "ofox.io"), ("ofox.io", "ofox.ai")] {
+        let config = tempfile::tempdir().unwrap();
+        let original = Gateway::start();
+        let selected = Gateway::start();
+        let env = TestEnv::new(
+            config.path(),
+            &runtime_dir,
+            &[(from, &original), (to, &selected)],
+        );
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let queued = request(
+                &sid,
+                "Do not forward old queued text",
+                json!({
+                    "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                }),
+            );
+            env.signed_in(to);
+            host.cancel_all();
+            assert_eq!(
+                host.send(queued).await.unwrap_err(),
+                "assistant_identity_changed"
+            );
+            let queued = request(
+                &sid,
+                "Not this account's text",
+                json!({
+                    "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                }),
+            );
+            env.set_identity(Ok(Identity {
+                owner: "cd".repeat(32),
+                apex: to.into(),
+            }));
+            assert_eq!(
+                host.send(queued).await.unwrap_err(),
+                "assistant_identity_changed"
+            );
+            assert!(!env.state.lock().unwrap().key_minted);
+            assert!(original.requests().is_empty());
+            assert!(selected.requests().is_empty());
+            assert!(saved(config.path(), &sid)["operations"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            assert!(saved(config.path(), &sid)["messages"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        });
+    }
+}
+
+#[test]
+fn live_steering_uses_the_existing_sidecar_and_keeps_a_fenced_ledger() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(root.path(), &bundle, &[("ofox.io", &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        let sid = create(&host).await;
+        let gate = Arc::new(AtomicBool::new(false));
+        gateway.reply(Reply::Wait(gate.clone(), Box::new(Reply::Stream("First answer".into()))));
+        gateway.reply(Reply::Stream("Steered answer".into()));
+        let run = host.send(request(&sid,"First question",json!({}))).await.unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while gateway.requests().is_empty() { assert!(Instant::now()<deadline); tokio::time::sleep(Duration::from_millis(10)).await; }
+        let input = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"id":types::id(),"text":format!("Change course {KEY}"),"expectedOwner":owner(),"expectedGeneration":host.generation()});
+        let mut stale = input.clone(); stale["expectedGeneration"]=json!(host.generation()+1);
+        assert_eq!(host.steer(serde_json::from_value(stale).unwrap()).await.unwrap_err(),"assistant_identity_changed");
+        host.steer(serde_json::from_value(input.clone()).unwrap()).await.unwrap();
+        host.steer(serde_json::from_value(input).unwrap()).await.unwrap();
+        gate.store(true,Ordering::SeqCst);
+        let end = wait_for(&env,&run.run_id,"run_end").await;
+        assert_eq!(end.data["status"],"completed");
+        assert_eq!(gateway.requests().len(),2);
+        assert!(gateway.requests()[1].text().contains("Change course"));
+        let detail=host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.messages.iter().filter(|m|m.role=="user").count(),2);
+        assert_eq!(detail.messages.iter().filter(|m|m.role=="assistant").count(),2);
+        assert!(detail.messages.iter().all(|m|m.status=="completed"));
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .map(|m| m.role.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user", "assistant", "user", "assistant"]
+        );
+        let replies: Vec<_> = detail
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .collect();
+        assert_ne!(replies[0].run_id, replies[1].run_id);
+        assert!(replies
+            .iter()
+            .all(|m| m.usage.as_ref().unwrap()["modelRequests"] == 1));
+        assert_eq!(detail.usage["modelRequests"],2);
+        let record=saved(root.path(),&sid);
+        let ops=record["operations"].as_array().unwrap();
+        assert_eq!(ops.len(),2);
+        assert!(ops.iter().all(|op|op["status"]=="completed"));
+        assert!(env.events(&run.run_id).iter().any(|event|event.r#type=="steer_applied"));
+        assert_no_secret_on_disk(root.path(),&[KEY]);
+        assert_no_secret_in_events(&env,&[KEY]);
+        host.shutdown().await;
+    });
+}
+
+#[test]
+fn stopping_live_steering_keeps_the_unsent_input_without_replaying_it() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let root=tempfile::tempdir().unwrap(); let gateway=Gateway::start();
+        let env=TestEnv::new(root.path(),&bundle,&[("ofox.io",&gateway)]); let host=AssistantHost::new(env.clone());
+        let sid=create(&host).await;
+        gateway.reply(Reply::Hang("Partial response ".repeat(20)));
+        let run=host.send(request(&sid,"First",json!({}))).await.unwrap();
+        wait_for(&env,&run.run_id,"text_delta").await;
+        let id=types::id();
+        host.steer(serde_json::from_value(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"id":id,"text":"Unsent interruption","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+        host.stop(&sid,&run.run_id,&run.operation_id).await.unwrap();
+        wait_for(&env,&run.run_id,"run_end").await;
+        let detail=host.get_session(&sid).await.unwrap();
+        let user=detail.messages.iter().find(|m|m.id==id).unwrap();
+        assert_eq!(user.content,"Unsent interruption"); assert_eq!(user.status,"error");
+        assert_eq!(user.error_code.as_deref(),Some("assistant_cancelled"));
+        assert_eq!(gateway.requests().len(),1);
+        let saved=saved(root.path(),&sid);
+        assert!(saved["operations"].as_array().unwrap().iter().all(|op|op["status"]=="cancelled"));
+        host.shutdown().await;
+    });
+}
+
 /// Everyday code and configuration that looks like credentials.
 const LOOKALIKES: &str = concat!(
     "OpenAI(api_key=os.environ[\"OPENAI_API_KEY\"])\n",

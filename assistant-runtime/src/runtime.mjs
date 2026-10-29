@@ -750,6 +750,54 @@ export class AssistantRuntime {
     return projection(manager, [...this.secrets]);
   }
 
+  async steer(params) {
+    const context = this.runs.get(params.runId);
+    if (
+      !context ||
+      context.params.sessionId !== params.sessionId ||
+      context.params.operationId !== params.operationId ||
+      context.abort.signal.aborted ||
+      !context.turnStarted ||
+      !context.session?.isStreaming
+    )
+      throw new Error("No matching active run for live input");
+    if (
+      typeof params.id !== "string" ||
+      !params.id ||
+      params.id.length > 128 ||
+      typeof params.text !== "string" ||
+      !params.text.trim() ||
+      Buffer.byteLength(params.text) > 128000 ||
+      !["steer", "followUp"].includes(params.behavior)
+    )
+      throw new Error("Invalid live input");
+    const text = scrubSecrets(params.text, [...this.secrets]);
+    const existing = context.liveInputs.get(params.id);
+    if (existing) {
+      if (existing.text !== text || existing.behavior !== params.behavior)
+        throw new Error("Live input id already used");
+      return { accepted: true };
+    }
+    if (context.liveInputs.size >= 100) throw new Error("Too many live inputs");
+    const input = {
+      id: params.id,
+      text,
+      behavior: params.behavior,
+      applied: false,
+    };
+    context.liveInputs.set(params.id, input);
+    try {
+      await context.session.prompt(text, {
+        streamingBehavior: params.behavior,
+        expandPromptTemplates: false,
+      });
+    } catch (error) {
+      context.liveInputs.delete(params.id);
+      throw error;
+    }
+    return { accepted: true };
+  }
+
   async stop(params) {
     const context = this.runs.get(params.runId);
     if (
@@ -1074,6 +1122,7 @@ export class AssistantRuntime {
       attachments,
       abort: new AbortController(),
       callCount: 0,
+      liveInputs: new Map(),
       calls: new Map(),
       unknownOutcome: false,
       webUrls,
@@ -1179,7 +1228,13 @@ export class AssistantRuntime {
       const recordSummaryUsage = (target, usage) =>
         manager.appendCustomEntry(
           "ofox-desktop-usage",
-          usageEntry(params, target, "compaction", usage, secrets),
+          usageEntry(
+            context.nativeParams ?? params,
+            target,
+            "compaction",
+            usage,
+            secrets,
+          ),
         );
       const safeFetch = credentialFetch({
         baseUrl: model.baseUrl,
@@ -1372,6 +1427,43 @@ export class AssistantRuntime {
         this.notify(context, "thinking_end");
       };
       unsubscribe = session.subscribe((event) => {
+        if (event.type === "message_start" && event.message.role === "user") {
+          const text = contentText(event.message.content);
+          const inputs = [...context.liveInputs.values()].filter(
+            (input) => !input.applied && input.text === text,
+          );
+          const input =
+            inputs.find((input) => input.behavior === "steer") ?? inputs[0];
+          if (input) {
+            input.applied = true;
+            context.nativeParams = {
+              ...params,
+              runId: input.id,
+              operationId: input.id,
+            };
+            manager.appendCustomEntry("ofox-desktop-run", {
+              runId: input.id,
+              operationId: input.id,
+              pricingKnown: params.model.pricingKnown === true,
+              cacheReadKnown: knownPrice(params.model.cost?.cacheRead),
+              cacheWriteKnown: knownPrice(params.model.cost?.cacheWrite),
+            });
+            const previousEntryId = manager
+              .getBranch()
+              .filter(
+                (entry) =>
+                  entry.type === "message" &&
+                  entry.message.role === "assistant",
+              )
+              .at(-1)?.id;
+            this.notify(context, "steer_applied", {
+              id: input.id,
+              text: input.text,
+              behavior: input.behavior,
+              previousEntryId,
+            });
+          }
+        }
         if (event.type === "message_update") {
           const update = event.assistantMessageEvent;
           if (update.type === "text_delta") {

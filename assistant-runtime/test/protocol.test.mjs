@@ -548,3 +548,60 @@ test(
     await fixture.assertClean([token]);
   },
 );
+
+test(
+  "private stdio admits steering while run is awaiting its model response",
+  { timeout: 15000 },
+  async (t) => {
+    let held;
+    let requested;
+    const firstRequest = new Promise((resolve) => {
+      requested = resolve;
+    });
+    const fixture = await createStdioAcceptance(
+      t,
+      (_request, response, number) => {
+        if (number === 1) {
+          held = response;
+          requested();
+        } else writeModelStream(response, "Steered reply");
+      },
+    );
+    const wire = fixture.spawnSidecar();
+    t.after(() => {
+      if (held && !held.writableEnded) writeModelStream(held, "cleanup");
+    });
+    const params = fixture.params(
+      "live-stdio",
+      "synthetic-live-stdio-credential",
+    );
+    const running = wire.start("run", params);
+    await firstRequest;
+    assert.deepEqual(
+      await wire.start("steer", {
+        sessionId: params.sessionId,
+        runId: params.runId,
+        operationId: params.operationId,
+        id: "live-action",
+        behavior: "steer",
+        text: "Use a different direction",
+      }),
+      { accepted: true },
+    );
+    writeModelStream(held, "First reply");
+    const result = await running;
+    assert.equal(result.status, "completed");
+    assert.equal(
+      result.entries.filter((entry) => entry.role == "user").length,
+      2,
+    );
+    assert.ok(
+      wire.messages.some(
+        (frame) =>
+          frame.method == "event" && frame.params.type == "steer_applied",
+      ),
+    );
+    await wire.close();
+    await fixture.assertClean([params.apiKey]);
+  },
+);

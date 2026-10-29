@@ -27,7 +27,7 @@ pub(super) fn settle_run(
     let message = record
         .messages
         .iter_mut()
-        .find(|m| m.id == control.message_id)
+        .find(|m| m.id == control.reply_id())
         .map(|message| {
             message.status = if completed {
                 "completed"
@@ -59,18 +59,36 @@ pub(super) fn settle_run(
     if !completed && !unbilled {
         mark_cost_unknown(&mut record.usage);
     }
+    let unsent: HashSet<String> = record
+        .messages
+        .iter()
+        .filter(|m| m.role == "user" && m.status == "queued")
+        .filter_map(|m| m.run_id.clone())
+        .collect();
     for op in record
         .operations
         .iter_mut()
-        .filter(|op| op.id == control.operation_id)
+        .filter(|op| control.owns_native_run(&op.run_id) && op.status == OperationStatus::Running)
     {
-        op.status = if completed {
+        op.status = if unsent.contains(&op.run_id) {
+            OperationStatus::Cancelled
+        } else if completed {
             OperationStatus::Completed
         } else if stopped {
             OperationStatus::Cancelled
         } else {
             OperationStatus::Failed
         };
+    }
+    for user in record.messages.iter_mut().filter(|m| {
+        m.run_id
+            .as_deref()
+            .is_some_and(|id| control.owns_native_run(id))
+            && m.role == "user"
+            && m.status == "queued"
+    }) {
+        user.status = "error".into();
+        user.error_code = Some("assistant_cancelled".into());
     }
     Ok((message, record.session.clone()))
 }
@@ -116,6 +134,16 @@ pub(super) fn settle_interrupted(
         }
     }
     for message in &mut record.messages {
+        if message.role == "user"
+            && message.status == "queued"
+            && message
+                .run_id
+                .as_ref()
+                .is_some_and(|id| interrupted.contains(id))
+        {
+            message.status = "error".into();
+            message.error_code = Some("assistant_cancelled".into());
+        }
         if message.status == "streaming" {
             message.status = "stopped".into();
             if let Some(media) = &mut message.media {
@@ -187,7 +215,7 @@ impl Default for ProjectionBuffer {
 impl ProjectionBuffer {
     pub(super) fn push(&mut self, run: &RunControl, kind: &str, data: &mut Value) {
         scrub_secrets_in(data, &run.secrets());
-        data["messageId"] = json!(run.message_id);
+        data["messageId"] = json!(run.reply_id());
         if let Some(delta) = data["delta"].as_str() {
             if kind == "text_delta" {
                 self.pending.text.push_str(delta);
@@ -410,9 +438,20 @@ pub(super) fn merge_native(
     follow_native_branch(record, entries);
     // Native history is authoritative even when the last UI event was lost.
     let active_run = record.session.active_run.as_ref().map(|run| &run.run_id);
+    let live_children: HashSet<&str> = record
+        .operations
+        .iter()
+        .filter(|op| op.status == OperationStatus::Running)
+        .map(|op| op.run_id.as_str())
+        .collect();
     for message in &mut record.messages {
         if message.status == "streaming"
-            && !(active_run.is_some() && message.run_id.as_ref() == active_run)
+            && !(active_run.is_some()
+                && (message.run_id.as_ref() == active_run
+                    || message
+                        .run_id
+                        .as_deref()
+                        .is_some_and(|id| live_children.contains(id))))
         {
             message.status = "stopped".into();
         }
@@ -818,6 +857,47 @@ mod tests {
             &request,
             "test-opaque-credential".into(),
         )
+    }
+
+    #[test]
+    fn a_live_child_reply_survives_a_merge_under_the_parent_run() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        record.session.active_run = Some(RunRef {
+            run_id: "parent".into(),
+            operation_id: "parent-op".into(),
+        });
+        record.operations.push(
+            serde_json::from_value(json!({"id":"child","runId":"child","status":"running"}))
+                .unwrap(),
+        );
+        record
+            .messages
+            .push(message("reply", "assistant", "child", 1));
+        merge_native(&mut record, &json!([]), &[]).unwrap();
+        assert_eq!(record.messages[0].status, "streaming");
+    }
+
+    #[test]
+    fn restart_marks_an_unconsumed_live_input_unsent_instead_of_leaving_it_queued() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        record.operations.push(
+            serde_json::from_value(json!({"id":"child","runId":"child","status":"running"}))
+                .unwrap(),
+        );
+        let mut input = message("child", "user", "child", 1);
+        input.status = "queued".into();
+        record.messages.push(input);
+        settle_interrupted(&mut record, None).unwrap();
+        assert_eq!(record.messages[0].status, "error");
+        assert_eq!(
+            record.messages[0].error_code.as_deref(),
+            Some("assistant_cancelled")
+        );
+        assert_eq!(record.operations[0].status, OperationStatus::Interrupted);
     }
 
     #[test]

@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncWrite};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, oneshot, watch};
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// Whether a run may still get a key; the error is the code to report.
@@ -137,6 +137,9 @@ pub struct RunControl {
     pub run_id: String,
     pub operation_id: String,
     pub message_id: String,
+    pub(super) live_reply: Mutex<Option<String>>,
+    pub(super) live_runs: Mutex<HashSet<String>>,
+    live_input: Mutex<Option<mpsc::Sender<super::live::LiveCommand>>>,
     pub cancel: watch::Sender<bool>,
     pub deadline: tokio::time::Instant,
     /// Every API key this run has used (a 401 retry adds the new one). Each is
@@ -152,10 +155,30 @@ impl RunControl {
             run_id: request.run_id.clone(),
             operation_id: request.operation_id.clone(),
             message_id: id(),
+            live_reply: Mutex::new(None),
+            live_runs: Mutex::new(HashSet::new()),
+            live_input: Mutex::new(None),
             cancel: watch::channel(false).0,
             deadline: tokio::time::Instant::now() + RUN_DEADLINE,
             secret: Mutex::new(vec![secret]),
         }
+    }
+
+    pub(super) fn reply_id(&self) -> String {
+        self.live_reply
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .unwrap_or_else(|| self.message_id.clone())
+    }
+
+    pub(super) fn owns_native_run(&self, run_id: &str) -> bool {
+        run_id == self.run_id
+            || self
+                .live_runs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(run_id)
     }
 
     pub(super) fn secrets(&self) -> Vec<String> {
@@ -1312,6 +1335,61 @@ impl AssistantHost {
             .await
     }
 
+    pub async fn steer(&self, request: SteerRequest) -> Result<(), String> {
+        self.ensure_accepting_runs()?;
+        let identity = self.identity().await?;
+        if request.expected_owner != identity.owner
+            || request.expected_generation != self.generation()
+        {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        for id in [
+            &request.session_id,
+            &request.run_id,
+            &request.operation_id,
+            &request.id,
+        ] {
+            validate_id(id)?;
+        }
+        if request.text.len() > 128_000 {
+            return Err("assistant_message_too_large".into());
+        }
+        if request.text.trim().is_empty() {
+            return Err("assistant_invalid_message".into());
+        }
+        let run = self
+            .runs
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&request.session_id)
+            .cloned()
+            .ok_or(SESSION_BUSY)?;
+        if run.identity != identity
+            || run.run_id != request.run_id
+            || run.operation_id != request.operation_id
+        {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        self.validate_run(&run)?;
+        if request.id == run.run_id || request.id == run.operation_id {
+            return Err("assistant_stale_operation".into());
+        }
+        let sender = run
+            .live_input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+            .ok_or(SESSION_BUSY)?;
+        let (reply, receipt) = oneshot::channel();
+        sender
+            .try_send(super::live::LiveCommand { request, reply })
+            .map_err(|_| SESSION_BUSY)?;
+        tokio::time::timeout(Duration::from_secs(10), receipt)
+            .await
+            .map_err(|_| "assistant_runtime_failed")?
+            .map_err(|_| SESSION_BUSY)?
+    }
+
     async fn run_once(
         &self,
         control: &Arc<RunControl>,
@@ -1336,6 +1414,11 @@ impl AssistantHost {
         let mut buffer = Vec::new();
         let mut attempt = Attempt::default();
         let request_id = id();
+        let (sender, mut commands) = mpsc::channel(8);
+        *control
+            .live_input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(sender);
         let result = self
             .converse(
                 control,
@@ -1343,13 +1426,17 @@ impl AssistantHost {
                 may_retry,
                 &request_id,
                 (&mut input, &mut output, &mut buffer),
-                &mut attempt,
+                (&mut attempt, &mut commands),
             )
             .await
             .map_err(|failure| Failure {
                 unbilled: failure.unbilled || !attempt.sent,
                 ..failure
             });
+        *control
+            .live_input
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = None;
         attempt.projection.end_thinking();
         let flushed = self.flush(control, &mut attempt.projection).await;
         let result = match (result, flushed) {
@@ -1376,7 +1463,7 @@ impl AssistantHost {
         may_retry: bool,
         request_id: &str,
         (input, output, buffer): (&mut I, &mut O, &mut Vec<u8>),
-        attempt: &mut Attempt,
+        (attempt, commands): (&mut Attempt, &mut mpsc::Receiver<super::live::LiveCommand>),
     ) -> Result<Finish, Failure>
     where
         I: AsyncWrite + Unpin,
@@ -1396,9 +1483,27 @@ impl AssistantHost {
         }
         attempt.sent = true;
         let mut ticker = tokio::time::interval(Duration::from_millis(250));
+        let mut pending: HashMap<String, super::live::LiveCommand> = HashMap::new();
         loop {
             let length = tokio::select! {
                 _ = cancel.changed() => return Err(CANCELLED.into()),
+                Some(command) = commands.recv() => {
+                    match self.admit_live_input(control,&command.request).await {
+                        Ok(false) => {let _=command.reply.send(Ok(()));}
+                        Ok(true) => {
+                            let rpc_id=format!("steer:{}",command.request.id);
+                            let text=scrub_secrets(&command.request.text,&self.known_keys());
+                            let line=frame(&json!({"id":rpc_id,"method":"steer","params":{"sessionId":control.session_id,"runId":control.run_id,"operationId":control.operation_id,"id":command.request.id,"text":text,"behavior":"steer"}}))?;
+                            self.ensure_current(&control.identity,command.request.expected_generation).await?;
+                            self.validate_run(control)?;
+                            attempt.progressed=true;
+                            write_line(input,&line).await?;
+                            pending.insert(rpc_id,command);
+                        }
+                        Err(error) => {let _=command.reply.send(Err(error));}
+                    }
+                    continue;
+                }
                 _ = ticker.tick() => {
                     if attempt.projection.due() {
                         self.flush(control, &mut attempt.projection).await?;
@@ -1419,7 +1524,15 @@ impl AssistantHost {
             }
             let value: Value = serde_json::from_slice(buffer).map_err(|_| PROTOCOL)?;
             buffer.clear();
-            if value["method"] == "event" {
+            if let Some(command) = value["id"].as_str().and_then(|id| pending.remove(id)) {
+                let result = if value["result"]["accepted"] == true {
+                    Ok(())
+                } else {
+                    self.refuse_live_input(control, &command.request.id).await?;
+                    Err(SESSION_BUSY.into())
+                };
+                let _ = command.reply.send(result);
+            } else if value["method"] == "event" {
                 self.on_event(control, &value["params"], attempt).await?;
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
@@ -1448,6 +1561,12 @@ impl AssistantHost {
             return Err(PROTOCOL.into());
         }
         match kind {
+            "steer_applied" => {
+                attempt.projection.end_thinking();
+                self.flush(control, &mut attempt.projection).await?;
+                let data = self.apply_live_input(control, &data).await?;
+                self.emit(control, "steer_applied", data);
+            }
             "text_delta" | "thinking_delta" => {
                 attempt.progressed = true;
                 attempt.projection.push(control, kind, &mut data);
@@ -1461,13 +1580,13 @@ impl AssistantHost {
             "thinking_start" => {
                 attempt.progressed = true;
                 attempt.projection.start_thinking();
-                self.emit(control, kind, json!({"messageId": control.message_id}));
+                self.emit(control, kind, json!({"messageId": control.reply_id()}));
             }
             // Reasoning stopped. The reply's text may come in a little later:
             // the runtime holds back its start the same way.
             "thinking_end" => {
                 attempt.projection.end_thinking();
-                self.emit(control, kind, json!({"messageId": control.message_id}));
+                self.emit(control, kind, json!({"messageId": control.reply_id()}));
             }
             "usage" => {
                 attempt.progressed |= counts_tokens(&data);
@@ -1483,21 +1602,21 @@ impl AssistantHost {
                 // As for text: the query is the model's, the keys are not.
                 scrub_secrets_in(&mut data, &control.secrets());
                 let mut shown = web::tool_start_event(&data)?;
-                shown["messageId"] = json!(control.message_id);
+                shown["messageId"] = json!(control.reply_id());
                 self.emit(control, kind, shown);
             }
             "tool_end" => {
                 attempt.progressed = true;
                 scrub_secrets_in(&mut data, &control.secrets());
                 let mut shown = web::tool_end_event(&data)?;
-                shown["messageId"] = json!(control.message_id);
+                shown["messageId"] = json!(control.reply_id());
                 if data["name"] == "web_search" && data["success"] == true {
                     let found = web::search_sources(&control.run_id, &data["details"]);
                     if let Some(sources) = self.save_sources(control, found).await? {
                         self.emit(
                             control,
                             "sources",
-                            json!({"messageId": control.message_id, "sources": sources}),
+                            json!({"messageId": control.reply_id(), "sources": sources}),
                         );
                     }
                 }
@@ -1626,7 +1745,7 @@ impl AssistantHost {
         let store = self.store(&control.identity.owner)?;
         let (sid, mid, secrets) = (
             control.session_id.clone(),
-            control.message_id.clone(),
+            control.reply_id(),
             control.secrets(),
         );
         blocking(move || save_projection(&store, &sid, &mid, &pending, &secrets)).await
@@ -1661,7 +1780,7 @@ impl AssistantHost {
             scrub_secrets_in(source, &secrets);
         }
         let store = self.store(&control.identity.owner)?;
-        let (sid, mid) = (control.session_id.clone(), control.message_id.clone());
+        let (sid, mid) = (control.session_id.clone(), control.reply_id());
         blocking(move || {
             store.mutate(&sid, |record| {
                 let message = record
@@ -2246,6 +2365,75 @@ mod tests {
                 host.send(request).await.unwrap_err(),
                 "assistant_message_too_large"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_prepared_for_stale_authority_are_refused_before_recovery() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let generation = host.generation();
+        for authority in [
+            json!({"expectedOwner": "b".repeat(64), "expectedGeneration": generation}),
+            json!({"expectedOwner": identity().owner, "expectedGeneration": generation + 1}),
+            json!({"expectedOwner": identity().owner}),
+            json!({"expectedGeneration": generation}),
+        ] {
+            for media in [
+                json!({}),
+                json!({"media": {}}),
+                json!({"video": {"duration": 4, "resolution": "480p"}}),
+            ] {
+                let mut value = json!({
+                    "sessionId": sid, "runId": id(), "operationId": id(), "text": "Queued text",
+                });
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(authority.as_object().unwrap().clone());
+                value
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(media.as_object().unwrap().clone());
+                let request: SendRequest = serde_json::from_value(value).unwrap();
+                assert_eq!(host.send(request).await.unwrap_err(), IDENTITY_CHANGED);
+            }
+        }
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 0);
+        assert!(env.events.lock().unwrap().is_empty());
+        let record = store.load_record(&sid).unwrap();
+        assert!(record.messages.is_empty());
+        assert!(record.operations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn current_and_legacy_send_authority_reach_normal_admission() {
+        let (_config, host) = fixture();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        for authority in [
+            json!({}),
+            json!({
+                "expectedOwner": identity().owner, "expectedGeneration": host.generation(),
+            }),
+        ] {
+            let mut value = json!({
+                "sessionId": sid, "runId": id(), "operationId": id(), "text": "Ordinary text",
+            });
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(authority.as_object().unwrap().clone());
+            let request: SendRequest = serde_json::from_value(value).unwrap();
+            // This fixture deliberately has no runtime. Both forms get past
+            // the authority fence, without minting a key or starting a run.
+            assert_eq!(host.send(request).await.unwrap_err(), RUNTIME_UNAVAILABLE);
         }
     }
 

@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   assistantApi,
   assistantErrorCode,
@@ -23,6 +29,12 @@ import {
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 import { currentThinking, type ThinkingChoice } from "@/utils/assistantModels";
 import { useFinishNotice } from "./useFinishNotice";
+import { useInteractionActive } from "@/components/ui/interaction-scope";
+import {
+  useMessageQueue,
+  MAX_MESSAGE_BYTES,
+  type QueueTicket,
+} from "./useMessageQueue";
 
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
@@ -155,6 +167,13 @@ type ImportFiles = (sessionId: string) => Promise<ImportedFiles>;
 
 /** All asynchronous replies are fenced by the selected session and component lifetime. */
 export function useAssistant(enabled: boolean) {
+  const interactionActive = useInteractionActive();
+  const activeRef = useRef(interactionActive);
+  activeRef.current = interactionActive;
+  const { queues, controls: messageQueue } = useMessageQueue();
+  useLayoutEffect(() => {
+    if (!interactionActive) messageQueue.pauseAll();
+  }, [interactionActive, messageQueue]);
   const [bootstrap, setBootstrap] = useState<AssistantBootstrap | null>(null);
   const [chosenModel, setChosenModel] = useState<string | null>(null);
   const newModelId = chosenModel ?? bootstrap?.defaultModelId ?? "";
@@ -212,7 +231,12 @@ export function useAssistant(enabled: boolean) {
     setErrorDetail(null);
   }, []);
   const [loading, setLoading] = useState(false);
-  const [operationBusy, setBusy] = useState(false);
+  const [operationBusy, setBusyState] = useState(false);
+  const operationBusyRef = useRef(false);
+  const setBusy = useCallback((value: boolean) => {
+    operationBusyRef.current = value;
+    setBusyState(value);
+  }, []);
   const [transferring, setTransferring] = useState(false);
   const transferInFlight = useRef(false);
   const [transferResult, setTransferResult] =
@@ -394,24 +418,30 @@ export function useAssistant(enabled: boolean) {
     setAttachmentsState(value);
   }, []);
 
-  const showError = useCallback((value: unknown) => {
-    if (!mounted.current) return;
-    const code = assistantErrorCode(value);
-    setError(code);
-    // Only media diagnostics supplied by the host have this explicit contract:
-    // Rust scrubs credentials and caps their length before emitting them.
-    if (
-      code.startsWith("assistant_media_") &&
-      value &&
-      typeof value === "object"
-    ) {
-      const detail = (value as { detail?: unknown }).detail;
-      if (typeof detail === "string") setErrorDetail(detail.slice(0, 2000));
-    }
-    // A sign-in, sign-out or region change moved the backend's authority on:
-    // the owner and generation every write carries must be read again.
-    if (code === IDENTITY_CHANGED) reloadAuthority.current();
-  }, []);
+  const showError = useCallback(
+    (value: unknown) => {
+      if (!mounted.current) return;
+      const code = assistantErrorCode(value);
+      setError(code);
+      // Only media diagnostics supplied by the host have this explicit contract:
+      // Rust scrubs credentials and caps their length before emitting them.
+      if (
+        code.startsWith("assistant_media_") &&
+        value &&
+        typeof value === "object"
+      ) {
+        const detail = (value as { detail?: unknown }).detail;
+        if (typeof detail === "string") setErrorDetail(detail.slice(0, 2000));
+      }
+      // A sign-in, sign-out or region change moved the backend's authority on:
+      // the owner and generation every write carries must be read again.
+      if (code === IDENTITY_CHANGED) {
+        messageQueue.clear();
+        reloadAuthority.current();
+      }
+    },
+    [messageQueue],
+  );
 
   /** The backend's authority now, or null when it could not be read. */
   const loadBootstrap = useCallback(async () => {
@@ -422,6 +452,13 @@ export function useAssistant(enabled: boolean) {
       try {
         const value = await assistantApi.bootstrap();
         if (!mounted.current || generation !== epoch.current) return null;
+        const previous = bootstrapRef.current;
+        if (
+          previous &&
+          (previous.owner !== value.owner ||
+            previous.authorityGeneration !== value.authorityGeneration)
+        )
+          messageQueue.clear();
         bootstrapRef.current = value;
         setBootstrap(value);
         return value;
@@ -433,7 +470,7 @@ export function useAssistant(enabled: boolean) {
         return null;
       }
     }
-  }, []);
+  }, [messageQueue]);
   reloadAuthority.current = () => void loadBootstrap();
 
   /**
@@ -723,6 +760,7 @@ export function useAssistant(enabled: boolean) {
     const cleanup: (() => void)[] = [];
     let disposed = false;
     const reset = () => {
+      messageQueue.clear();
       signedOut.current = false;
       epoch.current += 1;
       draftAuthority.current += 1;
@@ -796,6 +834,7 @@ export function useAssistant(enabled: boolean) {
     enabled,
     loadBootstrap,
     loadPreferences,
+    messageQueue,
     setAttachments,
     setDraft,
     setNewThinking,
@@ -1055,6 +1094,26 @@ export function useAssistant(enabled: boolean) {
             }));
             return;
           }
+          case "steer_applied": {
+            endThinking(event.runId);
+            writeThinking(null);
+            const { messages, messageId } = event.data;
+            setDetail((old) =>
+              old && old.session.id === event.sessionId
+                ? {
+                    ...old,
+                    messages: [
+                      ...old.messages.filter(
+                        (m) => !messages.some((next) => next.id === m.id),
+                      ),
+                      ...messages.filter((message) => message.id !== messageId),
+                    ].sort((a, b) => a.createdAt - b.createdAt),
+                  }
+                : old,
+            );
+            setStream({ ...blankReply(event.runId), id: messageId });
+            return;
+          }
           case "thinking_start":
             doneReading(event.runId);
             startThinking(event.runId);
@@ -1171,17 +1230,24 @@ export function useAssistant(enabled: boolean) {
           }
           case "error":
             // A stop sends no error; a failure is shown by its code alone.
+            messageQueue.pause(event.sessionId);
             endThinking(event.runId);
             showError(event.data);
             return;
           case "run_end":
+            if (event.data.status !== "completed" || event.data.stopped)
+              messageQueue.pause(event.sessionId);
             writeThinking(null);
             setRun(null);
             setCompacting(false);
-            // Keep the streamed reply until the canonical saved transcript is available.
+            // A successful event alone is not enough to dispatch another run:
+            // its saved history must be visible first. A failed read pauses.
             void refreshDetail(event.sessionId).then((loaded) => {
-              if (loaded && selectedRef.current === event.sessionId)
+              if (generation !== epoch.current || !mounted.current) return;
+              if (loaded && selectedRef.current === event.sessionId) {
                 setStream(null);
+                if (!runRef.current) messageQueue.completed(event.sessionId);
+              } else messageQueue.pause(event.sessionId);
             });
             void refreshSessionsRef.current(generation);
             return;
@@ -1206,6 +1272,7 @@ export function useAssistant(enabled: boolean) {
     enabled,
     endThinking,
     flushDeltas,
+    messageQueue,
     notifyFinish,
     queueDelta,
     refreshDetail,
@@ -1232,6 +1299,7 @@ export function useAssistant(enabled: boolean) {
         }
         return;
       }
+      if (previous) messageQueue.pause(previous);
       if (previous && drafts.current.has(previous))
         void persistDraft(
           previous,
@@ -1273,6 +1341,7 @@ export function useAssistant(enabled: boolean) {
       loading,
       detail,
       loadSelected,
+      messageQueue,
       dropDeltas,
       setRun,
       setNewThinking,
@@ -1409,6 +1478,7 @@ export function useAssistant(enabled: boolean) {
     async (patch: Omit<AssistantUpdateRequest, "sessionId">) => {
       const sessionId = selectedRef.current;
       if (!sessionId) return;
+      if (patch.modelId) messageQueue.pause(sessionId);
       const generation = epoch.current;
       const sequence = ++updateSequence.current;
       try {
@@ -1437,7 +1507,7 @@ export function useAssistant(enabled: boolean) {
           showError(reason);
       }
     },
-    [showError, rememberModel],
+    [showError, rememberModel, messageQueue],
   );
 
   /**
@@ -1452,6 +1522,7 @@ export function useAssistant(enabled: boolean) {
       const open = sid === selectedRef.current;
       if (open ? busy || loading : transferInFlight.current) return false;
       const generation = epoch.current;
+      messageQueue.pause(sid);
       if (open) {
         setBusy(true);
         setError(null);
@@ -1494,7 +1565,7 @@ export function useAssistant(enabled: boolean) {
           setBusy(false);
       }
     },
-    [busy, loading, persistDraft, select, switchList, showError],
+    [busy, loading, persistDraft, select, switchList, showError, messageQueue],
   );
 
   /**
@@ -1544,6 +1615,7 @@ export function useAssistant(enabled: boolean) {
       drafts.current.delete(sid);
       attachmentDrafts.current.delete(sid);
       savedDrafts.current.delete(sid);
+      messageQueue.clear(sid);
       if (selectedRef.current === sid) select(null);
     };
     try {
@@ -1572,7 +1644,7 @@ export function useAssistant(enabled: boolean) {
         if (!selectedRef.current || selectedRef.current === sid) setBusy(false);
       }
     }
-  }, [busy, loading, select, showError]);
+  }, [busy, loading, select, showError, messageQueue]);
 
   /**
    * Delete every conversation in the trash for good. Resolves with what was
@@ -1909,6 +1981,8 @@ export function useAssistant(enabled: boolean) {
       media?: AssistantImageRequest;
       video?: AssistantVideoRequest;
       quoteId?: string;
+      /** Internal ordinary-queue admission; never forwarded to the runtime. */
+      queueTicket?: QueueTicket;
     }) => {
       const { editMessageId, regenerateMessageId, retryMessageId } =
         options ?? {};
@@ -1941,6 +2015,8 @@ export function useAssistant(enabled: boolean) {
         : files;
       if (
         busy ||
+        operationBusyRef.current ||
+        transferInFlight.current ||
         loading ||
         showTrash ||
         detail?.session.deletedAt != null ||
@@ -1959,10 +2035,33 @@ export function useAssistant(enabled: boolean) {
       let preparation: PendingSend | undefined;
       const generation = epoch.current;
       const selection = selectionSequence.current;
+      const ticket = options?.queueTicket;
+      const queueCurrent = () =>
+        !ticket ||
+        (!ticket.cancelled &&
+          mounted.current &&
+          activeRef.current &&
+          generation === epoch.current &&
+          selection === selectionSequence.current &&
+          selectedRef.current === ticket.sessionId &&
+          messageQueue.get(ticket.sessionId)?.sending === ticket &&
+          bootstrapRef.current?.models.some(
+            (model) =>
+              model.id === modelRef.current &&
+              (model.kind ?? "chat") === "chat",
+          ));
       try {
+        const authority = requireIdentity(bootstrapRef.current);
         const session = await ensureSession();
         sessionId = session.id;
-        if (selectedRef.current !== sessionId) return false;
+        if (
+          !mounted.current ||
+          generation !== epoch.current ||
+          selectedRef.current !== sessionId ||
+          !queueCurrent()
+        )
+          return false;
+        if (!ticket) messageQueue.manualRun(sessionId);
         if (fromComposer) {
           if (draftScopes.current.get(sessionId)?.held)
             throw new Error("assistant_session_busy");
@@ -2048,10 +2147,12 @@ export function useAssistant(enabled: boolean) {
           );
         if (generation !== epoch.current)
           throw new Error("assistant_request_expired");
+        if (!queueCurrent()) preparation.cancelled = true;
         if (preparation.cancelled) throw new Error("assistant_cancelled");
         await assistantApi.send({
           sessionId,
           ...reference,
+          ...authority,
           text,
           attachmentIds: files.map((file) => file.id),
           ...(options?.media ? { media: options.media } : {}),
@@ -2160,8 +2261,146 @@ export function useAssistant(enabled: boolean) {
       persistDraft,
       releaseDraft,
       refreshDetail,
+      messageQueue,
     ],
   );
+
+  const queue = selectedId ? queues.get(selectedId) : undefined;
+  const chatModel = bootstrap?.models.some(
+    (model) =>
+      model.id === (detail?.session.modelId ?? newModelId) &&
+      (model.kind ?? "chat") === "chat",
+  );
+  const queueAvailable = Boolean(
+    enabled &&
+      interactionActive &&
+      connected &&
+      bootstrap?.runtime.available &&
+      bootstrap.owner &&
+      bootstrap.authorityGeneration !== undefined &&
+      chatModel &&
+      !busy &&
+      !loading &&
+      !showTrash &&
+      detail?.session.id === selectedId &&
+      detail?.session.deletedAt == null,
+  );
+
+  /** Only text is queued; attachment imports remain disabled during a reply. */
+  const enqueue = useCallback(() => {
+    const sid = selectedRef.current;
+    if (
+      !queueAvailable ||
+      operationBusyRef.current ||
+      !sid ||
+      attachmentsRef.current.length ||
+      (!runRef.current && !messageQueue.get(sid)?.messages.length)
+    )
+      return false;
+    if (!messageQueue.enqueue(sid, draftRef.current)) return false;
+    setDraft("");
+    return true;
+  }, [queueAvailable, messageQueue, setDraft]);
+
+  const steerSending = useRef(false);
+  const steer = useCallback(async () => {
+    const active = runRef.current;
+    const sid = selectedRef.current;
+    const text = draftRef.current;
+    if (
+      !active ||
+      !sid ||
+      !queueAvailable ||
+      steerSending.current ||
+      attachmentsRef.current.length ||
+      !text.trim() ||
+      new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES
+    )
+      return false;
+    const generation = epoch.current;
+    const selection = selectionSequence.current;
+    const draftVersion = draftSequence.current;
+    steerSending.current = true;
+    try {
+      const authority = requireIdentity(bootstrapRef.current);
+      await assistantApi.steer({
+        sessionId: sid,
+        ...active,
+        ...authority,
+        id: crypto.randomUUID(),
+        text,
+      });
+      if (
+        mounted.current &&
+        generation === epoch.current &&
+        selection === selectionSequence.current &&
+        sid === selectedRef.current &&
+        draftRef.current === text &&
+        draftVersion === draftSequence.current
+      )
+        setDraft("");
+      return true;
+    } catch (reason) {
+      if (generation === epoch.current && sid === selectedRef.current)
+        showError(reason);
+      return false;
+    } finally {
+      steerSending.current = false;
+    }
+  }, [queueAvailable, setDraft, showError]);
+
+  /** An explicit resume rechecks the saved conversation before any send. */
+  const resumeQueue = useCallback(async () => {
+    const sid = selectedRef.current;
+    if (!sid || !queueAvailable || operationBusyRef.current || runRef.current)
+      return;
+    const snapshot = messageQueue.get(sid);
+    if (!snapshot?.messages.length || snapshot.sending) return;
+    const generation = epoch.current;
+    const selection = selectionSequence.current;
+    const current = () =>
+      mounted.current &&
+      activeRef.current &&
+      generation === epoch.current &&
+      selection === selectionSequence.current &&
+      selectedRef.current === sid &&
+      messageQueue.get(sid) === snapshot;
+    setBusy(true);
+    try {
+      if ((await refreshDetail(sid)) && current() && !runRef.current) {
+        setStream(null);
+        messageQueue.resume(sid);
+      }
+    } finally {
+      if (
+        mounted.current &&
+        generation === epoch.current &&
+        selection === selectionSequence.current
+      )
+        setBusy(false);
+    }
+  }, [queueAvailable, messageQueue, refreshDetail, setBusy]);
+
+  useEffect(() => {
+    if (
+      !queueAvailable ||
+      !selectedId ||
+      operationBusyRef.current ||
+      runRef.current ||
+      stream ||
+      !queue?.ready ||
+      queue.paused ||
+      queue.sending
+    )
+      return;
+    const ticket = messageQueue.claim(selectedId);
+    if (!ticket) return;
+    void send({
+      text: ticket.message.text,
+      attachments: [],
+      queueTicket: ticket,
+    }).then((sent) => messageQueue.settle(ticket, sent));
+  }, [queueAvailable, selectedId, queue, stream, run, send, messageQueue]);
 
   /**
    * Leave a conversation this window just created for a pick that imported
@@ -2394,6 +2633,7 @@ export function useAssistant(enabled: boolean) {
     const active = runRef.current;
     const sessionId = selectedRef.current;
     if (!active || !sessionId) return;
+    messageQueue.pause(sessionId);
     const generation = epoch.current;
     const preparing = pendingSends.current.get(active.runId);
     if (preparing) preparing.cancelled = true;
@@ -2403,7 +2643,7 @@ export function useAssistant(enabled: boolean) {
       if (generation === epoch.current && selectedRef.current === sessionId)
         showError(reason);
     }
-  }, [showError]);
+  }, [showError, messageQueue]);
 
   // Set at once: a second press that comes before the render that disables
   // the switcher must not start a second switch.
@@ -2437,6 +2677,7 @@ export function useAssistant(enabled: boolean) {
         generation === epoch.current &&
         selection === selectionSequence.current &&
         selectedRef.current === sid;
+      messageQueue.pause(sid);
       switchInFlight.current = true;
       setBusy(true);
       setError(null);
@@ -2461,7 +2702,14 @@ export function useAssistant(enabled: boolean) {
         if (current()) setBusy(false);
       }
     },
-    [busy, loading, showTrash, detail?.session.deletedAt, showError],
+    [
+      busy,
+      loading,
+      showTrash,
+      detail?.session.deletedAt,
+      showError,
+      messageQueue,
+    ],
   );
 
   // The latest tool still running says what the reply is doing; before its
@@ -2549,6 +2797,24 @@ export function useAssistant(enabled: boolean) {
     detail,
     draft,
     setDraft,
+    queue,
+    queueAvailable,
+    enqueue,
+    steer,
+    resumeQueue,
+    pauseQueue: () => {
+      if (selectedRef.current) messageQueue.pause(selectedRef.current);
+    },
+    clearQueue: () => {
+      if (selectedRef.current) messageQueue.clear(selectedRef.current);
+    },
+    editQueued: (id: string, text: string) =>
+      selectedRef.current
+        ? messageQueue.edit(selectedRef.current, id, text)
+        : false,
+    removeQueued: (id: string) => {
+      if (selectedRef.current) messageQueue.remove(selectedRef.current, id);
+    },
     attachments,
     useMediaInput: async (file: AssistantAttachment, modelId: string) => {
       if (

@@ -19,6 +19,7 @@ import {
   Ellipsis,
   Globe,
   Loader2,
+  ListPlus,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -47,6 +48,8 @@ import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
 import { VideoParams, defaultVideoParams } from "./VideoParams";
 import { AssistantMessageView } from "./AssistantMessageView";
+import { AssistantQueue } from "./AssistantQueue";
+import { MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES } from "./useMessageQueue";
 import { AttachmentList } from "./AssistantAttachments";
 import { AssistantModelPicker } from "./AssistantModelPicker";
 import {
@@ -88,8 +91,6 @@ import { cn } from "@/lib/utils";
 
 const STARTERS = ["summary", "writing", "explain"] as const;
 
-/** The most bytes of text one message may carry (the backend's limit). */
-const MAX_MESSAGE_BYTES = 128_000;
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
 
@@ -200,6 +201,7 @@ function AssistantWorkspace() {
   const visionHint = useId();
   const searchNoteId = useId();
   const lengthHintId = useId();
+  const queueHintId = useId();
   const interactionActive = useInteractionActive();
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -334,6 +336,10 @@ function AssistantWorkspace() {
   );
   const imageMode = composerModel?.kind === "image";
   const videoMode = composerModel?.kind === "video";
+  const queueCount = assistant.queue?.messages.length ?? 0;
+  const queueMode = !imageMode && !videoMode && Boolean(run || queueCount);
+  const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
+  const canQueue = assistant.queueAvailable && !files.length && !queueFull;
   const [videoParams, setVideoParams] = useState<AssistantVideoRequest>({
     duration: 4,
     resolution: "",
@@ -394,6 +400,7 @@ function AssistantWorkspace() {
       blockedFiles && blockedHint,
       imagesNeedVision && visionHint,
       overLength && lengthHintId,
+      queueMode && (queueFull || files.length > 0) && queueHintId,
     ]
       .filter(Boolean)
       .join(" ") || undefined;
@@ -475,6 +482,10 @@ function AssistantWorkspace() {
   }, [assistant.draft]);
 
   const send = () => {
+    if (queueMode) {
+      if (assistant.enqueue()) focusComposer();
+      return;
+    }
     if (invalidImageInput) return;
     if (videoMode) {
       void assistant.quoteVideo(videoParams).then((confirmation) => {
@@ -1287,6 +1298,24 @@ function AssistantWorkspace() {
             ) : (
               <div className="mx-auto flex min-h-0 w-full max-w-[760px] flex-col">
                 <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
+                  {queueCount > 0 && assistant.queue && (
+                    <AssistantQueue
+                      key={assistant.selectedId}
+                      queue={assistant.queue}
+                      canResume={assistant.queueAvailable && !run}
+                      onPause={assistant.pauseQueue}
+                      onResume={() => {
+                        // Move focus while the user is still here, never in a
+                        // delayed completion that could follow navigation.
+                        focusComposer();
+                        void assistant.resumeQueue();
+                      }}
+                      onClear={assistant.clearQueue}
+                      onEdit={assistant.editQueued}
+                      onRemove={assistant.removeQueued}
+                      focusComposer={focusComposer}
+                    />
+                  )}
                   {/* Kept mounted: its live region announces the warnings, and
                   the list hands focus back once its last file is removed.
                   Only the list scrolls: the warnings that explain why Send
@@ -1322,6 +1351,19 @@ function AssistantWorkspace() {
                     />
                   )}
                   <div aria-live="polite" className="shrink-0 px-3">
+                    {queueMode && (queueFull || files.length > 0) && (
+                      <p
+                        id={queueHintId}
+                        className="mt-1.5 text-note text-warn"
+                      >
+                        {t(
+                          queueFull
+                            ? "assistant.queue.full"
+                            : "assistant.queue.textOnly",
+                          { max: MAX_QUEUED_MESSAGES },
+                        )}
+                      </p>
+                    )}
                     {invalidImageInput && (
                       <p className="text-note text-danger">
                         {t(
@@ -1369,7 +1411,7 @@ function AssistantWorkspace() {
                       // Files and no words of their own: the field has
                       // nothing to paste.
                       event.preventDefault();
-                      if (!writable) return;
+                      if (!writable || queueCount > 0) return;
                       // The skipped files are told once the import is under
                       // way, not for a paste that was refused.
                       void assistant.pasteAttachments(
@@ -1395,7 +1437,8 @@ function AssistantWorkspace() {
                         event.keyCode !== 229
                       ) {
                         event.preventDefault();
-                        if (writable && !overLength) send();
+                        if ((queueMode ? canQueue : writable) && !overLength)
+                          send();
                       }
                     }}
                   />
@@ -1407,6 +1450,7 @@ function AssistantWorkspace() {
                         title={t("assistant.attach")}
                         disabled={
                           !writable ||
+                          queueCount > 0 ||
                           (imageMode &&
                             (!composerModel?.image?.edits || files.length > 0))
                         }
@@ -1459,7 +1503,26 @@ function AssistantWorkspace() {
                           })}
                         </span>
                       )}
-                      {run ? (
+                      {run && queueMode && (
+                        <Button
+                          variant="ghost"
+                          className="h-7 px-2 text-note"
+                          disabled={
+                            !assistant.queueAvailable ||
+                            !assistant.draft.trim() ||
+                            files.length > 0 ||
+                            overLength
+                          }
+                          onClick={() =>
+                            void assistant.steer().then((sent) => {
+                              if (sent) focusComposer();
+                            })
+                          }
+                        >
+                          {t("assistant.queue.interrupt")}
+                        </Button>
+                      )}
+                      {run && (
                         <Tooltip>
                           <TooltipTrigger asChild>
                             <Button
@@ -1483,7 +1546,8 @@ function AssistantWorkspace() {
                             {t("assistant.stopTooltip")}
                           </TooltipContent>
                         </Tooltip>
-                      ) : (
+                      )}
+                      {(!run || queueMode) && (
                         <Tooltip>
                           {/* The wrapper takes the hover while Send is disabled:
                           a disabled button gets no pointer events. */}
@@ -1492,10 +1556,14 @@ function AssistantWorkspace() {
                               <Button
                                 size="icon"
                                 className="h-7 w-7 rounded-full"
-                                aria-label={t("assistant.send")}
+                                aria-label={t(
+                                  queueMode
+                                    ? "assistant.queue.add"
+                                    : "assistant.send",
+                                )}
                                 aria-describedby={sendHints}
                                 disabled={
-                                  !writable ||
+                                  !(queueMode ? canQueue : writable) ||
                                   blockedFiles ||
                                   invalidImageInput ||
                                   overLength ||
@@ -1503,12 +1571,26 @@ function AssistantWorkspace() {
                                 }
                                 onClick={send}
                               >
-                                <ArrowUp aria-hidden className="h-3.5 w-3.5" />
+                                {queueMode ? (
+                                  <ListPlus
+                                    aria-hidden
+                                    className="h-3.5 w-3.5"
+                                  />
+                                ) : (
+                                  <ArrowUp
+                                    aria-hidden
+                                    className="h-3.5 w-3.5"
+                                  />
+                                )}
                               </Button>
                             </span>
                           </TooltipTrigger>
                           <TooltipContent side="top">
-                            {t("assistant.sendTooltip")}
+                            {t(
+                              queueMode
+                                ? "assistant.queue.addTooltip"
+                                : "assistant.sendTooltip",
+                            )}
                           </TooltipContent>
                         </Tooltip>
                       )}

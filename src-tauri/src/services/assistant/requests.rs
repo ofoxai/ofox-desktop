@@ -434,6 +434,13 @@ impl AssistantHost {
         self.ensure_accepting_runs()?;
         let generation = self.generation();
         let identity = self.identity().await?;
+        match (&request.expected_owner, request.expected_generation) {
+            (None, None) => {} // Compatibility with callers predating the queue.
+            (Some(owner), Some(expected)) if *owner == identity.owner && expected == generation => {
+            }
+            _ => return Err(super::host::IDENTITY_CHANGED.into()),
+        }
+        self.ensure_current(&identity, generation).await?;
         self.recover(&identity, &request.session_id).await?;
         self.repair_media_history(&identity, &request.session_id)
             .await?;

@@ -385,6 +385,12 @@ pub struct ExportMarkdownRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
+    /// Optional together for older callers; new sends freeze the account and
+    /// region generation before IPC admission, including ordinary queues.
+    #[serde(default)]
+    pub expected_owner: Option<String>,
+    #[serde(default)]
+    pub expected_generation: Option<u64>,
     #[serde(default)]
     pub media: Option<ImageRequest>,
     #[serde(default)]
@@ -411,6 +417,19 @@ pub struct SendRequest {
     /// every version.
     #[serde(default)]
     pub retry_message_id: Option<String>,
+}
+
+/// Text admitted into a running chat, tied to its authority and operation.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SteerRequest {
+    pub session_id: String,
+    pub run_id: String,
+    pub operation_id: String,
+    pub id: String,
+    pub text: String,
+    pub expected_owner: String,
+    pub expected_generation: u64,
 }
 
 /// Show another version of a turn: `message_id` is the user turn to show.

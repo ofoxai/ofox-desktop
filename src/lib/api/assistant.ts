@@ -441,6 +441,9 @@ export interface AssistantUpdateRequest {
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
+  /** Frozen before admission; the host rejects work left by an old account or region. */
+  expectedOwner?: string;
+  expectedGeneration?: number;
   video?: AssistantVideoRequest;
   quoteId?: string;
   media?: AssistantImageRequest;
@@ -557,6 +560,14 @@ export interface AssistantPasteTarget {
   expectedGeneration: number;
 }
 
+export interface AssistantSteerRequest extends AssistantRunRef {
+  sessionId: string;
+  id: string;
+  text: string;
+  expectedOwner: string;
+  expectedGeneration: number;
+}
+
 export interface AssistantSwitchVersionRequest {
   sessionId: string;
   /** The user turn to show: one with a `nativeEntryId`. */
@@ -572,6 +583,10 @@ export interface AssistantSwitchVersionRequest {
  * stop) and `run_end` last.
  */
 export type AssistantRunEvent =
+  | {
+      type: "steer_applied";
+      data: { messageId: string; messages: AssistantMessage[] };
+    }
   | {
       type: "media_progress";
       data: {
@@ -842,6 +857,8 @@ export const assistantApi = {
     ),
   send: (request: AssistantSendRequest) =>
     invoke<AssistantRunRef>("assistant_send", { request }),
+  steer: (request: AssistantSteerRequest) =>
+    invoke<null>("assistant_steer", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
     invoke<null>("assistant_stop", { sessionId, runId, operationId }),
   /**
