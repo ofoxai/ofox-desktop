@@ -16,6 +16,10 @@ export default defineConfig(({ command }) => ({
   build: {
     outDir: "../dist",
     emptyOutDir: true,
+    // The CSP has no `data:` for fonts, so a small font (KaTeX_Size3) inlined
+    // into the CSS would be blocked; fonts always stay files from the app.
+    assetsInlineLimit: (file) =>
+      /\.(?:woff2?|ttf|otf)$/i.test(file) ? false : undefined,
   },
   server: {
     port: 3011,

@@ -352,6 +352,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                 content={message.content}
                 highlight={highlight}
                 syntaxHighlight
+                math
               />
             </div>
           )}

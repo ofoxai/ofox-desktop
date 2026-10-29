@@ -13,6 +13,7 @@ import type {
 } from "@/lib/api/assistant";
 
 const markdown = vi.hoisted(() => vi.fn());
+const markdownProps = vi.hoisted(() => vi.fn());
 const copyButtonRenders = vi.hoisted(() => vi.fn());
 const external = vi.hoisted(() => ({
   openExternal: vi.fn(),
@@ -36,9 +37,10 @@ vi.mock("@/components/ui/copy-button", async (importOriginal) => {
   };
 });
 vi.mock("@/components/sessions/SessionMarkdown", () => ({
-  SessionMarkdown: ({ content }: { content: string }) => {
-    markdown(content);
-    return <p>{content}</p>;
+  SessionMarkdown: (props: { content: string }) => {
+    markdown(props.content);
+    markdownProps(props);
+    return <p>{props.content}</p>;
   },
 }));
 
@@ -206,6 +208,15 @@ describe("assistant transcript rendering", () => {
     await userEvent.click(screen.getByRole("button", { name: "Regenerate" }));
     expect(onRegenerate).toHaveBeenCalledOnce();
     expect(onRegenerate).toHaveBeenCalledWith("m");
+  });
+
+  it("draws math in the words it shows and copies them as written", () => {
+    const content = "Area \\(\\pi r^2\\)";
+    render(view({ content, status: "completed" }));
+    expect(markdownProps).toHaveBeenCalledWith(
+      expect.objectContaining({ content, math: true }),
+    );
+    expect(copyButtonRenders).toHaveBeenCalledWith(content);
   });
 
   it("edits a question in place and resends it", async () => {
