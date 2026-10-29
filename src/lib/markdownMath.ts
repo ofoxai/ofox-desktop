@@ -25,7 +25,10 @@ export function loadMarkdownMath(): Promise<void> {
         // `trust: false` leaves out \href, \url, \includegraphics and \htmlData;
         // a formula that will not parse is shown as its text, never thrown.
         rehype: [
-          [rehypeKatex, { trust: false, maxExpand: 1000, strict: "ignore" }],
+          [
+            rehypeKatex,
+            { trust: false, maxExpand: 1000, maxSize: 20, strict: "ignore" },
+          ],
         ],
       };
     })
@@ -139,10 +142,13 @@ function codeSpanEnd(text: string, from: number): number {
   return run;
 }
 
-/** `$$ … $$`, padded where a dollar at the edge of the formula would join the fence. */
-function textMath(formula: string): string {
+/**
+ * `$$ … $$`, padded where a dollar at the edge of the formula, or right before
+ * or after it (`before`, `after`: the characters around), would join its fence.
+ */
+function textMath(formula: string, before: string, after: string): string {
   const padded = /^\$|\$$/.test(formula) ? ` ${formula} ` : formula;
-  return `$$${padded}$$`;
+  return `${before === "$" ? " " : ""}$$${padded}$$${after === "$" ? " " : ""}`;
 }
 
 function rewriteProse(text: string): string {
@@ -181,19 +187,24 @@ function rewriteProse(text: string): string {
       next === "[" && /^[ \t>]*$/.test(prefix) && /^[ \t\r]*$/.test(rest);
     out += block
       ? `$$\n${formula.replace(/^[ \t]*\n/, "").replace(/\n[ \t>]*$/, "")}\n${prefix}$$`
-      : textMath(formula);
+      : textMath(formula, out.slice(-1), text[end + 2] ?? "");
     index = end + 2;
   }
   return out;
 }
 
+// The same bound markdownSyntax puts on the text it will work through.
+const MAX_REWRITE = 64 * 1024;
+
 /**
  * Writes `\(…\)` and `\[…\]` as the `$$` math remark-math reads, outside code.
  * Markdown reads `\(` as an escaped bracket and drops the backslash, so this
  * must run on the text before it is parsed. A `\[` that stands on its own
- * lines becomes a `$$` block; every other formula becomes text math.
+ * lines becomes a `$$` block; every other formula becomes text math. A message
+ * above the size cap is left as written (its `$$` math still draws).
  */
 export function rewriteMathDelimiters(content: string): string {
+  if (content.length > MAX_REWRITE) return content;
   return splitCode(content)
     .map(({ code, text }) => (code ? text : rewriteProse(text)))
     .join("\n");

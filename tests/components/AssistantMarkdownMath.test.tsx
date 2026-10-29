@@ -165,6 +165,13 @@ describe("assistant math", () => {
     expect(container.querySelector("a, img, script")).toBeNull();
   });
 
+  it("caps the size a formula can take", async () => {
+    const { container } = render(message("$$\\rule{9999em}{9999em}$$"));
+    await rendered(container);
+    expect(container.querySelector("[style*='9999em']")).toBeNull();
+    expect(container.querySelector("[style*='20em']")).not.toBeNull();
+  });
+
   it("does not expand a macro bomb", async () => {
     const { container } = render(message("$$\\def\\a{\\a\\a}\\a$$"));
     await waitFor(() =>

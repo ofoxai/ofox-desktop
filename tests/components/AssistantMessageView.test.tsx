@@ -210,13 +210,21 @@ describe("assistant transcript rendering", () => {
     expect(onRegenerate).toHaveBeenCalledWith("m");
   });
 
-  it("draws math in the words it shows and copies them as written", () => {
+  it("draws math in a reply and copies it as written", () => {
     const content = "Area \\(\\pi r^2\\)";
     render(view({ content, status: "completed" }));
     expect(markdownProps).toHaveBeenCalledWith(
       expect.objectContaining({ content, math: true }),
     );
     expect(copyButtonRenders).toHaveBeenCalledWith(content);
+  });
+
+  it("shows a question as it was typed, without drawing math", () => {
+    const content = "find . \\( -name a \\)";
+    render(view({ role: "user", content }));
+    expect(markdownProps).toHaveBeenCalledWith(
+      expect.objectContaining({ content, math: false }),
+    );
   });
 
   it("edits a question in place and resends it", async () => {

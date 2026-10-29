@@ -56,6 +56,22 @@ describe("rewriteMathDelimiters", () => {
     expect(rewriteMathDelimiters("\\($x$\\)")).toBe("$$ $x$ $$");
   });
 
+  it("keeps adjacent formulas apart", () => {
+    expect(rewriteMathDelimiters("\\(x\\)\\(y\\)")).toBe("$$x$$ $$y$$");
+  });
+
+  it("keeps a formula apart from a dollar before or after it", () => {
+    expect(rewriteMathDelimiters("$\\(x\\)$5")).toBe("$ $$x$$ $5");
+  });
+
+  it("leaves a message above the size cap as it was", () => {
+    const small = "\\(x\\) ";
+    const text = small.repeat(Math.ceil((64 * 1024 + 1) / small.length));
+    expect(text.length).toBeGreaterThan(64 * 1024);
+    expect(rewriteMathDelimiters(text)).toBe(text);
+    expect(rewriteMathDelimiters(text.slice(0, 1000))).toContain("$$x$$");
+  });
+
   it("leaves a formula that holds $$ as it was", () => {
     expect(rewriteMathDelimiters("\\(a $$ b\\)")).toBe("\\(a $$ b\\)");
   });
