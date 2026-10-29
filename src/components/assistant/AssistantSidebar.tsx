@@ -175,6 +175,8 @@ export const AssistantSidebar = forwardRef<
   const [searchOpen, setSearchOpen] = useState(false);
   const searchButton = useRef<HTMLButtonElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
+  // What the chosen item of a row's menu does, once the menu has closed.
+  const rowAction = useRef<(() => void) | null>(null);
   const backupHint = useId();
   const rowIds = useId();
   const focusSoon = usePendingFocus();
@@ -303,6 +305,13 @@ export const AssistantSidebar = forwardRef<
             <DropdownMenuContent
               align="end"
               className="min-w-[140px] max-w-[280px]"
+              // The chosen item acts once the menu has closed: the focus the
+              // menu gives back to its button cannot then race the action.
+              onCloseAutoFocus={() => {
+                const action = rowAction.current;
+                rowAction.current = null;
+                action?.();
+              }}
             >
               <DropdownMenuItem onSelect={() => togglePin(item)}>
                 {item.pinnedAt === null ? (
@@ -318,7 +327,9 @@ export const AssistantSidebar = forwardRef<
               <DropdownMenuItem
                 disabled={assistant.busy}
                 className="text-danger"
-                onSelect={() => onMoveToTrash(item)}
+                onSelect={() => {
+                  rowAction.current = () => onMoveToTrash(item);
+                }}
               >
                 <Trash2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
                 {t("assistant.moveToTrash")}

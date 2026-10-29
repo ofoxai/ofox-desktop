@@ -1,9 +1,17 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantPage } from "@/components/assistant/AssistantPage";
+import { useConversationActions } from "@/components/assistant/useConversationActions";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
 import {
   assistantErrorKey,
@@ -214,6 +222,14 @@ async function searchFor(text: string) {
 }
 
 beforeEach(async () => {
+  // Reset, not just clear: `clearAllMocks` leaves the queues of
+  // `mockResolvedValueOnce` / `mockRejectedValueOnce` a test did not use, and
+  // the next test would take them.
+  for (const mock of Object.values(mocks)) mock.mockReset();
+  toasts.mockReset();
+  toasts.success.mockReset();
+  toasts.warning.mockReset();
+  toasts.error.mockReset();
   Element.prototype.scrollIntoView = vi.fn();
   // Only the date is held: timers stay real for the user-event delays.
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -521,6 +537,21 @@ describe("moving a conversation to the trash from its row", () => {
     );
   });
 
+  it("moves it only once the menu has closed, so the menu's focus return cannot race it", async () => {
+    render(page());
+    await open("Trip plan");
+    const save = mocks.updateSession.getMockImplementation()!;
+    const menuOpenAtMove: boolean[] = [];
+    mocks.updateSession.mockImplementation(async (patch) => {
+      if (patch.deleted === true)
+        menuOpenAtMove.push(document.querySelector('[role="menu"]') !== null);
+      return save(patch);
+    });
+    await trashFromRow("Weekly report");
+    await waitFor(() => expect(toasts).toHaveBeenCalledTimes(1));
+    expect(menuOpenAtMove).toEqual([false]);
+  });
+
   it("undoes it from the notice, back in the list with focus, the open conversation untouched", async () => {
     render(page());
     await open("Trip plan");
@@ -580,6 +611,47 @@ describe("undo when something unsent is in the composer", () => {
     expect(
       screen.queryByRole("heading", { level: 1, name: "Trip plan" }),
     ).toBeNull();
+  });
+
+  // Files without words are unsent work too. No screen reaches "nothing open
+  // yet files in the composer" (leaving a conversation drops its files from
+  // the view), so the hook is driven with that state directly.
+  it("restores by id and does not reopen it when the composer holds only files", async () => {
+    const assistant = {
+      selectedId: null,
+      showTrash: false,
+      draft: "",
+      attachments: [{ id: "file-1" }],
+      setDeleted: vi.fn().mockResolvedValue(true),
+      select: vi.fn(),
+    };
+    const sidebar = { current: { focusRow: vi.fn() } };
+    const focusSoon = vi.fn();
+    const { result } = renderHook(() =>
+      useConversationActions({
+        assistant: assistant as never,
+        sidebarCollapsed: false,
+        sidebar: sidebar as never,
+        scroll: { current: null },
+        follow: { current: true },
+        focusSoon,
+        landOnSidebar: (entry) => entry,
+        composer: { current: null },
+        sidebarToggle: { current: null },
+        trashEntry: { current: null },
+        trashBack: { current: null },
+        emptyTrashButton: { current: null },
+      }),
+    );
+    result.current.moveToTrash("a", "Trip plan");
+    await waitFor(() => expect(toasts).toHaveBeenCalledTimes(1));
+    const [, options] = toasts.mock.calls[0];
+    await act(async () => {
+      options.action.onClick();
+    });
+    expect(assistant.setDeleted).toHaveBeenLastCalledWith(false, "a");
+    expect(assistant.select).not.toHaveBeenCalled();
+    expect(sidebar.current.focusRow).toHaveBeenCalledWith("a");
   });
 });
 
