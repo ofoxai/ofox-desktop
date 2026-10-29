@@ -4956,7 +4956,10 @@
       "backupFailed": "Could not read or write the backup. Check the file and available disk space.",
       "backupContainsKey": "A file contains a managed assistant API key. Remove the key from the file before backing up or restoring.",
       "backupOwnerMismatch": "This backup belongs to a different account or organization. Sign in to the original account to restore it.",
-      "mediaReadFailed": "The generated file could not be read."
+      "mediaReadFailed": "The generated file could not be read.",
+      "forkFailed": "The conversation could not be forked. Try again.",
+      "forkUnavailable": "This message cannot be forked. Refresh the conversation.",
+      "forkPendingMedia": "Wait for the video task to finish before forking this part of the conversation."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5292,6 +5295,10 @@
       "inputHint": "Choose one PNG, JPEG or WebP up to 15 MiB for editing.",
       "noInput": "This model generates images from text only.",
       "activity": "View activity"
-    }
+    },
+    "quote": "Quote",
+    "messageActions": "Message actions",
+    "fork": "Fork from here",
+    "forkTitle": "{{title}} (fork)"
   }
 }

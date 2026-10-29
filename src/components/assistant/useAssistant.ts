@@ -2712,6 +2712,64 @@ export function useAssistant(enabled: boolean) {
     ],
   );
 
+  const forkSession = useCallback(
+    async (messageId: string, title: string) => {
+      const sid = selectedRef.current,
+        identity = bootstrapRef.current;
+      if (
+        !sid ||
+        busy ||
+        loading ||
+        showTrash ||
+        detail?.session.deletedAt != null ||
+        runRef.current ||
+        switchInFlight.current ||
+        !identity?.owner ||
+        identity.authorityGeneration === undefined
+      )
+        return false;
+      const generation = epoch.current,
+        selection = selectionSequence.current;
+      const current = () =>
+        mounted.current &&
+        generation === epoch.current &&
+        selection === selectionSequence.current &&
+        selectedRef.current === sid;
+      messageQueue.pause(sid);
+      switchInFlight.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        const value = await assistantApi.forkSession({
+          sessionId: sid,
+          messageId,
+          title,
+          expectedOwner: identity.owner,
+          expectedGeneration: identity.authorityGeneration,
+        });
+        if (!current()) return false;
+        select(value.session.id);
+        void refreshSessionsRef.current();
+        return true;
+      } catch (reason) {
+        if (current()) showError(reason);
+        return false;
+      } finally {
+        switchInFlight.current = false;
+        if (current()) setBusy(false);
+      }
+    },
+    [
+      busy,
+      loading,
+      showTrash,
+      detail?.session.deletedAt,
+      messageQueue,
+      select,
+      showError,
+    ],
+  );
+
   // The latest tool still running says what the reply is doing; before its
   // model request, a run reads the files it was sent with.
   const activity =
@@ -2862,6 +2920,7 @@ export function useAssistant(enabled: boolean) {
     send,
     stop,
     switchVersion,
+    forkSession,
     refreshSessions,
     refreshDetail,
     loadBootstrap,

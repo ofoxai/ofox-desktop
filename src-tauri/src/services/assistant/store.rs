@@ -13,8 +13,10 @@
 //! writers to one file are serialized in this process. A damaged file is an
 //! error for that session; it is never read as, or overwritten by, an empty one.
 mod backup;
+mod fork;
 mod lifecycle;
 pub use backup::{BackupReport, RestoreReport, TRANSFER_BUSY};
+pub use fork::InheritedUsage;
 
 use super::thinking;
 use super::types::*;
@@ -81,6 +83,8 @@ pub struct SessionRecord {
     pub attachments: Vec<Attachment>,
     pub usage: Value,
     pub operations: Vec<Operation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inherited_usage: Vec<InheritedUsage>,
 }
 
 impl SessionRecord {
@@ -206,6 +210,7 @@ pub struct UnreadableSession {
 /// One owner's conversations. Cheap to build; holds no open files. Every
 /// method does synchronous file IO, and the writers wait on a per-file lock, so
 /// async code calls them inside `tauri::async_runtime::spawn_blocking`.
+#[derive(Clone)]
 pub struct AssistantStore {
     config_dir: PathBuf,
     owner: String,
@@ -245,6 +250,7 @@ impl AssistantStore {
             attachments: vec![],
             usage: json!({}),
             operations: vec![],
+            inherited_usage: vec![],
         };
         let directory = private_subdir(&self.ensure_root()?, &record.session.id)?;
         let path = directory.join(SESSION_FILE);
@@ -585,12 +591,77 @@ impl AssistantStore {
     /// the estimate into `null` instead of a low number.
     pub fn usage_summary(&self) -> Result<Value, String> {
         let mut totals = UsageTotals::new();
+        let mut records = vec![];
         if real_dir(&self.root)? {
             for sid in self.session_ids()? {
                 match read_listed(&self.root, &sid) {
-                    Ok(Some(record)) => totals.add(&record),
+                    Ok(Some(mut record)) => {
+                        // The summary needs billing facts, not every transcript
+                        // and inline preview held in memory at the same time.
+                        if record.messages.iter().any(|m| m.status == "streaming") {
+                            record.usage["usageCoverage"] = json!("incomplete");
+                        }
+                        record.messages.clear();
+                        record.attachments.clear();
+                        record.session.draft.clear();
+                        record.session.draft_attachment_ids.clear();
+                        for op in &mut record.operations {
+                            op.media = None;
+                            op.search_price = None;
+                        }
+                        records.push(record);
+                    }
                     Ok(None) => {}
                     Err(_) => totals.priced = false,
+                }
+            }
+        }
+        let present_sessions: HashSet<&str> =
+            records.iter().map(|r| r.session.id.as_str()).collect();
+        let owned_runs: HashSet<String> = records
+            .iter()
+            .flat_map(|r| {
+                let inherited: HashSet<&str> = r
+                    .inherited_usage
+                    .iter()
+                    .map(|i| i.run_id.as_str())
+                    .collect();
+                r.operations
+                    .iter()
+                    .filter(move |op| !inherited.contains(op.run_id.as_str()))
+                    .map(|op| op.run_id.clone())
+            })
+            .collect();
+        let mut seen = HashSet::new();
+        for record in &records {
+            if record.inherited_usage.is_empty() {
+                totals.add(record);
+                continue;
+            }
+            totals.sessions += 1;
+            let usage = fork::own_usage(record);
+            let own_pending = record.session.active_run.is_some()
+                || record.operations.iter().any(|op| {
+                    op.status == OperationStatus::Running
+                        && !record.inherited_usage.iter().any(|i| i.run_id == op.run_id)
+                });
+            let has_own_operations = record
+                .operations
+                .iter()
+                .any(|op| !record.inherited_usage.iter().any(|i| i.run_id == op.run_id));
+            if own_pending
+                || (has_own_operations && usage["usageCoverage"] == "incomplete")
+                || usage["modelRequests"].as_u64().unwrap_or(0) > 0
+                || usage["searchCount"].as_u64().unwrap_or(0) > 0
+            {
+                totals.add_values(&usage, own_pending);
+            }
+            for inherited in &record.inherited_usage {
+                if !present_sessions.contains(inherited.source_session_id.as_str())
+                    && !owned_runs.contains(&inherited.run_id)
+                    && seen.insert((inherited.source_session_id.clone(), inherited.key.clone()))
+                {
+                    totals.add_values(&inherited.usage, false);
                 }
             }
         }
@@ -810,7 +881,6 @@ impl UsageTotals {
     }
 
     fn add(&mut self, record: &SessionRecord) {
-        let usage = &record.usage;
         self.sessions += 1;
         let interrupted = record.session.active_run.is_some()
             || record.messages.iter().any(|m| m.status == "streaming")
@@ -818,6 +888,10 @@ impl UsageTotals {
                 .operations
                 .iter()
                 .any(|op| op.status == OperationStatus::Running);
+        self.add_values(&record.usage, interrupted);
+    }
+
+    fn add_values(&mut self, usage: &Value, interrupted: bool) {
         if interrupted || usage["usageCoverage"] == "incomplete" {
             self.priced = false;
         }
@@ -2346,6 +2420,7 @@ mod tests {
             attachments: vec![],
             usage: json!({}),
             operations: vec![],
+            inherited_usage: vec![],
         }
     }
 

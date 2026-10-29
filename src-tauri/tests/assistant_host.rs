@@ -5539,3 +5539,53 @@ fn video_fields_cannot_be_silently_ignored_by_an_image_run() {
         assert!(gateway.requests().is_empty());
     });
 }
+
+#[test]
+fn forking_a_native_reply_keeps_only_its_context_and_does_not_double_charge() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &runtime_dir, &[(apex, &gateway)]);
+        env.signed_in(apex);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::Stream("First answer".into()));
+            turn(&host, &env, request(&sid, "First question", json!({}))).await;
+            gateway.reply(Reply::Stream("Later answer".into()));
+            turn(&host, &env, request(&sid, "Later question", json!({}))).await;
+            let source = host.get_session(&sid).await.unwrap();
+            let bytes = native_of(config.path(), &sid);
+            let total = host.usage_summary().await.unwrap();
+            let req = json!({"sessionId":sid,"messageId":find(&source,"First answer").id,
+                "expectedOwner":owner(),"expectedGeneration":host.generation(),"title":"Original (fork)"});
+            let mut stale = req.clone(); stale["expectedGeneration"] = json!(host.generation()+1);
+            assert_eq!(host.fork_session(serde_json::from_value(stale).unwrap()).await.unwrap_err(), "assistant_identity_changed");
+            let fork = host.fork_session(serde_json::from_value(req).unwrap()).await.unwrap();
+            assert_ne!(fork.session.id, sid);
+            assert_eq!(active(&fork), pairs(&[("user","First question"),("assistant","First answer")]));
+            assert_eq!(native_of(config.path(), &sid), bytes);
+            assert_eq!(host.usage_summary().await.unwrap()["estimatedCostUsd"], total["estimatedCostUsd"]);
+            gateway.reply(Reply::Stream("Fork answer".into()));
+            turn(&host, &env, request(&fork.session.id, "Fork question", json!({}))).await;
+            let continued = host.get_session(&fork.session.id).await.unwrap();
+            let expected = decimal(&total["estimatedCostUsd"]) + decimal(&continued.usage["estimatedCostUsd"]) - decimal(&fork.usage["estimatedCostUsd"]);
+            assert!((decimal(&host.usage_summary().await.unwrap()["estimatedCostUsd"]) - expected).abs() < 1e-12);
+            let sent = gateway.requests().last().unwrap().text();
+            assert!(sent.contains("First question"));
+            assert!(!sent.contains("Later question"));
+            assert_eq!(native_of(config.path(), &sid), bytes);
+            gateway.reply(Reply::Hang("Still working".into()));
+            let run = host.send(request(&sid,"One more turn",json!({}))).await.unwrap();
+            let busy = json!({"sessionId":sid,"messageId":find(&source,"First answer").id,
+                "expectedOwner":owner(),"expectedGeneration":host.generation(),"title":"busy fork"});
+            assert_eq!(host.fork_session(serde_json::from_value(busy).unwrap()).await.unwrap_err(), "assistant_session_busy");
+            host.stop(&sid,&run.run_id,&run.operation_id).await.unwrap();
+            wait_for(&env,&run.run_id,"run_end").await;
+            host.shutdown().await;
+        });
+    }
+}

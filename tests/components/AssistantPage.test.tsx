@@ -47,6 +47,7 @@ const mocks = vi.hoisted(() => ({
   cancelVideo: vi.fn(),
   resumeVideo: vi.fn(),
   stop: vi.fn(),
+  forkSession: vi.fn(),
   getPreferences: vi.fn(),
   setPreferences: vi.fn(),
   subscribe: vi.fn(),
@@ -263,6 +264,7 @@ beforeEach(async () => {
   mocks.pickAttachments.mockResolvedValue([]);
   mocks.send.mockResolvedValue({ runId: "unused", operationId: "unused" });
   mocks.stop.mockResolvedValue(undefined);
+  mocks.forkSession.mockReset();
   mocks.subscribe.mockImplementation(async (listener) => {
     mocks.listener = listener;
     return () => undefined;
@@ -7408,13 +7410,11 @@ it("preserves video parameters when the first quote creates the conversation", a
     defaultModelId: video.id,
     models: [video],
   });
-  mocks.quoteMedia
-    .mockReset()
-    .mockResolvedValue({
-      id: "q",
-      estimatedCostUsd: "0.08",
-      expiresAt: Date.now() + 600000,
-    });
+  mocks.quoteMedia.mockReset().mockResolvedValue({
+    id: "q",
+    estimatedCostUsd: "0.08",
+    expiresAt: Date.now() + 600000,
+  });
   render(page());
   await userEvent.click(
     await screen.findByRole("combobox", { name: "Resolution" }),
@@ -7429,4 +7429,66 @@ it("preserves video parameters when the first quote creates the conversation", a
   ).toHaveTextContent("480p");
   expect(composer()).toHaveValue("Lake");
   expect(mocks.send).not.toHaveBeenCalled();
+});
+
+describe("fork navigation", () => {
+  it("freezes authority, opens the new conversation and preserves the original draft", async () => {
+    const target = {
+      ...current,
+      session: {
+        ...session,
+        id: "fork",
+        title: "My conversation (fork)",
+        draft: "",
+      },
+    };
+    mocks.forkSession.mockResolvedValue(target);
+    mocks.getSession.mockImplementation(async (id) =>
+      id === "fork" ? target : current,
+    );
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("unfinished original"));
+    await act(async () => {
+      expect(
+        await hook.result.current.forkSession("message", target.session.title),
+      ).toBe(true);
+    });
+    await waitFor(() => expect(hook.result.current.selectedId).toBe("fork"));
+    expect(mocks.forkSession).toHaveBeenCalledWith({
+      sessionId: session.id,
+      messageId: "message",
+      title: target.session.title,
+      expectedOwner: capabilities.owner,
+      expectedGeneration: 1,
+    });
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    expect(hook.result.current.draft).toBe("unfinished original");
+  });
+  it("ignores a late fork result after leaving the conversation", async () => {
+    let finish!: (value: AssistantSessionDetail) => void;
+    mocks.forkSession.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    let pending!: Promise<boolean>;
+    act(() => {
+      pending = hook.result.current.forkSession("message", "fork");
+    });
+    act(() => hook.result.current.select(null));
+    await act(async () => {
+      finish({ ...current, session: { ...session, id: "fork" } });
+      expect(await pending).toBe(false);
+    });
+    expect(hook.result.current.selectedId).toBeNull();
+    expect(hook.result.current.busy).toBe(false);
+  });
 });

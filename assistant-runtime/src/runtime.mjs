@@ -1,4 +1,4 @@
-import { mkdir, stat } from "node:fs/promises";
+import { mkdir, stat, lstat, open, rm } from "node:fs/promises";
 import path from "node:path";
 import {
   AttachmentStore,
@@ -748,6 +748,76 @@ export class AssistantRuntime {
     manager.branch(latestLeaf(manager, params.entryId));
     manager.appendCustomEntry(LEAF, { entryId: params.entryId });
     return projection(manager, [...this.secrets]);
+  }
+
+  // A local snapshot of the selected branch. The host supplies both paths;
+  // no provider, credentials or ambient configuration is needed.
+  async fork(params) {
+    checkSessionFile(params.sessionFile);
+    checkSessionFile(params.targetFile);
+    if (this.runs.size)
+      throw new Error("This sidecar already owns an active run");
+    if (
+      params.sessionFile === params.targetFile ||
+      typeof params.entryId !== "string" ||
+      !params.entryId
+    )
+      throw new Error("Invalid fork destination or entry");
+    const source = await lstat(params.sessionFile);
+    if (!source.isFile() || source.isSymbolicLink())
+      throw new Error("Invalid native history");
+    const directory = path.dirname(params.targetFile);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const targetDirectory = await lstat(directory);
+    if (!targetDirectory.isDirectory() || targetDirectory.isSymbolicLink())
+      throw new Error("Invalid fork directory");
+    const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+    const manager = SessionManager.open(
+      params.sessionFile,
+      directory,
+      path.join(directory, "workspace"),
+    );
+    const selected = manager.getEntry(params.entryId);
+    if (
+      !selected ||
+      !(
+        (selected.type === "message" &&
+          ["user", "assistant"].includes(selected.message.role)) ||
+        (selected.type === "custom_message" &&
+          selected.customType === "ofox-desktop-media")
+      )
+    )
+      throw new Error("Missing conversation message for fork");
+    let target;
+    let generated;
+    try {
+      target = await open(params.targetFile, "wx", 0o600);
+      generated = manager.createBranchedSession(params.entryId);
+      // Pi delays disk creation for a user-only branch. Its public entries
+      // and header still describe the complete new session in either case.
+      const lines = [manager.getHeader(), ...manager.getEntries()];
+      await target.writeFile(
+        lines.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
+      );
+      await target.sync();
+      return projection(manager, [...this.secrets]);
+    } catch (error) {
+      if (target) {
+        await target.close();
+        target = undefined;
+        await rm(params.targetFile, { force: true });
+      }
+      throw error;
+    } finally {
+      await target?.close();
+      if (
+        generated &&
+        path.dirname(generated) === directory &&
+        generated !== params.targetFile &&
+        generated !== params.sessionFile
+      )
+        await rm(generated, { force: true });
+    }
   }
 
   async steer(params) {

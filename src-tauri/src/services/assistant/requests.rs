@@ -3,8 +3,8 @@
 use super::{
     attachments, catalog,
     host::{
-        blocking, local_gateway_allowed, navigate_native, read_optional, restore, session_key,
-        AssistantHost, Identity, RunControl,
+        blocking, local_gateway_allowed, native_entries, navigate_native, read_optional, restore,
+        session_key, AssistantHost, Identity, RunControl,
     },
     projection::merge_native,
     store::{self, SessionList, SessionRecord},
@@ -850,6 +850,81 @@ impl AssistantHost {
         .await
     }
 
+    /// Fork under the same history/admission exclusion as version changes.
+    /// No catalog, credential or provider request is needed for a local copy.
+    pub async fn fork_session(self: &Arc<Self>, request: ForkRequest) -> Result<Detail, String> {
+        const UNAVAILABLE: &str = "assistant_fork_unavailable";
+        let ForkRequest {
+            authority,
+            message_id,
+            title,
+        } = request;
+        let sid = authority.session_id;
+        validate_id(&sid)?;
+        self.ensure_accepting_runs()?;
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if authority.expected_owner != identity.owner || authority.expected_generation != generation
+        {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        self.ensure_idle(&sid)?;
+        self.recover(&identity, &sid).await?;
+        self.repair_media_history(&identity, &sid).await?;
+        let _history = self
+            .native_lock(&session_key(&identity.owner, &sid))?
+            .lock_owned()
+            .await;
+        let _navigation = self.begin_navigation(&sid)?;
+        self.ensure_current(&identity, generation).await?;
+        let (record, native, stage) = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = sid.clone();
+            move || {
+                let record = store.load_record(&sid)?;
+                if record.session.deleted_at.is_some() {
+                    return Err("assistant_session_deleted".into());
+                }
+                let native = store.native_history_path(&sid)?;
+                if !native.is_file() {
+                    return Err("assistant_native_history_missing".into());
+                }
+                let stage = store.stage_fork(&sid)?;
+                Ok((record, native, stage))
+            }
+        })
+        .await?;
+        let entry = record
+            .messages
+            .iter()
+            .find(|m| m.id == message_id && !m.superseded)
+            .and_then(|m| m.native_entry_id.as_ref())
+            .ok_or(UNAVAILABLE)?;
+        let entries = native_entries(
+            &self.runtime()?,
+            "fork",
+            json!({"sessionFile":native,"targetFile":stage.native_path(),"entryId":entry}),
+            ("assistant_fork_failed", "assistant_fork_failed"),
+        )
+        .await?;
+        self.ensure_current(&identity, generation).await?;
+        let host = self.clone();
+        let title = super::host::scrub_secrets(&title, &self.known_keys());
+        let record = blocking(move || {
+            let entries = entries.as_array().ok_or(super::host::PROTOCOL)?;
+            stage.publish(record, entries, &title, || {
+                if host.generation() != generation {
+                    return Err(super::host::IDENTITY_CHANGED.into());
+                }
+                Ok(())
+            })
+        })
+        .await?;
+        let mut detail = record.into_detail();
+        self.decorate(&identity.owner, &mut detail.session);
+        Ok(detail)
+    }
+
     pub async fn stop(self: &Arc<Self>, sid: &str, rid: &str, op: &str) -> Result<(), String> {
         validate_id(sid)?;
         validate_id(rid)?;
@@ -1351,6 +1426,7 @@ mod tests {
             attachments: vec![a.clone(), b.clone(), pending.clone()],
             usage: json!({}),
             operations: vec![],
+            inherited_usage: vec![],
         };
         (record, [a, b, pending], user, reply)
     }

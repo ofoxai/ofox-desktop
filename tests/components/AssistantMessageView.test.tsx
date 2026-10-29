@@ -60,6 +60,7 @@ function view(
       text: string,
       attachments: AssistantAttachment[],
     ) => Promise<boolean>;
+    onFork?: (messageId: string) => void;
     onEditingChange?: (editing: boolean) => void;
     onRegenerate?: (messageId: string) => void;
     onRetry?: (messageId: string, modelId?: string) => Promise<boolean> | void;
@@ -84,6 +85,7 @@ function view(
       onEditingChange={handlers.onEditingChange}
       onRegenerate={handlers.onRegenerate ?? (() => undefined)}
       onRetry={handlers.onRetry}
+      onFork={handlers.onFork}
     />
   );
 }
@@ -913,4 +915,21 @@ describe("a reply's thinking", () => {
     );
     expect(screen.getByRole("status")).toHaveTextContent("Searching the web…");
   });
+});
+
+it("offers fork for a saved reply and keeps it unavailable while busy", async () => {
+  const fork = vi.fn();
+  const user = userEvent.setup();
+  const shown = render(
+    view({ content: "answer", status: "completed" }, { onFork: fork }),
+  );
+  await user.click(screen.getByRole("button", { name: "Message actions" }));
+  await user.click(screen.getByRole("menuitem", { name: "Fork from here" }));
+  expect(fork).toHaveBeenCalledWith("m");
+  shown.rerender(
+    view({ content: "answer", status: "completed" }, { onFork: fork }, true),
+  );
+  expect(
+    screen.getByRole("button", { name: "Message actions" }),
+  ).toBeDisabled();
 });

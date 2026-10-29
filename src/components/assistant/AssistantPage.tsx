@@ -61,6 +61,7 @@ import { ThinkingMenu } from "./ThinkingMenu";
 import { useConversationActions } from "./useConversationActions";
 import { useFileDrop } from "./useFileDrop";
 import { usePendingFocus } from "./usePendingFocus";
+import { insertAssistantQuote } from "@/utils/assistantQuote";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { searchHighlight } from "@/utils/assistantSearch";
 import { isSendable } from "@/utils/assistantAttachments";
@@ -631,6 +632,10 @@ function AssistantWorkspace() {
     send: assistant.send,
     update: assistant.update,
     switchVersion: assistant.switchVersion,
+    forkSession: assistant.forkSession,
+    setDraft: assistant.setDraft,
+    draft: assistant.draft,
+    title: session?.title,
     messages,
     modelId: session?.modelId,
   });
@@ -638,6 +643,10 @@ function AssistantWorkspace() {
     send: assistant.send,
     update: assistant.update,
     switchVersion: assistant.switchVersion,
+    forkSession: assistant.forkSession,
+    setDraft: assistant.setDraft,
+    draft: assistant.draft,
+    title: session?.title,
     messages,
     modelId: session?.modelId,
   };
@@ -685,6 +694,35 @@ function AssistantWorkspace() {
     (messageId: string) => void actions.current.switchVersion(messageId),
     [],
   );
+  const forkMessage = useCallback(
+    (messageId: string) => {
+      const title = Array.from(
+        actions.current.title || t("assistant.newConversation"),
+      );
+      const base =
+        title.slice(0, 100).join("") + (title.length > 100 ? "…" : "");
+      void actions.current.forkSession(
+        messageId,
+        t("assistant.forkTitle", { title: base }),
+      );
+    },
+    [t],
+  );
+  const quoteText = useCallback((text: string) => {
+    const input = composer.current;
+    if (!input || input.disabled) return;
+    const next = insertAssistantQuote(
+      actions.current.draft,
+      input.selectionStart,
+      input.selectionEnd,
+      text,
+    );
+    actions.current.setDraft(next.text);
+    requestAnimationFrame(() => {
+      input.focus();
+      input.setSelectionRange(next.cursor, next.cursor);
+    });
+  }, []);
   const toggleSidebar = () => {
     const collapsed = !sidebarCollapsed;
     setSidebarCollapsed(collapsed);
@@ -1198,6 +1236,12 @@ function AssistantWorkspace() {
                           onRegenerate={regenerateMessage}
                           onRetry={retryable(message) ? retryReply : undefined}
                           onSwitchVersion={switchVersion}
+                          onFork={forkMessage}
+                          onQuote={
+                            !assistant.busy && !assistant.showTrash
+                              ? quoteText
+                              : undefined
+                          }
                         />
                       );
                     })}

@@ -1288,6 +1288,7 @@ mod tests {
             attachments: vec![existing(10)],
             usage: json!({}),
             operations: vec![],
+            inherited_usage: vec![],
         };
         assert!(check_room(&record, MAX_PER_SESSION - 1, MAX_SESSION_BYTES - 10).is_ok());
         assert_eq!(

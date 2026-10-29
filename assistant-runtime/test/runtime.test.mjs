@@ -2761,3 +2761,124 @@ test("live input prioritizes steering over follow-up and fences authority withou
   );
   assert.ok(!JSON.stringify(result).includes(token));
 });
+
+test("fork copies only the selected native context and continues independently", async (t) => {
+  const params = await sandbox(t);
+  const bodies = [];
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, input) => {
+      bodies.push(JSON.parse(input.body));
+      return stream(`Answer ${bodies.length}`);
+    },
+  });
+  t.after(() => runtime.close());
+  const first = await runtime.run({
+    ...params,
+    prompt: "Original first question",
+  });
+  const entry = first.entries.find(
+    (item) => item.role === "assistant" && item.active,
+  ).id;
+  await runtime.run({
+    ...params,
+    runId: "later-run",
+    operationId: "later-operation",
+    prompt: "Later source-only question",
+  });
+  const before = await readFile(params.sessionFile, "utf8");
+  const targetFile = path.join(
+    path.dirname(params.sessionFile),
+    "fork",
+    "session.jsonl",
+  );
+  const fork = await runtime.fork({
+    sessionFile: params.sessionFile,
+    entryId: entry,
+    targetFile,
+  });
+  assert.deepEqual(
+    fork.entries
+      .filter((item) => ["user", "assistant"].includes(item.role))
+      .map((item) => item.content),
+    ["Original first question", "Answer 1"],
+  );
+  assert.ok(fork.entries.every((item) => item.active));
+  assert.equal(await readFile(params.sessionFile, "utf8"), before);
+  await runtime.run({
+    ...params,
+    sessionId: "fork-session",
+    sessionFile: targetFile,
+    runId: "fork-run",
+    operationId: "fork-operation",
+    prompt: "Continue fork",
+  });
+  const context = JSON.stringify(bodies.at(-1).messages);
+  assert.match(context, /Original first question/);
+  assert.match(context, /Answer 1/);
+  assert.match(context, /Continue fork/);
+  assert.doesNotMatch(context, /Later source-only question|Answer 2/);
+  assert.equal(await readFile(params.sessionFile, "utf8"), before);
+});
+
+test("fork preserves a user-only native branch and refuses existing targets", async (t) => {
+  const params = await sandbox(t);
+  const runtime = new AssistantRuntime({
+    fetch: async () => stream("Source answer"),
+  });
+  t.after(() => runtime.close());
+  const source = await runtime.run(params);
+  const user = source.entries.find((entry) => entry.role === "user");
+  const targetFile = path.join(
+    path.dirname(params.sessionFile),
+    "fork-user",
+    "session.jsonl",
+  );
+  const child = await runtime.fork({
+    sessionFile: params.sessionFile,
+    entryId: user.id,
+    targetFile,
+  });
+  assert.deepEqual(
+    child.entries
+      .filter((entry) => ["user", "assistant"].includes(entry.role))
+      .map((entry) => entry.content),
+    ["hello"],
+  );
+  assert.deepEqual(
+    (await runtime.load({ sessionFile: targetFile })).entries,
+    child.entries,
+  );
+  const saved = await readFile(targetFile, "utf8");
+  await assert.rejects(
+    runtime.fork({
+      sessionFile: params.sessionFile,
+      entryId: user.id,
+      targetFile,
+    }),
+    /EEXIST/,
+  );
+  assert.equal(await readFile(targetFile, "utf8"), saved);
+  assert.ok(!saved.includes(token));
+  const before = await readFile(params.sessionFile, "utf8");
+  await assert.rejects(
+    runtime.fork({
+      sessionFile: params.sessionFile,
+      entryId: "missing",
+      targetFile: path.join(
+        path.dirname(params.sessionFile),
+        "invalid",
+        "session.jsonl",
+      ),
+    }),
+    /conversation message/,
+  );
+  await assert.rejects(
+    runtime.fork({
+      sessionFile: params.sessionFile,
+      entryId: user.id,
+      targetFile: params.sessionFile,
+    }),
+    /destination/,
+  );
+  assert.equal(await readFile(params.sessionFile, "utf8"), before);
+});

@@ -38,6 +38,16 @@ text-only/partial warnings accompany model input and attachment chips. Legacy
 word-extractor 1.0.4; users are directed to docx or PDF. Bounds, license evidence,
 fixtures and platform verification limits are in the [Office audit](assistant-office.md).
 
+## Assistant conversation forks (2026-10-30)
+
+Forks copy local native context and historical usage without calling a provider.
+An unresolved video job must finish before that part of the conversation can be
+forked. Files explicitly excluded from a backup remain missing in its forks.
+Ordinary failures clean unpublished staging folders; a hard application kill can
+leave an ignored private `.fork-*` folder, which is never shown as a conversation
+or resumed as provider work. Fork and quote behavior has local mock-gateway and
+renderer coverage on macOS; native Windows acceptance remains deferred.
+
 ## Request dashboard alignment
 
 - Cache-inclusive totals apply to Requests only. Overview and session-analysis

@@ -122,6 +122,8 @@ async function handle(line) {
       result = await runtime.navigate(request.params ?? {});
     else if (request.method === "append_media")
       result = await runtime.appendMedia(request.params ?? {});
+    else if (request.method === "fork")
+      result = await runtime.fork(request.params ?? {});
     else if (request.method === "steer")
       result = await runtime.steer(request.params ?? {});
     else if (request.method === "stop")

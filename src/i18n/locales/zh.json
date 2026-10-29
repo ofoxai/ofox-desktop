@@ -4956,7 +4956,10 @@
       "backupFailed": "无法读取或写入备份，请检查文件及可用磁盘空间。",
       "backupContainsKey": "文件中包含助手专用的 API Key，请先将其移除，再进行备份或恢复。",
       "backupOwnerMismatch": "此备份属于其他账号或组织，请登录原账号后恢复。",
-      "mediaReadFailed": "无法读取生成的文件。"
+      "mediaReadFailed": "无法读取生成的文件。",
+      "forkFailed": "无法分叉对话，请重试。",
+      "forkUnavailable": "此消息暂时无法分叉，请刷新对话。",
+      "forkPendingMedia": "请等待视频任务结束后再从这部分对话分叉。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5292,6 +5295,10 @@
       "inputHint": "改图支持一张不超过 15 MiB 的 PNG、JPEG 或 WebP。",
       "noInput": "此模型仅支持文字生成图像。",
       "activity": "查看用量记录"
-    }
+    },
+    "quote": "引用",
+    "messageActions": "消息操作",
+    "fork": "从这里分叉",
+    "forkTitle": "{{title}}（分叉）"
   }
 }

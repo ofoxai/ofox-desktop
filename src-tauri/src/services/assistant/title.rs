@@ -444,6 +444,7 @@ mod tests {
             attachments: vec![],
             usage: json!({}),
             operations: vec![],
+            inherited_usage: vec![],
         };
         (record, runs)
     }

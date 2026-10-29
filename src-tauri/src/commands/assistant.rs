@@ -10,8 +10,8 @@ use crate::services::assistant::{
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
         Attachment, CreateRequest, DeleteRequest, Detail, EmptyTrashReport, EmptyTrashRequest,
-        Event, ExportMarkdownRequest, ImportDropRequest, Preferences, RunProxy, RunRef,
-        SendRequest, Session, SetPreferencesRequest, SteerRequest, SwitchVersionRequest,
+        Event, ExportMarkdownRequest, ForkRequest, ImportDropRequest, Preferences, RunProxy,
+        RunRef, SendRequest, Session, SetPreferencesRequest, SteerRequest, SwitchVersionRequest,
         TransferRequest, UpdateRequest,
     },
     AssistantHost,
@@ -189,6 +189,11 @@ pub async fn assistant_switch_version(
     request: SwitchVersionRequest,
 ) -> Result<Detail, String> {
     host.switch_version(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_fork(host: Host<'_>, request: ForkRequest) -> Result<Detail, String> {
+    host.fork_session(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

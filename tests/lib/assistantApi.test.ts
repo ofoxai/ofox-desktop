@@ -571,3 +571,16 @@ describe("video commands", () => {
     });
   });
 });
+
+it("forks a message with the visible authority and localized title", async () => {
+  const request = {
+    sessionId: "s",
+    messageId: "m",
+    expectedOwner: "owner",
+    expectedGeneration: 2,
+    title: "Original (fork)",
+  };
+  invoke.mockResolvedValue({ session: { id: "fork" } });
+  await assistantApi.forkSession(request);
+  expect(invoke).toHaveBeenCalledWith("assistant_fork", { request });
+});

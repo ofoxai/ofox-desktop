@@ -442,6 +442,16 @@ pub struct SwitchVersionRequest {
     pub message_id: String,
 }
 
+/// Copy a selected native branch into an independent conversation.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ForkRequest {
+    #[serde(flatten)]
+    pub authority: DeleteRequest,
+    pub message_id: String,
+    pub title: String,
+}
+
 /// Import the files last dropped on the window. It names the token the
 /// window's drop event gave the renderer, never a path (an unknown field is
 /// refused), and the authority the page showed.

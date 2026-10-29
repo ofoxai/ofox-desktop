@@ -867,6 +867,8 @@ export const assistantApi = {
    * says which are shown. Refused with `assistant_session_busy` while it
    * replies; the version shown already changes nothing.
    */
+  forkSession: (request: AssistantSwitchVersionRequest & { title: string }) =>
+    invoke<AssistantSessionDetail>("assistant_fork", { request }),
   switchVersion: (request: AssistantSwitchVersionRequest) =>
     invoke<AssistantSessionDetail>("assistant_switch_version", { request }),
   subscribe: (callback: (event: AssistantEvent) => void): Promise<UnlistenFn> =>
@@ -945,6 +947,9 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_invalid_session: "sessionUnreadable",
   assistant_message_not_found: "messageMissing",
   assistant_branch_unavailable: "messageMissing",
+  assistant_fork_failed: "forkFailed",
+  assistant_fork_unavailable: "forkUnavailable",
+  assistant_fork_pending_media: "forkPendingMedia",
   assistant_version_unavailable: "versionUnavailable",
   assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",

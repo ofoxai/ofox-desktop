@@ -1,7 +1,14 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { ChevronDown, ExternalLink, Pencil, RotateCcw } from "lucide-react";
+import {
+  ChevronDown,
+  ExternalLink,
+  MoreHorizontal,
+  GitFork,
+  Pencil,
+  RotateCcw,
+} from "lucide-react";
 import type {
   AssistantAttachment,
   AssistantMessage,
@@ -25,6 +32,14 @@ import { ReplyMeta } from "./ReplyMeta";
 import { RetryCard } from "./RetryCard";
 import { VersionSwitcher } from "./VersionSwitcher";
 import type { AssistantActivity, AssistantThinking } from "./useAssistant";
+
+import { AssistantQuote } from "./AssistantQuote";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 const MessageMarkdown = memo(SessionMarkdown);
 
@@ -207,6 +222,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onRegenerate,
   onRetry,
   onSwitchVersion,
+  onFork,
+  onQuote,
   immutable = false,
   mediaBlock,
 }: {
@@ -240,6 +257,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
    */
   onRetry?: (messageId: string, modelId?: string) => Promise<boolean> | void;
   onSwitchVersion?: (messageId: string) => void;
+  onFork?: (messageId: string) => void;
+  onQuote?: (text: string) => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -296,6 +315,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     !message.superseded &&
     Boolean(message.nativeEntryId) &&
     (isUser || Boolean(message.runId));
+  const forkable = Boolean(
+    onFork && !immutable && !message.superseded && message.nativeEntryId,
+  );
   const role = t(isUser ? "assistant.roles.user" : "assistant.roles.assistant");
   // A failed or stopped reply carries the card that asks again; that does
   // what Regenerate would, so only the card is offered.
@@ -309,6 +331,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   const hasActions =
     Boolean(message.content) ||
     branchable ||
+    forkable ||
     Boolean(versions) ||
     // Every settled reply says its model and time.
     !isUser;
@@ -397,14 +420,19 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                 isUser && "max-w-[80%] rounded-list bg-pill px-3.5 py-2",
               )}
             >
-              <MessageMarkdown
-                content={message.content}
-                highlight={highlight}
-                syntaxHighlight
-                // Only replies draw math; a question shows as it was typed
-                // (`find . \( -name a \)` is a command, not a formula).
-                math={!isUser}
-              />
+              <AssistantQuote
+                key={message.id}
+                onQuote={!isUser && !immutable ? onQuote : undefined}
+              >
+                <MessageMarkdown
+                  content={message.content}
+                  highlight={highlight}
+                  syntaxHighlight
+                  // Only replies draw math; a question shows as it was typed
+                  // (`find . \( -name a \)` is a command, not a formula).
+                  math={!isUser}
+                />
+              </AssistantQuote>
             </div>
           )}
           {files.length > 0 && (
@@ -507,6 +535,26 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                 >
                   <RotateCcw className="h-3.5 w-3.5" />
                 </Button>
+              )}
+              {forkable && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="icon"
+                      className="h-6 w-6"
+                      aria-label={t("assistant.messageActions")}
+                      disabled={disabled}
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => onFork?.(message.id)}>
+                      <GitFork className="mr-2 h-3.5 w-3.5" />
+                      {t("assistant.fork")}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               )}
               {versions && (
                 <VersionSwitcher

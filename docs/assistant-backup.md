@@ -176,3 +176,13 @@ continuation were subsequently verified in the real Tauri application with local
 mock services; see [native acceptance](assistant-native-acceptance.md). Windows
 is deferred at the user’s request. Search fees remain estimates from the saved
 catalog, as confirmed by the earlier real-gateway audit.
+
+
+Forked conversations keep the selected native branch, its referenced attachments,
+original search prices and historical usage. That history remains visible in each
+conversation. The account summary counts inherited requests only once by their
+native run/entry identities, including nested forks or a deleted original. New
+requests in each fork add their own usage. The optional inherited-usage receipts
+travel with the conversation backup; older records without them remain readable.
+An unresolved video generation must finish before its part of a conversation can
+be forked, so copying history never creates a second generation tracker.
