@@ -576,6 +576,20 @@ export type AssistantEvent = AssistantRunRef & {
   sessionId: string;
 } & AssistantRunEvent;
 
+/** The largest file the backend imports (its MAX_FILE_BYTES). */
+const MAX_PASTED_FILE_BYTES = 25 * 1024 * 1024;
+
+/** A name as a header value; one that can't be encoded is sent as none. */
+function headerFileName(name: string) {
+  try {
+    return encodeURIComponent(name);
+  } catch {
+    // A lone surrogate (possible in a Windows name): the backend gives the
+    // file a name of its own.
+    return "";
+  }
+}
+
 export const ASSISTANT_EVENT = "assistant:event";
 /** A file drag entered or left the window (`AssistantDragState`). */
 export const ASSISTANT_DRAG_EVENT = "assistant:drag";
@@ -645,17 +659,21 @@ export const assistantApi = {
    * One file per call; at most 10 per paste event, as in a pick. The bytes
    * go as a raw body and the rest as headers. Its type is read by the backend
    * from the bytes, never from `file.type`; a name that disagrees is fixed,
-   * and a missing name becomes `pasted-image-<time>.png`. The returned file
-   * is the attachment to add to the draft.
+   * and a missing (or unencodable) name becomes `pasted-image-<time>.png`. A
+   * file over 25 MB is refused with `assistant_attachment_too_large` before
+   * it is read. The returned file is the attachment to add to the draft.
    */
   importPasted: async (file: File, target: AssistantPasteTarget) => {
+    // Rejected with the code alone, as a command's failure is.
+    if (file.size > MAX_PASTED_FILE_BYTES)
+      throw "assistant_attachment_too_large";
     const bytes = new Uint8Array(await file.arrayBuffer());
     return invoke<AssistantAttachment[]>("assistant_import_pasted", bytes, {
       headers: {
         "x-session-id": target.sessionId,
         "x-expected-owner": target.expectedOwner,
         "x-expected-generation": String(target.expectedGeneration),
-        "x-file-name": encodeURIComponent(file.name),
+        "x-file-name": headerFileName(file.name),
       },
     });
   },

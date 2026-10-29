@@ -225,6 +225,53 @@ describe("assistant commands", () => {
     expect(headers["x-file-name"]).toBe("");
   });
 
+  it("refuses a pasted file over 25 MB before reading it", async () => {
+    const huge = new File([], "movie.mov");
+    Object.defineProperty(huge, "size", { value: 25 * 1024 * 1024 + 1 });
+    const read = vi.fn(async () => new ArrayBuffer(0));
+    Object.defineProperty(huge, "arrayBuffer", { value: read });
+    await expect(
+      assistantApi.importPasted(huge, {
+        sessionId: "s",
+        expectedOwner: "o",
+        expectedGeneration: 0,
+      }),
+    ).rejects.toBe("assistant_attachment_too_large");
+    expect(read).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+
+  it("reads a pasted file of exactly 25 MB", async () => {
+    invoke.mockResolvedValue([]);
+    const limit = new File([], "limit.bin");
+    Object.defineProperty(limit, "size", { value: 25 * 1024 * 1024 });
+    Object.defineProperty(limit, "arrayBuffer", {
+      value: async () => new ArrayBuffer(4),
+    });
+    await assistantApi.importPasted(limit, {
+      sessionId: "s",
+      expectedOwner: "o",
+      expectedGeneration: 0,
+    });
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends no name for a pasted file whose name can't be encoded", async () => {
+    invoke.mockResolvedValue([]);
+    // A lone surrogate: encodeURIComponent throws a URIError for it. jsdom's
+    // File repairs one in its constructor, so the name is set afterwards.
+    const pasted = fileOf(new Uint8Array([1]), "name.png");
+    Object.defineProperty(pasted, "name", { value: "bad\ud800name.png" });
+    expect(() => encodeURIComponent(pasted.name)).toThrow(URIError);
+    await assistantApi.importPasted(pasted, {
+      sessionId: "s",
+      expectedOwner: "o",
+      expectedGeneration: 0,
+    });
+    const headers = invoke.mock.calls[0][2].headers as Record<string, string>;
+    expect(headers["x-file-name"]).toBe("");
+  });
+
   it("stops one run by session, run and operation", async () => {
     invoke.mockResolvedValue(undefined);
     await assistantApi.stop("s", "r", "o");
