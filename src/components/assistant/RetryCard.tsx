@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Loader2, RotateCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AssistantModel } from "@/lib/api/assistant";
@@ -41,8 +41,15 @@ export function RetryCard({
   // Read at once, where `pending` waits for the next render: two presses
   // that close together send one retry.
   const inFlight = useRef(false);
-  const options = useModelOptions(models);
+  const modelOptions = useModelOptions(models);
   const blocked = disabled || pending;
+  // The menu itself is never `disabled`: that would take away the focus it
+  // gets back after a pick (or had before the page turned busy). While
+  // blocked it offers nothing to pick instead.
+  const options = useMemo(
+    () => modelOptions.map((option) => ({ ...option, disabled: blocked })),
+    [modelOptions, blocked],
+  );
   const retry = (modelId?: string) => {
     if (disabled || inFlight.current) return;
     inFlight.current = true;
@@ -93,7 +100,6 @@ export function RetryCard({
           aria-label={t("assistant.retryWithModel")}
           value={currentModelId}
           onChange={(modelId) => retry(modelId)}
-          disabled={blocked}
           searchable
           searchPlaceholder={t("assistant.searchModels")}
           valueLabel={t("assistant.retryWithModel")}

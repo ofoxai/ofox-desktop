@@ -1,4 +1,4 @@
-import { act, render, screen, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -123,6 +123,18 @@ describe("the line under a reply", () => {
     expect(meta.closest(".flex-wrap")).toBeNull();
   });
 
+  it("lets the model name be cut short at a narrow width: every flex wrapper may shrink", () => {
+    render(view({ modelId: "openai/gpt-5-mini", completedAt: AT }));
+    const name = screen.getByText("GPT-5 mini");
+    expect(name).toHaveClass("truncate", "min-w-0");
+    for (
+      let wrapper = name.parentElement;
+      wrapper && wrapper.tagName !== "ARTICLE";
+      wrapper = wrapper.parentElement
+    )
+      expect(wrapper).toHaveClass("min-w-0");
+  });
+
   it("is shown with the newest reply's actions and on hover or focus for the others", () => {
     const rendered = render(
       view({ modelId: "openai/gpt-5-mini", completedAt: AT }, { latest: true }),
@@ -213,8 +225,7 @@ describe("the version switcher", () => {
     previousId: "u1",
     nextId: "u3",
   };
-  const group = () =>
-    screen.getByRole("group", { name: "Versions of this reply" });
+  const group = () => screen.getByRole("group", { name: "Versions" });
   const previous = () =>
     within(group()).getByRole("button", { name: "Previous version" });
   const next = () =>
@@ -229,9 +240,7 @@ describe("the version switcher", () => {
 
   it("is not there for a turn with one version", () => {
     render(view());
-    expect(
-      screen.queryByRole("group", { name: "Versions of this reply" }),
-    ).toBeNull();
+    expect(screen.queryByRole("group", { name: "Versions" })).toBeNull();
   });
 
   it("asks for the neighbouring question to be shown", async () => {
@@ -384,7 +393,15 @@ describe("the card of a failed or stopped reply", () => {
     await userEvent.click(retry());
     expect(retry()).toHaveAttribute("aria-disabled", "true");
     expect(retry()).toHaveAttribute("aria-busy", "true");
-    expect(anotherModel()).toBeDisabled();
+    // The menu is not `disabled` (that would drop the focus), but offers
+    // nothing to pick.
+    expect(anotherModel()).not.toBeDisabled();
+    await userEvent.click(anotherModel());
+    for (const option of within(
+      await screen.findByRole("listbox"),
+    ).getAllByRole("option"))
+      expect(option).toHaveAttribute("aria-disabled", "true");
+    await userEvent.keyboard("{Escape}");
     await userEvent.click(retry());
     expect(onRetry).toHaveBeenCalledOnce();
     // The send was refused: the card is ready again, with the focus it had.
@@ -400,9 +417,38 @@ describe("the card of a failed or stopped reply", () => {
     const onRetry = vi.fn();
     render(view(failed(), { onRetry, disabled: true }));
     expect(retry()).toHaveAttribute("aria-disabled", "true");
-    expect(anotherModel()).toBeDisabled();
+    expect(anotherModel()).not.toBeDisabled();
     await userEvent.click(retry());
+    await userEvent.click(anotherModel());
+    await userEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: /Claude Sonnet 5/,
+      }),
+    );
     expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("keeps the focus on the model menu after a pick, while the send is pending and the page turns busy", async () => {
+    let finish: (sent: boolean) => void = () => undefined;
+    const onRetry = vi.fn(
+      () => new Promise<boolean>((resolve) => (finish = resolve)),
+    );
+    const props = { onRetry, currentModelId: "openai/gpt-5-mini" };
+    const rendered = render(view(failed(), props));
+    await userEvent.click(anotherModel());
+    await userEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: /Claude Sonnet 5/,
+      }),
+    );
+    expect(onRetry).toHaveBeenCalledWith("m", "anthropic/claude-sonnet-5");
+    await waitFor(() => expect(anotherModel()).toHaveFocus());
+    // The send starts: the page can't send for a while, as the real one does.
+    rendered.rerender(view(failed(), { ...props, disabled: true }));
+    expect(anotherModel()).toHaveFocus();
+    await act(async () => finish(false));
+    rendered.rerender(view(failed(), props));
+    expect(anotherModel()).toHaveFocus();
   });
 
   it("retries with another model picked from the picker's grouped list", async () => {

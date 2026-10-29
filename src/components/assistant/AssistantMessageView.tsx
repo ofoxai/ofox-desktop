@@ -440,7 +440,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       {!editing && !streaming && (
         <div
           className={cn(
-            "mt-0.5 flex items-center gap-1.5",
+            "mt-0.5 flex min-w-0 items-center gap-1.5",
             isUser && "justify-end",
           )}
         >
@@ -465,7 +465,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {hasActions && (
             <div
               className={cn(
-                "flex items-center gap-1 transition-opacity motion-reduce:transition-none",
+                "flex min-w-0 items-center gap-1 transition-opacity motion-reduce:transition-none",
                 !actionsShown &&
                   "opacity-0 focus-within:opacity-100 group-hover:opacity-100",
               )}

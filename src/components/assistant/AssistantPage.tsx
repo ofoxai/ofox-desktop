@@ -525,7 +525,8 @@ function AssistantWorkspace() {
     )
       return false;
     follow.current = true;
-    // The send as of now: the model change just rendered a newer one.
+    // `send` is read only now. It takes the conversation's model from the
+    // backend's record, so a render that has not happened yet changes nothing.
     return actions.current.send({
       text: question.content,
       attachments: question.attachments,

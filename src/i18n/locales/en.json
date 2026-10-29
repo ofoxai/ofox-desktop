@@ -4997,7 +4997,7 @@
     "retryBilledNote": "The web search couldn't be confirmed and may already be billed. Retrying searches again and may be billed again.",
     "previousVersion": "Previous version",
     "nextVersion": "Next version",
-    "versions": "Versions of this reply",
+    "versions": "Versions",
     "versionPosition": "{{index}}/{{total}}",
     "replyDetails": "Reply details",
     "replyDuration": "Took {{duration}}",

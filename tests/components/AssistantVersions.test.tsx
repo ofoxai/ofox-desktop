@@ -1,9 +1,17 @@
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantPage } from "@/components/assistant/AssistantPage";
+import { useAssistant } from "@/components/assistant/useAssistant";
 import { ShellProvider } from "@/components/shell/ShellContext";
 import type {
   AssistantBootstrap,
@@ -187,8 +195,7 @@ async function open() {
     expect(screen.getByRole("textbox", { name: "Message" })).toBeEnabled(),
   );
 }
-const switcher = () =>
-  screen.getByRole("group", { name: "Versions of this reply" });
+const switcher = () => screen.getByRole("group", { name: "Versions" });
 const previous = () =>
   within(switcher()).getByRole("button", { name: "Previous version" });
 const next = () =>
@@ -293,9 +300,7 @@ describe("the versions of a turn", () => {
     detail = { ...detail, messages: detail.messages.slice(2) };
     await open();
     expect(screen.getByText("Second wording")).toBeVisible();
-    expect(
-      screen.queryByRole("group", { name: "Versions of this reply" }),
-    ).toBeNull();
+    expect(screen.queryByRole("group", { name: "Versions" })).toBeNull();
   });
 });
 
@@ -313,4 +318,29 @@ describe("the line under a reply, on the page", () => {
       "Input 3 · Output 312 tokens · Estimated cost <$0.001",
     );
   });
+});
+
+describe("switching without the page", () => {
+  // The page switches the switcher off in the trash; the hook refuses too,
+  // as `send` does, so no other caller can reach the backend from there.
+  it.each([
+    ["an open conversation", null, true],
+    ["a conversation in the trash", 5, false],
+  ])(
+    "on %s: asks the backend only when it can",
+    async (_name, deletedAt, asked) => {
+      detail = { ...detail, session: { ...session, deletedAt } };
+      const { result } = renderHook(() => useAssistant(true));
+      await waitFor(() => expect(result.current.bootstrap).not.toBeNull());
+      act(() => result.current.select("session-a"));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.detail?.session.id).toBe("session-a");
+      let switched: boolean | undefined;
+      await act(async () => {
+        switched = await result.current.switchVersion("q1");
+      });
+      expect(switched).toBe(asked);
+      expect(mocks.switchVersion).toHaveBeenCalledTimes(asked ? 1 : 0);
+    },
+  );
 });

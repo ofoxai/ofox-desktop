@@ -19,7 +19,7 @@ export interface TurnVersions {
 /**
  * The turns that have more than one version, as the switcher shows them:
  * each keyed by the message that carries the switcher, which is the shown
- * version's reply (or its question while it has no reply).
+ * version's last reply (or its question while it has no reply).
  *
  * Versions are the questions the model's own history holds that follow the
  * same message (`branchFrom`; null for the first turn), in the order they
@@ -49,14 +49,18 @@ export function turnVersions(
     const at = ordered.findIndex((message) => !message.superseded);
     if (at < 0) continue;
     const shown = ordered[at];
+    // The reply row that stays in view is the newest message's, so the
+    // switcher goes on the run's last reply.
     const carrier =
-      messages.find(
-        (message) =>
-          message.role === "assistant" &&
-          !message.superseded &&
-          Boolean(shown.runId) &&
-          message.runId === shown.runId,
-      ) ?? shown;
+      messages
+        .filter(
+          (message) =>
+            message.role === "assistant" &&
+            !message.superseded &&
+            Boolean(shown.runId) &&
+            message.runId === shown.runId,
+        )
+        .pop() ?? shown;
     found.set(carrier.id, {
       group,
       index: at + 1,

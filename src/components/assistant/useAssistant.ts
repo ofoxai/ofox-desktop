@@ -1979,6 +1979,8 @@ export function useAssistant(enabled: boolean) {
         !sid ||
         busy ||
         loading ||
+        showTrash ||
+        detail?.session.deletedAt != null ||
         runRef.current ||
         switchInFlight.current ||
         !identity?.owner ||
@@ -2016,7 +2018,7 @@ export function useAssistant(enabled: boolean) {
         if (current()) setBusy(false);
       }
     },
-    [busy, loading, showError],
+    [busy, loading, showTrash, detail?.session.deletedAt, showError],
   );
 
   // The latest tool still running says what the reply is doing; before its

@@ -106,6 +106,17 @@ describe("turnVersions", () => {
     expect(versions.get("rb1")).toMatchObject({ index: 1, count: 2 });
   });
 
+  it("puts the switcher on the last reply of the run, where the always-visible row is", () => {
+    const versions = turnVersions([
+      user("u1", { superseded: true }),
+      user("u2"),
+      reply("first-part", "run-u2"),
+      reply("last-part", "run-u2"),
+      reply("cut", "run-u2", { superseded: true }),
+    ]);
+    expect([...versions.keys()]).toEqual(["last-part"]);
+  });
+
   it("puts the switcher on the question while its reply is not there", () => {
     const versions = turnVersions([
       user("u1", { superseded: true }),

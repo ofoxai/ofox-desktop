@@ -4997,7 +4997,7 @@
     "retryBilledNote": "Web 検索が実行されたか確認できず、すでに課金されている可能性があります。再試行すると再度検索され、もう一度課金される場合があります。",
     "previousVersion": "前のバージョン",
     "nextVersion": "次のバージョン",
-    "versions": "この返信のバージョン",
+    "versions": "バージョン",
     "versionPosition": "{{index}}/{{total}}",
     "replyDetails": "返信の詳細",
     "replyDuration": "所要時間 {{duration}}",
