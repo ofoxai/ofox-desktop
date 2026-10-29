@@ -1,16 +1,11 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import {
-  ChevronDown,
-  ExternalLink,
-  Pencil,
-  RotateCcw,
-  RotateCw,
-} from "lucide-react";
+import { ChevronDown, ExternalLink, Pencil, RotateCcw } from "lucide-react";
 import type {
   AssistantAttachment,
   AssistantMessage,
+  AssistantModel,
   AssistantSource,
 } from "@/lib/api/assistant";
 import { assistantErrorKey } from "@/lib/api/assistant";
@@ -23,11 +18,18 @@ import { CopyButton } from "@/components/ui/copy-button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { isSendable } from "@/utils/assistantAttachments";
+import type { TurnVersions } from "@/utils/assistantVersions";
 import { AttachmentList } from "./AssistantAttachments";
 import { ReasoningBlock } from "./ReasoningBlock";
+import { ReplyMeta } from "./ReplyMeta";
+import { RetryCard } from "./RetryCard";
+import { VersionSwitcher } from "./VersionSwitcher";
 import type { AssistantActivity, AssistantThinking } from "./useAssistant";
 
 const MessageMarkdown = memo(SessionMarkdown);
+
+/** No catalog yet: one array, so a message that did not change is not drawn again. */
+const NO_MODELS: ReadonlyArray<AssistantModel> = [];
 
 type ShownSource = AssistantSource & { site: string };
 
@@ -167,22 +169,27 @@ function SourceList({
 }
 
 /**
- * One user question or assistant reply. Only those two roles reach this view.
+ * One user question or assistant reply. Only those two roles reach this view,
+ * and only the versions of a turn that are on screen.
  * Its callbacks name the message they are about, so the page can hand every
  * message the same functions and a message that did not change is not drawn
  * again while another one streams.
  *
  * A question is a bubble on the right, with the files it was sent with under
  * it and that turn's outcome; an edit sends them again, leaving out those
- * that can't be read. A reply uses the full width. `onRetry` is given for a
- * question whose turn failed before the model kept it: it can only be sent
- * again, as a new turn. `activity` says what a streaming reply is doing while
- * one of its tools runs; `thinking` times the reasoning it is streaming.
- * `searchUnavailable` marks a reply whose run went without the web search its
- * conversation asked for. `highlight` marks what a conversation search looks
- * for in the text. `latest` marks the newest reply, whose actions stay
- * in view; the others show theirs while the pointer or keyboard focus is on
- * the message.
+ * that can't be read. A reply uses the full width, with a line under it: its
+ * actions, its model and time, and a popover with what it used. A failed or
+ * stopped reply, when `onRetry` is given, carries a card to ask again (with
+ * the same model or another of `models`; `currentModelId` is the
+ * conversation's). `versions` is given to the message that carries a turn's
+ * `‹2/3›` switcher: it asks `onSwitchVersion` for the question of the version
+ * to show, and is off while `disabled`. `activity` says what a streaming
+ * reply is doing while one of its tools runs; `thinking` times the reasoning
+ * it is streaming. `searchUnavailable` marks a reply whose run went without
+ * the web search its conversation asked for. `highlight` marks what a
+ * conversation search looks for in the text. `latest` marks the newest
+ * reply, whose actions stay in view; the others show theirs while the
+ * pointer or keyboard focus is on the message.
  */
 export const AssistantMessageView = memo(function AssistantMessageView({
   message,
@@ -191,11 +198,15 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   searchUnavailable = false,
   latest = false,
   highlight = "",
+  models = NO_MODELS,
+  currentModelId = "",
+  versions,
   disabled,
   onEdit,
   onEditingChange,
   onRegenerate,
   onRetry,
+  onSwitchVersion,
 }: {
   message: AssistantMessage;
   activity?: AssistantActivity | null;
@@ -213,14 +224,33 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   ) => Promise<boolean>;
   /** Tells the page whether this message is being edited. */
   onEditingChange?: (editing: boolean) => void;
+  /** The catalog's models: for the names under replies and the retry menu. */
+  models?: ReadonlyArray<AssistantModel>;
+  currentModelId?: string;
+  versions?: TurnVersions;
   onRegenerate: (messageId: string) => void;
-  onRetry?: (messageId: string) => void;
+  /**
+   * Asks again for a failed or stopped reply, with `modelId` when another
+   * model was picked. Settles when the send is over (false: it did not go
+   * out); the card waits for that.
+   */
+  onRetry?: (messageId: string, modelId?: string) => Promise<boolean> | void;
+  onSwitchVersion?: (messageId: string) => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(message.content);
   const [editFiles, setEditFiles] = useState<AssistantAttachment[]>([]);
+  // The reply's usage popover is open: its row stays in view meanwhile.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const editor = useRef<HTMLTextAreaElement>(null);
+  // A message that carries a turn's switcher is kept when another version is
+  // shown (so the switcher keeps its focus): what is open on the old one is
+  // not carried over.
+  useEffect(() => {
+    setEditing(false);
+    setDetailsOpen(false);
+  }, [message.id]);
   // Also told when the message goes away with its edit still open.
   useEffect(() => {
     if (!editing) return;
@@ -261,11 +291,21 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     Boolean(message.nativeEntryId) &&
     (isUser || Boolean(message.runId));
   const role = t(isUser ? "assistant.roles.user" : "assistant.roles.assistant");
-  // A failed turn's question can only be sent again: that stays in view.
-  const retryable = isUser && Boolean(onRetry) && !message.superseded;
-  const actionsShown = latest || retryable;
-  const hasActions = Boolean(message.content) || branchable || retryable;
-  const body = (
+  // A failed or stopped reply carries the card that asks again; that does
+  // what Regenerate would, so only the card is offered.
+  const retryCard =
+    !isUser &&
+    Boolean(onRetry) &&
+    !message.superseded &&
+    (message.status === "error" || message.status === "stopped");
+  const actionsShown = latest || detailsOpen;
+  const hasActions =
+    Boolean(message.content) ||
+    branchable ||
+    Boolean(versions) ||
+    // Every settled reply says its model and time.
+    !isUser;
+  return (
     // The room between two turns is the actions row of the one above (always
     // kept, so that showing it moves nothing): no more is added to it.
     <article
@@ -370,12 +410,24 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {progress && statusLine(progress, "mt-2")}
         </>
       )}
-      {/* Plain text: a live failure was already announced by the page's
-          banner, and opening a conversation must not announce its old ones. */}
-      {message.status === "error" && message.errorCode && (
-        <p className="mt-2 text-ctl text-danger">
-          {t(assistantErrorKey(message.errorCode))}
-        </p>
+      {retryCard ? (
+        <RetryCard
+          key={message.id}
+          errorCode={message.status === "error" ? message.errorCode : null}
+          models={models}
+          currentModelId={currentModelId}
+          disabled={disabled}
+          onRetry={(modelId) => onRetry?.(message.id, modelId)}
+        />
+      ) : (
+        // Plain text: a live failure was already announced by the page's
+        // banner, and opening a conversation must not announce its old ones.
+        message.status === "error" &&
+        message.errorCode && (
+          <p className="mt-2 text-ctl text-danger">
+            {t(assistantErrorKey(message.errorCode))}
+          </p>
+        )
       )}
       {searchUnavailable && !isUser && (
         <p className="mt-2 text-note text-ink-muted">
@@ -388,7 +440,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       {!editing && !streaming && (
         <div
           className={cn(
-            "mt-0.5 flex flex-wrap items-center gap-1.5",
+            "mt-0.5 flex items-center gap-1.5",
             isUser && "justify-end",
           )}
         >
@@ -435,7 +487,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
               )}
-              {!isUser && branchable && (
+              {!isUser && branchable && !retryCard && (
                 <Button
                   variant="icon"
                   className="h-6 w-6"
@@ -447,30 +499,25 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   <RotateCcw className="h-3.5 w-3.5" />
                 </Button>
               )}
-              {retryable && (
-                <Button
-                  variant="ghost"
+              {versions && (
+                <VersionSwitcher
+                  versions={versions}
                   disabled={disabled}
-                  onClick={() => onRetry?.(message.id)}
-                >
-                  <RotateCw aria-hidden className="h-3.5 w-3.5" />
-                  {t("assistant.retryMessage")}
-                </Button>
+                  onSwitch={(messageId) => onSwitchVersion?.(messageId)}
+                />
+              )}
+              {!isUser && (
+                <ReplyMeta
+                  key={message.id}
+                  message={message}
+                  models={models}
+                  onOpenChange={setDetailsOpen}
+                />
               )}
             </div>
           )}
         </div>
       )}
     </article>
-  );
-  return message.superseded ? (
-    <details className="rounded-ctl border border-line px-3 text-ink-muted">
-      <summary className="cursor-pointer py-2 text-ctl">
-        {t("assistant.previousVersion")}
-      </summary>
-      {body}
-    </details>
-  ) : (
-    body
   );
 });

@@ -1,10 +1,9 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AssistantModel, AssistantModelKind } from "@/lib/api/assistant";
-import { fmtTokens } from "@/lib/format";
-import { groupModelsByVendor } from "@/utils/assistantModels";
-import { MenuSelect, type MenuSelectOption } from "@/components/ui/menu-select";
+import { MenuSelect } from "@/components/ui/menu-select";
 import { SegmentedControl } from "@/components/ui/segmented";
+import { useModelOptions } from "./useModelOptions";
 
 /**
  * The kinds the picker's switch offers. Stage 9 adds "image" and "video"
@@ -36,50 +35,10 @@ export function AssistantModelPicker({
   disabled: boolean;
   placeholder: string;
 }) {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const [kind, setKind] = useState<AssistantModelKind>("chat");
 
-  const options = useMemo<MenuSelectOption[]>(() => {
-    const vendorLabel = (vendor: string) =>
-      vendor
-        ? t(`assistant.vendors.${vendor}`, { defaultValue: vendor })
-        : t("assistant.vendorOther");
-    return groupModelsByVendor(
-      models.filter((model) => kindOf(model) === kind),
-      vendorLabel,
-      i18n.language,
-    ).flatMap(({ vendor, label, models: members }) =>
-      members.map((model) => {
-        const tokens = model.contextWindow
-          ? fmtTokens(model.contextWindow)
-          : "";
-        const prices = model.inputPricePerMillion
-          ? {
-              input: model.inputPricePerMillion,
-              output: model.outputPricePerMillion ?? "—",
-            }
-          : null;
-        const detail = [
-          tokens ? t("assistant.contextWindow", { tokens }) : "",
-          prices ? t("assistant.modelPrice", prices) : "",
-          model.reasoning ? t("assistant.modelTags.reasoning") : "",
-          model.supportsImages ? t("assistant.modelTags.vision") : "",
-        ].filter(Boolean);
-        return {
-          value: model.id,
-          label: model.shortName || model.name,
-          meta:
-            [tokens, prices ? t("assistant.modelPriceShort", prices) : ""]
-              .filter(Boolean)
-              .join(" · ") || undefined,
-          title: [model.name, detail.join(" · ")].filter(Boolean).join("\n"),
-          group: vendor,
-          groupLabel: label,
-        };
-      }),
-    );
-    // `t` changes with the language, which is all `i18n.language` adds.
-  }, [models, kind, t, i18n.language]);
+  const options = useModelOptions(models, kind);
 
   const count = (of: AssistantModelKind) =>
     models.filter((model) => kindOf(model) === of).length;

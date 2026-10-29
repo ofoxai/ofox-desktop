@@ -62,7 +62,7 @@ function view(
     ) => Promise<boolean>;
     onEditingChange?: (editing: boolean) => void;
     onRegenerate?: (messageId: string) => void;
-    onRetry?: (messageId: string) => void;
+    onRetry?: (messageId: string, modelId?: string) => Promise<boolean> | void;
   } = {},
   disabled = false,
   latest = false,
@@ -266,14 +266,6 @@ describe("assistant transcript rendering", () => {
     expect(onEditingChange).toHaveBeenCalledTimes(4);
   });
 
-  it("keeps a replaced version readable behind a disclosure, without actions", () => {
-    render(view({ role: "user", content: "Old question", superseded: true }));
-    expect(screen.getByText("View previous version")).toBeVisible();
-    expect(
-      screen.queryByRole("button", { name: "Edit and resend" }),
-    ).not.toBeInTheDocument();
-  });
-
   it.each(["user", "assistant"] as const)(
     "offers no edit or regenerate on a %s message the model never received",
     (role) => {
@@ -285,23 +277,6 @@ describe("assistant transcript rendering", () => {
       ).toBeNull();
     },
   );
-
-  it("offers to send a failed question again when the page allows it", async () => {
-    const onRetry = vi.fn();
-    const failed: Partial<AssistantMessage> = {
-      role: "user",
-      content: "Lost",
-      nativeEntryId: null,
-    };
-    const rendered = render(view(failed, { onRetry }, true));
-    expect(screen.getByRole("button", { name: "Send again" })).toBeDisabled();
-    rendered.rerender(view(failed, { onRetry }));
-    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
-    expect(onRetry).toHaveBeenCalledOnce();
-    expect(onRetry).toHaveBeenCalledWith("m");
-    rendered.rerender(view(failed));
-    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
-  });
 
   it("marks a stopped or failed reply", () => {
     const rendered = render(view({ content: "Part", status: "stopped" }));
@@ -730,16 +705,6 @@ describe("a message's actions", () => {
     expect(screen.getByRole("button", { name: "Copy" })).toHaveFocus();
     await userEvent.tab();
     expect(screen.getByRole("button", { name: "Regenerate" })).toHaveFocus();
-  });
-
-  it("keeps the way to send a failed question again in view", () => {
-    render(
-      view(
-        { role: "user", content: "Lost", nativeEntryId: null },
-        { onRetry: vi.fn() },
-      ),
-    );
-    expect(toolbarOf("Send again")).not.toHaveClass("opacity-0");
   });
 
   it("marks a stopped or failed reply with a badge in the actions' row", () => {

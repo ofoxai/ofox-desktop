@@ -1556,10 +1556,13 @@ export function useAssistant(enabled: boolean) {
     async (options?: {
       editMessageId?: string;
       regenerateMessageId?: string;
+      /** A failed or stopped reply to ask again for, with `text` and `attachments`. */
+      retryMessageId?: string;
       text?: string;
       attachments?: AssistantAttachment[];
     }) => {
-      const { editMessageId, regenerateMessageId } = options ?? {};
+      const { editMessageId, regenerateMessageId, retryMessageId } =
+        options ?? {};
       const text = options?.text ?? draftRef.current;
       const fromComposer = options?.text === undefined;
       const revision = Boolean(editMessageId || regenerateMessageId);
@@ -1677,6 +1680,7 @@ export function useAssistant(enabled: boolean) {
           attachmentIds: files.map((file) => file.id),
           ...(editMessageId ? { editMessageId, replaceAttachments: true } : {}),
           ...(regenerateMessageId ? { regenerateMessageId } : {}),
+          ...(retryMessageId ? { retryMessageId } : {}),
         });
         // Admission is over even if saving the next draft still takes time.
         // A return to this conversation must trust the backend's run state.
@@ -1958,6 +1962,63 @@ export function useAssistant(enabled: boolean) {
     }
   }, [showError]);
 
+  // Set at once: a second press that comes before the render that disables
+  // the switcher must not start a second switch.
+  const switchInFlight = useRef(false);
+  /**
+   * Show another version of a turn: the one whose question is `messageId`.
+   * The conversation is busy meanwhile (nothing else is sent, and the
+   * backend refuses a switch while a reply runs). Resolves true once the
+   * conversation shows it.
+   */
+  const switchVersion = useCallback(
+    async (messageId: string) => {
+      const sid = selectedRef.current;
+      const identity = bootstrapRef.current;
+      if (
+        !sid ||
+        busy ||
+        loading ||
+        runRef.current ||
+        switchInFlight.current ||
+        !identity?.owner ||
+        identity.authorityGeneration === undefined
+      )
+        return false;
+      const generation = epoch.current;
+      const selection = selectionSequence.current;
+      const current = () =>
+        mounted.current &&
+        generation === epoch.current &&
+        selection === selectionSequence.current &&
+        selectedRef.current === sid;
+      switchInFlight.current = true;
+      setBusy(true);
+      setError(null);
+      try {
+        const value = await assistantApi.switchVersion({
+          sessionId: sid,
+          messageId,
+          expectedOwner: identity.owner,
+          expectedGeneration: identity.authorityGeneration,
+        });
+        if (!current()) return false;
+        // A read that began before the switch would bring the old version back.
+        detailSequence.current += 1;
+        setDetail(value);
+        void refreshSessionsRef.current();
+        return true;
+      } catch (reason) {
+        if (current()) showError(reason);
+        return false;
+      } finally {
+        switchInFlight.current = false;
+        if (current()) setBusy(false);
+      }
+    },
+    [busy, loading, showError],
+  );
+
   // The latest tool still running says what the reply is doing; before its
   // model request, a run reads the files it was sent with.
   const activity =
@@ -2036,6 +2097,7 @@ export function useAssistant(enabled: boolean) {
     update,
     send,
     stop,
+    switchVersion,
     refreshSessions,
     refreshDetail,
     loadBootstrap,

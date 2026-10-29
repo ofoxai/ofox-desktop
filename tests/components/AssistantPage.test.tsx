@@ -1354,17 +1354,18 @@ describe("a turn that failed before the model kept it", () => {
     };
   };
 
-  it("sends the stored question again as a new turn, keeping the draft", async () => {
+  it("asks again for the failed reply with its question's words, keeping the draft", async () => {
     failedTurn();
     await openConversation();
     await userEvent.type(composer(), "Unsent draft");
-    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
     const request = mocks.send.mock.calls[0][0];
     expect(request).toMatchObject({
       sessionId: "session-a",
       text: "The lost question",
       attachmentIds: [],
+      retryMessageId: "lost-reply",
     });
     expect(request.editMessageId).toBeUndefined();
     expect(request.regenerateMessageId).toBeUndefined();
@@ -1373,14 +1374,79 @@ describe("a turn that failed before the model kept it", () => {
     await waitFor(() => expect(current.session.draft).toBe("Unsent draft"));
   });
 
-  it("is never offered for a turn the model has, or while a reply runs", async () => {
+  it("is offered for a stopped reply whose question the model has: the backend picks edit or new turn", async () => {
     failedTurn("stopped");
     current.messages[0].nativeEntryId = "native-question";
     await openConversation();
-    expect(screen.queryByRole("button", { name: "Send again" })).toBeNull();
     expect(
       screen.getByRole("button", { name: "Edit and resend" }),
     ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "The lost question",
+          retryMessageId: "lost-reply",
+        }),
+      ),
+    );
+  });
+
+  it("keeps Retry pending until the send is over, then lets a refused one be tried again", async () => {
+    failedTurn();
+    await openConversation();
+    let refuse: (reason: unknown) => void = () => undefined;
+    mocks.send.mockImplementationOnce(
+      () => new Promise((_, reject) => (refuse = reject)),
+    );
+    const retry = () => screen.getByRole("button", { name: "Retry" });
+    await userEvent.click(retry());
+    await waitFor(() => expect(retry()).toHaveAttribute("aria-busy", "true"));
+    await userEvent.click(retry());
+    expect(mocks.send).toHaveBeenCalledOnce();
+    await act(async () => refuse("assistant_session_busy"));
+    expect(await screen.findByRole("alert")).toBeVisible();
+    await waitFor(() => expect(retry()).not.toHaveAttribute("aria-busy"));
+    await waitFor(() => expect(retry()).not.toHaveAttribute("aria-disabled"));
+  });
+
+  it("changes the conversation's model first when another one is picked, then asks again", async () => {
+    failedTurn();
+    await openConversation();
+    const order: string[] = [];
+    mocks.updateSession.mockImplementationOnce(async (patch) => {
+      order.push(`update:${patch.modelId}`);
+      return { ...current.session, modelId: patch.modelId };
+    });
+    mocks.send.mockImplementationOnce(async (request) => {
+      order.push(`send:${request.retryMessageId}`);
+      return { runId: request.runId, operationId: request.operationId };
+    });
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "Retry with another model" }),
+    );
+    const list = await screen.findByRole("listbox");
+    await userEvent.click(
+      within(list).getByRole("option", { name: /Fast model/ }),
+    );
+    await waitFor(() => expect(mocks.send).toHaveBeenCalledOnce());
+    expect(order).toEqual(["update:fast", "send:lost-reply"]);
+  });
+
+  it("asks nothing again when the model could not be changed", async () => {
+    failedTurn();
+    await openConversation();
+    mocks.updateSession.mockRejectedValueOnce("assistant_model_unavailable");
+    await userEvent.click(
+      screen.getByRole("combobox", { name: "Retry with another model" }),
+    );
+    await userEvent.click(
+      within(await screen.findByRole("listbox")).getByRole("option", {
+        name: /Fast model/,
+      }),
+    );
+    expect(await screen.findByRole("alert")).toBeVisible();
+    expect(mocks.send).not.toHaveBeenCalled();
   });
 });
 
@@ -2054,7 +2120,7 @@ describe("attachments", () => {
     );
   });
 
-  it("sends a failed question again with the files that can still be read", async () => {
+  it("asks again for a failed reply with the files that can still be read", async () => {
     current.messages = [
       {
         id: "lost-question",
@@ -2077,12 +2143,13 @@ describe("attachments", () => {
       },
     ];
     await openConversation();
-    await userEvent.click(screen.getByRole("button", { name: "Send again" }));
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
       expect(mocks.send).toHaveBeenCalledWith(
         expect.objectContaining({
           text: "Compare these",
           attachmentIds: ["file-pdf"],
+          retryMessageId: "lost-reply",
         }),
       ),
     );

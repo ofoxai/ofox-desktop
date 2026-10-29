@@ -11,7 +11,6 @@ import {
   type RefObject,
 } from "react";
 import { useTranslation } from "react-i18next";
-import type { TFunction } from "i18next";
 import { toast } from "sonner";
 import {
   ArrowDown,
@@ -35,9 +34,7 @@ import {
 import {
   assistantErrorKey,
   type AssistantAttachment,
-  type AssistantUsage,
 } from "@/lib/api/assistant";
-import { fmtCost, fmtTokens } from "@/lib/format";
 import { isMac } from "@/lib/platform";
 import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
@@ -54,6 +51,8 @@ import { usePendingFocus } from "./usePendingFocus";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { searchHighlight } from "@/utils/assistantSearch";
 import { isSendable } from "@/utils/assistantAttachments";
+import { usageSummary } from "@/utils/assistantUsage";
+import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -125,48 +124,6 @@ function searchPriceNote(unitPriceUsd: string) {
     high: usd.format(price * 2),
     max: MAX_SEARCHES_PER_REPLY,
   };
-}
-
-/**
- * A conversation's tokens and cost. The cost is shown only once its runs are
- * saved, and as unavailable whenever a request's cost is unknown: never as
- * $0 or as a partial sum. A cost that includes web searches says how many
- * search charges it holds (one search can bill two).
- */
-function usageSummary(
-  usage: AssistantUsage | undefined,
-  settled: boolean,
-  t: TFunction,
-): string | null {
-  if (!usage) return null;
-  const input = usage.inputTokens ?? 0;
-  const output = usage.outputTokens ?? 0;
-  const counted = input > 0 || output > 0;
-  const parts = counted
-    ? [
-        t("assistant.usageTokens", {
-          input: fmtTokens(input),
-          output: fmtTokens(output),
-        }),
-      ]
-    : [];
-  if (settled) {
-    if (usage.usageCoverage === "incomplete")
-      parts.push(t("assistant.costUnavailable"));
-    else if (typeof usage.estimatedCostUsd === "string") {
-      const cost = fmtCost(Number(usage.estimatedCostUsd));
-      const searches = usage.searchCount ?? 0;
-      parts.push(
-        searches > 0
-          ? t("assistant.usageCostWithSearches", { cost, count: searches })
-          : t("assistant.usageCost", { cost }),
-      );
-    }
-    // Requests were made but a model had no price.
-    else if (counted || (usage.modelRequests ?? 0) > 0)
-      parts.push(t("assistant.costUnavailable"));
-  }
-  return parts.length ? parts.join(" · ") : null;
 }
 
 interface AssistantPageProps {
@@ -305,10 +262,19 @@ function AssistantWorkspace() {
   // saved with search on while it is unavailable still says "on" to
   // assistive tech (and can be turned off), but doesn't look on.
   const searchLit = assistant.webSearch && searchPrice !== null;
-  // Tool, system and other internal records stay out of the transcript.
-  const messages = (detail?.messages ?? []).filter(
-    (message) => message.role === "user" || message.role === "assistant",
+  // Tool, system and other internal records stay out of the transcript, and
+  // so do the versions of a turn that are not the one shown: the switcher
+  // under the shown one brings them back.
+  const detailMessages = detail?.messages;
+  const turns = useMemo(
+    () =>
+      (detailMessages ?? []).filter(
+        (message) => message.role === "user" || message.role === "assistant",
+      ),
+    [detailMessages],
   );
+  const versions = useMemo(() => turnVersions(turns), [turns]);
+  const messages = turns.filter((message) => !message.superseded);
   const emptyTranscript = !messages.length && !assistant.stream;
   // The newest reply keeps its actions in view; only a reply has them there.
   const newest =
@@ -316,25 +282,23 @@ function AssistantWorkspace() {
       ? assistant.stream
       : messages[messages.length - 1];
   const latestReplyId = newest?.role === "assistant" ? newest.id : undefined;
-  // Runs whose reply failed or stopped. Their question can be sent again
-  // when the model never kept it (nothing to edit or regenerate from).
-  const unfinishedRuns = new Set(
-    messages
-      .filter(
-        (message) =>
-          message.role === "assistant" &&
-          (message.status === "error" || message.status === "stopped"),
-      )
-      .map((message) => message.runId),
-  );
-  const retryable = (message: (typeof messages)[number]) =>
-    message.role === "user" &&
-    !message.superseded &&
-    !message.nativeEntryId &&
-    Boolean(message.runId) &&
-    unfinishedRuns.has(message.runId) &&
-    // Sent again, it carries only the files that can still be read.
-    Boolean(message.content.trim() || message.attachments?.some(isSendable));
+  // A failed or stopped reply can be asked for again when its question is
+  // still there to send: with its words, or with files that can be read.
+  const retryable = (message: (typeof messages)[number]) => {
+    if (
+      message.role !== "assistant" ||
+      !message.runId ||
+      (message.status !== "error" && message.status !== "stopped")
+    )
+      return false;
+    const question = messages.find(
+      (item) => item.role === "user" && item.runId === message.runId,
+    );
+    return Boolean(
+      question &&
+        (question.content.trim() || question.attachments?.some(isSendable)),
+    );
+  };
   const files = assistant.attachments;
   // Files whose last read failed outright are never sent: they must go first.
   const blockedFiles = files.some((file) => !isSendable(file));
@@ -515,8 +479,20 @@ function AssistantWorkspace() {
   // Everything a message needs to act, reached through one ref so that the
   // functions below never change and a message that did not change is not
   // drawn again while another one streams.
-  const actions = useRef({ send: assistant.send, messages });
-  actions.current = { send: assistant.send, messages };
+  const actions = useRef({
+    send: assistant.send,
+    update: assistant.update,
+    switchVersion: assistant.switchVersion,
+    messages,
+    modelId: session?.modelId,
+  });
+  actions.current = {
+    send: assistant.send,
+    update: assistant.update,
+    switchVersion: assistant.switchVersion,
+    messages,
+    modelId: session?.modelId,
+  };
   const editMessage = useCallback(
     (editMessageId: string, text: string, attachments: AssistantAttachment[]) =>
       actions.current.send({ text, attachments, editMessageId }),
@@ -530,17 +506,36 @@ function AssistantWorkspace() {
   const trackEdit = useCallback((open: boolean) => {
     openEdits.current += open ? 1 : -1;
   }, []);
-  const retryMessage = useCallback((messageId: string) => {
-    const message = actions.current.messages.find(
-      (item) => item.id === messageId,
+  // Asks again for a failed or stopped reply with its question's own words
+  // and files; the backend decides whether that is an edit of the question
+  // the model kept or a new turn. With `modelId` the conversation changes
+  // model first (the model it asks is the conversation's). Settles once the
+  // send is over: true when it went out.
+  const retryReply = useCallback(async (replyId: string, modelId?: string) => {
+    const { messages: shown, modelId: current } = actions.current;
+    const reply = shown.find((item) => item.id === replyId);
+    const question = shown.find(
+      (item) => item.role === "user" && item.runId === reply?.runId,
     );
-    if (!message) return;
+    if (!reply || !question) return false;
+    if (
+      modelId &&
+      modelId !== current &&
+      !(await actions.current.update({ modelId }))
+    )
+      return false;
     follow.current = true;
-    void actions.current.send({
-      text: message.content,
-      attachments: message.attachments,
+    // The send as of now: the model change just rendered a newer one.
+    return actions.current.send({
+      text: question.content,
+      attachments: question.attachments,
+      retryMessageId: replyId,
     });
   }, []);
+  const switchVersion = useCallback(
+    (messageId: string) => void actions.current.switchVersion(messageId),
+    [],
+  );
   const toggleSidebar = () => {
     const collapsed = !sidebarCollapsed;
     setSidebarCollapsed(collapsed);
@@ -925,22 +920,32 @@ function AssistantWorkspace() {
                   </div>
                 )}
                 <div className="mx-auto max-w-[760px] py-2">
-                  {messages.map((message) => (
-                    <AssistantMessageView
-                      key={message.id}
-                      message={message}
-                      searchUnavailable={assistant.searchSkipped.has(
-                        message.id,
-                      )}
-                      latest={message.id === latestReplyId}
-                      highlight={transcriptHighlight}
-                      disabled={!writable}
-                      onEdit={editMessage}
-                      onEditingChange={trackEdit}
-                      onRegenerate={regenerateMessage}
-                      onRetry={retryable(message) ? retryMessage : undefined}
-                    />
-                  ))}
+                  {messages.map((message) => {
+                    const turn = versions.get(message.id);
+                    return (
+                      <AssistantMessageView
+                        // The message that carries a switcher keeps its place
+                        // when another version is shown, and the keyboard
+                        // focus on the switcher with it.
+                        key={turn ? `versions:${turn.group}` : message.id}
+                        message={message}
+                        models={bootstrap?.models}
+                        currentModelId={session?.modelId}
+                        versions={turn}
+                        searchUnavailable={assistant.searchSkipped.has(
+                          message.id,
+                        )}
+                        latest={message.id === latestReplyId}
+                        highlight={transcriptHighlight}
+                        disabled={!writable}
+                        onEdit={editMessage}
+                        onEditingChange={trackEdit}
+                        onRegenerate={regenerateMessage}
+                        onRetry={retryable(message) ? retryReply : undefined}
+                        onSwitchVersion={switchVersion}
+                      />
+                    );
+                  })}
                   {assistant.stream?.role === "assistant" && (
                     <AssistantMessageView
                       message={assistant.stream}
