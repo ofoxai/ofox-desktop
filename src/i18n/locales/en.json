@@ -5143,6 +5143,26 @@
     "restoreSkipped_other": "{{count}} conversations were already on this device.",
     "restoreConflicts_one": "{{count}} conversation on this device is different or in use, so it was left unchanged.",
     "restoreConflicts_other": "{{count}} conversations on this device are different or in use, so they were left unchanged.",
-    "restoreNothing": "The backup has no conversations to restore."
+    "restoreNothing": "The backup has no conversations to restore.",
+    "groups": {
+      "pinned": "Pinned",
+      "today": "Today",
+      "yesterday": "Yesterday",
+      "week": "Past 7 days",
+      "earlier": "Earlier"
+    },
+    "pin": "Pin",
+    "unpin": "Unpin",
+    "rowActions": "Conversation options",
+    "trashed": "Moved “{{title}}” to trash",
+    "undo": "Undo",
+    "emptyTrash": "Empty",
+    "emptyTrashAction": "Empty trash",
+    "emptyTrashTitle": "Empty the trash?",
+    "emptyTrashDescription_one": "This permanently deletes the {{count}} conversation in the trash, with its attachments and history, from this device. This cannot be undone.",
+    "emptyTrashDescription_other": "This permanently deletes all {{count}} conversations in the trash, with their attachments and history, from this device. This cannot be undone.",
+    "emptyTrashDone_one": "Permanently deleted {{count}} conversation.",
+    "emptyTrashDone_other": "Permanently deleted {{count}} conversations.",
+    "emptyTrashPartial": "Deleted {{deleted}}; {{failed}} couldn't be deleted. Try again later."
   }
 }

@@ -1,6 +1,8 @@
 import {
+  forwardRef,
   useEffect,
   useId,
+  useImperativeHandle,
   useMemo,
   useRef,
   useState,
@@ -15,12 +17,14 @@ import {
   Download,
   Ellipsis,
   Loader2,
+  Pin,
+  PinOff,
   Search,
   SquarePen,
   Trash2,
   Upload,
 } from "lucide-react";
-import { assistantErrorKey } from "@/lib/api/assistant";
+import { assistantErrorKey, type AssistantSession } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
 import { Button } from "@/components/ui/button";
 import { SearchInput } from "@/components/ui/search-input";
@@ -30,9 +34,12 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { highlightText } from "@/components/sessions/utils";
+import { groupSessions } from "@/utils/assistantSessionGroups";
 import { cn } from "@/lib/utils";
 import type { AssistantTransferResult, useAssistant } from "./useAssistant";
 import { usePendingFocus } from "./usePendingFocus";
+import { useStartOfToday } from "./useStartOfToday";
 
 /** Long enough to read a restore's several lines. */
 const TRANSFER_TOAST_MS = 8000;
@@ -103,9 +110,17 @@ interface AssistantSidebarProps {
   canCreate: boolean;
   /** Start one: the same action as the keyboard shortcut. */
   onCreate: () => void;
+  /**
+   * A row was chosen. `messageId` is the message a search found in it, which
+   * the page scrolls to; none for a conversation found by its title.
+   */
+  onOpen: (id: string, messageId?: string) => void;
+  /** Ask to empty the trash (the page confirms it). */
+  onEmptyTrash: () => void;
   newConversationRef: RefObject<HTMLButtonElement>;
   trashEntryRef: RefObject<HTMLButtonElement>;
   trashBackRef: RefObject<HTMLButtonElement>;
+  emptyTrashRef: RefObject<HTMLButtonElement>;
   /** Back up or restore; `trigger` takes focus back once it is over. */
   onTransfer: (
     kind: "backup" | "restore",
@@ -113,34 +128,106 @@ interface AssistantSidebarProps {
   ) => void;
 }
 
+export interface AssistantSidebarHandle {
+  /**
+   * Give focus to a conversation's row once it is listed: where a pin or an
+   * undo puts it, which is only known after the list is read again. With
+   * `pinned`, once it is listed as pinned (or not).
+   */
+  focusRow: (id: string, pinned?: boolean) => void;
+}
+
+/** How long a requested focus waits for its row to be listed. */
+const ROW_FOCUS_WAIT_MS = 3000;
+
 /**
- * The conversation list: search and new conversation on top, the trash and
- * backup/restore in the footer. In the trash it lists trashed conversations
- * under a way back.
+ * The conversation list, in groups by date with the pinned ones first:
+ * search and new conversation on top, the trash and backup/restore in the
+ * footer. In the trash it lists trashed conversations, ungrouped, under a way
+ * back and the means to empty it.
  */
-export function AssistantSidebar({
-  id,
-  collapsed,
-  assistant,
-  canCreate,
-  onCreate,
-  newConversationRef,
-  trashEntryRef,
-  trashBackRef,
-  onTransfer,
-}: AssistantSidebarProps) {
+export const AssistantSidebar = forwardRef<
+  AssistantSidebarHandle,
+  AssistantSidebarProps
+>(function AssistantSidebar(
+  {
+    id,
+    collapsed,
+    assistant,
+    canCreate,
+    onCreate,
+    onOpen,
+    onEmptyTrash,
+    newConversationRef,
+    trashEntryRef,
+    trashBackRef,
+    emptyTrashRef,
+    onTransfer,
+  },
+  handle,
+) {
   const { t, i18n } = useTranslation();
   const [searchOpen, setSearchOpen] = useState(false);
   const searchButton = useRef<HTMLButtonElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
   const backupHint = useId();
+  const rowIds = useId();
   const focusSoon = usePendingFocus();
+  const rowButtons = useRef(new Map<string, HTMLButtonElement>());
+  const wantedRow = useRef<{
+    id: string;
+    pinned?: boolean;
+    until: number;
+  } | null>(null);
+  const today = useStartOfToday();
   const { showTrash, transferring, trashCount } = assistant;
   // A search with text stays open: its filter is in force.
   const searchShown = searchOpen || assistant.search !== "";
   const transferLocked =
     assistant.busy || assistant.loading || !assistant.bootstrap?.owner;
   useTransferToast(assistant.transferResult);
+  const groups = useMemo(
+    () => (showTrash ? [] : groupSessions(assistant.sessions, today)),
+    [assistant.sessions, showTrash, today],
+  );
+
+  // The wanted row takes focus once it is listed (where it is to be). A row
+  // that never is, say a filter hides it, stops waiting.
+  const focusWantedRow = () => {
+    const wanted = wantedRow.current;
+    if (!wanted) return;
+    if (Date.now() > wanted.until) {
+      wantedRow.current = null;
+      return;
+    }
+    const item = assistant.sessions.find((listed) => listed.id === wanted.id);
+    const button = rowButtons.current.get(wanted.id);
+    if (!item || !button) return;
+    if (
+      wanted.pinned !== undefined &&
+      (item.pinnedAt !== null) !== wanted.pinned
+    )
+      return;
+    wantedRow.current = null;
+    button.focus();
+  };
+  useEffect(focusWantedRow);
+  const wantRow = (rowId: string, pinned?: boolean) => {
+    wantedRow.current = {
+      id: rowId,
+      pinned,
+      until: Date.now() + ROW_FOCUS_WAIT_MS,
+    };
+    focusWantedRow();
+  };
+  useImperativeHandle(handle, () => ({ focusRow: wantRow }));
+  const togglePin = (item: AssistantSession) => {
+    const pinned = item.pinnedAt === null;
+    wantRow(item.id, pinned);
+    void assistant.setPinned(item.id, pinned).then((saved) => {
+      if (!saved) wantedRow.current = null;
+    });
+  };
 
   // Every row is dated on each render, and the list renders with each
   // streamed frame: one formatter per language, not one per row.
@@ -153,6 +240,96 @@ export function AssistantSidebar({
     [i18n.language],
   );
   const stamp = (at: number) => stampFormat.format(at);
+
+  const renderRow = (item: AssistantSession) => {
+    const selected = assistant.selectedId === item.id;
+    const title = item.title || t("assistant.untitled");
+    const rowId = `${rowIds}-${item.id}`;
+    return (
+      <li key={item.id} className="group relative">
+        <button
+          ref={(element) => {
+            if (element) rowButtons.current.set(item.id, element);
+            else rowButtons.current.delete(item.id);
+          }}
+          id={rowId}
+          type="button"
+          disabled={transferring}
+          // The title may be cut short in the row: here it is whole.
+          title={`${title}\n${stamp(item.updatedAt)}`}
+          aria-current={selected ? "page" : undefined}
+          onClick={() => onOpen(item.id, assistant.matches[item.id])}
+          className={cn(
+            "flex w-full items-center gap-1.5 rounded-ctl px-2 py-1.5 text-left text-ctl transition-colors hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-50",
+            selected && "bg-brand-soft text-brand-ink",
+          )}
+        >
+          <span className="min-w-0 flex-1 truncate">
+            {highlightText(title, assistant.search)}
+          </span>
+          {/* Pins are told by their group's heading: the icon is for the eye. */}
+          {item.pinnedAt !== null && !showTrash && (
+            <Pin aria-hidden className="h-3 w-3 shrink-0 text-ink-faint" />
+          )}
+          {item.activeRun && (
+            <>
+              <Loader2
+                aria-hidden
+                className="h-3.5 w-3.5 shrink-0 animate-spin text-ink-muted motion-reduce:animate-none"
+              />
+              <span className="sr-only">{t("assistant.running")}</span>
+            </>
+          )}
+        </button>
+        {!showTrash && (
+          <DropdownMenu modal={false}>
+            <DropdownMenuTrigger asChild>
+              {/* Over the row's end, shown while the pointer or focus is in
+                  the row; it stays in the tab order. */}
+              <Button
+                variant="icon"
+                aria-label={t("assistant.rowActions")}
+                aria-describedby={rowId}
+                disabled={transferring}
+                className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2 opacity-0 focus-visible:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100 data-[state=open]:bg-pill data-[state=open]:text-ink data-[state=open]:opacity-100"
+              >
+                <Ellipsis aria-hidden className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent
+              align="end"
+              className="min-w-[140px] max-w-[280px]"
+            >
+              <DropdownMenuItem onSelect={() => togglePin(item)}>
+                {item.pinnedAt === null ? (
+                  <Pin aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <PinOff aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                )}
+                {t(
+                  item.pinnedAt === null ? "assistant.pin" : "assistant.unpin",
+                )}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
+      </li>
+    );
+  };
+  const unreadableRows = assistant.unreadable.map((item) => (
+    <li
+      key={item.id}
+      className="rounded-ctl px-2 py-1.5 text-ctl text-ink-muted"
+    >
+      <span className="flex items-center gap-1.5 font-medium text-danger">
+        <AlertTriangle aria-hidden className="h-3.5 w-3.5" />
+        {t("assistant.unreadable")}
+      </span>
+      <span className="mt-0.5 block text-note">
+        {t(assistantErrorKey(item.error))}
+      </span>
+    </li>
+  ));
 
   return (
     <aside
@@ -232,65 +409,53 @@ export function AssistantSidebar({
           >
             <ArrowLeft aria-hidden className="h-3.5 w-3.5" />
           </Button>
-          <h2 className="min-w-0 truncate text-ctl font-semibold text-ink">
+          <h2 className="min-w-0 flex-1 truncate text-ctl font-semibold text-ink">
             {t("assistant.trash")}
           </h2>
+          <Button
+            ref={emptyTrashRef}
+            variant="dangerGhost"
+            className="shrink-0 px-2"
+            aria-label={t("assistant.emptyTrashAction")}
+            disabled={
+              trashCount === 0 ||
+              transferring ||
+              assistant.busy ||
+              assistant.loading
+            }
+            onClick={onEmptyTrash}
+          >
+            {t("assistant.emptyTrash")}
+          </Button>
         </div>
       )}
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <ul
-          className="space-y-0.5"
-          aria-label={t(
-            showTrash ? "assistant.trash" : "assistant.conversations",
-          )}
-        >
-          {assistant.sessions.map((item) => (
-            <li key={item.id}>
-              <button
-                type="button"
-                disabled={transferring}
-                // The title may be cut short in the row: here it is whole.
-                title={`${item.title || t("assistant.untitled")}\n${stamp(item.updatedAt)}`}
-                aria-current={
-                  assistant.selectedId === item.id ? "page" : undefined
-                }
-                onClick={() => assistant.select(item.id)}
-                className={cn(
-                  "flex w-full items-center gap-1.5 rounded-ctl px-2 py-1.5 text-left text-ctl transition-colors hover:bg-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-wait disabled:opacity-50",
-                  assistant.selectedId === item.id &&
-                    "bg-brand-soft text-brand-ink",
-                )}
-              >
-                <span className="min-w-0 flex-1 truncate">
-                  {item.title || t("assistant.untitled")}
-                </span>
-                {item.activeRun && (
-                  <>
-                    <Loader2
-                      aria-hidden
-                      className="h-3.5 w-3.5 shrink-0 animate-spin text-ink-muted motion-reduce:animate-none"
-                    />
-                    <span className="sr-only">{t("assistant.running")}</span>
-                  </>
-                )}
-              </button>
-            </li>
-          ))}
-          {assistant.unreadable.map((item) => (
-            <li
-              key={item.id}
-              className="rounded-ctl px-2 py-1.5 text-ctl text-ink-muted"
-            >
-              <span className="flex items-center gap-1.5 font-medium text-danger">
-                <AlertTriangle aria-hidden className="h-3.5 w-3.5" />
-                {t("assistant.unreadable")}
-              </span>
-              <span className="mt-0.5 block text-note">
-                {t(assistantErrorKey(item.error))}
-              </span>
-            </li>
-          ))}
-        </ul>
+        {showTrash ? (
+          <ul className="space-y-0.5" aria-label={t("assistant.trash")}>
+            {assistant.sessions.map(renderRow)}
+            {unreadableRows}
+          </ul>
+        ) : (
+          <ul aria-label={t("assistant.conversations")}>
+            {groups.map((group) => (
+              <li key={group.id}>
+                <h3
+                  id={`${rowIds}-group-${group.id}`}
+                  className="px-2 pb-0.5 pt-2 text-note font-medium text-ink-ctl"
+                >
+                  {t(`assistant.groups.${group.id}`)}
+                </h3>
+                <ul
+                  className="space-y-0.5"
+                  aria-labelledby={`${rowIds}-group-${group.id}`}
+                >
+                  {group.sessions.map(renderRow)}
+                </ul>
+              </li>
+            ))}
+            {unreadableRows}
+          </ul>
+        )}
         {!assistant.sessions.length && !assistant.unreadable.length && (
           <p className="px-2 py-6 text-center text-note text-ink-muted">
             {t(
@@ -366,4 +531,4 @@ export function AssistantSidebar({
       </div>
     </aside>
   );
-}
+});

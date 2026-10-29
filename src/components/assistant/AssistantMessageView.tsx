@@ -179,7 +179,8 @@ function SourceList({
  * again, as a new turn. `activity` says what a streaming reply is doing while
  * one of its tools runs; `thinking` times the reasoning it is streaming.
  * `searchUnavailable` marks a reply whose run went without the web search its
- * conversation asked for. `latest` marks the newest reply, whose actions stay
+ * conversation asked for. `highlight` marks what a conversation search looks
+ * for in the text. `latest` marks the newest reply, whose actions stay
  * in view; the others show theirs while the pointer or keyboard focus is on
  * the message.
  */
@@ -189,6 +190,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   thinking = null,
   searchUnavailable = false,
   latest = false,
+  highlight = "",
   disabled,
   onEdit,
   onEditingChange,
@@ -201,6 +203,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   thinking?: AssistantThinking | null;
   searchUnavailable?: boolean;
   latest?: boolean;
+  /** What the sidebar's search looks for: marked wherever the text has it. */
+  highlight?: string;
   disabled: boolean;
   onEdit: (
     messageId: string,
@@ -267,6 +271,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     <article
       className={cn("group min-w-0 pt-1", isUser && "flex flex-col items-end")}
       aria-label={role}
+      // What a search result scrolls to.
+      data-message-id={message.id}
     >
       <h2 className="sr-only">{role}</h2>
       <ReasoningBlock
@@ -342,7 +348,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                 isUser && "max-w-[80%] rounded-list bg-pill px-3.5 py-2",
               )}
             >
-              <MessageMarkdown content={message.content} syntaxHighlight />
+              <MessageMarkdown
+                content={message.content}
+                highlight={highlight}
+                syntaxHighlight
+              />
             </div>
           )}
           {files.length > 0 && (

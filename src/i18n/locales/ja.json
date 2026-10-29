@@ -5143,6 +5143,26 @@
     "restoreSkipped_other": "{{count}} 件の会話は既にこの端末にあるため、スキップしました。",
     "restoreConflicts_one": "{{count}} 件の会話は、この端末に別の内容で存在するか使用中のため、そのままにしました。",
     "restoreConflicts_other": "{{count}} 件の会話は、この端末に別の内容で存在するか使用中のため、そのままにしました。",
-    "restoreNothing": "バックアップに復元できる会話はありません。"
+    "restoreNothing": "バックアップに復元できる会話はありません。",
+    "groups": {
+      "pinned": "固定済み",
+      "today": "今日",
+      "yesterday": "昨日",
+      "week": "過去 7 日間",
+      "earlier": "それ以前"
+    },
+    "pin": "固定",
+    "unpin": "固定を解除",
+    "rowActions": "会話のオプション",
+    "trashed": "「{{title}}」をゴミ箱に移動しました",
+    "undo": "元に戻す",
+    "emptyTrash": "空にする",
+    "emptyTrashAction": "ゴミ箱を空にする",
+    "emptyTrashTitle": "ゴミ箱を空にしますか？",
+    "emptyTrashDescription_one": "ゴミ箱にある {{count}} 件の会話を、添付ファイルと履歴ごとこの端末から完全に削除します。この操作は取り消せません。",
+    "emptyTrashDescription_other": "ゴミ箱にあるすべての会話（{{count}} 件）を、添付ファイルと履歴ごとこの端末から完全に削除します。この操作は取り消せません。",
+    "emptyTrashDone_one": "{{count}} 件の会話を完全に削除しました。",
+    "emptyTrashDone_other": "{{count}} 件の会話を完全に削除しました。",
+    "emptyTrashPartial": "{{deleted}} 件を削除しました。{{failed}} 件は削除できませんでした。後でもう一度お試しください。"
   }
 }

@@ -55,11 +55,15 @@ vi.mock("@/lib/api/assistant", async (importOriginal) => ({
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
 }));
-const toasts = vi.hoisted(() => ({
-  success: vi.fn(),
-  warning: vi.fn(),
-  error: vi.fn(),
-}));
+// `toast(...)` itself is the notice with an action (the undo after a move to
+// the trash); the kinds hang off it.
+const toasts = vi.hoisted(() =>
+  Object.assign(vi.fn(), {
+    success: vi.fn(),
+    warning: vi.fn(),
+    error: vi.fn(),
+  }),
+);
 vi.mock("sonner", () => ({ toast: toasts }));
 
 const session: AssistantSession = {

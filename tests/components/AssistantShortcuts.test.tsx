@@ -143,6 +143,7 @@ beforeEach(async () => {
     sessions: [current.session],
     unreadable: [],
     trashCount: 0,
+    matches: {},
   }));
   mocks.createSession.mockImplementation(async () => ({
     ...session,

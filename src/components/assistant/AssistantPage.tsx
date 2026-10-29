@@ -24,6 +24,8 @@ import {
   PanelLeftOpen,
   Paperclip,
   Pencil,
+  Pin,
+  PinOff,
   Square,
   Trash2,
   RotateCcw,
@@ -40,7 +42,10 @@ import { useAssistant } from "./useAssistant";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
 import { AssistantModelPicker } from "./AssistantModelPicker";
-import { AssistantSidebar } from "./AssistantSidebar";
+import {
+  AssistantSidebar,
+  type AssistantSidebarHandle,
+} from "./AssistantSidebar";
 import { InlineRename } from "./InlineRename";
 import { ThinkingMenu } from "./ThinkingMenu";
 import { usePendingFocus } from "./usePendingFocus";
@@ -73,6 +78,20 @@ const STARTERS = ["summary", "writing", "explain"] as const;
 const MAX_MESSAGE_BYTES = 128_000;
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
+
+/** An Undo has to be reachable by keyboard: it stays up longer than a notice. */
+const UNDO_TOAST_MS = 8000;
+/** Long enough to read the several parts of a result. */
+const RESULT_TOAST_MS = 8000;
+/** How much of a conversation's title a toast repeats. */
+const TOAST_TITLE_CHARS = 40;
+
+const clipTitle = (title: string) => {
+  const chars = Array.from(title);
+  return chars.length > TOAST_TITLE_CHARS
+    ? `${chars.slice(0, TOAST_TITLE_CHARS).join("")}…`
+    : title;
+};
 
 const noEdit = async () => false;
 const noRegenerate = () => undefined;
@@ -209,6 +228,15 @@ function AssistantWorkspace() {
   const { detail, bootstrap, run, busy } = assistant;
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // Emptying the trash is being confirmed: how many conversations the
+  // dialog says it holds.
+  const [confirmEmpty, setConfirmEmpty] = useState<number | null>(null);
+  // The message a search found in the conversation being opened, until the
+  // transcript has scrolled to it.
+  const [jump, setJump] = useState<{
+    sessionId: string;
+    messageId: string;
+  } | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(readSidebarCollapsed);
   const sidebarId = useId();
@@ -236,6 +264,11 @@ function AssistantWorkspace() {
   const newConversationButton = useRef<HTMLButtonElement>(null);
   const trashEntry = useRef<HTMLButtonElement>(null);
   const trashBack = useRef<HTMLButtonElement>(null);
+  const emptyTrashButton = useRef<HTMLButtonElement>(null);
+  // The trash was emptied: the dialog's focus goes to the way back, not to
+  // the button that has just run out of work.
+  const trashEmptied = useRef(false);
+  const sidebarHandle = useRef<AssistantSidebarHandle>(null);
   const sidebarToggle = useRef<HTMLButtonElement>(null);
   const menuTrigger = useRef<HTMLButtonElement>(null);
   // What the header menu's chosen item does, once the menu has closed.
@@ -258,6 +291,7 @@ function AssistantWorkspace() {
   // Closes with the conversation it asks about, e.g. once only its files are
   // left to delete.
   const deleteDialogOpen = confirmDelete && session !== undefined;
+  const emptyDialogOpen = confirmEmpty !== null && assistant.showTrash;
   const writable = available && !run && !busy && !assistant.loading && !trashed;
   // While a run goes on, or until its saved outcome is read back, the totals
   // are running ones and no cost is claimed.
@@ -388,6 +422,7 @@ function AssistantWorkspace() {
       await assistant.refreshDetail(assistant.selectedId);
   });
 
+  useEffect(() => setConfirmEmpty(null), [assistant.showTrash]);
   useEffect(() => {
     setRenaming(false);
     setConfirmDelete(false);
@@ -402,6 +437,23 @@ function AssistantWorkspace() {
     if (follow.current) view.scrollTop = view.scrollHeight;
     else setUnseenBelow(true);
   }, [assistant.stream, messages.length]);
+  // A conversation opened from a search result scrolls to the message that
+  // matched, once its transcript is on screen (after the effect above, which
+  // scrolls a transcript to its end).
+  useEffect(() => {
+    if (!jump || assistant.loading || detail?.session.id !== jump.sessionId)
+      return;
+    setJump(null);
+    const target = [
+      ...(scroll.current?.querySelectorAll("[data-message-id]") ?? []),
+    ].find(
+      (element) => element.getAttribute("data-message-id") === jump.messageId,
+    );
+    if (!target) return;
+    // Not the end: new content below must not pull the view away again.
+    follow.current = false;
+    target.scrollIntoView?.({ block: "center" });
+  }, [jump, assistant.loading, detail]);
   useLayoutEffect(() => {
     if (!focusStarter.current) return;
     focusStarter.current = false;
@@ -552,11 +604,40 @@ function AssistantWorkspace() {
         if (saved) toast.success(t("assistant.markdownSaved"));
         returnFocusTo(menuTrigger.current);
       });
-  const moveToTrash = () =>
-    void assistant.setDeleted(true).then((saved) => {
-      if (saved) focusSoon(landOnSidebar(trashEntry));
-      else returnFocusTo(menuTrigger.current);
+  // What a toast's Undo needs, as of the render it is pressed in: the toast
+  // outlives the render that made it.
+  const latest = useRef({ assistant, sidebarCollapsed });
+  latest.current = { assistant, sidebarCollapsed };
+  // Restore the conversation the toast is about, even if the selection has
+  // moved on since.
+  const undoTrash = (id: string) =>
+    void latest.current.assistant.setDeleted(false, id).then((restored) => {
+      if (!restored) return;
+      const { assistant: now, sidebarCollapsed: collapsed } = latest.current;
+      if (!now.selectedId && !now.showTrash) {
+        // Nothing else is open: back to the conversation it was.
+        now.select(id);
+        focusSoon(composer);
+      } else if (collapsed) focusSoon(sidebarToggle);
+      else if (now.showTrash) focusSoon(trashBack);
+      else sidebarHandle.current?.focusRow(id);
     });
+  const moveToTrash = () => {
+    if (!session) return;
+    const { id } = session;
+    const title = clipTitle(session.title || t("assistant.untitled"));
+    void assistant.setDeleted(true, id).then((saved) => {
+      if (!saved) {
+        returnFocusTo(menuTrigger.current);
+        return;
+      }
+      focusSoon(landOnSidebar(trashEntry));
+      toast(t("assistant.trashed", { title }), {
+        duration: UNDO_TOAST_MS,
+        action: { label: t("assistant.undo"), onClick: () => undoTrash(id) },
+      });
+    });
+  };
   // `trigger` is the Restore button that was pressed: it takes focus back
   // if the restore failed.
   const restore = (trigger: HTMLButtonElement) =>
@@ -569,6 +650,36 @@ function AssistantWorkspace() {
     // A failure from before is not this dialog's to show.
     assistant.setError(null);
     setConfirmDelete(true);
+  };
+  const askToEmptyTrash = () => {
+    assistant.setError(null);
+    trashEmptied.current = false;
+    setConfirmEmpty(assistant.trashCount);
+  };
+  const emptyTrash = () =>
+    void assistant.emptyTrash().then((report) => {
+      // Not done: the dialog stays, with the reason.
+      if (!report) return;
+      trashEmptied.current = true;
+      setConfirmEmpty(null);
+      if (report.failed > 0)
+        toast.warning(
+          t("assistant.emptyTrashPartial", {
+            deleted: report.deleted,
+            failed: report.failed,
+          }),
+          {
+            duration: RESULT_TOAST_MS,
+          },
+        );
+      else if (report.deleted > 0)
+        toast.success(t("assistant.emptyTrashDone", { count: report.deleted }));
+      else toast(t("assistant.trashEmpty"));
+    });
+  // A row chosen in the list; for a search result, also the message to show.
+  const openFromList = (id: string, messageId?: string) => {
+    setJump(messageId ? { sessionId: id, messageId } : null);
+    assistant.select(id);
   };
 
   const webSearchToggle = (
@@ -597,14 +708,18 @@ function AssistantWorkspace() {
       onKeyDown={handleShortcuts}
     >
       <AssistantSidebar
+        ref={sidebarHandle}
         id={sidebarId}
         collapsed={sidebarCollapsed}
         assistant={assistant}
         canCreate={available && !busy}
         onCreate={newConversation}
+        onOpen={openFromList}
+        onEmptyTrash={askToEmptyTrash}
         newConversationRef={newConversationButton}
         trashEntryRef={trashEntry}
         trashBackRef={trashBack}
+        emptyTrashRef={emptyTrashButton}
         onTransfer={(kind, trigger) =>
           void assistant.transfer(kind).then(() => returnFocusTo(trigger))
         }
@@ -710,6 +825,26 @@ function AssistantWorkspace() {
                   {t("assistant.rename")}
                 </DropdownMenuItem>
                 <DropdownMenuItem
+                  disabled={sessionTrashed}
+                  onSelect={() =>
+                    void assistant.setPinned(
+                      session.id,
+                      session.pinnedAt === null,
+                    )
+                  }
+                >
+                  {session.pinnedAt === null ? (
+                    <Pin aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <PinOff aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                  {t(
+                    session.pinnedAt === null
+                      ? "assistant.pin"
+                      : "assistant.unpin",
+                  )}
+                </DropdownMenuItem>
+                <DropdownMenuItem
                   disabled={busy || Boolean(run) || assistant.loading}
                   onSelect={() => {
                     menuAction.current = exportConversation;
@@ -784,9 +919,9 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
-        {/* While the delete dialog is open it shows the failure itself: a
+        {/* While a delete dialog is open it shows the failure itself: a
             banner behind it would be announced a second time. */}
-        {assistant.error !== null && !deleteDialogOpen && (
+        {assistant.error !== null && !deleteDialogOpen && !emptyDialogOpen && (
           <div
             role="alert"
             className="flex items-start justify-between gap-3 border-b border-line bg-danger-soft px-4 py-2 text-ctl text-danger"
@@ -876,6 +1011,7 @@ function AssistantWorkspace() {
                         message.id,
                       )}
                       latest={message.id === latestReplyId}
+                      highlight={assistant.search}
                       disabled={!writable}
                       onEdit={editMessage}
                       onEditingChange={trackEdit}
@@ -1160,6 +1296,32 @@ function AssistantWorkspace() {
         onCancel={() => {
           setConfirmDelete(false);
           // The failure was told in the dialog: it does not wait in the banner.
+          assistant.setError(null);
+        }}
+      />
+      <ConfirmDialog
+        isOpen={emptyDialogOpen}
+        title={t("assistant.emptyTrashTitle")}
+        message={t("assistant.emptyTrashDescription", {
+          count: confirmEmpty ?? 0,
+        })}
+        confirmText={t("assistant.emptyTrashAction")}
+        busy={busy}
+        error={
+          assistant.error !== null
+            ? t(assistantErrorKey(assistant.error))
+            : undefined
+        }
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          (trashEmptied.current
+            ? landOnSidebar(trashBack)
+            : emptyTrashButton
+          ).current?.focus();
+        }}
+        onConfirm={emptyTrash}
+        onCancel={() => {
+          setConfirmEmpty(null);
           assistant.setError(null);
         }}
       />

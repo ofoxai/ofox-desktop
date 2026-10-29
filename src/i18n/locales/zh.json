@@ -5143,6 +5143,26 @@
     "restoreSkipped_other": "{{count}} 个对话已在本机，已跳过。",
     "restoreConflicts_one": "{{count}} 个对话与本机已有的内容不同或正在使用，已保留本机的版本。",
     "restoreConflicts_other": "{{count}} 个对话与本机已有的内容不同或正在使用，已保留本机的版本。",
-    "restoreNothing": "备份中没有可恢复的对话。"
+    "restoreNothing": "备份中没有可恢复的对话。",
+    "groups": {
+      "pinned": "已置顶",
+      "today": "今天",
+      "yesterday": "昨天",
+      "week": "过去 7 天",
+      "earlier": "更早"
+    },
+    "pin": "置顶",
+    "unpin": "取消置顶",
+    "rowActions": "对话选项",
+    "trashed": "已将「{{title}}」移入回收站",
+    "undo": "撤销",
+    "emptyTrash": "清空",
+    "emptyTrashAction": "清空回收站",
+    "emptyTrashTitle": "清空回收站？",
+    "emptyTrashDescription_one": "这会从此设备永久删除回收站中的 {{count}} 个对话及其附件和历史记录，且无法撤销。",
+    "emptyTrashDescription_other": "这会从此设备永久删除回收站中的全部 {{count}} 个对话及其附件和历史记录，且无法撤销。",
+    "emptyTrashDone_one": "已永久删除 {{count}} 个对话。",
+    "emptyTrashDone_other": "已永久删除 {{count}} 个对话。",
+    "emptyTrashPartial": "已删除 {{deleted}} 个；{{failed}} 个未能删除，请稍后再试。"
   }
 }

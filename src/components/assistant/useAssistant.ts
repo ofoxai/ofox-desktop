@@ -139,6 +139,8 @@ export function useAssistant(enabled: boolean) {
     [],
   );
   const [trashCount, setTrashCount] = useState(0);
+  // For a search: the first message each listed conversation matches.
+  const [matches, setMatches] = useState<Record<string, string>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AssistantSessionDetail | null>(null);
   const [draft, setDraftState] = useState("");
@@ -467,6 +469,7 @@ export function useAssistant(enabled: boolean) {
         setSessions(listed.sessions);
         setUnreadable(listed.unreadable);
         setTrashCount(listed.trashCount);
+        setMatches(listed.matches);
       } catch (reason) {
         if (sequence === listSequence.current && generation === epoch.current)
           showError(reason);
@@ -1037,6 +1040,7 @@ export function useAssistant(enabled: boolean) {
     listSequence.current += 1;
     setSessions([]);
     setUnreadable([]);
+    setMatches({});
     showTrashRef.current = deleted;
     setShowTrash(deleted);
   }, []);
@@ -1167,20 +1171,33 @@ export function useAssistant(enabled: boolean) {
     [showError],
   );
 
+  /**
+   * Move a conversation to the trash or back. `sid` names it: the open one by
+   * default, or another one (an undo made after the selection moved on). The
+   * other one is not the open one's business: the busy state, the composer
+   * draft, the selection and the list being shown are left as they are.
+   */
   const setDeleted = useCallback(
-    async (deleted: boolean) => {
-      const sid = selectedRef.current;
-      if (!sid || busy || loading) return false;
+    async (deleted: boolean, sid: string | null = selectedRef.current) => {
+      if (!sid) return false;
+      const open = sid === selectedRef.current;
+      if (open ? busy || loading : transferInFlight.current) return false;
       const generation = epoch.current;
-      setBusy(true);
-      setError(null);
+      if (open) {
+        setBusy(true);
+        setError(null);
+      }
       try {
-        await persistDraft(
-          sid,
-          draftRef.current,
-          attachmentsRef.current.map((file) => file.id),
-        );
-        if (generation !== epoch.current || selectedRef.current !== sid)
+        if (open)
+          await persistDraft(
+            sid,
+            draftRef.current,
+            attachmentsRef.current.map((file) => file.id),
+          );
+        if (
+          generation !== epoch.current ||
+          (open && selectedRef.current !== sid)
+        )
           return false;
         const saved = await assistantApi.updateSession({
           sessionId: sid,
@@ -1192,7 +1209,7 @@ export function useAssistant(enabled: boolean) {
         // Restored, the conversation goes back to the conversations view, whose
         // list is read once the view has changed: reading the trash now would
         // flash the restored conversation among the trashed ones.
-        if (!deleted && showTrashRef.current) switchList(false);
+        if (open && !deleted && showTrashRef.current) switchList(false);
         else void refreshSessionsRef.current();
         if (saved.cleanupWarning) showError(saved.cleanupWarning);
         return true;
@@ -1201,6 +1218,7 @@ export function useAssistant(enabled: boolean) {
         return false;
       } finally {
         if (
+          open &&
           generation === epoch.current &&
           (!selectedRef.current || selectedRef.current === sid)
         )
@@ -1208,6 +1226,33 @@ export function useAssistant(enabled: boolean) {
       }
     },
     [busy, loading, persistDraft, select, switchList, showError],
+  );
+
+  /**
+   * Pin a conversation to the top of the list, or unpin it: the open one or
+   * any other. Resolves true once it is saved.
+   */
+  const setPinned = useCallback(
+    async (sessionId: string, pinned: boolean) => {
+      const generation = epoch.current;
+      try {
+        const value = await assistantApi.updateSession({
+          sessionId,
+          pinned,
+          ...expectedIdentity(bootstrapRef.current),
+        });
+        if (!mounted.current || generation !== epoch.current) return false;
+        setDetail((old) =>
+          old?.session.id === sessionId ? { ...old, session: value } : old,
+        );
+        void refreshSessionsRef.current();
+        return true;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        return false;
+      }
+    },
+    [showError],
   );
 
   const deleteSession = useCallback(async () => {
@@ -1257,6 +1302,52 @@ export function useAssistant(enabled: boolean) {
         draftScopes.current.set(sid, { held: false });
         if (!selectedRef.current || selectedRef.current === sid) setBusy(false);
       }
+    }
+  }, [busy, loading, select, showError]);
+
+  /**
+   * Delete every conversation in the trash for good. Resolves with what was
+   * done, or null when nothing was attempted or the request failed (the
+   * failure is shown). Some may stay: see `AssistantEmptyTrashReport`.
+   */
+  const emptyTrash = useCallback(async () => {
+    const identity = bootstrapRef.current;
+    if (
+      busy ||
+      loading ||
+      !identity?.owner ||
+      identity.authorityGeneration === undefined
+    )
+      return null;
+    const generation = epoch.current;
+    setBusy(true);
+    setError(null);
+    try {
+      const report = await assistantApi.emptyTrash({
+        expectedOwner: identity.owner,
+        expectedGeneration: identity.authorityGeneration,
+      });
+      if (generation !== epoch.current) return null;
+      // A trashed conversation that is open may be gone now. Its composer is
+      // read-only, so there is no draft to keep, and saving one for a
+      // conversation that no longer exists would fail.
+      const open = selectedRef.current;
+      if (open && showTrashRef.current) {
+        drafts.current.delete(open);
+        attachmentDrafts.current.delete(open);
+        savedDrafts.current.delete(open);
+        select(null);
+      }
+      void refreshSessionsRef.current();
+      return report;
+    } catch (reason) {
+      if (generation === epoch.current) {
+        void refreshSessionsRef.current();
+        showError(reason);
+      }
+      return null;
+    } finally {
+      if (generation === epoch.current) setBusy(false);
     }
   }, [busy, loading, select, showError]);
 
@@ -1913,7 +2004,9 @@ export function useAssistant(enabled: boolean) {
     showTrash,
     viewTrash,
     setDeleted,
+    setPinned,
     deleteSession,
+    emptyTrash,
     exportMarkdown,
     transfer,
     transferring,
@@ -1921,6 +2014,7 @@ export function useAssistant(enabled: boolean) {
     sessions,
     unreadable,
     trashCount,
+    matches,
     selectedId,
     detail,
     draft,
