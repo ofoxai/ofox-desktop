@@ -157,9 +157,11 @@ pub struct Message {
     pub model_id: Option<String>,
     /// What a reply's run used and cost, shaped like [`Detail::usage`]:
     /// counted from native history like the conversation's, without its
-    /// title. With the title's, the replies' usage adds up to the
-    /// conversation's. `None` on a user turn and until native history counts
-    /// the run.
+    /// title. With the title's, the replies' tokens add up to the
+    /// conversation's and their costs nearly so (each is a sum of floats), as
+    /// long as every native usage record names its run (older histories may
+    /// hold some that do not, counted only in the conversation's). `None` on
+    /// a user turn and until native history counts the run.
     #[serde(default)]
     pub usage: Option<Value>,
     /// When a reply's run ended, however it ended.
@@ -176,6 +178,13 @@ pub struct Message {
         skip_serializing_if = "Option::is_none"
     )]
     pub branch_from: Option<Option<String>>,
+    /// For a turn sent after this existed: the native message it was sent
+    /// after (the last one shown then), `None` when there was none. A turn
+    /// native history never got (its run failed before reaching it) is shown
+    /// with the version this message is on. A retried turn has none: it stays
+    /// hidden on every version.
+    #[serde(default)]
+    pub anchor_entry_id: Option<String>,
 }
 
 /// A field that is there, `null` included (`Some(None)`); one left out is
@@ -312,9 +321,12 @@ pub struct SendRequest {
     pub replace_attachments: bool,
     pub edit_message_id: Option<String>,
     pub regenerate_message_id: Option<String>,
-    /// A failed or stopped reply whose turn never reached native history
-    /// (nothing to regenerate from): this send asks again, and that turn is
-    /// superseded, so it is hidden. Text and files are this send's own.
+    /// A failed or stopped reply to ask again for, with this send's own text
+    /// and files; that turn is superseded. When native history holds its
+    /// question (checked against the history first, which a failed run may
+    /// have left unsaved), it is asked again from before it, like an edit;
+    /// otherwise from the end of the conversation, and the turn is hidden on
+    /// every version.
     #[serde(default)]
     pub retry_message_id: Option<String>,
 }

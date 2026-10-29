@@ -3890,3 +3890,158 @@ fn each_reply_names_its_model_and_with_the_title_the_replies_add_up_to_the_cost(
         assert_eq!(published.data["message"]["usage"]["inputTokens"], 10);
     });
 }
+
+#[test]
+fn retrying_a_turn_the_runtime_kept_but_the_host_did_not_save_asks_from_before_it() {
+    use cc_switch_lib::assistant::store::AssistantStore;
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Answer A".into()));
+        turn(&host, &env, request(&sid, "Question A", json!({}))).await;
+        // The runtime keeps the question and the failed reply.
+        gateway.reply(Reply::Error(
+            500,
+            json!({"error": {"message": "overloaded", "type": "server_error"}}),
+        ));
+        let (run, end) = turn(&host, &env, request(&sid, "Question B", json!({}))).await;
+        assert_eq!(end.data["status"], "error");
+        // As a host that failed before saving it leaves the conversation (its
+        // runtime died, or the host itself failed): none of it is known.
+        let store = AssistantStore::for_owner(config.path(), &owner()).unwrap();
+        let failed = store
+            .mutate(&sid, |record| {
+                let mut failed = None;
+                for message in record
+                    .messages
+                    .iter_mut()
+                    .filter(|m| m.run_id.as_deref() == Some(run.as_str()))
+                {
+                    message.native_entry_id = None;
+                    message.branch_from = None;
+                    if message.role == "assistant" {
+                        failed = Some(message.id.clone());
+                    }
+                }
+                Ok(failed.unwrap())
+            })
+            .unwrap();
+
+        gateway.reply(Reply::Stream("Answer B".into()));
+        let retry = request(&sid, "Question B", json!({ "retryMessageId": failed }));
+        let (_, end) = turn(&host, &env, retry).await;
+        assert_eq!(end.data["status"], "completed");
+        // Asked again from before the kept question: the model saw it once.
+        let context = gateway.requests().last().unwrap().text();
+        assert_eq!(context.matches("Question B").count(), 1, "{context}");
+        gateway.reply(Reply::Stream("Answer C".into()));
+        turn(&host, &env, request(&sid, "Question C", json!({}))).await;
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(
+            active(&detail),
+            pairs(&[
+                ("user", "Question A"),
+                ("assistant", "Answer A"),
+                ("user", "Question B"),
+                ("assistant", "Answer B"),
+                ("user", "Question C"),
+                ("assistant", "Answer C"),
+            ])
+        );
+        let questions: Vec<&Message> = detail
+            .messages
+            .iter()
+            .filter(|m| m.role == "user" && m.content == "Question B")
+            .collect();
+        assert_eq!(questions.len(), 2);
+        // The failed question is a version of the turn, hidden for good.
+        let (kept, asked) = (questions[0], questions[1]);
+        assert_eq!(kept.run_id.as_deref(), Some(run.as_str()));
+        assert!(kept.superseded && !asked.superseded);
+        assert!(kept.native_entry_id.is_some());
+        assert_eq!(kept.branch_from, asked.branch_from);
+        assert_eq!(
+            asked.branch_from,
+            Some(find(&detail, "Answer A").native_entry_id.clone())
+        );
+    });
+}
+
+#[test]
+fn a_turn_that_never_reached_the_runtime_shows_with_the_version_it_was_sent_on() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.title(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Two Versions".into())),
+        ));
+        gateway.reply(Reply::Stream("Answer A".into()));
+        turn(&host, &env, request(&sid, "Question A", json!({}))).await;
+        // The title holds the native history, so the next run waits for it
+        // and is stopped before it reaches the runtime.
+        title_requests(&gateway, 1).await;
+        let run = host
+            .send(request(&sid, "Follow-up", json!({})))
+            .await
+            .unwrap();
+        host.stop(&sid, &run.run_id, &run.operation_id)
+            .await
+            .unwrap();
+        open.store(true, Ordering::SeqCst);
+        let end = wait_for(&env, &run.run_id, "run_end").await;
+        assert_eq!(end.data["status"], "stopped");
+        let on_a = host.get_session(&sid).await.unwrap();
+        let local: Vec<&Message> = on_a
+            .messages
+            .iter()
+            .filter(|m| m.run_id.as_deref() == Some(run.run_id.as_str()))
+            .collect();
+        assert_eq!(local.len(), 2);
+        assert!(local
+            .iter()
+            .all(|m| m.native_entry_id.is_none() && !m.superseded));
+        let question_a = find(&on_a, "Question A").id.clone();
+        let with_local = pairs(&[
+            ("user", "Question A"),
+            ("assistant", "Answer A"),
+            ("user", "Follow-up"),
+            ("assistant", ""),
+        ]);
+        assert_eq!(active(&on_a), with_local);
+
+        gateway.reply(Reply::Stream("Answer B".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Question B", json!({ "editMessageId": question_a })),
+        )
+        .await;
+        let on_b = host.get_session(&sid).await.unwrap();
+        assert_eq!(active(&on_b), pairs(&VERSION_B));
+        let question_b = find(&on_b, "Question B").id.clone();
+        let back = host
+            .switch_version(switch(&host, &sid, &question_a))
+            .await
+            .unwrap();
+        assert_eq!(active(&back), with_local);
+        let forth = host
+            .switch_version(switch(&host, &sid, &question_b))
+            .await
+            .unwrap();
+        assert_eq!(active(&forth), pairs(&VERSION_B));
+    });
+}

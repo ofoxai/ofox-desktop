@@ -387,9 +387,11 @@ pub(super) fn merge_native(
                 usage: None,
                 completed_at: None,
                 branch_from: follows,
+                anchor_entry_id: None,
             });
         }
     }
+    follow_native_branch(record, entries);
     // Native history is authoritative even when the last UI event was lost.
     for message in &mut record.messages {
         if message.status == "streaming" {
@@ -415,6 +417,40 @@ pub(super) fn merge_native(
     recount_usage(record, entries);
     count_reply_usage(record, entries);
     Ok(())
+}
+
+/// Show the messages native history does not hold with the version they
+/// belong to: one of a run whose question it holds (a reply cut before it was
+/// kept) as that question; a turn it never got as its anchor, the native
+/// message it was sent after, while native history still holds that one. A
+/// retried turn has no anchor and stays hidden.
+fn follow_native_branch(record: &mut SessionRecord, entries: &[Value]) {
+    let shown: HashMap<&str, bool> = entries
+        .iter()
+        .filter_map(|e| Some((e["id"].as_str()?, e["active"] != false)))
+        .collect();
+    let questions: HashMap<String, bool> = record
+        .messages
+        .iter()
+        .filter(|m| m.role == "user" && m.native_entry_id.is_some())
+        .filter_map(|m| Some((m.run_id.clone()?, m.superseded)))
+        .collect();
+    for message in record
+        .messages
+        .iter_mut()
+        .filter(|m| m.native_entry_id.is_none())
+    {
+        let question = message.run_id.as_ref().and_then(|run| questions.get(run));
+        let anchor = message
+            .anchor_entry_id
+            .as_deref()
+            .and_then(|anchor| shown.get(anchor));
+        if let Some(superseded) = question {
+            message.superseded = *superseded;
+        } else if let Some(shown) = anchor {
+            message.superseded = !shown;
+        }
+    }
 }
 
 /// The message a native user entry follows (the runtime's `branchFrom`):
@@ -1677,5 +1713,105 @@ mod tests {
         assert!(usage["estimatedCostUsd"].is_null());
         assert!(reply.completed_at.is_none());
         assert!(record.messages[0].usage.is_none());
+    }
+
+    /// Native user entry `native` of `run`, on the branch shown or not.
+    fn native_question(native: &str, run: &str, active: bool) -> Value {
+        json!({"id": native, "role": "user", "runId": run, "content": "q", "active": active,
+               "timestamp": 50})
+    }
+
+    #[test]
+    fn a_reply_native_history_never_kept_follows_its_question_across_versions() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        // The runtime kept the question, then died before the reply.
+        record.messages = vec![message("u1", "user", "run1", 1), {
+            let mut cut = message("a1", "assistant", "run1", 1);
+            cut.status = "stopped".into();
+            cut
+        }];
+        for shown in [false, true, false] {
+            merge_native(
+                &mut record,
+                &json!([native_question("n1", "run1", shown)]),
+                &[],
+            )
+            .unwrap();
+            let flags: Vec<bool> = record.messages.iter().map(|m| m.superseded).collect();
+            assert_eq!(flags, [!shown, !shown], "shown: {shown}");
+            assert!(record.messages[1].native_entry_id.is_none());
+        }
+    }
+
+    #[test]
+    fn a_turn_native_history_never_got_shows_with_the_version_it_was_sent_on() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages = vec![
+            message(&id(), "user", "run-a", 1),
+            message(&id(), "assistant", "run-a", 1),
+            message(&id(), "user", "run-b", 2),
+            message(&id(), "assistant", "run-b", 2),
+        ];
+        // Sent on version A, failed before the runtime: no native entries.
+        let local: Vec<Message> = ["user", "assistant"]
+            .into_iter()
+            .map(|role| {
+                let mut turn = message(&id(), role, "run-local", 3);
+                turn.status = "error".into();
+                turn.anchor_entry_id = Some("a1".into());
+                turn
+            })
+            .collect();
+        record.messages.extend(local);
+        // Asked again on version A: hidden on every version.
+        let mut retried = message(&id(), "user", "run-retried", 3);
+        retried.superseded = true;
+        record.messages.push(retried);
+        let versions = |a_shown: bool| {
+            json!([
+                native_question("ua", "run-a", a_shown),
+                {"id": "a1", "role": "assistant", "runId": "run-a", "active": a_shown,
+                 "final": true, "timestamp": 51},
+                native_question("ub", "run-b", !a_shown),
+                {"id": "b1", "role": "assistant", "runId": "run-b", "active": !a_shown,
+                 "final": true, "timestamp": 52},
+            ])
+        };
+        for a_shown in [true, false, true] {
+            merge_native(&mut record, &versions(a_shown), &[]).unwrap();
+            let hidden = |run: &str| {
+                record
+                    .messages
+                    .iter()
+                    .filter(|m| m.run_id.as_deref() == Some(run))
+                    .map(|m| m.superseded)
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                hidden("run-local"),
+                [!a_shown, !a_shown],
+                "A shown: {a_shown}"
+            );
+            assert_eq!(hidden("run-retried"), [true]);
+        }
+        // An anchor native history no longer holds changes nothing.
+        let question = record
+            .messages
+            .iter_mut()
+            .find(|m| m.run_id.as_deref() == Some("run-local") && m.role == "user")
+            .unwrap();
+        question.anchor_entry_id = Some("gone".into());
+        question.superseded = false;
+        merge_native(&mut record, &versions(false), &[]).unwrap();
+        let unanchored = record
+            .messages
+            .iter()
+            .find(|m| m.anchor_entry_id.as_deref() == Some("gone"))
+            .unwrap();
+        assert!(!unanchored.superseded);
     }
 }

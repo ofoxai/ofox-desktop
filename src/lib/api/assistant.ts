@@ -296,8 +296,10 @@ export interface AssistantMessage {
   modelId?: string | null;
   /**
    * What a reply's run used and cost, counted like the conversation's usage
-   * but without its generated title (the replies' usage plus the title's is
-   * the conversation's). Null on a user turn and until the run is counted.
+   * but without its generated title. The replies' tokens plus the title's
+   * add up to the conversation's, their costs nearly so (float sums); usage
+   * records of older histories that name no run count only in the
+   * conversation's. Null on a user turn and until the run is counted.
    */
   usage?: AssistantUsage | null;
   /** When a reply's run ended (ms), however it ended. */
@@ -310,6 +312,12 @@ export interface AssistantMessage {
    * existed — the one field the backend may omit.
    */
   branchFrom?: string | null;
+  /**
+   * The model's history entry a turn was sent after (internal): a turn the
+   * history never got shows with that entry's version. Null on older
+   * messages and on a retried turn.
+   */
+  anchorEntryId?: string | null;
 }
 
 /**
@@ -404,10 +412,11 @@ export interface AssistantSendRequest extends AssistantRunRef {
   editMessageId?: string;
   regenerateMessageId?: string;
   /**
-   * A failed or stopped reply whose turn never reached the model's history
-   * (it has no `nativeEntryId`, so it cannot be regenerated): this send asks
-   * again with its own text and files, and that turn becomes superseded.
-   * One of edit, regenerate and retry at most.
+   * A failed or stopped reply to ask again for, with this send's own text
+   * and files; that turn becomes superseded. When the model's history holds
+   * its question it is asked again from before it (like an edit), otherwise
+   * from the end of the conversation. One of edit, regenerate and retry at
+   * most.
    */
   retryMessageId?: string;
 }

@@ -935,7 +935,8 @@ impl AssistantHost {
     /// outside a run, such as a version switch: refused while the session
     /// has a live run or is already held, and while it is held no run of it
     /// registers ([`Self::register_run`]). Released when the [`Navigation`]
-    /// drops. The holder still takes the session's native lock to write.
+    /// drops. Taken once the session's native lock is held, so that waiting
+    /// for the lock (a title writing the history) holds no send up.
     pub(super) fn begin_navigation(&self, sid: &str) -> Result<Navigation, String> {
         // The runs lock first, as registration takes them.
         let runs = self.runs.lock().map_err(|_| STATE)?;
@@ -947,6 +948,43 @@ impl AssistantHost {
             sessions: self.navigating.clone(),
             sid: sid.to_owned(),
         })
+    }
+
+    /// Refused while `sid` has a live run.
+    pub(super) fn ensure_idle(&self, sid: &str) -> Result<(), String> {
+        if self.runs.lock().map_err(|_| STATE)?.contains_key(sid) {
+            return Err(SESSION_BUSY.into());
+        }
+        Ok(())
+    }
+
+    /// Bring a conversation's messages up to date with its native history,
+    /// under its native lock. A run that failed without saving what the
+    /// runtime wrote (its process died, or the host failed before reading
+    /// the result) leaves a turn there that the messages hold without native
+    /// entries. Refused while the conversation replies.
+    pub(super) async fn sync_native(&self, identity: &Identity, sid: &str) -> Result<(), String> {
+        self.ensure_idle(sid)?;
+        let _history = self
+            .native_lock(&session_key(&identity.owner, sid))?
+            .lock_owned()
+            .await;
+        let native = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = sid.to_owned();
+            move || store.native_history_path(&sid)
+        })
+        .await?;
+        if !native.is_file() {
+            return Ok(());
+        }
+        let entries = load_native(&self.runtime()?, &native).await?;
+        if self.identity().await? != *identity {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        let store = self.store(&identity.owner)?;
+        let (sid, keys) = (sid.to_owned(), self.known_keys());
+        blocking(move || store.mutate(&sid, |record| merge_native(record, &entries, &keys))).await
     }
 
     pub fn ensure_accepting_runs(&self) -> Result<(), String> {
@@ -2208,6 +2246,38 @@ mod tests {
             "assistant_session_busy"
         );
         assert!(host.begin_navigation(&other).is_ok());
+    }
+
+    /// A title writing the native history makes a switch wait, not a send:
+    /// a switch holds the conversation only once it has the history.
+    #[tokio::test]
+    async fn a_switch_waiting_for_the_native_history_does_not_hold_the_conversation() {
+        let (_config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        host.recover(&identity(), &sid).await.unwrap();
+        let title = host
+            .native_lock(&session_key(&identity().owner, &sid))
+            .unwrap()
+            .lock_owned()
+            .await;
+        let request: SwitchVersionRequest = serde_json::from_value(json!({
+            "sessionId": sid, "messageId": id(), "expectedOwner": identity().owner,
+            "expectedGeneration": host.generation(),
+        }))
+        .unwrap();
+        let switching = tokio::spawn({
+            let host = host.clone();
+            async move { host.switch_version(request).await }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        host.register_run(control(&sid), host.generation(), || Ok(()))
+            .unwrap();
+        drop(title);
+        assert_eq!(
+            switching.await.unwrap().unwrap_err(),
+            "assistant_session_busy"
+        );
     }
 
     #[test]
