@@ -157,7 +157,7 @@ impl AssistantHost {
         Ok(detail)
     }
 
-    /// Title, model, thinking level, draft, web search and trash state.
+    /// Title, model, thinking level, draft, web search, pin and trash state.
     /// Changing the model or trashing the session stops its run, once the
     /// change is saved; changing the thinking level does not.
     pub async fn update_session(
@@ -267,7 +267,8 @@ impl AssistantHost {
     /// Delete every trashed conversation for good, one at a time the way
     /// [`Self::delete_session`] does. One that cannot be removed (still
     /// replying, or some files could not be deleted) is counted in `failed`
-    /// and does not stop the others; one still replying stays in the trash.
+    /// and does not stop the others; one still replying stays in the trash,
+    /// and one restored or removed meanwhile is not counted.
     pub async fn empty_trash(
         self: &Arc<Self>,
         request: EmptyTrashRequest,
@@ -293,8 +294,11 @@ impl AssistantHost {
                 Ok(()) => report.deleted += 1,
                 // The account changed: every other one would be refused too.
                 Err(error) if error == super::host::IDENTITY_CHANGED => return Err(error),
-                // Deleted meanwhile (another window, or startup cleanup).
-                Err(error) if error == "assistant_session_not_found" => {}
+                // Deleted meanwhile (another window, or startup cleanup), or
+                // restored meanwhile (Undo): neither is a failure.
+                Err(error)
+                    if error == "assistant_session_not_found"
+                        || error == "assistant_session_not_trashed" => {}
                 Err(error) => {
                     log::warn!(
                         "[Assistant] could not delete trashed session {}: {error}",

@@ -1935,10 +1935,11 @@ mod tests {
     fn every_other_update_still_moves_the_update_time() {
         let (_config, store) = fixture();
         let sid = session_updated_at(&store, 5);
-        let loud: [&dyn Fn(&mut UpdateRequest); 5] = [
+        let loud: [&dyn Fn(&mut UpdateRequest); 6] = [
             &|u| u.title = Some("Renamed".into()),
             &|u| u.model_id = Some("other/model".into()),
             &|u| u.web_search = Some(true),
+            &|u| u.thinking_level = Some("high".into()),
             &|u| u.deleted = Some(true),
             &|u| u.deleted = Some(false),
         ];

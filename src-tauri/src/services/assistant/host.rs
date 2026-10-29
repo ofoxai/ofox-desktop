@@ -3121,6 +3121,29 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn an_unpicked_model_that_is_the_current_default_is_remembered_with_a_complete_catalog() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = CLAUDE_IN_CATALOG_ORDER.map(str::to_owned).to_vec();
+        // Nothing remembered yet: the default is the first preferred model.
+        assert_eq!(remembered_model(&host), None);
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["partial"], json!([]));
+        assert_eq!(boot["defaultModelId"], "anthropic/claude-haiku-5.5");
+        // The page sends the default it shows, by name and unpicked.
+        let session = host
+            .create_session(create_request(
+                json!({"modelId": "anthropic/claude-haiku-5.5"}),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(session.model_id, "anthropic/claude-haiku-5.5");
+        assert_eq!(
+            remembered_model(&host).as_deref(),
+            Some("anthropic/claude-haiku-5.5")
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn opening_the_page_waits_only_briefly_for_a_hanging_source_whose_copy_stands_in() {
         let (_config, env, host) = fixture_with_env();
@@ -3691,12 +3714,64 @@ mod tests {
         assert_eq!(account_folder(config.path()), [sid]);
     }
 
+    #[tokio::test]
+    async fn a_conversation_restored_while_the_trash_is_emptied_stays_and_is_no_failure() {
+        let (_config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let restored = trashed_session(&store);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // Newer, so it is emptied first.
+        let gone = trashed_session(&store);
+        // Holding the other one's history lock parks the loop at it.
+        let lock = host
+            .native_lock(&session_key(&identity().owner, &restored))
+            .unwrap();
+        let held = lock.lock().await;
+        let emptying = tokio::spawn({
+            let (host, request) = (host.clone(), empty_trash_request(&host));
+            async move { host.empty_trash(request).await }
+        });
+        // Once `gone` is deleted, the trash was listed and the loop waits at `restored`.
+        for _ in 0..500 {
+            if store.load_record(&gone).is_err() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(store.load_record(&gone).is_err());
+        // The user presses Undo.
+        let undo: UpdateRequest =
+            serde_json::from_value(json!({"sessionId": restored, "deleted": false})).unwrap();
+        store.update(&undo, || Ok(())).unwrap();
+        drop(held);
+
+        let report = emptying.await.unwrap().unwrap();
+        assert_eq!(
+            report,
+            EmptyTrashReport {
+                deleted: 1,
+                failed: 0
+            }
+        );
+        assert!(store
+            .load_record(&restored)
+            .unwrap()
+            .session
+            .deleted_at
+            .is_none());
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_conversation_that_cannot_be_removed_does_not_stop_the_others() {
         let (config, host) = fixture();
         let store = host.store(&identity().owner).unwrap();
-        let (blocked, other) = (trashed_session(&store), trashed_session(&store));
+        let other = trashed_session(&store);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        // The newest trashed one is emptied first, so the loop has to go on
+        // past its failure to reach the other.
+        let blocked = trashed_session(&store);
+        assert_eq!(store.list(true, "").unwrap().sessions[0].id, blocked);
         // A link where the deletion's private tombstone goes is refused.
         let folder = config.path().join("assistant").join(identity().owner);
         let outside = config.path().join("outside");

@@ -218,7 +218,7 @@ export interface AssistantEmptyTrashReport {
   /**
    * Conversations not fully removed: one still replying stays in the trash;
    * one whose files could not all be deleted is hidden and cleaned up at the
-   * next start.
+   * next start. A conversation restored or removed meanwhile is not counted.
    */
   failed: number;
 }
