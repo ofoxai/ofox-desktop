@@ -186,3 +186,13 @@ requests in each fork add their own usage. The optional inherited-usage receipts
 travel with the conversation backup; older records without them remain readable.
 An unresolved video generation must finish before its part of a conversation can
 be forked, so copying history never creates a second generation tracker.
+
+
+Manual context compaction is an explicitly requested model operation. Its native
+summary usage and operation row are included in conversation totals and backups;
+it does not create a chat message or consume the unsent draft. Per-reply totals
+exclude separately recorded titles and manual compaction. A local refusal for a
+too-small or already-compacted context makes no provider request. The context
+ring shows the SDK estimate, separately from billed Tokens; after compaction its
+count remains unknown until the next model reply. Live compaction state is never
+restored from a backup or used to resubmit an interrupted operation.

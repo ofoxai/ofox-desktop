@@ -2882,3 +2882,75 @@ test("fork preserves a user-only native branch and refuses existing targets", as
   );
   assert.equal(await readFile(params.sessionFile, "utf8"), before);
 });
+
+test("run end reports the SDK context usage and compaction keeps an unknown token count", async (t) => {
+  const params = {
+    ...(await sandbox(t)),
+    model: { ...model, contextWindow: 8192, maxOutputTokens: 128 },
+    prompt: "long context ".repeat(500),
+  };
+  const events = [];
+  const bodies = [];
+  const runtime = new AssistantRuntime({
+    emit: (e) => events.push(e),
+    fetch: async (_url, input) => {
+      bodies.push(JSON.parse(input.body));
+      return stream("answer or summary");
+    },
+  });
+  t.after(() => runtime.close());
+  const first = await runtime.run(params);
+  assert.equal(first.contextUsage.contextWindow, 8192);
+  assert.equal(first.contextUsage.modelId, params.model.id);
+  assert.ok(first.contextUsage.tokens > 0);
+  assert.deepEqual(
+    events.findLast((e) => e.type === "run_end").data.contextUsage,
+    first.contextUsage,
+  );
+  await runtime.run({ ...params, runId: "second", operationId: "second" });
+  await runtime.run({ ...params, runId: "third", operationId: "third" });
+  const compact = await runtime.run(
+    {
+      ...params,
+      runId: "compact",
+      operationId: "compact",
+      instructions: "PRIVATE-STANDING-INSTRUCTION-ONLY",
+    },
+    true,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(bodies.at(-1)),
+    /PRIVATE-STANDING-INSTRUCTION-ONLY/,
+  );
+  assert.doesNotMatch(
+    await readFile(params.sessionFile, "utf8"),
+    /PRIVATE-STANDING-INSTRUCTION-ONLY/,
+  );
+  assert.equal(compact.contextUsage.contextWindow, 8192);
+  assert.equal(compact.contextUsage.tokens, null);
+  assert.deepEqual(
+    events.findLast((e) => e.type === "run_end").data.contextUsage,
+    compact.contextUsage,
+  );
+});
+
+test("a context too small to compact is refused locally without an unknown bill", async (t) => {
+  const params = await sandbox(t);
+  let calls = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => {
+      calls++;
+      return stream("short answer");
+    },
+  });
+  t.after(() => runtime.close());
+  await runtime.run(params);
+  const result = await runtime.run(
+    { ...params, runId: "compact", operationId: "compact" },
+    true,
+  );
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "assistant_compact_unavailable");
+  assert.equal(result.errorKind, "not_sent");
+  assert.equal(calls, 1);
+});

@@ -2,6 +2,7 @@
 //! process lifetimes and the persisted conversation files.
 pub mod attachments;
 pub mod catalog;
+mod context;
 pub mod drops;
 pub mod host;
 mod live;

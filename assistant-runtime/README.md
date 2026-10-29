@@ -92,8 +92,23 @@ sessionId, runId, operationId, sessionFile, model, apiKey, knownSecrets?,
 apex (ofox.ai|ofox.io), baseUrl?, allowLocalGateway?, proxy?, prompt,
 attachmentRoot?, attachments?[], selectedAttachmentIds?[], originalPrompt?,
 webSearch?, allowedWebUrls?[], editEntryId?, regenerateEntryId?,
-thinkingLevel?, instructions? (compact)
+thinkingLevel?, instructions? (private standing instructions),
+compactionInstructions? (compact only)
 ```
+
+`compact` uses explicit preservation instructions independently of private
+standing instructions, creates no user/assistant turn, and records summary usage
+in native history. A too-small or already-compacted context is refused before a
+provider request. Successful results and `run_end` include `contextUsage` from
+Pi's `getContextUsage` (model id, tokens, context window and percentage). Tokens
+and percentage remain `null` after compaction until a later model reply; these
+are context estimates, separate from billed usage. Stop aborts the operation,
+and failed/unknown outcomes are never replayed automatically.
+
+`fork` is local bookkeeping: trusted `sessionFile`, `targetFile` and `entryId`
+copy a branch through `createBranchedSession`. It needs no credentials and does
+not overwrite an existing target. The host owns paths, attachment copies,
+ledger receipts, publication and account isolation.
 
 `apiKey` is the assistant's own Ofox API key. It is sent only in the
 Authorization header, never in a URL. `knownSecrets` lists the run's earlier

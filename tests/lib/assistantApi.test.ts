@@ -584,3 +584,16 @@ it("forks a message with the visible authority and localized title", async () =>
   await assistantApi.forkSession(request);
   expect(invoke).toHaveBeenCalledWith("assistant_fork", { request });
 });
+
+it("starts manual compaction with the frozen authority and independent run ids", async () => {
+  const request = {
+    sessionId: "s",
+    expectedOwner: "owner",
+    expectedGeneration: 3,
+    runId: "run",
+    operationId: "op",
+  };
+  invoke.mockResolvedValue({ runId: "run", operationId: "op" });
+  await assistantApi.compact(request);
+  expect(invoke).toHaveBeenCalledWith("assistant_compact", { request });
+});

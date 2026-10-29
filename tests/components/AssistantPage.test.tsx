@@ -48,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   resumeVideo: vi.fn(),
   stop: vi.fn(),
   forkSession: vi.fn(),
+  compact: vi.fn(),
   getPreferences: vi.fn(),
   setPreferences: vi.fn(),
   subscribe: vi.fn(),
@@ -265,6 +266,10 @@ beforeEach(async () => {
   mocks.send.mockResolvedValue({ runId: "unused", operationId: "unused" });
   mocks.stop.mockResolvedValue(undefined);
   mocks.forkSession.mockReset();
+  mocks.compact.mockReset().mockImplementation(async (request) => ({
+    runId: request.runId,
+    operationId: request.operationId,
+  }));
   mocks.subscribe.mockImplementation(async (listener) => {
     mocks.listener = listener;
     return () => undefined;
@@ -7491,4 +7496,205 @@ describe("fork navigation", () => {
     expect(hook.result.current.selectedId).toBeNull();
     expect(hook.result.current.busy).toBe(false);
   });
+});
+
+describe("manual context compaction", () => {
+  beforeEach(() => {
+    current.messages = [
+      {
+        id: "user",
+        role: "user",
+        content: "Question",
+        createdAt: 1,
+        status: "completed",
+        runId: "old",
+        nativeEntryId: "u",
+      },
+      {
+        id: "reply",
+        role: "assistant",
+        content: "Existing reply",
+        createdAt: 2,
+        status: "completed",
+        runId: "old",
+        nativeEntryId: "a",
+      },
+    ];
+  });
+  it("starts from the header menu, preserves the draft and does not fabricate a reply", async () => {
+    await openConversation();
+    await userEvent.type(composer(), "Keep this draft");
+    await openConversationMenu();
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: /^Compact context/ }),
+    );
+    await waitFor(() => expect(mocks.compact).toHaveBeenCalledTimes(1));
+    expect(mocks.compact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: session.id,
+        expectedOwner: capabilities.owner,
+        expectedGeneration: 1,
+      }),
+    );
+    expect(composer()).toHaveValue("Keep this draft");
+    expect(screen.getAllByRole("article")).toHaveLength(2);
+    expect(screen.getByText("Existing reply")).toBeInTheDocument();
+    expect(
+      await screen.findByText(i18n.t("assistant.compacting")),
+    ).toBeInTheDocument();
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+  it("follows early compaction events and ends with saved history without a stream placeholder", async () => {
+    mocks.compact.mockImplementation(async (request) => {
+      current.session.activeRun = {
+        runId: request.runId,
+        operationId: request.operationId,
+      };
+      mocks.listener?.({
+        sessionId: session.id,
+        ...current.session.activeRun,
+        type: "run_start",
+        data: { messageId: "unused", webSearch: false, compactOnly: true },
+      });
+      return current.session.activeRun;
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("Draft stays"));
+    await act(async () => {
+      expect(await hook.result.current.compact()).toBe(true);
+    });
+    expect(hook.result.current.stream).toBeNull();
+    expect(hook.result.current.compacting).toBe(true);
+    expect(hook.result.current.draft).toBe("Draft stays");
+    const active = hook.result.current.run!;
+    current.session.activeRun = null;
+    current.session.contextUsage = {
+      modelId: session.modelId,
+      tokens: null,
+      contextWindow: 32000,
+    };
+    act(() =>
+      mocks.listener?.({
+        sessionId: session.id,
+        ...active,
+        type: "run_end",
+        data: { status: "completed", stopped: false },
+      }),
+    );
+    await waitFor(() => expect(hook.result.current.compacting).toBe(false));
+    expect(hook.result.current.run).toBeNull();
+    expect(hook.result.current.draft).toBe("Draft stays");
+  });
+});
+
+it("stopping manual compaction while admission waits keeps cancellation quiet", async () => {
+  current.messages = [
+    {
+      id: "user",
+      role: "user",
+      content: "Question",
+      createdAt: 1,
+      status: "completed",
+      nativeEntryId: "u",
+    },
+  ];
+  let reject!: (reason: unknown) => void;
+  mocks.compact.mockReturnValue(
+    new Promise((_resolve, fail) => {
+      reject = fail;
+    }),
+  );
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.connected).toBe(true));
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  let pending!: Promise<boolean>;
+  act(() => {
+    pending = hook.result.current.compact();
+  });
+  await act(async () => {
+    await hook.result.current.stop();
+  });
+  await act(async () => {
+    reject("assistant_cancelled");
+    expect(await pending).toBe(false);
+  });
+  expect(hook.result.current.error).toBeNull();
+  expect(hook.result.current.run).toBeNull();
+  expect(hook.result.current.compacting).toBe(false);
+});
+
+it("keeps a preparing compaction visible after leaving and returning", async () => {
+  current.messages = [
+    {
+      id: "user",
+      role: "user",
+      content: "Question",
+      createdAt: 1,
+      status: "completed",
+      nativeEntryId: "u",
+    },
+  ];
+  let release!: (value: AssistantRunRef) => void;
+  let admitted!: AssistantRunRef;
+  mocks.compact.mockImplementation((request) => {
+    admitted = { runId: request.runId, operationId: request.operationId };
+    return new Promise((resolve) => {
+      release = resolve;
+    });
+  });
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.connected).toBe(true));
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  let pending!: Promise<boolean>;
+  act(() => {
+    pending = hook.result.current.compact();
+  });
+  act(() => hook.result.current.select(null));
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  const followed = hook.result.current.run;
+  const compacting = hook.result.current.compacting;
+  await act(async () => {
+    current.session.activeRun = admitted;
+    release(admitted);
+    await pending;
+  });
+  current.session.activeRun = null;
+  act(() =>
+    mocks.listener?.({
+      sessionId: session.id,
+      ...admitted,
+      type: "run_end",
+      data: { status: "completed", stopped: false },
+    }),
+  );
+  expect(followed).toEqual(admitted);
+  expect(compacting).toBe(true);
+});
+
+it("restores an admitted compaction from the host's transient session state", async () => {
+  current.messages = [
+    {
+      id: "user",
+      role: "user",
+      content: "Question",
+      createdAt: 1,
+      status: "completed",
+      nativeEntryId: "u",
+    },
+  ];
+  current.session.activeRun = { runId: "compact", operationId: "op" };
+  current.session.compacting = true;
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.connected).toBe(true));
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  expect(hook.result.current.compacting).toBe(true);
+  expect(hook.result.current.run).toEqual(current.session.activeRun);
+  expect(hook.result.current.stream).toBeNull();
 });

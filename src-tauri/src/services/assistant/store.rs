@@ -231,6 +231,8 @@ impl AssistantStore {
         let at = now();
         let record = SessionRecord {
             session: Session {
+                context_usage: None,
+                compacting: None,
                 id: id(),
                 title: String::new(),
                 title_source: Some(TitleSource::Auto),
@@ -779,6 +781,9 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
         record.session.title_source = Some(TitleSource::User);
     }
     if let Some(model) = &request.model_id {
+        if record.session.model_id != *model {
+            record.session.context_usage = None;
+        }
         record.session.model_id = model.clone();
     }
     if let Some(web) = request.web_search {
@@ -2401,6 +2406,8 @@ mod tests {
     fn record_for(sid: &str) -> SessionRecord {
         SessionRecord {
             session: Session {
+                context_usage: None,
+                compacting: None,
                 id: sid.into(),
                 title: String::new(),
                 title_source: Some(TitleSource::Auto),
@@ -3071,5 +3078,28 @@ mod tests {
         assert_eq!(summary["usageCoverage"], "incomplete");
         assert!(summary["estimatedCostUsd"].is_null());
         drop(config);
+    }
+    #[test]
+    fn changing_a_model_invalidates_the_previous_context_window_estimate() {
+        let (_temp, store) = fixture();
+        let detail = store.create("model", false).unwrap();
+        let sid = detail.session.id;
+        store
+            .mutate(&sid, |r| {
+                r.session.context_usage = Some(ContextUsage {
+                    model_id: "model".into(),
+                    tokens: Some(15),
+                    context_window: 32000,
+                });
+                Ok(())
+            })
+            .unwrap();
+        let mut patch = request(&sid);
+        patch.model_id = Some("other".into());
+        assert!(store
+            .update(&patch, no_precondition)
+            .unwrap()
+            .context_usage
+            .is_none());
     }
 }

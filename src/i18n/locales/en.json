@@ -4959,7 +4959,8 @@
       "mediaReadFailed": "The generated file could not be read.",
       "forkFailed": "The conversation could not be forked. Try again.",
       "forkUnavailable": "This message cannot be forked. Refresh the conversation.",
-      "forkPendingMedia": "Wait for the video task to finish before forking this part of the conversation."
+      "forkPendingMedia": "Wait for the video task to finish before forking this part of the conversation.",
+      "compactUnavailable": "There is no conversation context to compact with this model."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5299,6 +5300,13 @@
     "quote": "Quote",
     "messageActions": "Message actions",
     "fork": "Fork from here",
-    "forkTitle": "{{title}} (fork)"
+    "forkTitle": "{{title}} (fork)",
+    "contextLabel": "Context usage",
+    "contextUnavailable": "Context usage unavailable",
+    "contextTooltip": "Estimated context: {{used}} / {{window}} tokens",
+    "contextUnknown": "Usage will be updated after the next reply.",
+    "contextNearFull": "Compact context to leave room for the next replies.",
+    "compact": "Compact context",
+    "compactCost": "Uses the selected model and may incur a charge."
   }
 }

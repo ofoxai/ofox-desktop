@@ -826,6 +826,7 @@ export class AssistantRuntime {
       !context ||
       context.params.sessionId !== params.sessionId ||
       context.params.operationId !== params.operationId ||
+      context.compactOnly ||
       context.abort.signal.aborted ||
       !context.turnStarted ||
       !context.session?.isStreaming
@@ -1179,6 +1180,9 @@ export class AssistantRuntime {
       throw new Error("Invalid attachment selection");
     const webUrls = allowedWebUrls(params.allowedWebUrls);
     const instructions = checkInstructions(params.instructions);
+    const compactionInstructions = checkInstructions(
+      params.compactionInstructions,
+    );
     const apiKey = params.apiKey;
     // Every credential of this run: its key, and a key the gateway refused
     // earlier in the same run. Conversation content loses exactly these.
@@ -1192,6 +1196,8 @@ export class AssistantRuntime {
       attachments,
       abort: new AbortController(),
       callCount: 0,
+      compactOnly,
+      compactionRequestSent: false,
       liveInputs: new Map(),
       calls: new Map(),
       unknownOutcome: false,
@@ -1313,6 +1319,7 @@ export class AssistantRuntime {
         signal: context.abort.signal,
       });
       modelRuntime.streamSimple = (target, transcript, options) => {
+        if (compactOnly) context.compactionRequestSent = true;
         const summaryRequest = options?.sessionId !== manager.getSessionId();
         const outcome = {};
         const source = originalStream(
@@ -1381,8 +1388,9 @@ export class AssistantRuntime {
         return filtered;
       };
       const originalComplete = modelRuntime.completeSimple.bind(modelRuntime);
-      modelRuntime.completeSimple = async (target, transcript, options) =>
-        safeMessage(
+      modelRuntime.completeSimple = async (target, transcript, options) => {
+        if (compactOnly) context.compactionRequestSent = true;
+        return safeMessage(
           await originalComplete(target, scrubSecrets(transcript, secrets), {
             ...options,
             maxRetries: 0,
@@ -1390,6 +1398,7 @@ export class AssistantRuntime {
           }),
           secrets,
         );
+      };
       const customTools = this.tools(context, model);
       const roleText = systemPrompt(customTools);
       const instructedRole = systemPrompt(
@@ -1588,7 +1597,7 @@ export class AssistantRuntime {
       if (compactOnly)
         await session.compact(
           scrubSecrets(
-            params.instructions ??
+            compactionInstructions ||
               "Preserve the user's requirements, decisions and unfinished work.",
             secrets,
           ),
@@ -1631,9 +1640,11 @@ export class AssistantRuntime {
         .filter((entry) => entry.active && entry.role === "assistant")
         .at(-1);
       result.status =
-        context.abort.signal.aborted || last?.stopReason === "aborted"
+        context.abort.signal.aborted ||
+        (!compactOnly && last?.stopReason === "aborted")
           ? "stopped"
-          : context.unknownOutcome || last?.stopReason === "error"
+          : context.unknownOutcome ||
+              (!compactOnly && last?.stopReason === "error")
             ? "error"
             : "completed";
       if (result.status === "error") {
@@ -1645,10 +1656,39 @@ export class AssistantRuntime {
         result.errorKind = last?.errorKind;
         result.errorCode = last?.errorCode;
       }
-      this.notify(context, "run_end", { status: result.status });
+      const usage = session.getContextUsage();
+      result.contextUsage = usage
+        ? { ...usage, modelId: params.model.id }
+        : null;
+      this.notify(context, "run_end", {
+        status: result.status,
+        contextUsage: result.contextUsage,
+      });
       return result;
     } catch (error) {
       const message = errorMessage(error, secrets);
+      if (
+        compactOnly &&
+        !context.compactionRequestSent &&
+        /^(Nothing to compact \(session too small\)|Already compacted)$/.test(
+          message,
+        ) &&
+        context.rejectedInput?.manager
+      ) {
+        const result = {
+          ...projection(context.rejectedInput.manager, secrets),
+          status: "error",
+          errorCode: "assistant_compact_unavailable",
+          errorKind: "not_sent",
+          errorMessage: "assistant_compact_unavailable",
+        };
+        this.notify(context, "run_end", {
+          status: result.status,
+          contextUsage: null,
+        });
+        return result;
+      }
+
       if (!compactOnly && context.rejectedInput && !context.turnStarted) {
         // Preserve failed input in native history before any paid request.
         // Native images and the attachment selection stay with the failed
@@ -1700,7 +1740,14 @@ export class AssistantRuntime {
               ? "stopped"
               : "input_preparation_failed",
         });
-        this.notify(context, "run_end", { status: rejected.status });
+        const usage = context.session?.getContextUsage();
+        rejected.contextUsage = usage
+          ? { ...usage, modelId: params.model.id }
+          : null;
+        this.notify(context, "run_end", {
+          status: rejected.status,
+          contextUsage: rejected.contextUsage,
+        });
         return rejected;
       }
 

@@ -5589,3 +5589,62 @@ fn forking_a_native_reply_keeps_only_its_context_and_does_not_double_charge() {
         });
     }
 }
+
+#[test]
+fn manual_compaction_is_an_exclusive_billed_native_run_without_a_fake_turn() {
+    let Some(bundle) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let root = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(root.path(), &bundle, &[(apex, &gateway)]);
+        env.catalog.lock().unwrap()[0].context_window = 8192;
+        env.catalog.lock().unwrap()[0].max_output_tokens = 128;
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid=create(&host).await;
+            for text in ["long first context ".repeat(400),"long second context ".repeat(400),"long third context ".repeat(400)] {
+                gateway.reply(Reply::Stream("Original answer".into()));
+                turn(&host,&env,request(&sid,&text,json!({}))).await;
+            }
+            host.update_session(serde_json::from_value(json!({"sessionId":sid,"draft":"Preserve this unsent draft"})).unwrap()).await.unwrap();
+            let before=host.get_session(&sid).await.unwrap();
+            assert!(serde_json::to_value(&before.session).unwrap()["contextUsage"]["tokens"].as_u64().unwrap()>0);
+            let compact=json!({"sessionId":sid,"runId":types::id(),"operationId":types::id(),"expectedOwner":owner(),"expectedGeneration":host.generation()});
+            let mut stale=compact.clone();stale["expectedGeneration"]=json!(host.generation()+1);
+            assert_eq!(host.compact_session(serde_json::from_value(stale).unwrap()).await.unwrap_err(),"assistant_identity_changed");
+            let compact_gate=gate();
+            gateway.reply(Reply::Wait(compact_gate.clone(), Box::new(Reply::Stream("Requirements and unfinished work summary".into()))));
+            let run=host.compact_session(serde_json::from_value(compact.clone()).unwrap()).await.unwrap();
+            assert_eq!(host.fork_session(serde_json::from_value(json!({"sessionId":sid,"messageId":before.messages[0].id,"title":"busy","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap_err(),"assistant_session_busy");
+            assert_eq!(host.compact_session(serde_json::from_value(compact).unwrap()).await.unwrap_err(),"assistant_session_busy");
+            let active=host.get_session(&sid).await.unwrap();
+            let compacting=serde_json::to_value(active.session).unwrap()["compacting"]==true;
+            compact_gate.store(true,Ordering::SeqCst);
+            let end=wait_for(&env,&run.run_id,"run_end").await;
+            assert_eq!(end.data["status"],"completed", "errors: {:?}", env.events.lock().unwrap().iter().filter(|e|e.run_id==run.run_id && e.r#type=="error").collect::<Vec<_>>());
+            let after=host.get_session(&sid).await.unwrap();
+            assert_eq!(after.messages.len(),before.messages.len());
+            assert_eq!(after.session.draft,"Preserve this unsent draft");
+            assert!(after.usage["estimatedCostUsd"].as_str().is_some(),"the completed compaction must retain a known estimate");
+            assert!(after.usage["modelRequests"].as_u64().unwrap()>before.usage["modelRequests"].as_u64().unwrap());
+            let context=serde_json::to_value(&after.session).unwrap()["contextUsage"].clone();
+            assert_eq!(context["contextWindow"],8192);
+            assert!(context["tokens"].is_null());
+            assert!(String::from_utf8(native_of(root.path(),&sid)).unwrap().contains("\"type\":\"compaction\""));
+            let saved=saved(root.path(),&sid);
+            assert_eq!(saved["operations"].as_array().unwrap().last().unwrap()["status"],"completed");
+            assert!(env.events.lock().unwrap().iter().any(|e| e.run_id==run.run_id&&e.r#type=="compaction_start"));
+            let requests=gateway.requests().len();
+            let refused=host.compact_session(serde_json::from_value(json!({"sessionId":sid,"runId":types::id(),"operationId":types::id(),"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            let failed=wait_for(&env,&refused.run_id,"run_end").await;
+            assert_eq!(failed.data["status"],"error");
+            assert_eq!(wait_for(&env,&refused.run_id,"error").await.data["code"],"assistant_compact_unavailable");
+            assert_eq!(gateway.requests().len(),requests);
+            assert_eq!(host.get_session(&sid).await.unwrap().usage["estimatedCostUsd"],after.usage["estimatedCostUsd"]);
+            host.shutdown().await;
+            assert!(compacting,"returning to an active compaction must expose its state");
+        });
+    }
+}

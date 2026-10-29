@@ -185,7 +185,16 @@ export interface AssistantRunRef {
   operationId: string;
 }
 
+export interface AssistantContextUsage {
+  modelId: string;
+  tokens: number | null;
+  contextWindow: number;
+}
+
 export interface AssistantSession {
+  contextUsage?: AssistantContextUsage | null;
+  /** Current runtime state; never restored from disk. */
+  compacting?: boolean;
   id: string;
   title: string;
   /**
@@ -615,6 +624,7 @@ export type AssistantRunEvent =
         messageId: string;
         webSearch: boolean;
         thinkingLevel?: AssistantThinkingLevel | null;
+        compactOnly?: boolean;
       };
     }
   /**
@@ -861,14 +871,18 @@ export const assistantApi = {
     invoke<null>("assistant_steer", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
     invoke<null>("assistant_stop", { sessionId, runId, operationId }),
+  /** Explicitly summarize native history as a separate billed run. */
+  compact: (
+    request: Omit<AssistantSwitchVersionRequest, "messageId"> & AssistantRunRef,
+  ) => invoke<AssistantRunRef>("assistant_compact", { request }),
+  forkSession: (request: AssistantSwitchVersionRequest & { title: string }) =>
+    invoke<AssistantSessionDetail>("assistant_fork", { request }),
   /**
    * Shows another version of a turn, with the latest of what followed it,
    * and returns the conversation as it shows now: messages' `superseded`
    * says which are shown. Refused with `assistant_session_busy` while it
    * replies; the version shown already changes nothing.
    */
-  forkSession: (request: AssistantSwitchVersionRequest & { title: string }) =>
-    invoke<AssistantSessionDetail>("assistant_fork", { request }),
   switchVersion: (request: AssistantSwitchVersionRequest) =>
     invoke<AssistantSessionDetail>("assistant_switch_version", { request }),
   subscribe: (callback: (event: AssistantEvent) => void): Promise<UnlistenFn> =>
@@ -947,6 +961,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_invalid_session: "sessionUnreadable",
   assistant_message_not_found: "messageMissing",
   assistant_branch_unavailable: "messageMissing",
+  assistant_compact_unavailable: "compactUnavailable",
   assistant_fork_failed: "forkFailed",
   assistant_fork_unavailable: "forkUnavailable",
   assistant_fork_pending_media: "forkPendingMedia",

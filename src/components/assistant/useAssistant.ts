@@ -121,6 +121,7 @@ export interface VideoConfirmation {
 }
 
 interface PendingSend extends AssistantRunRef {
+  compactOnly?: boolean;
   sessionId: string;
   cancelled: boolean;
 }
@@ -721,6 +722,11 @@ export function useAssistant(enabled: boolean) {
         });
         if (resumed && !alreadyFollowing) setStream(resumed);
         if (!preparing) setRun(value.session.activeRun);
+        setCompacting(
+          preparing
+            ? pendingSends.current.get(local!.runId)?.compactOnly === true
+            : value.session.compacting === true,
+        );
         if (!drafts.current.has(sessionId)) setDraft(value.session.draft);
         // A saved draft's files, as the next message would send them.
         if (!attachmentDrafts.current.has(sessionId))
@@ -1078,6 +1084,10 @@ export function useAssistant(enabled: boolean) {
         // on screen: the transcript and session are read again at run_end.
         switch (event.type) {
           case "run_start": {
+            if (event.data.compactOnly) {
+              setCompacting(true);
+              return;
+            }
             // The reply this run writes, and whether it got web search.
             const { messageId, webSearch } = event.data;
             if (typeof messageId !== "string" || typeof webSearch !== "boolean")
@@ -1324,6 +1334,7 @@ export function useAssistant(enabled: boolean) {
       const pending = [...pendingSends.current.values()].find(
         (item) => item.sessionId === id,
       );
+      setCompacting(pending?.compactOnly === true);
       setRun(
         pending
           ? { runId: pending.runId, operationId: pending.operationId }
@@ -2310,6 +2321,7 @@ export function useAssistant(enabled: boolean) {
     if (
       !active ||
       !sid ||
+      compacting ||
       !queueAvailable ||
       steerSending.current ||
       attachmentsRef.current.length ||
@@ -2347,7 +2359,7 @@ export function useAssistant(enabled: boolean) {
     } finally {
       steerSending.current = false;
     }
-  }, [queueAvailable, setDraft, showError]);
+  }, [queueAvailable, compacting, setDraft, showError]);
 
   /** An explicit resume rechecks the saved conversation before any send. */
   const resumeQueue = useCallback(async () => {
@@ -2770,6 +2782,81 @@ export function useAssistant(enabled: boolean) {
     ],
   );
 
+  const compact = useCallback(async () => {
+    const sid = selectedRef.current;
+    const identity = bootstrapRef.current;
+    if (
+      !sid ||
+      !identity?.owner ||
+      identity.authorityGeneration === undefined ||
+      busy ||
+      loading ||
+      showTrash ||
+      runRef.current ||
+      switchInFlight.current ||
+      detail?.session.deletedAt != null ||
+      !detail?.messages.length ||
+      !chatModel
+    )
+      return false;
+    const generation = epoch.current,
+      selection = selectionSequence.current;
+    const current = () =>
+      mounted.current &&
+      generation === epoch.current &&
+      selection === selectionSequence.current &&
+      selectedRef.current === sid;
+    const active = { runId: freshId(), operationId: freshId() };
+    const preparing: PendingSend = {
+      ...active,
+      sessionId: sid,
+      cancelled: false,
+      compactOnly: true,
+    };
+    pendingSends.current.set(active.runId, preparing);
+    messageQueue.pause(sid);
+    switchInFlight.current = true;
+    setBusy(true);
+    setError(null);
+    setRun(active);
+    setCompacting(true);
+    try {
+      await assistantApi.compact({
+        sessionId: sid,
+        ...active,
+        expectedOwner: identity.owner,
+        expectedGeneration: identity.authorityGeneration,
+      });
+      if (preparing.cancelled) {
+        if (current())
+          await assistantApi.stop(sid, active.runId, active.operationId);
+        return false;
+      }
+      return current();
+    } catch (reason) {
+      if (current()) {
+        setRun(null);
+        setCompacting(false);
+        if (!preparing.cancelled) showError(reason);
+      }
+      return false;
+    } finally {
+      if (pendingSends.current.get(active.runId) === preparing)
+        pendingSends.current.delete(active.runId);
+      switchInFlight.current = false;
+      if (current()) setBusy(false);
+    }
+  }, [
+    busy,
+    loading,
+    showTrash,
+    detail,
+    chatModel,
+    messageQueue,
+    setRun,
+    showError,
+  ]);
+
   // The latest tool still running says what the reply is doing; before its
   // model request, a run reads the files it was sent with.
   const activity =
@@ -2921,6 +3008,7 @@ export function useAssistant(enabled: boolean) {
     stop,
     switchVersion,
     forkSession,
+    compact,
     refreshSessions,
     refreshDetail,
     loadBootstrap,

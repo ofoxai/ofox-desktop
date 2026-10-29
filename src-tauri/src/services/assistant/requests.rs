@@ -844,6 +844,7 @@ impl AssistantHost {
                     return Err(super::host::IDENTITY_CHANGED.into());
                 }
                 merge_native(record, &entries, &keys)?;
+                record.session.context_usage = None;
                 Ok(record.clone().into_detail())
             })
         })
@@ -1214,7 +1215,10 @@ fn instruction_params(instructions: &str) -> Map<String, Value> {
 /// The thinking level a run gets: the conversation's choice while its model
 /// offers it (the catalog may have changed since), else none, and the
 /// provider's default applies.
-fn run_thinking_level<'a>(session: &'a Session, model: &catalog::Model) -> Option<&'a str> {
+pub(super) fn run_thinking_level<'a>(
+    session: &'a Session,
+    model: &catalog::Model,
+) -> Option<&'a str> {
     session
         .thinking_level
         .as_deref()

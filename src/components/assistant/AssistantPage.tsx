@@ -25,6 +25,7 @@ import {
   PanelLeftOpen,
   Paperclip,
   Pencil,
+  Minimize2,
   Pin,
   PinOff,
   Square,
@@ -48,6 +49,7 @@ import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
 import { VideoParams, defaultVideoParams } from "./VideoParams";
 import { AssistantMessageView } from "./AssistantMessageView";
+import { AssistantContextUsage } from "./AssistantContextUsage";
 import { AssistantQueue } from "./AssistantQueue";
 import { MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES } from "./useMessageQueue";
 import { AttachmentList } from "./AssistantAttachments";
@@ -976,6 +978,30 @@ function AssistantWorkspace() {
                   <Download aria-hidden className="h-3.5 w-3.5 shrink-0" />
                   {t("assistant.exportMarkdown")}
                 </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={
+                    busy ||
+                    Boolean(run) ||
+                    assistant.loading ||
+                    sessionTrashed ||
+                    imageMode ||
+                    videoMode ||
+                    !messages.length
+                  }
+                  onSelect={() => {
+                    menuAction.current = () => {
+                      void assistant.compact();
+                    };
+                  }}
+                >
+                  <Minimize2 aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  <div className="min-w-0">
+                    <span>{t("assistant.compact")}</span>
+                    <span className="mt-0.5 block max-w-64 whitespace-normal text-note text-ink-muted">
+                      {t("assistant.compactCost")}
+                    </span>
+                  </div>
+                </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 {usage && (
                   <>
@@ -1547,11 +1573,22 @@ function AssistantWorkspace() {
                           })}
                         </span>
                       )}
+                      {!imageMode && !videoMode && (
+                        <AssistantContextUsage
+                          modelId={session?.modelId ?? ""}
+                          usage={
+                            assistant.compacting
+                              ? undefined
+                              : session?.contextUsage
+                          }
+                        />
+                      )}
                       {run && queueMode && (
                         <Button
                           variant="ghost"
                           className="h-7 px-2 text-note"
                           disabled={
+                            assistant.compacting ||
                             !assistant.queueAvailable ||
                             !assistant.draft.trim() ||
                             files.length > 0 ||

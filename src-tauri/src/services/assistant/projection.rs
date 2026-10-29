@@ -56,6 +56,9 @@ pub(super) fn settle_run(
     {
         record.session.active_run = None;
     }
+    if !completed {
+        record.session.context_usage = None;
+    }
     if !completed && !unbilled {
         mark_cost_unknown(&mut record.usage);
     }

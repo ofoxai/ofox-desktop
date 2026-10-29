@@ -21,6 +21,9 @@ impl AssistantHost {
         request: &SteerRequest,
     ) -> Result<bool, String> {
         self.validate_run(run)?;
+        if run.compact_only {
+            return Err("assistant_session_busy".into());
+        }
         let text = scrub_secrets(&request.text, &self.known_keys());
         if text.trim().is_empty() {
             return Err("assistant_invalid_message".into());

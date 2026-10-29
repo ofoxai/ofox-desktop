@@ -293,7 +293,13 @@ export const AssistantSidebar = forwardRef<
                 aria-hidden
                 className="h-3.5 w-3.5 shrink-0 animate-spin text-ink-muted motion-reduce:animate-none"
               />
-              <span className="sr-only">{t("assistant.running")}</span>
+              <span className="sr-only">
+                {t(
+                  item.compacting
+                    ? "assistant.compacting"
+                    : "assistant.running",
+                )}
+              </span>
             </>
           )}
         </button>

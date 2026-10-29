@@ -4959,7 +4959,8 @@
       "mediaReadFailed": "无法读取生成的文件。",
       "forkFailed": "无法分叉对话，请重试。",
       "forkUnavailable": "此消息暂时无法分叉，请刷新对话。",
-      "forkPendingMedia": "请等待视频任务结束后再从这部分对话分叉。"
+      "forkPendingMedia": "请等待视频任务结束后再从这部分对话分叉。",
+      "compactUnavailable": "当前模型没有可整理的对话上下文。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5299,6 +5300,13 @@
     "quote": "引用",
     "messageActions": "消息操作",
     "fork": "从这里分叉",
-    "forkTitle": "{{title}}（分叉）"
+    "forkTitle": "{{title}}（分叉）",
+    "contextLabel": "上下文用量",
+    "contextUnavailable": "上下文用量暂不可用",
+    "contextTooltip": "估计上下文：{{used}} / {{window}} Token",
+    "contextUnknown": "将在下一次回复后更新用量。",
+    "contextNearFull": "整理上下文，为后续回复留出空间。",
+    "compact": "整理上下文",
+    "compactCost": "使用当前模型整理，可能产生相应费用。"
   }
 }

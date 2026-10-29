@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncWrite};
@@ -137,6 +137,8 @@ pub struct RunControl {
     pub run_id: String,
     pub operation_id: String,
     pub message_id: String,
+    pub(super) compact_only: bool,
+    compacting: AtomicBool,
     pub(super) live_reply: Mutex<Option<String>>,
     pub(super) live_runs: Mutex<HashSet<String>>,
     live_input: Mutex<Option<mpsc::Sender<super::live::LiveCommand>>>,
@@ -155,6 +157,8 @@ impl RunControl {
             run_id: request.run_id.clone(),
             operation_id: request.operation_id.clone(),
             message_id: id(),
+            compact_only: false,
+            compacting: AtomicBool::new(false),
             live_reply: Mutex::new(None),
             live_runs: Mutex::new(HashSet::new()),
             live_input: Mutex::new(None),
@@ -895,13 +899,18 @@ impl AssistantHost {
     /// The live run is the only truth for `activeRun`; the saved value can be
     /// left over from a process that died.
     pub(super) fn decorate(&self, owner: &str, session: &mut Session) {
-        session.active_run = self.runs.lock().ok().and_then(|runs| {
+        let active = self.runs.lock().ok().and_then(|runs| {
             runs.get(&session.id)
                 .filter(|r| r.identity.owner == owner)
-                .map(|r| RunRef {
-                    run_id: r.run_id.clone(),
-                    operation_id: r.operation_id.clone(),
-                })
+                .cloned()
+        });
+        session.compacting = active
+            .as_ref()
+            .filter(|run| run.compact_only || run.compacting.load(Ordering::SeqCst))
+            .map(|_| true);
+        session.active_run = active.map(|run| RunRef {
+            run_id: run.run_id.clone(),
+            operation_id: run.operation_id.clone(),
         });
     }
 
@@ -1248,15 +1257,11 @@ impl AssistantHost {
         web_search: bool,
         thinking_level: Option<&str>,
     ) {
-        self.emit(
-            run,
-            "run_start",
-            json!({
-                "messageId": run.message_id,
-                "webSearch": web_search,
-                "thinkingLevel": thinking_level,
-            }),
-        );
+        let mut data = json!({"messageId":run.message_id,"webSearch":web_search,"thinkingLevel":thinking_level});
+        if run.compact_only {
+            data["compactOnly"] = json!(true);
+        }
+        self.emit(run, "run_start", data);
     }
 
     async fn run(self: Arc<Self>, control: Arc<RunControl>, params: Value) {
@@ -1415,10 +1420,12 @@ impl AssistantHost {
         let mut attempt = Attempt::default();
         let request_id = id();
         let (sender, mut commands) = mpsc::channel(8);
-        *control
-            .live_input
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(sender);
+        if !control.compact_only {
+            *control
+                .live_input
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner) = Some(sender);
+        }
         let result = self
             .converse(
                 control,
@@ -1473,7 +1480,13 @@ impl AssistantHost {
         if self.identity().await? != control.identity {
             return Err(IDENTITY_CHANGED.into());
         }
-        let line = frame(&json!({"jsonrpc":"2.0","id":request_id,"method":"run","params":params}))?;
+        let method = if control.compact_only {
+            "compact"
+        } else {
+            "run"
+        };
+        let line =
+            frame(&json!({"jsonrpc":"2.0","id":request_id,"method":method,"params":params}))?;
         let mut cancel = control.cancel.subscribe();
         self.validate_run(control)?;
         tokio::select! {
@@ -1593,7 +1606,12 @@ impl AssistantHost {
                 let usage = self.save_usage(control, data).await?;
                 self.emit(control, "usage", json!({ "usage": usage }));
             }
-            "compaction_start" | "compaction_end" => self.emit(control, kind, data),
+            "compaction_start" | "compaction_end" => {
+                control
+                    .compacting
+                    .store(kind == "compaction_start", Ordering::SeqCst);
+                self.emit(control, kind, data);
+            }
             "tool_start" => {
                 // The model's tool call has been answered with tokens, and the
                 // tool may cost something: never repeat this attempt.
@@ -1657,9 +1675,23 @@ impl AssistantHost {
         attempt.projection.end_thinking();
         self.flush(control, &mut attempt.projection).await?;
         let result = &value["result"];
+        if control.compact_only
+            && result["errorCode"] == "assistant_compact_unavailable"
+            && result["errorKind"] == "not_sent"
+        {
+            self.apply_native(control, &result["entries"]).await?;
+            return Err(Failure {
+                code: "assistant_compact_unavailable".into(),
+                detail: None,
+                unbilled: true,
+                native: None,
+            });
+        }
         match result["status"].as_str() {
             Some("completed") | Some("stopped") => {
                 self.apply_native(control, &result["entries"]).await?;
+                self.save_context_usage(control, &result["contextUsage"])
+                    .await?;
                 Ok(if result["status"] == "stopped" {
                     Finish::Stopped
                 } else {

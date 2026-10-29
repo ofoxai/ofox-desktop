@@ -155,6 +155,7 @@ impl ForkStage {
             output.sync_all().map_err(|_| FORK_FAILED)?;
         }
         record.session.id = self.sid.clone();
+        record.session.context_usage = None;
         record.session.title = title
             .chars()
             .scan(0usize, |bytes, c| {
@@ -327,6 +328,11 @@ mod tests {
             private_subdir(&store.root.join(&session.session.id), ATTACHMENTS_DIR).unwrap();
         write_bytes(&attachments.join(&aid), b"hello").unwrap();
         let mut record = store.load_record(&session.session.id).unwrap();
+        record.session.context_usage = Some(ContextUsage {
+            model_id: record.session.model_id.clone(),
+            tokens: Some(15),
+            context_window: 32000,
+        });
         record.session.draft = "private draft".into();
         record.attachments = vec![serde_json::from_value(json!({
             "id":aid,"name":"hello.txt","mimeType":"text/plain","sizeBytes":5,"status":"ready"
@@ -374,6 +380,7 @@ mod tests {
         assert_ne!(fork.session.id, record.session.id);
         assert_eq!(fork.messages.len(), 2);
         assert!(fork.session.draft.is_empty());
+        assert!(fork.session.context_usage.is_none());
         assert_eq!(fork.operations, record.operations);
         assert_eq!(fork.usage["inputTokens"], 10);
         assert_eq!(

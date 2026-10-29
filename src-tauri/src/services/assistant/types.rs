@@ -47,9 +47,33 @@ pub struct RunRef {
     pub operation_id: String,
 }
 
+/// Last SDK context estimate. Unknown after compaction until a new reply.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextUsage {
+    pub model_id: String,
+    pub tokens: Option<u64>,
+    pub context_window: u64,
+}
+impl ContextUsage {
+    pub(super) fn parse(value: &Value) -> Option<Self> {
+        let usage: Self = serde_json::from_value(value.clone()).ok()?;
+        (usage.context_window > 0
+            && usage.context_window <= 9_007_199_254_740_991
+            && usage.tokens.is_none_or(|n| n <= 9_007_199_254_740_991)
+            && !usage.model_id.is_empty())
+        .then_some(usage)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    /// Live runtime state only; never resumed from a saved record/backup.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub compacting: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsage>,
     pub id: String,
     pub title: String,
     /// Who named the conversation. `None` only in a record saved before this
@@ -189,8 +213,9 @@ pub struct Message {
     pub model_id: Option<String>,
     /// What a reply's run used and cost, shaped like [`Detail::usage`]:
     /// counted from native history like the conversation's, without its
-    /// title. With the title's, the replies' tokens add up to the
-    /// conversation's and their costs nearly so (each is a sum of floats), as
+    /// title or separately requested compaction. Adding those operations' usage
+    /// to the replies' reaches the conversation total (costs nearly so, as each
+    /// is a sum of floats), as
     /// long as every native usage record names its run (older histories may
     /// hold some that do not, counted only in the conversation's). `None` on
     /// a user turn and until native history counts the run.
@@ -440,6 +465,15 @@ pub struct SwitchVersionRequest {
     #[serde(flatten)]
     pub authority: DeleteRequest,
     pub message_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CompactRequest {
+    #[serde(flatten)]
+    pub authority: DeleteRequest,
+    pub run_id: String,
+    pub operation_id: String,
 }
 
 /// Copy a selected native branch into an independent conversation.
@@ -701,5 +735,30 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+    #[test]
+    fn context_estimates_keep_unknown_distinct_from_zero_and_refuse_invalid_counts() {
+        let valid = json!({"modelId":"m","tokens":15,"contextWindow":32000});
+        assert_eq!(ContextUsage::parse(&valid).unwrap().tokens, Some(15));
+        let unknown = json!({"modelId":"m","tokens":null,"contextWindow":32000});
+        assert!(ContextUsage::parse(&unknown).unwrap().tokens.is_none());
+        for value in [
+            Value::Null,
+            json!({}),
+            json!({"modelId":"m","tokens":-1,"contextWindow":32000}),
+            json!({"modelId":"m","tokens":"15","contextWindow":32000}),
+            json!({"modelId":"m","tokens":15,"contextWindow":0}),
+            json!({"modelId":"m","tokens":9007199254740992u64,"contextWindow":32000}),
+        ] {
+            assert!(ContextUsage::parse(&value).is_none());
+        }
+        let old: Session = serde_json::from_value(minimal_session()).unwrap();
+        assert!(old.context_usage.is_none());
+        let mut saved = minimal_session();
+        saved["compacting"] = json!(true);
+        assert!(serde_json::from_value::<Session>(saved)
+            .unwrap()
+            .compacting
+            .is_none());
     }
 }

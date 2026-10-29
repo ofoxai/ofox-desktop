@@ -4959,7 +4959,8 @@
       "mediaReadFailed": "生成されたファイルを読み込めませんでした。",
       "forkFailed": "会話を分岐できませんでした。もう一度お試しください。",
       "forkUnavailable": "このメッセージは分岐できません。会話を更新してください。",
-      "forkPendingMedia": "この部分から分岐するには、動画タスクの完了をお待ちください。"
+      "forkPendingMedia": "この部分から分岐するには、動画タスクの完了をお待ちください。",
+      "compactUnavailable": "このモデルで整理できる会話コンテキストがありません。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
@@ -5299,6 +5300,13 @@
     "quote": "引用",
     "messageActions": "メッセージ操作",
     "fork": "ここから分岐",
-    "forkTitle": "{{title}}（分岐）"
+    "forkTitle": "{{title}}（分岐）",
+    "contextLabel": "コンテキスト使用量",
+    "contextUnavailable": "コンテキスト使用量は不明です",
+    "contextTooltip": "推定コンテキスト：{{used}} / {{window}} トークン",
+    "contextUnknown": "次の返信後に使用量が更新されます。",
+    "contextNearFull": "コンテキストを整理して、次の返信の余裕を確保できます。",
+    "compact": "コンテキストを整理",
+    "compactCost": "選択中のモデルを使用し、料金が発生する場合があります。"
   }
 }
