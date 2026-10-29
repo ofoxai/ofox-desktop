@@ -3555,6 +3555,167 @@ mod tests {
             .is_empty());
     }
 
+    fn trashed_session(store: &AssistantStore) -> String {
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .update(
+                &serde_json::from_value(json!({"sessionId":sid,"deleted":true})).unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        sid
+    }
+
+    fn set_saved_run(store: &AssistantStore, sid: &str, running: bool) {
+        store
+            .mutate(sid, |record| {
+                record.session.active_run = running.then(|| RunRef {
+                    run_id: id(),
+                    operation_id: id(),
+                });
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    fn empty_trash_request(host: &AssistantHost) -> EmptyTrashRequest {
+        EmptyTrashRequest {
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        }
+    }
+
+    /// The names in the account's folder, sorted: session folders, tombstones.
+    fn account_folder(config: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(config.join("assistant").join(identity().owner))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn emptying_the_trash_deletes_every_idle_trashed_conversation_from_disk() {
+        let (config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let kept = store.create("test/model", false).unwrap().session.id;
+        let (first, second) = (trashed_session(&store), trashed_session(&store));
+        std::fs::write(store.native_history_path(&second).unwrap(), b"history").unwrap();
+        std::fs::write(store.attachment_dir(&second).unwrap().join(id()), b"copy").unwrap();
+        // A run the previous process left behind is settled, as a single
+        // permanent deletion settles it, and the conversation goes.
+        let left_behind = trashed_session(&store);
+        set_saved_run(&store, &left_behind, true);
+        // A reply still streaming keeps its conversation.
+        let replying = trashed_session(&store);
+        set_saved_run(&store, &replying, true);
+        host.runs
+            .lock()
+            .unwrap()
+            .insert(replying.clone(), control(&replying));
+
+        let report = host.empty_trash(empty_trash_request(&host)).await.unwrap();
+        assert_eq!(
+            report,
+            EmptyTrashReport {
+                deleted: 3,
+                failed: 1
+            }
+        );
+        let mut remaining = vec![kept.clone(), replying.clone()];
+        remaining.sort();
+        assert_eq!(account_folder(config.path()), remaining);
+        for gone in [&first, &second, &left_behind] {
+            assert_eq!(
+                store.load_record(gone).unwrap_err(),
+                "assistant_session_not_found"
+            );
+        }
+
+        // `trashCount` counts what is left, and the live list is untouched.
+        let trash = host.list_sessions(true, "").await.unwrap();
+        assert_eq!(trash.trash_count, 1);
+        assert_eq!(trash.sessions[0].id, replying);
+        let live = host.list_sessions(false, "").await.unwrap();
+        assert_eq!(live.trash_count, 1);
+        assert_eq!(live.sessions.len(), 1);
+        assert_eq!(live.sessions[0].id, kept);
+
+        // Once its reply ended, the next emptying takes the rest.
+        host.runs.lock().unwrap().remove(&replying);
+        set_saved_run(&store, &replying, false);
+        let report = host.empty_trash(empty_trash_request(&host)).await.unwrap();
+        assert_eq!(
+            report,
+            EmptyTrashReport {
+                deleted: 1,
+                failed: 0
+            }
+        );
+        assert_eq!(account_folder(config.path()), [kept]);
+        assert_eq!(host.list_sessions(false, "").await.unwrap().trash_count, 0);
+        let report = host.empty_trash(empty_trash_request(&host)).await.unwrap();
+        assert_eq!(report, EmptyTrashReport::default());
+    }
+
+    #[tokio::test]
+    async fn emptying_the_trash_names_its_counts_as_the_renderer_reads_them() {
+        let (_config, host) = fixture();
+        let report = host.empty_trash(empty_trash_request(&host)).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(report).unwrap(),
+            json!({"deleted": 0, "failed": 0})
+        );
+    }
+
+    #[tokio::test]
+    async fn emptying_the_trash_checks_the_confirmed_account_and_generation() {
+        let (config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = trashed_session(&store);
+        let wrong_owner = EmptyTrashRequest {
+            expected_owner: "b".repeat(64),
+            ..empty_trash_request(&host)
+        };
+        let stale = EmptyTrashRequest {
+            expected_generation: host.generation() + 1,
+            ..empty_trash_request(&host)
+        };
+        for request in [wrong_owner, stale] {
+            assert_eq!(
+                host.empty_trash(request).await.unwrap_err(),
+                IDENTITY_CHANGED
+            );
+        }
+        assert_eq!(account_folder(config.path()), [sid]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_conversation_that_cannot_be_removed_does_not_stop_the_others() {
+        let (config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let (blocked, other) = (trashed_session(&store), trashed_session(&store));
+        // A link where the deletion's private tombstone goes is refused.
+        let folder = config.path().join("assistant").join(identity().owner);
+        let outside = config.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, folder.join(format!(".deleting-{blocked}"))).unwrap();
+
+        let report = host.empty_trash(empty_trash_request(&host)).await.unwrap();
+        assert_eq!(
+            report,
+            EmptyTrashReport {
+                deleted: 1,
+                failed: 1
+            }
+        );
+        assert!(store.load_record(&blocked).is_ok());
+        assert!(store.load_record(&other).is_err());
+        assert!(outside.is_dir(), "the link's target is never followed");
+    }
+
     #[tokio::test]
     async fn an_update_that_is_not_saved_leaves_the_run_running() {
         let (config, host) = fixture();

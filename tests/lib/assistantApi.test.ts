@@ -48,6 +48,37 @@ describe("assistant commands", () => {
     });
   });
 
+  it("passes on the first matching message of each searched conversation", async () => {
+    invoke.mockResolvedValue({
+      sessions: [{ id: "a", title: "Trip" }],
+      unreadable: [],
+      trashCount: 0,
+      matches: { a: "m1" },
+    });
+    const list = await assistantApi.listSessions(false, "kyoto");
+    expect(list.matches).toEqual({ a: "m1" });
+  });
+
+  it("pins with an update that carries only the pin", async () => {
+    invoke.mockResolvedValue({ id: "a", pinnedAt: 5 });
+    await assistantApi.updateSession({ sessionId: "a", pinned: true });
+    expect(invoke).toHaveBeenCalledWith("assistant_update_session", {
+      request: { sessionId: "a", pinned: true },
+    });
+  });
+
+  it("empties the trash with the confirmed authority and returns the counts", async () => {
+    invoke.mockResolvedValue({ deleted: 3, failed: 1 });
+    const report = await assistantApi.emptyTrash({
+      expectedOwner: "owner",
+      expectedGeneration: 7,
+    });
+    expect(invoke).toHaveBeenCalledWith("assistant_empty_trash", {
+      request: { expectedOwner: "owner", expectedGeneration: 7 },
+    });
+    expect(report).toEqual({ deleted: 3, failed: 1 });
+  });
+
   it("creates a chat session with only a model and the web search flag", async () => {
     invoke.mockResolvedValue({ id: "new" });
     await assistantApi.createSession({ modelId: "m", webSearch: false });

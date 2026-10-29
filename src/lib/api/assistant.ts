@@ -163,6 +163,12 @@ export interface AssistantRunRef {
 export interface AssistantSession {
   id: string;
   title: string;
+  /**
+   * Who named the conversation: its first message (`auto`; a generated title
+   * may replace it) or the user (`user`; never replaced). Any rename is the
+   * user's.
+   */
+  titleSource: AssistantTitleSource;
   modelId: string;
   webSearch: boolean;
   /**
@@ -175,11 +181,15 @@ export interface AssistantSession {
   createdAt: number;
   updatedAt: number;
   deletedAt: number | null;
+  /** When it was pinned to the top of the list; null when it is not. */
+  pinnedAt: number | null;
   /** The live run only; null once it ended. */
   activeRun: AssistantRunRef | null;
   /** This update committed; only unused disk-copy cleanup needs retrying. */
   cleanupWarning?: string;
 }
+
+export type AssistantTitleSource = "auto" | "user";
 
 /** A saved conversation the backend could not read: nothing but its id is known. */
 export interface AssistantUnreadableSession {
@@ -193,6 +203,24 @@ export interface AssistantSessionList {
   unreadable: AssistantUnreadableSession[];
   /** Readable conversations in the trash, whatever the filter and search. */
   trashCount: number;
+  /**
+   * For a search: the first active message each listed conversation matches
+   * (session id to message id). A conversation found by its title alone, or
+   * only through a replaced message, has no entry; `{}` without a search.
+   */
+  matches: Record<string, string>;
+}
+
+/** What emptying the trash did. */
+export interface AssistantEmptyTrashReport {
+  /** Conversations removed for good. */
+  deleted: number;
+  /**
+   * Conversations not fully removed: one still replying stays in the trash;
+   * one whose files could not all be deleted is hidden and cleaned up at the
+   * next start.
+   */
+  failed: number;
 }
 
 /**
@@ -333,6 +361,11 @@ export interface AssistantUpdateRequest {
   draft?: string;
   draftAttachmentIds?: string[];
   deleted?: boolean;
+  /**
+   * Pin to, or unpin from, the top of the list. A pin and a draft change do
+   * not change `updatedAt`.
+   */
+  pinned?: boolean;
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
@@ -489,6 +522,14 @@ export const assistantApi = {
     expectedOwner: string;
     expectedGeneration: number;
   }) => invoke<null>("assistant_delete_session", { request }),
+  /**
+   * Permanently deletes every trashed conversation that is not replying. Name
+   * the account and authority generation the confirmation showed.
+   */
+  emptyTrash: (request: {
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<AssistantEmptyTrashReport>("assistant_empty_trash", { request }),
   exportMarkdown: (request: {
     sessionId: string;
     expectedOwner: string;

@@ -23,6 +23,7 @@ const fixture = (): AssistantSessionDetail => ({
   session: {
     id: "session",
     title: "Notes [team]",
+    titleSource: "user",
     modelId: "test/model",
     webSearch: true,
     draft: "Continue later",
@@ -30,6 +31,7 @@ const fixture = (): AssistantSessionDetail => ({
     createdAt: 1,
     updatedAt: 2,
     deletedAt: null,
+    pinnedAt: null,
     activeRun: null,
   },
   messages: [

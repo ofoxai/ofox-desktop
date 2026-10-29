@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const MAX_MESSAGE_BYTES: usize = 128_000;
-const TITLE_CHARS: usize = 48;
 
 impl AssistantHost {
     /// Everything the assistant page needs to open. Never mints a key.
@@ -261,19 +260,75 @@ impl AssistantHost {
         if request.expected_owner != identity.owner || request.expected_generation != generation {
             return Err(super::host::IDENTITY_CHANGED.into());
         }
+        self.delete_trashed(&identity, generation, &request.session_id)
+            .await
+    }
+
+    /// Delete every trashed conversation for good, one at a time the way
+    /// [`Self::delete_session`] does. One that cannot be removed (still
+    /// replying, or some files could not be deleted) is counted in `failed`
+    /// and does not stop the others; one still replying stays in the trash.
+    pub async fn empty_trash(
+        self: &Arc<Self>,
+        request: EmptyTrashRequest,
+    ) -> Result<EmptyTrashReport, String> {
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if request.expected_owner != identity.owner || request.expected_generation != generation {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        let trashed = blocking({
+            let store = self.store(&identity.owner)?;
+            move || store.list(true, "")
+        })
+        .await?
+        .sessions;
+        self.ensure_current(&identity, generation).await?;
+        let mut report = EmptyTrashReport::default();
+        for session in trashed {
+            match self
+                .delete_trashed(&identity, generation, &session.id)
+                .await
+            {
+                Ok(()) => report.deleted += 1,
+                // The account changed: every other one would be refused too.
+                Err(error) if error == super::host::IDENTITY_CHANGED => return Err(error),
+                // Deleted meanwhile (another window, or startup cleanup).
+                Err(error) if error == "assistant_session_not_found" => {}
+                Err(error) => {
+                    log::warn!(
+                        "[Assistant] could not delete trashed session {}: {error}",
+                        session.id
+                    );
+                    report.failed += 1;
+                }
+            }
+        }
+        Ok(report)
+    }
+
+    /// The permanent deletion of one conversation, once the caller confirmed
+    /// the authority: refused unless it is trashed and idle.
+    async fn delete_trashed(
+        self: &Arc<Self>,
+        identity: &Identity,
+        generation: u64,
+        sid: &str,
+    ) -> Result<(), String> {
         // A previous process may have died while stopping this trashed run.
         // A missing session can be a tombstone whose disk cleanup is retried.
-        if let Err(error) = self.recover(&identity, &request.session_id).await {
+        if let Err(error) = self.recover(identity, sid).await {
             if error != "assistant_session_not_found" {
                 return Err(error);
             }
         }
-        self.ensure_current(&identity, generation).await?;
+        self.ensure_current(identity, generation).await?;
         blocking({
             let store = self.store(&identity.owner)?;
             let host = self.clone();
+            let sid = sid.to_owned();
             move || {
-                store.delete_trashed(&request.session_id, || {
+                store.delete_trashed(&sid, || {
                     if host.generation() != generation {
                         return Err(super::host::IDENTITY_CHANGED.into());
                     }
@@ -726,11 +781,8 @@ fn publish_turn(
     });
     if record.session.title.is_empty() {
         // A file sent alone names the conversation.
-        let title = match user_text.trim() {
-            "" => selected.first().map_or("", |a| a.name.as_str()),
-            text => text,
-        };
-        record.session.title = title.chars().take(TITLE_CHARS).collect();
+        record.session.title = auto_title(user_text, selected);
+        record.session.title_source = Some(TitleSource::Auto);
     }
     store::consume_draft(&mut record.session, request);
     record.session.updated_at = at;
@@ -945,6 +997,40 @@ mod tests {
         assert_eq!(record.session.title, "b.md");
         // The conversation's own list keeps the last outcomes.
         assert_eq!(record.attachments[0].status, "partial");
+    }
+
+    #[test]
+    fn the_title_a_send_fills_in_is_automatic_and_one_the_user_set_stays() {
+        let (mut record, _, _, _) = fixture();
+        let publish = |record: &mut SessionRecord, text: &str| {
+            let request = send(record, text, json!({}));
+            let branch = Branch::resolve(record, &request).unwrap();
+            let control = RunControl::new(
+                Identity {
+                    owner: "ab".repeat(32),
+                    apex: "ofox.ai".into(),
+                },
+                &request,
+                "test-key-0123".into(),
+            );
+            publish_turn(record, &control, &request, &branch, text, &[], None).unwrap();
+            record.session.active_run = None;
+        };
+        publish(&mut record, "First question");
+        assert_eq!(record.session.title, "First question");
+        assert_eq!(record.session.title_source, Some(TitleSource::Auto));
+
+        record.session.title = "Mine".into();
+        record.session.title_source = Some(TitleSource::User);
+        publish(&mut record, "Second question");
+        assert_eq!(record.session.title, "Mine");
+        assert_eq!(record.session.title_source, Some(TitleSource::User));
+
+        // A title the user emptied is named by the next message again.
+        record.session.title.clear();
+        publish(&mut record, "Third question");
+        assert_eq!(record.session.title, "Third question");
+        assert_eq!(record.session.title_source, Some(TitleSource::Auto));
     }
 
     #[test]

@@ -123,6 +123,10 @@ pub struct SessionList {
     pub unreadable: Vec<UnreadableSession>,
     /// Readable conversations in the trash, whatever the filter and search.
     pub trash_count: usize,
+    /// For a search: the first active message of each listed conversation
+    /// that matches it (session id to message id). A conversation found by
+    /// its title alone, or only through a replaced message, has no entry.
+    pub matches: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -157,12 +161,14 @@ impl AssistantStore {
             session: Session {
                 id: id(),
                 title: String::new(),
+                title_source: Some(TitleSource::Auto),
                 model_id: model_id.into(),
                 web_search,
                 thinking_level: None,
                 created_at: at,
                 updated_at: at,
                 deleted_at: None,
+                pinned_at: None,
                 active_run: None,
                 draft: String::new(),
                 draft_attachment_ids: vec![],
@@ -181,9 +187,12 @@ impl AssistantStore {
         Ok(record.into_detail())
     }
 
-    /// Sessions in the trash (`deleted`) or out of it, most recently updated
-    /// first (ties by id). `search` matches the title or any message, ignoring
-    /// case. The trash count covers the whole trash either way.
+    /// Sessions in the trash (`deleted`) or out of it. Out of it, pinned ones
+    /// come first (the latest pin on top), then the rest; the trash and the
+    /// rest go most recently updated first (ties by id). `search` matches the
+    /// title or any message, ignoring case, and `matches` names the first
+    /// active message that does. The trash count covers the whole trash
+    /// either way.
     ///
     /// Blocking file IO (reads every session): async callers run it in
     /// `spawn_blocking`.
@@ -201,6 +210,10 @@ impl AssistantStore {
                         list.trash_count += 1;
                     }
                     if trashed == deleted && matches_search(&record, &search) {
+                        if let Some(hit) = first_active_hit(&record, &search) {
+                            list.matches
+                                .insert(record.session.id.clone(), hit.id.clone());
+                        }
                         list.sessions.push(record.session);
                     }
                 }
@@ -209,8 +222,11 @@ impl AssistantStore {
             }
         }
         list.sessions.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
+            // The trash is not a list of pins: a pin only waits there for an undo.
+            let pinned = |s: &Session| if deleted { None } else { s.pinned_at };
+            pinned(b)
+                .cmp(&pinned(a))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
                 .then_with(|| a.id.cmp(&b.id))
         });
         Ok(list)
@@ -558,6 +574,7 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
             return Err("assistant_title_too_long".into());
         }
         record.session.title = title.clone();
+        record.session.title_source = Some(TitleSource::User);
     }
     if let Some(model) = &request.model_id {
         record.session.model_id = model.clone();
@@ -571,6 +588,10 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     }
     if let Some(deleted) = request.deleted {
         record.session.deleted_at = deleted.then(now);
+    }
+    if let Some(pinned) = request.pinned {
+        // Pinning again keeps the first pin's place.
+        record.session.pinned_at = pinned.then(|| record.session.pinned_at.unwrap_or_else(now));
     }
     if let Some(draft) = &request.draft {
         if draft.len() > MAX_DRAFT_BYTES {
@@ -590,17 +611,39 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
         }
         record.session.draft_attachment_ids = ids.clone();
     }
-    record.session.updated_at = now();
+    // A pin or the composer draft is bookkeeping, not activity: it must not
+    // move the conversation in the list.
+    let changes_the_conversation = request.title.is_some()
+        || request.model_id.is_some()
+        || request.web_search.is_some()
+        || request.thinking_level.is_some()
+        || request.deleted.is_some();
+    if changes_the_conversation {
+        record.session.updated_at = now();
+    }
     Ok(())
 }
 
 fn matches_search(record: &SessionRecord, search: &str) -> bool {
     search.is_empty()
         || record.session.title.to_lowercase().contains(search)
-        || record
-            .messages
-            .iter()
-            .any(|m| m.content.to_lowercase().contains(search))
+        || record.messages.iter().any(|m| says(m, search))
+}
+
+/// The first message of the live branch that `search` (already lowercase)
+/// matches: what the page scrolls to. A replaced message is not shown.
+fn first_active_hit<'a>(record: &'a SessionRecord, search: &str) -> Option<&'a Message> {
+    if search.is_empty() {
+        return None;
+    }
+    record
+        .messages
+        .iter()
+        .find(|m| !m.superseded && says(m, search))
+}
+
+fn says(message: &Message, search: &str) -> bool {
+    message.content.to_lowercase().contains(search)
 }
 
 struct UsageTotals {
@@ -785,7 +828,30 @@ fn parse_record(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
         );
         return Err(INVALID_SESSION.into());
     }
-    Ok(file.record)
+    let mut record = file.record;
+    derive_title_source(&mut record);
+    Ok(record)
+}
+
+/// A record saved before titles had a source gets one: its title is the
+/// first message's own start (what a send names a conversation) unless the
+/// user renamed it. Read again, a record saved with a source keeps it.
+fn derive_title_source(record: &mut SessionRecord) {
+    if record.session.title_source.is_some() {
+        return;
+    }
+    let automatic = record
+        .messages
+        .iter()
+        .find(|m| m.role == "user")
+        .map_or_else(String::new, |first| {
+            auto_title(&first.content, &first.attachments)
+        });
+    record.session.title_source = Some(if record.session.title == automatic {
+        TitleSource::Auto
+    } else {
+        TitleSource::User
+    });
 }
 
 /// A record belongs in `<sid>/session.json` only if it names that session,
@@ -1745,6 +1811,338 @@ mod tests {
         assert_eq!(listed, ids);
     }
 
+    /// A conversation with its update time fixed, so the order is explicit.
+    fn session_updated_at(store: &AssistantStore, at: i64) -> String {
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |record| {
+                record.session.updated_at = at;
+                Ok(())
+            })
+            .unwrap();
+        sid
+    }
+
+    fn pin(store: &AssistantStore, sid: &str, pinned: bool) -> Session {
+        let mut change = request(sid);
+        change.pinned = Some(pinned);
+        store.update(&change, no_precondition).unwrap()
+    }
+
+    fn listed_ids(store: &AssistantStore, deleted: bool) -> Vec<String> {
+        store
+            .list(deleted, "")
+            .unwrap()
+            .sessions
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    #[test]
+    fn pinned_conversations_come_first_the_latest_pin_on_top() {
+        let (_config, store) = fixture();
+        let oldest = session_updated_at(&store, 10);
+        let middle = session_updated_at(&store, 20);
+        let newest = session_updated_at(&store, 30);
+        assert_eq!(
+            listed_ids(&store, false),
+            [newest.as_str(), middle.as_str(), oldest.as_str()]
+        );
+
+        pin(&store, &oldest, true);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        pin(&store, &middle, true);
+        // Pinned first (latest pin on top), then the rest by update time.
+        assert_eq!(
+            listed_ids(&store, false),
+            [middle.as_str(), oldest.as_str(), newest.as_str()]
+        );
+
+        pin(&store, &middle, false);
+        assert_eq!(
+            listed_ids(&store, false),
+            [oldest.as_str(), newest.as_str(), middle.as_str()]
+        );
+    }
+
+    #[test]
+    fn pinning_twice_keeps_the_first_pin_time_and_unpinning_clears_it() {
+        let (_config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let first = pin(&store, &sid, true).pinned_at.unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert_eq!(pin(&store, &sid, true).pinned_at, Some(first));
+        assert_eq!(pin(&store, &sid, false).pinned_at, None);
+        assert_eq!(store.load_detail(&sid).unwrap().session.pinned_at, None);
+    }
+
+    #[test]
+    fn a_pin_does_not_reorder_the_trash() {
+        let (_config, store) = fixture();
+        let pinned_then_trashed = session_updated_at(&store, 10);
+        let trashed_later = session_updated_at(&store, 20);
+        pin(&store, &pinned_then_trashed, true);
+        for sid in [&pinned_then_trashed, &trashed_later] {
+            let mut trash = request(sid);
+            trash.deleted = Some(true);
+            store.update(&trash, no_precondition).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        // Most recently trashed first, pin or not; the pin survives for an undo.
+        assert_eq!(
+            listed_ids(&store, true),
+            [trashed_later.as_str(), pinned_then_trashed.as_str()]
+        );
+        let session = &store.load_detail(&pinned_then_trashed).unwrap().session;
+        assert!(session.pinned_at.is_some());
+    }
+
+    #[test]
+    fn pin_and_draft_changes_leave_the_update_time_alone() {
+        let (_config, store) = fixture();
+        let sid = session_updated_at(&store, 5);
+        let attachment = attachment("ready");
+        let attachment_id = attachment.id.clone();
+        store
+            .mutate(&sid, |record| {
+                record.attachments.push(attachment);
+                Ok(())
+            })
+            .unwrap();
+        let quiet = |change: &dyn Fn(&mut UpdateRequest)| {
+            let mut update = request(&sid);
+            change(&mut update);
+            let session = store.update(&update, no_precondition).unwrap();
+            assert_eq!(session.updated_at, 5);
+            assert_eq!(store.load_detail(&sid).unwrap().session.updated_at, 5);
+        };
+        quiet(&|u| u.pinned = Some(true));
+        quiet(&|u| u.pinned = Some(false));
+        quiet(&|u| u.draft = Some("half a thought".into()));
+        quiet(&|u| u.draft_attachment_ids = Some(vec![attachment_id.clone()]));
+        quiet(&|u| {
+            u.pinned = Some(true);
+            u.draft = Some("both at once".into());
+        });
+        assert_eq!(
+            store.load_detail(&sid).unwrap().session.draft,
+            "both at once"
+        );
+    }
+
+    #[test]
+    fn every_other_update_still_moves_the_update_time() {
+        let (_config, store) = fixture();
+        let sid = session_updated_at(&store, 5);
+        let loud: [&dyn Fn(&mut UpdateRequest); 5] = [
+            &|u| u.title = Some("Renamed".into()),
+            &|u| u.model_id = Some("other/model".into()),
+            &|u| u.web_search = Some(true),
+            &|u| u.deleted = Some(true),
+            &|u| u.deleted = Some(false),
+        ];
+        for change in loud {
+            let mut update = request(&sid);
+            change(&mut update);
+            assert!(store.update(&update, no_precondition).unwrap().updated_at > 5);
+            store
+                .mutate(&sid, |record| {
+                    record.session.updated_at = 5;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        // A pin does not hide a change that does move it.
+        let mut update = request(&sid);
+        update.pinned = Some(true);
+        update.title = Some("Pinned and renamed".into());
+        assert!(store.update(&update, no_precondition).unwrap().updated_at > 5);
+    }
+
+    // ── title source ─────────────────────────────────────────────────────
+
+    /// `session.json` as an earlier version wrote it: no `pinnedAt`, no
+    /// `titleSource`; `title` and `messages` as given.
+    fn save_as_old_version(
+        config: &Path,
+        store: &AssistantStore,
+        sid: &str,
+        title: &str,
+        messages: &[Message],
+    ) {
+        let path = session_file(config, store, sid);
+        let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let session = saved["session"].as_object_mut().unwrap();
+        session.remove("pinnedAt");
+        session.remove("titleSource");
+        session.insert("title".into(), json!(title));
+        saved["messages"] = serde_json::to_value(messages).unwrap();
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+    }
+
+    fn title_source_of(store: &AssistantStore, sid: &str) -> Option<TitleSource> {
+        store.load_detail(sid).unwrap().session.title_source
+    }
+
+    #[test]
+    fn a_new_conversation_is_named_by_its_first_message_and_a_rename_is_the_users() {
+        let (_config, store) = fixture();
+        let created = store.create("test/model", false).unwrap().session;
+        assert_eq!(created.title_source, Some(TitleSource::Auto));
+        assert_eq!(created.pinned_at, None);
+
+        let mut rename = request(&created.id);
+        rename.title = Some("Trip plan".into());
+        let renamed = store.update(&rename, no_precondition).unwrap();
+        assert_eq!(renamed.title_source, Some(TitleSource::User));
+        assert_eq!(
+            title_source_of(&store, &created.id),
+            Some(TitleSource::User)
+        );
+
+        // Only a rename counts: a pin keeps whoever named it.
+        let other = store.create("test/model", false).unwrap().session.id;
+        assert_eq!(
+            pin(&store, &other, true).title_source,
+            Some(TitleSource::Auto)
+        );
+    }
+
+    #[test]
+    fn an_old_conversation_titled_by_its_first_message_reads_as_auto() {
+        let (config, store) = fixture();
+        let long = "Explain the difference between a mutex and a semaphore, with examples";
+        assert!(long.chars().count() > 48);
+        let cases: [(&str, Vec<Message>, Option<TitleSource>); 4] = [
+            // Cut to 48 characters, as the first send does.
+            (&long[..48], vec![message(long)], Some(TitleSource::Auto)),
+            // Not sent yet.
+            ("", vec![], Some(TitleSource::Auto)),
+            // Renamed by hand in the old version.
+            (
+                "Locking notes",
+                vec![message(long)],
+                Some(TitleSource::User),
+            ),
+            // Renamed before its first message.
+            ("Locking notes", vec![], Some(TitleSource::User)),
+        ];
+        for (title, messages, expected) in cases {
+            let sid = store.create("test/model", false).unwrap().session.id;
+            save_as_old_version(config.path(), &store, &sid, title, &messages);
+            assert_eq!(title_source_of(&store, &sid), expected, "{title:?}");
+            // The title is never changed by deriving its source.
+            assert_eq!(store.load_detail(&sid).unwrap().session.title, title);
+        }
+    }
+
+    #[test]
+    fn an_old_conversation_started_with_a_file_alone_reads_as_auto() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut first = message("   ");
+        first.attachments = vec![attachment("ready")];
+        save_as_old_version(config.path(), &store, &sid, "a.txt", &[first]);
+        assert_eq!(title_source_of(&store, &sid), Some(TitleSource::Auto));
+    }
+
+    #[test]
+    fn an_old_conversation_is_compared_with_its_first_message_not_a_later_one() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut reply = message("an answer");
+        reply.role = "assistant".into();
+        let messages = [message("first question"), reply, message("second question")];
+        save_as_old_version(config.path(), &store, &sid, "second question", &messages);
+        assert_eq!(title_source_of(&store, &sid), Some(TitleSource::User));
+        save_as_old_version(config.path(), &store, &sid, "first question", &messages);
+        assert_eq!(title_source_of(&store, &sid), Some(TitleSource::Auto));
+    }
+
+    #[test]
+    fn an_old_conversation_round_trips_with_the_new_fields_filled_in() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        save_as_old_version(config.path(), &store, &sid, "Kept", &[message("hello")]);
+        let session = store.load_detail(&sid).unwrap().session;
+        assert_eq!(session.pinned_at, None);
+        assert_eq!(session.title_source, Some(TitleSource::User));
+
+        // The next save writes what the read derived, and it is read back as is.
+        pin(&store, &sid, true);
+        let saved: Value =
+            serde_json::from_slice(&fs::read(session_file(config.path(), &store, &sid)).unwrap())
+                .unwrap();
+        assert_eq!(saved["session"]["titleSource"], "user");
+        assert!(saved["session"]["pinnedAt"].is_i64());
+        let session = store.load_detail(&sid).unwrap().session;
+        assert_eq!(session.title_source, Some(TitleSource::User));
+        assert!(session.pinned_at.is_some());
+    }
+
+    // ── search hits ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_search_names_the_first_matching_message_that_is_still_active() {
+        let (_config, store) = fixture();
+        let talked = store.create("test/model", false).unwrap().session.id;
+        let mut old_branch = message("The Kyoto draft I replaced");
+        old_branch.superseded = true;
+        let first_hit = message("Plan the KYOTO trip");
+        let later_hit = message("More about kyoto food");
+        let wanted = first_hit.id.clone();
+        store
+            .mutate(&talked, |record| {
+                record.messages.extend([
+                    message("Hello"),
+                    old_branch,
+                    first_hit,
+                    message("Anything else?"),
+                    later_hit,
+                ]);
+                Ok(())
+            })
+            .unwrap();
+        let titled = store.create("test/model", false).unwrap().session.id;
+        let mut rename = request(&titled);
+        rename.title = Some("Kyoto notes".into());
+        store.update(&rename, no_precondition).unwrap();
+        let only_replaced = store.create("test/model", false).unwrap().session.id;
+        let mut replaced = message("kyoto, before the edit");
+        replaced.superseded = true;
+        store
+            .mutate(&only_replaced, |record| {
+                record.messages.push(replaced);
+                Ok(())
+            })
+            .unwrap();
+        store.create("test/model", false).unwrap();
+
+        let list = store.list(false, "kyoto").unwrap();
+        assert_eq!(list.sessions.len(), 3);
+        // A title-only or replaced-only match is listed but has nowhere to jump.
+        assert_eq!(list.matches, HashMap::from([(talked.clone(), wanted)]));
+        let value = serde_json::to_value(&list).unwrap();
+        assert!(value["matches"][&talked].is_string());
+    }
+
+    #[test]
+    fn without_a_search_there_are_no_matches() {
+        let (_config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(message("anything"));
+                Ok(())
+            })
+            .unwrap();
+        assert!(store.list(false, "").unwrap().matches.is_empty());
+        assert!(store.list(false, "nowhere").unwrap().matches.is_empty());
+        let value = serde_json::to_value(store.list(false, "").unwrap()).unwrap();
+        assert_eq!(value["matches"], json!({}));
+    }
+
     #[test]
     fn a_session_folder_with_history_but_no_session_file_is_reported() {
         let (config, store) = fixture();
@@ -1786,12 +2184,14 @@ mod tests {
             session: Session {
                 id: sid.into(),
                 title: String::new(),
+                title_source: Some(TitleSource::Auto),
                 model_id: "test/model".into(),
                 web_search: false,
                 thinking_level: None,
                 created_at: 1,
                 updated_at: 1,
                 deleted_at: None,
+                pinned_at: None,
                 active_run: None,
                 draft: String::new(),
                 draft_attachment_ids: vec![],

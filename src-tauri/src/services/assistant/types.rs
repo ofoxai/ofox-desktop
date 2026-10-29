@@ -26,6 +26,11 @@ pub struct RunRef {
 pub struct Session {
     pub id: String,
     pub title: String,
+    /// Who named the conversation. `None` only in a record saved before this
+    /// field existed: every read derives it (see `store`), so a session the
+    /// renderer or host holds always has one.
+    #[serde(default)]
+    pub title_source: Option<TitleSource>,
     pub model_id: String,
     /// Web search (S3) stays off until the user turns it on.
     #[serde(default)]
@@ -40,6 +45,9 @@ pub struct Session {
     /// Set while the session sits in the trash (S4).
     #[serde(default)]
     pub deleted_at: Option<i64>,
+    /// When the conversation was pinned to the top of the list.
+    #[serde(default)]
+    pub pinned_at: Option<i64>,
     #[serde(default)]
     pub active_run: Option<RunRef>,
     #[serde(default)]
@@ -51,6 +59,28 @@ pub struct Session {
     /// Transient response only; never restored from a saved session.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub cleanup_warning: Option<String>,
+}
+
+/// Who named a conversation: the first message (`auto`; a generated title
+/// may still replace it) or the user (`user`; never replaced).
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum TitleSource {
+    Auto,
+    User,
+}
+
+/// How many characters of the first message name a conversation.
+const TITLE_CHARS: usize = 48;
+
+/// What a conversation is called until it is renamed: the start of its first
+/// message, or of the first file's name when a file is sent alone.
+pub fn auto_title(text: &str, attachments: &[Attachment]) -> String {
+    let named = match text.trim() {
+        "" => attachments.first().map_or("", |a| a.name.as_str()),
+        text => text,
+    };
+    named.chars().take(TITLE_CHARS).collect()
 }
 
 /// A file imported into a conversation, as saved in its folder. On the
@@ -187,6 +217,8 @@ pub struct UpdateRequest {
     /// One of the model's thinking levels, or `"default"` to clear the choice.
     pub thinking_level: Option<String>,
     pub deleted: Option<bool>,
+    /// Pin to, or unpin from, the top of the list.
+    pub pinned: Option<bool>,
     pub draft: Option<String>,
     pub draft_attachment_ids: Option<Vec<String>>,
 }
@@ -198,6 +230,25 @@ pub struct DeleteRequest {
     pub session_id: String,
     pub expected_owner: String,
     pub expected_generation: u64,
+}
+
+/// Emptying the trash names the authority shown by its confirmation, like a
+/// permanent deletion.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmptyTrashRequest {
+    pub expected_owner: String,
+    pub expected_generation: u64,
+}
+
+/// What emptying the trash did: conversations removed for good, and those not
+/// fully removed. A conversation still replying stays in the trash; one whose
+/// files could not all be removed is hidden and cleaned up at the next start.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EmptyTrashReport {
+    pub deleted: usize,
+    pub failed: usize,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -288,6 +339,39 @@ mod tests {
         assert!(session.draft.is_empty());
         assert!(session.draft_attachment_ids.is_empty());
         assert!(session.thinking_level.is_none());
+        assert!(session.pinned_at.is_none());
+        // Derived from the conversation when a saved one is read (see `store`).
+        assert!(session.title_source.is_none());
+    }
+
+    #[test]
+    fn the_title_source_and_pin_time_use_the_renderers_names() {
+        let mut saved = minimal_session();
+        saved["pinnedAt"] = json!(1700);
+        saved["titleSource"] = json!("user");
+        let session: Session = serde_json::from_value(saved).unwrap();
+        assert_eq!(session.pinned_at, Some(1700));
+        assert_eq!(session.title_source, Some(TitleSource::User));
+        let value = serde_json::to_value(session).unwrap();
+        assert_eq!(value["pinnedAt"], 1700);
+        assert_eq!(value["titleSource"], "user");
+        assert_eq!(serde_json::to_value(TitleSource::Auto).unwrap(), "auto");
+    }
+
+    #[test]
+    fn an_automatic_title_is_the_first_48_characters_of_the_text_or_the_first_file() {
+        let file = |name: &str| -> Attachment {
+            serde_json::from_value(json!({
+                "id": id(), "name": name, "mimeType": "text/plain", "sizeBytes": 1,
+                "status": "ready",
+            }))
+            .unwrap()
+        };
+        assert_eq!(auto_title("  hello  ", &[file("a.txt")]), "hello");
+        assert_eq!(auto_title("   ", &[file("a.txt"), file("b.txt")]), "a.txt");
+        assert_eq!(auto_title("", &[]), "");
+        let long = "字".repeat(60);
+        assert_eq!(auto_title(&long, &[]).chars().count(), 48);
     }
 
     #[test]

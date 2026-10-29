@@ -40,6 +40,7 @@ vi.mock("sonner", () => ({
 const session: AssistantSession = {
   id: "session-a",
   title: "My conversation",
+  titleSource: "auto",
   modelId: "balanced",
   webSearch: false,
   draft: "",
@@ -47,6 +48,7 @@ const session: AssistantSession = {
   createdAt: 1,
   updatedAt: 1,
   deletedAt: null,
+  pinnedAt: null,
   activeRun: null,
 };
 const model = (id: string, name: string): AssistantModel => ({

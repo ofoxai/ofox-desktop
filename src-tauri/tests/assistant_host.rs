@@ -751,14 +751,17 @@ fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
         let list = host.list_sessions(false, "").await.unwrap();
         assert_eq!(list.sessions.len(), 1);
         assert!(list.unreadable.is_empty());
+        assert!(list.matches.is_empty());
+        // The first message named the conversation; nobody renamed it.
+        assert_eq!(list.sessions[0].title, "Hello there");
         assert_eq!(
-            host.list_sessions(false, "then")
-                .await
-                .unwrap()
-                .sessions
-                .len(),
-            1
+            list.sessions[0].title_source,
+            Some(types::TitleSource::Auto)
         );
+        let found = host.list_sessions(false, "then").await.unwrap();
+        assert_eq!(found.sessions.len(), 1);
+        // The search jumps to the first message that says it.
+        assert_eq!(found.matches.get(&sid), Some(&detail.messages[2].id));
         assert!(host
             .list_sessions(false, "zzz")
             .await

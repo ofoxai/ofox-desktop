@@ -9,8 +9,9 @@ use crate::services::assistant::{
     host::{blocking, Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
-        Attachment, CreateRequest, DeleteRequest, Detail, Event, ExportMarkdownRequest, RunProxy,
-        RunRef, SendRequest, Session, TransferRequest, UpdateRequest,
+        Attachment, CreateRequest, DeleteRequest, Detail, EmptyTrashReport, EmptyTrashRequest,
+        Event, ExportMarkdownRequest, RunProxy, RunRef, SendRequest, Session, TransferRequest,
+        UpdateRequest,
     },
     AssistantHost,
 };
@@ -72,6 +73,15 @@ pub async fn assistant_delete_session(
     request: DeleteRequest,
 ) -> Result<(), String> {
     host.delete_session(request).await
+}
+
+/// Permanently delete every conversation in the trash.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_empty_trash(
+    host: Host<'_>,
+    request: EmptyTrashRequest,
+) -> Result<EmptyTrashReport, String> {
+    host.empty_trash(request).await
 }
 
 /// `None` when the save dialog was cancelled.

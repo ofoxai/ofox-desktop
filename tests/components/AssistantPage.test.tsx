@@ -65,6 +65,7 @@ vi.mock("sonner", () => ({ toast: toasts }));
 const session: AssistantSession = {
   id: "session-a",
   title: "My conversation",
+  titleSource: "auto",
   modelId: "balanced",
   webSearch: false,
   draft: "",
@@ -72,6 +73,7 @@ const session: AssistantSession = {
   createdAt: 1,
   updatedAt: 1,
   deletedAt: null,
+  pinnedAt: null,
   activeRun: null,
 };
 const model = (id: string, name: string): AssistantModel => ({
@@ -107,7 +109,12 @@ const listOf = (
   sessions: AssistantSession[],
   unreadable: AssistantSessionList["unreadable"] = [],
   trashCount = 0,
-): AssistantSessionList => ({ sessions, unreadable, trashCount });
+): AssistantSessionList => ({
+  sessions,
+  unreadable,
+  trashCount,
+  matches: {},
+});
 
 function page(enabled = true) {
   return (
