@@ -1149,6 +1149,8 @@ mod tests {
     fn send(sid: &str, edit: Option<&str>, regenerate: Option<&str>) -> SendRequest {
         SendRequest {
             media: None,
+            video: None,
+            quote_id: None,
             session_id: sid.into(),
             run_id: id(),
             operation_id: id(),

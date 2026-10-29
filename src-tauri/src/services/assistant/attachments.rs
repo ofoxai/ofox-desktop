@@ -378,6 +378,97 @@ pub(super) fn generated(
     })
 }
 
+/// Publish a downloaded video and its references together, without buffering
+/// the movie in memory. A failed record write rolls the private copy back.
+pub(super) fn generated_video(
+    store: &AssistantStore,
+    sid: &str,
+    mid: &str,
+    file: &mut std::fs::File,
+    mut media: MediaRecord,
+    precondition: impl FnOnce(&SessionRecord) -> Result<(), String>,
+) -> Result<Attachment, String> {
+    use std::io::{Seek, SeekFrom};
+    let size = file.metadata().map_err(|_| UNREADABLE)?.len();
+    if size > super::video::MAX_VIDEO_BYTES {
+        return Err(TOO_LARGE.into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| UNREADABLE)?;
+    let mut head = [0_u8; 12];
+    file.read_exact(&mut head).map_err(|_| UNREADABLE)?;
+    if &head[4..8] != b"ftyp" {
+        return Err(UNSUPPORTED.into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| UNREADABLE)?;
+    store.with_attachment_lock(sid, || {
+        let mut txn = FileTxn::new();
+        let item = Attachment {
+            id: id(),
+            name: "generated.mp4".into(),
+            mime_type: "video/mp4".into(),
+            size_bytes: size,
+            status: "ready".into(),
+            reason: None,
+            preview_url: None,
+            details: None,
+            origin: Some("generated".into()),
+            source_message_id: Some(mid.into()),
+        };
+        let dir = store.attachment_dir(sid)?;
+        let target = dir.join(&item.id);
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(WRITE_FAILED.into());
+        }
+        // Check quota before copying and again under the record lock. Other
+        // imports cannot publish in between because this attachment lock is held.
+        check_capacity(&store.load_record(sid)?, 1, size)?;
+        media.outputs = vec![item.id.clone()];
+        media.status = "completed".into();
+        let copied = (|| {
+            txn.copy_with_mode(&target, &mut file.take(size + 1), 0o600)
+                .map_err(|_| WRITE_FAILED)?;
+            if fs::metadata(&target).map_err(|_| WRITE_FAILED)?.len() != size {
+                return Err(UNREADABLE.into());
+            }
+            store.mutate(sid, |record| {
+                precondition(record)?;
+                check_capacity(record, 1, size)?;
+                let message = record
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == mid)
+                    .ok_or("assistant_message_not_found")?;
+                message.attachments = vec![item.clone()];
+                message.media = Some(media.clone());
+                message.status = "completed".into();
+                message.error_code = None;
+                message.completed_at = Some(now());
+                message.usage = Some(
+                    serde_json::json!({"mediaCostUsd":media.cost,"estimatedCostUsd":media.cost}),
+                );
+                let run = message.run_id.clone();
+                for op in record
+                    .operations
+                    .iter_mut()
+                    .filter(|op| Some(&op.run_id) == run.as_ref())
+                {
+                    op.media = Some(media.clone());
+                    op.status = OperationStatus::Completed;
+                }
+                record.attachments.push(item.clone());
+                Ok(())
+            })
+        })();
+        match copied {
+            Ok(()) => Ok(item),
+            Err(error) => {
+                let _ = txn.rollback();
+                Err(error)
+            }
+        }
+    })
+}
+
 /// The MIME type of `source`, by its extension.
 fn source_type(source: &Path) -> Result<&'static str, String> {
     source
@@ -1211,6 +1302,84 @@ mod tests {
         assert_eq!(
             check_room(&record, 0, 0).unwrap_err(),
             "assistant_session_deleted"
+        );
+    }
+    #[test]
+    fn generated_video_is_streamed_private_atomic_and_quota_checked() {
+        use std::io::{Seek, SeekFrom, Write};
+        let (_config, store, sid) = fixture();
+        let mid = id();
+        let run = id();
+        let media = MediaRecord {
+            kind: "video".into(),
+            status: "completed".into(),
+            cost: Some("0.12".into()),
+            job_id: Some(id()),
+            ..Default::default()
+        };
+        store.mutate(&sid, |record| {
+            record.messages.push(serde_json::from_value(json!({"id":mid,"role":"media","content":"square","createdAt":1,"status":"downloading","runId":run,"media":media})).unwrap());
+            record.operations.push(Operation {id:id(),run_id:run,status:OperationStatus::PendingMedia,media:Some(media.clone()),search_price:None}); Ok(())
+        }).unwrap();
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"\0\0\0\x18ftypisomfixture").unwrap();
+        file.set_len(MAX_FILE_BYTES + 1).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let attachment =
+            generated_video(&store, &sid, &mid, &mut file, media.clone(), |_| Ok(())).unwrap();
+        assert_eq!(attachment.size_bytes, MAX_FILE_BYTES + 1);
+        assert_eq!(attachment.mime_type, "video/mp4");
+        assert_eq!(attachment.origin.as_deref(), Some("generated"));
+        assert_eq!(attachment.source_message_id.as_deref(), Some(mid.as_str()));
+        let path = store.attachment_root(&sid).unwrap().join(&attachment.id);
+        #[cfg(unix)]
+        assert_eq!(crate::config::file_mode(&path), Some(0o600));
+        store.cleanup_orphan_attachments(&sid).unwrap();
+        assert!(path.exists());
+        let record = store.load_record(&sid).unwrap();
+        assert_eq!(
+            record.messages[0]
+                .media
+                .as_ref()
+                .unwrap()
+                .outputs
+                .as_slice(),
+            std::slice::from_ref(&attachment.id)
+        );
+        assert_eq!(record.messages[0].status, "completed");
+        assert!(matches!(
+            record.operations[0].status,
+            OperationStatus::Completed
+        ));
+        let before = copies(&store, &sid);
+        file.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(
+            generated_video(&store, &sid, &mid, &mut file, media.clone(), |_| Err(
+                "assistant_identity_changed".into()
+            ))
+            .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert_eq!(copies(&store, &sid), before);
+        store
+            .mutate(&sid, |record| {
+                record
+                    .attachments
+                    .push(existing(MAX_SESSION_BYTES - attachment.size_bytes));
+                Ok(())
+            })
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        assert_eq!(
+            generated_video(&store, &sid, &mid, &mut file, media.clone(), |_| Ok(())).unwrap_err(),
+            TOTAL_TOO_LARGE
+        );
+        assert_eq!(copies(&store, &sid), before);
+        file.set_len(super::super::video::MAX_VIDEO_BYTES + 1)
+            .unwrap();
+        assert_eq!(
+            generated_video(&store, &sid, &mid, &mut file, media, |_| Ok(())).unwrap_err(),
+            TOO_LARGE
         );
     }
 }

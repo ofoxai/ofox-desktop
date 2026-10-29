@@ -7,12 +7,20 @@ use serde_json::Value;
 
 /// Persisted media state, also kept in the operation ledger so a later
 /// catalog change or branch switch cannot change what the request cost.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaRecord {
     pub kind: String,
     pub model: String,
     pub params: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub apex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submitted_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_started_at: Option<i64>,
     #[serde(default)]
     pub input_ids: Vec<String>,
     pub status: String,
@@ -238,6 +246,8 @@ pub struct Operation {
 #[serde(rename_all = "camelCase")]
 pub enum OperationStatus {
     Running,
+    /// A remote job is known; querying it resumes without repeating submission.
+    PendingMedia,
     Completed,
     Failed,
     /// Stopped by the user, possibly before the request was registered.
@@ -358,6 +368,8 @@ pub struct EmptyTrashReport {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TransferRequest {
+    #[serde(default)]
+    pub exclude_videos: bool,
     pub expected_owner: String,
     pub expected_generation: u64,
 }
@@ -375,6 +387,10 @@ pub struct ExportMarkdownRequest {
 pub struct SendRequest {
     #[serde(default)]
     pub media: Option<ImageRequest>,
+    #[serde(default)]
+    pub video: Option<super::video::VideoRequest>,
+    #[serde(default)]
+    pub quote_id: Option<String>,
     pub session_id: String,
     pub run_id: String,
     pub operation_id: String,

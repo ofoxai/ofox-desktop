@@ -9,7 +9,7 @@ import {
 import { useOptionalShell } from "@/components/shell/ShellContext";
 
 /** How a run ended, as its `run_end` says. */
-export type FinishStatus = "completed" | "stopped" | "error";
+export type FinishStatus = "completed" | "stopped" | "error" | "queued";
 
 /** A run of a conversation that just ended. */
 export interface FinishedRun {
@@ -44,7 +44,7 @@ export function finishNotice({
   openSessionId: string | null;
   sessionId: string;
 }): "system" | "toast" | null {
-  if (!enabled || status === "stopped") return null;
+  if (!enabled || (status !== "completed" && status !== "error")) return null;
   if (!focused) return "system";
   if (!onAssistantPage || openSessionId !== sessionId) return "toast";
   return null;

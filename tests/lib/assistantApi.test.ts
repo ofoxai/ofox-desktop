@@ -503,3 +503,41 @@ it("passes on what a backup holds and what a restore did", async () => {
   });
   expect(await assistantApi.restore(request)).toEqual(restored);
 });
+
+describe("video commands", () => {
+  it("quotes the displayed parameters with the current authority", async () => {
+    const request = {
+      sessionId: "s",
+      expectedOwner: "o",
+      expectedGeneration: 7,
+      params: { duration: 4, resolution: "480p" },
+    };
+    invoke.mockResolvedValue({
+      id: "quote",
+      estimatedCostUsd: "0.12",
+      expiresAt: 600_000,
+    });
+    expect(await assistantApi.quoteMedia(request)).toEqual({
+      id: "quote",
+      estimatedCostUsd: "0.12",
+      expiresAt: 600_000,
+    });
+    expect(invoke).toHaveBeenCalledWith("assistant_quote_media", { request });
+  });
+  it("cancels and resumes only the selected message under its authority", async () => {
+    const request = {
+      sessionId: "s",
+      messageId: "m",
+      expectedOwner: "o",
+      expectedGeneration: 7,
+    };
+    await assistantApi.cancelVideo(request);
+    expect(invoke).toHaveBeenLastCalledWith("assistant_cancel_video", {
+      request,
+    });
+    await assistantApi.resumeVideo(request);
+    expect(invoke).toHaveBeenLastCalledWith("assistant_resume_video", {
+      request,
+    });
+  });
+});

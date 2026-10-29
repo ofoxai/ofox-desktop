@@ -90,7 +90,7 @@ impl AssistantHost {
             host.ensure_no_reply(&identity.owner)?;
             let store = host.store(&identity.owner)?;
             store
-                .backup(&path, &secrets, || {
+                .backup_with_options(&path, &secrets, request.exclude_videos, || {
                     if host.generation() != generation {
                         Err(IDENTITY_CHANGED.into())
                     } else {

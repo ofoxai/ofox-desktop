@@ -154,7 +154,7 @@ async function searchFor(text: string) {
   );
 }
 /** Pick an entry of the sidebar footer's More actions menu once it can run. */
-async function chooseFromMenu(name: string) {
+async function chooseFromMenu(name: string, confirmBackup = true) {
   await userEvent.click(
     screen.getByRole("button", { name: i18n.t("assistant.moreActions") }),
   );
@@ -163,6 +163,13 @@ async function chooseFromMenu(name: string) {
     expect(item).not.toHaveAttribute("aria-disabled", "true"),
   );
   await userEvent.click(item);
+  if (confirmBackup && name === i18n.t("assistant.backupMenu")) {
+    await userEvent.click(
+      await screen.findByRole("button", {
+        name: i18n.t("assistant.createBackup"),
+      }),
+    );
+  }
 }
 /** A trashed conversation is restored from the centred notice where the composer was. */
 const restoreButton = () => screen.getByRole("button", { name: "Restore" });
@@ -6925,5 +6932,43 @@ describe("image conversations", () => {
     expect(
       await screen.findByText("Provider refused this prompt <b>safely</b>"),
     ).toBeVisible();
+  });
+});
+
+describe("video backup options", () => {
+  it("includes videos by default and can cancel without opening the save dialog", async () => {
+    render(page());
+    await chooseFromMenu("Back up…", false);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Back up conversations",
+    });
+    expect(
+      within(dialog).getByRole("switch", { name: "Exclude videos" }),
+    ).not.toBeChecked();
+    expect(mocks.backup).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+    expect(mocks.backup).not.toHaveBeenCalled();
+  });
+  it("passes the explicitly selected video exclusion to the native backup", async () => {
+    render(page());
+    await chooseFromMenu("Back up…", false);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Back up conversations",
+    });
+    await userEvent.click(
+      within(dialog).getByRole("switch", { name: "Exclude videos" }),
+    );
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Create backup" }),
+    );
+    await waitFor(() =>
+      expect(mocks.backup).toHaveBeenCalledWith({
+        expectedOwner: capabilities.owner,
+        expectedGeneration: capabilities.authorityGeneration,
+        excludeVideos: true,
+      }),
+    );
   });
 });

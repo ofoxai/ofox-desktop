@@ -13,6 +13,13 @@ draft that does not yet have a conversation. Conversation switching and editing
 are disabled while this save and the file dialog run. Cancelling the dialog is
 quiet; the draft remains saved. An unchanged draft is not rewritten.
 
+The backup options include **Exclude videos**, off by default. Excluding videos
+keeps their message, parameters, task ID and cost, but omits the video bytes.
+Restored results say the file was not included in the backup. The source files
+are unchanged. Re-backing up an excluded result preserves that missing-file
+marker; it does not count the conversation as damaged. Images and included videos
+use ZIP Stored entries rather than being compressed again.
+
 A backup reports how many conversations it wrote and how many damaged ones it
 left out: an unreadable or invalid record, a missing native history that
 messages point into, a missing or resized attachment file, or a file over its
@@ -60,7 +67,11 @@ importing files.
 ## Format and validation
 
 ZIP format version 1 contains `manifest.json` with `nativeVersion: 3`, the owner
-hash, UUID session IDs and a size/SHA-256 inventory. Allowed member names are:
+hash, UUID session IDs and a size/SHA-256 inventory. Optional `excludedVideos`
+lists the omitted video member names. Restore requires an exact match between
+this list and the video missing-file markers in the records, rejects duplicates
+or omitted members that also appear in the ZIP, and validates all paths before
+publishing. Older archives without the field still restore. Allowed member names are:
 
 - `prefs.json`
 - `<session UUID>/session.json`
@@ -92,7 +103,8 @@ hashes are checked before imported sessions become visible.
 | Manifest | 16 MiB |
 | Session record | 64 MiB |
 | Native history | 256 MiB |
-| Individual attachment | 50 MiB |
+| Individual video attachment | 200 MiB |
+| Other individual attachment | 50 MiB |
 | Preferences | 1 MiB |
 
 The native validator checks the pinned Pi SDK 1.4.0 session-3 entry shapes,

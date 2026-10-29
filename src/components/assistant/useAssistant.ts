@@ -1482,7 +1482,7 @@ export function useAssistant(enabled: boolean) {
   }, [busy, loading, select, showError]);
 
   const transfer = useCallback(
-    async (kind: "backup" | "restore") => {
+    async (kind: "backup" | "restore", excludeVideos = false) => {
       const identity = bootstrapRef.current;
       if (
         busy ||
@@ -1534,7 +1534,9 @@ export function useAssistant(enabled: boolean) {
           expectedGeneration: identity.authorityGeneration,
         };
         if (kind === "backup") {
-          const report = await assistantApi.backup(request);
+          const report = await assistantApi.backup(
+            excludeVideos ? { ...request, excludeVideos: true } : request,
+          );
           if (current() && report) setTransferResult({ kind, ...report });
         } else {
           const report = await assistantApi.restore(request);

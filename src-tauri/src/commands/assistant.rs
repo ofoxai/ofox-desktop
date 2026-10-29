@@ -828,3 +828,25 @@ pub async fn assistant_save_media(
     })
     .await
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_quote_media(
+    host: Host<'_>,
+    request: crate::services::assistant::video::QuoteMediaRequest,
+) -> Result<crate::services::assistant::video::MediaQuote, String> {
+    host.quote_media(request).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_cancel_video(
+    host: Host<'_>,
+    request: crate::services::assistant::video::VideoActionRequest,
+) -> Result<(), String> {
+    host.cancel_video(request).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_resume_video(
+    host: Host<'_>,
+    request: crate::services::assistant::video::VideoActionRequest,
+) -> Result<(), String> {
+    host.resume_video(request).await
+}

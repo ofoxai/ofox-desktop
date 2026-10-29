@@ -236,6 +236,26 @@ pub(crate) fn models_catalog_base_for(apex: &str) -> Option<String> {
     known_apex(apex).map(models_catalog_base_at)
 }
 
+/// Keyless model-specific provider prices, resolved from the selected apex.
+pub(crate) fn model_pricing_url_for(apex: &str, model: &str) -> Option<String> {
+    let base = models_catalog_base_for(apex)?;
+    let parts: Vec<_> = model.split('/').collect();
+    if parts.len() != 2
+        || parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || !part
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+        })
+    {
+        return None;
+    }
+    Some(format!(
+        "{base}/v2/models/catalog/{model}?include=provider_price"
+    ))
+}
+
 fn models_catalog_base_at(apex: &'static str) -> String {
     format!("https://api.{apex}")
 }
@@ -554,6 +574,28 @@ async fn reconcile_after_apex_change(app: &tauri::AppHandle, apex_before: &str, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_pricing_paths_follow_the_apex_and_cannot_escape_the_model_path() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            assert_eq!(
+                model_pricing_url_for(apex, "vendor/model"),
+                Some(format!(
+                    "https://api.{apex}/v2/models/catalog/vendor/model?include=provider_price"
+                ))
+            );
+        }
+        for model in [
+            "../model",
+            "vendor/../model",
+            "vendor/model?key=secret",
+            "https://outside/model",
+            "",
+        ] {
+            assert!(model_pricing_url_for("ofox.ai", model).is_none());
+        }
+        assert!(model_pricing_url_for("outside.invalid", "vendor/model").is_none());
+    }
 
     #[test]
     fn startup_probe_follows_the_network_unless_pinned() {

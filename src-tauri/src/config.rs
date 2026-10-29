@@ -903,6 +903,17 @@ impl FileTxn {
         atomic_write_with(&target, data, AtomicOpts { mode: Some(mode) })
     }
 
+    /// Stream a large new file through the same atomic/rollback transaction.
+    pub(crate) fn copy_with_mode(
+        &mut self,
+        path: &Path,
+        source: &mut dyn std::io::Read,
+        mode: u32,
+    ) -> Result<(), AppError> {
+        let target = self.remember(path)?;
+        atomic_copy_with(&target, source, AtomicOpts { mode: Some(mode) })
+    }
+
     pub(crate) fn set_mode(&mut self, path: &Path, mode: u32) -> Result<(), AppError> {
         let target = self.remember(path)?;
         set_file_mode(&target, mode)

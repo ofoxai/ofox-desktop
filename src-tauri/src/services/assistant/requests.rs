@@ -468,7 +468,12 @@ impl AssistantHost {
                 .send_image(request, identity, generation, record, native_file, model)
                 .await;
         }
-        if request.media.is_some() {
+        if model.kind == catalog::Kind::Video {
+            return self
+                .send_video(request, identity, generation, record, native_file, model)
+                .await;
+        }
+        if request.media.is_some() || request.video.is_some() || request.quote_id.is_some() {
             return Err(super::media::INVALID.into());
         }
         // Native history is the conversation's context: once a turn reached

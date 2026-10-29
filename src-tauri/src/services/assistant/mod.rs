@@ -16,6 +16,9 @@ pub mod thinking;
 mod title;
 mod transfers;
 pub mod types;
+pub mod video;
+mod video_host;
+mod video_http;
 mod web;
 
 pub use host::AssistantHost;

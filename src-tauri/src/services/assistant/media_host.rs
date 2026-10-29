@@ -119,7 +119,9 @@ impl AssistantHost {
         native_file: PathBuf,
         model: Model,
     ) -> Result<RunRef, String> {
-        if request.edit_message_id.is_some()
+        if request.video.is_some()
+            || request.quote_id.is_some()
+            || request.edit_message_id.is_some()
             || request.regenerate_message_id.is_some()
             || request.retry_message_id.is_some()
         {
@@ -169,6 +171,7 @@ impl AssistantHost {
             status: "submitting".into(),
             outputs: vec![],
             cost: None,
+            ..Default::default()
         };
         let branch = Branch::resolve(&record, &request)?;
         blocking({
@@ -372,7 +375,18 @@ impl AssistantHost {
     }
 }
 
-fn read_input(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
+pub(super) fn read_frame(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
+    read_image_input(root, file, true)
+}
+
+pub(super) fn read_input(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
+    read_image_input(root, file, false)
+}
+fn read_image_input(
+    root: PathBuf,
+    file: &Attachment,
+    video_frame: bool,
+) -> Result<InputImage, String> {
     const LIMIT: u64 = 15 * 1024 * 1024;
     if !std::fs::symlink_metadata(&root)
         .map_err(|_| attachments::UNREADABLE)?
@@ -407,7 +421,7 @@ fn read_input(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
         return Err(attachments::TOO_LARGE.into());
     }
     let ext = media::image_type(&bytes)
-        .filter(|ext| matches!(*ext, "png" | "jpg"))
+        .filter(|ext| matches!(*ext, "png" | "jpg") || (video_frame && *ext == "webp"))
         .ok_or(media::INVALID)?;
     Ok(InputImage {
         name: format!("input.{ext}"),
@@ -452,5 +466,17 @@ mod tests {
         let linked = root.path().join("attachments");
         std::os::unix::fs::symlink(outside, &linked).unwrap();
         assert!(read_input(linked, &file).is_err());
+    }
+    #[test]
+    fn video_frames_accept_webp_without_loosening_image_edit_limits() {
+        let root = tempfile::tempdir().unwrap();
+        let aid = id();
+        let bytes = b"RIFF\x10\0\0\0WEBPfixture";
+        std::fs::write(root.path().join(&aid), bytes).unwrap();
+        let file:Attachment=serde_json::from_value(json!({"id":aid,"name":"frame.webp","mimeType":"image/webp","sizeBytes":bytes.len(),"status":"ready"})).unwrap();
+        let frame = read_frame(root.path().into(), &file).unwrap();
+        assert_eq!(frame.mime, "image/webp");
+        assert_eq!(frame.bytes, bytes);
+        assert!(read_input(root.path().into(), &file).is_err());
     }
 }

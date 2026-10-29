@@ -375,6 +375,7 @@ export interface AssistantUsage {
 }
 
 export interface AssistantTransferRequest {
+  excludeVideos?: boolean;
   expectedOwner: string;
   expectedGeneration: number;
 }
@@ -456,6 +457,26 @@ export interface AssistantImageRequest {
   quality?: string | null;
   n?: number | null;
   inputAttachmentId?: string | null;
+}
+
+export interface AssistantVideoRequest {
+  duration: number;
+  resolution: string;
+  aspectRatio?: string | null;
+  generateAudio?: boolean;
+  firstFrameId?: string | null;
+  lastFrameId?: string | null;
+}
+export interface AssistantMediaQuote {
+  id: string;
+  estimatedCostUsd: string | null;
+  expiresAt: number;
+}
+export interface AssistantVideoActionRequest {
+  sessionId: string;
+  messageId: string;
+  expectedOwner: string;
+  expectedGeneration: number;
 }
 
 export interface AssistantMedia {
@@ -616,7 +637,10 @@ export type AssistantRunEvent =
   | { type: "error"; data: { code: string; message?: string } }
   | {
       type: "run_end";
-      data: { stopped: boolean; status: "completed" | "stopped" | "error" };
+      data: {
+        stopped: boolean;
+        status: "completed" | "stopped" | "error" | "queued";
+      };
     };
 
 export type AssistantEvent = AssistantRunRef & {
@@ -695,6 +719,16 @@ export const assistantApi = {
     expectedOwner: string;
     expectedGeneration: number;
   }) => invoke<AssistantEmptyTrashReport>("assistant_empty_trash", { request }),
+  quoteMedia: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+    params: AssistantVideoRequest;
+  }) => invoke<AssistantMediaQuote>("assistant_quote_media", { request }),
+  cancelVideo: (request: AssistantVideoActionRequest) =>
+    invoke<void>("assistant_cancel_video", { request }),
+  resumeVideo: (request: AssistantVideoActionRequest) =>
+    invoke<void>("assistant_resume_video", { request }),
   saveMedia: (request: {
     sessionId: string;
     attachmentId: string;
@@ -863,6 +897,14 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_attachment_cleanup_failed: "attachmentCleanupFailed",
   assistant_attachment_dialog_failed: "attachmentDialogFailed",
   assistant_drop_unavailable: "dropUnavailable",
+  assistant_attachment_not_in_backup: "attachmentNotInBackup",
+  assistant_media_quote_expired: "mediaQuoteExpired",
+  assistant_media_download_failed: "mediaDownloadFailed",
+  assistant_media_job_not_found: "mediaJobNotFound",
+  assistant_media_cancel_not_supported: "mediaCancelNotSupported",
+  assistant_media_cancel_failed: "mediaCancelFailed",
+  assistant_media_query_expired: "mediaQueryExpired",
+  assistant_media_video_limit: "mediaVideoLimit",
   assistant_media_invalid_params: "mediaInvalidParams",
   assistant_media_outcome_unknown: "mediaOutcomeUnknown",
   assistant_media_safety_rejected: "mediaSafetyRejected",

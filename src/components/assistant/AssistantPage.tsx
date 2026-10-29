@@ -63,6 +63,7 @@ import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
+import { Switch } from "@/components/ui/switch";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -181,6 +182,13 @@ function AssistantWorkspace() {
   const { detail, bootstrap, run, busy } = assistant;
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [backupDialog, setBackupDialog] = useState<{
+    trigger: HTMLButtonElement | null;
+    owner?: string | null;
+    generation?: number;
+  } | null>(null);
+  const [excludeVideos, setExcludeVideos] = useState(false);
+  const backupTrigger = useRef<HTMLButtonElement | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(readSidebarCollapsed);
   const sidebarId = useId();
@@ -699,9 +707,19 @@ function AssistantWorkspace() {
         trashEntryRef={trashEntry}
         trashBackRef={trashBack}
         emptyTrashRef={emptyTrashButton}
-        onTransfer={(kind, trigger) =>
-          void assistant.transfer(kind).then(() => returnFocusTo(trigger))
-        }
+        onTransfer={(kind, trigger) => {
+          if (kind === "backup") {
+            setExcludeVideos(false);
+            backupTrigger.current = trigger;
+            setBackupDialog({
+              trigger,
+              owner: bootstrap?.owner,
+              generation: bootstrap?.authorityGeneration,
+            });
+          } else {
+            void assistant.transfer(kind).then(() => returnFocusTo(trigger));
+          }
+        }}
       />
       <section
         className="flex min-h-0 min-w-0 flex-1 flex-col"
@@ -1431,6 +1449,45 @@ function AssistantWorkspace() {
           )}
         </div>
       </section>
+      <ConfirmDialog
+        isOpen={
+          backupDialog !== null &&
+          backupDialog.owner === bootstrap?.owner &&
+          backupDialog.generation === bootstrap?.authorityGeneration
+        }
+        title={t("assistant.backupTitle")}
+        message={t("assistant.backupHint")}
+        confirmText={t("assistant.createBackup")}
+        variant="info"
+        busy={assistant.transferring}
+        details={
+          <label className="flex items-center justify-between gap-3">
+            <span>{t("assistant.excludeVideos")}</span>
+            <Switch
+              aria-label={t("assistant.excludeVideos")}
+              checked={excludeVideos}
+              onCheckedChange={setExcludeVideos}
+              disabled={assistant.transferring}
+            />
+          </label>
+        }
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          returnFocusTo(backupTrigger.current);
+        }}
+        onCancel={() => {
+          const trigger = backupDialog?.trigger;
+          setBackupDialog(null);
+          returnFocusTo(trigger ?? null);
+        }}
+        onConfirm={() => {
+          const trigger = backupDialog?.trigger;
+          void assistant.transfer("backup", excludeVideos).then(() => {
+            setBackupDialog(null);
+            returnFocusTo(trigger ?? null);
+          });
+        }}
+      />
       <ConfirmDialog
         isOpen={deleteDialogOpen}
         title={t("assistant.deleteTitle")}

@@ -181,14 +181,23 @@ fn serve(stream: TcpStream, script: &Script) {
         let mut body = vec![0; length.parse().unwrap()];
         reader.read_exact(&mut body).unwrap();
         body
-    } else {
+    } else if headers
+        .get("transfer-encoding")
+        .is_some_and(|v| v == "chunked")
+    {
         read_chunked(&mut reader)
+    } else {
+        Vec::new()
     };
     let request = Request {
         path: path.clone(),
         authorization: headers.get("authorization").cloned().unwrap_or_default(),
         headers,
-        body: serde_json::from_slice(&body).unwrap(),
+        body: if body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        },
     };
     let mut reply = if is_title_request(&request.body) {
         script.title_requests.lock().unwrap().push(request);
@@ -411,6 +420,7 @@ struct TestEnv {
     catalog: Mutex<Vec<Model>>,
     /// The rows `/anthropic/v1/models` gives.
     anthropic: Mutex<Vec<Model>>,
+    video_price: Mutex<String>,
 }
 
 struct EnvState {
@@ -454,6 +464,7 @@ impl TestEnv {
             proxy: Mutex::new(None),
             catalog: Mutex::new(vec![test_model()]),
             anthropic: Mutex::default(),
+            video_price: Mutex::new("0.03".into()),
         })
     }
 
@@ -555,6 +566,17 @@ impl Environment for TestEnv {
             .ok_or_else(|| "assistant_unknown_apex".into())
     }
 
+    fn provider_prices<'a>(
+        &'a self,
+        _apex: &'a str,
+        _model: &'a str,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async {
+            Ok(
+                json!({"provider_cards":[{"pricing":{"video_pricing":{"unit":"per_second","tiers":[{"resolution":"480p","input_type":"t2v","price":self.video_price.lock().unwrap().clone()}]}}}]}),
+            )
+        })
+    }
     fn config_dir(&self) -> PathBuf {
         self.config.clone()
     }
@@ -4831,5 +4853,430 @@ fn media_save_checks_file_and_owner_before_dialog_and_rechecks_after_it() {
         let private=output.path().join("must-not-exist.png");let picked=private.clone();let auth=env.clone();
         assert!(host.save_media(request(aid),move |_name|{auth.set_identity(Err("assistant_sign_in_required".into()));Ok(Some(picked))}).await.is_err());
         assert!(!private.exists());assert!(gateway.requests().is_empty());host.shutdown().await;
+    });
+}
+
+fn video_model() -> Model {
+    let mut model = serde_json::to_value(test_model()).unwrap();
+    model["id"] = json!("test/video");
+    model["kind"] = json!("video");
+    model["tools"] = json!(false);
+    model["video"] = json!({"modes":["t2v","i2v"],"resolutions":["480p"],"defaultResolution":"480p","minDuration":4,"maxDuration":15,"supportsAudio":false,"aspectRatios":["16:9"],"fromPricePerSecond":"0.02"});
+    model["supportedEndpoints"] = json!(["/v1/videos"]);
+    serde_json::from_value(model).unwrap()
+}
+#[test]
+fn video_quotes_are_keyless_and_bound_to_current_authority_on_both_apexes() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        for apex in ["ofox.ai","ofox.io"] {
+            let config=tempfile::tempdir().unwrap();let gateway=Gateway::start();
+            let env=TestEnv::new(config.path(),&bundle,&[(apex,&gateway)]);
+            env.catalog.lock().unwrap().push(video_model());let host=AssistantHost::new(env.clone());
+            let sid=host.create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap()).await.unwrap().id;
+            let request=json!({"sessionId":sid,"expectedOwner":owner(),"expectedGeneration":host.generation(),"params":{"duration":4,"resolution":"480p"}});
+            let before=types::now();
+            let quote=host.quote_media(serde_json::from_value(request.clone()).unwrap()).await.unwrap();
+            assert_eq!(quote.estimated_cost_usd.as_deref(),Some("0.12"));
+            assert!(quote.expires_at>=before+600_000);
+            assert!(!env.state.lock().unwrap().key_minted);
+            assert!(gateway.requests().is_empty());
+            let mut wrong=request.clone();wrong["expectedOwner"]=json!("cd".repeat(32));
+            assert_eq!(host.quote_media(serde_json::from_value(wrong).unwrap()).await.unwrap_err(),"assistant_identity_changed");
+            host.cancel_all();
+            assert_eq!(host.quote_media(serde_json::from_value(request).unwrap()).await.unwrap_err(),"assistant_identity_changed");
+            host.shutdown().await;
+        }
+    });
+}
+
+async fn video_quote_for(host: &Arc<AssistantHost>, sid: &str) -> String {
+    host.quote_media(serde_json::from_value(json!({"sessionId":sid,"expectedOwner":owner(),"expectedGeneration":host.generation(),"params":{"duration":4,"resolution":"480p"}})).unwrap()).await.unwrap().id
+}
+#[test]
+fn video_submit_persists_before_post_and_releases_chat_only_after_job_is_saved() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let config = tempfile::tempdir().unwrap();
+            let gateway = Gateway::start();
+            let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+            env.catalog.lock().unwrap().push(video_model());
+            let host = AssistantHost::new(env.clone());
+            let sid = host
+                .create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap())
+                .await
+                .unwrap()
+                .id;
+            let params = json!({"duration":4,"resolution":"480p"});
+            assert_eq!(
+                host.send(request(&sid, "Moving square", json!({"video":params})))
+                    .await
+                    .unwrap_err(),
+                "assistant_media_quote_expired"
+            );
+            assert!(gateway.requests().is_empty());
+            let quote = video_quote_for(&host, &sid).await;
+            let job = types::id();
+            let gate = Arc::new(AtomicBool::new(false));
+            gateway.reply(Reply::Wait(
+                gate.clone(),
+                Box::new(Reply::Json(202, json!({"id":job,"status":"pending"}))),
+            ));
+            gateway.reply(Reply::Json(200, json!({"id":job,"status":"queued"})));
+            let req = request(
+                &sid,
+                "Moving square",
+                json!({"video":params,"quoteId":quote}),
+            );
+            let repeat = req.clone();
+            let run = host.send(req).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while gateway.requests().is_empty() {
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let disk = saved(config.path(), &sid);
+            assert_eq!(disk["operations"][0]["media"]["status"], "submitting");
+            assert_eq!(disk["messages"][1]["media"]["status"], "submitting");
+            gate.store(true, Ordering::SeqCst);
+            while host
+                .get_session(&sid)
+                .await
+                .unwrap()
+                .session
+                .active_run
+                .is_some()
+            {
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let disk = saved(config.path(), &sid);
+            assert_eq!(disk["operations"][0]["status"], "pendingMedia");
+            assert_eq!(disk["messages"][1]["media"]["jobId"], job);
+            assert_eq!(disk["messages"][1]["media"]["apex"], apex);
+            assert!(disk["messages"][1]["nativeEntryId"].is_string());
+            assert!(host.send(repeat).await.is_err());
+            assert_eq!(
+                gateway
+                    .requests()
+                    .iter()
+                    .filter(|r| r.path == "/v1/videos")
+                    .count(),
+                1
+            );
+            assert!(env
+                .events(&run.run_id)
+                .iter()
+                .any(|e| e.r#type == "run_end" && e.data["status"] == "queued"));
+            host.shutdown().await;
+            gateway.reply(Reply::Json(200, json!({"id":job,"status":"queued"})));
+            let before = gateway.requests().len();
+            let fresh = AssistantHost::new(env.clone());
+            fresh.recover_all().await;
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while gateway.requests().len() == before {
+                assert!(Instant::now() < deadline);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                gateway
+                    .requests()
+                    .iter()
+                    .filter(|r| r.path == "/v1/videos")
+                    .count(),
+                1,
+                "recovery only polls a saved job"
+            );
+            assert_eq!(
+                fresh
+                    .get_session(&sid)
+                    .await
+                    .unwrap()
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == "user")
+                    .count(),
+                1
+            );
+            fresh.shutdown().await;
+            assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
+        }
+    });
+}
+#[test]
+fn video_ambiguous_submission_is_never_replayed_after_restart() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        env.catalog.lock().unwrap().push(video_model());
+        let host = AssistantHost::new(env.clone());
+        let sid = host
+            .create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap())
+            .await
+            .unwrap()
+            .id;
+        let quote = video_quote_for(&host, &sid).await;
+        gateway.reply(Reply::Drop);
+        let req = request(
+            &sid,
+            "Moving square",
+            json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote}),
+        );
+        let repeat = req.clone();
+        let (_, end) = turn(&host, &env, req).await;
+        assert_eq!(end.data["status"], "error");
+        assert_eq!(
+            saved(config.path(), &sid)["messages"][1]["media"]["status"],
+            "unknown"
+        );
+        host.shutdown().await;
+        let fresh = AssistantHost::new(env.clone());
+        fresh.recover_all().await;
+        assert!(fresh.send(repeat).await.is_err());
+        assert_eq!(gateway.requests().len(), 1);
+        fresh.shutdown().await;
+        assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
+    });
+}
+
+#[test]
+fn video_submit_rechecks_price_and_binds_quote_to_its_conversation_and_parameters() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        env.catalog.lock().unwrap().push(video_model());
+        let host = AssistantHost::new(env.clone());
+        let one = host
+            .create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap())
+            .await
+            .unwrap()
+            .id;
+        let two = host
+            .create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap())
+            .await
+            .unwrap()
+            .id;
+        let quote = video_quote_for(&host, &one).await;
+        for (sid, duration) in [(&two, 4), (&one, 5)] {
+            assert_eq!(
+                host.send(request(
+                    sid,
+                    "Square",
+                    json!({"video":{"duration":duration,"resolution":"480p"},"quoteId":quote})
+                ))
+                .await
+                .unwrap_err(),
+                "assistant_media_quote_expired"
+            );
+        }
+        *env.video_price.lock().unwrap() = "0.04".into();
+        assert_eq!(
+            host.send(request(
+                &one,
+                "Square",
+                json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote})
+            ))
+            .await
+            .unwrap_err(),
+            "assistant_media_quote_expired"
+        );
+        assert!(gateway.requests().is_empty());
+        assert!(!env.state.lock().unwrap().key_minted);
+        host.shutdown().await;
+    });
+}
+#[test]
+fn video_limits_allow_one_job_per_conversation_and_three_per_account() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        use wiremock::{
+            matchers::{method, path, path_regex},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .respond_with(|_: &wiremock::Request| {
+                ResponseTemplate::new(202)
+                    .set_body_json(json!({"id":types::id(),"status":"pending"}))
+            })
+            .expect(3)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path_regex("^/v1/videos/"))
+            .respond_with(|req: &wiremock::Request| {
+                ResponseTemplate::new(200).set_body_json(
+                    json!({"id":req.url.path().rsplit('/').next(),"status":"queued"}),
+                )
+            })
+            .mount(&server)
+            .await;
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        env.route("ofox.ai", server.uri());
+        env.catalog.lock().unwrap().push(video_model());
+        let host = AssistantHost::new(env.clone());
+        let mut sessions = vec![];
+        for i in 0..4 {
+            let sid = host
+                .create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap())
+                .await
+                .unwrap()
+                .id;
+            let quote = video_quote_for(&host, &sid).await;
+            let req = request(
+                &sid,
+                "Square",
+                json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote}),
+            );
+            if i < 3 {
+                let (_, end) = turn(&host, &env, req).await;
+                assert_eq!(end.data["status"], "queued");
+            } else {
+                assert_eq!(
+                    host.send(req).await.unwrap_err(),
+                    "assistant_media_video_limit"
+                );
+            }
+            sessions.push(sid);
+        }
+        let quote = video_quote_for(&host, &sessions[0]).await;
+        assert_eq!(
+            host.send(request(
+                &sessions[0],
+                "Another",
+                json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote})
+            ))
+            .await
+            .unwrap_err(),
+            "assistant_media_video_limit"
+        );
+        host.shutdown().await;
+    });
+}
+
+#[test]
+fn video_cancel_is_remote_and_unsupported_cancellation_keeps_tracking() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        use wiremock::{matchers::{method,path},Mock,MockServer,ResponseTemplate};
+        for supported in [false,true] {
+            let root=tempfile::tempdir().unwrap();let gateway=Gateway::start();let server=MockServer::start().await;let job=types::id();
+            Mock::given(method("POST")).and(path("/v1/videos")).respond_with(ResponseTemplate::new(202).set_body_json(json!({"id":job,"status":"pending"}))).expect(1).mount(&server).await;
+            Mock::given(method("GET")).and(path(format!("/v1/videos/{job}"))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":job,"status":"queued"}))).mount(&server).await;
+            let reply=if supported {ResponseTemplate::new(204)} else {ResponseTemplate::new(400).set_body_json(json!({"error":{"code":"cancel_not_supported"}}))};
+            Mock::given(method("DELETE")).and(path(format!("/v1/videos/{job}"))).respond_with(reply).expect(1).mount(&server).await;
+            let env=TestEnv::new(root.path(),&bundle,&[("ofox.ai",&gateway)]);env.route("ofox.ai",server.uri());env.catalog.lock().unwrap().push(video_model());
+            let host=AssistantHost::new(env.clone());let sid=host.create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap()).await.unwrap().id;
+            let quote=video_quote_for(&host,&sid).await;
+            turn(&host,&env,request(&sid,"square",json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote}))).await;
+            let detail=host.get_session(&sid).await.unwrap();let mid=&detail.messages.iter().find(|m|m.role=="media").unwrap().id;
+            let action=json!({"sessionId":sid,"messageId":mid,"expectedOwner":owner(),"expectedGeneration":host.generation()});
+            let mut stale=action.clone();stale["expectedGeneration"]=json!(99999);
+            assert_eq!(host.cancel_video(serde_json::from_value(stale).unwrap()).await.unwrap_err(),"assistant_identity_changed");
+            let result=host.cancel_video(serde_json::from_value(action).unwrap()).await;
+            if supported {result.unwrap();} else {assert_eq!(result.unwrap_err(),"assistant_media_cancel_not_supported");}
+            let record=saved(root.path(),&sid);let media=record["messages"].as_array().unwrap().iter().find(|m|m["role"]=="media").unwrap();
+            assert_eq!(media["media"]["status"],if supported {"cancelled"} else {"queued"});
+            assert_eq!(media["media"]["jobId"],job);
+            host.shutdown().await;
+        }
+    });
+}
+#[test]
+fn video_failed_download_preserves_job_cost_and_resumes_without_posting() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        use wiremock::{matchers::{method,path},Mock,MockServer,ResponseTemplate};
+        let root=tempfile::tempdir().unwrap();let gateway=Gateway::start();let server=MockServer::start().await;let job=types::id();
+        Mock::given(method("POST")).and(path("/v1/videos")).respond_with(ResponseTemplate::new(202).set_body_json(json!({"id":job,"status":"pending"}))).expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path(format!("/v1/videos/{job}"))).respond_with(ResponseTemplate::new(200).set_body_json(json!({"id":job,"status":"completed","usage":{"video_cost":"0.123"},"mirror_urls":["http://localhost/private"]}))).mount(&server).await;
+        let env=TestEnv::new(root.path(),&bundle,&[("ofox.ai",&gateway)]);env.route("ofox.ai",server.uri());env.catalog.lock().unwrap().push(video_model());let host=AssistantHost::new(env.clone());
+        let sid=host.create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap()).await.unwrap().id;
+        let quote=video_quote_for(&host,&sid).await;turn(&host,&env,request(&sid,"square",json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote}))).await;
+        let deadline=Instant::now()+Duration::from_secs(10);
+        let mid=loop {
+            let record=saved(root.path(),&sid);let media=record["messages"].as_array().unwrap().iter().find(|m|m["role"]=="media").unwrap();
+            if media["media"]["status"]=="download_failed" {
+                assert_eq!(media["media"]["cost"],"0.123");assert_eq!(media["media"]["jobId"],job);
+                assert_eq!(record["usage"]["mediaCostUsd"],"0.123");break media["id"].as_str().unwrap().to_owned();
+            }
+            assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;
+        };
+        let before=server.received_requests().await.unwrap().len();
+        host.resume_video(serde_json::from_value(json!({"sessionId":sid,"messageId":mid,"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+        while server.received_requests().await.unwrap().len()<=before {assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}
+        host.shutdown().await;
+    });
+}
+
+#[test]
+fn video_resume_tracks_only_the_current_owner_and_apex_and_pauses_after_a_day() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        use cc_switch_lib::assistant::store::AssistantStore;
+        use wiremock::{matchers::{method,path_regex},Mock,MockServer,ResponseTemplate};
+        let root=tempfile::tempdir().unwrap();let gateway=Gateway::start();let ai=MockServer::start().await;let io=MockServer::start().await;
+        for server in [&ai,&io] {Mock::given(method("GET")).and(path_regex("^/v1/videos/")).respond_with(|req:&wiremock::Request|ResponseTemplate::new(200).set_body_json(json!({"id":req.url.path().rsplit('/').next(),"status":"queued"}))).mount(server).await;}
+        let env=TestEnv::new(root.path(),&bundle,&[("ofox.ai",&gateway)]);env.route("ofox.ai",ai.uri());env.route("ofox.io",io.uri());env.catalog.lock().unwrap().push(video_model());
+        let host=AssistantHost::new(env.clone());let store=AssistantStore::for_owner(root.path(),&owner()).unwrap();let mut expired=None;
+        for (apex,started) in [("ofox.ai",types::now()),("ofox.io",types::now()),("ofox.ai",types::now()-86_400_001)] {
+            let sid=host.create_session(serde_json::from_value(json!({"modelId":"test/video"})).unwrap()).await.unwrap().id;
+            let run=types::id();let mid=types::id();let media=json!({"kind":"video","model":"test/video","params":{},"status":"queued","jobId":types::id(),"apex":apex,"submittedAt":started,"pollStartedAt":started});
+            store.mutate(&sid,|record|{record.messages.push(serde_json::from_value(json!({"id":mid,"role":"media","content":"square","createdAt":1,"status":"queued","runId":run,"media":media})).unwrap());record.operations.push(serde_json::from_value(json!({"id":types::id(),"runId":run,"status":"pendingMedia","media":media})).unwrap());Ok(())}).unwrap();
+            if started<types::now()-86_400_000 {expired=Some(sid);}
+        }
+        host.recover_all().await;
+        let deadline=Instant::now()+Duration::from_secs(5);
+        while ai.received_requests().await.unwrap().is_empty(){assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}
+        assert!(io.received_requests().await.unwrap().is_empty());
+        while saved(root.path(),expired.as_ref().unwrap())["messages"][0]["media"]["status"]!="query_expired"{assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}
+        assert_eq!(ai.received_requests().await.unwrap().len(),1);
+        let receipt=host.begin_logout();env.set_identity(Err("assistant_sign_in_required".into()));host.finish_logout(receipt);
+        env.set_identity(Ok(Identity{owner:owner(),apex:"ofox.io".into()}));host.sign_in_completed();
+        while io.received_requests().await.unwrap().is_empty(){assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}
+        assert_eq!(ai.received_requests().await.unwrap().len(),1);
+        env.set_identity(Ok(Identity{owner:owner(),apex:"ofox.ai".into()}));host.cancel_all();
+        while ai.received_requests().await.unwrap().len()<2{assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}
+        assert_eq!(io.received_requests().await.unwrap().len(),1);
+        host.shutdown().await;
+    });
+}
+
+#[test]
+fn video_fields_cannot_be_silently_ignored_by_an_image_run() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let root = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        gateway.reply(Reply::Error(
+            400,
+            json!({"error":{"code":"invalid_request"}}),
+        ));
+        let env = TestEnv::new(root.path(), &bundle, &[("ofox.ai", &gateway)]);
+        env.catalog.lock().unwrap().push(image_model());
+        let host = AssistantHost::new(env);
+        let sid = host
+            .create_session(serde_json::from_value(json!({"modelId":"test/image"})).unwrap())
+            .await
+            .unwrap()
+            .id;
+        let result = host
+            .send(request(
+                &sid,
+                "square",
+                json!({"video":{"duration":4,"resolution":"480p"},"quoteId":types::id()}),
+            ))
+            .await;
+        host.shutdown().await;
+        assert_eq!(result.unwrap_err(), "assistant_media_invalid_params");
+        assert!(gateway.requests().is_empty());
     });
 }

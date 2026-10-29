@@ -280,6 +280,7 @@ mod tests {
             status: "completed".into(),
             outputs: vec![],
             cost: Some("0.02".into()),
+            ..Default::default()
         };
         store.mutate(&sid,|record| {
             record.messages.push(serde_json::from_value(json!({"id":mid,"role":"media","content":"blue square","createdAt":1,"status":"streaming","runId":run,"media":media})).unwrap());

@@ -21,6 +21,7 @@ const MAX_MANIFEST: u64 = 16 * 1024 * 1024;
 const MAX_RECORD: u64 = 64 * 1024 * 1024;
 const MAX_NATIVE: u64 = 256 * 1024 * 1024;
 const MAX_ATTACHMENT: u64 = 50 * 1024 * 1024;
+const EXCLUDED_VIDEO: &str = "assistant_attachment_not_in_backup";
 const MANIFEST: &str = "manifest.json";
 
 #[derive(Debug, Default, Serialize)]
@@ -61,6 +62,8 @@ struct Manifest {
     owner: String,
     sessions: Vec<String>,
     files: BTreeMap<String, Fingerprint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    excluded_videos: Vec<String>,
 }
 
 /// One conversation folder as a backup finds it.
@@ -107,7 +110,7 @@ fn limit(name: &str) -> Result<u64, String> {
         [sid, SESSION_FILE] if validate_id(sid).is_ok() => Ok(MAX_RECORD),
         [sid, NATIVE_HISTORY_FILE] if validate_id(sid).is_ok() => Ok(MAX_NATIVE),
         [sid, ATTACHMENTS_DIR, aid] if validate_id(sid).is_ok() && validate_id(aid).is_ok() => {
-            Ok(MAX_ATTACHMENT)
+            Ok(super::super::video::MAX_VIDEO_BYTES)
         }
         _ => Err(INVALID.into()),
     }
@@ -331,6 +334,19 @@ fn idle(record: &SessionRecord) -> Result<(), String> {
     Ok(())
 }
 
+fn excluded_video(file: &Attachment) -> bool {
+    file.mime_type.starts_with("video/")
+        && file.status == "missing"
+        && file.reason.as_deref() == Some(EXCLUDED_VIDEO)
+}
+fn attachment_cap(file: &Attachment) -> u64 {
+    if file.mime_type.starts_with("video/") {
+        super::super::video::MAX_VIDEO_BYTES
+    } else {
+        MAX_ATTACHMENT
+    }
+}
+
 /// Check one conversation's files under `root` against its record: each
 /// listed attachment (its size, and the type its messages expect), the
 /// draft's files, and the native history's shape and lineage. Returns the
@@ -348,7 +364,16 @@ fn validate_session(
             return Err(INVALID.into());
         }
         let name = format!("{sid}/{ATTACHMENTS_DIR}/{}", file.id);
-        let bytes = read_file(&root.join(&name), MAX_ATTACHMENT)?.ok_or(INVALID)?;
+        if file.size_bytes > attachment_cap(file) {
+            return Err(TOO_LARGE.into());
+        }
+        if excluded_video(file) {
+            if root.join(&name).exists() {
+                return Err(INVALID.into());
+            }
+            continue;
+        }
+        let bytes = read_file(&root.join(&name), attachment_cap(file))?.ok_or(INVALID)?;
         if bytes.len() as u64 != file.size_bytes {
             return Err(INVALID.into());
         }
@@ -401,6 +426,7 @@ fn add_member(
     total: &mut u64,
     name: String,
     bytes: Vec<u8>,
+    stored: bool,
 ) -> Result<(), String> {
     if bytes.len() as u64 > limit(&name)?
         || *total + bytes.len() as u64 > MAX_TOTAL
@@ -410,7 +436,12 @@ fn add_member(
     }
     *total += bytes.len() as u64;
     manifest.files.insert(name.clone(), digest(&bytes));
-    writer.start_file(name, options()).map_err(|_| FAILED)?;
+    let opts = if stored {
+        options().compression_method(zip::CompressionMethod::Stored)
+    } else {
+        options()
+    };
+    writer.start_file(name, opts).map_err(|_| FAILED)?;
     writer.write_all(&bytes).map_err(|_| FAILED.to_string())
 }
 
@@ -422,6 +453,15 @@ impl AssistantStore {
         &self,
         path: &Path,
         secrets: &[String],
+        admit: impl Fn() -> Result<(), String>,
+    ) -> Result<BackupReport, String> {
+        self.backup_with_options(path, secrets, false, admit)
+    }
+    pub fn backup_with_options(
+        &self,
+        path: &Path,
+        secrets: &[String],
+        exclude_videos: bool,
         admit: impl Fn() -> Result<(), String>,
     ) -> Result<BackupReport, String> {
         let lock = file_lock(&self.root.join(".transfer-lock"));
@@ -440,6 +480,7 @@ impl AssistantStore {
             owner: self.owner.clone(),
             sessions: vec![],
             files: BTreeMap::new(),
+            excluded_videos: vec![],
         };
         let mut writer = zip::ZipWriter::new(tempfile::tempfile().map_err(|_| FAILED)?);
         let mut total = 0;
@@ -451,7 +492,7 @@ impl AssistantStore {
                 let lock = file_lock(&self.root.join(sid).join(SESSION_FILE));
                 let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 admit()?;
-                let (record, names) = match self.inspect(sid)? {
+                let (record, mut names) = match self.inspect(sid)? {
                     Found::Empty => return Ok(()),
                     Found::Damaged => {
                         listed.push(sid.clone());
@@ -460,6 +501,45 @@ impl AssistantStore {
                     }
                     Found::Ready { record, names } => (record, names),
                 };
+                let mut saved = decode(&record, sid)?;
+                let media_names: BTreeSet<_> = saved
+                    .attachments
+                    .iter()
+                    .filter(|file| {
+                        file.mime_type.starts_with("image/") || file.mime_type.starts_with("video/")
+                    })
+                    .map(|file| format!("{sid}/{ATTACHMENTS_DIR}/{}", file.id))
+                    .collect();
+                let mut missing = BTreeSet::new();
+                for file in &mut saved.attachments {
+                    if (exclude_videos && file.mime_type.starts_with("video/"))
+                        || excluded_video(file)
+                    {
+                        let name = format!("{sid}/{ATTACHMENTS_DIR}/{}", file.id);
+                        manifest.excluded_videos.push(name.clone());
+                        names.remove(&name);
+                        missing.insert(file.id.clone());
+                        file.status = "missing".into();
+                        file.reason = Some(EXCLUDED_VIDEO.into());
+                        file.preview_url = None;
+                    }
+                }
+                for file in saved
+                    .messages
+                    .iter_mut()
+                    .flat_map(|message| &mut message.attachments)
+                {
+                    if missing.contains(&file.id) {
+                        file.status = "missing".into();
+                        file.reason = Some(EXCLUDED_VIDEO.into());
+                        file.preview_url = None;
+                    }
+                }
+                let record = if missing.is_empty() {
+                    record
+                } else {
+                    encode_record(&saved)?
+                };
                 let record_name = format!("{sid}/{SESSION_FILE}");
                 add_member(
                     &mut writer,
@@ -467,12 +547,14 @@ impl AssistantStore {
                     &mut total,
                     record_name.clone(),
                     archived(&record_name, record, secrets)?,
+                    false,
                 )?;
                 // Checked under the same locks just now; read one at a time.
                 for name in names.into_iter().filter(|name| *name != record_name) {
                     let bytes = read_file(&self.root.join(&name), limit(&name)?)?.ok_or(INVALID)?;
                     let bytes = archived(&name, bytes, secrets)?;
-                    add_member(&mut writer, &mut manifest, &mut total, name, bytes)?;
+                    let stored = media_names.contains(&name);
+                    add_member(&mut writer, &mut manifest, &mut total, name, bytes, stored)?;
                 }
                 listed.push(sid.clone());
                 manifest.sessions.push(sid.clone());
@@ -489,6 +571,7 @@ impl AssistantStore {
                 &mut total,
                 PREFS_FILE.into(),
                 clean_json(serde_json::to_vec(&value).map_err(|_| FAILED)?, secrets)?,
+                false,
             )?;
         }
         if self.listed_ids()? != listed {
@@ -641,6 +724,22 @@ impl AssistantStore {
                 return Err(INVALID.into());
             }
         }
+        let excluded: BTreeSet<_> = manifest.excluded_videos.iter().cloned().collect();
+        if excluded.len() != manifest.excluded_videos.len() {
+            return Err(INVALID.into());
+        }
+        for name in &excluded {
+            let parts: Vec<_> = name.split('/').collect();
+            if parts.len() != 3
+                || parts[1] != ATTACHMENTS_DIR
+                || !sessions.contains(parts[0])
+                || validate_id(parts[2]).is_err()
+                || names.contains(name)
+            {
+                return Err(INVALID.into());
+            }
+        }
+        let mut found_excluded = BTreeSet::new();
         let root = self.ensure_root()?;
         let staging = tempfile::Builder::new()
             .prefix(&format!(".restore-{}-", id()))
@@ -669,6 +768,13 @@ impl AssistantStore {
             let record = read_file(&staging.path().join(sid).join(SESSION_FILE), MAX_RECORD)?
                 .ok_or(INVALID)?;
             let record = decode_exact(&record, sid).map_err(|_| INVALID)?;
+            for file in record
+                .attachments
+                .iter()
+                .filter(|file| excluded_video(file))
+            {
+                found_excluded.insert(format!("{sid}/{ATTACHMENTS_DIR}/{}", file.id));
+            }
             // A backup never holds a conversation that was replying.
             idle(&record).map_err(|_| INVALID)?;
             let prefix = format!("{sid}/");
@@ -680,6 +786,9 @@ impl AssistantStore {
             if validate_session(staging.path(), sid, &record)? != members {
                 return Err(INVALID.into());
             }
+        }
+        if found_excluded != excluded {
+            return Err(INVALID.into());
         }
         let archived_prefs = if names.contains(PREFS_FILE) {
             let bytes =
@@ -2074,5 +2183,71 @@ mod tests {
             TOO_LARGE
         );
         assert!(restored.list(false, "").unwrap().sessions.is_empty());
+    }
+    #[test]
+    fn video_backup_keeps_large_media_stored_and_can_exclude_with_a_manifest() {
+        let (_tmp, store, sid) = fixture();
+        let aid = id();
+        let mid = id();
+        let size = MAX_ATTACHMENT + 1;
+        let source = store.attachment_dir(&sid).unwrap().join(&aid);
+        let mut file = fs::File::create(&source).unwrap();
+        file.write_all(b"\0\0\0\x18ftypisomfixture").unwrap();
+        file.set_len(size).unwrap();
+        let attachment:Attachment=serde_json::from_value(json!({"id":aid,"name":"movie.mp4","mimeType":"video/mp4","sizeBytes":size,"status":"ready","origin":"generated","sourceMessageId":mid})).unwrap();
+        store.mutate(&sid,|record|{record.attachments.push(attachment.clone());record.messages.push(serde_json::from_value(json!({"id":mid,"role":"media","content":"movie","createdAt":1,"status":"completed","attachments":[attachment],"media":{"kind":"video","model":"test/video","params":{},"status":"completed","outputs":[aid],"cost":"0.123"}})).unwrap());Ok(())}).unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("video.zip");
+        let report = store.backup(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(report.sessions, 1);
+        assert_eq!(report.skipped, 0);
+        let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
+        let member = format!("{sid}/{ATTACHMENTS_DIR}/{aid}");
+        assert_eq!(
+            zip.by_name(&member).unwrap().compression(),
+            zip::CompressionMethod::Stored
+        );
+        let restored = tempfile::tempdir().unwrap();
+        let target = AssistantStore::for_owner(restored.path(), &store.owner).unwrap();
+        target.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(
+            fs::metadata(target.attachment_root(&sid).unwrap().join(&aid))
+                .unwrap()
+                .len(),
+            size
+        );
+        let excluded = out.path().join("excluded.zip");
+        store
+            .backup_with_options(&excluded, &[], true, || Ok(()))
+            .unwrap();
+        let mut zip = zip::ZipArchive::new(fs::File::open(&excluded).unwrap()).unwrap();
+        assert!(zip.by_name(&member).is_err());
+        let manifest: Value =
+            serde_json::from_slice(&read_member(&mut zip, MANIFEST, MAX_MANIFEST).unwrap())
+                .unwrap();
+        assert_eq!(manifest["excludedVideos"], json!([member]));
+        let blank = tempfile::tempdir().unwrap();
+        let target = AssistantStore::for_owner(blank.path(), &store.owner).unwrap();
+        target.restore(&excluded, &[], || Ok(())).unwrap();
+        let record = target.load_record(&sid).unwrap();
+        assert_eq!(record.attachments[0].status, "missing");
+        assert_eq!(
+            record.attachments[0].reason.as_deref(),
+            Some("assistant_attachment_not_in_backup")
+        );
+        assert_eq!(record.messages[0].attachments[0].status, "missing");
+        assert!(!target.attachment_root(&sid).unwrap().join(&aid).exists());
+        assert_eq!(
+            store.load_record(&sid).unwrap().attachments[0].status,
+            "ready"
+        );
+        assert!(source.exists());
+        let again = out.path().join("again.zip");
+        assert_eq!(target.backup(&again, &[], || Ok(())).unwrap().sessions, 1);
+        let third = tempfile::tempdir().unwrap();
+        AssistantStore::for_owner(third.path(), &store.owner)
+            .unwrap()
+            .restore(&again, &[], || Ok(()))
+            .unwrap();
     }
 }

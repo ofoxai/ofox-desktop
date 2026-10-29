@@ -98,6 +98,14 @@ pub trait Environment: Send + Sync + 'static {
     ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>>;
     /// The LLM gateway base of `apex`.
     fn gateway_base(&self, apex: &str) -> Result<String, String>;
+    /// Keyless, model-specific provider pricing for a media quote.
+    fn provider_prices<'a>(
+        &'a self,
+        apex: &'a str,
+        model: &'a str,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(super::video_http::provider_prices(apex, model))
+    }
     /// The folder that holds `assistant/`.
     fn config_dir(&self) -> PathBuf;
     /// The prepared runtime: `node/`, `runtime/src/main.mjs`, `manifest.json`.
@@ -197,6 +205,10 @@ pub struct AssistantHost {
     /// The files last dropped on the window, waiting for the renderer's
     /// token (see [`super::drops`]).
     pub(super) drops: Mutex<DropSlot>,
+    pub(super) video_quotes: Mutex<HashMap<String, super::video_host::StoredQuote>>,
+    pub(super) video_admission: tokio::sync::Mutex<()>,
+    pub(super) video_polling: Arc<Mutex<HashSet<String>>>,
+    pub(super) video_revocation: watch::Sender<u64>,
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
@@ -549,6 +561,10 @@ impl AssistantHost {
             runs: Mutex::default(),
             models: Mutex::default(),
             drops: Mutex::default(),
+            video_quotes: Mutex::default(),
+            video_admission: tokio::sync::Mutex::new(()),
+            video_polling: Arc::default(),
+            video_revocation: watch::channel(0).0,
             keys: Mutex::default(),
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
@@ -801,7 +817,7 @@ impl AssistantHost {
 
     /// At startup: recover every session of the signed-in account that a
     /// previous process left running.
-    pub async fn recover_all(&self) {
+    pub async fn recover_all(self: &Arc<Self>) {
         let Ok(identity) = self.identity().await else {
             return;
         };
@@ -839,15 +855,16 @@ impl AssistantHost {
         }
         // Imports share this file lock, so their unpublished copies cannot be
         // mistaken for crash leftovers even if startup overlaps the UI.
-        for session in sessions {
+        for session in &sessions {
             let Ok(store) = self.store(&identity.owner) else {
                 continue;
             };
-            let sid = session.id;
+            let sid = session.id.clone();
             if let Err(error) = blocking(move || store.cleanup_orphan_attachments(&sid)).await {
                 log::warn!("[Assistant] orphan attachment cleanup failed: {error}");
             }
         }
+        self.resume_video_jobs().await;
     }
 
     // ── runs ─────────────────────────────────────────────────────────────
@@ -1039,14 +1056,22 @@ impl AssistantHost {
     /// still revoking keys or the app is shutting down. The authority stays
     /// as it is: the `ofox-auth-restored` event of this sign-in already
     /// cancelled runs, and the renderer may have read the authority since.
-    pub fn sign_in_completed(&self) {
-        let _registration = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut admission = self
-            .admission
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if !admission.shutting_down && admission.logouts.is_empty() {
-            admission.needs_sign_in = false;
+    pub fn sign_in_completed(self: &Arc<Self>) {
+        let allowed = {
+            let _registration = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut admission = self
+                .admission
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if !admission.shutting_down && admission.logouts.is_empty() {
+                admission.needs_sign_in = false;
+                true
+            } else {
+                false
+            }
+        };
+        if allowed {
+            self.schedule_video_resume();
         }
     }
 
@@ -1098,8 +1123,19 @@ impl AssistantHost {
 
     /// Cancel every run but keep admission open (the account, its sign-in
     /// state or the region changed).
-    pub fn cancel_all(&self) {
+    pub fn cancel_all(self: &Arc<Self>) {
         self.revoke_runs(|_, _| {});
+        self.schedule_video_resume();
+    }
+
+    pub(super) fn release_video_run(&self, control: &RunControl) {
+        let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+        if runs
+            .get(&control.session_id)
+            .is_some_and(|run| run.run_id == control.run_id)
+        {
+            runs.remove(&control.session_id);
+        }
     }
 
     fn revoke_runs(&self, transition: impl FnOnce(&mut Admission, u64)) -> u64 {
@@ -1124,6 +1160,7 @@ impl AssistantHost {
         for run in runs.values() {
             run.cancel.send_replace(true);
         }
+        self.video_revocation.send_replace(generation);
         generation
     }
 
@@ -3691,6 +3728,7 @@ while read line; do :; done"#,
             .session
             .id;
         let authority = TransferRequest {
+            exclude_videos: false,
             expected_owner: identity().owner,
             expected_generation: host.generation(),
         };
@@ -3720,6 +3758,7 @@ while read line; do :; done"#,
         assert_eq!((backup.sessions, backup.skipped), (1, 0));
         let (_target_config, target) = fixture();
         let request = TransferRequest {
+            exclude_videos: false,
             expected_owner: identity().owner,
             expected_generation: target.generation(),
         };
@@ -3747,6 +3786,7 @@ while read line; do :; done"#,
             .sessions
             .is_empty());
         let request = TransferRequest {
+            exclude_videos: false,
             expected_owner: identity().owner,
             expected_generation: target.generation(),
         };
@@ -3776,6 +3816,7 @@ while read line; do :; done"#,
         host.register_run(control(&sid), host.generation(), || Ok(()))
             .unwrap();
         let authority = TransferRequest {
+            exclude_videos: false,
             expected_owner: identity().owner,
             expected_generation: host.generation(),
         };
@@ -3810,6 +3851,7 @@ while read line; do :; done"#,
         let archive = out.path().join("backup.zip");
         let selected = archive.clone();
         let authority = TransferRequest {
+            exclude_videos: false,
             expected_owner: identity().owner,
             expected_generation: host.generation(),
         };
@@ -3853,6 +3895,7 @@ while read line; do :; done"#,
         let (_config, env, target) = fixture_with_env();
         *env.stored_key.lock().unwrap() = Some(key.into());
         let request = TransferRequest {
+            exclude_videos: false,
             expected_owner: identity().owner,
             expected_generation: target.generation(),
         };

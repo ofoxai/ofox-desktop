@@ -201,7 +201,7 @@ pub struct RuntimeModel<'a> {
 }
 
 impl Model {
-    /// Whether a conversation can use this model: chat or supported images.
+    /// Whether a conversation can use this model: chat or supported media.
     pub fn for_conversations(&self) -> bool {
         self.kind == Kind::Chat
             || (self.kind == Kind::Image
@@ -209,6 +209,13 @@ impl Model {
                     .image
                     .as_ref()
                     .is_some_and(|i| i.generations || i.edits))
+            || (self.kind == Kind::Video
+                && self.video.as_ref().is_some_and(|video| {
+                    video
+                        .modes
+                        .iter()
+                        .any(|mode| matches!(mode.as_str(), "t2v" | "i2v"))
+                }))
     }
 
     /// Whether a conversation may run this model at `level`.

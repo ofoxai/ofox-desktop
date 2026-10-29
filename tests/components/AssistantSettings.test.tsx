@@ -403,6 +403,9 @@ describe("finish notifications", () => {
       sessionId: "a",
     };
     expect(finishNotice(base)).toBeNull();
+    expect(
+      finishNotice({ ...base, status: "queued", focused: false }),
+    ).toBeNull();
     expect(finishNotice({ ...base, focused: false })).toBe("system");
     expect(finishNotice({ ...base, onAssistantPage: false })).toBe("toast");
     expect(finishNotice({ ...base, openSessionId: "b" })).toBe("toast");
