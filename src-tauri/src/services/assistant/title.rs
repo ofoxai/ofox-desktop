@@ -647,7 +647,7 @@ mod tests {
             title_model(&[chat.clone(), search.clone()]).map(|m| m.id.as_str()),
             Some(catalog::SEARCH_MODEL)
         );
-        assert!(title_model(&[chat.clone()]).is_none());
+        assert!(title_model(std::slice::from_ref(&chat)).is_none());
         let unpriced = model(catalog::SEARCH_MODEL, false, &["minimal"]);
         assert!(title_model(&[chat, unpriced]).is_none());
     }

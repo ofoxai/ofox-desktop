@@ -975,6 +975,9 @@ impl AssistantHost {
             .native_lock(&session_key(&identity.owner, sid))?
             .lock_owned()
             .await;
+        // Admission can change while the native lock is held by another
+        // operation. Fence new runs until this projection has been saved.
+        let _navigation = self.begin_navigation(sid)?;
         let native = blocking({
             let store = self.store(&identity.owner)?;
             let sid = sid.to_owned();
@@ -2289,6 +2292,29 @@ mod tests {
             switching.await.unwrap().unwrap_err(),
             "assistant_session_busy"
         );
+    }
+
+    #[tokio::test]
+    async fn a_native_sync_rechecks_run_admission_after_waiting_for_history() {
+        let (_config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let held = host
+            .native_lock(&session_key(&identity().owner, &sid))
+            .unwrap()
+            .lock_owned()
+            .await;
+        let current_identity = identity();
+        let syncing = host.sync_native(&current_identity, &sid);
+        tokio::pin!(syncing);
+        tokio::select! {
+            result = &mut syncing => panic!("must wait for history: {result:?}"),
+            _ = tokio::task::yield_now() => {}
+        }
+        host.register_run(control(&sid), host.generation(), || Ok(()))
+            .unwrap();
+        drop(held);
+        assert_eq!(syncing.await.unwrap_err(), SESSION_BUSY);
     }
 
     #[test]

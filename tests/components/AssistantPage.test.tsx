@@ -409,6 +409,34 @@ describe("starting a conversation", () => {
 describe("the composer's controls", () => {
   const footer = () => composer().closest("footer") as HTMLElement;
 
+  it("grows with a draft up to 160px and shrinks after clearing or resizing", async () => {
+    let contentHeight = 60;
+    const proto = HTMLTextAreaElement.prototype;
+    const original = Object.getOwnPropertyDescriptor(proto, "scrollHeight");
+    Object.defineProperty(proto, "scrollHeight", {
+      configurable: true,
+      get: () => contentHeight,
+    });
+    try {
+      await openConversation();
+      expect(composer()).toHaveStyle({ height: "76px" });
+      contentHeight = 320;
+      fireEvent.change(composer(), {
+        target: { value: "Long draft\n".repeat(30) },
+      });
+      expect(composer()).toHaveStyle({ height: "160px" });
+      contentHeight = 120;
+      fireEvent(window, new Event("resize"));
+      expect(composer()).toHaveStyle({ height: "120px" });
+      contentHeight = 60;
+      fireEvent.change(composer(), { target: { value: "" } });
+      expect(composer()).toHaveStyle({ height: "76px" });
+    } finally {
+      if (original) Object.defineProperty(proto, "scrollHeight", original);
+      else Reflect.deleteProperty(proto, "scrollHeight");
+    }
+  });
+
   it("sends with an icon-only button whose tooltip names the Enter key", async () => {
     await openConversation();
     await userEvent.type(composer(), "Hello");

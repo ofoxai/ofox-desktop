@@ -189,6 +189,28 @@ impl AssistantHost {
             move || store.load_detail(&sid)
         })
         .await?;
+        // Older projections predate version metadata. Rebuild it from the
+        // existing history without asking the provider for another turn.
+        if detail
+            .messages
+            .iter()
+            .any(|m| m.role == "user" && m.native_entry_id.is_some() && m.branch_from.is_none())
+            && self.ensure_idle(sid).is_ok()
+        {
+            match self.sync_native(&identity, sid).await {
+                Ok(()) => {
+                    detail = blocking({
+                        let store = self.store(&identity.owner)?;
+                        let sid = sid.to_owned();
+                        move || store.load_detail(&sid)
+                    })
+                    .await?;
+                }
+                Err(error) => {
+                    log::warn!("[Assistant] could not refresh session {sid}: {error}");
+                }
+            }
+        }
         self.ensure_current(&identity, generation).await?;
         self.decorate(&identity.owner, &mut detail.session);
         if detail.session.active_run.is_none() {
@@ -909,10 +931,23 @@ impl Branch {
             {
                 return Err(UNAVAILABLE.into());
             }
+            // A revision may fail before Pi writes its question. Preserve
+            // its branch intent across any number of such failed attempts.
+            let mut origin = user;
+            let mut visited = HashSet::new();
+            while origin.native_entry_id.is_none() {
+                if !visited.insert(&origin.id) {
+                    return Err(UNAVAILABLE.into());
+                }
+                let Some(parent) = &origin.revision_of else {
+                    break;
+                };
+                origin = find(parent, "user").ok_or(UNAVAILABLE)?;
+            }
             return Ok(Self {
-                revision_of: Some(user.id.clone()),
+                revision_of: Some(origin.id.clone()),
                 retried_run: Some(run.into()),
-                edit_entry: user.native_entry_id.clone(),
+                edit_entry: origin.native_entry_id.clone(),
                 ..Self::default()
             });
         }
@@ -1096,6 +1131,23 @@ fn publish_turn(
             || record.messages.iter().filter(of_run).any(|m| m.superseded)
         {
             return Err("assistant_branch_unavailable".into());
+        }
+        if !record
+            .messages
+            .iter()
+            .filter(of_run)
+            .any(|m| m.native_entry_id.is_some())
+        {
+            // A local failed revision must stay hidden even when its old
+            // anchor becomes active again during the next history merge.
+            for message in record
+                .messages
+                .iter_mut()
+                .filter(|m| m.run_id.as_ref() == Some(run))
+            {
+                message.superseded = true;
+                message.anchor_entry_id = None;
+            }
         }
     }
     match (&branch.retried_run, &branch.revision_of) {
@@ -1883,6 +1935,71 @@ mod tests {
         let request = send(&kept, "x", json!({ "retryMessageId": kept_reply }));
         let branch = Branch::resolve(&kept, &request).unwrap();
         assert_eq!(branch.edit_entry, kept.messages[0].native_entry_id);
+    }
+
+    #[test]
+    fn retry_of_an_unsaved_revision_keeps_its_native_branch_and_hides_all_failed_attempts() {
+        for regenerate in [false, true] {
+            let (mut record, _, original, reply) = fixture();
+            record.messages[0].content = "Read https://replaced.example.com/".into();
+            let extra = if regenerate {
+                json!({"regenerateMessageId": reply.id})
+            } else {
+                json!({"editMessageId": original.id})
+            };
+            let edit = send(&record, "Replacement question", extra);
+            let failed = publish(&mut record, &edit, "m").unwrap();
+            super::super::projection::settle_run(
+                &mut record,
+                &failed,
+                false,
+                false,
+                true,
+                Some("assistant_runtime_exited"),
+            )
+            .unwrap();
+            // Sync sees only the original native turn; the edit never reached Pi.
+            let old_native = json!([
+                {"id":original.native_entry_id,"role":"user","runId":original.run_id,"content":original.content,"active":true,"branchFrom":null},
+                {"id":reply.native_entry_id,"role":"assistant","runId":reply.run_id,"content":reply.content,"active":true}
+            ]);
+            merge_native(&mut record, &old_native, &[]).unwrap();
+            // A second pre-runtime failure must retain the same branch intent.
+            let mut failed = failed;
+            for attempt in 0..2 {
+                let retry = send(
+                    &record,
+                    "Replacement question",
+                    json!({"retryMessageId": failed.message_id}),
+                );
+                let branch = Branch::resolve(&record, &retry).unwrap();
+                assert_eq!(
+                    branch.edit_entry, original.native_entry_id,
+                    "regenerate={regenerate}, attempt={attempt}"
+                );
+                assert_eq!(
+                    web_params(&record, &branch, "Replacement question", Some(&price()))
+                        ["allowedWebUrls"],
+                    json!([])
+                );
+                failed = publish(&mut record, &retry, "m").unwrap();
+                super::super::projection::settle_run(
+                    &mut record,
+                    &failed,
+                    false,
+                    false,
+                    true,
+                    Some("assistant_runtime_exited"),
+                )
+                .unwrap();
+                merge_native(&mut record, &old_native, &[]).unwrap();
+                assert!(record
+                    .messages
+                    .iter()
+                    .filter(|m| m.run_id.as_deref() == Some(edit.run_id.as_str()))
+                    .all(|m| m.superseded));
+            }
+        }
     }
 
     #[test]

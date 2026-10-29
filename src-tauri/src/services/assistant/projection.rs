@@ -393,8 +393,11 @@ pub(super) fn merge_native(
     }
     follow_native_branch(record, entries);
     // Native history is authoritative even when the last UI event was lost.
+    let active_run = record.session.active_run.as_ref().map(|run| &run.run_id);
     for message in &mut record.messages {
-        if message.status == "streaming" {
+        if message.status == "streaming"
+            && !(active_run.is_some() && message.run_id.as_ref() == active_run)
+        {
             message.status = "stopped".into();
         }
     }
@@ -767,6 +770,28 @@ mod tests {
             &request,
             "test-opaque-credential".into(),
         )
+    }
+
+    #[test]
+    fn merging_older_history_keeps_the_registered_reply_streaming_until_settled() {
+        let (_config, store) = store();
+        let sid = store.create("test", false).unwrap().session.id;
+        let mut record = store.load_record(&sid).unwrap();
+        let live = control(&sid);
+        record
+            .messages
+            .push(message(&live.message_id, "assistant", &live.run_id, 1));
+        record.session.active_run = Some(RunRef {
+            run_id: live.run_id.clone(),
+            operation_id: live.operation_id.clone(),
+        });
+        merge_native(&mut record, &json!([]), &[]).unwrap();
+        assert_eq!(record.messages[0].status, "streaming");
+        assert_eq!(record.messages[0].content, "partial");
+        // Recovery still settles a previous process's dangling run.
+        settle_interrupted(&mut record, Some(&json!([]))).unwrap();
+        assert_eq!(record.messages[0].status, "stopped");
+        assert!(record.session.active_run.is_none());
     }
 
     #[test]

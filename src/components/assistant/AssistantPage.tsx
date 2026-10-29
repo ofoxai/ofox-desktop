@@ -387,6 +387,18 @@ function AssistantWorkspace() {
     else setUnseenBelow(true);
   }, [assistant.stream, messages.length]);
   useLayoutEffect(() => {
+    const input = composer.current;
+    if (!input) return;
+    const resize = () => {
+      // Clear the previous height so deleting text can shrink the field.
+      input.style.height = "auto";
+      input.style.height = `${Math.max(76, Math.min(160, input.scrollHeight))}px`;
+    };
+    resize();
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, [assistant.draft, assistant.selectedId, sidebarCollapsed, trashed]);
+  useLayoutEffect(() => {
     if (!focusStarter.current) return;
     focusStarter.current = false;
     const input = composer.current;

@@ -4290,7 +4290,7 @@ fn switching_versions_shows_the_chosen_turn_and_keeps_it_after_a_restart() {
             .await
             .unwrap();
         assert_eq!(active(&shown), pairs(&VERSION_A));
-        assert_eq!(find(&shown, "Answer B").superseded, true);
+        assert!(find(&shown, "Answer B").superseded);
         assert_eq!(
             active(&host.get_session(&sid).await.unwrap()),
             pairs(&VERSION_A)
@@ -4353,6 +4353,39 @@ fn switching_versions_shows_the_chosen_turn_and_keeps_it_after_a_restart() {
         assert_eq!(active(&forth), continued);
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn opening_an_older_conversation_restores_version_metadata_without_another_paid_turn() {
+    use cc_switch_lib::assistant::store::AssistantStore;
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = two_versions(&host, &env, &gateway).await;
+        let store = AssistantStore::for_owner(config.path(), &owner()).unwrap();
+        store
+            .mutate(&sid, |record| {
+                for message in &mut record.messages {
+                    message.branch_from = None;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let requests = gateway.requests().len();
+        let reopened = AssistantHost::new(env.clone());
+        let detail = reopened.get_session(&sid).await.unwrap();
+        let a = find(&detail, "Question A");
+        let b = find(&detail, "Question B");
+        assert_eq!(a.branch_from, Some(None));
+        assert_eq!(b.branch_from, Some(None));
+        assert!(a.superseded && !b.superseded);
+        assert_eq!(gateway.requests().len(), requests);
+    });
 }
 
 #[test]

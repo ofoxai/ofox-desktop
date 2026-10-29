@@ -182,6 +182,11 @@ export const AssistantSidebar = forwardRef<
   // The same for the footer's menu.
   const footerAction = useRef<(() => void) | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    // Unsaved instructions belong to the account that opened the editor.
+    setSettingsOpen(false);
+    footerAction.current = null;
+  }, [assistant.bootstrap?.owner, assistant.bootstrap?.authorityGeneration]);
   const backupHint = useId();
   const rowIds = useId();
   const focusSoon = usePendingFocus();

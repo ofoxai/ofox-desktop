@@ -1,5 +1,12 @@
 import { createRef } from "react";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -412,4 +419,54 @@ describe("the trash's header", () => {
     renderSidebar({ trashCount: 3 });
     expect(screen.queryByRole("button", { name: "Empty trash" })).toBeNull();
   });
+});
+
+describe("settings authority", () => {
+  it.each(["owner", "generation"])(
+    "closes unsaved settings when the %s changes",
+    async (field) => {
+      const bootstrap = {
+        owner: "a".repeat(64),
+        authorityGeneration: 1,
+      } as Assistant["bootstrap"];
+      const savePreferences = vi.fn();
+      const view = renderSidebar({
+        bootstrap,
+        reloadPreferences: vi.fn(async () => ({
+          instructions: "Private A instructions",
+          autoTitle: true,
+          notifyOnFinish: true,
+        })),
+        savePreferences,
+      });
+      await userEvent.click(
+        screen.getByRole("button", { name: "More actions" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("menuitem", { name: "Assistant settings…" }),
+      );
+      const dialog = await screen.findByRole("dialog", {
+        name: "Assistant settings",
+      });
+      const input = within(dialog).getByRole("textbox", {
+        name: "Custom instructions",
+      });
+      await waitFor(() => expect(input).toHaveValue("Private A instructions"));
+      fireEvent.change(input, { target: { value: "Unsaved A instructions" } });
+      view.rerenderWith({
+        bootstrap: {
+          ...bootstrap!,
+          ...(field === "owner"
+            ? { owner: "b".repeat(64) }
+            : { authorityGeneration: 2 }),
+        },
+      });
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("dialog", { name: "Assistant settings" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(savePreferences).not.toHaveBeenCalled();
+    },
+  );
 });
