@@ -42,6 +42,10 @@ const mocks = vi.hoisted(() => ({
   restore: vi.fn(),
   pickAttachments: vi.fn(),
   send: vi.fn(),
+  notify: vi.fn(),
+  quoteMedia: vi.fn(),
+  cancelVideo: vi.fn(),
+  resumeVideo: vi.fn(),
   stop: vi.fn(),
   getPreferences: vi.fn(),
   setPreferences: vi.fn(),
@@ -55,6 +59,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api/assistant", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/assistant")>()),
   assistantApi: mocks,
+}));
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: vi.fn().mockResolvedValue(true),
+  requestPermission: vi.fn().mockResolvedValue("granted"),
+  sendNotification: mocks.notify,
 }));
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
@@ -6968,6 +6977,389 @@ describe("video backup options", () => {
         expectedOwner: capabilities.owner,
         expectedGeneration: capabilities.authorityGeneration,
         excludeVideos: true,
+      }),
+    );
+  });
+});
+
+describe("quoted video submission", () => {
+  const videoModel: AssistantModel = {
+    ...model("video/test", "Video model"),
+    kind: "video",
+    video: {
+      modes: ["t2v", "i2v"],
+      resolutions: ["480p"],
+      defaultResolution: "480p",
+      minDuration: 4,
+      maxDuration: 6,
+      supportsAudio: false,
+      aspectRatios: [],
+      fromPricePerSecond: "0.02",
+    },
+  };
+  beforeEach(() => {
+    mocks.quoteMedia.mockReset().mockResolvedValue({
+      id: "quote-1",
+      estimatedCostUsd: "0.08",
+      expiresAt: Date.now() + 600000,
+    });
+    mocks.cancelVideo.mockReset().mockResolvedValue(undefined);
+    mocks.resumeVideo.mockReset().mockResolvedValue(undefined);
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [...capabilities.models, videoModel],
+    });
+    current.session.modelId = videoModel.id;
+    current.session.draft = "A quiet lake";
+  });
+  it("quotes before submitting and preserves the draft when confirmation is cancelled", async () => {
+    await openConversation();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Generate video?",
+    });
+    expect(dialog).toHaveTextContent("0.08");
+    expect(mocks.quoteMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: session.id,
+        params: { duration: 4, resolution: "480p", generateAudio: false },
+        expectedOwner: capabilities.owner,
+        expectedGeneration: 1,
+      }),
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+    expect(composer()).toHaveValue("A quiet lake");
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+  it("submits only the explicitly confirmed quote and exact parameters", async () => {
+    await openConversation();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Generate video?",
+    });
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Generate video" }),
+    );
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          quoteId: "quote-1",
+          video: { duration: 4, resolution: "480p", generateAudio: false },
+          text: "A quiet lake",
+          attachmentIds: [],
+        }),
+      ),
+    );
+    expect(mocks.send).toHaveBeenCalledOnce();
+  });
+  it("requires an explicit submit anyway choice when a price is unknown", async () => {
+    mocks.quoteMedia.mockResolvedValue({
+      id: "unknown-price",
+      estimatedCostUsd: null,
+      expiresAt: Date.now() + 600000,
+    });
+    await openConversation();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const dialog = await screen.findByRole("dialog", {
+      name: "Generate video?",
+    });
+    expect(dialog).toHaveTextContent("The cost cannot be estimated");
+    expect(mocks.send).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Submit anyway" }),
+    );
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({ quoteId: "unknown-price" }),
+      ),
+    );
+  });
+  it("dismisses a quote when its account authority expires", async () => {
+    await openConversation();
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("dialog", { name: "Generate video?" });
+    act(() => mocks.auth?.("expired"));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Generate video?" }),
+      ).toBeNull(),
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+});
+
+describe("background video progress", () => {
+  const movie: AssistantMessage = {
+    id: "movie",
+    runId: "video-run",
+    operationId: "video-op",
+    role: "media",
+    content: "Private prompt",
+    createdAt: 10,
+    status: "queued",
+    media: {
+      kind: "video",
+      model: "video/test",
+      params: { duration: 4, resolution: "480p" },
+      inputIds: [],
+      outputs: [],
+      status: "queued",
+      cost: null,
+      apex: "ofox.ai",
+      jobId: "job",
+    },
+  };
+  const event = (status: string, over: Record<string, unknown> = {}) =>
+    act(() =>
+      mocks.listener?.({
+        sessionId: session.id,
+        runId: "video-run",
+        operationId: "video-op",
+        type: "media_progress",
+        data: {
+          owner: capabilities.owner,
+          generation: 1,
+          apex: "ofox.ai",
+          messageId: movie.id,
+          status,
+          message: {
+            ...movie,
+            status,
+            media: { ...movie.media, status, cost: "0.08" },
+          },
+          usage: { mediaCostUsd: "0.08" },
+          elapsedMs: 1000,
+          updatedAt: Date.now() + 1000,
+          ...over,
+        },
+      } as AssistantEvent),
+    );
+  beforeEach(() => {
+    current.messages = [movie];
+    mocks.notify.mockClear();
+  });
+  it("updates a saved video and cost while preserving a different live chat and its next draft", async () => {
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    act(() => hook.result.current.setDraft("Chat question"));
+    mocks.send.mockReturnValue(new Promise(() => undefined));
+    act(() => void hook.result.current.send());
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    const run = hook.result.current.run;
+    act(() => hook.result.current.setDraft("Next draft"));
+    event("completed");
+    expect(
+      hook.result.current.detail?.messages.find((m) => m.id === movie.id)?.media
+        ?.status,
+    ).toBe("completed");
+    expect(hook.result.current.detail?.usage.mediaCostUsd).toBe("0.08");
+    expect(hook.result.current.run).toEqual(run);
+    expect(hook.result.current.draft).toBe("Next draft");
+  });
+  it("ignores events from a different owner or expired authority", async () => {
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    event("completed", { owner: "another" });
+    event("completed", { generation: 0 });
+    expect(hook.result.current.detail?.messages[0].media?.status).toBe(
+      "queued",
+    );
+    expect(mocks.notify).not.toHaveBeenCalled();
+  });
+  it("notifies once at completion, with only the conversation title and completion message", async () => {
+    const focus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    try {
+      const hook = renderHook(() => useAssistant(true));
+      await waitFor(() => expect(hook.result.current.connected).toBe(true));
+      act(() => hook.result.current.select(session.id));
+      await waitFor(() => expect(hook.result.current.loading).toBe(false));
+      event("queued");
+      expect(mocks.notify).not.toHaveBeenCalled();
+      event("completed");
+      event("completed");
+      await waitFor(() => expect(mocks.notify).toHaveBeenCalledOnce());
+      expect(mocks.notify).toHaveBeenCalledWith({
+        title: session.title,
+        body: i18n.t("assistant.finishNotice.completed"),
+      });
+    } finally {
+      focus.mockRestore();
+    }
+  });
+});
+
+it("keeps a video completion that arrives during a transcript refresh", async () => {
+  const movie: AssistantMessage = {
+    id: "refresh-movie",
+    runId: "vr",
+    operationId: "vo",
+    role: "media",
+    content: "",
+    createdAt: 1,
+    status: "queued",
+    media: {
+      kind: "video",
+      model: "test/video",
+      params: { duration: 4, resolution: "480p" },
+      inputIds: [],
+      outputs: [],
+      status: "queued",
+      cost: null,
+      apex: "ofox.ai",
+    },
+  };
+  current.messages = [movie];
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.connected).toBe(true));
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.loading).toBe(false));
+  let resolve!: (value: AssistantSessionDetail) => void;
+  mocks.getSession.mockReturnValueOnce(new Promise((done) => (resolve = done)));
+  let refresh!: Promise<boolean>;
+  act(() => {
+    refresh = hook.result.current.refreshDetail(session.id);
+  });
+  act(() =>
+    mocks.listener?.({
+      sessionId: session.id,
+      runId: "vr",
+      operationId: "vo",
+      type: "media_progress",
+      data: {
+        owner: capabilities.owner,
+        generation: 1,
+        apex: "ofox.ai",
+        messageId: movie.id,
+        status: "completed",
+        message: {
+          ...movie,
+          status: "completed",
+          media: { ...movie.media!, status: "completed", cost: "0.08" },
+        },
+        usage: { mediaCostUsd: "0.08" },
+        elapsedMs: 1000,
+        updatedAt: Date.now() + 1000,
+      },
+    } as AssistantEvent),
+  );
+  await act(async () => {
+    resolve({ ...current, messages: [movie] });
+    await refresh;
+  });
+  expect(hook.result.current.detail?.messages[0].media?.status).toBe(
+    "completed",
+  );
+  expect(hook.result.current.detail?.usage.mediaCostUsd).toBe("0.08");
+});
+
+describe("video confirmation scope", () => {
+  const params = { duration: 4, resolution: "480p" };
+  beforeEach(() => {
+    current.session.modelId = "video/test";
+    current.session.draft = "Lake";
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [{ ...model("video/test", "Video"), kind: "video" }],
+    });
+    mocks.quoteMedia
+      .mockReset()
+      .mockResolvedValue({
+        id: "q",
+        estimatedCostUsd: "0.1",
+        expiresAt: Date.now() + 600000,
+      });
+  });
+  const openHook = async () => {
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.connected).toBe(true));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    return hook;
+  };
+  it("ignores a quote returned after leaving its conversation", async () => {
+    const hook = await openHook();
+    let resolve!: (value: unknown) => void;
+    mocks.quoteMedia.mockReturnValue(new Promise((done) => (resolve = done)));
+    let quote: unknown;
+    act(() => {
+      void hook.result.current
+        .quoteVideo(params)
+        .then((value) => (quote = value));
+    });
+    await waitFor(() => expect(mocks.quoteMedia).toHaveBeenCalled());
+    act(() => hook.result.current.select(null));
+    await act(async () =>
+      resolve({
+        id: "q",
+        estimatedCostUsd: "0.1",
+        expiresAt: Date.now() + 600000,
+      }),
+    );
+    expect(quote).toBeNull();
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+  it.each(["model", "draft", "expiry"])(
+    "refuses a confirmation after %s changes",
+    async (change) => {
+      const hook = await openHook();
+      let quote: Awaited<ReturnType<typeof hook.result.current.quoteVideo>> =
+        null;
+      await act(async () => {
+        quote = await hook.result.current.quoteVideo(params);
+      });
+      expect(quote).not.toBeNull();
+      if (change === "model")
+        await act(async () => {
+          await hook.result.current.update({ modelId: "balanced" });
+        });
+      if (change === "draft")
+        act(() => hook.result.current.setDraft("Different prompt"));
+      if (change === "expiry") quote!.quote.expiresAt = Date.now() - 1;
+      await act(async () => {
+        expect(await hook.result.current.sendVideo(quote!)).toBe(false);
+      });
+      expect(mocks.send).not.toHaveBeenCalled();
+    },
+  );
+  it("submits only the selected historical frame instead of unrelated draft files", async () => {
+    const frame: AssistantAttachment = {
+      id: "frame",
+      name: "frame.webp",
+      mimeType: "image/webp",
+      sizeBytes: 5,
+      status: "ready",
+      reason: null,
+      details: null,
+    };
+    current.attachments = [
+      frame,
+      { ...frame, id: "unrelated", name: "other.webp" },
+    ];
+    current.session.draftAttachmentIds = ["unrelated"];
+    const hook = await openHook();
+    let quote: Awaited<ReturnType<typeof hook.result.current.quoteVideo>> =
+      null;
+    await act(async () => {
+      quote = await hook.result.current.quoteVideo({
+        ...params,
+        firstFrameId: frame.id,
+      });
+    });
+    await act(async () => {
+      await hook.result.current.sendVideo(quote!);
+    });
+    expect(mocks.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        attachmentIds: ["frame"],
+        video: { ...params, firstFrameId: "frame" },
+        quoteId: "q",
       }),
     );
   });

@@ -5,7 +5,7 @@ import { MenuSelect } from "@/components/ui/menu-select";
 import { SegmentedControl } from "@/components/ui/segmented";
 import { useModelOptions } from "./useModelOptions";
 
-const KINDS: AssistantModelKind[] = ["chat", "image"];
+const KINDS: AssistantModelKind[] = ["chat", "image", "video"];
 
 const kindOf = (model: AssistantModel): AssistantModelKind =>
   model.kind ?? "chat";

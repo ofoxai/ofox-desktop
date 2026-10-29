@@ -707,7 +707,7 @@ impl AssistantHost {
                     Some("assistant_media_query_expired"),
                 )
                 .await?;
-                return Ok(());
+                return self.emit_video_state(&control, generation).await;
             }
             let mut result = video_http::query(&client, &gateway, &key, job).await;
             if result
@@ -812,7 +812,7 @@ impl AssistantHost {
                         Some(&error.code),
                     )
                     .await?;
-                    return Ok(());
+                    return self.emit_video_state(&control, generation).await;
                 }
                 Err(error) if error.code == "assistant_rate_limited" => {
                     delay = Duration::from_secs(60);
@@ -1022,7 +1022,7 @@ impl AssistantHost {
                 .as_ref()
                 .and_then(|m| m.submitted_at)
                 .map(|start| now().saturating_sub(start));
-            self.emit(control,"media_progress",json!({"messageId":message.id,"status":message.media.as_ref().map(|m|&m.status),"message":message,"usage":detail.usage,"elapsedMs":elapsed}));
+            self.emit(control,"media_progress",json!({"owner":control.identity.owner,"generation":generation,"apex":control.identity.apex,"messageId":message.id,"status":message.media.as_ref().map(|m|&m.status),"message":message,"usage":detail.usage,"elapsedMs":elapsed,"updatedAt":detail.session.updated_at}));
         }
         Ok(())
     }

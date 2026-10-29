@@ -36,12 +36,16 @@ import {
   assistantApi,
   assistantErrorKey,
   type AssistantImageRequest,
+  type AssistantVideoRequest,
+  type AssistantMessage,
   type AssistantAttachment,
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
-import { useAssistant } from "./useAssistant";
+import { useAssistant, type VideoConfirmation } from "./useAssistant";
 import { ImageParams } from "./ImageParams";
 import { MediaBlock } from "./MediaBlock";
+import { VideoBlock } from "./VideoBlock";
+import { VideoParams, defaultVideoParams } from "./VideoParams";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AttachmentList } from "./AssistantAttachments";
 import { AssistantModelPicker } from "./AssistantModelPicker";
@@ -329,6 +333,33 @@ function AssistantWorkspace() {
     (item) => item.id === (session?.modelId ?? assistant.newModelId),
   );
   const imageMode = composerModel?.kind === "image";
+  const videoMode = composerModel?.kind === "video";
+  const [videoParams, setVideoParams] = useState<AssistantVideoRequest>({
+    duration: 4,
+    resolution: "",
+  });
+  const [videoConfirmation, setVideoConfirmation] =
+    useState<VideoConfirmation | null>(null);
+  useEffect(() => {
+    if (composerModel?.kind === "video")
+      setVideoParams(defaultVideoParams(composerModel));
+  }, [session?.id, composerModel?.id]);
+  const videoQuoteOpen = Boolean(
+    videoConfirmation &&
+      videoConfirmation.owner === bootstrap?.owner &&
+      videoConfirmation.generation === bootstrap?.authorityGeneration &&
+      videoConfirmation.sessionId === session?.id &&
+      videoConfirmation.modelId === composerModel?.id &&
+      videoConfirmation.text === assistant.draft,
+  );
+  useEffect(() => {
+    if (videoConfirmation && !videoQuoteOpen) setVideoConfirmation(null);
+  }, [videoQuoteOpen, videoConfirmation]);
+  const frameOptions = [
+    ...new Map(
+      [...(detail?.attachments ?? []), ...files].map((file) => [file.id, file]),
+    ).values(),
+  ];
   const [imageParams, setImageParams] = useState<AssistantImageRequest>({});
   useEffect(() => setImageParams({}), [session?.id, composerModel?.id]);
   const invalidImageInput =
@@ -343,6 +374,7 @@ function AssistantWorkspace() {
       ));
   const imagesNeedVision =
     !imageMode &&
+    !videoMode &&
     composerModel?.supportsImages === false &&
     files.some((file) => file.mimeType.startsWith("image/"));
   // The backend refuses a message of more than MAX_MESSAGE_BYTES of text.
@@ -442,6 +474,12 @@ function AssistantWorkspace() {
 
   const send = () => {
     if (invalidImageInput) return;
+    if (videoMode) {
+      void assistant.quoteVideo(videoParams).then((confirmation) => {
+        if (confirmation) setVideoConfirmation(confirmation);
+      });
+      return;
+    }
     follow.current = true;
     const media = imageMode
       ? {
@@ -453,6 +491,42 @@ function AssistantWorkspace() {
       if (sent) composer.current?.focus();
     });
   };
+  const videoBlock = (message: AssistantMessage, submitting = false) =>
+    session && bootstrap?.owner ? (
+      <VideoBlock
+        message={message}
+        sessionId={session.id}
+        owner={bootstrap.owner}
+        generation={bootstrap.authorityGeneration}
+        disabled={!available || assistant.loading || trashed}
+        onSave={(file) =>
+          assistantApi.saveMedia({
+            sessionId: session.id,
+            attachmentId: file.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+          })
+        }
+        onCancel={() =>
+          submitting
+            ? assistant.stop()
+            : assistantApi.cancelVideo({
+                sessionId: session.id,
+                messageId: message.id,
+                expectedOwner: bootstrap.owner!,
+                expectedGeneration: bootstrap.authorityGeneration,
+              })
+        }
+        onResume={() =>
+          assistantApi.resumeVideo({
+            sessionId: session.id,
+            messageId: message.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+          })
+        }
+      />
+    ) : undefined;
   const stop = () =>
     void assistant.stop().then(() => composer.current?.focus());
   const trackScroll = () => {
@@ -1026,7 +1100,9 @@ function AssistantWorkspace() {
                               ),
                           )}
                           mediaBlock={
-                            message.media && session && bootstrap?.owner ? (
+                            message.media?.kind === "video" ? (
+                              videoBlock(message)
+                            ) : message.media && session && bootstrap?.owner ? (
                               <MediaBlock
                                 message={message}
                                 sessionId={session.id}
@@ -1067,6 +1143,7 @@ function AssistantWorkspace() {
                                 onRegenerate={() =>
                                   void (async () => {
                                     const media = message.media!;
+                                    if (media.kind !== "image") return;
                                     const question = messages.find(
                                       (item) =>
                                         item.role === "user" &&
@@ -1118,9 +1195,11 @@ function AssistantWorkspace() {
                         <AssistantMessageView
                           message={assistant.stream}
                           mediaBlock={
-                            assistant.stream.media &&
-                            session &&
-                            bootstrap?.owner ? (
+                            assistant.stream.media?.kind === "video" ? (
+                              videoBlock(assistant.stream, true)
+                            ) : assistant.stream.media &&
+                              session &&
+                              bootstrap?.owner ? (
                               <MediaBlock
                                 message={assistant.stream}
                                 sessionId={session.id}
@@ -1223,6 +1302,15 @@ function AssistantWorkspace() {
                       removeDisabled={busy || Boolean(run) || trashed}
                     />
                   </div>
+                  {videoMode && composerModel && (
+                    <VideoParams
+                      model={composerModel}
+                      value={videoParams}
+                      attachments={frameOptions}
+                      onChange={setVideoParams}
+                      disabled={!writable}
+                    />
+                  )}
                   {imageMode && composerModel && (
                     <ImageParams
                       model={composerModel}
@@ -1329,6 +1417,7 @@ function AssistantWorkspace() {
                         <Paperclip aria-hidden className="h-3.5 w-3.5" />
                       </Button>
                       {!imageMode &&
+                        !videoMode &&
                         (showSearchNote ? (
                           <Tooltip>
                             {/* The wrapper takes the hover while the switch is off. */}
@@ -1344,14 +1433,14 @@ function AssistantWorkspace() {
                         ) : (
                           webSearchToggle
                         ))}
-                      {!imageMode && showSearchNote && (
+                      {!imageMode && !videoMode && showSearchNote && (
                         <span id={searchNoteId} className="sr-only">
                           {searchNote}
                         </span>
                       )}
                       {/* A reply under way goes on as it began: the choice is
                       for the next message. */}
-                      {!imageMode && (
+                      {!imageMode && !videoMode && (
                         <ThinkingMenu
                           model={composerModel}
                           level={assistant.thinkingLevel}
@@ -1449,6 +1538,47 @@ function AssistantWorkspace() {
           )}
         </div>
       </section>
+      <ConfirmDialog
+        isOpen={videoQuoteOpen}
+        title={t("assistant.video.confirmTitle")}
+        message={
+          videoConfirmation?.quote.estimatedCostUsd != null
+            ? t("assistant.video.estimate", {
+                cost: videoConfirmation.quote.estimatedCostUsd,
+              })
+            : t("assistant.video.unknownPrice")
+        }
+        details={
+          videoConfirmation && (
+            <p>
+              {composerModel?.name} ·{" "}
+              {t("assistant.video.seconds", {
+                count: videoConfirmation.video.duration,
+              })}{" "}
+              · {videoConfirmation.video.resolution}
+            </p>
+          )
+        }
+        variant="info"
+        confirmText={t(
+          videoConfirmation?.quote.estimatedCostUsd == null
+            ? "assistant.video.submitAnyway"
+            : "assistant.video.confirm",
+        )}
+        onCancel={() => setVideoConfirmation(null)}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          focusComposer();
+        }}
+        onConfirm={() => {
+          const confirmation = videoConfirmation;
+          setVideoConfirmation(null);
+          if (confirmation && videoQuoteOpen)
+            void assistant.sendVideo(confirmation).then((sent) => {
+              if (sent) focusComposer();
+            });
+        }}
+      />
       <ConfirmDialog
         isOpen={
           backupDialog !== null &&

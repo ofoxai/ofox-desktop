@@ -146,7 +146,7 @@ export function MediaBlock({
   );
 }
 
-function ActivityLink() {
+export function ActivityLink() {
   const { t } = useTranslation();
   const { apex, isLoading } = useOfoxApex();
   return (

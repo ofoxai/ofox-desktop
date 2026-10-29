@@ -4,6 +4,8 @@ import {
   assistantErrorCode,
   type AssistantAttachment,
   type AssistantImageRequest,
+  type AssistantVideoRequest,
+  type AssistantMediaQuote,
   type AssistantBackupReport,
   type AssistantBootstrap,
   type AssistantEvent,
@@ -91,6 +93,19 @@ interface PendingDeltas {
 
 interface DraftWriteScope {
   held: boolean;
+}
+
+export interface VideoConfirmation {
+  quote: AssistantMediaQuote;
+  sessionId: string;
+  modelId: string;
+  owner: string;
+  generation: number;
+  video: AssistantVideoRequest;
+  text: string;
+  attachments: AssistantAttachment[];
+  epoch: number;
+  selection: number;
 }
 
 interface PendingSend extends AssistantRunRef {
@@ -234,6 +249,18 @@ export function useAssistant(enabled: boolean) {
   const importing = useRef(false);
   const savedDrafts = useRef(new Map<string, SavedDraft>());
   const bootstrapRef = useRef<AssistantBootstrap | null>(null);
+  const modelRef = useRef("");
+  modelRef.current = detail?.session.modelId ?? newModelId;
+  const videoNotices = useRef(new Set<string>());
+  const videoProgressSequence = useRef(0);
+  const videoProgress = useRef(
+    new Map<
+      string,
+      { sequence: number; event: AssistantEvent & { type: "media_progress" } }
+    >(),
+  );
+  const quoting = useRef(false);
+  const confirmedQuote = useRef<VideoConfirmation | null>(null);
   const pendingSends = useRef(new Map<string, PendingSend>());
   const refreshSessionsRef = useRef<(generation?: number) => Promise<void>>(
     async () => undefined,
@@ -571,8 +598,9 @@ export function useAssistant(enabled: boolean) {
     async (sessionId: string) => {
       const sequence = ++detailSequence.current;
       const generation = epoch.current;
+      const mediaSequence = videoProgressSequence.current;
       try {
-        const value = await assistantApi.getSession(sessionId);
+        let value = await assistantApi.getSession(sessionId);
         if (
           !mounted.current ||
           generation !== epoch.current ||
@@ -580,6 +608,37 @@ export function useAssistant(enabled: boolean) {
           sequence !== detailSequence.current
         )
           return false;
+        // A read begun before a progress event must not roll its saved video
+        // back. Prefer a genuinely newer session snapshot over the event.
+        for (const progress of videoProgress.current.values()) {
+          const { event } = progress;
+          if (
+            progress.sequence <= mediaSequence ||
+            event.sessionId !== sessionId ||
+            event.data.updatedAt < value.session.updatedAt ||
+            event.data.owner !== bootstrapRef.current?.owner ||
+            event.data.generation !== bootstrapRef.current?.authorityGeneration
+          )
+            continue;
+          const { message, usage, updatedAt } = event.data;
+          value = {
+            ...value,
+            session: { ...value.session, updatedAt },
+            usage,
+            messages: value.messages.some((item) => item.id === message.id)
+              ? value.messages.map((item) =>
+                  item.id === message.id ? message : item,
+                )
+              : [...value.messages, message],
+            attachments: [
+              ...new Map(
+                [...value.attachments, ...(message.attachments ?? [])].map(
+                  (file) => [file.id, file],
+                ),
+              ).values(),
+            ],
+          };
+        }
         // While this window is still preparing a send (the first send may be
         // minting the key) the backend has no run yet: keep the local run and
         // the optimistic question, or later events would be dropped.
@@ -697,6 +756,9 @@ export function useAssistant(enabled: boolean) {
       setAttachments([]);
       setBootstrap(null);
       bootstrapRef.current = null;
+      videoProgress.current.clear();
+      videoNotices.current.clear();
+      confirmedQuote.current = null;
       setChosenModel(null);
       lastWebSearch.current = false;
       setNewWebSearch(false);
@@ -865,6 +927,87 @@ export function useAssistant(enabled: boolean) {
         // The identity generation this event arrived under: a list read it
         // asks for is fenced on it.
         const generation = epoch.current;
+        if (event.type === "media_progress") {
+          const {
+            owner,
+            generation: authority,
+            apex,
+            messageId,
+            message,
+            status,
+            usage,
+          } = event.data;
+          const identity = bootstrapRef.current;
+          if (
+            signedOut.current ||
+            !identity ||
+            owner !== identity.owner ||
+            authority !== identity.authorityGeneration ||
+            message?.id !== messageId ||
+            message.media?.kind !== "video" ||
+            message.media.apex !== apex ||
+            message.runId !== event.runId ||
+            message.operationId !== event.operationId ||
+            message.media.status !== status
+          )
+            return;
+          const progressKey = `${event.sessionId}:${messageId}`;
+          videoProgress.current.delete(progressKey);
+          videoProgress.current.set(progressKey, {
+            sequence: ++videoProgressSequence.current,
+            event,
+          });
+          if (videoProgress.current.size > 512)
+            videoProgress.current.delete(
+              videoProgress.current.keys().next().value!,
+            );
+          setDetail((old) => {
+            if (
+              old?.session.id !== event.sessionId ||
+              old.session.updatedAt > event.data.updatedAt
+            )
+              return old;
+            const previous = old.messages.find(
+              (item) =>
+                item.id === messageId &&
+                item.runId === event.runId &&
+                item.operationId === event.operationId,
+            );
+            if (
+              !previous ||
+              previous.media?.kind !== "video" ||
+              (previous.media.status === "completed" && status !== "completed")
+            )
+              return old;
+            return {
+              ...old,
+              session: { ...old.session, updatedAt: event.data.updatedAt },
+              usage,
+              messages: old.messages.map((item) =>
+                item.id === messageId ? message : item,
+              ),
+              attachments: [
+                ...new Map(
+                  [...old.attachments, ...(message.attachments ?? [])].map(
+                    (file) => [file.id, file],
+                  ),
+                ).values(),
+              ],
+            };
+          });
+          if (["completed", "failed", "error", "expired"].includes(status)) {
+            const key = `${owner}:${authority}:${event.sessionId}:${messageId}`;
+            if (!videoNotices.current.has(key)) {
+              videoNotices.current.add(key);
+              notifyFinish({
+                sessionId: event.sessionId,
+                status: status === "completed" ? "completed" : "error",
+              });
+              void refreshSessionsRef.current(generation);
+            }
+          }
+          return;
+        }
         if (event.type === "run_start")
           void refreshSessionsRef.current(generation);
         // Any conversation's reply, followed or not.
@@ -1688,6 +1831,77 @@ export function useAssistant(enabled: boolean) {
    * or (`text`, with the question's `attachments`) send a stored question
    * again as a new turn, leaving the draft.
    */
+  const quoteVideo = useCallback(
+    async (video: AssistantVideoRequest): Promise<VideoConfirmation | null> => {
+      if (
+        busy ||
+        loading ||
+        showTrash ||
+        detail?.session.deletedAt != null ||
+        runRef.current ||
+        quoting.current
+      )
+        return null;
+      quoting.current = true;
+      confirmedQuote.current = null;
+      setBusy(true);
+      const generation = epoch.current;
+      const selection = selectionSequence.current;
+      const modelId = modelRef.current;
+      const text = draftRef.current;
+      try {
+        const identity = requireIdentity(bootstrapRef.current);
+        const session = await ensureSession();
+        const valid = () =>
+          generation === epoch.current &&
+          selection === selectionSequence.current &&
+          selectedRef.current === session.id &&
+          modelRef.current === modelId &&
+          draftRef.current === text;
+        if (!valid() || session.modelId !== modelId)
+          throw new Error("assistant_request_expired");
+        const params = { ...video };
+        const quote = await assistantApi.quoteMedia({
+          sessionId: session.id,
+          params,
+          ...identity,
+        });
+        if (!valid()) throw new Error("assistant_request_expired");
+        const frameIds = [params.firstFrameId, params.lastFrameId].filter(
+          Boolean,
+        );
+        const available = new Map(
+          [...(detail?.attachments ?? []), ...attachmentsRef.current].map(
+            (file) => [file.id, file],
+          ),
+        );
+        const confirmation: VideoConfirmation = {
+          quote,
+          sessionId: session.id,
+          modelId,
+          owner: identity.expectedOwner,
+          generation: identity.expectedGeneration,
+          video: params,
+          text,
+          attachments: [...available.values()].filter((file) =>
+            frameIds.includes(file.id),
+          ),
+          epoch: generation,
+          selection,
+        };
+        confirmedQuote.current = confirmation;
+        return confirmation;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        return null;
+      } finally {
+        quoting.current = false;
+        if (generation === epoch.current) setBusy(false);
+      }
+    },
+    [busy, loading, showTrash, detail, ensureSession, showError],
+  );
+
   const send = useCallback(
     async (options?: {
       editMessageId?: string;
@@ -1697,6 +1911,8 @@ export function useAssistant(enabled: boolean) {
       text?: string;
       attachments?: AssistantAttachment[];
       media?: AssistantImageRequest;
+      video?: AssistantVideoRequest;
+      quoteId?: string;
     }) => {
       const { editMessageId, regenerateMessageId, retryMessageId } =
         options ?? {};
@@ -1709,9 +1925,11 @@ export function useAssistant(enabled: boolean) {
       // be.
       const chosen = regenerateMessageId
         ? []
-        : fromComposer
-          ? attachmentsRef.current
-          : (options?.attachments ?? []);
+        : options?.video
+          ? (options.attachments ?? [])
+          : fromComposer
+            ? attachmentsRef.current
+            : (options?.attachments ?? []);
       const files = fromComposer ? chosen : chosen.filter(isSendable);
       // What the run reads first: a regenerate reads its question's files.
       const regenerated = regenerateMessageId
@@ -1776,19 +1994,31 @@ export function useAssistant(enabled: boolean) {
           content: "",
           createdAt: Date.now(),
           status: "streaming",
-          ...(options?.media
+          ...(options?.video
             ? {
                 media: {
-                  kind: "image" as const,
+                  kind: "video" as const,
                   model: session.modelId,
-                  params: options.media,
+                  params: options.video,
                   inputIds: files.map((file) => file.id),
                   status: "submitting" as const,
                   outputs: [],
                   cost: null,
                 },
               }
-            : {}),
+            : options?.media
+              ? {
+                  media: {
+                    kind: "image" as const,
+                    model: session.modelId,
+                    params: options.media,
+                    inputIds: files.map((file) => file.id),
+                    status: "submitting" as const,
+                    outputs: [],
+                    cost: null,
+                  },
+                }
+              : {}),
         });
         if (fromComposer) {
           setDraft("");
@@ -1829,6 +2059,9 @@ export function useAssistant(enabled: boolean) {
           text,
           attachmentIds: files.map((file) => file.id),
           ...(options?.media ? { media: options.media } : {}),
+          ...(options?.video
+            ? { video: options.video, quoteId: options.quoteId }
+            : {}),
           ...(editMessageId ? { editMessageId, replaceAttachments: true } : {}),
           ...(regenerateMessageId ? { regenerateMessageId } : {}),
           ...(retryMessageId ? { retryMessageId } : {}),
@@ -2269,6 +2502,29 @@ export function useAssistant(enabled: boolean) {
     bootstrap,
     newModelId,
     chooseNewModel,
+    quoteVideo,
+    sendVideo: async (confirmation: VideoConfirmation) => {
+      if (
+        confirmedQuote.current !== confirmation ||
+        confirmation.epoch !== epoch.current ||
+        confirmation.selection !== selectionSequence.current ||
+        confirmation.sessionId !== selectedRef.current ||
+        confirmation.modelId !== modelRef.current ||
+        confirmation.owner !== bootstrapRef.current?.owner ||
+        confirmation.generation !== bootstrapRef.current?.authorityGeneration ||
+        confirmation.text !== draftRef.current ||
+        confirmation.quote.expiresAt <= Date.now()
+      ) {
+        showError(new Error("assistant_media_quote_expired"));
+        return false;
+      }
+      confirmedQuote.current = null;
+      return send({
+        video: confirmation.video,
+        quoteId: confirmation.quote.id,
+        attachments: confirmation.attachments,
+      });
+    },
     thinkingLevel,
     setThinkingLevel,
     thinking: liveThinking,

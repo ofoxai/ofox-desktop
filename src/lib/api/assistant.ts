@@ -259,7 +259,8 @@ export type AssistantAttachmentStatus =
   | "unreadable"
   | "unsupported"
   | "too_large"
-  | "model_unsupported";
+  | "model_unsupported"
+  | "missing";
 
 /**
  * A file imported into a conversation. In `AssistantSessionDetail.attachments`
@@ -305,7 +306,18 @@ export interface AssistantMessage {
    * did.
    */
   reasoningMs?: number | null;
-  status?: "completed" | "streaming" | "stopped" | "error";
+  status?:
+    | "completed"
+    | "streaming"
+    | "stopped"
+    | "error"
+    | "queued"
+    | "in_progress"
+    | "downloading"
+    | "paused"
+    | "failed"
+    | "cancelled"
+    | "expired";
   /** Stable failure code saved with the reply; older messages may omit it. */
   errorCode?: string | null;
   attachments?: AssistantAttachment[];
@@ -429,6 +441,8 @@ export interface AssistantUpdateRequest {
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
+  video?: AssistantVideoRequest;
+  quoteId?: string;
   media?: AssistantImageRequest;
   sessionId: string;
   /** May be empty when at least one file is attached. */
@@ -479,15 +493,36 @@ export interface AssistantVideoActionRequest {
   expectedGeneration: number;
 }
 
-export interface AssistantMedia {
-  kind: "image";
+export type AssistantMediaStatus =
+  | "submitting"
+  | "queued"
+  | "in_progress"
+  | "downloading"
+  | "paused"
+  | "query_expired"
+  | "download_failed"
+  | "completed"
+  | "error"
+  | "failed"
+  | "cancelled"
+  | "expired"
+  | "unknown";
+interface AssistantMediaBase {
   model: string;
-  params: AssistantImageRequest;
   inputIds: string[];
-  status: "submitting" | "completed" | "error" | "unknown";
+  status: AssistantMediaStatus;
   outputs: string[];
   cost: string | null;
+  jobId?: string | null;
+  apex?: string | null;
+  submittedAt?: number | null;
+  pollStartedAt?: number | null;
 }
+export type AssistantMedia = AssistantMediaBase &
+  (
+    | { kind: "image"; params: AssistantImageRequest }
+    | { kind: "video"; params: AssistantVideoRequest }
+  );
 
 /**
  * Whether a file drag is over the window. A drop ends the drag: the backend
@@ -537,6 +572,20 @@ export interface AssistantSwitchVersionRequest {
  * stop) and `run_end` last.
  */
 export type AssistantRunEvent =
+  | {
+      type: "media_progress";
+      data: {
+        owner: string;
+        generation: number;
+        apex: string;
+        messageId: string;
+        status: AssistantMediaStatus;
+        message: AssistantMessage;
+        usage: AssistantUsage;
+        elapsedMs: number | null;
+        updatedAt: number;
+      };
+    }
   /**
    * `messageId` is the run's reply. `webSearch` is whether the run got web
    * search: false with the conversation's switch on means search was

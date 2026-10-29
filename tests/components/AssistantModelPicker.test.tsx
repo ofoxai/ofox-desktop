@@ -405,3 +405,25 @@ it("highlights the remembered image model when changing kinds without changing t
   await userEvent.keyboard("{Enter}");
   expect(onChange).toHaveBeenCalledWith("image/b");
 });
+
+it("offers the video segment and remembers its choice with keyboard navigation", async () => {
+  const onChange = vi.fn();
+  render(
+    picker({
+      models: [
+        ...CATALOG,
+        model("video/a", "Video A", { kind: "video" }),
+        model("video/b", "Video B", { kind: "video" }),
+      ],
+      rememberedModels: { video: "video/b" },
+      onChange,
+    }),
+  );
+  await open();
+  await userEvent.tab({ shift: true });
+  await userEvent.keyboard("{ArrowRight}");
+  expect(screen.getByRole("radio", { name: /Video/ })).toHaveFocus();
+  await userEvent.tab();
+  await userEvent.keyboard("{Enter}");
+  expect(onChange).toHaveBeenCalledWith("video/b");
+});

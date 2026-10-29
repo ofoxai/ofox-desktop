@@ -64,8 +64,15 @@ export function assistantMarkdown(
       parts.push(
         [
           inline(message.media.model),
-          message.media.params.size,
-          message.media.params.quality,
+          ...(message.media.kind === "image"
+            ? [message.media.params.size, message.media.params.quality]
+            : [
+                t("assistant.video.seconds", {
+                  count: message.media.params.duration,
+                }),
+                message.media.params.resolution,
+                message.media.params.aspectRatio,
+              ]),
         ]
           .filter(Boolean)
           .join(" · "),

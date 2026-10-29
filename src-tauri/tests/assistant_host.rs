@@ -5186,6 +5186,14 @@ fn video_cancel_is_remote_and_unsupported_cancellation_keeps_tracking() {
             let record=saved(root.path(),&sid);let media=record["messages"].as_array().unwrap().iter().find(|m|m["role"]=="media").unwrap();
             assert_eq!(media["media"]["status"],if supported {"cancelled"} else {"queued"});
             assert_eq!(media["media"]["jobId"],job);
+            if supported {
+                let events = env.events.lock().unwrap();
+                let progress = events.iter().rev().find(|event| event.r#type == "media_progress").unwrap();
+                assert_eq!(progress.data["owner"], owner());
+                assert_eq!(progress.data["generation"], host.generation());
+                assert_eq!(progress.data["apex"], "ofox.ai");
+                assert_eq!(progress.data["messageId"], *mid);
+            }
             host.shutdown().await;
         }
     });
@@ -5239,6 +5247,13 @@ fn video_resume_tracks_only_the_current_owner_and_apex_and_pauses_after_a_day() 
         assert!(io.received_requests().await.unwrap().is_empty());
         while saved(root.path(),expired.as_ref().unwrap())["messages"][0]["media"]["status"]!="query_expired"{assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}
         assert_eq!(ai.received_requests().await.unwrap().len(),1);
+        // A persisted timeout must also update an already-open renderer.
+        let expiry_event_deadline = Instant::now() + Duration::from_millis(500);
+        loop {
+            if env.events.lock().unwrap().iter().any(|event| event.r#type == "media_progress" && event.session_id == *expired.as_ref().unwrap() && event.data["status"] == "query_expired") { break; }
+            assert!(Instant::now() < expiry_event_deadline, "query expiry did not reach the renderer");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         let receipt=host.begin_logout();env.set_identity(Err("assistant_sign_in_required".into()));host.finish_logout(receipt);
         env.set_identity(Ok(Identity{owner:owner(),apex:"ofox.io".into()}));host.sign_in_completed();
         while io.received_requests().await.unwrap().is_empty(){assert!(Instant::now()<deadline);tokio::time::sleep(Duration::from_millis(10)).await;}

@@ -180,3 +180,23 @@ it("exports generated media metadata and files without private resource URLs", a
   expect(text).toContain("0.02");
   expect(text).not.toContain("assistant-media:");
 });
+
+it("exports video duration and resolution instead of image parameters", async () => {
+  const detail = fixture();
+  detail.messages.push({
+    id: "movie",
+    role: "media",
+    content: "",
+    createdAt: 3,
+    media: {
+      kind: "video",
+      model: "video/test",
+      params: { duration: 4, resolution: "480p" },
+      inputIds: [],
+      outputs: [],
+      status: "queued",
+      cost: null,
+    },
+  });
+  expect(await render(detail)).toContain("video/test · 4 s · 480p");
+});
