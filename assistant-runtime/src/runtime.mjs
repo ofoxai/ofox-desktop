@@ -1197,7 +1197,8 @@ export class AssistantRuntime {
           secrets,
         );
       const customTools = this.tools(context, model);
-      const roleText = systemPrompt(
+      const roleText = systemPrompt(customTools);
+      const instructedRole = systemPrompt(
         customTools,
         scrubSecrets(instructions, secrets),
       );
@@ -1215,6 +1216,17 @@ export class AssistantRuntime {
         appendSystemPromptOverride: () => [],
         extensionFactories: [
           (pi) => {
+            // Pi persists loader prompts as structured system messages. Its
+            // forced prompt projection changes only the provider request, so
+            // standing instructions never enter the native session file.
+            if (instructedRole !== roleText) {
+              pi.on("before_agent_start", (event) => ({
+                systemPrompt: event.systemPrompt.replace(
+                  roleText,
+                  () => instructedRole,
+                ),
+              }));
+            }
             pi.on("message_end", (event) => ({
               message: safeMessage(event.message, secrets),
             }));

@@ -1,4 +1,4 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -64,6 +64,8 @@ async function notificationsAllowed() {
 interface FinishNoticeOptions {
   /** The user's switch. */
   enabled: boolean;
+  /** Changes when the account or authority changes. */
+  authority: () => number;
   /** The conversation the assistant page shows; null for none. */
   openSessionId: string | null;
   /** A conversation's title as the user knows it; empty for untitled. */
@@ -83,8 +85,21 @@ export function useFinishNotice(options: FinishNoticeOptions) {
   const latest = useRef({ options, shell, t });
   latest.current = { options, shell, t };
   const permission = useRef<Promise<boolean> | null>(null);
+  const mounted = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   return useCallback((run: FinishedRun) => {
     const { options, shell, t } = latest.current;
+    const authority = options.authority();
+    const current = () =>
+      mounted.current &&
+      latest.current.options.enabled &&
+      latest.current.options.authority() === authority;
+    if (!current()) return;
     const kind = finishNotice({
       status: run.status,
       enabled: options.enabled,
@@ -107,6 +122,7 @@ export function useFinishNotice(options: FinishNoticeOptions) {
         action: {
           label: t("assistant.finishNotice.view"),
           onClick: () => {
+            if (!current()) return;
             latest.current.shell?.setActive("assistant");
             latest.current.options.open(run.sessionId);
           },
@@ -116,7 +132,7 @@ export function useFinishNotice(options: FinishNoticeOptions) {
     }
     permission.current ??= notificationsAllowed();
     void permission.current.then((allowed) => {
-      if (!allowed) return;
+      if (!allowed || !current()) return;
       try {
         sendNotification({ title, body });
       } catch (error) {

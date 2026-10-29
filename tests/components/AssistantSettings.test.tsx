@@ -91,6 +91,16 @@ const saved: AssistantPreferences = {
 };
 
 beforeEach(async () => {
+  for (const mock of Object.values(mocks)) {
+    if (vi.isMockFunction(mock)) mock.mockReset();
+  }
+  toasts.mockReset();
+  for (const mock of Object.values(toasts)) {
+    if (vi.isMockFunction(mock)) mock.mockReset();
+  }
+  vi.mocked(isPermissionGranted).mockReset();
+  vi.mocked(requestPermission).mockReset();
+  vi.mocked(sendNotification).mockReset();
   i18n.addResourceBundle("en", "translation", en, true, true);
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   i18n.addResourceBundle("ja", "translation", ja, true, true);
@@ -292,6 +302,18 @@ describe("assistant settings dialog", () => {
     expect(assistant.reloadPreferences).toHaveBeenCalledTimes(2);
   });
 
+  it("counts emoji as code points, like the Rust and runtime limits", async () => {
+    renderSidebar();
+    const dialog = await openSettings();
+    const input = instructionsBox(dialog);
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: "🦊".repeat(4000) } });
+    expect(within(dialog).getByText("4,000 / 4,000")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeEnabled();
+    fireEvent.change(input, { target: { value: "🦊".repeat(4001) } });
+    expect(within(dialog).getByRole("button", { name: "Save" })).toBeDisabled();
+  });
+
   it("waits for the settings before they can be edited", async () => {
     let finish: (value: AssistantPreferences) => void = () => undefined;
     renderSidebar({
@@ -425,6 +447,37 @@ describe("finish notifications", () => {
     expect(sendNotification).toHaveBeenCalledTimes(2);
     expect(toasts).not.toHaveBeenCalled();
   });
+
+  it.each(["sign-out", "unmount", "disabled"])(
+    "discards a pending notification after %s",
+    async (change) => {
+      focused(false);
+      let permit!: (permission: "granted") => void;
+      vi.mocked(requestPermission).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            permit = resolve;
+          }),
+      );
+      const hook = await workspace();
+      end("session-a", "completed");
+      await waitFor(() => expect(requestPermission).toHaveBeenCalledTimes(1));
+      if (change === "sign-out") {
+        act(() => mocks.onAuthChange.mock.calls[0][0]("expired"));
+      } else if (change === "unmount") {
+        hook.unmount();
+      } else {
+        await act(async () => {
+          await hook.result.current.assistant.savePreferences({
+            ...saved,
+            notifyOnFinish: false,
+          });
+        });
+      }
+      await act(async () => permit("granted"));
+      expect(sendNotification).not.toHaveBeenCalled();
+    },
+  );
 
   it("sends nothing once permission is refused, and does not ask again", async () => {
     focused(false);

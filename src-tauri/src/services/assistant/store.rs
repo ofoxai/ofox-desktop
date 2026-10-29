@@ -498,7 +498,7 @@ impl AssistantStore {
     }
 
     /// [`Self::preferences`], or the defaults when the file is damaged: a
-    /// damaged file loses the settings until the next save replaces it.
+    /// damaged file is preserved; background runs use defaults until repaired.
     pub fn preferences_or_default(&self) -> Preferences {
         self.preferences().unwrap_or_else(|error| {
             log::warn!("[Assistant] using the default settings: {error}");
@@ -507,7 +507,7 @@ impl AssistantStore {
     }
 
     /// Save every setting; the remembered model and fields this version does
-    /// not know stay. A damaged file is replaced.
+    /// not know stay. A damaged or unsupported file is preserved and reported.
     ///
     /// Blocking file IO: async callers run it in `spawn_blocking`.
     pub fn save_preferences(&self, preferences: &Preferences) -> Result<Preferences, String> {
@@ -539,15 +539,16 @@ impl AssistantStore {
     }
 
     /// Read, change and write `prefs.json` under its lock. Whatever else the
-    /// file holds stays; a damaged file starts again from nothing.
+    /// file holds stays; a damaged or unsupported file is never overwritten.
     fn update_prefs(&self, change: impl FnOnce(&mut Prefs)) -> Result<(), String> {
         let path = self.ensure_root()?.join(PREFS_FILE);
         let lock = file_lock(&path);
         let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_regular_or_absent(&path)?;
-        let (mut prefs, object) = read_regular(&path)?
-            .and_then(|bytes| Prefs::parse(&bytes))
-            .unwrap_or_default();
+        let (mut prefs, object) = match read_regular(&path)? {
+            Some(bytes) => Prefs::parse(&bytes).ok_or(INVALID_PREFERENCES)?,
+            None => Default::default(),
+        };
         prefs.version = FORMAT_VERSION;
         change(&mut prefs);
         write_bytes(&path, &prefs.to_bytes(object)?)
@@ -2732,7 +2733,7 @@ mod tests {
     }
 
     #[test]
-    fn damaged_prefs_are_reported_and_the_next_choice_replaces_them() {
+    fn damaged_prefs_are_reported_and_model_choices_preserve_them() {
         let (config, store) = fixture();
         store.remember_model("first/model").unwrap();
         let path = config
@@ -2747,11 +2748,12 @@ mod tests {
                 "assistant_invalid_preferences"
             );
         }
-        store.remember_model("next/model").unwrap();
+        let before = fs::read(&path).unwrap();
         assert_eq!(
-            store.remembered_model().unwrap().as_deref(),
-            Some("next/model")
+            store.remember_model("next/model").unwrap_err(),
+            INVALID_PREFERENCES
         );
+        assert_eq!(fs::read(&path).unwrap(), before);
     }
 
     // ── assistant settings ───────────────────────────────────────────────
@@ -2852,7 +2854,7 @@ mod tests {
     }
 
     #[test]
-    fn damaged_preferences_are_reported_and_saving_replaces_them() {
+    fn damaged_preferences_are_reported_and_saving_preserves_them() {
         let (config, store) = fixture();
         let path = prefs_path(config.path(), &store);
         store.remember_model("first/model").unwrap();
@@ -2870,10 +2872,17 @@ mod tests {
                 "{damaged}"
             );
             assert_eq!(store.preferences_or_default(), settings("", true, true));
+            let chosen = settings("Use metric units.", true, false);
+            assert_eq!(
+                store.save_preferences(&chosen).unwrap_err(),
+                INVALID_PREFERENCES
+            );
+            assert_eq!(
+                store.remember_model("next/model").unwrap_err(),
+                INVALID_PREFERENCES
+            );
+            assert_eq!(fs::read(&path).unwrap(), damaged.as_bytes());
         }
-        let chosen = settings("Use metric units.", true, false);
-        store.save_preferences(&chosen).unwrap();
-        assert_eq!(store.preferences().unwrap(), chosen);
     }
 
     // ── usage ────────────────────────────────────────────────────────────

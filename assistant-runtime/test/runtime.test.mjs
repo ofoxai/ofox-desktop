@@ -1558,6 +1558,55 @@ test("custom instructions follow the role as standing instructions, without the 
   assert.ok(!instructed.includes(token));
 });
 
+test("custom instructions reach the model without being stored in native history", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    const params = { ...(await sandbox(t)), apex };
+    const instructions = "PRIVATE_STANDING_INSTRUCTION_SENTINEL";
+    const prompts = [];
+    const events = [];
+    const options = {
+      emit: (event) => events.push(event),
+      fetch: async (url, options) => {
+        assert.equal(new URL(url).hostname, `api.${apex}`);
+        prompts.push(JSON.parse(options.body).messages[0].content);
+        return stream("noted");
+      },
+    };
+    const runtime = new AssistantRuntime(options);
+    t.after(() => runtime.close());
+    assert.equal(
+      (await runtime.run({ ...params, instructions })).status,
+      "completed",
+    );
+    assert.ok(prompts[0].includes(instructions));
+    assert.ok(
+      !(await readFile(params.sessionFile, "utf8")).includes(instructions),
+    );
+    assert.ok(!JSON.stringify(events).includes(instructions));
+    await runtime.close();
+    // Restart with cleared preferences: old system entries cannot revive them.
+    const reopened = new AssistantRuntime(options);
+    t.after(() => reopened.close());
+    assert.equal(
+      (
+        await reopened.run({
+          ...params,
+          runId: "next-run",
+          operationId: "next-operation",
+          instructions: "",
+        })
+      ).status,
+      "completed",
+    );
+    assert.ok(!JSON.stringify(prompts[1]).includes(instructions));
+  }
+});
+
+test("custom instructions preserve literal replacement syntax", async (t) => {
+  const instructions = "Keep $& and $$ literally.";
+  assert.ok((await systemPreamble(t, { instructions })).endsWith(instructions));
+});
+
 test("instructions that are not text or over 4,000 characters are refused", async (t) => {
   // 4,000 characters, not UTF-16 units: an emoji is one character.
   assert.match(

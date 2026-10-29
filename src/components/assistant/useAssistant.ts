@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   assistantApi,
   assistantErrorCode,
-  DEFAULT_ASSISTANT_PREFERENCES,
   type AssistantAttachment,
   type AssistantBackupReport,
   type AssistantBootstrap,
@@ -810,7 +809,9 @@ export function useAssistant(enabled: boolean) {
   // A reply that finished out of the user's sight is told (see
   // useFinishNotice); `select` is only called once the page is rendered.
   const notifyFinish = useFinishNotice({
-    enabled: (preferences ?? DEFAULT_ASSISTANT_PREFERENCES).notifyOnFinish,
+    enabled:
+      enabled && !signedOut.current && preferences?.notifyOnFinish === true,
+    authority: () => epoch.current,
     openSessionId: selectedId,
     titleOf: (id) =>
       sessions.find((item) => item.id === id)?.title ??

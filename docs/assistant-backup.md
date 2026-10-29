@@ -42,7 +42,9 @@ and the archive only fills in the fields the profile never saved, so an empty
 profile receives all of them. An archive made before the settings existed holds
 only the model: the current settings stay, or their defaults (no instructions,
 both switches on) when none were saved. An unreadable local preferences file is
-left as it is. The renderer reloads the model preference and the settings after
+left as it is. Saving settings or remembering a model also refuses to overwrite
+an unreadable or unsupported preferences file; the settings dialog reports the
+read error instead of presenting defaults as saved settings. The renderer reloads the model preference and the settings after
 restoration.
 
 The selected account and its authority generation are checked before opening

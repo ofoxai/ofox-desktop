@@ -3372,7 +3372,7 @@ while read line; do :; done"#,
         assert_eq!(host.get_preferences().await.unwrap(), expected);
         let store = host.store(&identity().owner).unwrap();
         assert_eq!(store.preferences().unwrap(), expected);
-        // A damaged file reads as the defaults; the next save replaces it.
+        // A damaged file must be surfaced to the settings editor.
         let prefs = config
             .path()
             .join("assistant")
@@ -3380,8 +3380,8 @@ while read line; do :; done"#,
             .join("prefs.json");
         std::fs::write(&prefs, "damaged").unwrap();
         assert_eq!(
-            host.get_preferences().await.unwrap(),
-            Preferences::default()
+            host.get_preferences().await.unwrap_err(),
+            "assistant_invalid_preferences"
         );
         let too_long = settings_request(json!({
             "instructions": "a".repeat(4001), "autoTitle": true, "notifyOnFinish": true,

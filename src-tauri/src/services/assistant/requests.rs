@@ -86,13 +86,13 @@ impl AssistantHost {
         Ok(summary)
     }
 
-    /// The account's assistant settings; the defaults while its preferences
-    /// file is damaged.
+    /// The account's assistant settings; unreadable settings are surfaced so
+    /// the editor cannot present defaults as saved values.
     pub async fn get_preferences(&self) -> Result<Preferences, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
         let store = self.store(&identity.owner)?;
-        let preferences = blocking(move || Ok(store.preferences_or_default())).await?;
+        let preferences = blocking(move || store.preferences()).await?;
         self.ensure_current(&identity, generation).await?;
         Ok(preferences)
     }

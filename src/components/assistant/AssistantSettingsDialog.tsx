@@ -102,7 +102,7 @@ export function AssistantSettingsDialog({
 
   const shown = form ?? DEFAULT_ASSISTANT_PREFERENCES;
   const editable = form !== null && !saving;
-  const used = shown.instructions.length;
+  const used = Array.from(shown.instructions).length;
   const tooLong = used > MAX_ASSISTANT_INSTRUCTIONS;
   const number = (value: number) => value.toLocaleString(i18n.language);
   const max = number(MAX_ASSISTANT_INSTRUCTIONS);
