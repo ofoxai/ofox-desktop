@@ -3150,6 +3150,20 @@ async fn counting(config: &Path, sid: &str, count: u64) -> Value {
     .await
 }
 
+/// The one `session` event a title published for `sid`, once it is out.
+async fn title_event(env: &TestEnv, sid: &str, runs: &[&str]) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(45);
+    loop {
+        let published = title_events(env, sid, runs);
+        if let [event] = published.as_slice() {
+            return event.clone();
+        }
+        assert!(published.len() < 2, "{published:?}");
+        assert!(Instant::now() < deadline, "the title published nothing");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 /// The `session` events of `sid` that no run published: a title's.
 fn title_events(env: &TestEnv, sid: &str, runs: &[&str]) -> Vec<Value> {
     env.events
@@ -3195,6 +3209,10 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
             .await
             .unwrap();
         let asked = title_requests(&gateway, 1).await;
+        // The second turn is held back until the title is written.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(gateway.requests().len(), 1, "the next turn waits");
+        assert!(of_type(&env, &second.run_id, "text_delta").is_empty());
         assert_eq!(asked[0].authorization, format!("Bearer {KEY}"));
         assert!(!asked[0].body.to_string().contains(KEY));
         // No priced search model in this catalog: the conversation's model.
@@ -3225,6 +3243,8 @@ fn the_first_answer_names_the_conversation_once_without_holding_up_a_run() {
         let named = title_events(&env, &sid, &[&first, &second.run_id]);
         assert_eq!(named.len(), 1);
         assert_eq!(named[0]["session"]["title"], "Kyoto Trip Plan");
+        // With the conversation's cost as the title left it.
+        assert_eq!(named[0]["usage"]["modelRequests"], 2);
         // The next turn's context is the conversation, not its title.
         let requests = gateway.requests();
         assert_eq!(requests.len(), 2);
@@ -3301,7 +3321,11 @@ fn a_rename_or_trash_while_the_title_is_written_wins_and_the_title_is_still_paid
             let record = counting(config.path(), &sid, 2).await;
             assert_eq!(record["session"]["title"], title, "{change}");
             assert_eq!(record["session"]["titleSource"], json!(source), "{change}");
-            assert!(title_events(&env, &sid, &[&run]).is_empty(), "{change}");
+            // Published all the same: the open conversation's cost changed.
+            let published = title_event(&env, &sid, &[&run]).await;
+            assert_eq!(published["session"]["title"], title, "{change}");
+            assert_eq!(published["usage"]["modelRequests"], 2, "{change}");
+            assert_eq!(published["usage"], record["usage"], "{change}");
         }
     });
 }
@@ -3415,8 +3439,9 @@ fn a_logout_stops_a_title_on_its_way_and_its_cost_stays_unknown() {
         .await;
         title_requests(&gateway, 1).await;
         let receipt = host.begin_logout();
-        // The request was sent and may have been billed: the conversation's
-        // cost becomes unknown, and it keeps its name.
+        // No answer within the grace: the title is stopped. The request was
+        // sent and may have been billed: the conversation's cost becomes
+        // unknown, and it keeps its name.
         let record = saved_once(config.path(), &sid, |record| {
             record["usage"]["usageCoverage"] == "incomplete"
         })
@@ -3428,7 +3453,9 @@ fn a_logout_stops_a_title_on_its_way_and_its_cost_stays_unknown() {
             std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
                 .unwrap();
         assert!(native.contains("\"type\":\"title\""));
-        assert!(title_events(&env, &sid, &[&run]).is_empty());
+        let published = title_event(&env, &sid, &[&run]).await;
+        assert_eq!(published["usage"]["usageCoverage"], "incomplete");
+        assert_eq!(published["session"]["title"], "Plan a trip to Kyoto");
         open.store(true, Ordering::SeqCst);
         host.finish_logout(receipt);
     });
@@ -3465,5 +3492,79 @@ fn quitting_while_a_title_is_on_its_way_waits_for_its_cost() {
         assert_eq!(record["usage"]["usageCoverage"], "incomplete");
         assert_eq!(record["session"]["title"], "Plan a trip to Kyoto");
         open.store(true, Ordering::SeqCst);
+    });
+}
+
+#[test]
+fn a_title_that_answers_soon_after_a_logout_keeps_its_known_cost() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.title(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Kyoto Trip Plan".into())),
+        ));
+        gateway.reply(Reply::Stream("Day one.".into()));
+        let (run, _) = turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        title_requests(&gateway, 1).await;
+        let receipt = host.begin_logout();
+        // The request already on its way answers within the grace.
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        open.store(true, Ordering::SeqCst);
+        let published = title_event(&env, &sid, &[&run]).await;
+        assert_eq!(published["usage"]["modelRequests"], 2);
+        assert_ne!(published["usage"]["usageCoverage"], "incomplete");
+        assert!((decimal(&published["usage"]["estimatedCostUsd"]) - 0.00014).abs() < 1e-12);
+        // Not saved under an authority that has gone.
+        assert_eq!(published["session"]["title"], "Plan a trip to Kyoto");
+        host.finish_logout(receipt);
+    });
+}
+
+#[test]
+fn quitting_lets_a_title_answer_until_shortly_before_the_end_of_shutdown() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let open = gate();
+        gateway.title(Reply::Wait(
+            open.clone(),
+            Box::new(Reply::Stream("Kyoto Trip Plan".into())),
+        ));
+        gateway.reply(Reply::Stream("Day one.".into()));
+        turn(
+            &host,
+            &env,
+            request(&sid, "Plan a trip to Kyoto", json!({})),
+        )
+        .await;
+        title_requests(&gateway, 1).await;
+        let answer_soon = async {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            open.store(true, Ordering::SeqCst);
+        };
+        tokio::join!(host.shutdown(), answer_soon);
+        let record = saved(config.path(), &sid);
+        assert_eq!(record["usage"]["modelRequests"], 2);
+        assert_ne!(record["usage"]["usageCoverage"], "incomplete");
+        assert!((decimal(&record["usage"]["estimatedCostUsd"]) - 0.00014).abs() < 1e-12);
     });
 }

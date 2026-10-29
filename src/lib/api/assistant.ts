@@ -478,8 +478,14 @@ export type AssistantRunEvent =
   | { type: "compaction_end"; data: { success: boolean; willRetry?: boolean } }
   /** The run's saved assistant message. */
   | { type: "message"; data: { message: AssistantMessage } }
-  /** The saved session; its `activeRun` is null. */
-  | { type: "session"; data: { session: AssistantSession } }
+  /**
+   * The saved session; its `activeRun` is null. A generated title's event
+   * also carries the conversation's usage, which the title's request added to.
+   */
+  | {
+      type: "session";
+      data: { session: AssistantSession; usage?: AssistantUsage };
+    }
   /** `message` is scrubbed provider text: never shown. */
   | { type: "error"; data: { code: string; message?: string } }
   | {

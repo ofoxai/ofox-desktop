@@ -192,7 +192,9 @@ pub struct AssistantHost {
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
     /// Background work at it (see [`Self::track`]), such as a title.
-    background: AtomicU64,
+    background: Arc<AtomicU64>,
+    /// When shutdown aborts what is still at work, once it began.
+    shutdown_deadline: Mutex<Option<tokio::time::Instant>>,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -522,7 +524,8 @@ impl AssistantHost {
             runs: Mutex::default(),
             models: Mutex::default(),
             keys: Mutex::default(),
-            background: AtomicU64::new(0),
+            background: Arc::default(),
+            shutdown_deadline: Mutex::default(),
         })
     }
 
@@ -975,6 +978,10 @@ impl AssistantHost {
     pub async fn shutdown(&self) {
         self.begin_shutdown();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        *self
+            .shutdown_deadline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(deadline);
         while (self.runs.lock().is_ok_and(|runs| !runs.is_empty())
             || self.background.load(Ordering::SeqCst) > 0)
             && tokio::time::Instant::now() < deadline
@@ -987,6 +994,14 @@ impl AssistantHost {
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    /// When a shutdown under way aborts what is still at work.
+    pub(super) fn shutdown_deadline(&self) -> Option<tokio::time::Instant> {
+        *self
+            .shutdown_deadline
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Cancel every run but keep admission open (the account, its sign-in
@@ -1033,13 +1048,21 @@ impl AssistantHost {
         key: String,
         work: impl Future<Output = ()> + Send + 'static,
     ) {
+        /// Counts the work as over however it ends: done, panicked or aborted.
+        struct AtWork(Arc<AtomicU64>);
+        impl Drop for AtWork {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
         let mut tasks = self.tasks.lock().unwrap_or_else(PoisonError::into_inner);
         let host = self.clone();
         let done = key.clone();
         self.background.fetch_add(1, Ordering::SeqCst);
+        let at_work = AtWork(self.background.clone());
         let task = tokio::spawn(async move {
+            let _at_work = at_work;
             work.await;
-            host.background.fetch_sub(1, Ordering::SeqCst);
             if let Ok(mut tasks) = host.tasks.lock() {
                 tasks.remove(&done);
             }
@@ -2403,6 +2426,74 @@ mod tests {
         let failure = host.run_once(&run, &json!({}), true).await.unwrap_err();
         assert_eq!(failure.code, IDENTITY_CHANGED);
         assert!(failure.unbilled);
+    }
+
+    /// A stand-in runtime: `script` is the shell body of its `node`.
+    #[cfg(unix)]
+    fn stub_runtime(dir: &Path, script: &str) -> Runtime {
+        use std::os::unix::fs::PermissionsExt;
+        let base = dir.join("runtime-stub");
+        let node = base.join("node").join("node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(&node, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let entry = base.join("runtime").join("src").join("main.mjs");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "").unwrap();
+        runtime_at(&base).unwrap()
+    }
+
+    /// A title still unanswered at its deadline is asked to stop, and the
+    /// answer it then gives (with what the request may have cost) is kept.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_title_past_its_deadline_is_stopped_and_still_answers() {
+        let (config, host) = fixture();
+        // Answers only once it is told to stop.
+        let runtime = stub_runtime(
+            config.path(),
+            r#"read request
+read stop
+case "$stop" in *'"method":"stop"'*'"runId":"turn"'*) echo '{"id":"title","result":{"title":null,"entries":[]}}' ;; esac
+while read line; do :; done"#,
+        );
+        let params = json!({"sessionId": "conversation", "runId": "turn", "operationId": "op"});
+        let times = title::TitleTimes {
+            deadline: Duration::from_millis(300),
+            answer_grace: Duration::from_secs(30),
+            stop_grace: Duration::from_secs(5),
+        };
+        let answer = host
+            .ask_title(&runtime, &params, host.generation(), &times)
+            .await
+            .unwrap();
+        assert_eq!(answer, json!({"title": null, "entries": []}));
+    }
+
+    /// Background work that panics still counts as over: shutdown does not
+    /// wait for it.
+    #[tokio::test]
+    async fn background_work_that_panics_does_not_hold_up_shutdown() {
+        let (_config, host) = fixture();
+        host.track("panics".into(), async { panic!("a title went wrong") });
+        let finished = tokio::time::Instant::now() + Duration::from_secs(2);
+        while host
+            .tasks
+            .lock()
+            .unwrap()
+            .values()
+            .any(|task| !task.is_finished())
+            && tokio::time::Instant::now() < finished
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let started = std::time::Instant::now();
+        host.shutdown().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// A refused key after shown text is not retried: the retry would append

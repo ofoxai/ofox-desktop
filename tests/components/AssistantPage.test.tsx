@@ -3007,6 +3007,45 @@ describe("conversation cost", () => {
     );
   });
 
+  it("adds what a title written after the reply cost", async () => {
+    current.usage = {
+      inputTokens: 1234,
+      outputTokens: 340,
+      estimatedCostUsd: "0.0123",
+      modelRequests: 1,
+    };
+    await openConversation();
+    expect(await usageLine()).toHaveTextContent("Input 1.2K");
+    const titled = (usage: AssistantSessionDetail["usage"]) =>
+      act(() =>
+        mocks.listener?.({
+          sessionId: "session-a",
+          runId: "title-job",
+          operationId: "title-job",
+          type: "session",
+          data: { session: current.session, usage },
+        }),
+      );
+    titled({
+      inputTokens: 1434,
+      outputTokens: 357,
+      estimatedCostUsd: "0.0125",
+      modelRequests: 2,
+    });
+    expect(await usageLine()).toHaveTextContent(
+      "Input 1.4K · Output 357 tokens · Estimated cost ≈$0.013",
+    );
+    // A title request that got no answer may have been billed.
+    titled({
+      inputTokens: 1434,
+      outputTokens: 357,
+      estimatedCostUsd: null,
+      usageCoverage: "incomplete",
+      modelRequests: 2,
+    });
+    expect(await usageLine()).toHaveTextContent("Cost unavailable");
+  });
+
   it.each([
     [
       "a request that may have been billed",

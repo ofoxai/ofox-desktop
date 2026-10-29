@@ -19,11 +19,26 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The runtime gives a title request up after 8 s; this also covers
-/// starting its process.
-const DEADLINE: Duration = Duration::from_secs(15);
-/// How long a stopped title has to answer with what it may have cost.
-const STOP_GRACE: Duration = Duration::from_secs(2);
+/// How long a title may take, and how it is stopped when it must end.
+pub(super) struct TitleTimes {
+    /// The runtime gives the request up after 8 s; this also covers
+    /// starting its process. Past it, the title is stopped.
+    pub deadline: Duration,
+    /// After a logout or an account or region change, how long a request
+    /// already on its way may still answer before the title is stopped.
+    pub answer_grace: Duration,
+    /// How long a stopped title has to answer with what it may have cost.
+    pub stop_grace: Duration,
+}
+
+/// Shutdown aborts what is still at work after 4 s: a title it stops at
+/// 3 s has `stop_grace` to answer before that.
+const TIMES: TitleTimes = TitleTimes {
+    deadline: Duration::from_secs(15),
+    answer_grace: Duration::from_secs(2),
+    stop_grace: Duration::from_secs(1),
+};
+
 /// Characters of the question, and of the reply, a title is made from.
 const INPUT_CHARS: usize = 1_500;
 /// The most characters a generated title keeps.
@@ -117,28 +132,29 @@ pub(super) fn sanitize_title(raw: &str, secrets: &[String]) -> Option<String> {
 /// recounted from the native history it returned (`entries`); its title
 /// replaces the automatic one unless the user renamed or trashed the
 /// conversation meanwhile, or the authority changed (`current` is false).
-/// The conversation keeps its place in the list. Returns the session when
-/// its title changed.
+/// The conversation keeps its place in the list. Returns the session and
+/// its usage when either changed, to publish.
 pub(super) fn settle_title(
     record: &mut SessionRecord,
     entries: Option<&[Value]>,
     title: Option<&str>,
     current: bool,
-) -> Option<Session> {
+) -> Option<(Session, Value)> {
     if let Some(entries) = entries {
         recount_usage(record, entries);
     }
-    let title = title?;
     let session = &mut record.session;
-    if !current
-        || session.title_source != Some(TitleSource::Auto)
-        || session.deleted_at.is_some()
-        || session.title == title
-    {
-        return None;
-    }
-    session.title = title.to_owned();
-    Some(session.clone())
+    let renamed = title.is_some_and(|title| {
+        let named = current
+            && session.title_source == Some(TitleSource::Auto)
+            && session.deleted_at.is_none()
+            && session.title != title;
+        if named {
+            session.title = title.to_owned();
+        }
+        named
+    });
+    (renamed || entries.is_some()).then(|| (record.session.clone(), record.usage.clone()))
 }
 
 /// The model titles use while the catalog prices it: the search model, the
@@ -249,7 +265,9 @@ impl AssistantHost {
         if let Some(level) = level {
             params["thinkingLevel"] = json!(level);
         }
-        let answer = self.ask_title(&runtime, &params, job.generation).await?;
+        let answer = self
+            .ask_title(&runtime, &params, job.generation, &TIMES)
+            .await?;
         let secrets = self.known_keys();
         let title = answer["title"]
             .as_str()
@@ -275,8 +293,9 @@ impl AssistantHost {
             }
         })
         .await?;
-        if let Some(session) = saved {
-            let mut data = json!({ "session": session });
+        // The open conversation shows its new name and cost.
+        if let Some((session, usage)) = saved {
+            let mut data = json!({ "session": session, "usage": usage });
             scrub_secrets_in(&mut data, &secrets);
             self.env.emit(Event {
                 session_id: job.session_id.clone(),
@@ -290,17 +309,20 @@ impl AssistantHost {
     }
 
     /// The runtime's answer to one `title` request, from a process of its own
-    /// that ends with it. Once a logout, an account or region change or
-    /// shutdown makes the title unwanted, the runtime is asked to stop, and
-    /// it still answers with what the request may have cost, within
-    /// [`STOP_GRACE`]. Given up after [`DEADLINE`].
-    async fn ask_title(
+    /// that ends with it. A title is stopped (the runtime then answers with
+    /// what the request may have cost, within `stop_grace`) at its
+    /// deadline; after a logout or an account or region change once
+    /// `answer_grace` has passed; at shutdown only shortly before shutdown
+    /// ends. With no answer by then, it is given up.
+    pub(super) async fn ask_title(
         &self,
         runtime: &Runtime,
         params: &Value,
         generation: u64,
+        times: &TitleTimes,
     ) -> Result<Value, String> {
         use tokio::io::BufReader;
+        use tokio::time::Instant;
         let mut child = process::Child::spawn(host::runtime_command(runtime))?;
         let mut input = child.take_stdin().ok_or(STDIO)?;
         let mut output = BufReader::new(child.take_stdout().ok_or(STDIO)?);
@@ -320,22 +342,42 @@ impl AssistantHost {
                 "operationId": params["operationId"],
             },
         }))?;
-        let answer = tokio::time::timeout(DEADLINE, async {
+        let started = Instant::now();
+        let conversation = async {
             host::write_line(&mut input, &request).await?;
             let mut buffer = Vec::new();
             let mut ticker = tokio::time::interval(Duration::from_millis(250));
-            let mut stopping: Option<tokio::time::Instant> = None;
+            let mut unwanted_since: Option<Instant> = None;
+            let mut stopped_at: Option<Instant> = None;
             loop {
                 let length = tokio::select! {
                     _ = ticker.tick() => {
-                        let unwanted = self.generation() != generation
-                            || self.ensure_accepting_runs().is_err();
-                        if unwanted && stopping.is_none() {
-                            host::write_line(&mut input, &stop).await?;
-                            stopping = Some(tokio::time::Instant::now() + STOP_GRACE);
+                        let now = Instant::now();
+                        if let Some(stopped) = stopped_at {
+                            if now >= stopped + times.stop_grace {
+                                return Err(if unwanted_since.is_some() {
+                                    CANCELLED.to_string()
+                                } else {
+                                    "assistant_run_timeout".to_string()
+                                });
+                            }
+                            continue;
                         }
-                        if stopping.is_some_and(|until| tokio::time::Instant::now() > until) {
-                            return Err(CANCELLED.to_string());
+                        if unwanted_since.is_none()
+                            && (self.generation() != generation
+                                || self.ensure_accepting_runs().is_err())
+                        {
+                            unwanted_since = Some(now);
+                        }
+                        let stop_at = match (self.shutdown_deadline(), unwanted_since) {
+                            (Some(end), _) => end.checked_sub(times.stop_grace).unwrap_or(now),
+                            (None, Some(since)) => since + times.answer_grace,
+                            (None, None) => started + times.deadline,
+                        }
+                        .min(started + times.deadline);
+                        if now >= stop_at {
+                            host::write_line(&mut input, &stop).await?;
+                            stopped_at = Some(now);
                         }
                         continue;
                     }
@@ -353,9 +395,12 @@ impl AssistantHost {
                     };
                 }
             }
-        })
-        .await
-        .unwrap_or_else(|_| Err("assistant_run_timeout".to_string()));
+        };
+        // A backstop for a pipe that stops moving at all.
+        let limit = times.deadline + times.stop_grace + Duration::from_secs(1);
+        let answer = tokio::time::timeout(limit, conversation)
+            .await
+            .unwrap_or_else(|_| Err("assistant_run_timeout".to_string()));
         child.stop().await;
         drain.abort();
         answer
@@ -534,13 +579,15 @@ mod tests {
     #[test]
     fn the_title_replaces_only_an_automatic_title_and_keeps_the_conversations_place() {
         let (mut record, _) = conversation(&[("Plan a trip", "Day one", "completed", false)]);
-        let session = settle_title(&mut record, None, Some("Kyoto Trip Plan"), true).unwrap();
+        let (session, _) = settle_title(&mut record, None, Some("Kyoto Trip Plan"), true).unwrap();
         assert_eq!(session.title, "Kyoto Trip Plan");
         assert_eq!(record.session.title, "Kyoto Trip Plan");
         assert_eq!(record.session.title_source, Some(TitleSource::Auto));
         assert_eq!(record.session.updated_at, 7, "the list order stays");
-        // The same title again changes nothing.
+        // Nothing to publish when neither the name nor the cost changed.
         assert!(settle_title(&mut record, None, Some("Kyoto Trip Plan"), true).is_none());
+        assert!(settle_title(&mut record, None, Some("Other"), false).is_none());
+        assert!(settle_title(&mut record, None, None, true).is_none());
     }
 
     #[test]
@@ -562,7 +609,10 @@ mod tests {
                 current,
             );
             let renamed = source == TitleSource::Auto && deleted.is_none() && current;
-            assert_eq!(saved.is_some(), renamed, "{source:?} {deleted:?} {current}");
+            // Always published: the conversation's cost changed.
+            let (session, usage) = saved.expect("the cost changed");
+            assert_eq!(session.title, record.session.title);
+            assert_eq!(usage, record.usage, "{source:?} {deleted:?} {current}");
             assert_eq!(
                 record.session.title,
                 if renamed {

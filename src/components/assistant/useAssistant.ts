@@ -14,6 +14,7 @@ import {
   type AssistantThinkingLevel,
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
+  type AssistantUsage,
 } from "@/lib/api/assistant";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 import { currentThinking, type ThinkingChoice } from "@/utils/assistantModels";
@@ -734,14 +735,19 @@ export function useAssistant(enabled: boolean) {
     // its files first, even if an outcome never came in.
     const doneReading = (runId: string) =>
       setReading((old) => (old?.runId === runId ? null : old));
-    // Only the name: whatever else the session holds is read with the list
-    // and the transcript as usual.
-    const showTitle = ({ id, title, titleSource }: AssistantSession) => {
+    // Only the name, and the cost when the event has it: whatever else the
+    // session holds is read with the list and the transcript as usual.
+    const showTitle = (
+      { id, title, titleSource }: AssistantSession,
+      usage?: AssistantUsage,
+    ) => {
       const named = <T extends AssistantSession>(item: T): T =>
         item.id === id ? { ...item, title, titleSource } : item;
       setSessions((old) => old.map(named));
       setDetail((old) =>
-        old?.session.id === id ? { ...old, session: named(old.session) } : old,
+        old?.session.id === id
+          ? { ...old, session: named(old.session), usage: usage ?? old.usage }
+          : old,
       );
     };
     void assistantApi
@@ -765,8 +771,10 @@ export function useAssistant(enabled: boolean) {
           if (event.type === "run_end")
             void refreshSessionsRef.current(generation);
           // A saved session no followed run published, such as a title
-          // generated after a reply: the list and the header show its name.
-          else if (event.type === "session") showTitle(event.data.session);
+          // generated after a reply: the list and the header show its name,
+          // and the open conversation the cost the title added.
+          else if (event.type === "session")
+            showTitle(event.data.session, event.data.usage);
           return;
         }
         // Anything but more words shows the words that came before it first,
