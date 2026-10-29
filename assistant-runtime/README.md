@@ -152,6 +152,16 @@ answer) and the result also carries the projection. A request refused with a
 4xx or never sent leaves native history untouched. A failed request never
 throws; invalid parameters or a missing `sessionFile` do.
 
+`navigate` shows another version of a saved conversation. It takes a trusted
+absolute `sessionFile` and `entryId`, a native message entry (the host sends
+a user turn). The branch becomes the leaf under that entry written last (the
+entry itself when nothing follows it; a later line wins a tie), which is where
+that version was left, and an `ofox-desktop-leaf` custom entry
+(`{entryId}`) is appended under it: Pi takes the leaf from the file's last
+line, so the version stays shown after a reopen and the next turn continues
+it. The result is the projection. An entry that is not a message, a missing
+file or a path that is not absolute JSONL throws, and nothing is written.
+
 `stop` matches sessionId/runId/operationId. The host owns one sidecar process
 per operation and the stable native session file, and ends the process after
 the response. Pi native JSONL is the context authority. Edit and regenerate
@@ -162,7 +172,11 @@ attachment selection kept with it, and any other turn is resent as stored,
 native images included. Every new turn has a non-context `ofox-desktop-run`
 marker with the run and operation IDs and the historical pricing-availability flags. Projection entries
 return normalized text, active branch, runId/operationId, usage, stopReason,
-pricingKnown and final (only the last assistant entry of each run). A failed
+pricingKnown and final (only the last assistant entry of each run). A user
+entry also carries `branchFrom`: the nearest user, assistant or tool-result
+message above it (past run markers and Pi's model and system prompt records),
+or null at the start of the conversation. Every version of a turn (edited or
+regenerated) has the same `branchFrom`. A failed
 run's result and its assistant entry also carry `errorStatus` (the HTTP status
 of a refused model request) or `errorKind`: `not_sent` when the request never
 left the machine (DNS, connection refused, connect timeout, TLS certificate, a

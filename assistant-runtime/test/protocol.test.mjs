@@ -493,3 +493,58 @@ test(
     await fixture.assertClean([token]);
   },
 );
+
+test(
+  "private stdio navigates to another version and refuses anything else",
+  { timeout: 20000 },
+  async (t) => {
+    const token = "synthetic-stdio-navigate-credential";
+    const fixture = await createStdioAcceptance(
+      t,
+      (_request, response, number) =>
+        writeModelStream(response, `Version ${number}`),
+    );
+    const wire = fixture.spawnSidecar();
+    const params = fixture.params("navigate", token);
+    const first = await wire.start("run", params);
+    const original = first.entries.find((entry) => entry.role === "user");
+    const edited = await wire.start("run", {
+      ...params,
+      runId: "navigate-run-2",
+      operationId: "navigate-operation-2",
+      prompt: "Edited question",
+      editEntryId: original.id,
+    });
+    assert.equal(
+      edited.entries.find((e) => e.id === original.id).active,
+      false,
+    );
+    const shown = await wire.start("navigate", {
+      sessionFile: params.sessionFile,
+      entryId: original.id,
+    });
+    assert.deepEqual(
+      shown.entries
+        .filter((entry) => entry.active)
+        .map(({ role, content }) => [role, content]),
+      [
+        ["user", "Synthetic question"],
+        ["assistant", "Version 1"],
+      ],
+    );
+    await assert.rejects(
+      wire.start("navigate", {
+        sessionFile: params.sessionFile,
+        entryId: "missing",
+      }),
+      /Native message entry does not exist/,
+    );
+    assert.deepEqual(
+      (await wire.start("load", { sessionFile: params.sessionFile })).entries,
+      shown.entries,
+    );
+    assert.equal(fixture.requests.length, 2);
+    await wire.close();
+    await fixture.assertClean([token]);
+  },
+);

@@ -362,9 +362,53 @@ function branchBefore(manager, entryId, regenerate) {
   return { message: entry.message, failedSelection };
 }
 
+// Appended under the leaf a navigation chose: Pi takes the leaf from the
+// file's last line, so a reopened history shows the version chosen.
+const LEAF = "ofox-desktop-leaf";
+
+// The leaf under message `entryId` (itself when it has none) written last,
+// a later line winning a tie: where that version was left.
+function latestLeaf(manager, entryId) {
+  const entry = manager.getEntry(entryId);
+  if (!entry || entry.type !== "message")
+    throw new Error("Native message entry does not exist");
+  const entries = manager.getEntries();
+  const parents = new Set(entries.map((item) => item.parentId));
+  const below = new Set([entryId]);
+  let latest = entry;
+  // The file is append-only: an entry comes after its parent.
+  for (const item of entries) {
+    if (item.id !== entryId && !below.has(item.parentId)) continue;
+    below.add(item.id);
+    if (
+      !parents.has(item.id) &&
+      (latest.id === entryId ||
+        Date.parse(item.timestamp) >= Date.parse(latest.timestamp))
+    )
+      latest = item;
+  }
+  return latest.id;
+}
+
 function projection(manager, secrets = []) {
   const active = new Set(manager.getBranch().map((entry) => entry.id));
   const all = new Map(manager.getEntries().map((entry) => [entry.id, entry]));
+  // The conversation message a user turn follows, past its run marker and
+  // Pi's own records (model and system prompt changes): each version of a
+  // turn (edited, regenerated) follows the same one, and a turn that starts
+  // the conversation follows none.
+  const branchFrom = (entry) => {
+    let parent = all.get(entry.parentId);
+    while (
+      parent &&
+      !(
+        parent.type === "message" &&
+        ["user", "assistant", "toolResult"].includes(parent.message.role)
+      )
+    )
+      parent = all.get(parent.parentId);
+    return parent?.id ?? null;
+  };
   const markerCache = new Map();
   const markerFor = (entry) => {
     if (!entry) return undefined;
@@ -456,6 +500,7 @@ function projection(manager, secrets = []) {
         {
           id: entry.id,
           parentId: entry.parentId,
+          ...(message.role === "user" ? { branchFrom: branchFrom(entry) } : {}),
           role: message.role === "toolResult" ? "tool" : message.role,
           content: contentText(message.content),
           thinking: Array.isArray(message.content)
@@ -516,9 +561,14 @@ function checkTrusted(params) {
   ])
     if (typeof params[key] !== "string" || !params[key])
       throw new Error(`Missing trusted run parameter: ${key}`);
+  checkSessionFile(params.sessionFile);
+}
+
+function checkSessionFile(sessionFile) {
   if (
-    !path.isAbsolute(params.sessionFile) ||
-    path.extname(params.sessionFile) !== ".jsonl"
+    typeof sessionFile !== "string" ||
+    !path.isAbsolute(sessionFile) ||
+    path.extname(sessionFile) !== ".jsonl"
   )
     throw new Error("Native session path must be absolute JSONL");
 }
@@ -584,6 +634,29 @@ export class AssistantRuntime {
       ),
       [...this.secrets],
     );
+  }
+
+  // Show another version of a saved conversation: the branch becomes the
+  // latest leaf under message `entryId`, kept by an `ofox-desktop-leaf`
+  // entry appended under it. Returns the projection. Nothing is written
+  // unless the entry is a message of that history.
+  async navigate(params) {
+    checkSessionFile(params.sessionFile);
+    if (typeof params.entryId !== "string" || !params.entryId)
+      throw new Error("Missing native entry");
+    if (this.runs.size)
+      throw new Error("This sidecar already owns an active run");
+    const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+    await stat(params.sessionFile);
+    const directory = path.dirname(params.sessionFile);
+    const manager = SessionManager.open(
+      params.sessionFile,
+      directory,
+      directory,
+    );
+    manager.branch(latestLeaf(manager, params.entryId));
+    manager.appendCustomEntry(LEAF, { entryId: params.entryId });
+    return projection(manager, [...this.secrets]);
   }
 
   async stop(params) {

@@ -544,6 +544,193 @@ test("native editing and regeneration keep superseded branches and resume after 
   await runtime.close();
 });
 
+const userTurns = (projection) =>
+  projection.entries.filter((entry) => entry.role === "user");
+const activeTexts = (projection) =>
+  projection.entries
+    .filter(
+      (entry) => entry.active && ["user", "assistant"].includes(entry.role),
+    )
+    .map((entry) => entry.content);
+const nativeLines = async (sessionFile) =>
+  (await readFile(sessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+
+test("a user turn names the message it follows, the same for each of its versions", async (t) => {
+  const params = await sandbox(t);
+  let response = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async () => stream(`reply ${++response}`),
+  });
+  const first = await runtime.run({ ...params, prompt: "first" });
+  const firstReply = first.entries.find((entry) => entry.role === "assistant");
+  assert.equal(userTurns(first)[0].branchFrom, null);
+  const second = await runtime.run({
+    ...params,
+    runId: "run-2",
+    operationId: "operation-2",
+    prompt: "second",
+  });
+  const question = userTurns(second).at(-1);
+  // Its run marker sits between them: the nearest message is the reply.
+  assert.equal(question.branchFrom, firstReply.id);
+  const edited = await runtime.run({
+    ...params,
+    runId: "run-3",
+    operationId: "operation-3",
+    prompt: "second, edited",
+    editEntryId: question.id,
+  });
+  const reply = edited.entries.findLast(
+    (entry) => entry.active && entry.role === "assistant",
+  );
+  const regenerated = await runtime.run({
+    ...params,
+    runId: "run-4",
+    operationId: "operation-4",
+    regenerateEntryId: reply.id,
+  });
+  assert.deepEqual(
+    userTurns(regenerated).map((entry) => [entry.content, entry.branchFrom]),
+    [
+      ["first", null],
+      ["second", firstReply.id],
+      ["second, edited", firstReply.id],
+      ["second, edited", firstReply.id],
+    ],
+  );
+  assert.ok(
+    regenerated.entries
+      .filter((entry) => entry.role !== "user")
+      .every((entry) => !("branchFrom" in entry)),
+  );
+  // An edit of the first turn starts the conversation again.
+  const restarted = await runtime.run({
+    ...params,
+    runId: "run-5",
+    operationId: "operation-5",
+    prompt: "first, edited",
+    editEntryId: userTurns(first)[0].id,
+  });
+  assert.equal(userTurns(restarted).at(-1).branchFrom, null);
+  assert.deepEqual(
+    (await new AssistantRuntime().load(params)).entries,
+    restarted.entries,
+  );
+  await runtime.close();
+});
+
+test("navigate shows the latest of another version and keeps it after reopening", async (t) => {
+  const params = await sandbox(t);
+  const bodies = [];
+  let response = 0;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return stream(`reply ${++response}`);
+    },
+  });
+  const first = await runtime.run({ ...params, prompt: "question A" });
+  const original = userTurns(first)[0];
+  const followed = await runtime.run({
+    ...params,
+    runId: "run-2",
+    operationId: "operation-2",
+    prompt: "follow-up",
+  });
+  await runtime.run({
+    ...params,
+    runId: "run-3",
+    operationId: "operation-3",
+    regenerateEntryId: followed.entries.findLast(
+      (entry) => entry.role === "assistant",
+    ).id,
+  });
+  const edited = await runtime.run({
+    ...params,
+    runId: "run-4",
+    operationId: "operation-4",
+    prompt: "question B",
+    editEntryId: original.id,
+  });
+  assert.deepEqual(activeTexts(edited), ["question B", "reply 4"]);
+
+  const shown = await runtime.navigate({
+    sessionFile: params.sessionFile,
+    entryId: original.id,
+  });
+  // The newest leaf under that turn: its regenerated follow-up.
+  assert.deepEqual(activeTexts(shown), [
+    "question A",
+    "reply 1",
+    "follow-up",
+    "reply 3",
+  ]);
+  for (const text of ["question B", "reply 4", "reply 2"])
+    assert.equal(
+      shown.entries.find((entry) => entry.content === text).active,
+      false,
+      text,
+    );
+  // Kept by the file's last line, so a reopened history shows it too.
+  const last = (await nativeLines(params.sessionFile)).at(-1);
+  assert.equal(last.type, "custom");
+  assert.equal(last.customType, "ofox-desktop-leaf");
+  assert.deepEqual(
+    (await new AssistantRuntime().load(params)).entries,
+    shown.entries,
+  );
+
+  // The next turn continues the version shown.
+  const next = await runtime.run({
+    ...params,
+    runId: "run-5",
+    operationId: "operation-5",
+    prompt: "and then?",
+  });
+  const context = JSON.stringify(bodies.at(-1).messages);
+  for (const text of ["question A", "reply 1", "follow-up", "reply 3"])
+    assert.match(context, new RegExp(text));
+  assert.doesNotMatch(context, /question B|reply 2|reply 4/);
+  assert.equal(
+    userTurns(next).at(-1).branchFrom,
+    shown.entries.find((entry) => entry.content === "reply 3").id,
+  );
+
+  // And back to the edited version.
+  const back = await runtime.navigate({
+    sessionFile: params.sessionFile,
+    entryId: userTurns(edited).at(-1).id,
+  });
+  assert.deepEqual(activeTexts(back), ["question B", "reply 4"]);
+  await runtime.close();
+});
+
+test("navigate refuses anything but a message of a saved history and changes nothing", async (t) => {
+  const params = await sandbox(t);
+  const runtime = new AssistantRuntime({ fetch: async () => stream("reply") });
+  await assert.rejects(
+    runtime.navigate({ sessionFile: params.sessionFile, entryId: "anything" }),
+  );
+  const done = await runtime.run(params);
+  const user = userTurns(done)[0];
+  const before = await readFile(params.sessionFile, "utf8");
+  const marker = (await nativeLines(params.sessionFile)).find(
+    (line) => line.customType === "ofox-desktop-run",
+  );
+  for (const entryId of ["missing", "", undefined, marker.id])
+    await assert.rejects(
+      runtime.navigate({ sessionFile: params.sessionFile, entryId }),
+      String(entryId),
+    );
+  for (const sessionFile of ["session.jsonl", `${params.sessionFile}.txt`])
+    await assert.rejects(runtime.navigate({ sessionFile, entryId: user.id }));
+  assert.equal(await readFile(params.sessionFile, "utf8"), before);
+  await runtime.close();
+});
+
 test("provider errors never retry paid requests and stay scrubbed in native history", async (t) => {
   const params = await sandbox(t);
   let requests = 0;
