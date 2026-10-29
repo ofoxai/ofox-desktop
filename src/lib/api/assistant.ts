@@ -24,7 +24,7 @@ export interface AssistantModel {
     cacheWrite: number | null;
   };
   pricingKnown: boolean;
-  /** What the model makes; conversations are offered chat models only. */
+  /** What the model makes; conversations offer chat and supported images. */
   kind?: AssistantModelKind;
   /** The id's prefix (`openai`, `anthropic`, …); empty when it has none. */
   vendor?: string;
@@ -133,6 +133,7 @@ export const DEFAULT_ASSISTANT_PREFERENCES: AssistantPreferences = {
 export type AssistantCatalogSource = "v1" | "anthropic";
 
 export interface AssistantBootstrap {
+  rememberedModels?: Partial<Record<"chat" | "image" | "video", string | null>>;
   /** The signed-in account as the backend keys its data (64 hex). */
   owner: string;
   /** Bumped by every sign-in, sign-out, region change and auth expiry. */
@@ -265,6 +266,8 @@ export type AssistantAttachmentStatus =
  * outcome of that turn.
  */
 export interface AssistantAttachment {
+  origin?: "generated";
+  sourceMessageId?: string;
   id: string;
   name: string;
   mimeType: string;
@@ -288,8 +291,9 @@ export interface AssistantAttachment {
  * being streamed).
  */
 export interface AssistantMessage {
+  media?: AssistantMedia;
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "media";
   content: string;
   createdAt: number;
   reasoning?: string | null;
@@ -350,6 +354,7 @@ export interface AssistantMessage {
  * without a known cost, for good: the cost is then unknown, never zero.
  */
 export interface AssistantUsage {
+  mediaCostUsd?: string | null;
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
@@ -422,6 +427,7 @@ export interface AssistantUpdateRequest {
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
+  media?: AssistantImageRequest;
   sessionId: string;
   /** May be empty when at least one file is attached. */
   text: string;
@@ -442,6 +448,23 @@ export interface AssistantSendRequest extends AssistantRunRef {
    * most.
    */
   retryMessageId?: string;
+}
+
+export interface AssistantImageRequest {
+  size?: string | null;
+  quality?: string | null;
+  n?: number | null;
+  inputAttachmentId?: string | null;
+}
+
+export interface AssistantMedia {
+  kind: "image";
+  model: string;
+  params: AssistantImageRequest;
+  inputIds: string[];
+  status: "submitting" | "completed" | "error" | "unknown";
+  outputs: string[];
+  cost: string | null;
 }
 
 /**
@@ -832,6 +855,10 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_attachment_cleanup_failed: "attachmentCleanupFailed",
   assistant_attachment_dialog_failed: "attachmentDialogFailed",
   assistant_drop_unavailable: "dropUnavailable",
+  assistant_media_invalid_params: "mediaInvalidParams",
+  assistant_media_outcome_unknown: "mediaOutcomeUnknown",
+  assistant_media_safety_rejected: "mediaSafetyRejected",
+  assistant_media_insufficient_credits: "mediaInsufficientCredits",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",

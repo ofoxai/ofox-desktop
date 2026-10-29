@@ -201,10 +201,14 @@ pub struct RuntimeModel<'a> {
 }
 
 impl Model {
-    /// Whether a conversation can use this model: chat only, until media
-    /// generation is offered.
+    /// Whether a conversation can use this model: chat or supported images.
     pub fn for_conversations(&self) -> bool {
         self.kind == Kind::Chat
+            || (self.kind == Kind::Image
+                && self
+                    .image
+                    .as_ref()
+                    .is_some_and(|i| i.generations || i.edits))
     }
 
     /// Whether a conversation may run this model at `level`.
@@ -608,7 +612,7 @@ pub fn merge(
         Ok(rows) => models.extend(rows.into_iter().filter(|m| !listed.contains(&m.id))),
         Err(_) => partial.push(Source::Anthropic),
     }
-    if !models.iter().any(Model::for_conversations) {
+    if !models.iter().any(|m| m.kind == Kind::Chat) {
         return Err(NO_COMPATIBLE_MODELS.into());
     }
     Ok(Catalog { models, partial })
@@ -622,14 +626,14 @@ const NO_COMPATIBLE_MODELS: &str = "assistant_no_compatible_models";
 /// model `models` does not contain, never one of another kind; `None` only
 /// when there is no chat model.
 pub fn default_model_id(models: &[Model], remembered: Option<&str>) -> Option<String> {
-    let offered = |id: &str| models.iter().any(|m| m.id == id && m.for_conversations());
+    let offered = |id: &str| models.iter().any(|m| m.id == id && m.kind == Kind::Chat);
     remembered
         .filter(|id| offered(id))
         .or_else(|| PREFERRED_MODEL_IDS.iter().copied().find(|id| offered(id)))
         .or_else(|| {
             models
                 .iter()
-                .find(|m| m.for_conversations())
+                .find(|m| m.kind == Kind::Chat)
                 .map(|m| m.id.as_str())
         })
         .map(str::to_owned)
@@ -679,7 +683,7 @@ async fn fetch_models_at(url: &str, source: Source) -> Result<Vec<Model>, String
     let models = parse_models(catalog, source);
     // An answer without a conversation model (empty, or media only) is no
     // catalog: it fails, so it never replaces one read before.
-    if !models.iter().any(Model::for_conversations) {
+    if !models.iter().any(|m| m.kind == Kind::Chat) {
         return Err(NO_COMPATIBLE_MODELS.into());
     }
     Ok(models)
@@ -983,7 +987,22 @@ mod tests {
 
         let without_claude = merge(rows(), down()).unwrap();
         assert_eq!(without_claude.partial, [Source::Anthropic]);
-        assert_eq!(ids(&without_claude.conversation_models()), TODAY_CHAT_IDS);
+        assert_eq!(
+            ids(&without_claude
+                .conversation_models()
+                .into_iter()
+                .filter(|m| m.kind == Kind::Chat)
+                .collect::<Vec<_>>()),
+            TODAY_CHAT_IDS
+        );
+        assert_eq!(
+            without_claude
+                .conversation_models()
+                .iter()
+                .filter(|m| m.kind == Kind::Image)
+                .count(),
+            5
+        );
 
         let only_anthropic = merge(down(), claude()).unwrap();
         assert_eq!(only_anthropic.partial, [Source::V1]);
@@ -1494,7 +1513,11 @@ mod tests {
 
     #[test]
     fn todays_chat_models_of_the_real_catalog_are_pinned() {
-        let offered = real_catalog().conversation_models();
+        let offered: Vec<_> = real_catalog()
+            .conversation_models()
+            .into_iter()
+            .filter(|m| m.kind == Kind::Chat)
+            .collect();
         let offered = ids(&offered);
         let (today, added) = offered.split_at(TODAY_CHAT_IDS.len());
         assert_eq!(today, TODAY_CHAT_IDS);

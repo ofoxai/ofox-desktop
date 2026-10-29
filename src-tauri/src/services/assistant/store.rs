@@ -117,6 +117,10 @@ struct Prefs {
     version: u32,
     model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auto_title: Option<bool>,
@@ -160,6 +164,8 @@ impl Prefs {
         }
         // `|`, not `||`: every field is filled.
         fill(&mut self.model_id, &other.model_id)
+            | fill(&mut self.image_model_id, &other.image_model_id)
+            | fill(&mut self.video_model_id, &other.video_model_id)
             | fill(&mut self.instructions, &other.instructions)
             | fill(&mut self.auto_title, &other.auto_title)
             | fill(&mut self.notify_on_finish, &other.notify_on_finish)
@@ -487,6 +493,25 @@ impl AssistantStore {
         self.update_prefs(|prefs| prefs.model_id = Some(model_id.into()))
     }
 
+    pub fn remember_model_kind(
+        &self,
+        model_id: &str,
+        kind: super::catalog::Kind,
+    ) -> Result<(), String> {
+        use super::catalog::Kind;
+        match kind {
+            Kind::Chat => self.remember_model(model_id),
+            Kind::Image => self.update_prefs(|prefs| prefs.image_model_id = Some(model_id.into())),
+            Kind::Video => self.update_prefs(|prefs| prefs.video_model_id = Some(model_id.into())),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn remembered_models(&self) -> Result<Value, String> {
+        let prefs = self.read_prefs()?.unwrap_or_default();
+        Ok(json!({"chat":prefs.model_id,"image":prefs.image_model_id,"video":prefs.video_model_id}))
+    }
+
     pub fn remembered_model(&self) -> Result<Option<String>, String> {
         Ok(self.read_prefs()?.and_then(|prefs| prefs.model_id))
     }
@@ -762,6 +787,7 @@ struct UsageTotals {
     searches: u64,
     estimate: rust_decimal::Decimal,
     search_estimate: rust_decimal::Decimal,
+    media_estimate: rust_decimal::Decimal,
     /// Whether every session's cost is known; see [`AssistantStore::usage_summary`].
     priced: bool,
 }
@@ -778,6 +804,7 @@ impl UsageTotals {
             searches: 0,
             estimate: rust_decimal::Decimal::ZERO,
             search_estimate: rust_decimal::Decimal::ZERO,
+            media_estimate: rust_decimal::Decimal::ZERO,
             priced: true,
         }
     }
@@ -810,6 +837,9 @@ impl UsageTotals {
         if let Some(value) = decimal(&usage["searchCostUsd"]) {
             self.search_estimate += value;
         }
+        if let Some(value) = decimal(&usage["mediaCostUsd"]) {
+            self.media_estimate += value;
+        }
     }
 
     fn into_json(self) -> Value {
@@ -827,6 +857,7 @@ impl UsageTotals {
             "searchCount": self.searches,
             "usageCoverage": if priced { "complete" } else { "incomplete" },
             "searchCostUsd": price(self.search_estimate),
+            "mediaCostUsd": price(self.media_estimate),
         })
     }
 }
@@ -1117,6 +1148,7 @@ mod tests {
 
     fn send(sid: &str, edit: Option<&str>, regenerate: Option<&str>) -> SendRequest {
         SendRequest {
+            media: None,
             session_id: sid.into(),
             run_id: id(),
             operation_id: id(),
@@ -1525,6 +1557,7 @@ mod tests {
         let (config, store) = fixture();
         let sid = store.create("test/model", false).unwrap().session.id;
         let operation = Operation {
+            media: None,
             id: id(),
             run_id: id(),
             status: OperationStatus::Running,
@@ -2614,12 +2647,14 @@ mod tests {
         let mut record = store.load_record(&sid).unwrap();
         assert!(ensure_new_operation(&record, &running).is_ok());
         record.operations.push(Operation {
+            media: None,
             id: running.clone(),
             run_id: id(),
             status: OperationStatus::Running,
             search_price: None,
         });
         record.operations.push(Operation {
+            media: None,
             id: stopped.clone(),
             run_id: id(),
             status: OperationStatus::Cancelled,
@@ -2932,6 +2967,7 @@ mod tests {
         clean
             .mutate(&sid, |record| {
                 record.operations.push(Operation {
+                    media: None,
                     id: id(),
                     run_id: id(),
                     status: OperationStatus::Running,

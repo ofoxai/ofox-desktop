@@ -118,12 +118,22 @@ pub(super) fn settle_interrupted(
     for message in &mut record.messages {
         if message.status == "streaming" {
             message.status = "stopped".into();
+            if let Some(media) = &mut message.media {
+                if media.status == "submitting" {
+                    media.status = "unknown".into();
+                }
+            }
         }
     }
     record.session.active_run = None;
     for op in &mut record.operations {
         if op.status == OperationStatus::Running {
             op.status = OperationStatus::Interrupted;
+            if let Some(media) = &mut op.media {
+                if media.status == "submitting" {
+                    media.status = "unknown".into();
+                }
+            }
         }
     }
     Ok(())
@@ -294,7 +304,7 @@ pub(super) fn merge_native(
         };
         let Some(role) = entry["role"]
             .as_str()
-            .filter(|r| matches!(*r, "user" | "assistant"))
+            .filter(|r| matches!(*r, "user" | "assistant" | "media"))
         else {
             continue;
         };
@@ -349,6 +359,11 @@ pub(super) fn merge_native(
             let m = &mut record.messages[index];
             m.native_entry_id = Some(native_id.into());
             m.superseded = entry["active"] == false;
+            // The host owns media results and billing. Native history only
+            // determines where this already persisted bubble is visible.
+            if role == "media" {
+                continue;
+            }
             if role == "assistant" {
                 m.content = content;
             }
@@ -369,6 +384,7 @@ pub(super) fn merge_native(
             }
         } else {
             record.messages.push(Message {
+                media: None,
                 id: id(),
                 role: role.into(),
                 content,
@@ -524,6 +540,35 @@ fn count_reply_usage(record: &mut SessionRecord, entries: &[Value]) {
 pub(super) fn recount_usage(record: &mut SessionRecord, entries: &[Value]) {
     let prices = search_prices(&record.operations);
     project_usage(&mut record.usage, entries, &prices);
+    let media: Vec<_> = record
+        .operations
+        .iter()
+        .filter_map(|op| op.media.as_ref())
+        .filter(|media| media.status != "submitting")
+        .collect();
+    if media.is_empty() {
+        return;
+    }
+    let sum = media.iter().try_fold(Decimal::ZERO, |sum, m| {
+        sum.checked_add(m.cost.as_deref()?.parse().ok()?)
+    });
+    let chat_requests = record.usage["modelRequests"].as_u64().unwrap_or(0);
+    let chat_cost = if chat_requests == 0 && record.usage["usageCoverage"] != "incomplete" {
+        Some(Decimal::ZERO)
+    } else {
+        record.usage["estimatedCostUsd"]
+            .as_str()
+            .and_then(|s| s.parse::<Decimal>().ok())
+    };
+    record.usage["mediaCostUsd"] = json!(sum.map(|n| n.normalize().to_string()));
+    record.usage["estimatedCostUsd"] = json!(sum
+        .zip(chat_cost)
+        .and_then(|(a, b)| a.checked_add(b))
+        .map(|n| n.normalize().to_string()));
+    record.usage["modelRequests"] = json!(chat_requests + media.len() as u64);
+    if sum.is_none() {
+        record.usage["usageCoverage"] = json!("incomplete");
+    }
 }
 
 /// The search price each run was given, by run id.
@@ -1264,6 +1309,7 @@ mod tests {
         ];
         for (run, price) in [("run1", Some(search_price())), ("run2", Some(dearer))] {
             record.operations.push(Operation {
+                media: None,
                 id: id(),
                 run_id: run.into(),
                 status: OperationStatus::Completed,
@@ -1567,6 +1613,7 @@ mod tests {
         ];
         // The first run could search, at the price it was given.
         record.operations.push(Operation {
+            media: None,
             id: id(),
             run_id: first.clone(),
             status: OperationStatus::Completed,
@@ -1716,6 +1763,7 @@ mod tests {
             message(&run.message_id, "assistant", &run.run_id, 1),
         ];
         record.operations.push(Operation {
+            media: None,
             id: run.operation_id.clone(),
             run_id: run.run_id.clone(),
             status: OperationStatus::Running,

@@ -402,8 +402,10 @@ function projection(manager, secrets = []) {
     while (
       parent &&
       !(
-        parent.type === "message" &&
-        ["user", "assistant", "toolResult"].includes(parent.message.role)
+        (parent.type === "custom_message" &&
+          parent.customType === "ofox-desktop-media") ||
+        (parent.type === "message" &&
+          ["user", "assistant", "toolResult"].includes(parent.message.role))
       )
     )
       parent = all.get(parent.parentId);
@@ -456,6 +458,8 @@ function projection(manager, secrets = []) {
   const entries = [...all.values()]
     .filter(
       (entry) =>
+        (entry.type === "custom_message" &&
+          entry.customType === "ofox-desktop-media") ||
         (entry.type === "message" &&
           ["user", "assistant", "toolResult"].includes(entry.message.role)) ||
         (entry.type === "custom" &&
@@ -465,6 +469,22 @@ function projection(manager, secrets = []) {
           !summaryHasOwnRecords(entry)),
     )
     .map((entry) => {
+      if (entry.type === "custom_message") {
+        const marker = markerFor(entry);
+        return scrubSecrets(
+          {
+            id: entry.id,
+            parentId: entry.parentId,
+            role: "media",
+            content: contentText(entry.content),
+            active: active.has(entry.id),
+            timestamp: Date.parse(entry.timestamp),
+            runId: marker?.runId,
+            operationId: marker?.operationId,
+          },
+          secrets,
+        );
+      }
       if (entry.type !== "message") {
         const data =
           entry.type === "custom"
@@ -656,6 +676,55 @@ export class AssistantRuntime {
       ),
       [...this.secrets],
     );
+  }
+
+  // Local bookkeeping only: no provider, tools, credentials or HTTP client.
+  async appendMedia(params) {
+    checkSessionFile(params.sessionFile);
+    if (this.runs.size)
+      throw new Error("This sidecar already owns an active run");
+    for (const key of ["runId", "operationId", "text"])
+      if (typeof params[key] !== "string" || !params[key])
+        throw new Error("Missing media history field");
+    const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+    const directory = path.dirname(params.sessionFile);
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const manager = SessionManager.open(
+      params.sessionFile,
+      directory,
+      directory,
+    );
+    const existing = projection(manager, [...this.secrets]);
+    if (
+      existing.entries.some(
+        (entry) => entry.role === "media" && entry.runId === params.runId,
+      )
+    )
+      return existing;
+    manager.appendCustomEntry("ofox-desktop-run", {
+      runId: params.runId,
+      operationId: params.operationId,
+      pricingKnown: false,
+    });
+    // Pi creates a new file only after a user/assistant message. Save the
+    // user's prompt through its public API, also binding our user bubble.
+    if (
+      !existing.entries.some(
+        (entry) => entry.role === "user" && entry.runId === params.runId,
+      )
+    )
+      manager.appendMessage({
+        role: "user",
+        content: params.prompt ?? params.text,
+        timestamp: Date.now(),
+      });
+    manager.appendCustomMessageEntry(
+      "ofox-desktop-media",
+      params.text,
+      false,
+      params.details ?? {},
+    );
+    return projection(manager, [...this.secrets]);
   }
 
   // Show another version of a saved conversation: the branch becomes the

@@ -46,7 +46,7 @@ dirs = "5.0"
 keyring = "4"
 toml = "0.8"
 toml_edit = "0.22"
-reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks", "multipart"] }
 arboard = "3.6"
 flate2 = "1"
 brotli = "7"

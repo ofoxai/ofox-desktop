@@ -853,9 +853,9 @@ mod tests {
         store.mutate(&sid, |record| {
             record.session.draft = "未发送草稿".into();
             record.session.draft_attachment_ids = vec![attachment.clone()];
-            record.attachments.push(Attachment { id:attachment.clone(), name:"中文.txt".into(), mime_type:"text/plain".into(),size_bytes:12,status:"ready".into(),reason:None,preview_url:None,details:None });
+            record.attachments.push(Attachment { origin: None, source_message_id: None, id:attachment.clone(), name:"中文.txt".into(), mime_type:"text/plain".into(),size_bytes:12,status:"ready".into(),reason:None,preview_url:None,details:None });
             record.usage = json!({"modelRequests":1,"estimatedCostUsd":"0.123456789123456789","searchCount":1});
-            record.operations.push(Operation {
+            record.operations.push(Operation { media: None,
                 id: "79346d31-7f3c-48d5-b3ac-81a889060608".into(),
                 run_id: "a48cac04-e861-4e76-92e8-6a73896a095c".into(),
                 status: OperationStatus::Completed,
@@ -1306,6 +1306,8 @@ mod tests {
         store
             .mutate(&lost_file, |record| {
                 record.attachments.push(Attachment {
+                    origin: None,
+                    source_message_id: None,
                     id: id(),
                     name: "gone.txt".into(),
                     mime_type: "text/plain".into(),
@@ -1327,6 +1329,8 @@ mod tests {
         store
             .mutate(&oversized, |record| {
                 record.attachments.push(Attachment {
+                    origin: None,
+                    source_message_id: None,
                     id: big.clone(),
                     name: "big.pdf".into(),
                     mime_type: "application/pdf".into(),

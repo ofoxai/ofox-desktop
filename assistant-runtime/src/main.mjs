@@ -120,6 +120,8 @@ async function handle(line) {
       result = await runtime.title(request.params ?? {});
     else if (request.method === "navigate")
       result = await runtime.navigate(request.params ?? {});
+    else if (request.method === "append_media")
+      result = await runtime.appendMedia(request.params ?? {});
     else if (request.method === "stop")
       result = await runtime.stop(request.params ?? {});
     else throw new Error("Unknown assistant runtime method");

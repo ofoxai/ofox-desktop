@@ -4708,3 +4708,103 @@ fn a_turn_that_never_reached_the_runtime_shows_with_the_version_it_was_sent_on()
         assert_eq!(active(&forth), pairs(&VERSION_B));
     });
 }
+
+fn image_model() -> Model {
+    let mut model = serde_json::to_value(test_model()).unwrap();
+    model["id"] = json!("test/image");
+    model["kind"] = json!("image");
+    model["tools"] = json!(false);
+    model["image"] = json!({"generations":true,"edits":true,"n":true,"sizes":["1024x1024"],"qualities":["low"],"perImagePrice":"0.02"});
+    model["supportedEndpoints"] = json!(["/v1/images/generations", "/v1/images/edits"]);
+    serde_json::from_value(model).unwrap()
+}
+
+#[test]
+fn image_media_survives_restart_and_followup_on_both_apexes() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let config = tempfile::tempdir().unwrap();
+            let gateway = Gateway::start();
+            let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+            env.catalog.lock().unwrap().push(image_model());
+            let host = AssistantHost::new(env.clone());
+            let sid = host.create_session(serde_json::from_value(json!({"modelId":"test/image","modelPicked":true})).unwrap()).await.unwrap().id;
+            gateway.reply(Reply::Json(200,json!({"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="}]})));
+            let (_, end) = turn(&host, &env, request(&sid,"Blue square",json!({"media":{"size":"1024x1024","quality":"low"}}))).await;
+            assert_eq!(end.data["status"], "completed", "{:?}",end.data);
+            assert_eq!(gateway.requests().len(),1);
+            assert_eq!(gateway.requests()[0].path,"/v1/images/generations");
+            let detail = host.get_session(&sid).await.unwrap();
+            let media = detail.messages.iter().find(|m|m.role=="media").expect("media bubble");
+            let projected = serde_json::to_value(media).unwrap();
+            assert_eq!(projected["media"]["cost"], "0.02");
+            assert!(media.native_entry_id.is_some());
+            assert_eq!(detail.usage["mediaCostUsd"],"0.02");
+            assert_eq!(detail.usage["estimatedCostUsd"],"0.02");
+            assert_eq!(detail.attachments.len(),1);
+            assert!(detail.session.draft_attachment_ids.is_empty());
+            assert_eq!(serde_json::to_value(&detail.attachments[0]).unwrap()["origin"],"generated");
+            host.shutdown().await;
+            // A crash after storing images but before the custom native entry
+            // must repair local history without another provider request.
+            let folder = session_dir(config.path(), &sid);
+            let native = std::fs::read_to_string(folder.join("session.jsonl")).unwrap();
+            let kept = native.lines().filter(|line|serde_json::from_str::<Value>(line).unwrap()["customType"]!="ofox-desktop-media").collect::<Vec<_>>().join("\n")+"\n";
+            std::fs::write(folder.join("session.jsonl"),kept).unwrap();
+            let mut record = saved(config.path(), &sid);
+            let media_row=record["messages"].as_array_mut().unwrap().iter_mut().find(|m|m["role"]=="media").unwrap();
+            media_row["nativeEntryId"]=Value::Null;
+            std::fs::write(folder.join("session.json"),serde_json::to_vec(&record).unwrap()).unwrap();
+            let host = AssistantHost::new(env.clone());
+            let restored = host.get_session(&sid).await.unwrap();
+            assert!(restored.messages.iter().find(|m|m.role=="media").unwrap().native_entry_id.is_some(),"repair media history locally");
+            assert_eq!(gateway.requests().len(),1);
+            assert_eq!(restored.usage["mediaCostUsd"],"0.02");
+            host.update_session(serde_json::from_value(json!({"sessionId":sid,"modelId":MODEL})).unwrap()).await.unwrap();
+            gateway.reply(Reply::Stream("I remember the generated blue square.".into()));
+            let (_, end) = turn(&host,&env,request(&sid,"What did I generate?",json!({}))).await;
+            assert_eq!(end.data["status"],"completed");
+            assert!(gateway.requests()[1].text().contains("Blue square"));
+            assert_eq!(host.get_session(&sid).await.unwrap().usage["mediaCostUsd"],"0.02");
+            assert_no_secret_on_disk(config.path(), &[KEY,NEW_KEY]);
+            host.shutdown().await;
+        }
+    });
+}
+
+#[test]
+fn image_requests_retry_only_a_refused_key_and_never_replay_unknown_outcomes() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        for (replies, expected, count) in [
+            (vec![Reply::Error(401,invalid_key()), Reply::Json(200,json!({"data":[{"b64_json":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="}]}))],"completed",2),
+            (vec![Reply::Error(401,invalid_key()),Reply::Error(401,invalid_key())],"assistant_key_rejected",2),
+            (vec![Reply::Drop],"assistant_media_outcome_unknown",1),
+        ] {
+            let config=tempfile::tempdir().unwrap(); let gateway=Gateway::start();
+            let env=TestEnv::new(config.path(),&bundle,&[("ofox.ai",&gateway)]);
+            env.catalog.lock().unwrap().push(image_model());
+            let host=AssistantHost::new(env.clone());
+            let sid=host.create_session(serde_json::from_value(json!({"modelId":"test/image"})).unwrap()).await.unwrap().id;
+            for reply in replies {gateway.reply(reply);}
+            let req=request(&sid,"Blue square",json!({"media":{}}));
+            let repeat=req.clone();
+            let (_,end)=turn(&host,&env,req).await;
+            let detail=host.get_session(&sid).await.unwrap();
+            if expected=="completed" {assert_eq!(end.data["status"],"completed");}
+            else {assert_eq!(detail.messages.last().unwrap().error_code.as_deref(),Some(expected));}
+            assert_eq!(gateway.requests().len(),count);
+            assert!(host.send(repeat).await.is_err());
+            assert_eq!(gateway.requests().len(),count,"operation identity prevents re-submit");
+            if count==2 {
+                let calls=gateway.requests();
+                assert_eq!(calls[0].authorization,format!("Bearer {KEY}"));
+                assert_eq!(calls[1].authorization,format!("Bearer {NEW_KEY}"));
+                assert_eq!(env.state.lock().unwrap().rejected.len(),1);
+            }
+            assert_no_secret_on_disk(config.path(),&[KEY,NEW_KEY]);
+            host.shutdown().await;
+        }
+    });
+}

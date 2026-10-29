@@ -157,14 +157,14 @@ impl RunControl {
             .clone()
     }
 
-    fn add_secret(&self, key: &str) {
+    pub(super) fn add_secret(&self, key: &str) {
         self.secret
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(key.to_owned());
     }
 
-    fn cancelled(&self) -> bool {
+    pub(super) fn cancelled(&self) -> bool {
         *self.cancel.borrow()
     }
 }
@@ -470,7 +470,7 @@ pub(super) fn runtime_command(runtime: &Runtime) -> tokio::process::Command {
 
 /// How a run ended when it did not fail.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Finish {
+pub(super) enum Finish {
     Completed,
     Stopped,
 }
@@ -478,19 +478,19 @@ enum Finish {
 /// A failed run: a stable `assistant_*` code, and for provider failures the
 /// scrubbed provider text.
 #[derive(Debug)]
-struct Failure {
-    code: String,
-    detail: Option<String>,
+pub(super) struct Failure {
+    pub(super) code: String,
+    pub(super) detail: Option<String>,
     /// The request cost nothing: the session's cost stays known.
-    unbilled: bool,
+    pub(super) unbilled: bool,
     /// For [`RETRY_WITH_NEW_KEY`]: the refused attempt's native entries, kept
     /// if the retry does not start.
-    native: Option<Value>,
+    pub(super) native: Option<Value>,
 }
 
 impl Failure {
     /// A failure before anything was sent: it cost nothing.
-    fn unsent(code: String) -> Self {
+    pub(super) fn unsent(code: String) -> Self {
         Self {
             unbilled: true,
             ..code.into()
@@ -899,6 +899,7 @@ impl AssistantHost {
         store.mutate(sid, |record| {
             if !record.operations.iter().any(|o| o.id == op) {
                 record.operations.push(Operation {
+                    media: None,
                     id: op.into(),
                     run_id: rid.into(),
                     status: OperationStatus::Cancelled,
@@ -1009,7 +1010,7 @@ impl AssistantHost {
         }
     }
 
-    fn validate_run(&self, run: &RunControl) -> Result<(), String> {
+    pub(super) fn validate_run(&self, run: &RunControl) -> Result<(), String> {
         if run.cancelled() {
             return Err(CANCELLED.into());
         }
@@ -1166,7 +1167,7 @@ impl AssistantHost {
         tasks.insert(key, task);
     }
 
-    fn emit(&self, run: &RunControl, kind: &str, mut data: Value) {
+    pub(super) fn emit(&self, run: &RunControl, kind: &str, mut data: Value) {
         scrub_secrets_in(&mut data, &run.secrets());
         self.env.emit(Event {
             session_id: run.session_id.clone(),
@@ -1258,7 +1259,7 @@ impl AssistantHost {
 
     /// A new key for a run whose key the gateway refused, asked for only
     /// while the run may still go on.
-    async fn key_for_retry(
+    pub(super) async fn key_for_retry(
         &self,
         control: &Arc<RunControl>,
         params: &Value,
@@ -1663,7 +1664,11 @@ impl AssistantHost {
         .await
     }
 
-    async fn apply_native(&self, control: &RunControl, entries: &Value) -> Result<(), String> {
+    pub(super) async fn apply_native(
+        &self,
+        control: &RunControl,
+        entries: &Value,
+    ) -> Result<(), String> {
         let store = self.store(&control.identity.owner)?;
         let (sid, entries, secrets) = (
             control.session_id.clone(),
@@ -1677,7 +1682,11 @@ impl AssistantHost {
     /// Save how the run ended, release the session, then publish: the saved
     /// message and session, an error when it failed, and `run_end` last.
     /// The conversation's first answer then has it named in the background.
-    async fn finish(self: &Arc<Self>, control: &Arc<RunControl>, outcome: Result<Finish, Failure>) {
+    pub(super) async fn finish(
+        self: &Arc<Self>,
+        control: &Arc<RunControl>,
+        outcome: Result<Finish, Failure>,
+    ) {
         let stopped = match &outcome {
             Ok(finish) => *finish == Finish::Stopped,
             Err(_) => control.cancelled(),
@@ -1827,7 +1836,7 @@ pub(super) async fn read_frame<R: AsyncBufRead + Unpin>(
 }
 
 /// The native entries of `file`, read by a short-lived runtime process.
-async fn load_native(runtime: &Runtime, file: &Path) -> Result<Value, String> {
+pub(super) async fn load_native(runtime: &Runtime, file: &Path) -> Result<Value, String> {
     native_entries(
         runtime,
         "load",
@@ -1861,7 +1870,7 @@ pub(super) async fn navigate_native(
 /// The projection's entries from one `method` request to a short-lived
 /// runtime process; `(failed, timeout)` are the codes when it refuses, or
 /// gives no answer within 15 seconds.
-async fn native_entries(
+pub(super) async fn native_entries(
     runtime: &Runtime,
     method: &str,
     params: Value,
@@ -2082,6 +2091,7 @@ mod tests {
                 host.register_run(run.clone(), generation, || {
                     store.mutate(&sid, |record| {
                         record.operations.push(Operation {
+                            media: None,
                             id: run.operation_id.clone(),
                             run_id: run.run_id.clone(),
                             status: OperationStatus::Running,
@@ -2345,6 +2355,7 @@ mod tests {
         assert_eq!(
             record.operations,
             [Operation {
+                media: None,
                 id: op.clone(),
                 run_id: rid.clone(),
                 status: OperationStatus::Cancelled,

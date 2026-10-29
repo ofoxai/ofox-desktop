@@ -162,6 +162,17 @@ line, so the version stays shown after a reopen and the next turn continues
 it. The result is the projection. An entry that is not a message, a missing
 file or a path that is not absolute JSONL throws, and nothing is written.
 
+`append_media` records a completed image operation locally. It takes the
+trusted `sessionFile`, `runId`, `operationId`, the user `prompt`, a short `text`
+describing the model, parameters and attachment IDs, and media `details`.
+It requires no model, credential or network. The runtime appends an
+`ofox-desktop-run` marker, a user turn (Pi requires a conversation message to
+create a new file), and an `ofox-desktop-media` custom message. Its projection
+has role `media`; the host keeps its saved outputs and billing, using the
+projection only for native ID and branch visibility. Repeating an already
+recorded run returns the existing entry, so repairing a local write never
+regenerates the image.
+
 `stop` matches sessionId/runId/operationId. The host owns one sidecar process
 per operation and the stable native session file, and ends the process after
 the response. Pi native JSONL is the context authority. Edit and regenerate

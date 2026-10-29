@@ -32,9 +32,14 @@ impl AssistantHost {
             Ok(merged) => (merged, None),
             Err(error) => (catalog::Catalog::default(), Some(error)),
         };
-        // Conversations use chat models only, until media generation lands.
         let models = merged.conversation_models();
         let default_model_id = self.default_model(&identity.owner, &merged).await?;
+        let remembered_models = blocking({
+            let store = self.store(&identity.owner)?;
+            move || store.remembered_models()
+        })
+        .await
+        .unwrap_or_default();
         let search = search_status(&merged.models);
         let runtime = match self.runtime() {
             Ok(runtime) => json!({"available": true, "reason": null, "version": runtime.version}),
@@ -52,6 +57,7 @@ impl AssistantHost {
             "runtime": runtime,
             "models": models,
             "defaultModelId": default_model_id,
+            "rememberedModels": remembered_models,
             "modelUnavailableReason": model_error,
             // Catalog sources that could not be read: some models are missing.
             "partial": merged.partial,
@@ -162,11 +168,12 @@ impl AssistantHost {
         // opened during an outage may show a default that is stale by now.
         let remember = request.model_picked
             || (merged.partial.is_empty() && default.as_deref() == Some(selected.as_str()));
+        let kind = self.model(&identity.apex, &selected).await?.kind;
         self.ensure_current(&identity, generation).await?;
         let detail = blocking(move || {
             let detail = store.create(&selected, request.web_search)?;
             if remember {
-                store.remember_model(&selected)?;
+                store.remember_model_kind(&selected, kind)?;
             }
             Ok(detail)
         })
@@ -182,6 +189,11 @@ impl AssistantHost {
         let generation = self.generation();
         if let Err(error) = self.recover(&identity, sid).await {
             log::warn!("[Assistant] could not recover session {sid}: {error}");
+        }
+        if self.ensure_idle(sid).is_ok() {
+            if let Err(error) = self.repair_media_history(&identity, sid).await {
+                log::warn!("[Assistant] could not restore media history: {error}");
+            }
         }
         let mut detail = blocking({
             let store = self.store(&identity.owner)?;
@@ -247,6 +259,7 @@ impl AssistantHost {
             Some(model) => Some(self.model(&identity.apex, model).await?),
             None => None,
         };
+        let new_kind = new_model.as_ref().map(|m| m.kind);
         let levels = self
             .update_thinking_levels(&identity, &request, new_model)
             .await?;
@@ -272,7 +285,9 @@ impl AssistantHost {
                     Ok(())
                 })?;
                 let remembered = match &request.model_id {
-                    Some(_) => store.remember_model(&session.model_id),
+                    Some(_) => {
+                        store.remember_model_kind(&session.model_id, new_kind.unwrap_or_default())
+                    }
                     None => Ok(()),
                 };
                 Ok((session, remembered))
@@ -420,6 +435,8 @@ impl AssistantHost {
         let generation = self.generation();
         let identity = self.identity().await?;
         self.recover(&identity, &request.session_id).await?;
+        self.repair_media_history(&identity, &request.session_id)
+            .await?;
         // A retry asks again from what native history holds of its turn,
         // which a run that failed may have left unsaved.
         if request.retry_message_id.is_some() {
@@ -443,11 +460,19 @@ impl AssistantHost {
         }
         self.runtime()?;
         let model = self.model(&identity.apex, &record.session.model_id).await?;
-        // Native history is the conversation's context: once a turn reached
-        // the runtime, its history must still be there.
         if !native_file.is_file() && record.messages.iter().any(|m| m.native_entry_id.is_some()) {
             return Err("assistant_native_history_missing".into());
         }
+        if model.kind == catalog::Kind::Image {
+            return self
+                .send_image(request, identity, generation, record, native_file, model)
+                .await;
+        }
+        if request.media.is_some() {
+            return Err(super::media::INVALID.into());
+        }
+        // Native history is the conversation's context: once a turn reached
+        // the runtime, its history must still be there.
         let branch = Branch::resolve(&record, &request)?;
         let selected = selection(&record, &request, &branch)?;
         // Search only at a price the catalog gives, for a model that takes
@@ -733,6 +758,7 @@ impl AssistantHost {
             return Err(super::host::IDENTITY_CHANGED.into());
         }
         self.recover(&identity, &sid).await?;
+        self.repair_media_history(&identity, &sid).await?;
         // Refused at once while it replies. The hold decides once the
         // history is ours: a title may be writing it meanwhile.
         self.ensure_idle(&sid)?;
@@ -854,7 +880,7 @@ fn check_message(request: &SendRequest) -> Result<(), String> {
 
 /// Which earlier turn a send rewrites, if any.
 #[derive(Clone, Default)]
-struct Branch {
+pub(super) struct Branch {
     /// The user message an edit, a regenerate or a retry replaces.
     revision_of: Option<String>,
     /// For a retry: the run of the turn it asks again. When native history
@@ -871,8 +897,31 @@ struct Branch {
 }
 
 impl Branch {
-    fn resolve(record: &SessionRecord, request: &SendRequest) -> Result<Self, String> {
+    pub(super) fn resolve(record: &SessionRecord, request: &SendRequest) -> Result<Self, String> {
         const UNAVAILABLE: &str = "assistant_branch_unavailable";
+        // Media generations are immutable paid operations, even after the
+        // conversation switches back to a chat model. Regeneration is a new turn.
+        for target in [
+            &request.edit_message_id,
+            &request.regenerate_message_id,
+            &request.retry_message_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(message) = record.messages.iter().find(|m| &m.id == target) {
+                if message.media.is_some()
+                    || message.run_id.as_ref().is_some_and(|run| {
+                        record
+                            .messages
+                            .iter()
+                            .any(|m| m.run_id.as_ref() == Some(run) && m.media.is_some())
+                    })
+                {
+                    return Err(super::media::INVALID.into());
+                }
+            }
+        }
         let find = |id: &str, role: &str| {
             record
                 .messages
@@ -1102,7 +1151,7 @@ fn search_status(models: &[catalog::Model]) -> Value {
 /// search price the run was given. An edit or regenerate marks the replaced
 /// turns superseded, a retry the turn it asks again.
 #[allow(clippy::too_many_arguments)]
-fn publish_turn(
+pub(super) fn publish_turn(
     record: &mut SessionRecord,
     control: &RunControl,
     request: &SendRequest,
@@ -1182,6 +1231,7 @@ fn publish_turn(
     let at = now();
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
+        media: None,
         id: id(),
         role: "user".into(),
         content: user_text.into(),
@@ -1203,6 +1253,7 @@ fn publish_turn(
         anchor_entry_id: anchor.clone(),
     });
     record.messages.push(Message {
+        media: None,
         id: control.message_id.clone(),
         role: "assistant".into(),
         content: String::new(),
@@ -1238,6 +1289,7 @@ fn publish_turn(
         operation_id: request.operation_id.clone(),
     });
     record.operations.push(Operation {
+        media: None,
         id: request.operation_id.clone(),
         run_id: request.run_id.clone(),
         status: OperationStatus::Running,

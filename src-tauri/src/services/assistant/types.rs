@@ -1,8 +1,26 @@
 //! Data model shared by the assistant store, host and commands. Field names are
 //! the renderer's camelCase contract.
 use super::catalog::SearchPrice;
+pub use super::media::ImageRequest;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+
+/// Persisted media state, also kept in the operation ledger so a later
+/// catalog change or branch switch cannot change what the request cost.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaRecord {
+    pub kind: String,
+    pub model: String,
+    pub params: Value,
+    #[serde(default)]
+    pub input_ids: Vec<String>,
+    pub status: String,
+    #[serde(default)]
+    pub outputs: Vec<String>,
+    #[serde(default)]
+    pub cost: Option<String>,
+}
 
 /// The proxy a run's model requests go through. `url` may carry the proxy's
 /// credentials: it goes to the runtime only, never to a log or an event.
@@ -90,6 +108,10 @@ pub fn auto_title(text: &str, attachments: &[Attachment]) -> String {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attachment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_message_id: Option<String>,
     pub id: String,
     pub name: String,
     pub mime_type: String,
@@ -129,6 +151,8 @@ impl Attachment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaRecord>,
     pub id: String,
     pub role: String,
     pub content: String,
@@ -199,6 +223,8 @@ fn present<'de, D: Deserializer<'de>>(value: D) -> Result<Option<Option<String>>
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Operation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<MediaRecord>,
     pub id: String,
     pub run_id: String,
     pub status: OperationStatus,
@@ -347,6 +373,8 @@ pub struct ExportMarkdownRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
+    #[serde(default)]
+    pub media: Option<ImageRequest>,
     pub session_id: String,
     pub run_id: String,
     pub operation_id: String,

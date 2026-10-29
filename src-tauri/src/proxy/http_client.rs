@@ -242,6 +242,19 @@ pub(crate) fn mcp_check_client() -> Result<Client, String> {
         .build()
         .map_err(|_| "MCP client unavailable".into())
 }
+
+/// Paid media operations must never follow redirects or replay a POST.
+/// Reuse the global client's proxy policy while keeping this stricter
+/// redirect policy scoped to media requests.
+pub(crate) fn assistant_media_client() -> Result<Client, String> {
+    let builder = Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(300));
+    configure_client_proxy(builder, get_current_proxy_url().as_deref())?
+        .build()
+        .map_err(|_| "assistant_network_error".into())
+}
 fn configure_client_proxy(
     mut builder: reqwest::ClientBuilder,
     proxy_url: Option<&str>,
