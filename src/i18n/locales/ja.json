@@ -4924,6 +4924,7 @@
       "mediaCancelNotSupported": "このプロバイダーは動画のキャンセルに対応していません。生成は続行され、課金される場合があります。",
       "mediaCancelFailed": "動画をキャンセルできませんでした。進捗の確認を続けます。",
       "mediaQueryExpired": "24 時間が経過したため自動確認を停止しました。結果の確認を再開できます。",
+      "mediaDeletePending": "この会話には未完了の動画ジョブがあります。会話を復元し、完了を待つかジョブをキャンセルしてから完全に削除してください。",
       "mediaVideoLimit": "現在の動画タスクが完了するまでお待ちください。同時実行は会話ごとに 1 件、アカウントごとに 3 件までです。",
       "mediaInvalidParams": "このモデルは選択したメディア設定に対応していません。",
       "mediaOutcomeUnknown": "メディアのリクエストは課金された可能性がありますが、結果を確認できませんでした。再送信前に利用履歴を確認してください。",
@@ -5247,7 +5248,10 @@
       "submitAnyway": "それでも送信",
       "confirm": "動画を生成",
       "seconds_one": "{{count}} 秒",
-      "seconds_other": "{{count}} 秒"
+      "seconds_other": "{{count}} 秒",
+      "fromPrice": "${{price}}/秒から",
+      "durationRange": "{{min}}–{{max}} 秒",
+      "audioCapability": "音声対応"
     },
     "media": {
       "perImage": "${{price}}/枚",
@@ -5266,7 +5270,7 @@
       "cost": "料金 ${{cost}}",
       "generating": "画像を生成中…",
       "unknown": "結果は不明で、課金済みの可能性があります。再生成の前に利用履歴を確認してください。",
-      "inputHint": "編集には 15 MiB 以下の PNG または JPEG を 1 枚選択してください。",
+      "inputHint": "編集には 15 MiB 以下の PNG、JPEG または WebP を 1 枚選択してください。",
       "noInput": "このモデルはテキストからの画像生成のみ対応しています。",
       "activity": "利用履歴を表示"
     }

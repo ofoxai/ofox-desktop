@@ -53,6 +53,32 @@ export function useModelOptions(
             groupLabel: label,
           };
         }
+        if (kind === "video") {
+          const caps = model.video;
+          const notes = [
+            caps?.fromPricePerSecond != null
+              ? t("assistant.video.fromPrice", {
+                  price: caps.fromPricePerSecond,
+                })
+              : "",
+            caps?.minDuration != null && caps.maxDuration != null
+              ? t("assistant.video.durationRange", {
+                  min: caps.minDuration,
+                  max: caps.maxDuration,
+                })
+              : "",
+            caps?.resolutions.join(" / ") ?? "",
+            caps?.supportsAudio ? t("assistant.video.audioCapability") : "",
+          ].filter(Boolean);
+          return {
+            value: model.id,
+            label: model.shortName || model.name,
+            meta: notes.join(" · ") || undefined,
+            title: [model.name, ...notes].join(" · "),
+            group: vendor,
+            groupLabel: label,
+          };
+        }
         const tokens = model.contextWindow
           ? fmtTokens(model.contextWindow)
           : "";

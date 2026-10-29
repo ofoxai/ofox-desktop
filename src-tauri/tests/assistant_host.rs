@@ -5107,7 +5107,7 @@ fn video_limits_allow_one_job_per_conversation_and_three_per_account() {
                 ResponseTemplate::new(202)
                     .set_body_json(json!({"id":types::id(),"status":"pending"}))
             })
-            .expect(3)
+            .expect(4)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -5158,6 +5158,34 @@ fn video_limits_allow_one_job_per_conversation_and_three_per_account() {
             .unwrap_err(),
             "assistant_media_video_limit"
         );
+        // The provider has finished this job; a local download failure must not
+        // reserve a generation slot forever, even while it remains recoverable.
+        let store =
+            cc_switch_lib::assistant::store::AssistantStore::for_owner(config.path(), &owner())
+                .unwrap();
+        store
+            .mutate(&sessions[0], |record| {
+                for message in &mut record.messages {
+                    if let Some(media) = message.media.as_mut() {
+                        media.status = "download_failed".into();
+                        message.status = "download_failed".into();
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+        let quote = video_quote_for(&host, &sessions[0]).await;
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(
+                &sessions[0],
+                "After completed remote job",
+                json!({"video":{"duration":4,"resolution":"480p"},"quoteId":quote}),
+            ),
+        )
+        .await;
+        assert_eq!(end.data["status"], "queued");
         host.shutdown().await;
     });
 }

@@ -947,7 +947,6 @@ export function useAssistant(enabled: boolean) {
             message.media?.kind !== "video" ||
             message.media.apex !== apex ||
             message.runId !== event.runId ||
-            message.operationId !== event.operationId ||
             message.media.status !== status
           )
             return;
@@ -968,10 +967,7 @@ export function useAssistant(enabled: boolean) {
             )
               return old;
             const previous = old.messages.find(
-              (item) =>
-                item.id === messageId &&
-                item.runId === event.runId &&
-                item.operationId === event.operationId,
+              (item) => item.id === messageId && item.runId === event.runId,
             );
             if (
               !previous ||
@@ -2549,6 +2545,7 @@ export function useAssistant(enabled: boolean) {
     trashCount,
     matches,
     selectedId,
+    selectionKey: selectionSequence.current,
     detail,
     draft,
     setDraft,

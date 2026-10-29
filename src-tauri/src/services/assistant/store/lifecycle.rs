@@ -40,6 +40,17 @@ impl AssistantStore {
                 if record.session.active_run.is_some() {
                     return Err("assistant_session_busy".into());
                 }
+                if record
+                    .messages
+                    .iter()
+                    .filter_map(|message| message.media.as_ref())
+                    .any(|media| {
+                        media.kind == "video"
+                            && super::super::video::occupies_generation_slot(&media.status)
+                    })
+                {
+                    return Err("assistant_media_delete_pending".into());
+                }
                 // An earlier deletion of this id never finished, and the
                 // conversation was restored since: its old copy goes first.
                 if real_dir(&tombstone)? {
@@ -163,6 +174,55 @@ mod tests {
             "assistant_session_busy"
         );
         assert!(store.load_record(&sid).is_ok());
+    }
+
+    #[test]
+    fn deletion_preserves_unresolved_remote_video_jobs_but_allows_finished_downloads() {
+        for status in [
+            "submitting",
+            "queued",
+            "in_progress",
+            "paused",
+            "unknown",
+            "query_expired",
+            "downloading",
+            "download_failed",
+            "completed",
+            "cancelled",
+            "failed",
+            "expired",
+        ] {
+            let (_temp, store, sid) = fixture();
+            store
+                .mutate(&sid, |record| {
+                    record.messages.push(serde_json::from_value(json!({
+                    "id":id(),"role":"media","content":"","createdAt":1,"status":status,
+                    "media":{"kind":"video","model":"test/video","params":{},"status":status}
+                })).unwrap());
+                    Ok(())
+                })
+                .unwrap();
+            trash(&store, &sid);
+            let result = store.delete_trashed(&sid, || Ok(()));
+            if matches!(
+                status,
+                "downloading"
+                    | "download_failed"
+                    | "completed"
+                    | "cancelled"
+                    | "failed"
+                    | "expired"
+            ) {
+                result.unwrap();
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "assistant_media_delete_pending",
+                    "{status}"
+                );
+                assert!(store.load_record(&sid).is_ok());
+            }
+        }
     }
 
     #[test]

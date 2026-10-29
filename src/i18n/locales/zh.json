@@ -4924,6 +4924,7 @@
       "mediaCancelNotSupported": "此服务商不支持取消视频。任务仍在生成，可能会计费。",
       "mediaCancelFailed": "未能取消视频，仍会继续查询进度。",
       "mediaQueryExpired": "自动查询已满 24 小时。可继续查询结果。",
+      "mediaDeletePending": "此对话仍有未结束的视频任务。请先恢复对话，等待任务完成或取消任务，再永久删除。",
       "mediaVideoLimit": "请等待当前视频任务完成。每个对话最多 1 个、每个账号最多 3 个进行中的任务。",
       "mediaInvalidParams": "此模型不支持所选媒体参数。",
       "mediaOutcomeUnknown": "此媒体请求可能已计费，但无法确认结果。再次提交前请查看使用记录。",
@@ -5247,7 +5248,10 @@
       "submitAnyway": "仍然提交",
       "confirm": "生成视频",
       "seconds_one": "{{count}} 秒",
-      "seconds_other": "{{count}} 秒"
+      "seconds_other": "{{count}} 秒",
+      "fromPrice": "${{price}}/秒起",
+      "durationRange": "{{min}}–{{max}} 秒",
+      "audioCapability": "有声"
     },
     "media": {
       "perImage": "${{price}}/张",
@@ -5266,7 +5270,7 @@
       "cost": "费用 ${{cost}}",
       "generating": "正在生成图像…",
       "unknown": "结果不明，可能已计费。再次生成前请先查看用量记录。",
-      "inputHint": "改图仅支持一张不超过 15 MiB 的 PNG 或 JPEG。",
+      "inputHint": "改图支持一张不超过 15 MiB 的 PNG、JPEG 或 WebP。",
       "noInput": "此模型仅支持文字生成图像。",
       "activity": "查看用量记录"
     }

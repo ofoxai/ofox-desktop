@@ -6852,6 +6852,32 @@ describe("image conversations", () => {
       ),
     );
   });
+  it("sends a WebP reference image to an edit-capable model", async () => {
+    images();
+    current.attachments = [
+      {
+        id: "webp",
+        name: "reference.webp",
+        mimeType: "image/webp",
+        sizeBytes: 64,
+        status: "ready",
+        reason: null,
+        details: null,
+      },
+    ];
+    current.session.draftAttachmentIds = ["webp"];
+    await openConversation();
+    await userEvent.type(composer(), "make it blue");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          text: "make it blue",
+          attachmentIds: ["webp"],
+        }),
+      ),
+    );
+  });
   it("blocks non-image attachments in image mode before sending", async () => {
     images();
     current.attachments = [
@@ -6871,7 +6897,7 @@ describe("image conversations", () => {
     expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
     await userEvent.keyboard("{Enter}");
     expect(mocks.send).not.toHaveBeenCalled();
-    expect(screen.getByText(/one PNG or JPEG/)).toBeVisible();
+    expect(screen.getByText(/one PNG, JPEG or WebP/)).toBeVisible();
   });
   it("media inputs cannot be edited and generated images can become a draft input", async () => {
     images();
@@ -7095,7 +7121,6 @@ describe("background video progress", () => {
   const movie: AssistantMessage = {
     id: "movie",
     runId: "video-run",
-    operationId: "video-op",
     role: "media",
     content: "Private prompt",
     createdAt: 10,
@@ -7199,7 +7224,6 @@ it("keeps a video completion that arrives during a transcript refresh", async ()
   const movie: AssistantMessage = {
     id: "refresh-movie",
     runId: "vr",
-    operationId: "vo",
     role: "media",
     content: "",
     createdAt: 1,
@@ -7268,13 +7292,11 @@ describe("video confirmation scope", () => {
       ...capabilities,
       models: [{ ...model("video/test", "Video"), kind: "video" }],
     });
-    mocks.quoteMedia
-      .mockReset()
-      .mockResolvedValue({
-        id: "q",
-        estimatedCostUsd: "0.1",
-        expiresAt: Date.now() + 600000,
-      });
+    mocks.quoteMedia.mockReset().mockResolvedValue({
+      id: "q",
+      estimatedCostUsd: "0.1",
+      expiresAt: Date.now() + 600000,
+    });
   });
   const openHook = async () => {
     const hook = renderHook(() => useAssistant(true));
@@ -7363,4 +7385,48 @@ describe("video confirmation scope", () => {
       }),
     );
   });
+});
+
+it("preserves video parameters when the first quote creates the conversation", async () => {
+  const video: AssistantModel = {
+    ...model("video/test", "Video"),
+    kind: "video",
+    video: {
+      modes: ["t2v"],
+      resolutions: ["480p", "720p"],
+      defaultResolution: "720p",
+      minDuration: 4,
+      maxDuration: 6,
+      supportsAudio: false,
+      aspectRatios: [],
+      fromPricePerSecond: "0.02",
+    },
+  };
+  current.session.modelId = video.id;
+  mocks.bootstrap.mockResolvedValue({
+    ...capabilities,
+    defaultModelId: video.id,
+    models: [video],
+  });
+  mocks.quoteMedia
+    .mockReset()
+    .mockResolvedValue({
+      id: "q",
+      estimatedCostUsd: "0.08",
+      expiresAt: Date.now() + 600000,
+    });
+  render(page());
+  await userEvent.click(
+    await screen.findByRole("combobox", { name: "Resolution" }),
+  );
+  await userEvent.click(screen.getByRole("option", { name: "480p" }));
+  await userEvent.type(composer(), "Lake");
+  await userEvent.click(screen.getByRole("button", { name: "Send" }));
+  const dialog = await screen.findByRole("dialog", { name: "Generate video?" });
+  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(
+    screen.getByRole("combobox", { name: "Resolution" }),
+  ).toHaveTextContent("480p");
+  expect(composer()).toHaveValue("Lake");
+  expect(mocks.send).not.toHaveBeenCalled();
 });

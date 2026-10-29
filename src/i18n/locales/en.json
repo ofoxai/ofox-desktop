@@ -4924,6 +4924,7 @@
       "mediaCancelNotSupported": "This provider cannot cancel the video. It is still being generated and may be charged.",
       "mediaCancelFailed": "The video could not be cancelled. It is still being tracked.",
       "mediaQueryExpired": "Automatic video queries paused after 24 hours. Continue querying to check the result.",
+      "mediaDeletePending": "This conversation still has an unresolved video job. Restore it and wait for completion or cancel the job before deleting permanently.",
       "mediaVideoLimit": "Wait for the current video task to finish. Each conversation allows one active task and each account allows three.",
       "mediaInvalidParams": "This model does not support the selected media parameters.",
       "mediaOutcomeUnknown": "The media request may have been charged, but its result could not be confirmed. Check your activity before submitting again.",
@@ -5247,7 +5248,10 @@
       "unknownPrice": "The cost cannot be estimated. This request may incur charges.",
       "submitAnyway": "Submit anyway",
       "confirm": "Generate video",
-      "seconds": "{{count}} s"
+      "seconds": "{{count}} s",
+      "fromPrice": "From ${{price}}/s",
+      "durationRange": "{{min}}–{{max}} s",
+      "audioCapability": "Audio"
     },
     "media": {
       "perImage": "${{price}}/image",
@@ -5266,7 +5270,7 @@
       "cost": "Cost ${{cost}}",
       "generating": "Generating image…",
       "unknown": "The result is unknown and may have been charged. Check your activity before starting another generation.",
-      "inputHint": "Choose one PNG or JPEG up to 15 MiB for editing.",
+      "inputHint": "Choose one PNG, JPEG or WebP up to 15 MiB for editing.",
       "noInput": "This model generates images from text only.",
       "activity": "View activity"
     }

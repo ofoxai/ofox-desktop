@@ -953,6 +953,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_cancel_not_supported: "mediaCancelNotSupported",
   assistant_media_cancel_failed: "mediaCancelFailed",
   assistant_media_query_expired: "mediaQueryExpired",
+  assistant_media_delete_pending: "mediaDeletePending",
   assistant_media_video_limit: "mediaVideoLimit",
   assistant_media_invalid_params: "mediaInvalidParams",
   assistant_media_outcome_unknown: "mediaOutcomeUnknown",

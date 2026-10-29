@@ -427,3 +427,35 @@ it("offers the video segment and remembers its choice with keyboard navigation",
   await userEvent.keyboard("{Enter}");
   expect(onChange).toHaveBeenCalledWith("video/b");
 });
+
+it("shows video prices per second and capabilities rather than zero token prices", async () => {
+  render(
+    picker({
+      models: [
+        model("video/test", "Video model", {
+          kind: "video",
+          inputPricePerMillion: "0",
+          outputPricePerMillion: "0",
+          video: {
+            modes: ["t2v", "i2v"],
+            resolutions: ["480p", "1080p"],
+            defaultResolution: "480p",
+            minDuration: 4,
+            maxDuration: 15,
+            supportsAudio: true,
+            aspectRatios: [],
+            fromPricePerSecond: "0.04",
+          },
+        }),
+      ],
+      value: "video/test",
+    }),
+  );
+  const list = await open();
+  const option = within(list).getByRole("option");
+  expect(option).toHaveTextContent("From $0.04/s");
+  expect(option).toHaveTextContent("4–15 s");
+  expect(option).toHaveTextContent("1080p");
+  expect(option).not.toHaveTextContent("$0 / $0");
+  expect(option).toHaveAttribute("title", expect.stringContaining("Audio"));
+});

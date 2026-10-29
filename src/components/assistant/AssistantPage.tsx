@@ -343,7 +343,9 @@ function AssistantWorkspace() {
   useEffect(() => {
     if (composerModel?.kind === "video")
       setVideoParams(defaultVideoParams(composerModel));
-  }, [session?.id, composerModel?.id]);
+    // Saving the first quote assigns an id without selecting a different
+    // conversation. Keep the parameters the user is about to confirm.
+  }, [assistant.selectionKey, composerModel?.id]);
   const videoQuoteOpen = Boolean(
     videoConfirmation &&
       videoConfirmation.owner === bootstrap?.owner &&
@@ -369,7 +371,7 @@ function AssistantWorkspace() {
       files.length > 1 ||
       files.some(
         (file) =>
-          !["image/png", "image/jpeg"].includes(file.mimeType) ||
+          !["image/png", "image/jpeg", "image/webp"].includes(file.mimeType) ||
           file.sizeBytes > 15 * 1024 * 1024,
       ));
   const imagesNeedVision =

@@ -228,7 +228,7 @@ impl AssistantHost {
                         .iter()
                         .filter_map(|message| message.media.as_ref())
                         .filter(|media| {
-                            media.kind == "video" && video::active_status(&media.status)
+                            media.kind == "video" && video::occupies_generation_slot(&media.status)
                         })
                         .count();
                     if session.id == sid && jobs > 0 {

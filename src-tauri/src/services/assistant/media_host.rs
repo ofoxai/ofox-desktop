@@ -376,17 +376,10 @@ impl AssistantHost {
 }
 
 pub(super) fn read_frame(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
-    read_image_input(root, file, true)
+    read_input(root, file)
 }
 
 pub(super) fn read_input(root: PathBuf, file: &Attachment) -> Result<InputImage, String> {
-    read_image_input(root, file, false)
-}
-fn read_image_input(
-    root: PathBuf,
-    file: &Attachment,
-    video_frame: bool,
-) -> Result<InputImage, String> {
     const LIMIT: u64 = 15 * 1024 * 1024;
     if !std::fs::symlink_metadata(&root)
         .map_err(|_| attachments::UNREADABLE)?
@@ -421,7 +414,7 @@ fn read_image_input(
         return Err(attachments::TOO_LARGE.into());
     }
     let ext = media::image_type(&bytes)
-        .filter(|ext| matches!(*ext, "png" | "jpg") || (video_frame && *ext == "webp"))
+        .filter(|ext| matches!(*ext, "png" | "jpg" | "webp"))
         .ok_or(media::INVALID)?;
     Ok(InputImage {
         name: format!("input.{ext}"),
@@ -468,7 +461,7 @@ mod tests {
         assert!(read_input(linked, &file).is_err());
     }
     #[test]
-    fn video_frames_accept_webp_without_loosening_image_edit_limits() {
+    fn video_frames_and_image_edits_accept_webp() {
         let root = tempfile::tempdir().unwrap();
         let aid = id();
         let bytes = b"RIFF\x10\0\0\0WEBPfixture";
@@ -477,6 +470,9 @@ mod tests {
         let frame = read_frame(root.path().into(), &file).unwrap();
         assert_eq!(frame.mime, "image/webp");
         assert_eq!(frame.bytes, bytes);
-        assert!(read_input(root.path().into(), &file).is_err());
+        assert_eq!(
+            read_input(root.path().into(), &file).unwrap().mime,
+            "image/webp"
+        );
     }
 }

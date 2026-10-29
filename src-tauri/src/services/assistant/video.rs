@@ -109,6 +109,12 @@ pub(super) fn active_status(status: &str) -> bool {
     )
 }
 
+/// Only unresolved remote generation reserves a slot. Local download recovery
+/// remains mutable without blocking another generation or permanent deletion.
+pub(super) fn occupies_generation_slot(status: &str) -> bool {
+    active_status(status) && !matches!(status, "downloading" | "download_failed")
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VideoActionRequest {
@@ -269,7 +275,7 @@ mod tests {
         }
     }
     #[test]
-    fn video_limits_count_paused_and_uncertain_jobs_until_resolved() {
+    fn video_recovery_accepts_download_failures_without_reserving_generation_slots() {
         for status in [
             "submitting",
             "queued",
@@ -281,6 +287,10 @@ mod tests {
             "download_failed",
         ] {
             assert!(active_status(status), "{status}");
+            assert_eq!(
+                occupies_generation_slot(status),
+                !matches!(status, "downloading" | "download_failed")
+            );
         }
         for status in ["completed", "failed", "cancelled", "expired"] {
             assert!(!active_status(status));
