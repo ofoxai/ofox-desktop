@@ -29,6 +29,7 @@ import {
   Square,
   Trash2,
   RotateCcw,
+  Upload,
   X,
 } from "lucide-react";
 import {
@@ -47,10 +48,12 @@ import {
 import { InlineRename } from "./InlineRename";
 import { ThinkingMenu } from "./ThinkingMenu";
 import { useConversationActions } from "./useConversationActions";
+import { useFileDrop } from "./useFileDrop";
 import { usePendingFocus } from "./usePendingFocus";
 import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { searchHighlight } from "@/utils/assistantSearch";
 import { isSendable } from "@/utils/assistantAttachments";
+import { MAX_PASTED_FILES, pastedFiles } from "@/utils/assistantPaste";
 import { usageSummary } from "@/utils/assistantUsage";
 import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
@@ -329,6 +332,13 @@ function AssistantWorkspace() {
       .filter(Boolean)
       .join(" ") || undefined;
   const focusComposer = useCallback(() => composer.current?.focus(), []);
+  // A drop leaves focus where it was; only a focus the import's disabled
+  // buttons dropped (on the page itself) goes to the message.
+  const focusComposerIfLost = () => {
+    const active = document.activeElement;
+    if (!active || active === document.body || active === workspace.current)
+      focusComposer();
+  };
   const returnFocusTo = (button: HTMLButtonElement | null) => {
     refocus.current = button;
     settleFocus();
@@ -587,6 +597,14 @@ function AssistantWorkspace() {
     emptyTrashButton,
   });
   const emptyTrash = conversations.emptyTrash;
+  // Files dropped on the window join the draft only where Attach would work,
+  // and only while this page is the one on screen.
+  const { dragging } = useFileDrop({
+    ready: interactionActive && writable,
+    onDrop: (token) =>
+      void assistant.dropAttachments(token).then(focusComposerIfLost),
+    onError: assistant.showError,
+  });
   const moveToTrash = () => {
     if (!session) return;
     conversations.moveToTrash(session.id, session.title, () =>
@@ -856,348 +874,386 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
+        {/* The drop overlay covers what the files would be added to: the
+            transcript and the composer. */}
         <div className="relative flex min-h-0 flex-1 flex-col">
-          <div
-            ref={scroll}
-            onScroll={trackScroll}
-            onWheel={endJump}
-            onTouchMove={endJump}
-            onPointerDown={endJump}
-            onKeyDown={endJump}
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
-            aria-busy={assistant.loading}
-          >
-            {assistant.loading ? (
-              <div
-                role="status"
-                className="flex justify-center gap-2 py-12 text-ctl text-ink-muted"
-              >
-                <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
-                {t("assistant.loading")}
-              </div>
-            ) : (
-              <>
-                {emptyTranscript && (
-                  <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
-                    <h2 className="text-title font-semibold">
-                      {t(trashed ? "assistant.trash" : "assistant.welcome")}
-                    </h2>
-                    {/* A trashed conversation says so below, where its composer
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              ref={scroll}
+              onScroll={trackScroll}
+              onWheel={endJump}
+              onTouchMove={endJump}
+              onPointerDown={endJump}
+              onKeyDown={endJump}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
+              aria-busy={assistant.loading}
+            >
+              {assistant.loading ? (
+                <div
+                  role="status"
+                  className="flex justify-center gap-2 py-12 text-ctl text-ink-muted"
+                >
+                  <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
+                  {t("assistant.loading")}
+                </div>
+              ) : (
+                <>
+                  {emptyTranscript && (
+                    <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
+                      <h2 className="text-title font-semibold">
+                        {t(trashed ? "assistant.trash" : "assistant.welcome")}
+                      </h2>
+                      {/* A trashed conversation says so below, where its composer
                         would be. */}
-                    {trashed && !session && (
-                      <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
-                        {t("assistant.trashSelect")}
-                      </p>
+                      {trashed && !session && (
+                        <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
+                          {t("assistant.trashSelect")}
+                        </p>
+                      )}
+                      {writable && !assistant.draft.trim() && (
+                        <div className="mt-5 flex flex-wrap justify-center gap-2">
+                          {STARTERS.map((id) => (
+                            <Button
+                              key={id}
+                              variant="pill"
+                              className="h-8 px-3.5 text-ctl"
+                              onClick={() => {
+                                focusStarter.current = true;
+                                assistant.setDraft(
+                                  t(`assistant.starters.${id}.prompt`),
+                                );
+                              }}
+                            >
+                              {t(`assistant.starters.${id}.label`)}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                      {!trashed && (
+                        <p className="mt-4 text-balance text-note text-ink-muted">
+                          {t("assistant.emptyBoundary")}
+                        </p>
+                      )}
+                      {!trashed && keyMissing && (
+                        <p className="mt-2 text-note text-ink-muted">
+                          {t("assistant.keyMissingHint")}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                  <div className="mx-auto max-w-[760px] py-2">
+                    {messages.map((message) => {
+                      const turn = versions.get(message.id);
+                      return (
+                        <AssistantMessageView
+                          // The message that carries a switcher keeps its place
+                          // when another version is shown, and the keyboard
+                          // focus on the switcher with it.
+                          key={turn ? `versions:${turn.group}` : message.id}
+                          message={message}
+                          models={bootstrap?.models}
+                          currentModelId={session?.modelId}
+                          versions={turn}
+                          searchUnavailable={assistant.searchSkipped.has(
+                            message.id,
+                          )}
+                          latest={message.id === latestReplyId}
+                          highlight={transcriptHighlight}
+                          disabled={!writable}
+                          onEdit={editMessage}
+                          onEditingChange={trackEdit}
+                          onRegenerate={regenerateMessage}
+                          onRetry={retryable(message) ? retryReply : undefined}
+                          onSwitchVersion={switchVersion}
+                        />
+                      );
+                    })}
+                    {assistant.stream?.role === "assistant" && (
+                      <AssistantMessageView
+                        message={assistant.stream}
+                        activity={assistant.activity}
+                        thinking={assistant.thinking}
+                        searchUnavailable={assistant.searchSkipped.has(
+                          assistant.stream.id,
+                        )}
+                        latest={assistant.stream.id === latestReplyId}
+                        disabled
+                        onEdit={noEdit}
+                        onRegenerate={noRegenerate}
+                      />
                     )}
-                    {writable && !assistant.draft.trim() && (
-                      <div className="mt-5 flex flex-wrap justify-center gap-2">
-                        {STARTERS.map((id) => (
-                          <Button
-                            key={id}
-                            variant="pill"
-                            className="h-8 px-3.5 text-ctl"
-                            onClick={() => {
-                              focusStarter.current = true;
-                              assistant.setDraft(
-                                t(`assistant.starters.${id}.prompt`),
-                              );
-                            }}
-                          >
-                            {t(`assistant.starters.${id}.label`)}
-                          </Button>
-                        ))}
-                      </div>
-                    )}
-                    {!trashed && (
-                      <p className="mt-4 text-balance text-note text-ink-muted">
-                        {t("assistant.emptyBoundary")}
-                      </p>
-                    )}
-                    {!trashed && keyMissing && (
-                      <p className="mt-2 text-note text-ink-muted">
-                        {t("assistant.keyMissingHint")}
+                    {assistant.compacting && (
+                      <p
+                        role="status"
+                        className="py-2 text-note text-ink-muted"
+                      >
+                        {t("assistant.compacting")}
                       </p>
                     )}
                   </div>
-                )}
-                <div className="mx-auto max-w-[760px] py-2">
-                  {messages.map((message) => {
-                    const turn = versions.get(message.id);
-                    return (
-                      <AssistantMessageView
-                        // The message that carries a switcher keeps its place
-                        // when another version is shown, and the keyboard
-                        // focus on the switcher with it.
-                        key={turn ? `versions:${turn.group}` : message.id}
-                        message={message}
-                        models={bootstrap?.models}
-                        currentModelId={session?.modelId}
-                        versions={turn}
-                        searchUnavailable={assistant.searchSkipped.has(
-                          message.id,
-                        )}
-                        latest={message.id === latestReplyId}
-                        highlight={transcriptHighlight}
-                        disabled={!writable}
-                        onEdit={editMessage}
-                        onEditingChange={trackEdit}
-                        onRegenerate={regenerateMessage}
-                        onRetry={retryable(message) ? retryReply : undefined}
-                        onSwitchVersion={switchVersion}
-                      />
-                    );
-                  })}
-                  {assistant.stream?.role === "assistant" && (
-                    <AssistantMessageView
-                      message={assistant.stream}
-                      activity={assistant.activity}
-                      thinking={assistant.thinking}
-                      searchUnavailable={assistant.searchSkipped.has(
-                        assistant.stream.id,
-                      )}
-                      latest={assistant.stream.id === latestReplyId}
-                      disabled
-                      onEdit={noEdit}
-                      onRegenerate={noRegenerate}
-                    />
-                  )}
-                  {assistant.compacting && (
-                    <p role="status" className="py-2 text-note text-ink-muted">
-                      {t("assistant.compacting")}
-                    </p>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
-          {awayFromEnd && !assistant.loading && (
-            <Button
-              variant="secondary"
-              size="icon"
-              // A mid-grey ring: the card's own border is too faint to see
-              // against the transcript in the dark theme.
-              className="absolute bottom-3 left-1/2 h-8 w-8 -translate-x-1/2 rounded-full border-ink-muted text-ink shadow-md"
-              aria-label={t(
-                unseenBelow
-                  ? "assistant.scrollToEndNew"
-                  : "assistant.scrollToEnd",
+                </>
               )}
-              title={t("assistant.scrollToEnd")}
-              onClick={(event) =>
-                jumpToEnd(document.activeElement === event.currentTarget)
-              }
-            >
-              <ArrowDown aria-hidden className="h-4 w-4" />
-              {unseenBelow && (
-                <span
-                  aria-hidden
-                  data-testid="scroll-to-end-dot"
-                  className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full border-2 border-card bg-brand"
-                />
-              )}
-            </Button>
-          )}
-        </div>
-        <footer className="flex max-h-[50%] min-h-0 shrink-0 flex-col bg-card px-4 pb-3 pt-2">
-          {session && sessionTrashed ? (
-            // Read-only until restored: no composer, and the way back.
-            <div
-              role="status"
-              className="mx-auto flex w-full max-w-[760px] flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4"
-            >
-              <p className="text-center text-ctl text-ink-2">
-                {t("assistant.trashHint")}
-              </p>
+            </div>
+            {awayFromEnd && !assistant.loading && (
               <Button
                 variant="secondary"
-                disabled={busy || Boolean(run)}
-                onClick={(event) => restore(event.currentTarget)}
+                size="icon"
+                // A mid-grey ring: the card's own border is too faint to see
+                // against the transcript in the dark theme.
+                className="absolute bottom-3 left-1/2 h-8 w-8 -translate-x-1/2 rounded-full border-ink-muted text-ink shadow-md"
+                aria-label={t(
+                  unseenBelow
+                    ? "assistant.scrollToEndNew"
+                    : "assistant.scrollToEnd",
+                )}
+                title={t("assistant.scrollToEnd")}
+                onClick={(event) =>
+                  jumpToEnd(document.activeElement === event.currentTarget)
+                }
               >
-                <RotateCcw aria-hidden className="h-3.5 w-3.5" />
-                {t("assistant.restore")}
+                <ArrowDown aria-hidden className="h-4 w-4" />
+                {unseenBelow && (
+                  <span
+                    aria-hidden
+                    data-testid="scroll-to-end-dot"
+                    className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full border-2 border-card bg-brand"
+                  />
+                )}
               </Button>
-            </div>
-          ) : (
-            <div className="mx-auto flex min-h-0 w-full max-w-[760px] flex-col">
-              <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
-                {/* Kept mounted: its live region announces the warnings, and
+            )}
+          </div>
+          <footer className="flex max-h-[50%] min-h-0 shrink-0 flex-col bg-card px-4 pb-3 pt-2">
+            {session && sessionTrashed ? (
+              // Read-only until restored: no composer, and the way back.
+              <div
+                role="status"
+                className="mx-auto flex w-full max-w-[760px] flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4"
+              >
+                <p className="text-center text-ctl text-ink-2">
+                  {t("assistant.trashHint")}
+                </p>
+                <Button
+                  variant="secondary"
+                  disabled={busy || Boolean(run)}
+                  onClick={(event) => restore(event.currentTarget)}
+                >
+                  <RotateCcw aria-hidden className="h-3.5 w-3.5" />
+                  {t("assistant.restore")}
+                </Button>
+              </div>
+            ) : (
+              <div className="mx-auto flex min-h-0 w-full max-w-[760px] flex-col">
+                <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
+                  {/* Kept mounted: its live region announces the warnings, and
                   the list hands focus back once its last file is removed.
                   Only the list scrolls: the warnings that explain why Send
                   is disabled stay in view below it. */}
-                <div
-                  className={cn(
-                    "min-h-0",
-                    files.length > 0 && "max-h-36 overflow-y-auto px-3 pt-3",
-                  )}
-                >
-                  <AttachmentList
-                    files={files}
-                    onRemove={assistant.removeAttachment}
-                    onAllRemoved={focusComposer}
-                    removeDisabled={busy || Boolean(run) || trashed}
-                  />
-                </div>
-                <div aria-live="polite" className="shrink-0 px-3">
-                  {blockedFiles && (
-                    <p
-                      id={blockedHint}
-                      className="mt-1.5 text-note text-danger"
-                    >
-                      {t("assistant.attachmentsBlocked")}
-                    </p>
-                  )}
-                  {imagesNeedVision && (
-                    <p id={visionHint} className="mt-1.5 text-note text-warn">
-                      {t("assistant.imagesNeedVision")}
-                    </p>
-                  )}
-                  {overLength && (
-                    <p
-                      id={lengthHintId}
-                      className="mt-1.5 text-note text-danger"
-                    >
-                      {t("assistant.lengthExceeded")}
-                    </p>
-                  )}
-                </div>
-                <Textarea
-                  ref={composer}
-                  rows={3}
-                  className="max-h-40 min-h-[76px] shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0"
-                  aria-label={t("assistant.message")}
-                  placeholder={t("assistant.composerPlaceholder")}
-                  value={assistant.draft}
-                  disabled={!available}
-                  readOnly={busy || trashed}
-                  onChange={(event) => assistant.setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    // WKWebView reports the Enter that confirms an IME candidate
-                    // with isComposing false but keyCode 229.
-                    if (
-                      event.key === "Enter" &&
-                      !event.shiftKey &&
-                      !event.nativeEvent.isComposing &&
-                      event.keyCode !== 229
-                    ) {
-                      event.preventDefault();
-                      if (writable && !overLength) send();
-                    }
-                  }}
-                />
-                <div className="flex shrink-0 items-center justify-between gap-2 pb-2 pl-2 pr-3">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <Button
-                      variant="icon"
-                      aria-label={t("assistant.attach")}
-                      title={t("assistant.attach")}
-                      disabled={!writable}
-                      onClick={() =>
-                        // The dialog leaves focus on a button disabled while
-                        // it was open: the message takes it back.
-                        void assistant.pickAttachments().then(focusComposer)
-                      }
-                    >
-                      <Paperclip aria-hidden className="h-3.5 w-3.5" />
-                    </Button>
-                    {showSearchNote ? (
-                      <Tooltip>
-                        {/* The wrapper takes the hover while the switch is off. */}
-                        <TooltipTrigger asChild>
-                          <span className="inline-flex shrink-0">
-                            {webSearchToggle}
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent side="top">{searchNote}</TooltipContent>
-                      </Tooltip>
-                    ) : (
-                      webSearchToggle
+                  <div
+                    className={cn(
+                      "min-h-0",
+                      files.length > 0 && "max-h-36 overflow-y-auto px-3 pt-3",
                     )}
-                    {showSearchNote && (
-                      <span id={searchNoteId} className="sr-only">
-                        {searchNote}
-                      </span>
-                    )}
-                    {/* A reply under way goes on as it began: the choice is
-                      for the next message. */}
-                    <ThinkingMenu
-                      model={composerModel}
-                      level={assistant.thinkingLevel}
-                      disabled={settingsLocked}
-                      onChange={assistant.setThinkingLevel}
+                  >
+                    <AttachmentList
+                      files={files}
+                      onRemove={assistant.removeAttachment}
+                      onAllRemoved={focusComposer}
+                      removeDisabled={busy || Boolean(run) || trashed}
                     />
                   </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    {showLength && (
-                      <span className="text-note tabular-nums text-ink-muted">
-                        {t("assistant.lengthHint", { percent: lengthPercent })}
-                      </span>
+                  <div aria-live="polite" className="shrink-0 px-3">
+                    {blockedFiles && (
+                      <p
+                        id={blockedHint}
+                        className="mt-1.5 text-note text-danger"
+                      >
+                        {t("assistant.attachmentsBlocked")}
+                      </p>
                     )}
-                    {run ? (
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            variant="secondary"
-                            size="icon"
-                            className="h-7 w-7 rounded-full"
-                            aria-label={t("assistant.stop")}
-                            aria-keyshortcuts="Escape"
-                            onClick={stop}
-                          >
-                            <Square
-                              aria-hidden
-                              className="h-3 w-3 fill-current"
-                            />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent
-                          side="top"
-                          onEscapeKeyDown={stopOnTooltipEscape}
-                        >
-                          {t("assistant.stopTooltip")}
-                        </TooltipContent>
-                      </Tooltip>
-                    ) : (
-                      <Tooltip>
-                        {/* The wrapper takes the hover while Send is disabled:
-                          a disabled button gets no pointer events. */}
-                        <TooltipTrigger asChild>
-                          <span className="inline-flex shrink-0">
-                            <Button
-                              size="icon"
-                              className="h-7 w-7 rounded-full"
-                              aria-label={t("assistant.send")}
-                              aria-describedby={sendHints}
-                              disabled={
-                                !writable ||
-                                blockedFiles ||
-                                overLength ||
-                                (!assistant.draft.trim() && !files.length)
-                              }
-                              onClick={send}
-                            >
-                              <ArrowUp aria-hidden className="h-3.5 w-3.5" />
-                            </Button>
-                          </span>
-                        </TooltipTrigger>
-                        <TooltipContent side="top">
-                          {t("assistant.sendTooltip")}
-                        </TooltipContent>
-                      </Tooltip>
+                    {imagesNeedVision && (
+                      <p id={visionHint} className="mt-1.5 text-note text-warn">
+                        {t("assistant.imagesNeedVision")}
+                      </p>
+                    )}
+                    {overLength && (
+                      <p
+                        id={lengthHintId}
+                        className="mt-1.5 text-note text-danger"
+                      >
+                        {t("assistant.lengthExceeded")}
+                      </p>
                     )}
                   </div>
+                  <Textarea
+                    ref={composer}
+                    rows={3}
+                    className="max-h-40 min-h-[76px] shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0"
+                    aria-label={t("assistant.message")}
+                    placeholder={t("assistant.composerPlaceholder")}
+                    value={assistant.draft}
+                    disabled={!available}
+                    readOnly={busy || trashed}
+                    onChange={(event) => assistant.setDraft(event.target.value)}
+                    onPaste={(event) => {
+                      const pasted = pastedFiles(event.clipboardData);
+                      if (!pasted) return;
+                      // Files and no text: the field has nothing to paste.
+                      event.preventDefault();
+                      if (!writable) return;
+                      if (pasted.skipped > 0)
+                        toast.warning(
+                          t("assistant.pasteSkipped", {
+                            count: pasted.skipped,
+                            max: MAX_PASTED_FILES,
+                          }),
+                        );
+                      void assistant.pasteAttachments(pasted.files);
+                    }}
+                    onKeyDown={(event) => {
+                      // WKWebView reports the Enter that confirms an IME candidate
+                      // with isComposing false but keyCode 229.
+                      if (
+                        event.key === "Enter" &&
+                        !event.shiftKey &&
+                        !event.nativeEvent.isComposing &&
+                        event.keyCode !== 229
+                      ) {
+                        event.preventDefault();
+                        if (writable && !overLength) send();
+                      }
+                    }}
+                  />
+                  <div className="flex shrink-0 items-center justify-between gap-2 pb-2 pl-2 pr-3">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <Button
+                        variant="icon"
+                        aria-label={t("assistant.attach")}
+                        title={t("assistant.attach")}
+                        disabled={!writable}
+                        onClick={() =>
+                          // The dialog leaves focus on a button disabled while
+                          // it was open: the message takes it back.
+                          void assistant.pickAttachments().then(focusComposer)
+                        }
+                      >
+                        <Paperclip aria-hidden className="h-3.5 w-3.5" />
+                      </Button>
+                      {showSearchNote ? (
+                        <Tooltip>
+                          {/* The wrapper takes the hover while the switch is off. */}
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex shrink-0">
+                              {webSearchToggle}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            {searchNote}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        webSearchToggle
+                      )}
+                      {showSearchNote && (
+                        <span id={searchNoteId} className="sr-only">
+                          {searchNote}
+                        </span>
+                      )}
+                      {/* A reply under way goes on as it began: the choice is
+                      for the next message. */}
+                      <ThinkingMenu
+                        model={composerModel}
+                        level={assistant.thinkingLevel}
+                        disabled={settingsLocked}
+                        onChange={assistant.setThinkingLevel}
+                      />
+                    </div>
+                    <div className="flex shrink-0 items-center gap-2">
+                      {showLength && (
+                        <span className="text-note tabular-nums text-ink-muted">
+                          {t("assistant.lengthHint", {
+                            percent: lengthPercent,
+                          })}
+                        </span>
+                      )}
+                      {run ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="secondary"
+                              size="icon"
+                              className="h-7 w-7 rounded-full"
+                              aria-label={t("assistant.stop")}
+                              aria-keyshortcuts="Escape"
+                              onClick={stop}
+                            >
+                              <Square
+                                aria-hidden
+                                className="h-3 w-3 fill-current"
+                              />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent
+                            side="top"
+                            onEscapeKeyDown={stopOnTooltipEscape}
+                          >
+                            {t("assistant.stopTooltip")}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        <Tooltip>
+                          {/* The wrapper takes the hover while Send is disabled:
+                          a disabled button gets no pointer events. */}
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex shrink-0">
+                              <Button
+                                size="icon"
+                                className="h-7 w-7 rounded-full"
+                                aria-label={t("assistant.send")}
+                                aria-describedby={sendHints}
+                                disabled={
+                                  !writable ||
+                                  blockedFiles ||
+                                  overLength ||
+                                  (!assistant.draft.trim() && !files.length)
+                                }
+                                onClick={send}
+                              >
+                                <ArrowUp aria-hidden className="h-3.5 w-3.5" />
+                              </Button>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            {t("assistant.sendTooltip")}
+                          </TooltipContent>
+                        </Tooltip>
+                      )}
+                    </div>
+                  </div>
                 </div>
+                {assistant.webSearchWaits && (
+                  <p
+                    role="status"
+                    className="mt-2 shrink-0 text-note text-ink-muted"
+                  >
+                    {t("assistant.webSearchNextMessage")}
+                  </p>
+                )}
               </div>
-              {assistant.webSearchWaits && (
-                <p
-                  role="status"
-                  className="mt-2 shrink-0 text-note text-ink-muted"
-                >
-                  {t("assistant.webSearchNextMessage")}
-                </p>
-              )}
+            )}
+          </footer>
+          {dragging && (
+            <div
+              aria-hidden
+              data-testid="assistant-drop-overlay"
+              className="pointer-events-none absolute inset-0 z-20 grid animate-fade place-items-center rounded-card border-2 border-dashed border-brand bg-card/85"
+            >
+              <p className="flex items-center gap-2 text-ui font-medium text-brand-ink">
+                <Upload aria-hidden className="h-4 w-4" />
+                {t("assistant.dropOverlay")}
+              </p>
             </div>
           )}
-        </footer>
+        </div>
       </section>
       <ConfirmDialog
         isOpen={deleteDialogOpen}

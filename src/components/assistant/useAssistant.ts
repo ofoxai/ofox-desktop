@@ -114,6 +114,27 @@ function expectedIdentity(identity: AssistantBootstrap | null) {
     : {};
 }
 
+/** The owner check for a write that must name the account it was made for. */
+function requireIdentity(identity: AssistantBootstrap | null) {
+  if (!identity?.owner || identity.authorityGeneration === undefined)
+    throw new Error(IDENTITY_CHANGED);
+  return {
+    expectedOwner: identity.owner,
+    expectedGeneration: identity.authorityGeneration,
+  };
+}
+
+/**
+ * What a file import brought into a conversation, and the failure that
+ * stopped it early (files imported before it are kept).
+ */
+interface ImportedFiles {
+  added: AssistantAttachment[];
+  failure?: unknown;
+}
+
+type ImportFiles = (sessionId: string) => Promise<ImportedFiles>;
+
 /** All asynchronous replies are fenced by the selected session and component lifetime. */
 export function useAssistant(enabled: boolean) {
   const [bootstrap, setBootstrap] = useState<AssistantBootstrap | null>(null);
@@ -196,6 +217,8 @@ export function useAssistant(enabled: boolean) {
   // Replacing the scope also invalidates saves queued before that operation.
   const draftScopes = useRef(new Map<string, DraftWriteScope>());
   const draftAuthority = useRef(0);
+  // A file import is under way (set at once; `busy` follows on the next render).
+  const importing = useRef(false);
   const savedDrafts = useRef(new Map<string, SavedDraft>());
   const bootstrapRef = useRef<AssistantBootstrap | null>(null);
   const pendingSends = useRef(new Map<string, PendingSend>());
@@ -1807,138 +1830,198 @@ export function useAssistant(enabled: boolean) {
   );
 
   /**
-   * Open the file dialog and add the files it imports to the draft, saved at
-   * once. With no conversation open one is created first, and trashed again
-   * when the pick imports nothing.
+   * Import files into the open conversation and add them to the draft, saved
+   * at once. With no conversation open one is created first, and trashed
+   * again when nothing is imported. `importFiles` does the import; one that
+   * stops early with a failure keeps the files it had imported, and the
+   * failure is told.
    */
-  const pickAttachments = useCallback(async () => {
-    if (
-      busy ||
-      loading ||
-      runRef.current ||
-      showTrash ||
-      detail?.session.deletedAt != null
-    )
-      return;
-    setBusy(true);
-    setError(null);
-    const generation = epoch.current;
-    const selection = selectionSequence.current;
-    const creates = !selectedRef.current;
-    let sessionId: string | undefined;
-    let scope: DraftWriteScope | undefined;
-    // Files are in the conversation: it is no longer empty.
-    let imported = false;
-    const current = () =>
-      mounted.current &&
-      generation === epoch.current &&
-      selectedRef.current === sessionId;
-    try {
-      const id = (await ensureSession()).id;
-      sessionId = id;
-      if (!current()) return;
-      if (draftScopes.current.get(id)?.held)
-        throw new Error("assistant_session_busy");
-      scope = { held: true };
-      draftScopes.current.set(id, scope);
-      // Drain earlier writes and commit removals before the native import can
-      // add its own saved references. Autosave/leave writes cannot pass it.
-      await persistDraft(
-        id,
-        draftRef.current,
-        attachmentsRef.current.map((file) => file.id),
-        scope,
-      );
-      if (!current()) return;
-      const added = await assistantApi.pickAttachments(id);
-      if (generation !== epoch.current) return;
-      if (!added.length) {
-        if (creates && current()) await discardCreated(id).catch(showError);
-        return;
-      }
-      imported = true;
-      const existing = attachmentDrafts.current.get(id) ?? [];
-      const files = [
-        ...existing,
-        ...added.filter(
-          (file) => !existing.some((item) => item.id === file.id),
-        ),
-      ];
-      attachmentDrafts.current.set(id, files);
-      if (current()) {
-        setAttachments(files);
-        setDetail((old) =>
-          old?.session.id === id
-            ? {
-                ...old,
-                attachments: [
-                  ...old.attachments,
-                  ...added.filter(
-                    (file) =>
-                      !old.attachments.some((item) => item.id === file.id),
-                  ),
-                ],
-              }
-            : old,
-        );
-      }
-      const text = drafts.current.get(id) ?? "";
-      const ids = files.map((file) => file.id);
-      // Import already committed these files. Forget the pre-import snapshot
-      // so a local removal or an unchanged empty text cannot skip this write.
-      savedDrafts.current.delete(id);
-      await persistDraft(id, text, ids, scope);
-      if (current())
-        setDetail((old) =>
-          old?.session.id === id
-            ? {
-                ...old,
-                session: {
-                  ...old.session,
-                  draft: text,
-                  draftAttachmentIds: ids,
-                },
-              }
-            : old,
-        );
-    } catch (reason) {
+  const importAttachments = useCallback(
+    async (importFiles: ImportFiles) => {
       if (
-        generation !== epoch.current ||
-        (sessionId
-          ? selectedRef.current !== sessionId
-          : selection !== selectionSequence.current)
+        importing.current ||
+        busy ||
+        loading ||
+        runRef.current ||
+        showTrash ||
+        detail?.session.deletedAt != null
       )
         return;
-      // A failure after the import (saving the draft) keeps the conversation
-      // that holds the files; only one that is still empty goes to the trash.
-      const created =
-        creates && !imported && sessionId && current() ? sessionId : null;
-      const discarding = created ? discardCreated(created) : null;
-      showError(reason);
-      await discarding?.catch(showError);
-    } finally {
-      if (sessionId && scope) await releaseDraft(sessionId, scope, generation);
-      if (
+      importing.current = true;
+      setBusy(true);
+      setError(null);
+      const generation = epoch.current;
+      const selection = selectionSequence.current;
+      const creates = !selectedRef.current;
+      let sessionId: string | undefined;
+      let scope: DraftWriteScope | undefined;
+      // Files are in the conversation: it is no longer empty.
+      let imported = false;
+      const current = () =>
         mounted.current &&
         generation === epoch.current &&
-        (sessionId
-          ? selectedRef.current === sessionId
-          : selection === selectionSequence.current)
-      )
-        setBusy(false);
-    }
-  }, [
-    busy,
-    loading,
-    showTrash,
-    detail?.session.deletedAt,
-    ensureSession,
-    discardCreated,
-    persistDraft,
-    releaseDraft,
-    setAttachments,
-    showError,
-  ]);
+        selectedRef.current === sessionId;
+      try {
+        const id = (await ensureSession()).id;
+        sessionId = id;
+        if (!current()) return;
+        if (draftScopes.current.get(id)?.held)
+          throw new Error("assistant_session_busy");
+        scope = { held: true };
+        draftScopes.current.set(id, scope);
+        // Drain earlier writes and commit removals before the native import can
+        // add its own saved references. Autosave/leave writes cannot pass it.
+        await persistDraft(
+          id,
+          draftRef.current,
+          attachmentsRef.current.map((file) => file.id),
+          scope,
+        );
+        if (!current()) return;
+        const { added, failure } = await importFiles(id);
+        if (generation !== epoch.current) return;
+        if (!added.length) {
+          // Nothing came in: the failure is the whole outcome.
+          if (failure !== undefined) throw failure;
+          if (creates && current()) await discardCreated(id).catch(showError);
+          return;
+        }
+        imported = true;
+        const existing = attachmentDrafts.current.get(id) ?? [];
+        const files = [
+          ...existing,
+          ...added.filter(
+            (file) => !existing.some((item) => item.id === file.id),
+          ),
+        ];
+        attachmentDrafts.current.set(id, files);
+        if (current()) {
+          setAttachments(files);
+          setDetail((old) =>
+            old?.session.id === id
+              ? {
+                  ...old,
+                  attachments: [
+                    ...old.attachments,
+                    ...added.filter(
+                      (file) =>
+                        !old.attachments.some((item) => item.id === file.id),
+                    ),
+                  ],
+                }
+              : old,
+          );
+        }
+        const text = drafts.current.get(id) ?? "";
+        const ids = files.map((file) => file.id);
+        // Import already committed these files. Forget the pre-import snapshot
+        // so a local removal or an unchanged empty text cannot skip this write.
+        savedDrafts.current.delete(id);
+        await persistDraft(id, text, ids, scope);
+        if (current())
+          setDetail((old) =>
+            old?.session.id === id
+              ? {
+                  ...old,
+                  session: {
+                    ...old.session,
+                    draft: text,
+                    draftAttachmentIds: ids,
+                  },
+                }
+              : old,
+          );
+        if (failure !== undefined && current()) showError(failure);
+      } catch (reason) {
+        if (
+          generation !== epoch.current ||
+          (sessionId
+            ? selectedRef.current !== sessionId
+            : selection !== selectionSequence.current)
+        )
+          return;
+        // A failure after the import (saving the draft) keeps the conversation
+        // that holds the files; only one that is still empty goes to the trash.
+        const created =
+          creates && !imported && sessionId && current() ? sessionId : null;
+        const discarding = created ? discardCreated(created) : null;
+        showError(reason);
+        await discarding?.catch(showError);
+      } finally {
+        if (sessionId && scope)
+          await releaseDraft(sessionId, scope, generation);
+        if (
+          mounted.current &&
+          generation === epoch.current &&
+          (sessionId
+            ? selectedRef.current === sessionId
+            : selection === selectionSequence.current)
+        )
+          setBusy(false);
+        importing.current = false;
+      }
+    },
+    [
+      busy,
+      loading,
+      showTrash,
+      detail?.session.deletedAt,
+      ensureSession,
+      discardCreated,
+      persistDraft,
+      releaseDraft,
+      setAttachments,
+      showError,
+    ],
+  );
+
+  /** Open the file dialog and add the files it imports to the draft. */
+  const pickAttachments = useCallback(
+    () =>
+      importAttachments(async (sessionId) => ({
+        added: await assistantApi.pickAttachments(sessionId),
+      })),
+    [importAttachments],
+  );
+
+  /**
+   * Add the files dropped on the window to the draft. `token` is the one the
+   * `assistant:drop` event carried: the backend holds the paths.
+   */
+  const dropAttachments = useCallback(
+    (token: string) =>
+      importAttachments(async (sessionId) => ({
+        added: await assistantApi.importDrop({
+          sessionId,
+          token,
+          ...requireIdentity(bootstrapRef.current),
+        }),
+      })),
+    [importAttachments],
+  );
+
+  /**
+   * Add pasted files to the draft, one import each, in order. The first one
+   * that fails ends it: the files before it stay, the rest are not tried.
+   */
+  const pasteAttachments = useCallback(
+    (files: File[]) =>
+      importAttachments(async (sessionId) => {
+        const added: AssistantAttachment[] = [];
+        try {
+          const target = {
+            sessionId,
+            ...requireIdentity(bootstrapRef.current),
+          };
+          for (const file of files)
+            added.push(...(await assistantApi.importPasted(file, target)));
+        } catch (failure) {
+          return { added, failure };
+        }
+        return { added };
+      }),
+    [importAttachments],
+  );
 
   /** Saving the new draft removes unused copies; files in message history stay. */
   const removeAttachment = useCallback(
@@ -2084,6 +2167,8 @@ export function useAssistant(enabled: boolean) {
     setDraft,
     attachments,
     pickAttachments,
+    dropAttachments,
+    pasteAttachments,
     removeAttachment,
     stream,
     activity,

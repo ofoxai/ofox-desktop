@@ -24,6 +24,8 @@ const mocks = vi.hoisted(() => ({
   stop: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
+  onDrag: vi.fn(),
+  onDrop: vi.fn(),
   listener: undefined as ((event: AssistantEvent) => void) | undefined,
 }));
 vi.mock("@/lib/api/assistant", async (importOriginal) => ({
@@ -162,6 +164,8 @@ beforeEach(async () => {
     return () => undefined;
   });
   mocks.onAuthChange.mockImplementation(async () => () => undefined);
+  mocks.onDrag.mockResolvedValue(() => undefined);
+  mocks.onDrop.mockResolvedValue(() => undefined);
 });
 afterEach(() => {
   window.removeEventListener("keydown", recordKey);

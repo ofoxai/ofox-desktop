@@ -43,6 +43,8 @@ const mocks = vi.hoisted(() => ({
   stop: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
+  onDrag: vi.fn(),
+  onDrop: vi.fn(),
 }));
 vi.mock("@/lib/api/assistant", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/assistant")>()),
@@ -286,6 +288,8 @@ beforeEach(async () => {
   mocks.pickAttachments.mockResolvedValue([]);
   mocks.subscribe.mockResolvedValue(() => undefined);
   mocks.onAuthChange.mockResolvedValue(() => undefined);
+  mocks.onDrag.mockResolvedValue(() => undefined);
+  mocks.onDrop.mockResolvedValue(() => undefined);
 });
 
 afterEach(() => {
