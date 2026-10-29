@@ -1097,17 +1097,24 @@ function AssistantWorkspace() {
                     onPaste={(event) => {
                       const pasted = pastedFiles(event.clipboardData);
                       if (!pasted) return;
-                      // Files and no text: the field has nothing to paste.
+                      // Files and no words of their own: the field has
+                      // nothing to paste.
                       event.preventDefault();
                       if (!writable) return;
-                      if (pasted.skipped > 0)
-                        toast.warning(
-                          t("assistant.pasteSkipped", {
-                            count: pasted.skipped,
-                            max: MAX_PASTED_FILES,
-                          }),
-                        );
-                      void assistant.pasteAttachments(pasted.files);
+                      // The skipped files are told once the import is under
+                      // way, not for a paste that was refused.
+                      void assistant.pasteAttachments(
+                        pasted.files,
+                        pasted.skipped > 0
+                          ? () =>
+                              toast.warning(
+                                t("assistant.pasteSkipped", {
+                                  count: pasted.skipped,
+                                  max: MAX_PASTED_FILES,
+                                }),
+                              )
+                          : undefined,
+                      );
                     }}
                     onKeyDown={(event) => {
                       // WKWebView reports the Enter that confirms an IME candidate

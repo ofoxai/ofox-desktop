@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import {
   act,
   fireEvent,
@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantPage } from "@/components/assistant/AssistantPage";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { ShellProvider } from "@/components/shell/ShellContext";
 import { InteractionScope } from "@/components/ui/interaction-scope";
 import { MAX_PASTED_FILES, pastedFiles } from "@/utils/assistantPaste";
@@ -135,15 +136,28 @@ const listOf = (sessions: AssistantSession[]): AssistantSessionList => ({
   matches: {},
 });
 
-function page(active = true) {
+function page(active = true, beside: ReactNode = null) {
   return (
-    <ShellProvider openSettings={() => undefined}>
-      <InteractionScope active={active}>
-        <AssistantPage />
-      </InteractionScope>
-    </ShellProvider>
+    <>
+      <ShellProvider openSettings={() => undefined}>
+        <InteractionScope active={active}>
+          <AssistantPage />
+        </InteractionScope>
+      </ShellProvider>
+      {beside}
+    </>
   );
 }
+/** A modal dialog of the app, as another part of the app would open one. */
+const dialog = (open: boolean) => (
+  <ConfirmDialog
+    isOpen={open}
+    title="Sure?"
+    message="Really?"
+    onConfirm={() => undefined}
+    onCancel={() => undefined}
+  />
+);
 const composer = () =>
   screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
 const composerFiles = () =>
@@ -360,6 +374,43 @@ describe("the drop overlay", () => {
   });
 });
 
+describe("under a modal dialog", () => {
+  it("shows no overlay and takes no drop while a dialog is open over the page", async () => {
+    const view = await openConversation();
+    view.rerender(page(true, dialog(true)));
+    await screen.findByRole("dialog");
+    drag("enter");
+    expect(overlay()).toBeNull();
+    drop();
+    await act(async () => undefined);
+    expect(api.importDrop).not.toHaveBeenCalled();
+    // Closed again, the page takes files as before.
+    view.rerender(page(true, dialog(false)));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    drag("enter");
+    expect(overlay()).not.toBeNull();
+  });
+
+  it("treats any modal dialog on the document as covering the page", async () => {
+    await openConversation();
+    const modal = document.createElement("div");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    document.body.append(modal);
+    try {
+      drag("enter");
+      expect(overlay()).toBeNull();
+      drop();
+      await act(async () => undefined);
+      expect(api.importDrop).not.toHaveBeenCalled();
+    } finally {
+      modal.remove();
+    }
+    drag("enter");
+    expect(overlay()).not.toBeNull();
+  });
+});
+
 describe("listening to the backend", () => {
   it("listens once under StrictMode and lets go of every listener on unmount", async () => {
     const view = render(<StrictMode>{page()}</StrictMode>);
@@ -570,6 +621,52 @@ describe("a drop", () => {
   });
 });
 
+describe("without a known account", () => {
+  // A bootstrap without an owner can't name the account a write is for.
+  const unknownAccount = () =>
+    api.bootstrap.mockResolvedValue({ ...capabilities, owner: "" });
+  const identityChanged = "The account or region changed. Please try again.";
+
+  it("refuses a drop, says so, and reads the authority again", async () => {
+    unknownAccount();
+    await openConversation();
+    const reads = api.bootstrap.mock.calls.length;
+    drop();
+    expect(await screen.findByRole("alert")).toHaveTextContent(identityChanged);
+    expect(api.importDrop).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(api.bootstrap.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(composerFiles()).toBeNull();
+  });
+
+  it("refuses a paste, says so, and reads the authority again", async () => {
+    unknownAccount();
+    await openConversation();
+    const reads = api.bootstrap.mock.calls.length;
+    paste({ files: [image()] });
+    expect(await screen.findByRole("alert")).toHaveTextContent(identityChanged);
+    expect(api.importPasted).not.toHaveBeenCalled();
+    await waitFor(() =>
+      expect(api.bootstrap.mock.calls.length).toBeGreaterThan(reads),
+    );
+    expect(composerFiles()).toBeNull();
+  });
+
+  it("leaves no empty conversation behind when the drop made for a new one is refused", async () => {
+    unknownAccount();
+    await openNewConversation();
+    drop();
+    expect(await screen.findByRole("alert")).toHaveTextContent(identityChanged);
+    await waitFor(() =>
+      expect(api.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "session-a", deleted: true }),
+      ),
+    );
+    expect(api.importDrop).not.toHaveBeenCalled();
+  });
+});
+
 describe("pasted files", () => {
   it("adds a pasted image to the draft and keeps the paste from the text field", async () => {
     importsAsItsName();
@@ -628,6 +725,14 @@ describe("pasted files", () => {
     expect(paste({ files: [image()], text: "a caption" })).toBe(true);
     expect(api.importPasted).not.toHaveBeenCalled();
     expect(composerFiles()).toBeNull();
+  });
+
+  it("takes a file copied in the file manager, whose plain text is only its name", async () => {
+    importsAsItsName();
+    await openConversation();
+    expect(paste({ files: [image("shot.png")], text: "shot.png" })).toBe(false);
+    await waitFor(() => expect(composerFiles()).toHaveTextContent("shot.png"));
+    expect(composer()).toHaveValue("");
   });
 
   it("takes files that come with markup but no plain text (an image copied from a page)", async () => {
@@ -727,6 +832,27 @@ describe("pasted files", () => {
     expect(composerFiles()).toBeNull();
   });
 
+  it("says nothing about skipped files for a paste that was not started", async () => {
+    importsAsItsName();
+    await openConversation();
+    // The second paste arrives before the page has drawn the first one's busy
+    // state: it is not run beside the first.
+    act(() => {
+      paste({ files: [image("first.png")] });
+      paste({
+        files: Array.from({ length: 12 }, (_, index) => image(`p${index}.png`)),
+      });
+    });
+    await waitFor(() => expect(composerFiles()).not.toBeNull());
+    expect(api.importPasted).toHaveBeenCalledTimes(1);
+    expect(api.importPasted.mock.calls[0][0]).toHaveProperty(
+      "name",
+      "first.png",
+    );
+    expect(toasts.warning).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("is not imported while a reply runs, and the field still gets nothing", async () => {
     await openConversation();
     await startReply();
@@ -740,6 +866,7 @@ describe("pasted files", () => {
 describe("what a paste is", () => {
   const files = (count: number) =>
     Array.from({ length: count }, (_, index) => image(`f${index}.png`));
+  const named = (...names: string[]) => names.map((name) => image(name));
   const clipboard = (list: File[], text = "") =>
     ({
       files: list as unknown as FileList,
@@ -751,13 +878,74 @@ describe("what a paste is", () => {
     expect(pastedFiles(clipboard([], "words"))).toBeNull();
   });
 
-  it("is a file paste when there are files and no plain text", () => {
+  it.each([
+    ["no plain text", ""],
+    ["blank plain text", "  \n\t \r\n "],
+  ])("is a file paste with %s", (_name, text) => {
     const list = files(2);
-    expect(pastedFiles(clipboard(list))).toEqual({ files: list, skipped: 0 });
+    expect(pastedFiles(clipboard(list, text))).toEqual({
+      files: list,
+      skipped: 0,
+    });
   });
 
-  it("is a text paste when plain text comes with the files", () => {
-    expect(pastedFiles(clipboard(files(1), "x"))).toBeNull();
+  // The file manager puts the names of the copied files in the plain text.
+  it.each([
+    ["one file", ["photo.png"], "photo.png"],
+    ["two files, a line each", ["a.png", "b.png"], "a.png\nb.png"],
+    ["two files, CRLF lines", ["a.png", "b.png"], "a.png\r\nb.png"],
+    ["two files, CR lines", ["a.png", "b.png"], "a.png\rb.png"],
+    ["two files in another order", ["a.png", "b.png"], "b.png\na.png"],
+    [
+      "a name with spaces around it and a final line break",
+      ["a.png"],
+      " a.png \n",
+    ],
+    [
+      "a decomposed name for a composed file name",
+      ["\u00e9.png"],
+      "e\u0301.png",
+    ],
+    [
+      "a composed name for a decomposed file name",
+      ["e\u0301.png"],
+      "\u00e9.png",
+    ],
+  ])(
+    "is a file paste when the text is only the names of the files: %s",
+    (_name, names, text) => {
+      const list = named(...names);
+      expect(pastedFiles(clipboard(list, text))).toEqual({
+        files: list,
+        skipped: 0,
+      });
+    },
+  );
+
+  it.each([
+    ["a caption", ["image.png"], "A cat on a sofa"],
+    [
+      "a title, then the name of a file that isn't there",
+      ["other.png"],
+      "Title\nimage.png",
+    ],
+    ["a name among other words", ["photo.png"], "photo.png from the trip"],
+    ["a name with a caption line", ["photo.png"], "photo.png\nfrom the trip"],
+    ["the name of a file that isn't on the clipboard", ["a.png"], "b.png"],
+  ])(
+    "is a text paste when the text says more than the names: %s",
+    (_name, names, text) => {
+      expect(pastedFiles(clipboard(named(...names), text))).toBeNull();
+    },
+  );
+
+  it("compares the text with the names of every file, also those a paste leaves out", () => {
+    const list = files(11);
+    const text = list.map((file) => file.name).join("\n");
+    expect(pastedFiles(clipboard(list, text))).toEqual({
+      files: list.slice(0, 10),
+      skipped: 1,
+    });
   });
 
   it("takes at most 10 files and counts the rest as skipped", () => {

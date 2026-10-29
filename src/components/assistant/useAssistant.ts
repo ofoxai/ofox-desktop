@@ -1834,10 +1834,11 @@ export function useAssistant(enabled: boolean) {
    * at once. With no conversation open one is created first, and trashed
    * again when nothing is imported. `importFiles` does the import; one that
    * stops early with a failure keeps the files it had imported, and the
-   * failure is told.
+   * failure is told. `onStart` is called once the import is under way, never
+   * for one that is refused because another is.
    */
   const importAttachments = useCallback(
-    async (importFiles: ImportFiles) => {
+    async (importFiles: ImportFiles, onStart?: () => void) => {
       if (
         importing.current ||
         busy ||
@@ -1850,6 +1851,7 @@ export function useAssistant(enabled: boolean) {
       importing.current = true;
       setBusy(true);
       setError(null);
+      onStart?.();
       const generation = epoch.current;
       const selection = selectionSequence.current;
       const creates = !selectedRef.current;
@@ -2003,9 +2005,10 @@ export function useAssistant(enabled: boolean) {
   /**
    * Add pasted files to the draft, one import each, in order. The first one
    * that fails ends it: the files before it stay, the rest are not tried.
+   * `onStart` is called once the import is under way.
    */
   const pasteAttachments = useCallback(
-    (files: File[]) =>
+    (files: File[], onStart?: () => void) =>
       importAttachments(async (sessionId) => {
         const added: AssistantAttachment[] = [];
         try {
@@ -2019,7 +2022,7 @@ export function useAssistant(enabled: boolean) {
           return { added, failure };
         }
         return { added };
-      }),
+      }, onStart),
     [importAttachments],
   );
 
