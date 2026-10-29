@@ -86,6 +86,44 @@ impl AssistantHost {
         Ok(summary)
     }
 
+    /// The account's assistant settings; the defaults while its preferences
+    /// file is damaged.
+    pub async fn get_preferences(&self) -> Result<Preferences, String> {
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        let store = self.store(&identity.owner)?;
+        let preferences = blocking(move || Ok(store.preferences_or_default())).await?;
+        self.ensure_current(&identity, generation).await?;
+        Ok(preferences)
+    }
+
+    /// Save every assistant setting for the account and authority the page
+    /// shows. The instructions apply from the next message on.
+    pub async fn set_preferences(
+        &self,
+        request: SetPreferencesRequest,
+    ) -> Result<Preferences, String> {
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if request
+            .expected_owner
+            .as_ref()
+            .is_some_and(|owner| *owner != identity.owner)
+            || request
+                .expected_generation
+                .is_some_and(|expected| expected != generation)
+        {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        let mut preferences = request.preferences;
+        // The user's own words: only a key this process handed out goes.
+        preferences.instructions =
+            super::host::scrub_secrets(&preferences.instructions, &self.known_keys());
+        let store = self.store(&identity.owner)?;
+        self.ensure_current(&identity, generation).await?;
+        blocking(move || store.save_preferences(&preferences)).await
+    }
+
     /// The model a new conversation of `owner` starts with in `merged` (see
     /// [`catalog::default_model_id`]): what the page shows, and what a create
     /// without a model takes.
@@ -365,7 +403,7 @@ impl AssistantHost {
         if request.retry_message_id.is_some() {
             self.sync_native(&identity, &request.session_id).await?;
         }
-        let (record, native_file, attachment_root) = blocking({
+        let (record, native_file, attachment_root, preferences) = blocking({
             let store = self.store(&identity.owner)?;
             let sid = request.session_id.clone();
             move || {
@@ -373,6 +411,7 @@ impl AssistantHost {
                     store.load_record(&sid)?,
                     store.native_history_path(&sid)?,
                     store.attachment_root(&sid)?,
+                    store.preferences_or_default(),
                 ))
             }
         })
@@ -471,6 +510,7 @@ impl AssistantHost {
             if let Some(level) = thinking_level {
                 params.insert("thinkingLevel".into(), json!(level));
             }
+            params.extend(instruction_params(&preferences.instructions));
         }
         self.emit_start(&control, search_price.is_some(), thinking_level);
         self.spawn_run(control, params);
@@ -986,6 +1026,17 @@ fn web_params(
         .filter(|m| !m.superseded);
     let urls = web::allowed_web_urls(prompt, earlier);
     params.insert("allowedWebUrls".into(), json!(urls));
+    params
+}
+
+/// The custom instructions part of a run's parameters: `instructions` only
+/// when there are some, so that without them a run's parameters stay as they
+/// were before the setting existed.
+fn instruction_params(instructions: &str) -> Map<String, Value> {
+    let mut params = Map::new();
+    if !instructions.trim().is_empty() {
+        params.insert("instructions".into(), json!(instructions));
+    }
     params
 }
 
@@ -1595,6 +1646,17 @@ mod tests {
         // The catalog changed since: the run goes at the default.
         model.thinking_levels = vec!["low".into()];
         assert_eq!(run_thinking_level(&record.session, &model), None);
+    }
+
+    #[test]
+    fn a_run_gets_the_custom_instructions_only_when_there_are_some() {
+        // None: the run's parameters stay as they were before the setting.
+        assert!(instruction_params("").is_empty());
+        assert!(instruction_params(" \n\t").is_empty());
+        assert_eq!(
+            Value::Object(instruction_params("Be brief.\n")),
+            json!({"instructions": "Be brief.\n"})
+        );
     }
 
     #[test]

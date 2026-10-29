@@ -4906,6 +4906,7 @@
       "invalidMessage": "这条消息无法发送，请检查后重试。",
       "messageTooLarge": "消息太长了，请缩短后重试。",
       "titleTooLong": "标题太长了，请换一个短一些的。",
+      "instructionsTooLong": "自定义指令太长了，请删减到 4,000 个字符以内。",
       "thinkingLevelUnavailable": "这个模型不支持该思考程度，请换一个。",
       "attachmentUnavailable": "有附件已不可用。请重新附加该文件，然后重新发送消息。",
       "attachmentTooMany": "文件太多。每次最多附加 10 个，每个对话最多 200 个。",
@@ -5124,6 +5125,25 @@
     "conversationActions": "对话操作",
     "backupMenu": "备份…",
     "restoreMenu": "从备份恢复…",
+    "settingsMenu": "助手设置…",
+    "settings": {
+      "title": "助手设置",
+      "instructions": "自定义指令",
+      "instructionsHint": "每个对话的回复都会遵循这些要求，从你的下一条消息开始生效。",
+      "instructionsPlaceholder": "例如：用简体中文回答，先给结论再解释。",
+      "instructionsCount": "{{used}} / {{max}}",
+      "instructionsTooLong": "自定义指令最多 {{max}} 个字符，请删减一些。",
+      "autoTitle": "自动生成标题",
+      "autoTitleHint": "第一条回复完成后，为对话起一个简短的标题。",
+      "notifyOnFinish": "回复完成时通知",
+      "notifyOnFinishHint": "窗口不在前台时发送系统通知；在其他页面或对话中时显示提示。通知只包含对话标题。",
+      "loading": "正在读取设置…"
+    },
+    "finishNotice": {
+      "completed": "回复已完成",
+      "failed": "回复失败",
+      "view": "查看"
+    },
     "sidebar": "对话列表",
     "hideSidebar": "收起对话列表",
     "showSidebar": "展开对话列表",

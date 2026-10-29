@@ -230,6 +230,44 @@ pub struct Detail {
     pub usage: Value,
 }
 
+/// The most characters the custom instructions may have.
+pub const MAX_INSTRUCTIONS_CHARS: usize = 4_000;
+
+/// The assistant settings of one account: standing instructions every run of
+/// every conversation follows from its next message, whether a conversation's
+/// first answer gets it a generated title, and whether a finished reply is
+/// announced. Kept in `prefs.json` beside the remembered model.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Preferences {
+    /// At most [`MAX_INSTRUCTIONS_CHARS`] characters; empty for none.
+    pub instructions: String,
+    pub auto_title: bool,
+    pub notify_on_finish: bool,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            instructions: String::new(),
+            auto_title: true,
+            notify_on_finish: true,
+        }
+    }
+}
+
+/// Save all of the assistant settings at once.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetPreferencesRequest {
+    /// Checked by the host against the signed-in owner, not by the store.
+    pub expected_owner: Option<String>,
+    /// Checked by the host against its authority generation, not by the store.
+    pub expected_generation: Option<u64>,
+    #[serde(flatten)]
+    pub preferences: Preferences,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRequest {

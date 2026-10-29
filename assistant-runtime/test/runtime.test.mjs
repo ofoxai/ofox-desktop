@@ -1522,6 +1522,60 @@ test("the system prompt describes only the capabilities enabled for the run", as
   assert.ok(withTool.includes(probeGuideline));
 });
 
+/** The preamble this runtime owns of the system prompt one run sends. */
+async function systemPreamble(t, extra) {
+  let preamble;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, options) => {
+      preamble = JSON.parse(options.body)
+        .messages[0].content.split("\n<cwd>")[0]
+        .trimEnd();
+      return stream("noted");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({ ...(await sandbox(t)), ...extra });
+  assert.equal(result.status, "completed");
+  return preamble;
+}
+
+test("custom instructions follow the role as standing instructions, without the run's key", async (t) => {
+  const plain = await systemPreamble(t, {});
+  // Empty or blank instructions are none.
+  assert.equal(await systemPreamble(t, { instructions: "" }), plain);
+  assert.equal(await systemPreamble(t, { instructions: " \n\t" }), plain);
+  const instructed = await systemPreamble(t, {
+    instructions: `Answer in haiku.\nSign as ${token}`,
+    knownSecrets: [],
+  });
+  assert.ok(instructed.startsWith(`${plain}\n`), instructed);
+  const added = instructed.slice(plain.length);
+  assert.match(added, /standing instructions/);
+  assert.ok(
+    added.endsWith("Answer in haiku.\nSign as [REDACTED]"),
+    JSON.stringify(added),
+  );
+  assert.ok(!instructed.includes(token));
+});
+
+test("instructions that are not text or over 4,000 characters are refused", async (t) => {
+  // 4,000 characters, not UTF-16 units: an emoji is one character.
+  assert.match(
+    await systemPreamble(t, { instructions: "🦊".repeat(4000) }),
+    /🦊$/,
+  );
+  for (const instructions of [42, ["a"], "a".repeat(4001)]) {
+    const runtime = new AssistantRuntime({
+      fetch: async () => assert.fail("No request for refused instructions"),
+    });
+    t.after(() => runtime.close());
+    await assert.rejects(
+      runtime.run({ ...(await sandbox(t)), instructions }),
+      /Invalid instructions/,
+    );
+  }
+});
+
 // Imports files into the sandbox the way the host does: one directory per
 // conversation, each attachment described by id, name, MIME type and path.
 async function withAttachments(params, files) {
@@ -2363,6 +2417,21 @@ test("a run without a thinking level sends exactly the request it sent before le
       name,
     );
   }
+});
+
+test("empty custom instructions leave each provider's default request exactly as it was", async (t) => {
+  const pinned = JSON.parse(
+    await readFile(
+      new URL("./fixtures/default-requests.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  for (const [name, input] of Object.entries(await thinkingModels()))
+    assert.equal(
+      (await thinkingRun(t, name, input, { instructions: "" })).raw,
+      pinned[name],
+      name,
+    );
 });
 
 test("a thinking level reaches each provider in its own form and its reasoning streams", async (t) => {

@@ -33,8 +33,17 @@ published, they remain valid and the result reports counts and a warning; a retr
 imports the rest and skips the unchanged ones. If an earlier permanent deletion
 of the same ID left an unfinished tombstone, restore removes it before publishing
 (and counts a conflict if it cannot), so the restored conversation can be deleted
-again. Current preferences take precedence; an empty profile can receive the
-archived preferences. The renderer reloads preferences after restoration.
+again.
+
+Preferences are the remembered model and the assistant settings (custom
+instructions, automatic titles, finish notifications). Restore merges them field
+by field: a value this profile has saved stays, including empty instructions,
+and the archive only fills in the fields the profile never saved, so an empty
+profile receives all of them. An archive made before the settings existed holds
+only the model: the current settings stay, or their defaults (no instructions,
+both switches on) when none were saved. An unreadable local preferences file is
+left as it is. The renderer reloads the model preference and the settings after
+restoration.
 
 The selected account and its authority generation are checked before opening
 the native picker, after it closes and before writes. An archive belongs to its
@@ -101,7 +110,8 @@ If the stored key cannot be read, that transfer scrubs only the keys known to
 this process. They are scrubbed from JSON and from Markdown exports; a matching key in
 attachment bytes blocks the backup instead of silently changing the file, and an
 archive containing one is refused on restore. Preferences serialize only known
-fields. This does not identify arbitrary secrets a user has pasted into a
+fields; archived instructions over 4,000 characters, or settings of the wrong
+type, make the archive invalid. This does not identify arbitrary secrets a user has pasted into a
 document. ZIP archives are not encrypted and contain conversation data.
 
 The native history's header names the conversation's absolute working folder
@@ -137,7 +147,8 @@ oversized conversations left out of a backup, active runs, per-conversation
 conflicts, partial publication, retries, pending deletions, blanked native
 working folders (and older archives without the blanking), invalid error codes,
 staging cleanup, credential exclusion (including the stored key, on backup,
-export and restore) and renderer draft/preferences races.
+export and restore), the field-by-field settings merge (and older archives
+without settings) and renderer draft/preferences races.
 
 The macOS integration test uses prepared Node 22.23.4 and Pi SDK 1.4.0 with local
 mock gateways for both `ofox.ai` and `ofox.io` identities. It creates a search and

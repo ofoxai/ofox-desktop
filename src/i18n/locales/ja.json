@@ -4906,6 +4906,7 @@
       "invalidMessage": "このメッセージは送信できません。内容を確認してもう一度お試しください。",
       "messageTooLarge": "メッセージが長すぎます。短くしてもう一度お試しください。",
       "titleTooLong": "タイトルが長すぎます。短くしてください。",
+      "instructionsTooLong": "カスタム指示が長すぎます。4,000 文字以内にしてください。",
       "thinkingLevelUnavailable": "このモデルではその思考レベルを使えません。別のレベルを選んでください。",
       "attachmentUnavailable": "添付ファイルが利用できなくなりました。ファイルをもう一度添付してから、メッセージを送り直してください。",
       "attachmentTooMany": "ファイルが多すぎます。一度に添付できるのは 10 個まで、1 つの会話では 200 個までです。",
@@ -5124,6 +5125,25 @@
     "conversationActions": "会話の操作",
     "backupMenu": "バックアップ…",
     "restoreMenu": "バックアップから復元…",
+    "settingsMenu": "アシスタント設定…",
+    "settings": {
+      "title": "アシスタント設定",
+      "instructions": "カスタム指示",
+      "instructionsHint": "すべての会話の返信がこの指示に従います。次のメッセージから適用されます。",
+      "instructionsPlaceholder": "例：日本語で、結論から答えてください。",
+      "instructionsCount": "{{used}} / {{max}}",
+      "instructionsTooLong": "カスタム指示は {{max}} 文字までです。短くしてください。",
+      "autoTitle": "タイトルを自動生成",
+      "autoTitleHint": "最初の返信のあと、会話に短いタイトルを付けます。",
+      "notifyOnFinish": "返信の完了を通知",
+      "notifyOnFinishHint": "ウィンドウが背面にあるときはシステム通知、別のページや会話を表示しているときはお知らせを表示します。表示されるのは会話のタイトルだけです。",
+      "loading": "設定を読み込んでいます…"
+    },
+    "finishNotice": {
+      "completed": "返信が完了しました",
+      "failed": "返信に失敗しました",
+      "view": "表示"
+    },
     "sidebar": "会話一覧",
     "hideSidebar": "会話一覧を閉じる",
     "showSidebar": "会話一覧を開く",

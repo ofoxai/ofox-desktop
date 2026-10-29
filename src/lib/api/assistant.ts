@@ -106,6 +106,29 @@ export interface AssistantVideoCapabilities {
   fromPricePerSecond: string | null;
 }
 
+/** The most characters the custom instructions may have. */
+export const MAX_ASSISTANT_INSTRUCTIONS = 4000;
+
+/** The assistant settings of the signed-in account. */
+export interface AssistantPreferences {
+  /**
+   * Standing instructions every reply follows, from the next message on;
+   * empty for none. At most `MAX_ASSISTANT_INSTRUCTIONS` characters.
+   */
+  instructions: string;
+  /** A conversation's first answer gets it a generated title. */
+  autoTitle: boolean;
+  /** Tell the user when a reply they are not looking at finishes. */
+  notifyOnFinish: boolean;
+}
+
+/** What an account that never saved its settings has. */
+export const DEFAULT_ASSISTANT_PREFERENCES: AssistantPreferences = {
+  instructions: "",
+  autoTitle: true,
+  notifyOnFinish: true,
+};
+
 /** A model catalog the backend could not read: some models are missing. */
 export type AssistantCatalogSource = "v1" | "anthropic";
 
@@ -610,6 +633,21 @@ export const assistantApi = {
       deleted,
       search,
     }),
+  /** The account's settings; the defaults while its saved ones are damaged. */
+  getPreferences: () =>
+    invoke<AssistantPreferences>("assistant_get_preferences"),
+  /**
+   * Saves every setting for the account and authority the page shows and
+   * returns them as saved: a key the app handed out is replaced in the
+   * instructions. Refused with `assistant_instructions_too_long` over the
+   * limit.
+   */
+  setPreferences: (
+    request: AssistantPreferences & {
+      expectedOwner?: string;
+      expectedGeneration?: number;
+    },
+  ) => invoke<AssistantPreferences>("assistant_set_preferences", { request }),
   createSession: (request: {
     modelId?: string;
     /** The user picked `modelId`: it is remembered even while some models are missing. */
@@ -782,6 +820,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_invalid_message: "invalidMessage",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",
+  assistant_instructions_too_long: "instructionsTooLong",
   assistant_invalid_thinking_level: "thinkingLevelUnavailable",
   assistant_attachment_not_found: "attachmentUnavailable",
   assistant_attachment_too_many: "attachmentTooMany",

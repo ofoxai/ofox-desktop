@@ -938,6 +938,70 @@ fn conversation_text_passes_byte_for_byte_and_only_the_key_is_scrubbed() {
     assert_no_secret_in_events(&env, &[KEY]);
 }
 
+/// The part of a request's system prompt the runtime writes (Pi adds the
+/// working folder after it).
+fn system_preamble(request: &Request) -> String {
+    let prompt = request.body["messages"][0]["content"].as_str().unwrap();
+    prompt
+        .split("\n<cwd>")
+        .next()
+        .unwrap()
+        .trim_end()
+        .to_owned()
+}
+
+#[test]
+fn saved_settings_shape_the_next_message_and_can_turn_titles_off() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        // The defaults: no instructions, and the first answer asks for a title.
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Plain answer.".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Hello", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let plain = system_preamble(&gateway.requests()[0]);
+        assert!(!plain.contains("standing instructions"), "{plain}");
+        title_requests(&gateway, 1).await;
+
+        let settings: types::SetPreferencesRequest = serde_json::from_value(json!({
+            "instructions": "Always answer in haiku.",
+            "autoTitle": false,
+            "notifyOnFinish": true,
+        }))
+        .unwrap();
+        host.set_preferences(settings).await.unwrap();
+        // From the next message on, in this conversation and a new one.
+        gateway.reply(Reply::Stream("Five, seven, five.".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Again", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let other = create(&host).await;
+        gateway.reply(Reply::Stream("Autumn moonlight.".into()));
+        let (_, end) = turn(&host, &env, request(&other, "Hi", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        for sent in &gateway.requests()[1..] {
+            let instructed = system_preamble(sent);
+            assert!(
+                instructed.starts_with(&format!("{plain}\n")),
+                "{instructed}"
+            );
+            assert!(
+                instructed.ends_with("\nAlways answer in haiku."),
+                "{instructed}"
+            );
+        }
+        // Titles are off: the new conversation's first answer asks for none.
+        no_more_title_requests(&gateway, 1).await;
+        assert_eq!(host.get_session(&other).await.unwrap().session.title, "Hi");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
 #[test]
 fn stopping_mid_stream_keeps_the_partial_reply_and_the_stopped_operation() {
     let Some(runtime_dir) = runtime_dir() else {

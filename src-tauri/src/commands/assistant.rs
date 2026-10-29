@@ -10,8 +10,9 @@ use crate::services::assistant::{
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
         Attachment, CreateRequest, DeleteRequest, Detail, EmptyTrashReport, EmptyTrashRequest,
-        Event, ExportMarkdownRequest, ImportDropRequest, RunProxy, RunRef, SendRequest, Session,
-        SwitchVersionRequest, TransferRequest, UpdateRequest,
+        Event, ExportMarkdownRequest, ImportDropRequest, Preferences, RunProxy, RunRef,
+        SendRequest, Session, SetPreferencesRequest, SwitchVersionRequest, TransferRequest,
+        UpdateRequest,
     },
     AssistantHost,
 };
@@ -50,6 +51,20 @@ pub async fn assistant_list_sessions(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_usage_summary(host: Host<'_>) -> Result<Value, String> {
     host.usage_summary().await
+}
+
+/// The assistant settings: custom instructions and the two switches.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_get_preferences(host: Host<'_>) -> Result<Preferences, String> {
+    host.get_preferences().await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_set_preferences(
+    host: Host<'_>,
+    request: SetPreferencesRequest,
+) -> Result<Preferences, String> {
+    host.set_preferences(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

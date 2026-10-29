@@ -4906,6 +4906,7 @@
       "invalidMessage": "This message can't be sent. Check it and try again.",
       "messageTooLarge": "This message is too long. Shorten it and try again.",
       "titleTooLong": "The title is too long. Use a shorter one.",
+      "instructionsTooLong": "The custom instructions are too long. Shorten them to 4,000 characters or fewer.",
       "thinkingLevelUnavailable": "This model doesn't offer that thinking level. Choose another one.",
       "attachmentUnavailable": "An attached file is no longer available. Attach the file again, then send your message again.",
       "attachmentTooMany": "Too many files. Attach up to 10 at a time and up to 200 per conversation.",
@@ -5124,6 +5125,25 @@
     "conversationActions": "Conversation actions",
     "backupMenu": "Back up…",
     "restoreMenu": "Restore from backup…",
+    "settingsMenu": "Assistant settings…",
+    "settings": {
+      "title": "Assistant settings",
+      "instructions": "Custom instructions",
+      "instructionsHint": "Replies in every conversation follow these, starting with your next message.",
+      "instructionsPlaceholder": "For example: answer in English and give the conclusion first.",
+      "instructionsCount": "{{used}} / {{max}}",
+      "instructionsTooLong": "Custom instructions can have at most {{max}} characters. Shorten them.",
+      "autoTitle": "Generate titles",
+      "autoTitleHint": "Give a conversation a short title after its first reply.",
+      "notifyOnFinish": "Notify when a reply finishes",
+      "notifyOnFinishHint": "A system notification while the window is in the background, or a notice while you are on another page or conversation. It shows only the conversation title.",
+      "loading": "Loading settings…"
+    },
+    "finishNotice": {
+      "completed": "Reply finished",
+      "failed": "Reply failed",
+      "view": "View"
+    },
     "sidebar": "Conversation list",
     "hideSidebar": "Hide the conversation list",
     "showSidebar": "Show the conversation list",

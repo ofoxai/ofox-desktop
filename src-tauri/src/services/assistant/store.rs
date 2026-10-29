@@ -3,7 +3,7 @@
 //! This module is the only place that knows the layout:
 //!
 //! ```text
-//! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…}
+//! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…,"instructions":…,"autoTitle":…,"notifyOnFinish":…}
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.json   SessionRecord + "version"
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.jsonl  native runtime history
 //! <app_config_dir>/assistant/<owner>/<session_id>/attachments/<attachment_id>  imported files
@@ -20,7 +20,7 @@ use super::thinking;
 use super::types::*;
 use crate::settings::KeyOwner;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -42,6 +42,7 @@ const MAX_DRAFT_ATTACHMENTS: usize = 200;
 const NOT_FOUND: &str = "assistant_session_not_found";
 const INVALID_SESSION: &str = "assistant_invalid_session";
 const INVALID_PREFERENCES: &str = "assistant_invalid_preferences";
+const INSTRUCTIONS_TOO_LONG: &str = "assistant_instructions_too_long";
 const INVALID_PATH: &str = "assistant_invalid_storage_path";
 const UNAVAILABLE: &str = "assistant_storage_unavailable";
 
@@ -107,11 +108,71 @@ struct SessionFileIn {
     record: SessionRecord,
 }
 
-#[derive(Deserialize, Serialize)]
+/// The fields of `prefs.json` this version knows. A settings field the user
+/// never saved is absent (`None`), so a restore can tell it from a choice.
+/// Fields are only ever set, never cleared: empty instructions are `""`.
+#[derive(Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Prefs {
     version: u32,
     model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    auto_title: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notify_on_finish: Option<bool>,
+}
+
+impl Prefs {
+    /// A preferences file this version can read: its known fields and the
+    /// whole object, unknown fields included. `None` for a damaged file, one
+    /// of another version or with instructions over their limit.
+    fn parse(bytes: &[u8]) -> Option<(Self, Map<String, Value>)> {
+        let object: Map<String, Value> = serde_json::from_slice(bytes).ok()?;
+        let prefs: Self = serde_json::from_value(Value::Object(object.clone())).ok()?;
+        let fits = prefs
+            .instructions
+            .as_deref()
+            .is_none_or(|text| text.chars().count() <= MAX_INSTRUCTIONS_CHARS);
+        (prefs.version == FORMAT_VERSION && fits).then_some((prefs, object))
+    }
+
+    /// The file's bytes: `object` (what it held, unknown fields included)
+    /// with the known fields replaced by these.
+    fn to_bytes(&self, mut object: Map<String, Value>) -> Result<Vec<u8>, String> {
+        let Value::Object(known) = serde_json::to_value(self).map_err(|_| UNAVAILABLE)? else {
+            return Err(UNAVAILABLE.into());
+        };
+        object.extend(known);
+        serde_json::to_vec(&object).map_err(|_| UNAVAILABLE.into())
+    }
+
+    /// Take each field of `other` that this one does not have; true when
+    /// one was taken.
+    fn fill_from(&mut self, other: &Prefs) -> bool {
+        fn fill<T: Clone>(mine: &mut Option<T>, theirs: &Option<T>) -> bool {
+            let taken = mine.is_none() && theirs.is_some();
+            if taken {
+                mine.clone_from(theirs);
+            }
+            taken
+        }
+        // `|`, not `||`: every field is filled.
+        fill(&mut self.model_id, &other.model_id)
+            | fill(&mut self.instructions, &other.instructions)
+            | fill(&mut self.auto_title, &other.auto_title)
+            | fill(&mut self.notify_on_finish, &other.notify_on_finish)
+    }
+
+    fn resolved(&self) -> Preferences {
+        let defaults = Preferences::default();
+        Preferences {
+            instructions: self.instructions.clone().unwrap_or(defaults.instructions),
+            auto_title: self.auto_title.unwrap_or(defaults.auto_title),
+            notify_on_finish: self.notify_on_finish.unwrap_or(defaults.notify_on_finish),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -423,35 +484,73 @@ impl AssistantStore {
 
     /// Blocking file IO: async callers run it in `spawn_blocking`.
     pub fn remember_model(&self, model_id: &str) -> Result<(), String> {
-        let path = self.ensure_root()?.join(PREFS_FILE);
-        let lock = file_lock(&path);
-        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-        ensure_regular_or_absent(&path)?;
-        let prefs = Prefs {
-            version: FORMAT_VERSION,
-            model_id: Some(model_id.into()),
-        };
-        write_bytes(&path, &serde_json::to_vec(&prefs).map_err(|_| UNAVAILABLE)?)
+        self.update_prefs(|prefs| prefs.model_id = Some(model_id.into()))
     }
 
     pub fn remembered_model(&self) -> Result<Option<String>, String> {
+        Ok(self.read_prefs()?.and_then(|prefs| prefs.model_id))
+    }
+
+    /// The assistant settings, the defaults for what was never saved.
+    /// A damaged preferences file is an error.
+    pub fn preferences(&self) -> Result<Preferences, String> {
+        Ok(self.read_prefs()?.unwrap_or_default().resolved())
+    }
+
+    /// [`Self::preferences`], or the defaults when the file is damaged: a
+    /// damaged file loses the settings until the next save replaces it.
+    pub fn preferences_or_default(&self) -> Preferences {
+        self.preferences().unwrap_or_else(|error| {
+            log::warn!("[Assistant] using the default settings: {error}");
+            Preferences::default()
+        })
+    }
+
+    /// Save every setting; the remembered model and fields this version does
+    /// not know stay. A damaged file is replaced.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn save_preferences(&self, preferences: &Preferences) -> Result<Preferences, String> {
+        if preferences.instructions.chars().count() > MAX_INSTRUCTIONS_CHARS {
+            return Err(INSTRUCTIONS_TOO_LONG.into());
+        }
+        self.update_prefs(|prefs| {
+            prefs.instructions = Some(preferences.instructions.clone());
+            prefs.auto_title = Some(preferences.auto_title);
+            prefs.notify_on_finish = Some(preferences.notify_on_finish);
+        })?;
+        Ok(preferences.clone())
+    }
+
+    /// Whether a conversation's first answer gets it a generated title.
+    pub fn auto_title_enabled(&self) -> bool {
+        self.preferences_or_default().auto_title
+    }
+
+    fn read_prefs(&self) -> Result<Option<Prefs>, String> {
         if !real_dir(&self.root)? {
             return Ok(None);
         }
         let Some(bytes) = read_regular(&self.root.join(PREFS_FILE))? else {
             return Ok(None);
         };
-        let prefs: Prefs = serde_json::from_slice(&bytes).map_err(|_| INVALID_PREFERENCES)?;
-        if prefs.version != FORMAT_VERSION {
-            return Err(INVALID_PREFERENCES.into());
-        }
-        Ok(prefs.model_id)
+        let (prefs, _) = Prefs::parse(&bytes).ok_or(INVALID_PREFERENCES)?;
+        Ok(Some(prefs))
     }
 
-    /// Whether a conversation's first answer gets it a generated title. On:
-    /// the preference that turns it off is not stored yet.
-    pub fn auto_title_enabled(&self) -> bool {
-        true
+    /// Read, change and write `prefs.json` under its lock. Whatever else the
+    /// file holds stays; a damaged file starts again from nothing.
+    fn update_prefs(&self, change: impl FnOnce(&mut Prefs)) -> Result<(), String> {
+        let path = self.ensure_root()?.join(PREFS_FILE);
+        let lock = file_lock(&path);
+        let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        ensure_regular_or_absent(&path)?;
+        let (mut prefs, object) = read_regular(&path)?
+            .and_then(|bytes| Prefs::parse(&bytes))
+            .unwrap_or_default();
+        prefs.version = FORMAT_VERSION;
+        change(&mut prefs);
+        write_bytes(&path, &prefs.to_bytes(object)?)
     }
 
     /// Token and cost totals over every session of this owner, trash included.
@@ -2653,6 +2752,128 @@ mod tests {
             store.remembered_model().unwrap().as_deref(),
             Some("next/model")
         );
+    }
+
+    // ── assistant settings ───────────────────────────────────────────────
+
+    fn prefs_path(config: &Path, store: &AssistantStore) -> PathBuf {
+        config
+            .join("assistant")
+            .join(&store.owner)
+            .join("prefs.json")
+    }
+
+    fn settings(instructions: &str, auto_title: bool, notify_on_finish: bool) -> Preferences {
+        Preferences {
+            instructions: instructions.into(),
+            auto_title,
+            notify_on_finish,
+        }
+    }
+
+    #[test]
+    fn preferences_start_with_no_instructions_and_both_switches_on() {
+        let (_config, store) = fixture();
+        let defaults = settings("", true, true);
+        assert_eq!(store.preferences().unwrap(), defaults);
+        // A file from before the settings existed holds only the model.
+        store.remember_model("test/model").unwrap();
+        assert_eq!(store.preferences().unwrap(), defaults);
+        assert!(store.auto_title_enabled());
+    }
+
+    #[test]
+    fn saved_preferences_are_read_back_beside_the_remembered_model_and_unknown_fields() {
+        let (config, store) = fixture();
+        store.remember_model("test/model").unwrap();
+        let path = prefs_path(config.path(), &store);
+        fs::write(
+            &path,
+            r#"{"version":1,"modelId":"test/model","laterField":{"kept":true}}"#,
+        )
+        .unwrap();
+        let chosen = settings("Answer in English.", false, false);
+        assert_eq!(store.save_preferences(&chosen).unwrap(), chosen);
+        assert_eq!(store.preferences().unwrap(), chosen);
+        assert_eq!(
+            store.remembered_model().unwrap().as_deref(),
+            Some("test/model")
+        );
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            saved,
+            json!({
+                "version": 1, "modelId": "test/model", "laterField": {"kept": true},
+                "instructions": "Answer in English.", "autoTitle": false, "notifyOnFinish": false,
+            })
+        );
+    }
+
+    #[test]
+    fn remembering_a_model_keeps_the_saved_preferences_and_unknown_fields() {
+        let (config, store) = fixture();
+        let chosen = settings("Be brief.", false, true);
+        store.save_preferences(&chosen).unwrap();
+        let path = prefs_path(config.path(), &store);
+        let mut saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        saved["laterField"] = json!(7);
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        store.remember_model("next/model").unwrap();
+        assert_eq!(store.preferences().unwrap(), chosen);
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["modelId"], "next/model");
+        assert_eq!(saved["laterField"], 7);
+    }
+
+    #[test]
+    fn instructions_are_limited_to_4000_characters() {
+        let (_config, store) = fixture();
+        // Characters, not bytes: 4,000 CJK characters are 12,000 bytes.
+        let longest = settings(&"字".repeat(4000), true, true);
+        assert_eq!(store.save_preferences(&longest).unwrap(), longest);
+        assert_eq!(
+            store
+                .save_preferences(&settings(&"a".repeat(4001), true, true))
+                .unwrap_err(),
+            "assistant_instructions_too_long"
+        );
+        assert_eq!(store.preferences().unwrap(), longest);
+    }
+
+    #[test]
+    fn auto_title_follows_the_saved_switch_and_a_damaged_file_leaves_it_on() {
+        let (config, store) = fixture();
+        store.save_preferences(&settings("", false, true)).unwrap();
+        assert!(!store.auto_title_enabled());
+        store.save_preferences(&settings("", true, true)).unwrap();
+        assert!(store.auto_title_enabled());
+        fs::write(prefs_path(config.path(), &store), "damaged").unwrap();
+        assert!(store.auto_title_enabled());
+    }
+
+    #[test]
+    fn damaged_preferences_are_reported_and_saving_replaces_them() {
+        let (config, store) = fixture();
+        let path = prefs_path(config.path(), &store);
+        store.remember_model("first/model").unwrap();
+        let too_long = format!(r#"{{"version":1,"instructions":"{}"}}"#, "a".repeat(4001));
+        for damaged in [
+            "damaged",
+            r#"{"version":2}"#,
+            r#"{"version":1,"autoTitle":"yes"}"#,
+            too_long.as_str(),
+        ] {
+            fs::write(&path, damaged).unwrap();
+            assert_eq!(
+                store.preferences().unwrap_err(),
+                "assistant_invalid_preferences",
+                "{damaged}"
+            );
+            assert_eq!(store.preferences_or_default(), settings("", true, true));
+        }
+        let chosen = settings("Use metric units.", true, false);
+        store.save_preferences(&chosen).unwrap();
+        assert_eq!(store.preferences().unwrap(), chosen);
     }
 
     // ── usage ────────────────────────────────────────────────────────────

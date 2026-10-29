@@ -481,10 +481,8 @@ impl AssistantStore {
             })?;
         }
         if let Some(prefs) = read_file(&self.root.join(PREFS_FILE), limit(PREFS_FILE)?)? {
-            let value: Prefs = serde_json::from_slice(&prefs).map_err(|_| INVALID)?;
-            if value.version != FORMAT_VERSION {
-                return Err(INVALID.into());
-            }
+            // Only the known fields: an unknown one may hold anything.
+            let (value, _) = Prefs::parse(&prefs).ok_or(INVALID)?;
             add_member(
                 &mut writer,
                 &mut manifest,
@@ -683,15 +681,13 @@ impl AssistantStore {
                 return Err(INVALID.into());
             }
         }
-        if names.contains(PREFS_FILE) {
-            let prefs: Prefs = serde_json::from_slice(
-                &read_file(&staging.path().join(PREFS_FILE), limit(PREFS_FILE)?)?.ok_or(INVALID)?,
-            )
-            .map_err(|_| INVALID)?;
-            if prefs.version != FORMAT_VERSION {
-                return Err(INVALID.into());
-            }
-        }
+        let archived_prefs = if names.contains(PREFS_FILE) {
+            let bytes =
+                read_file(&staging.path().join(PREFS_FILE), limit(PREFS_FILE)?)?.ok_or(INVALID)?;
+            Some(Prefs::parse(&bytes).ok_or(INVALID)?.0)
+        } else {
+            None
+        };
         let mut report = RestoreReport::default();
         for sid in &manifest.sessions {
             let result = self.with_attachment_lock(sid, || {
@@ -724,21 +720,28 @@ impl AssistantStore {
                 Err(error) => return Err(error),
             }
         }
-        // Existing preferences win, including unreadable ones. A failed optional
-        // preference import does not turn successful session imports into failure.
-        if names.contains(PREFS_FILE) {
+        // Existing preferences win field by field, and an unreadable file wins
+        // whole: the archive only fills in what this profile never saved (an
+        // older archive has no settings, so the current ones stay). A failed
+        // optional preference import does not turn successful session imports
+        // into failure.
+        if let Some(archived) = archived_prefs {
             let result = (|| {
                 let path = root.join(PREFS_FILE);
                 let lock = file_lock(&path);
                 let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 admit()?;
                 ensure_regular_or_absent(&path)?;
-                if !path.exists() {
-                    write_bytes(
-                        &path,
-                        &read_file(&staging.path().join(PREFS_FILE), limit(PREFS_FILE)?)?
-                            .ok_or(INVALID)?,
-                    )?;
+                let (mut local, object) = match read_regular(&path)? {
+                    None => Default::default(),
+                    Some(bytes) => match Prefs::parse(&bytes) {
+                        Some(found) => found,
+                        None => return Ok(()),
+                    },
+                };
+                if local.fill_from(&archived) {
+                    local.version = FORMAT_VERSION;
+                    write_bytes(&path, &local.to_bytes(object)?)?;
                 }
                 Ok::<_, String>(())
             })();
@@ -886,7 +889,7 @@ mod tests {
                 Ok(())
             })
             .unwrap();
-        fs::write(store.root.join(PREFS_FILE),serde_json::to_vec(&json!({"version":1,"modelId":"test/model","unknownCredential":"must-not-export-extra"})).unwrap()).unwrap();
+        fs::write(store.root.join(PREFS_FILE),serde_json::to_vec(&json!({"version":1,"modelId":"test/model","instructions":format!("Sign with {key}"),"unknownCredential":"must-not-export-extra"})).unwrap()).unwrap();
         let out = tempfile::tempdir().unwrap();
         let path = out.path().join("backup.zip");
         store
@@ -900,12 +903,154 @@ mod tests {
             assert!(!text.contains(&key));
             assert!(!text.contains("must-not-export-extra"));
         }
+        let (_, prefs) = members_of(&path)
+            .into_iter()
+            .find(|(name, _)| name == PREFS_FILE)
+            .unwrap();
+        let prefs: Value = serde_json::from_slice(&prefs).unwrap();
+        assert_eq!(
+            prefs["instructions"],
+            format!("Sign with {}", crate::redact::REDACTED)
+        );
         assert!(store
             .load_record(&sid)
             .unwrap()
             .session
             .draft
             .contains(&key));
+    }
+
+    // ── settings ─────────────────────────────────────────────────────────
+
+    fn chosen() -> Preferences {
+        Preferences {
+            instructions: "回答用简体中文。".into(),
+            auto_title: false,
+            notify_on_finish: false,
+        }
+    }
+
+    fn backed_up(store: &AssistantStore) -> (tempfile::TempDir, PathBuf) {
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("backup.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        (output, archive)
+    }
+
+    fn archived_prefs(archive: &Path) -> Value {
+        let (_, bytes) = members_of(archive)
+            .into_iter()
+            .find(|(name, _)| name == PREFS_FILE)
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// An empty profile of `owner`.
+    fn profile(owner: &str) -> (tempfile::TempDir, AssistantStore) {
+        let target = tempfile::tempdir().unwrap();
+        let store = AssistantStore::for_owner(target.path(), owner).unwrap();
+        (target, store)
+    }
+
+    #[test]
+    fn the_settings_are_backed_up_and_an_empty_profile_receives_them() {
+        let (_source, store, _sid, _) = seeded();
+        store.save_preferences(&chosen()).unwrap();
+        let (_output, archive) = backed_up(&store);
+        assert_eq!(
+            archived_prefs(&archive),
+            json!({
+                "version": 1, "modelId": "test/model", "instructions": "回答用简体中文。",
+                "autoTitle": false, "notifyOnFinish": false,
+            })
+        );
+        let (_target, restored) = profile(&store.owner);
+        restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(restored.preferences().unwrap(), chosen());
+        assert_eq!(
+            restored.remembered_model().unwrap().as_deref(),
+            Some("test/model")
+        );
+    }
+
+    #[test]
+    fn restore_fills_in_only_the_settings_this_profile_never_saved() {
+        let (_source, store, _sid, _) = seeded();
+        store.save_preferences(&chosen()).unwrap();
+        let (_output, archive) = backed_up(&store);
+        // Only a model of its own: it keeps the model and takes the settings.
+        let (_target, restored) = profile(&store.owner);
+        restored.remember_model("local/model").unwrap();
+        restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(restored.preferences().unwrap(), chosen());
+        assert_eq!(
+            restored.remembered_model().unwrap().as_deref(),
+            Some("local/model")
+        );
+        // Saved settings stay, empty instructions included; the model the
+        // profile never remembered comes from the archive.
+        let mine = Preferences::default();
+        let (_target, restored) = profile(&store.owner);
+        restored.save_preferences(&mine).unwrap();
+        restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(restored.preferences().unwrap(), mine);
+        assert_eq!(
+            restored.remembered_model().unwrap().as_deref(),
+            Some("test/model")
+        );
+    }
+
+    #[test]
+    fn an_archive_from_before_the_settings_keeps_the_current_ones() {
+        // `seeded` remembers a model only, as every profile did before.
+        let (_source, store, _sid, _) = seeded();
+        let (_output, archive) = backed_up(&store);
+        assert_eq!(
+            archived_prefs(&archive),
+            json!({"version": 1, "modelId": "test/model"})
+        );
+        let (_target, restored) = profile(&store.owner);
+        restored.save_preferences(&chosen()).unwrap();
+        restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(restored.preferences().unwrap(), chosen());
+        // An empty profile: the defaults, and the archive's model.
+        let (_target, restored) = profile(&store.owner);
+        restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(restored.preferences().unwrap(), Preferences::default());
+        assert_eq!(
+            restored.remembered_model().unwrap().as_deref(),
+            Some("test/model")
+        );
+        // A damaged file is kept as it is.
+        let (_target, restored) = profile(&store.owner);
+        restored.remember_model("local/model").unwrap();
+        fs::write(restored.root.join(PREFS_FILE), "damaged").unwrap();
+        let report = restored.restore(&archive, &[], || Ok(())).unwrap();
+        assert_eq!(report.imported, 1);
+        assert_eq!(
+            fs::read(restored.root.join(PREFS_FILE)).unwrap(),
+            b"damaged"
+        );
+    }
+
+    #[test]
+    fn restore_refuses_archived_settings_this_version_cannot_read() {
+        let (_source, store, _sid, _) = seeded();
+        let (_output, archive) = backed_up(&store);
+        for prefs in [
+            json!({"version": 1, "instructions": "a".repeat(4001)}),
+            json!({"version": 1, "autoTitle": "yes"}),
+        ] {
+            let mut members = members_of(&archive);
+            replace_member(
+                &mut members,
+                PREFS_FILE,
+                serde_json::to_vec(&prefs).unwrap(),
+            );
+            let edited = archive.with_file_name("edited.zip");
+            write_zip(&edited, &members, false);
+            assert_refused(&edited, &store.owner, INVALID);
+        }
     }
 
     #[test]

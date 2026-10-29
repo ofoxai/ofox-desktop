@@ -573,9 +573,27 @@ function checkSessionFile(sessionFile) {
     throw new Error("Native session path must be absolute JSONL");
 }
 
+// The most characters (code points, as the host counts them) the user's
+// custom instructions may have.
+const MAX_INSTRUCTIONS = 4000;
+
+// The user's custom instructions as the host sent them: text within the
+// limit, or none.
+function checkInstructions(instructions) {
+  if (instructions === undefined) return "";
+  if (
+    typeof instructions !== "string" ||
+    [...instructions].length > MAX_INSTRUCTIONS
+  )
+    throw new Error("Invalid instructions");
+  return instructions;
+}
+
 // Describe only what this run can do. Without tools nothing is claimed; each
 // tool enables its capability by carrying its own Pi-style promptGuidelines.
-function systemPrompt(tools) {
+// The user's custom instructions, already scrubbed of the run's credentials,
+// follow as standing instructions; blank ones add nothing.
+function systemPrompt(tools, instructions = "") {
   const capabilities = tools.length
     ? [
         "Use only the provided tools.",
@@ -587,7 +605,11 @@ function systemPrompt(tools) {
     ...capabilities,
     "Do not claim to have read images or files you could not access. You have no local configuration or terminal access.",
   ].join(" ");
-  return `${role}\nBe clear, useful and concise. Preserve the user's requirements through long conversations.`;
+  const prompt = `${role}\nBe clear, useful and concise. Preserve the user's requirements through long conversations.`;
+  const standing = instructions.trim();
+  return standing
+    ? `${prompt}\nThe user's standing instructions for every conversation follow. Apply them unless a message asks otherwise.\n${standing}`
+    : prompt;
 }
 
 export class AssistantRuntime {
@@ -969,6 +991,7 @@ export class AssistantRuntime {
     )
       throw new Error("Invalid attachment selection");
     const webUrls = allowedWebUrls(params.allowedWebUrls);
+    const instructions = checkInstructions(params.instructions);
     const apiKey = params.apiKey;
     // Every credential of this run: its key, and a key the gateway refused
     // earlier in the same run. Conversation content loses exactly these.
@@ -1174,7 +1197,10 @@ export class AssistantRuntime {
           secrets,
         );
       const customTools = this.tools(context, model);
-      const roleText = systemPrompt(customTools);
+      const roleText = systemPrompt(
+        customTools,
+        scrubSecrets(instructions, secrets),
+      );
       const loader = new DefaultResourceLoader({
         cwd: workspace,
         agentDir,

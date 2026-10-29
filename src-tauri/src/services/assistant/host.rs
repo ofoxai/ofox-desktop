@@ -3342,6 +3342,80 @@ while read line; do :; done"#,
             .unwrap()
     }
 
+    fn settings_request(value: Value) -> SetPreferencesRequest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_settings_are_saved_for_the_signed_in_account_without_a_known_key() {
+        let (config, _env, host) = fixture_with_env();
+        assert_eq!(
+            host.get_preferences().await.unwrap(),
+            Preferences::default()
+        );
+        let key = "sk-of-a-key-this-process-handed-out";
+        host.remember_key(key);
+        let saved = host
+            .set_preferences(settings_request(json!({
+                "instructions": format!("Sign as {key}"),
+                "autoTitle": false,
+                "notifyOnFinish": true,
+            })))
+            .await
+            .unwrap();
+        let expected = Preferences {
+            instructions: format!("Sign as {}", crate::redact::REDACTED),
+            auto_title: false,
+            notify_on_finish: true,
+        };
+        assert_eq!(saved, expected);
+        assert_eq!(host.get_preferences().await.unwrap(), expected);
+        let store = host.store(&identity().owner).unwrap();
+        assert_eq!(store.preferences().unwrap(), expected);
+        // A damaged file reads as the defaults; the next save replaces it.
+        let prefs = config
+            .path()
+            .join("assistant")
+            .join(identity().owner)
+            .join("prefs.json");
+        std::fs::write(&prefs, "damaged").unwrap();
+        assert_eq!(
+            host.get_preferences().await.unwrap(),
+            Preferences::default()
+        );
+        let too_long = settings_request(json!({
+            "instructions": "a".repeat(4001), "autoTitle": true, "notifyOnFinish": true,
+        }));
+        assert_eq!(
+            host.set_preferences(too_long).await.unwrap_err(),
+            "assistant_instructions_too_long"
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_saved_for_another_account_or_authority_are_refused() {
+        let (_config, host) = fixture();
+        let settings = json!({"instructions": "x", "autoTitle": false, "notifyOnFinish": false});
+        for (owner, generation) in [
+            ("b".repeat(64), host.generation()),
+            (identity().owner, host.generation() + 1),
+        ] {
+            let mut request = settings.clone();
+            request["expectedOwner"] = json!(owner);
+            request["expectedGeneration"] = json!(generation);
+            assert_eq!(
+                host.set_preferences(settings_request(request))
+                    .await
+                    .unwrap_err(),
+                IDENTITY_CHANGED
+            );
+        }
+        assert_eq!(
+            host.get_preferences().await.unwrap(),
+            Preferences::default()
+        );
+    }
+
     #[tokio::test]
     async fn with_v1_down_a_new_conversation_starts_on_the_cheapest_claude() {
         let (_config, env, host) = fixture_with_env();
