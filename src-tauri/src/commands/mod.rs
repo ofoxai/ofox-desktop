@@ -27,6 +27,8 @@ mod misc;
 mod model_fetch;
 mod model_profiles;
 pub(crate) mod model_selection;
+#[cfg(unix)]
+pub(crate) mod node_launcher;
 pub(crate) mod node_requirement;
 pub(crate) mod ofox_apex;
 pub(crate) mod ofox_api_keys;
