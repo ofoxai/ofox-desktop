@@ -21,6 +21,7 @@ import {
   type AssistantPasteTarget,
   type AssistantRunRef,
 } from "@/lib/api/assistant";
+import { AssistantAudioPlayer } from "./AssistantAudioPlayer";
 export interface AssistantSpeechOutputProps {
   target: AssistantPasteTarget;
   models: readonly AssistantModel[];
@@ -382,13 +383,10 @@ export function AssistantSpeechOutput({
             </div>
           )}
           {result && (
-            <div
-              role="status"
-              className="flex flex-col gap-1 text-note text-ink-muted"
-            >
+            <div className="flex flex-col gap-1 text-note text-ink-muted">
               {result.status === "completed" ? (
                 <>
-                  <p className="text-ctl text-ink">
+                  <p role="status" className="text-ctl text-ink">
                     {t("assistant.speech.generated")}
                   </p>
                   {result.audio.output && (
@@ -400,6 +398,15 @@ export function AssistantSpeechOutput({
                         size: (result.audio.output.sizeBytes / 1024).toFixed(2),
                       })}
                     </p>
+                  )}
+                  {result.outputs?.[0] && result.audio.output && (
+                    <AssistantAudioPlayer
+                      key={`${result.operationId}:${result.outputs[0]}`}
+                      target={target}
+                      attachmentId={result.outputs[0]}
+                      mimeType={result.audio.output.mimeType}
+                      durationMs={result.audio.output.durationMs}
+                    />
                   )}
                   <p>
                     {result.cost == null

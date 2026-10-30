@@ -102,8 +102,14 @@ status, MIME, bounded bytes and actual WAV/MP3 or Ogg Opus container structure
 are checked before atomic publication to the private attachment directory.
 Failed publication rolls back the file and retains an unknown operation receipt.
 Completed ledger outputs survive orphan cleanup and ordinary backup/restore.
-Playback/save/reuse controls and extended history preferences are subsequent
-steps, with native and live billing acceptance still separate.
+Stored results now expose explicit play/pause/stop and native save controls.
+Opening a result does not load or autoplay audio. The player releases its source
+on stop, result/account/generation change, inactive page and unmount. Replaying,
+read failures and saving do not request synthesis or silently convert formats.
+The device probes codec support; unsupported output remains available to save.
+The scoped protocol allows bounded full/range reads up to 50 MiB and preserves
+no-store, regular-file, authority and atomic-save checks. Native WKWebView and
+live billing acceptance remain separate; extended history preferences follow.
 
 ## Delivery and acceptance
 

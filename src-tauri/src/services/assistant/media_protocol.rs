@@ -41,7 +41,14 @@ fn open_file(
                 && f.origin.as_deref() == Some("generated")
                 && matches!(
                     f.mime_type.as_str(),
-                    "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "video/mp4"
+                    "image/png"
+                        | "image/jpeg"
+                        | "image/webp"
+                        | "image/gif"
+                        | "video/mp4"
+                        | "audio/wav"
+                        | "audio/mpeg"
+                        | "audio/ogg"
                 )
         })
         .ok_or("assistant_attachment_not_found")?;
@@ -73,6 +80,8 @@ fn open_file(
     let meta = handle.metadata().map_err(|_| fail())?;
     let cap = if file.mime_type.starts_with("video/") {
         200 * 1024 * 1024
+    } else if file.mime_type.starts_with("audio/") {
+        super::speech::MAX_OUTPUT_BYTES as u64
     } else {
         30 * 1024 * 1024
     };
@@ -363,5 +372,172 @@ mod tests {
             serve(&store, &owner, 7, &request(&owner, &sid, &aid)).status(),
             404
         );
+    }
+    #[test]
+    fn audio_protocol_supports_all_output_mimes_ranges_and_its_own_fifty_mib_limit() {
+        for mime in ["audio/wav", "audio/mpeg", "audio/ogg"] {
+            let (_root, store, owner, sid, aid) = fixture();
+            let size = 31 * 1024 * 1024u64;
+            let path = store.attachment_root(&sid).unwrap().join(&aid);
+            std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].mime_type = mime.into();
+                    r.attachments[0].size_bytes = size;
+                    Ok(())
+                })
+                .unwrap();
+            let mut req = request(&owner, &sid, &aid);
+            req.headers_mut()
+                .insert("range", "bytes=1048576-1048591".parse().unwrap());
+            let response = serve(&store, &owner, 7, &req);
+            assert_eq!(response.status(), 206);
+            assert_eq!(response.body(), &vec![0u8; 16]);
+            assert_eq!(response.headers()["content-type"], mime);
+            assert_eq!(response.headers()["content-length"], "16");
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(serve(&store, &owner, 8, &req).status(), 403);
+            let mut head = request(&owner, &sid, &aid);
+            *head.method_mut() = Method::HEAD;
+            let response = serve(&store, &owner, 7, &head);
+            assert_eq!(response.status(), 200);
+            assert!(response.body().is_empty());
+            assert_eq!(response.headers()["content-length"], size.to_string());
+            let too_big = super::super::speech::MAX_OUTPUT_BYTES as u64 + 1;
+            std::fs::File::create(path)
+                .unwrap()
+                .set_len(too_big)
+                .unwrap();
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].size_bytes = too_big;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(serve(&store, &owner, 7, &head).status(), 404);
+        }
+    }
+
+    struct ReadEnv {
+        root: PathBuf,
+        identity: std::sync::Mutex<super::super::host::Identity>,
+    }
+    impl super::super::host::Environment for ReadEnv {
+        fn identity(
+            &self,
+        ) -> super::super::host::BoxFuture<'_, Result<super::super::host::Identity, String>>
+        {
+            Box::pin(async { Ok(self.identity.lock().unwrap().clone()) })
+        }
+        fn api_key<'a>(
+            &'a self,
+            _: &'a super::super::host::Identity,
+            _: Option<&'a str>,
+            _: &'a super::super::host::Admit<'a>,
+        ) -> super::super::host::BoxFuture<'a, Result<String, String>> {
+            panic!("local audio playback/save must not acquire a key")
+        }
+        fn key_ready<'a>(
+            &'a self,
+            _: &'a super::super::host::Identity,
+        ) -> super::super::host::BoxFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+        fn models<'a>(
+            &'a self,
+            _: &'a str,
+            _: super::super::catalog::Source,
+        ) -> super::super::host::BoxFuture<'a, Result<Vec<super::super::catalog::Model>, String>>
+        {
+            panic!("local audio must not query model catalogs")
+        }
+        fn gateway_base(&self, _: &str) -> Result<String, String> {
+            panic!("local audio must not use a gateway")
+        }
+        fn config_dir(&self) -> PathBuf {
+            self.root.clone()
+        }
+        fn runtime_dir(&self) -> Result<PathBuf, String> {
+            Err("assistant_runtime_unavailable".into())
+        }
+        fn emit(&self, _: super::super::types::Event) {}
+    }
+    #[tokio::test]
+    async fn audio_save_reuses_bytes_with_no_paid_call_and_rechecks_owner_after_picker() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (root, store, owner, sid, aid) = fixture();
+            let bytes = super::super::speech::tests::wav(1);
+            std::fs::write(store.attachment_root(&sid).unwrap().join(&aid), &bytes).unwrap();
+            store
+                .mutate(&sid, |r| {
+                    let f = &mut r.attachments[0];
+                    f.mime_type = "audio/wav".into();
+                    f.size_bytes = bytes.len() as u64;
+                    f.name = "speech.wav".into();
+                    Ok(())
+                })
+                .unwrap();
+            let env = Arc::new(ReadEnv {
+                root: root.path().into(),
+                identity: std::sync::Mutex::new(super::super::host::Identity {
+                    owner: owner.clone(),
+                    apex: apex.into(),
+                }),
+            });
+            let host = AssistantHost::new(env.clone());
+            let make = || SaveMediaRequest {
+                authority: DeleteRequest {
+                    session_id: sid.clone(),
+                    expected_owner: owner.clone(),
+                    expected_generation: host.generation(),
+                },
+                attachment_id: aid.clone(),
+            };
+            let output = tempfile::tempdir().unwrap();
+            let destination = output.path().join("speech.wav");
+            let target = destination.clone();
+            assert!(host
+                .save_media(make(), move |name| {
+                    assert_eq!(name, "speech.wav");
+                    Ok(Some(target))
+                })
+                .await
+                .unwrap());
+            assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&destination)
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
+            assert!(!host.save_media(make(), |_| Ok(None)).await.unwrap());
+            let mut stale = make();
+            stale.authority.expected_generation += 1;
+            assert_eq!(
+                host.save_media(stale, |_| panic!("no stale picker"))
+                    .await
+                    .unwrap_err(),
+                IDENTITY_CHANGED
+            );
+            let target = output.path().join("refused.wav");
+            let rejected = target.clone();
+            let changed = env.clone();
+            assert_eq!(
+                host.save_media(make(), move |_| {
+                    changed.identity.lock().unwrap().owner = "cd".repeat(32);
+                    Ok(Some(target))
+                })
+                .await
+                .unwrap_err(),
+                IDENTITY_CHANGED
+            );
+            assert!(!rejected.exists());
+        }
     }
 }

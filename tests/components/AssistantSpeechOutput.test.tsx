@@ -4,9 +4,10 @@ import {
   render,
   screen,
   waitFor,
+  cleanup,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { AssistantSpeechOutput } from "@/components/assistant/AssistantSpeechOutput";
@@ -15,6 +16,7 @@ const api = vi.hoisted(() => ({
   synthesize: vi.fn(),
   stop: vi.fn(),
   send: vi.fn(),
+  saveMedia: vi.fn(),
 }));
 vi.mock("@/lib/api/assistant", async (original) => ({
   ...(await original<typeof import("@/lib/api/assistant")>()),
@@ -58,8 +60,18 @@ const models = [
 beforeEach(async () => {
   Object.values(api).forEach((fn) => fn.mockReset());
   api.stop.mockResolvedValue(null);
+  vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+  vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "load").mockImplementation(() => {});
+  vi.spyOn(HTMLMediaElement.prototype, "canPlayType").mockReturnValue(
+    "probably",
+  );
   i18n.addResourceBundle("en", "translation", en, true, true);
   await i18n.changeLanguage("en");
+});
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
 });
 it("previews supplied reply text and never synthesizes or plays on opening", () => {
   render(
@@ -270,4 +282,67 @@ it("previews the saved text and frozen estimate when selecting a historical resu
     ),
   ).toBeVisible();
   expect(api.synthesize).not.toHaveBeenCalled();
+});
+
+it("replays saved history locally and releases the old source when another result is selected", async () => {
+  const result = (id: string): AssistantAudioResult => ({
+    operationId: id,
+    runId: id,
+    kind: "speech",
+    model: models[0].id,
+    status: "completed",
+    outputs: [id],
+    cost: null,
+    params: { voice: "Kore", responseFormat: "wav" },
+    audio: {
+      text: id,
+      pricing: models[0].audio!.pricing,
+      input: null,
+      usage: null,
+      requestId: null,
+      requestIdSource: null,
+      errorCode: null,
+      output: {
+        mimeType: "audio/wav",
+        sizeBytes: 16044,
+        durationMs: 1000,
+        sampleRate: 8000,
+        channels: 1,
+      },
+    },
+  });
+  render(
+    <AssistantSpeechOutput
+      target={target}
+      models={models}
+      initialText=""
+      history={[result("first"), result("second")]}
+      onClose={() => {}}
+    />,
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Speech result 1" }),
+  );
+  const old = document.querySelector("audio")!;
+  expect(
+    screen
+      .getByRole("timer", { name: "Playback position" })
+      .closest('[role="status"]'),
+  ).toBeNull();
+  expect(old).not.toBeNull();
+  expect(old).not.toHaveAttribute("src");
+  await userEvent.click(screen.getByRole("button", { name: "Play audio" }));
+  expect(old.getAttribute("src")).toContain("second");
+  await userEvent.click(screen.getByRole("button", { name: "Stop audio" }));
+  await userEvent.click(screen.getByRole("button", { name: "Play audio" }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Speech result 2" }),
+  );
+  expect(old).not.toHaveAttribute("src");
+  expect(document.querySelector("audio")).not.toHaveAttribute("src");
+  expect(
+    screen.getByRole("button", { name: "Generate speech" }),
+  ).toBeDisabled();
+  expect(api.synthesize).not.toHaveBeenCalled();
+  expect(api.send).not.toHaveBeenCalled();
 });
