@@ -4980,6 +4980,11 @@ fn image_media_survives_restart_and_followup_on_both_apexes() {
             assert!(media.native_entry_id.is_some());
             assert_eq!(detail.usage["mediaCostUsd"],"0.02");
             assert_eq!(detail.usage["estimatedCostUsd"],"0.02");
+            assert_eq!(detail.usage["requests"][0]["kind"], "image");
+            assert_eq!(detail.usage["requests"][0]["apex"], apex);
+            assert_eq!(detail.usage["requests"][0]["httpStatus"], 200);
+            assert_eq!(detail.usage["requests"][0]["priceSnapshot"]["perImagePrice"], "0.02");
+            assert!(detail.usage["requests"][0]["billedCostUsd"].is_null());
             assert_eq!(detail.attachments.len(),1);
             assert!(detail.session.draft_attachment_ids.is_empty());
             assert_eq!(serde_json::to_value(&detail.attachments[0]).unwrap()["origin"],"generated");
@@ -5033,6 +5038,10 @@ fn image_requests_retry_only_a_refused_key_and_never_replay_unknown_outcomes() {
             if expected=="completed" {assert_eq!(end.data["status"],"completed");}
             else {assert_eq!(detail.messages.last().unwrap().error_code.as_deref(),Some(expected));}
             assert_eq!(gateway.requests().len(),count);
+            let attempts = detail.usage["requests"].as_array().expect("attempt receipts");
+            assert_eq!(attempts.len(), count);
+            assert_eq!(attempts[0]["httpStatus"], if count == 2 {json!(401)} else {Value::Null});
+            assert!(attempts.iter().all(|r|r["billedCostUsd"].is_null()));
             assert!(host.send(repeat).await.is_err());
             assert_eq!(gateway.requests().len(),count,"operation identity prevents re-submit");
             if count==2 {
@@ -5171,6 +5180,11 @@ fn video_submit_persists_before_post_and_releases_chat_only_after_job_is_saved()
             assert_eq!(disk["operations"][0]["status"], "pendingMedia");
             assert_eq!(disk["messages"][1]["media"]["jobId"], job);
             assert_eq!(disk["messages"][1]["media"]["apex"], apex);
+            assert_eq!(
+                disk["messages"][1]["media"]["requestAttempts"][0]["httpStatus"],
+                202
+            );
+            assert!(disk["messages"][1]["media"]["priceSnapshot"]["quotedTotalUsd"].is_string());
             assert!(disk["messages"][1]["nativeEntryId"].is_string());
             assert!(host.send(repeat).await.is_err());
             assert_eq!(

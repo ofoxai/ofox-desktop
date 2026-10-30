@@ -1,3 +1,5 @@
+import { useRef, useState } from "react";
+import { AssistantRequestDetails } from "./AssistantRequestDetails";
 import { Info } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AssistantMessage, AssistantModel } from "@/lib/api/assistant";
@@ -38,6 +40,9 @@ export function ReplyMeta({
   onOpenChange?: (open: boolean) => void;
 }) {
   const { t, i18n } = useTranslation();
+  const metaTrigger = useRef<HTMLButtonElement>(null);
+  const [requestsOpen, setRequestsOpen] = useState(false);
+  const requests = message.usage?.requests ?? [];
   const model = message.modelId ? modelName(models, message.modelId) : null;
   const at = message.completedAt ?? message.createdAt;
   const date = new Date(at);
@@ -74,10 +79,11 @@ export function ReplyMeta({
           })}
         </time>
       </span>
-      {details.length > 0 && (
+      {(details.length > 0 || requests.length > 0) && (
         <Popover onOpenChange={onOpenChange}>
           <PopoverTrigger asChild>
             <Button
+              ref={metaTrigger}
               variant="icon"
               className="h-6 w-6 shrink-0"
               aria-label={t("assistant.replyDetails")}
@@ -94,9 +100,24 @@ export function ReplyMeta({
             {details.map((line) => (
               <p key={line}>{line}</p>
             ))}
+            {requests.length > 0 && (
+              <Button
+                variant="link"
+                className="h-auto px-0 text-note"
+                onClick={() => setRequestsOpen(true)}
+              >
+                {t("assistant.requestRecords")}
+              </Button>
+            )}
           </PopoverContent>
         </Popover>
       )}
+      <AssistantRequestDetails
+        requests={requests}
+        open={requestsOpen}
+        onOpenChange={setRequestsOpen}
+        returnFocusRef={metaTrigger}
+      />
     </>
   );
 }

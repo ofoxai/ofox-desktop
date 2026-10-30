@@ -1,4 +1,5 @@
 //! Bounded video HTTP requests. Credentials only accompany gateway requests.
+use super::provenance::{Receipt, Response};
 use super::{
     media,
     media_http::Failure,
@@ -40,6 +41,7 @@ async fn pricing_at(client: &reqwest::Client, url: &str) -> Result<Value, String
 
 fn failure(code: &str) -> Failure {
     Failure {
+        receipt: None,
         code: code.into(),
         unbilled: false,
         detail: None,
@@ -56,7 +58,7 @@ pub(super) async fn create(
     prompt: &str,
     params: &VideoRequest,
     frames: &[(&str, String)],
-) -> Result<Value, Failure> {
+) -> Result<Response, Failure> {
     let mut body = json!({"model":model,"prompt":prompt,"duration":params.duration,
         "resolution":params.resolution,"generate_audio":params.generate_audio});
     if let Some(aspect) = &params.aspect_ratio {
@@ -78,7 +80,10 @@ pub(super) async fn create(
         .await
         .map_err(|_| failure(media::UNKNOWN))?;
     let value = read_response(response, key, false).await?;
-    video::job_id(&value).map_err(|_| failure(media::UNKNOWN))?;
+    video::job_id(&value).map_err(|_| Failure {
+        receipt: Some(value.receipt.clone()),
+        ..failure(media::UNKNOWN)
+    })?;
     Ok(value)
 }
 pub(super) async fn query(
@@ -86,7 +91,7 @@ pub(super) async fn query(
     gateway: &str,
     key: &str,
     job: &str,
-) -> Result<Value, Failure> {
+) -> Result<Response, Failure> {
     super::types::validate_id(job).map_err(|_| failure(media::INVALID))?;
     let response = client
         .get(format!("{}/v1/videos/{job}", gateway.trim_end_matches('/')))
@@ -115,10 +120,18 @@ async fn read_response(
     mut response: reqwest::Response,
     key: &str,
     cancelling: bool,
-) -> Result<Value, Failure> {
+) -> Result<Response, Failure> {
     let status = response.status();
+    let receipt = Receipt::from_response(&response, key);
+    let failure = |code: &str| Failure {
+        receipt: Some(receipt.clone()),
+        ..failure(code)
+    };
     if cancelling && status == reqwest::StatusCode::NO_CONTENT {
-        return Ok(Value::Null);
+        return Ok(Response {
+            value: Value::Null,
+            receipt,
+        });
     }
     let cap = 1024 * 1024;
     if response
@@ -142,7 +155,10 @@ async fn read_response(
     if status.is_success() && !cancelling {
         return value
             .is_object()
-            .then_some(value)
+            .then_some(Response {
+                value,
+                receipt: receipt.clone(),
+            })
             .ok_or_else(|| failure(media::UNKNOWN));
     }
     let upstream = value["error"]["code"].as_str().unwrap_or("");
@@ -157,6 +173,7 @@ async fn read_response(
         _ => media::UNKNOWN,
     };
     Err(Failure {
+        receipt: Some(receipt),
         code: code.into(),
         unbilled: status.is_client_error(),
         detail: value["error"]["message"].as_str().map(|text| {
@@ -352,7 +369,11 @@ mod tests {
         ] {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
-                .respond_with(ResponseTemplate::new(status).set_body_string("invalid-json"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("x-request-id", "req_submit")
+                        .set_body_string(if status == 202 { "{}" } else { "invalid-json" }),
+                )
                 .expect(1)
                 .mount(&server)
                 .await;
@@ -368,6 +389,11 @@ mod tests {
             .await
             .unwrap_err();
             assert_eq!(failure.code, expected);
+            assert_eq!(
+                failure.receipt.as_ref().unwrap().request_id.as_deref(),
+                Some("req_submit")
+            );
+            assert_eq!(failure.receipt.as_ref().unwrap().http_status, status);
         }
     }
     #[tokio::test]

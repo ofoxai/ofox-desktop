@@ -11,6 +11,16 @@ ten-minute TTL. Explicit Retry is available, including after a valid empty list.
 See [catalog behavior](assistant-catalog.md). Native application acceptance of this
 iteration remains pending; sandbox/browser results do not validate Windows.
 
+## Assistant request records (2026-10-30)
+
+New requests preserve bounded gateway header identifiers, outcomes, usage and
+frozen pricing evidence for inspection. Missing/legacy identifiers remain
+unavailable, and an interrupted response may never publish a receipt. Search
+currently exposes usage rather than a platform request ID. Estimates and returned
+video costs remain separate from unverified actual charges; binary speech without
+usage never proves billing. See [request records](assistant-request-records.md).
+Native and real audio invoice acceptance remains pending.
+
 ## Assistant audio foundation (2026-10-30)
 
 The audio catalog, bounded import, recording and editable ASR draft controls

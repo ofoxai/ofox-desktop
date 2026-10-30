@@ -135,7 +135,7 @@ test("a title is one short request about the first turn, and its cost is kept un
   assert.equal(added[0].usage.output, 5);
   assert.equal(added[0].priceSnapshot.modelId, model.id);
   // Everything the turn had is still there, plus the title's cost.
-  assert.equal(result.entries.length, turn.entries.length + 1);
+  assert.equal(result.entries.length, turn.entries.length + 2);
   assert.deepEqual(
     (await new AssistantRuntime().load(params)).entries,
     result.entries,
@@ -195,12 +195,24 @@ test("a title request that fails gives no title, never throws, and keeps what it
     const result = await title();
     assert.equal(result.title, null, name);
     if (!recorded) {
-      // Nothing was generated: native history is untouched.
-      assert.equal(result.entries, undefined, name);
-      assert.equal(await readFile(params.sessionFile, "utf8"), before, name);
+      // No usage charge is created; the failed attempt is still traceable.
+      assert.equal(result.entries.length, turn.entries.length + 1, name);
+      assert.equal(
+        usageEntries(result.entries).length,
+        usageEntries(turn.entries).length,
+        name,
+      );
+      const receipt = result.entries.find(
+        (entry) => entry.role === "request" && entry.request.kind === "title",
+      );
+      assert.equal(
+        receipt.request.status,
+        name === "refused" ? "rejected" : "not_sent",
+      );
+      assert.notEqual(await readFile(params.sessionFile, "utf8"), before, name);
       continue;
     }
-    assert.equal(result.entries.length, turn.entries.length + 1, name);
+    assert.equal(result.entries.length, turn.entries.length + 2, name);
     const added = usageEntries(result.entries).filter(
       (entry) => entry.type === "title",
     );

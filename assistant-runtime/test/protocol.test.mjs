@@ -197,7 +197,9 @@ test(
     const result = await wire.start("run", params);
     assert.equal(result.status, "completed");
     assert.deepEqual(
-      result.entries.map((entry) => entry.content),
+      result.entries
+        .filter((entry) => entry.role !== "request")
+        .map((entry) => entry.content),
       [`${lookalikes} [REDACTED]`, `${lookalikes} [REDACTED]`],
     );
     assert.equal(
@@ -525,7 +527,7 @@ test(
     });
     assert.deepEqual(
       shown.entries
-        .filter((entry) => entry.active)
+        .filter((entry) => entry.active && entry.role !== "request")
         .map(({ role, content }) => [role, content]),
       [
         ["user", "Synthetic question"],

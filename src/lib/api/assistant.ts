@@ -497,7 +497,24 @@ export interface AssistantMessage {
  * saved. `usageCoverage: "incomplete"` means some request may have been billed
  * without a known cost, for good: the cost is then unknown, never zero.
  */
+export interface AssistantRequestRecord {
+  kind: string;
+  modelId?: string | null;
+  apex?: string | null;
+  status: string;
+  httpStatus?: number | null;
+  requestId?: string | null;
+  requestIdSource?: string | null;
+  usage?: unknown;
+  priceSnapshot?: unknown;
+  estimatedCostUsd?: string | null;
+  reportedCostUsd?: string | null;
+  billedCostUsd?: null;
+  jobId?: string | null;
+}
+
 export interface AssistantUsage {
+  requests?: AssistantRequestRecord[];
   mediaCostUsd?: string | null;
   inputTokens?: number;
   outputTokens?: number;
@@ -643,6 +660,13 @@ export type AssistantMediaStatus =
   | "expired"
   | "unknown";
 interface AssistantMediaBase {
+  requestAttempts?: {
+    httpStatus: number;
+    requestId: string | null;
+    requestIdSource: string | null;
+  }[];
+  responseUsage?: unknown;
+  priceSnapshot?: unknown;
   model: string;
   inputIds: string[];
   status: AssistantMediaStatus;

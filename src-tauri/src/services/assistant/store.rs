@@ -89,12 +89,13 @@ pub struct SessionRecord {
 
 impl SessionRecord {
     pub fn into_detail(self) -> Detail {
+        let usage = super::provenance::with_media(self.usage.clone(), &self);
         Detail {
             audio_operations: super::audio::results(&self.operations),
             session: self.session,
             messages: self.messages,
             attachments: self.attachments,
-            usage: self.usage,
+            usage,
         }
     }
 }

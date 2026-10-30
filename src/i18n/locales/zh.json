@@ -5402,6 +5402,43 @@
       "refreshing": "正在更新模型，可继续使用已显示的模型。",
       "failed": "部分目录来源未能刷新，正在显示上次可用的模型。",
       "retry": "重试模型目录"
+    },
+    "requestRecords": "请求记录",
+    "requestChargeUnknown": "实扣费用需与平台账单逐笔核对。这里保留请求标识与计费依据。",
+    "requestRecordsEmpty": "这份历史没有请求记录。较早的历史可能未保留这些信息。",
+    "requestUnknown": "未知",
+    "requestIdentifier": "平台请求标识",
+    "requestNotReturned": "未返回",
+    "requestJobId": "视频任务标识",
+    "requestEstimate": "估算费用：${{cost}}",
+    "requestReportedCost": "平台返回费用：${{cost}}（未对账）",
+    "requestFacts": "用量和提交时价格",
+    "requestKind": {
+      "chat": "对话",
+      "title": "标题",
+      "compaction": "整理上下文",
+      "image": "图片",
+      "video": "视频",
+      "speech": "语音合成",
+      "transcription": "语音转写",
+      "search": "搜索"
+    },
+    "requestStatus": {
+      "completed": "已完成",
+      "rejected": "已拒绝",
+      "unknown": "结果未知",
+      "not_sent": "未发送",
+      "submitting": "正在提交",
+      "queued": "排队中",
+      "in_progress": "进行中",
+      "downloading": "下载中",
+      "paused": "已暂停",
+      "failed": "失败",
+      "cancelled": "已取消",
+      "expired": "已过期",
+      "download_failed": "下载失败",
+      "query_expired": "查询已过期",
+      "error": "错误"
     }
   }
 }

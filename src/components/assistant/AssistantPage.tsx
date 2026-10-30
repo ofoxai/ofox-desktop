@@ -72,6 +72,8 @@ import { assistantMarkdown } from "@/utils/assistantMarkdown";
 import { searchHighlight } from "@/utils/assistantSearch";
 import { isSendable } from "@/utils/assistantAttachments";
 import { MAX_PASTED_FILES, pastedFiles } from "@/utils/assistantPaste";
+import { assistantRequests } from "@/utils/assistantRequests";
+import { AssistantRequestDetails } from "./AssistantRequestDetails";
 import { usageSummary } from "@/utils/assistantUsage";
 import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
@@ -248,6 +250,10 @@ function AssistantWorkspace() {
   // How many messages are being edited: a new conversation would drop them.
   const openEdits = useRef(0);
   const usageLabelId = useId();
+  const [requestScope, setRequestScope] = useState<string | null>(null);
+  const requestScopeKey = `${bootstrap?.owner}:${bootstrap?.authorityGeneration}:${detail?.session.id}`;
+  const requests =
+    requestScope === requestScopeKey ? assistantRequests(detail) : [];
   const newConversationButton = useRef<HTMLButtonElement>(null);
   const trashEntry = useRef<HTMLButtonElement>(null);
   const trashBack = useRef<HTMLButtonElement>(null);
@@ -1033,6 +1039,13 @@ function AssistantWorkspace() {
                   </div>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() => {
+                    menuAction.current = () => setRequestScope(requestScopeKey);
+                  }}
+                >
+                  {t("assistant.requestRecords")}
+                </DropdownMenuItem>
                 {usage && (
                   <>
                     <DropdownMenuLabel
@@ -1924,6 +1937,14 @@ function AssistantWorkspace() {
             setBackupDialog(null);
             returnFocusTo(trigger ?? null);
           });
+        }}
+      />
+      <AssistantRequestDetails
+        requests={requests}
+        returnFocusRef={menuTrigger}
+        open={requestScope === requestScopeKey}
+        onOpenChange={(open) => {
+          if (!open) setRequestScope(null);
         }}
       />
       <ConfirmDialog

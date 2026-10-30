@@ -1,5 +1,6 @@
 //! One gateway image attempt. Authentication retry belongs to the host.
 use super::media::{ImageRequest, CREDITS, INVALID, MAX_IMAGE_BYTES, SAFETY, UNKNOWN};
+use super::provenance::{Receipt, Response};
 use serde_json::{json, Value};
 
 pub(super) struct InputImage {
@@ -10,6 +11,7 @@ pub(super) struct InputImage {
 
 #[derive(Debug)]
 pub(super) struct Failure {
+    pub receipt: Option<Receipt>,
     pub code: String,
     pub unbilled: bool,
     pub detail: Option<String>,
@@ -23,8 +25,9 @@ pub(super) async fn request(
     prompt: &str,
     params: &ImageRequest,
     input: Option<&InputImage>,
-) -> Result<Value, Failure> {
+) -> Result<Response, Failure> {
     let unknown = || Failure {
+        receipt: None,
         detail: None,
         code: UNKNOWN.into(),
         unbilled: false,
@@ -67,6 +70,7 @@ pub(super) async fn request(
             .file_name(input.name.clone())
             .mime_str(&input.mime)
             .map_err(|_| Failure {
+                receipt: None,
                 detail: None,
                 code: INVALID.into(),
                 unbilled: true,
@@ -77,6 +81,11 @@ pub(super) async fn request(
     }
     let mut response = request.send().await.map_err(|_| unknown())?;
     let status = response.status();
+    let receipt = Receipt::from_response(&response, key);
+    let unknown = || Failure {
+        receipt: Some(receipt.clone()),
+        ..unknown()
+    };
     // Bound encoded JSON before allocating decoded images. Error bodies
     // have a separate small cap and are never returned verbatim.
     let cap = if status.is_success() {
@@ -96,7 +105,13 @@ pub(super) async fn request(
     }
     let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     if status.is_success() {
-        return value.is_object().then_some(value).ok_or_else(unknown);
+        return value
+            .is_object()
+            .then_some(Response {
+                value,
+                receipt: receipt.clone(),
+            })
+            .ok_or_else(unknown);
     }
     let upstream = value["error"]["code"]
         .as_str()
@@ -115,6 +130,7 @@ pub(super) async fn request(
         _ => UNKNOWN,
     };
     Err(Failure {
+        receipt: Some(receipt),
         detail: value["error"]["message"].as_str().map(|message| {
             super::host::scrub_detail(message, &[key.to_owned()])
                 .chars()
@@ -142,6 +158,45 @@ mod tests {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn response_receipt_keeps_header_identity_even_when_body_is_invalid_or_refused() {
+        let server = MockServer::start().await;
+        for (status, body) in [(200, "broken"), (429, "{}"), (200, "{}")] {
+            server.reset().await;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(status)
+                        .insert_header("x-ofox-request-id", "req_image_1")
+                        .set_body_string(body),
+                )
+                .mount(&server)
+                .await;
+            let result = request(
+                &client(),
+                &server.uri(),
+                "synthetic-key",
+                "test/image",
+                "square",
+                &ImageRequest::default(),
+                None,
+            )
+            .await;
+            let receipt = match &result {
+                Ok(value) => &value.receipt,
+                Err(error) => error
+                    .receipt
+                    .as_ref()
+                    .expect("received headers survive a failed body"),
+            };
+            assert_eq!(receipt.request_id.as_deref(), Some("req_image_1"));
+            assert_eq!(
+                receipt.request_id_source.as_deref(),
+                Some("x-ofox-request-id")
+            );
+            assert_eq!(receipt.http_status, status);
+        }
     }
 
     #[tokio::test]

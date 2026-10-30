@@ -334,13 +334,21 @@ test("real Pi SDK streams and reloads native history without persisting credenti
   assert.equal(native.includes(token), false);
   // A key-shaped string the run was not given is the conversation's own text.
   assert.equal(native.includes("sk-ant-fakeSecretKey123456789"), true);
-  assert.equal(result.entries.filter((item) => item.active).length, 2);
+  assert.equal(
+    result.entries.filter((item) => item.active && item.role !== "request")
+      .length,
+    2,
+  );
   assert.deepEqual(
-    result.entries.map((item) => item.runId),
+    result.entries
+      .filter((item) => item.role !== "request")
+      .map((item) => item.runId),
     [params.runId, params.runId],
   );
   assert.deepEqual(
-    result.entries.map((item) => item.operationId),
+    result.entries
+      .filter((item) => item.role !== "request")
+      .map((item) => item.operationId),
     [params.operationId, params.operationId],
   );
   assert.equal(
@@ -419,7 +427,7 @@ test("conversation text passes byte for byte; only the run's own key is replaced
   );
   assert.deepEqual(
     result.entries
-      .filter((entry) => entry.role !== "usage")
+      .filter((entry) => !["usage", "request"].includes(entry.role))
       .map((entry) => entry.content),
     [question, answer],
   );
@@ -2953,4 +2961,109 @@ test("a context too small to compact is refused locally without an unknown bill"
   assert.equal(result.errorCode, "assistant_compact_unavailable");
   assert.equal(result.errorKind, "not_sent");
   assert.equal(calls, 1);
+});
+
+test("request provenance survives reload with frozen prices and scrubbed gateway header IDs", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    const params = {
+      ...(await sandbox(t)),
+      apex,
+      model: {
+        ...model,
+        pricingKnown: true,
+        cost: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0 },
+      },
+    };
+    const runtime = new AssistantRuntime({
+      fetch: async () =>
+        stream("receipt", {
+          headers: {
+            "content-type": "text/event-stream",
+            "x-ofox-request-id": "req_gateway_123",
+            "x-request-id": "lower_priority",
+          },
+        }),
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run(params);
+    const request = result.entries.find((entry) => entry.role === "request");
+    assert.ok(request, "one separate receipt, without a second usage row");
+    assert.equal(request.request.requestId, "req_gateway_123");
+    assert.equal(request.request.requestIdSource, "x-ofox-request-id");
+    assert.equal(request.request.httpStatus, 200);
+    assert.equal(request.request.kind, "chat");
+    assert.equal(request.request.apex, apex);
+    assert.equal(request.request.modelId, model.id);
+    assert.equal(request.request.status, "completed");
+    assert.equal(request.request.usage.input, 10);
+    assert.equal(request.request.priceSnapshot.cost.input, 2);
+    assert.equal(request.request.billedCostUsd, null);
+    assert.deepEqual((await runtime.load(params)).entries, result.entries);
+    assert.equal(
+      result.entries.filter((entry) => entry.role === "assistant").length,
+      1,
+    );
+    assert.ok(!(await readFile(params.sessionFile, "utf8")).includes(token));
+  }
+});
+
+test("refused and malformed streams retain response identity without inventing a completion ID", async (t) => {
+  for (const [status, id] of [
+    [429, "req_refused"],
+    [200, token],
+    [200, "bad id with spaces"],
+  ]) {
+    const params = await sandbox(t);
+    const runtime = new AssistantRuntime({
+      fetch: async () =>
+        new Response(
+          status === 429
+            ? JSON.stringify({ error: { message: "limited" } })
+            : "broken stream",
+          {
+            status,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-request-id": id,
+            },
+          },
+        ),
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run(params);
+    const receipt = result.entries.find(
+      (entry) => entry.role === "request",
+    )?.request;
+    assert.ok(receipt);
+    assert.equal(receipt.httpStatus, status);
+    assert.equal(receipt.status, status === 429 ? "rejected" : "unknown");
+    assert.equal(receipt.requestId, status === 429 ? "req_refused" : null);
+    assert.equal(receipt.billedCostUsd, null);
+    assert.ok(!(await readFile(params.sessionFile, "utf8")).includes(token));
+  }
+});
+
+test("a completed reply without usage retains its receipt while its cost stays unknown", async (t) => {
+  const params = {
+    ...(await sandbox(t)),
+    model: { ...model, pricingKnown: true, cost: { input: 2, output: 3 } },
+  };
+  const runtime = new AssistantRuntime({
+    fetch: async () =>
+      stream("Completed without counters", { omitUsage: true }),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run(params);
+  const receipt = result.entries.find(
+    (entry) => entry.role === "request",
+  ).request;
+  assert.equal(receipt.status, "completed");
+  assert.equal(
+    receipt.requestId,
+    null,
+    "the body's completion ID is not a gateway correlation header",
+  );
+  assert.equal(receipt.estimatedCostUsd, null);
+  assert.equal(receipt.billedCostUsd, null);
+  assert.equal(result.usageCoverage, "incomplete");
 });

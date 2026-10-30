@@ -1239,6 +1239,52 @@ mod tests {
         assert_eq!((repeat.imported, repeat.skipped), (0, 1));
     }
 
+    #[test]
+    fn request_provenance_survives_real_archive_roundtrip_without_rebilling() {
+        let (_source, store, sid, _) = seeded();
+        let native = store.native_history_path(&sid).unwrap();
+        let mut history = fs::read_to_string(&native).unwrap();
+        history.push_str(&json!({"type":"custom","customType":"ofox-desktop-request","id":"61ce1a09","parentId":"a005630a","timestamp":"2026-10-30T00:00:00Z",
+            "data":{"kind":"chat","modelId":"test/model","apex":"ofox.io","runId":"a48cac04-e861-4e76-92e8-6a73896a095c","operationId":"79346d31-7f3c-48d5-b3ac-81a889060608","status":"completed","httpStatus":200,"requestId":"req_archived","requestIdSource":"x-ofox-request-id","usage":{"input":10},"priceSnapshot":{"cost":{"input":2}},"billedCostUsd":null}}).to_string());
+        history.push('\n');
+        fs::write(&native, &history).unwrap();
+        store.mutate(&sid, |r| {
+            r.operations[0].media = Some(serde_json::from_value(json!({"kind":"image","model":"test/image","params":{},"status":"completed","apex":"ofox.ai","cost":"0.02","requestAttempts":[{"httpStatus":200,"requestId":"req_image_archived","requestIdSource":"x-request-id"}],"responseUsage":{"output_tokens":100},"priceSnapshot":{"perImagePrice":"0.02"}})).unwrap());
+            Ok(())
+        }).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("receipts.zip");
+        assert_eq!(store.backup(&archive, &[], || Ok(())).unwrap().sessions, 1);
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        assert_eq!(
+            restored.load_record(&sid).unwrap().operations,
+            store.load_record(&sid).unwrap().operations
+        );
+        assert_eq!(
+            fs::read_to_string(restored.native_history_path(&sid).unwrap()).unwrap(),
+            history
+        );
+        let detail = restored.load_detail(&sid).unwrap();
+        assert_eq!(
+            detail.usage["requests"][0]["requestId"],
+            "req_image_archived"
+        );
+        assert_eq!(
+            detail.usage["requests"][0]["priceSnapshot"]["perImagePrice"],
+            "0.02"
+        );
+        assert!(detail.usage["requests"][0]["billedCostUsd"].is_null());
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().skipped,
+            1
+        );
+    }
+
     /// A generated title's cost is kept under the turn it named.
     #[test]
     fn a_titles_usage_entry_is_backed_up_and_restored_with_its_history() {

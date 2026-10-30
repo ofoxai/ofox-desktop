@@ -165,6 +165,11 @@ impl AssistantHost {
         request.attachment_ids = selected.iter().map(|a| a.id.clone()).collect();
         let media = MediaRecord {
             kind: "image".into(),
+            apex: Some(identity.apex.clone()),
+            submitted_at: Some(now()),
+            price_snapshot: Some(
+                serde_json::to_value(model.image.as_ref()).map_err(|_| media::INVALID)?,
+            ),
             model: model.id.clone(),
             params: serde_json::to_value(&params).map_err(|_| media::INVALID)?,
             input_ids: request.attachment_ids.clone(),
@@ -283,6 +288,11 @@ impl AssistantHost {
             .ok_or("assistant_key_rejected")?;
         let mut result =
             media_http::request(&client, &gateway, &key, &model.id, prompt, &params, input).await;
+        let (receipt, usage) = match &result {
+            Ok(r) => (Some(&r.receipt), r.value.get("usage")),
+            Err(e) => (e.receipt.as_ref(), None),
+        };
+        let mut media = self.record_media_attempt(control, receipt, usage).await?;
         if result
             .as_ref()
             .is_err_and(|e| e.code == "assistant_key_rejected")
@@ -297,6 +307,11 @@ impl AssistantHost {
             result =
                 media_http::request(&client, &gateway, &key, &model.id, prompt, &params, input)
                     .await;
+            let (receipt, usage) = match &result {
+                Ok(r) => (Some(&r.receipt), r.value.get("usage")),
+                Err(e) => (e.receipt.as_ref(), None),
+            };
+            media = self.record_media_attempt(control, receipt, usage).await?;
         }
         let response = result.map_err(|e| Failure {
             code: e.code,
@@ -306,7 +321,6 @@ impl AssistantHost {
         })?;
         self.validate_run(control)?;
         let images = media::decode(&response, params.count())?;
-        let mut media = media.clone();
         media.cost = media::cost(
             model.image.as_ref().ok_or(media::INVALID)?,
             &response["usage"],

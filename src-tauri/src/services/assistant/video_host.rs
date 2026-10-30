@@ -254,6 +254,9 @@ impl AssistantHost {
         let prompt = super::host::scrub_secrets(&request.text, &self.known_keys());
         let media = MediaRecord {
             kind: "video".into(),
+            price_snapshot: Some(
+                json!({"quotedTotalUsd":quote.price.map(|v|v.normalize().to_string()),"params":params}),
+            ),
             model: model.id.clone(),
             params: serde_json::to_value(&params).map_err(|_| media::INVALID)?,
             input_ids: request.attachment_ids.clone(),
@@ -380,6 +383,11 @@ impl AssistantHost {
             &frames,
         )
         .await;
+        let (receipt, usage) = match &result {
+            Ok(r) => (Some(&r.receipt), r.value.get("usage")),
+            Err(e) => (e.receipt.as_ref(), None),
+        };
+        self.record_media_attempt(run, receipt, usage).await?;
         if result
             .as_ref()
             .is_err_and(|error| error.code == "assistant_key_rejected")
@@ -401,6 +409,11 @@ impl AssistantHost {
                 &frames,
             )
             .await;
+            let (receipt, usage) = match &result {
+                Ok(r) => (Some(&r.receipt), r.value.get("usage")),
+                Err(e) => (e.receipt.as_ref(), None),
+            };
+            self.record_media_attempt(run, receipt, usage).await?;
         }
         let response = result.map_err(|error| Failure {
             code: error.code,
@@ -735,6 +748,8 @@ impl AssistantHost {
                             continue;
                         }
                     };
+                    self.record_video_usage(&control, job, &value["usage"])
+                        .await?;
                     let cost = value["usage"]["video_cost"]
                         .as_str()
                         .and_then(|n| n.parse::<Decimal>().ok())
@@ -749,7 +764,10 @@ impl AssistantHost {
                         let result = match downloaded {
                             Ok(mut file) => {
                                 let mut media = media.clone();
-                                media.cost = cost;
+                                super::provenance::video_facts(&mut media, &value["usage"], cost);
+                                if let Some(usage) = &mut media.response_usage {
+                                    super::host::scrub_secrets_in(usage, &self.known_keys());
+                                }
                                 blocking({
                                     let store = self.store(&identity.owner)?;
                                     let sid = sid.clone();

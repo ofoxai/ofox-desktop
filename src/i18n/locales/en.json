@@ -5402,6 +5402,43 @@
       "refreshing": "Updating models; the displayed models remain available.",
       "failed": "Some catalog sources could not be refreshed. Showing the last available models.",
       "retry": "Retry model catalog"
+    },
+    "requestRecords": "Request records",
+    "requestChargeUnknown": "Actual charge is unknown until matched with the platform bill. These records retain request identifiers and pricing evidence.",
+    "requestRecordsEmpty": "No request records in this history. Older records may not contain these facts.",
+    "requestUnknown": "Unknown",
+    "requestIdentifier": "Platform request ID",
+    "requestNotReturned": "Not returned",
+    "requestJobId": "Video job ID",
+    "requestEstimate": "Estimated cost: ${{cost}}",
+    "requestReportedCost": "Platform-reported cost: ${{cost}} (not reconciled)",
+    "requestFacts": "Usage and frozen prices",
+    "requestKind": {
+      "chat": "Chat",
+      "title": "Title",
+      "compaction": "Compaction",
+      "image": "Image",
+      "video": "Video",
+      "speech": "Speech",
+      "transcription": "Transcription",
+      "search": "Search"
+    },
+    "requestStatus": {
+      "completed": "Completed",
+      "rejected": "Rejected",
+      "unknown": "Unknown outcome",
+      "not_sent": "Not sent",
+      "submitting": "Submitting",
+      "queued": "Queued",
+      "in_progress": "In progress",
+      "downloading": "Downloading",
+      "paused": "Paused",
+      "failed": "Failed",
+      "cancelled": "Cancelled",
+      "expired": "Expired",
+      "download_failed": "Download failed",
+      "query_expired": "Query expired",
+      "error": "Error"
     }
   }
 }

@@ -10,6 +10,12 @@ use serde_json::Value;
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaRecord {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_attempts: Vec<super::provenance::Receipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_usage: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price_snapshot: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<super::audio::Trace>,
     pub kind: String,

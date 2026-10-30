@@ -236,6 +236,79 @@ function usageEntry(params, target, type, usage, secrets) {
   );
 }
 
+// Gateway headers are correlation identifiers, never response/body completion
+// IDs or proof of billing. Keep only bounded opaque identifiers, with provenance.
+function responseIdentity(response, secrets) {
+  for (const name of ["x-ofox-request-id", "x-request-id", "request-id"]) {
+    const value = response.headers.get(name);
+    if (
+      value &&
+      value.length <= 200 &&
+      /^[A-Za-z0-9_.:-]+$/.test(value) &&
+      !secrets.some((secret) => secret && value.includes(secret))
+    )
+      return { requestId: value, requestIdSource: name };
+  }
+  return { requestId: null, requestIdSource: null };
+}
+
+// A separate custom entry preserves each HTTP attempt without counting its
+// usage twice or turning it into conversation input. The SDK retains its own
+// assistant/summary usage as before. Missing actual charges stay unknown.
+function recordRequest(
+  manager,
+  params,
+  target,
+  kind,
+  message,
+  outcome,
+  secrets,
+) {
+  if (!outcome.requested || outcome.recorded) return;
+  outcome.recorded = true;
+  const facts = usageEntry(params, target, kind, message?.usage, secrets);
+  const answered =
+    message &&
+    !["error", "aborted"].includes(message.stopReason) &&
+    (usageCoverage(message.usage) === "complete" ||
+      message.content?.some(
+        (part) =>
+          part.type === "toolCall" ||
+          (part.type === "text" && part.text?.length),
+      ));
+  const status =
+    outcome.status >= 400 && outcome.status < 500
+      ? "rejected"
+      : outcome.network?.sent === false
+        ? "not_sent"
+        : answered
+          ? "completed"
+          : "unknown";
+  const amount = message?.usage?.cost?.total;
+  manager.appendCustomEntry(
+    "ofox-desktop-request",
+    scrubSecrets(
+      {
+        ...facts,
+        kind,
+        apex: params.apex,
+        modelId: target.id,
+        httpStatus: outcome.responseStatus ?? null,
+        requestId: outcome.requestId ?? null,
+        requestIdSource: outcome.requestIdSource ?? null,
+        status,
+        estimatedCostUsd: ["rejected", "not_sent"].includes(status)
+          ? "0"
+          : facts.pricingKnown && Number.isFinite(amount) && amount >= 0
+            ? String(amount)
+            : null,
+        billedCostUsd: null,
+      },
+      secrets,
+    ),
+  );
+}
+
 // The only way a model request leaves the runtime: to the model's own Ofox
 // origin, never redirected, with the key only in the Authorization header.
 // `outcome` learns that the request was made, then the HTTP status of a
@@ -273,6 +346,8 @@ function credentialFetch({ baseUrl, apiKey, providerFetch, signal }) {
       if (!signal.aborted) outcome.network = networkFailure(error);
       throw error;
     }
+    outcome.responseStatus = response.status;
+    Object.assign(outcome, responseIdentity(response, [apiKey]));
     if (response.status >= 400) outcome.status = response.status;
     return response;
   };
@@ -463,7 +538,9 @@ function projection(manager, secrets = []) {
         (entry.type === "message" &&
           ["user", "assistant", "toolResult"].includes(entry.message.role)) ||
         (entry.type === "custom" &&
-          entry.customType === "ofox-desktop-usage") ||
+          ["ofox-desktop-usage", "ofox-desktop-request"].includes(
+            entry.customType,
+          )) ||
         entry.type === "usage" ||
         (["compaction", "branch_summary"].includes(entry.type) &&
           !summaryHasOwnRecords(entry)),
@@ -485,6 +562,24 @@ function projection(manager, secrets = []) {
           secrets,
         );
       }
+      if (
+        entry.type === "custom" &&
+        entry.customType === "ofox-desktop-request"
+      )
+        return scrubSecrets(
+          {
+            id: entry.id,
+            parentId: entry.parentId,
+            role: "request",
+            content: "",
+            active: active.has(entry.id),
+            timestamp: Date.parse(entry.timestamp),
+            runId: entry.data.runId,
+            operationId: entry.data.operationId,
+            request: entry.data,
+          },
+          secrets,
+        );
       if (entry.type !== "message") {
         const data =
           entry.type === "custom"
@@ -532,6 +627,9 @@ function projection(manager, secrets = []) {
           usage: message.usage,
           usageCoverage: messageCoverage(message),
           ...toolFields(message),
+          ...(message.role === "toolResult" && marker?.apex
+            ? { apex: marker.apex }
+            : {}),
           active: active.has(entry.id),
           timestamp: message.timestamp ?? Date.parse(entry.timestamp),
           stopReason: message.stopReason,
@@ -702,6 +800,7 @@ export class AssistantRuntime {
     )
       return existing;
     manager.appendCustomEntry("ofox-desktop-run", {
+      apex: params.apex,
       runId: params.runId,
       operationId: params.operationId,
       pricingKnown: false,
@@ -979,8 +1078,7 @@ export class AssistantRuntime {
       const title = answered ? contentText(message.content).trim() : "";
       // An answer costs its usage; a request refused or never sent cost
       // nothing; any other may have been billed at an unknown cost.
-      if (!answered && (unbilled(message) || !outcome.requested))
-        return { title: null };
+      if (!answered && !outcome.requested) return { title: null };
       // Deleted meanwhile: there is no history left to record it in.
       await stat(params.sessionFile);
       const { SessionManager } = await import(
@@ -992,6 +1090,9 @@ export class AssistantRuntime {
         directory,
         directory,
       );
+      recordRequest(manager, params, model, "title", message, outcome, secrets);
+      if (!answered && unbilled(message))
+        return { title: null, ...projection(manager, secrets) };
       manager.appendCustomEntry(
         "ofox-desktop-usage",
         usageEntry(
@@ -1236,6 +1337,7 @@ export class AssistantRuntime {
       const branchUser = branch?.message;
       if (!compactOnly) {
         manager.appendCustomEntry("ofox-desktop-run", {
+          apex: params.apex,
           runId: params.runId,
           operationId: params.operationId,
           pricingKnown: params.model.pricingKnown === true,
@@ -1352,9 +1454,27 @@ export class AssistantRuntime {
               safeMessage(await source.result(), secrets),
               outcome,
             );
+            recordRequest(
+              manager,
+              context.nativeParams ?? params,
+              target,
+              summaryRequest ? "compaction" : "chat",
+              result,
+              outcome,
+              secrets,
+            );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
             filtered.end(result);
           } catch (error) {
+            recordRequest(
+              manager,
+              context.nativeParams ?? params,
+              target,
+              summaryRequest ? "compaction" : "chat",
+              null,
+              outcome,
+              secrets,
+            );
             if (summaryRequest) recordSummaryUsage(target, null);
             const message = {
               role: "assistant",
@@ -1521,6 +1641,7 @@ export class AssistantRuntime {
               operationId: input.id,
             };
             manager.appendCustomEntry("ofox-desktop-run", {
+              apex: params.apex,
               runId: input.id,
               operationId: input.id,
               pricingKnown: params.model.pricingKnown === true,

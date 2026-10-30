@@ -8126,3 +8126,25 @@ it("shows cold catalog progress and offers an explicit retry after a source refr
   );
   await waitFor(() => expect(mocks.bootstrap).toHaveBeenLastCalledWith(true));
 });
+
+it("opens request records after the conversation menu closes and returns keyboard focus", async () => {
+  const user = userEvent.setup();
+  await openConversation();
+  const trigger = conversationMenuButton();
+  await user.click(trigger);
+  const item = await screen.findByRole("menuitem", { name: "Request records" });
+  item.focus();
+  await user.keyboard("{Enter}");
+  const dialog = await screen.findByRole("dialog", { name: "Request records" });
+  expect(
+    within(dialog).getByText(/No request records in this history/),
+  ).toBeVisible();
+  expect(within(dialog).getByRole("button", { name: "Close" })).toHaveFocus();
+  await user.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  expect(trigger).toHaveFocus();
+  expect(mocks.send).not.toHaveBeenCalled();
+  expect(mocks.quoteMedia).not.toHaveBeenCalled();
+});

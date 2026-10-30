@@ -5402,6 +5402,43 @@
       "refreshing": "モデルを更新中です。表示済みのモデルは引き続き使用できます。",
       "failed": "一部のモデル一覧を更新できませんでした。前回の利用可能なモデルを表示しています。",
       "retry": "モデル一覧を再読み込み"
+    },
+    "requestRecords": "リクエスト記録",
+    "requestChargeUnknown": "実際の請求額はプラットフォームの明細と照合するまで不明です。リクエストIDと料金の根拠を保存しています。",
+    "requestRecordsEmpty": "この履歴にはリクエスト記録がありません。以前の履歴には情報が保存されていない場合があります。",
+    "requestUnknown": "不明",
+    "requestIdentifier": "プラットフォームのリクエストID",
+    "requestNotReturned": "返されませんでした",
+    "requestJobId": "動画ジョブID",
+    "requestEstimate": "推定料金：${{cost}}",
+    "requestReportedCost": "プラットフォームが返した料金：${{cost}}（未照合）",
+    "requestFacts": "使用量と送信時の料金",
+    "requestKind": {
+      "chat": "チャット",
+      "title": "タイトル",
+      "compaction": "コンテキスト整理",
+      "image": "画像",
+      "video": "動画",
+      "speech": "音声合成",
+      "transcription": "文字起こし",
+      "search": "検索"
+    },
+    "requestStatus": {
+      "completed": "完了",
+      "rejected": "拒否",
+      "unknown": "結果不明",
+      "not_sent": "未送信",
+      "submitting": "送信中",
+      "queued": "待機中",
+      "in_progress": "処理中",
+      "downloading": "ダウンロード中",
+      "paused": "一時停止",
+      "failed": "失敗",
+      "cancelled": "キャンセル",
+      "expired": "期限切れ",
+      "download_failed": "ダウンロード失敗",
+      "query_expired": "照会期限切れ",
+      "error": "エラー"
     }
   }
 }

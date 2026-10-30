@@ -504,6 +504,12 @@ pub(super) fn merge_native(
     record.messages.sort_by_key(|m| m.created_at);
     recount_usage(record, entries);
     count_reply_usage(record, entries);
+    scrub_secrets_in(&mut record.usage, secrets);
+    for message in &mut record.messages {
+        if let Some(usage) = &mut message.usage {
+            scrub_secrets_in(usage, secrets);
+        }
+    }
     Ok(())
 }
 
@@ -584,7 +590,9 @@ fn reply_index(messages: &[Message], run: &str, last: Option<&str>) -> Option<us
 fn count_reply_usage(record: &mut SessionRecord, entries: &[Value]) {
     let mut runs: HashMap<&str, Vec<&Value>> = HashMap::new();
     for entry in entries {
-        if entry["role"] == "usage" && entry["type"] == "title" {
+        if (entry["role"] == "usage" && entry["type"] == "title")
+            || (entry["role"] == "request" && entry["request"]["kind"] == "title")
+        {
             continue;
         }
         if let Some(run) = entry["runId"].as_str() {
@@ -785,6 +793,72 @@ pub(super) fn project_usage<'a>(
     search_prices: &HashMap<&str, &SearchPrice>,
 ) {
     ensure_object(totals);
+    let mut requests: Vec<_> = entries
+        .clone()
+        .into_iter()
+        .filter(|e| e["role"] == "request")
+        .filter_map(|e| {
+            let receipt = e.get("request")?;
+            if !receipt.is_object()
+                || serde_json::to_vec(receipt).map_or(true, |v| v.len() > 64 * 1024)
+            {
+                return None;
+            }
+            let mut safe = serde_json::Map::new();
+            for key in [
+                "kind",
+                "apex",
+                "modelId",
+                "runId",
+                "operationId",
+                "status",
+                "httpStatus",
+                "requestId",
+                "requestIdSource",
+                "usage",
+                "priceSnapshot",
+                "estimatedCostUsd",
+            ] {
+                if let Some(value) = receipt.get(key) {
+                    safe.insert(key.into(), value.clone());
+                }
+            }
+            safe.insert("billedCostUsd".into(), Value::Null);
+            Some(Value::Object(safe))
+        })
+        .collect();
+    for entry in entries
+        .clone()
+        .into_iter()
+        .filter(|e| e["role"] == "tool" && e["toolName"] == "web_search")
+    {
+        let price = entry["runId"]
+            .as_str()
+            .and_then(|run| search_prices.get(run));
+        let (status, cost) = match search_entry_cost(entry, search_prices) {
+            SearchCost::Nothing => (
+                if entry["isError"] == true {
+                    "rejected"
+                } else {
+                    "completed"
+                },
+                Some("0".to_owned()),
+            ),
+            SearchCost::Paid(_, cost) => ("completed", cost.map(|v| v.normalize().to_string())),
+            SearchCost::Unknown => ("unknown", None),
+        };
+        requests.push(
+            json!({"kind":"search","modelId":price.map(|p|p.model.clone()),"apex":entry["apex"],
+            "runId":entry["runId"],"operationId":entry["operationId"],"status":status,
+            "requestId":null,"requestIdSource":null,"usage":entry["details"]["usage"],
+            "priceSnapshot":price,"estimatedCostUsd":cost,"billedCostUsd":null}),
+        );
+    }
+    if !requests.is_empty() {
+        totals["requests"] = json!(requests);
+    } else if let Some(object) = totals.as_object_mut() {
+        object.remove("requests");
+    }
     let (mut input, mut output, mut cache_read, mut cache_write) = (0u64, 0u64, 0u64, 0u64);
     let mut estimate = 0.0;
     let mut priced = totals["usageCoverage"] != "incomplete";
@@ -1187,6 +1261,33 @@ mod tests {
     fn model_entry(run: &str) -> Value {
         json!({"role": "assistant", "runId": run, "pricingKnown": true,
                "usage": {"input": 10, "output": 5, "cost": {"total": 0.1}}})
+    }
+
+    #[test]
+    fn provenance_preserves_search_basis_without_a_gateway_id_and_without_counting_twice() {
+        let price = search_price();
+        let prices = HashMap::from([("run1", &price)]);
+        let entries = vec![
+            model_entry("run1"),
+            search_entry("run1", searched(1, 100, 200), "complete", false),
+            json!({"role":"request","runId":"run1","request":{"kind":"chat","requestId":"req_1","requestIdSource":"x-request-id","status":"completed","modelId":"test/model","apex":"ofox.io","usage":{"input":10},"priceSnapshot":{"cost":{"input":2}},"billedCostUsd":"999","unexpected":"must not project"}}),
+        ];
+        let mut usage = json!({});
+        project_usage(&mut usage, &entries, &prices);
+        assert_eq!(usage["modelRequests"], 1);
+        assert_eq!(usage["requests"].as_array().unwrap().len(), 2);
+        let request = &usage["requests"][0];
+        assert_eq!(request["requestId"], "req_1");
+        assert!(request["billedCostUsd"].is_null());
+        assert!(request.get("unexpected").is_none());
+        let search = &usage["requests"][1];
+        assert_eq!(search["kind"], "search");
+        assert!(search["requestId"].is_null());
+        assert_eq!(search["priceSnapshot"]["perSearch"], "0.014");
+        assert_eq!(search["usage"]["searchCalls"], 1);
+        let mut again = usage.clone();
+        project_usage(&mut again, &entries, &prices);
+        assert_eq!(usage, again);
     }
 
     #[test]

@@ -480,3 +480,42 @@ describe("the card of a failed or stopped reply", () => {
     expect(onRetry).not.toHaveBeenCalled();
   });
 });
+
+it("offers each frozen request receipt under reply details without claiming an actual charge", async () => {
+  const user = userEvent.setup();
+  render(
+    view({
+      usage: {
+        inputTokens: 10,
+        estimatedCostUsd: "0.00001",
+        billedCostUsd: null,
+        requests: [
+          {
+            kind: "chat",
+            modelId: "retired/model",
+            apex: "ofox.io",
+            status: "completed",
+            requestId: "req_gateway_123",
+            requestIdSource: "x-ofox-request-id",
+            httpStatus: 200,
+            usage: { input: 10, output: 5 },
+            priceSnapshot: { cost: { input: 2, output: 3 } },
+            billedCostUsd: null,
+          },
+        ],
+      } as AssistantMessage["usage"],
+    }),
+  );
+  await user.click(screen.getByRole("button", { name: "Reply details" }));
+  await user.click(screen.getByRole("button", { name: "Request records" }));
+  const dialog = screen.getByRole("dialog", { name: "Request records" });
+  expect(within(dialog).getByText("req_gateway_123")).toBeVisible();
+  expect(within(dialog).getByText(/x-ofox-request-id/)).toBeVisible();
+  expect(within(dialog).getByText("retired/model")).toBeVisible();
+  expect(within(dialog).getByText(/Actual charge is unknown/)).toBeVisible();
+  expect(within(dialog).getByRole("button", { name: "Close" })).toBeVisible();
+  await user.click(within(dialog).getByText("Usage and frozen prices"));
+  expect(within(dialog).getByText(/"input": 2/)).toBeVisible();
+  await user.click(within(dialog).getByRole("button", { name: "Close" }));
+  expect(screen.getByRole("button", { name: "Reply details" })).toHaveFocus();
+});
