@@ -347,7 +347,15 @@ class NpmGlobalStep(Step):
     def check(self) -> bool:
         # 用 `command -v` 而不是 `npm ls -g`——后者要全量读 npm 全局 tree，
         # 启动慢；只要 PATH 能找到 binary 就算装好（cc-switch 检测逻辑也是这个）。
-        return _cmd_exists(self.bin_name)
+        # Ofox 的启动脚本目录不算：它只转发到某个 Node 版本里的安装，那个安装可能
+        # 已经不在了（fizzy #1351）。
+        launchers = os.path.normpath(os.path.expanduser("~/.ofox-desktop/bin"))
+        path = os.pathsep.join(
+            entry
+            for entry in login_shell_path().split(os.pathsep)
+            if os.path.normpath(os.path.expanduser(entry)) != launchers
+        )
+        return shutil.which(self.bin_name, path=path) is not None
 
     def terminal_command(self) -> str:
         return f"""

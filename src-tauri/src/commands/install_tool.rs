@@ -260,6 +260,10 @@ async fn run_installer(
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
     let code = status.code().unwrap_or(-1);
+    // npm 工具装在 fnm/nvm 的某个 Node 版本里时，写启动脚本（fizzy #1351）。
+    if code == 0 && super::tool_update::npm_package(&tool_id).is_some() {
+        super::node_launcher::reconcile(&tool_id).await;
+    }
 
     let _ = app.emit(
         "install-tool-done",

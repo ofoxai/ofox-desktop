@@ -1085,6 +1085,11 @@ pub fn run() {
                 }
             });
 
+            // 之前装在 fnm/nvm 某个 Node 版本里的 npm 工具补上启动脚本，进入锁定了
+            // 别的 Node 版本的目录也能用（fizzy #1351）。
+            #[cfg(unix)]
+            tauri::async_runtime::spawn(commands::node_launcher::reconcile_all());
+
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
