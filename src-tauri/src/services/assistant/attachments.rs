@@ -533,7 +533,7 @@ fn classify(name: &str, bytes: &[u8]) -> Result<(String, &'static str), String> 
 
 /// The last part of a name the renderer sent, without path separators or
 /// control characters: it is shown, never used as a path.
-fn clean_name(raw: &str) -> String {
+pub(super) fn clean_name(raw: &str) -> String {
     let last = raw.rsplit(['/', '\\']).next().unwrap_or_default();
     let printable: String = last.chars().filter(|c| !c.is_control()).collect();
     printable.trim().trim_end_matches('.').trim_end().to_owned()
@@ -589,7 +589,7 @@ fn source_size(source: &Path) -> Result<u64, String> {
 
 /// The bytes of `source`, read no further than one past [`MAX_FILE_BYTES`]:
 /// a file that grew past the limit since its size was checked is too large.
-fn read_source(source: &Path) -> Result<Vec<u8>, String> {
+pub(super) fn read_source(source: &Path) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     open_source(source)?
         .0

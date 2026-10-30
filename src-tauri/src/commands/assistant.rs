@@ -5,7 +5,7 @@
 use crate::ofox_api_keys::{self, ApiKeyError, AssistantKeyStatus, FetchMode};
 use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
-    attachments, catalog,
+    attachments, audio_input, catalog,
     host::{blocking, Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
@@ -262,6 +262,44 @@ pub async fn assistant_import_pasted(
 ) -> Result<Vec<Attachment>, String> {
     let (authority, name, bytes) = parse_paste(request.headers(), request.body())?;
     host.import_pasted(authority, name, bytes).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_pick_audio(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    request: DeleteRequest,
+) -> Result<Option<audio_input::Preview>, String> {
+    host.pick_audio(request, move || {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog()
+            .file()
+            .add_filter("WAV, MP3", &["wav", "mp3"])
+            .blocking_pick_file()
+            .map(|file| {
+                file.into_path()
+                    .map_err(|_| attachments::UNREADABLE.to_string())
+            })
+            .transpose()
+    })
+    .await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_import_audio(
+    host: Host<'_>,
+    request: Request<'_>,
+) -> Result<audio_input::Preview, String> {
+    let (authority, name, bytes) = parse_paste(request.headers(), request.body())?;
+    host.import_audio(authority, name, bytes).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_discard_audio(
+    host: Host<'_>,
+    request: audio_input::DiscardRequest,
+) -> Result<bool, String> {
+    host.discard_audio(request).await
 }
 
 const PASTE_SESSION_HEADER: &str = "x-session-id";

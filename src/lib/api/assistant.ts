@@ -136,6 +136,17 @@ export interface AssistantAudioCapabilities {
   };
 }
 
+/** Opaque temporary input; audio bytes and source paths stay in Rust. */
+export interface AssistantAudioInput {
+  inputId: string;
+  name: string;
+  sizeBytes: number;
+  mimeType: "audio/wav" | "audio/mpeg";
+  durationMs: number;
+  sampleRate: number;
+  channels: number;
+}
+
 /** The most characters the custom instructions may have. */
 export const MAX_ASSISTANT_INSTRUCTIONS = 4000;
 
@@ -853,6 +864,25 @@ export const assistantApi = {
    */
   pickAttachments: (sessionId: string) =>
     invoke<AssistantAttachment[]>("assistant_pick_attachments", { sessionId }),
+  /** Imports one short audio file into a temporary, private native slot. */
+  pickAudio: (request: AssistantPasteTarget) =>
+    invoke<AssistantAudioInput | null>("assistant_pick_audio", { request }),
+  discardAudio: (request: AssistantPasteTarget & { inputId: string }) =>
+    invoke<boolean>("assistant_discard_audio", { request }),
+  /** Recording bytes use the same authority headers as a pasted file. */
+  importAudio: async (file: File, target: AssistantPasteTarget) => {
+    if (file.size > MAX_PASTED_FILE_BYTES)
+      throw "assistant_attachment_too_large";
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return invoke<AssistantAudioInput>("assistant_import_audio", bytes, {
+      headers: {
+        "x-session-id": target.sessionId,
+        "x-expected-owner": target.expectedOwner,
+        "x-expected-generation": String(target.expectedGeneration),
+        "x-file-name": headerFileName(file.name),
+      },
+    });
+  },
   /**
    * Imports the files last dropped on the window into the conversation, with
    * a picked file's checks, all or nothing. Refused with
@@ -1004,6 +1034,9 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_instructions_too_long: "instructionsTooLong",
   assistant_invalid_thinking_level: "thinkingLevelUnavailable",
   assistant_attachment_not_found: "attachmentUnavailable",
+  assistant_audio_unsupported: "audioUnsupported",
+  assistant_audio_invalid: "audioInvalid",
+  assistant_audio_too_long: "audioTooLong",
   assistant_attachment_too_many: "attachmentTooMany",
   assistant_attachment_too_large: "attachmentTooLarge",
   assistant_attachment_total_too_large: "attachmentTotalTooLarge",

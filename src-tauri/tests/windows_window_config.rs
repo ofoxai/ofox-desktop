@@ -9,6 +9,22 @@ use std::{
     path::PathBuf,
 };
 
+#[test]
+fn every_platform_bundles_the_audio_decoder_license_and_source_notice() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for config in ["tauri.conf.json", "tauri.windows.conf.json"] {
+        let entries = expanded_resource_entries(&resource_config(config));
+        for name in ["SYMPHONIA-MPL-2.0.txt", "SYMPHONIA-NOTICE.md"] {
+            let source = root
+                .join("../docs/licenses")
+                .join(name)
+                .canonicalize()
+                .unwrap();
+            assert!(entries.contains(&(source, PathBuf::from("licenses").join(name))));
+        }
+    }
+}
+
 /// Fields that intentionally differ on Windows: no overlay title bar there.
 const PLATFORM_FIELDS: [&str; 2] = ["title", "titleBarStyle"];
 

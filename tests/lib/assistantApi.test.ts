@@ -33,6 +33,57 @@ beforeEach(() => {
   invoke.mockReset();
 });
 
+describe("private audio import commands", () => {
+  const target = {
+    sessionId: "session",
+    expectedOwner: "owner",
+    expectedGeneration: 7,
+  };
+
+  it("binds native import and discard to the confirmed conversation authority", async () => {
+    invoke.mockResolvedValue(null);
+    expect(await assistantApi.pickAudio(target)).toBeNull();
+    expect(invoke).toHaveBeenLastCalledWith("assistant_pick_audio", {
+      request: target,
+    });
+    await assistantApi.discardAudio({ ...target, inputId: "input" });
+    expect(invoke).toHaveBeenLastCalledWith("assistant_discard_audio", {
+      request: { ...target, inputId: "input" },
+    });
+  });
+
+  it("uploads recording bytes with authority headers and never a source path", async () => {
+    const file = fileOf(new Uint8Array([1, 2, 3]), "録音.wav", "audio/wav");
+    invoke.mockResolvedValue({ inputId: "input", durationMs: 250 });
+    const result = await assistantApi.importAudio(file, target);
+    expect(result.inputId).toBe("input");
+    expect(invoke).toHaveBeenCalledWith(
+      "assistant_import_audio",
+      new Uint8Array([1, 2, 3]),
+      {
+        headers: {
+          "x-session-id": "session",
+          "x-expected-owner": "owner",
+          "x-expected-generation": "7",
+          "x-file-name": encodeURIComponent(file.name),
+        },
+      },
+    );
+  });
+
+  it("rejects an oversized recording before reading it or invoking native code", async () => {
+    const file = {
+      size: 25 * 1024 * 1024 + 1,
+      arrayBuffer: vi.fn(),
+    } as unknown as File;
+    await expect(assistantApi.importAudio(file, target)).rejects.toBe(
+      "assistant_attachment_too_large",
+    );
+    expect(file.arrayBuffer).not.toHaveBeenCalled();
+    expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
 /** jsdom's File has no `arrayBuffer()`, which every supported WebView has. */
 function fileOf(bytes: Uint8Array, name: string, type = ""): File {
   const file = new File([bytes.slice().buffer as ArrayBuffer], name, { type });

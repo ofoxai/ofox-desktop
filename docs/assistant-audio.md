@@ -73,6 +73,10 @@ new audio result requires an idle conversation in the first release.
 Persist transcription text, generated-audio references, parameters and billing
 facts with the operation. Original recordings are temporary by default; an
 explicit keep-original choice retains them as private history attachments.
+Before submission, the host keeps one temporary audio input in memory. A new
+successful import replaces it; discard, authority revocation and a 15-minute
+expiry release it. Concurrent validation is refused to bound decoder memory.
+Unsubmitted raw input is never written into chat drafts or backup archives.
 History/backup/cleanup must include every retained audio-operation reference.
 Audio bytes use the owner/generation-scoped private media protocol and bounded
 range reads; native save is atomic and rechecks authority after the picker.

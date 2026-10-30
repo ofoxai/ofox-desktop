@@ -232,6 +232,8 @@ pub struct AssistantHost {
     /// The files last dropped on the window, waiting for the renderer's
     /// token (see [`super::drops`]).
     pub(super) drops: Mutex<DropSlot>,
+    pub(super) audio_inputs: Mutex<super::audio_input::Slot>,
+    pub(super) audio_importing: tokio::sync::Mutex<()>,
     pub(super) video_quotes: Mutex<HashMap<String, super::video_host::StoredQuote>>,
     pub(super) video_admission: tokio::sync::Mutex<()>,
     pub(super) video_polling: Arc<Mutex<HashSet<String>>>,
@@ -588,6 +590,8 @@ impl AssistantHost {
             runs: Mutex::default(),
             models: Mutex::default(),
             drops: Mutex::default(),
+            audio_inputs: Mutex::default(),
+            audio_importing: tokio::sync::Mutex::new(()),
             video_quotes: Mutex::default(),
             video_admission: tokio::sync::Mutex::new(()),
             video_polling: Arc::default(),
@@ -1179,6 +1183,10 @@ impl AssistantHost {
             .wrapping_add(1);
         // What was dropped belongs to the authority that just ended.
         self.drops
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.audio_inputs
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
@@ -4782,5 +4790,174 @@ while read line; do :; done"#,
             host.create_session(create).await.unwrap_err(),
             MODEL_UNAVAILABLE
         );
+    }
+    fn audio_target(host: &AssistantHost, sid: &str) -> DeleteRequest {
+        DeleteRequest {
+            session_id: sid.into(),
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        }
+    }
+    #[tokio::test]
+    async fn audio_import_is_private_temporary_and_does_not_create_a_chat_turn_or_mint_keys() {
+        let (config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let before = serde_json::to_value(store.load_record(&sid).unwrap()).unwrap();
+        let bytes = include_bytes!("../../../tests/fixtures/assistant-audio/tone-16k-mono.mp3");
+        let path = config.path().join("picked.bin");
+        std::fs::write(&path, bytes).unwrap();
+        let picked = host
+            .pick_audio(audio_target(&host, &sid), move || Ok(Some(path)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(picked.name, "picked.mp3");
+        let first = host
+            .import_audio(
+                audio_target(&host, &sid),
+                "voice.txt".into(),
+                bytes.to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.name, "voice.mp3");
+        assert_eq!(first.info.mime_type, "audio/mpeg");
+        let encoded = serde_json::to_value(&first).unwrap();
+        assert!(encoded.get("bytes").is_none());
+        assert!(encoded.get("path").is_none());
+        assert_eq!(
+            before,
+            serde_json::to_value(store.load_record(&sid).unwrap()).unwrap()
+        );
+        assert_eq!(
+            std::fs::read_dir(store.attachment_dir(&sid).unwrap())
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(env.events.lock().unwrap().is_empty());
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 0);
+        assert!(host
+            .import_audio(
+                audio_target(&host, &sid),
+                "broken.wav".into(),
+                b"RIFF".to_vec()
+            )
+            .await
+            .is_err());
+        let second = host
+            .import_audio(audio_target(&host, &sid), "next.mp3".into(), bytes.to_vec())
+            .await
+            .unwrap();
+        let discard = |id| super::super::audio_input::DiscardRequest {
+            authority: audio_target(&host, &sid),
+            input_id: id,
+        };
+        assert!(!host.discard_audio(discard(first.input_id)).await.unwrap());
+        assert!(host
+            .discard_audio(discard(second.input_id.clone()))
+            .await
+            .unwrap());
+        assert!(!host.discard_audio(discard(second.input_id)).await.unwrap());
+        let pending = host
+            .import_audio(
+                audio_target(&host, &sid),
+                "pending.mp3".into(),
+                bytes.to_vec(),
+            )
+            .await
+            .unwrap();
+        host.cancel_all();
+        assert!(!host.discard_audio(discard(pending.input_id)).await.unwrap());
+    }
+    #[tokio::test]
+    async fn audio_import_checks_authority_before_the_picker_and_after_it_returns() {
+        let (config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut wrong = audio_target(&host, &sid);
+        wrong.expected_generation += 1;
+        assert_eq!(
+            host.pick_audio(wrong, || panic!("a stale request opens no picker"))
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        assert!(host
+            .pick_audio(audio_target(&host, &sid), || Ok(None))
+            .await
+            .unwrap()
+            .is_none());
+        let file = config.path().join("audio.mp3");
+        std::fs::write(
+            &file,
+            include_bytes!("../../../tests/fixtures/assistant-audio/tone-16k-mono.mp3"),
+        )
+        .unwrap();
+        let changed = host.clone();
+        let result = host
+            .pick_audio(audio_target(&host, &sid), move || {
+                changed.cancel_all();
+                Ok(Some(file))
+            })
+            .await;
+        assert_eq!(result.unwrap_err(), IDENTITY_CHANGED);
+    }
+
+    #[tokio::test]
+    async fn audio_import_refuses_concurrent_validation_and_can_discard_after_session_deletion() {
+        let (_config, host) = fixture();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let bytes = include_bytes!("../../../tests/fixtures/assistant-audio/tone-16k-mono.mp3");
+        let ready = host
+            .import_audio(
+                audio_target(&host, &sid),
+                "input.mp3".into(),
+                bytes.to_vec(),
+            )
+            .await
+            .unwrap();
+        let (opened, wait) = tokio::sync::oneshot::channel();
+        let (release, dialog) = std::sync::mpsc::channel();
+        let picking = tokio::spawn({
+            let host = host.clone();
+            let target = audio_target(&host, &sid);
+            async move {
+                host.pick_audio(target, move || {
+                    let _ = opened.send(());
+                    let _ = dialog.recv();
+                    Ok(None)
+                })
+                .await
+            }
+        });
+        wait.await.unwrap();
+        assert_eq!(
+            host.import_audio(
+                audio_target(&host, &sid),
+                "other.mp3".into(),
+                bytes.to_vec()
+            )
+            .await
+            .unwrap_err(),
+            "assistant_session_busy"
+        );
+        release.send(()).unwrap();
+        assert!(picking.await.unwrap().unwrap().is_none());
+        store
+            .mutate(&sid, |r| {
+                r.session.deleted_at = Some(1);
+                Ok(())
+            })
+            .unwrap();
+        assert!(host
+            .discard_audio(super::super::audio_input::DiscardRequest {
+                authority: audio_target(&host, &sid),
+                input_id: ready.input_id
+            })
+            .await
+            .unwrap());
     }
 }

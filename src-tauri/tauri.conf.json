@@ -50,6 +50,8 @@
       "../src/assets/agent-logos/LICENSE-*.md": "_up_/src/assets/agent-logos/",
       "../src/assets/agent-logos/NOTICE.md": "_up_/src/assets/agent-logos/NOTICE.md",
       "../src/assets/library-logos/NOTICE.md": "_up_/src/assets/library-logos/NOTICE.md",
+      "../docs/licenses/SYMPHONIA-MPL-2.0.txt": "licenses/SYMPHONIA-MPL-2.0.txt",
+      "../docs/licenses/SYMPHONIA-NOTICE.md": "licenses/SYMPHONIA-NOTICE.md",
       "src/services/MAGPIE_LICENSE": "src/services/MAGPIE_LICENSE",
       "src/session_manager/MAGPIE_LICENSE": "src/session_manager/MAGPIE_LICENSE",
       "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE"

@@ -2,6 +2,16 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant audio foundation (2026-10-30)
+
+The audio catalog and private native import APIs are implemented; recording,
+transcription, synthesis and playback controls are still in progress. Import
+accepts short PCM RIFF WAV and Layer III MP3 only, mono/stereo at 8–48 kHz,
+up to 25 MiB and five minutes. Float/extensible WAV, FLAC and Ogg input are
+outside this first release. Unsubmitted inputs are temporary memory buffers,
+excluded from chat attachments and backups. Native microphone and live-gateway
+audio acceptance have not yet been performed. See [audio design](assistant-audio.md).
+
 ## Assistant backup and restore (2026-10-28)
 
 Complete ZIP backups are owner-scoped and preserve stored run prices. Restore
