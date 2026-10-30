@@ -46,7 +46,7 @@ fn is_public_v6(ip: std::net::Ipv6Addr) -> bool {
 
 /// A host a public page can be on: a dotted name that is not local or
 /// reserved, or a public address.
-fn is_public_host(host: url::Host<&str>) -> bool {
+pub(super) fn is_public_host(host: url::Host<&str>) -> bool {
     match host {
         url::Host::Domain(name) => {
             let name = name.trim_end_matches('.');

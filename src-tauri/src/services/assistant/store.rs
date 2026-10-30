@@ -13,6 +13,7 @@
 //! writers to one file are serialized in this process. A damaged file is an
 //! error for that session; it is never read as, or overwritten by, an empty one.
 mod backup;
+mod downloads;
 mod fork;
 mod lifecycle;
 pub use backup::{BackupReport, RestoreReport, TRANSFER_BUSY};

@@ -759,7 +759,20 @@ impl AssistantHost {
                         .await?;
                     self.emit_video_state(&control, generation).await?;
                     if status == "downloading" {
-                        let downloaded = video_http::download(&client, &value).await;
+                        let proxy = blocking({
+                            let env = self.env.clone();
+                            move || Ok(env.proxy())
+                        })
+                        .await?;
+                        self.ensure_current(&identity, generation).await?;
+                        let downloaded = video_http::download(
+                            self.store(&identity.owner)?,
+                            &client,
+                            &value,
+                            proxy,
+                            &control.secrets(),
+                        )
+                        .await;
                         self.ensure_current(&identity, generation).await?;
                         let result = match downloaded {
                             Ok(mut file) => {

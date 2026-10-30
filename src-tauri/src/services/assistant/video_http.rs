@@ -6,7 +6,6 @@ use super::{
     video::{self, VideoRequest},
 };
 use serde_json::{json, Value};
-use std::io::{Read, Seek, SeekFrom, Write};
 
 pub(super) async fn provider_prices(apex: &str, model: &str) -> Result<Value, String> {
     let url = crate::ofox_apex::model_pricing_url_for(apex, model).ok_or(media::INVALID)?;
@@ -185,32 +184,7 @@ async fn read_response(
     })
 }
 fn safe_download_url(value: &str) -> bool {
-    let Ok(url) = url::Url::parse(value) else {
-        return false;
-    };
-    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
-        return false;
-    }
-    match url.host() {
-        Some(url::Host::Ipv4(ip)) => {
-            !ip.is_private()
-                && !ip.is_loopback()
-                && !ip.is_link_local()
-                && !ip.is_unspecified()
-                && !ip.is_broadcast()
-        }
-        Some(url::Host::Ipv6(ip)) => {
-            !ip.is_loopback()
-                && !ip.is_unspecified()
-                && !ip.is_unique_local()
-                && !ip.is_unicast_link_local()
-                && ip.to_ipv4_mapped().is_none()
-        }
-        Some(url::Host::Domain(host)) => {
-            host != "localhost" && !host.ends_with(".localhost") && !host.ends_with(".local")
-        }
-        None => false,
-    }
+    super::download::source_url(value).is_ok()
 }
 pub(super) fn download_url(value: &Value) -> Result<String, String> {
     for key in ["mirror_urls", "unsigned_urls"] {
@@ -227,56 +201,19 @@ pub(super) fn download_url(value: &Value) -> Result<String, String> {
     Err("assistant_media_download_failed".into())
 }
 pub(super) async fn download(
+    store: super::store::AssistantStore,
     client: &reqwest::Client,
     value: &Value,
-) -> Result<tempfile::NamedTempFile, String> {
-    download_at(client, &download_url(value)?, video::MAX_VIDEO_BYTES).await
-}
-/// Called only after HTTPS validation; separated for loopback fixture tests.
-/// Every chunk is written to a private temporary file off the async worker.
-async fn download_at(
-    client: &reqwest::Client,
-    url: &str,
-    cap: u64,
-) -> Result<tempfile::NamedTempFile, String> {
-    const FAILED: &str = "assistant_media_download_failed";
-    let mut response = client.get(url).send().await.map_err(|_| FAILED)?;
-    if !response.status().is_success() || response.content_length().is_some_and(|len| len > cap) {
-        return Err(FAILED.into());
-    }
-    let mut file =
-        super::host::blocking(|| tempfile::NamedTempFile::new().map_err(|_| FAILED.into())).await?;
-    let mut total = 0_u64;
-    while let Some(chunk) = response.chunk().await.map_err(|_| FAILED)? {
-        total = total.checked_add(chunk.len() as u64).ok_or(FAILED)?;
-        if total > cap {
-            return Err(FAILED.into());
-        }
-        file = super::host::blocking(move || {
-            file.write_all(&chunk).map_err(|_| FAILED)?;
-            Ok(file)
-        })
-        .await?;
-    }
-    super::host::blocking(move || {
-        file.as_file_mut().sync_all().map_err(|_| FAILED)?;
-        file.seek(SeekFrom::Start(0)).map_err(|_| FAILED)?;
-        let mut head = [0_u8; 12];
-        file.read_exact(&mut head).map_err(|_| FAILED)?;
-        if &head[4..8] != b"ftyp" {
-            return Err(FAILED.into());
-        }
-        file.seek(SeekFrom::Start(0)).map_err(|_| FAILED)?;
-        Ok(file)
-    })
-    .await
+    proxy: Option<super::types::RunProxy>,
+    secrets: &[String],
+) -> Result<super::download::Downloaded, String> {
+    super::download::get(store, &download_url(value)?, proxy, client, secrets).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Read;
     use wiremock::{
         matchers::{body_json, header, method, path},
         Mock, MockServer, ResponseTemplate,
@@ -461,56 +398,28 @@ mod tests {
             assert!(download_url(&json!({"mirror_urls":[url]})).is_err());
         }
     }
-    #[tokio::test]
-    async fn video_download_is_private_bounded_and_never_follows_redirects_or_sends_auth() {
-        let server = MockServer::start().await;
-        let mp4 = b"\0\0\0\x18ftypmp42fixture";
-        Mock::given(path("/clip"))
-            .respond_with(ResponseTemplate::new(200).set_body_bytes(mp4))
-            .expect(1)
-            .mount(&server)
-            .await;
-        let mut file = download_at(&client(), &format!("{}/clip", server.uri()), 64)
-            .await
-            .unwrap();
-        let mut bytes = vec![];
-        file.read_to_end(&mut bytes).unwrap();
-        assert_eq!(bytes, mp4);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                file.as_file().metadata().unwrap().permissions().mode() & 0o777,
-                0o600
+    #[test]
+    fn video_download_rejects_reserved_and_transition_addresses_before_any_connection() {
+        for host in [
+            "100.64.0.1",
+            "198.18.0.1",
+            "192.0.2.1",
+            "198.51.100.1",
+            "203.0.113.1",
+            "224.0.0.1",
+            "240.0.0.1",
+            "0.1.2.3",
+            "[2001:db8::1]",
+            "[2002:7f00:1::1]",
+            "[64:ff9b::7f00:1]",
+        ] {
+            assert!(
+                !safe_download_url(&format!("https://{host}/video.mp4")),
+                "{host} is not a public download target"
             );
         }
-        assert!(!server.received_requests().await.unwrap()[0]
-            .headers
-            .contains_key("authorization"));
-        for (route, response) in [
-            (
-                "oversize",
-                ResponseTemplate::new(200).set_body_bytes(vec![0; 65]),
-            ),
-            (
-                "html",
-                ResponseTemplate::new(200).set_body_string("<html>not a video</html>"),
-            ),
-            (
-                "redirect",
-                ResponseTemplate::new(302)
-                    .insert_header("Location", format!("{}/clip", server.uri())),
-            ),
-        ] {
-            Mock::given(path(format!("/{route}")))
-                .respond_with(response)
-                .mount(&server)
-                .await;
-            assert!(
-                download_at(&client(), &format!("{}/{route}", server.uri()), 64)
-                    .await
-                    .is_err()
-            );
+        for host in ["1.1.1.1", "8.8.8.8", "[2606:4700:4700::1111]"] {
+            assert!(safe_download_url(&format!("https://{host}/video.mp4")));
         }
     }
 }

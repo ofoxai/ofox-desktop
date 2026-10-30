@@ -5,6 +5,7 @@ pub mod audio;
 pub mod audio_input;
 pub mod catalog;
 mod context;
+mod download;
 pub mod drops;
 pub mod host;
 mod live;

@@ -927,6 +927,9 @@ impl AssistantHost {
         let listed = match self.store(&identity.owner) {
             Ok(store) => {
                 blocking(move || {
+                    if let Err(error) = store.cleanup_downloads() {
+                        log::warn!("[Assistant] media download cleanup failed: {error}");
+                    }
                     if let Err(error) = store.cleanup_restore_staging() {
                         log::warn!("[Assistant] restore staging cleanup failed: {error}");
                     }
