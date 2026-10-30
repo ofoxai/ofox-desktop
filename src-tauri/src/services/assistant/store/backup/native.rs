@@ -246,9 +246,28 @@ pub(super) fn validate(
                         .is_some_and(|id| entries.contains_key(id))
             }
             Some("custom_message") => {
-                text(&item["customType"])
+                let valid = text(&item["customType"])
                     && content(&item["content"], "custom")
-                    && item["display"].is_boolean()
+                    && item["display"].is_boolean();
+                // The runtime projects this marker as media; the saved UI
+                // message is an assistant reply. Other custom entries cannot
+                // satisfy a saved reply's native reference.
+                if valid
+                    && item["customType"] == "ofox-desktop-media"
+                    && record.messages.iter().any(|message| {
+                        message.native_entry_id.as_deref() == Some(id)
+                            && message.role == "assistant"
+                            && message.media.as_ref().is_some_and(|media| {
+                                matches!(media.kind.as_str(), "image" | "video")
+                            })
+                    })
+                {
+                    if entry.run.is_none() {
+                        return Err(INVALID.into());
+                    }
+                    entry.role = Some("assistant".into());
+                }
+                valid
             }
             Some("context_edit") => item["targetId"]
                 .as_str()

@@ -991,6 +991,126 @@ mod tests {
         (tmp, store, sid, attachment)
     }
 
+    fn seeded_native_media(kind: &str) -> (tempfile::TempDir, AssistantStore, String) {
+        let (tmp, store, sid) = fixture();
+        let run = id();
+        let operation = id();
+        let attachment = id();
+        let bytes = b"synthetic media backup fixture";
+        fs::write(store.attachment_dir(&sid).unwrap().join(&attachment), bytes).unwrap();
+        let mime = if kind == "image" {
+            "image/png"
+        } else {
+            "video/mp4"
+        };
+        store.mutate(&sid, |record| {
+            let media = json!({"kind":kind,"model":"test/media","params":{},"status":"completed","outputs":[attachment],"cost":"0.08"});
+            record.attachments = serde_json::from_value(json!([{"id":attachment,"name":"synthetic-media","mimeType":mime,"sizeBytes":bytes.len(),"status":"ready","origin":"generated"}])).unwrap();
+            record.operations = serde_json::from_value(json!([{"id":operation,"runId":run,"status":"completed","media":media}])).unwrap();
+            record.messages = serde_json::from_value(json!([
+                {"id":id(),"role":"user","content":"Create synthetic media","createdAt":1,"status":"completed","nativeEntryId":"media-user","runId":run},
+                {"id":id(),"role":"assistant","content":"Saved media","createdAt":2,"status":"completed","nativeEntryId":"media-result","runId":run,"media":media}
+            ])).unwrap();
+            Ok(())
+        }).unwrap();
+        let entries = [
+            json!({"type":"session","version":3,"id":sid,"cwd":"","timestamp":"2026-01-01T00:00:00Z"}),
+            json!({"type":"custom","id":"media-run","parentId":null,"timestamp":"2026-01-01T00:00:00Z","customType":"ofox-desktop-run","data":{"runId":run,"operationId":operation}}),
+            json!({"type":"message","id":"media-user","parentId":"media-run","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"Create synthetic media","timestamp":1}}),
+            json!({"type":"custom_message","id":"media-result","parentId":"media-user","timestamp":"2026-01-01T00:00:00Z","customType":"ofox-desktop-media","content":"Saved media","display":false,"details":{}}),
+        ];
+        fs::write(
+            store.native_history_path(&sid).unwrap(),
+            entries
+                .iter()
+                .map(|v| serde_json::to_string(v).unwrap() + "\n")
+                .collect::<String>(),
+        )
+        .unwrap();
+        (tmp, store, sid)
+    }
+
+    #[test]
+    fn native_media_message_backups_round_trip_without_losing_lineage_or_rebilling() {
+        for kind in ["image", "video"] {
+            let (_tmp, store, sid) = seeded_native_media(kind);
+            let out = tempfile::tempdir().unwrap();
+            let archive = out.path().join("media.zip");
+            let report = store.backup(&archive, &[], || Ok(())).unwrap();
+            assert_eq!((report.sessions, report.skipped), (1, 0), "{kind}");
+            let target = tempfile::tempdir().unwrap();
+            let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+            assert_eq!(
+                restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+                1
+            );
+            let source = store.load_record(&sid).unwrap();
+            let copy = restored.load_record(&sid).unwrap();
+            assert_eq!(source.operations, copy.operations);
+            assert_eq!(
+                source.messages[1].native_entry_id,
+                copy.messages[1].native_entry_id
+            );
+            assert_eq!(source.messages[1].media, copy.messages[1].media);
+            assert_eq!(
+                restored.restore(&archive, &[], || Ok(())).unwrap().skipped,
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn native_media_backup_still_rejects_forged_roles_kinds_and_missing_run_lineage() {
+        for case in [
+            "other-custom",
+            "missing-media",
+            "wrong-kind",
+            "wrong-role",
+            "no-lineage",
+            "wrong-run",
+        ] {
+            let (_tmp, store, sid) = seeded_native_media("image");
+            let path = store.native_history_path(&sid).unwrap();
+            let mut lines: Vec<Value> = fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            store
+                .mutate(&sid, |record| {
+                    match case {
+                        "other-custom" => lines[3]["customType"] = json!("other"),
+                        "missing-media" => record.messages[1].media = None,
+                        "wrong-kind" => {
+                            record.messages[1].media.as_mut().unwrap().kind = "speech".into()
+                        }
+                        "wrong-role" => record.messages[1].role = "user".into(),
+                        "no-lineage" => {
+                            lines[3]["parentId"] = Value::Null;
+                            record.messages[1].run_id = None;
+                        }
+                        "wrong-run" => record.messages[1].run_id = Some(id()),
+                        _ => unreachable!(),
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            fs::write(
+                &path,
+                lines
+                    .iter()
+                    .map(|v| serde_json::to_string(v).unwrap() + "\n")
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let out = tempfile::tempdir().unwrap();
+            let report = store
+                .backup(&out.path().join("invalid.zip"), &[], || Ok(()))
+                .unwrap();
+            assert_eq!((report.sessions, report.skipped), (0, 1), "{case}");
+        }
+    }
+
     #[test]
     fn backup_excludes_unknown_preferences_and_managed_keys_without_changing_sources() {
         let (_tmp, store, sid, _) = seeded();
