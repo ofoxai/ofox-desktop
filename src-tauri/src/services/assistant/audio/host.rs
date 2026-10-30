@@ -557,6 +557,37 @@ mod tests {
         assert!(server.received_requests().await.unwrap().is_empty());
     }
     #[tokio::test]
+    async fn audio_host_gateway_timeout_keeps_unknown_cost_and_never_replays() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (_root, server, _env, host, request) = fixture(apex).await;
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/transcriptions"))
+                .respond_with(
+                    ResponseTemplate::new(408)
+                        .insert_header("x-request-id", "req_timeout")
+                        .set_body_json(json!({"error":{"message":"request timed out"}})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = host.transcribe_audio(request.clone()).await.unwrap();
+            assert_eq!(result.media.status, "unknown");
+            assert!(result.media.cost.is_none());
+            let trace = result.media.audio.as_ref().unwrap();
+            assert_eq!(trace.error_code.as_deref(), Some(UNKNOWN));
+            assert_eq!(trace.request_id.as_deref(), Some("req_timeout"));
+            let record = host
+                .store(&request.expected_owner)
+                .unwrap()
+                .load_record(&request.session_id)
+                .unwrap();
+            assert_eq!(record.usage["modelRequests"], 1);
+            assert!(record.session.active_run.is_none());
+            assert!(host.transcribe_audio(request).await.is_err());
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        }
+    }
+    #[tokio::test]
     async fn audio_host_cancellation_keeps_the_submitted_outcome_unknown_and_never_replays() {
         for keep in [false, true] {
             let (_root, server, _env, host, mut request) = fixture("ofox.io").await;

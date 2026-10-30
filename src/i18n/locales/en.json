@@ -5439,6 +5439,13 @@
       "download_failed": "Download failed",
       "query_expired": "Query expired",
       "error": "Error"
-    }
+    },
+    "audioHistoryTitle": "Audio history",
+    "audioHistoryHint": "Play or save existing audio locally. Opening history makes no new model request.",
+    "audioHistoryNoFile": "No saved audio file for this request.",
+    "audioHistoryOutput": "Generated audio",
+    "audioHistoryOriginal": "Retained original audio",
+    "audioHistoryItem": "Saved audio {{number}}",
+    "audioHistoryEmpty": "No saved audio history yet."
   }
 }

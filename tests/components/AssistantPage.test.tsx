@@ -46,6 +46,10 @@ const mocks = vi.hoisted(() => ({
   quoteMedia: vi.fn(),
   cancelVideo: vi.fn(),
   resumeVideo: vi.fn(),
+  saveMedia: vi.fn(),
+  speech: vi.fn(),
+  transcribe: vi.fn(),
+  pickAudio: vi.fn(),
   stop: vi.fn(),
   forkSession: vi.fn(),
   compact: vi.fn(),
@@ -499,6 +503,10 @@ beforeEach(async () => {
   });
   mocks.onDrag.mockResolvedValue(() => undefined);
   mocks.onDrop.mockResolvedValue(() => undefined);
+  mocks.saveMedia.mockReset().mockResolvedValue(true);
+  mocks.speech.mockReset();
+  mocks.transcribe.mockReset();
+  mocks.pickAudio.mockReset();
 });
 
 describe("signed out", () => {
@@ -8147,4 +8155,132 @@ it("opens request records after the conversation menu closes and returns keyboar
   expect(trigger).toHaveFocus();
   expect(mocks.send).not.toHaveBeenCalled();
   expect(mocks.quoteMedia).not.toHaveBeenCalled();
+});
+
+const savedAudioHistory = (): NonNullable<
+  AssistantSessionDetail["audioOperations"]
+> => [
+  {
+    operationId: "saved-audio-op",
+    runId: "saved-audio-run",
+    kind: "speech",
+    model: "retired/speech",
+    params: {},
+    outputs: ["saved-audio"],
+    inputIds: [],
+    status: "completed",
+    cost: null,
+    audio: {
+      pricing: {
+        unit: "tokens",
+        inputAudioPerSecond: null,
+        inputTextPerCharacter: null,
+        inputTextPerMillion: null,
+        inputAudioPerMillion: null,
+        outputTextPerMillion: null,
+        outputAudioPerMillion: null,
+      },
+      text: "Saved spoken words",
+      input: null,
+      usage: null,
+      requestId: null,
+      requestIdSource: null,
+      errorCode: null,
+      output: {
+        mimeType: "audio/wav",
+        sizeBytes: 8044,
+        durationMs: 1000,
+        sampleRate: 16000,
+        channels: 1,
+      },
+    },
+  },
+];
+
+it("saved audio history stays local when the model catalog and Pi runtime are unavailable", async () => {
+  mocks.bootstrap.mockReset().mockResolvedValue({
+    ...capabilities,
+    models: [],
+    audioModels: [],
+    defaultModelId: null,
+    runtime: { available: false, reason: "missing", version: null },
+  });
+  mocks.saveMedia.mockReset().mockResolvedValue(true);
+  mocks.speech.mockReset();
+  mocks.transcribe.mockReset();
+  mocks.pickAudio.mockReset();
+  current.session.draft = "Keep this offline draft";
+  current.audioOperations = savedAudioHistory();
+  render(page());
+  await userEvent.click(
+    await screen.findByRole("button", { name: /My conversation/ }),
+  );
+  await openConversationMenu();
+  const item = await screen.findByRole("menuitem", { name: "Audio history" });
+  expect(item).not.toHaveAttribute("aria-disabled", "true");
+  await userEvent.click(item);
+  const dialog = await screen.findByRole("dialog", { name: "Audio history" });
+  expect(within(dialog).getByText("Saved spoken words")).toBeVisible();
+  for (const audio of dialog.querySelectorAll("audio")) {
+    expect(audio).not.toHaveAttribute("src");
+    expect(audio).toHaveAttribute("preload", "none");
+  }
+  expect(mocks.saveMedia).not.toHaveBeenCalled();
+  expect(
+    within(dialog).getByRole("button", { name: "Play audio" }),
+  ).toBeVisible();
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Save audio" }),
+  );
+  expect(mocks.saveMedia).toHaveBeenCalledWith({
+    sessionId: session.id,
+    expectedOwner: capabilities.owner,
+    expectedGeneration: capabilities.authorityGeneration,
+    attachmentId: "saved-audio",
+  });
+  expect(
+    within(dialog).queryByRole("button", { name: "Generate speech" }),
+  ).toBeNull();
+  expect(within(dialog).queryByRole("button", { name: "Record" })).toBeNull();
+  expect(mocks.speech).not.toHaveBeenCalled();
+  expect(mocks.transcribe).not.toHaveBeenCalled();
+  expect(mocks.pickAudio).not.toHaveBeenCalled();
+  expect(mocks.send).not.toHaveBeenCalled();
+  expect(mocks.createSession).not.toHaveBeenCalled();
+  await userEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+  expect(conversationMenuButton()).toHaveFocus();
+  expect(composer()).toHaveValue("Keep this offline draft");
+});
+
+it.each(["expired", "inactive"] as const)(
+  "releases saved audio history when the page becomes %s",
+  async (change) => {
+    current.audioOperations = savedAudioHistory();
+    const view = render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: /My conversation/ }),
+    );
+    await openConversationMenu();
+    await userEvent.click(
+      await screen.findByRole("menuitem", { name: "Audio history" }),
+    );
+    const dialog = await screen.findByRole("dialog", { name: "Audio history" });
+    expect(dialog.querySelector("audio")).not.toBeNull();
+    if (change === "expired") act(() => mocks.auth?.("expired"));
+    else view.rerender(page(false));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Audio history" }),
+      ).toBeNull(),
+    );
+    expect(dialog.isConnected).toBe(false);
+    expect(mocks.speech).not.toHaveBeenCalled();
+    expect(mocks.transcribe).not.toHaveBeenCalled();
+  },
+);
+
+it("does not offer audio history when there is no saved audio operation", async () => {
+  await openConversation();
+  await openConversationMenu();
+  expect(screen.queryByRole("menuitem", { name: "Audio history" })).toBeNull();
 });

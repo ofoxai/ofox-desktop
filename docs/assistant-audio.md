@@ -133,7 +133,10 @@ A retention failure keeps the transcript and charge facts with a visible warning
 without another transcription. Retained originals can be played/saved from ASR
 history through the same private protocol.
 The transcript and frozen usage/pricing/request ID remain in the separate
-operation ledger, accessible from Voice input. Whole-conversation ZIP backups
+operation ledger, accessible from Voice input and the conversation menu’s Audio
+history. The local history view needs no model catalog or Pi runtime, opens no
+audio source before a play gesture, and releases the previous player when
+switching saved records. Whole-conversation ZIP backups
 preserve retained originals, generated speech, text, frozen prices and unknown
 usage; restore keeps local saved choices and fills only missing preference fields.
 Unknown preference fields remain local and are excluded from portable archives.

@@ -100,14 +100,15 @@ pub(super) async fn transcribe(
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
+        let unbilled = status.is_client_error() && status.as_u16() != 408;
         let code = match status.as_u16() {
             401 => "assistant_key_rejected",
             402 => "assistant_insufficient_balance",
             429 => "assistant_rate_limited",
-            400..=499 => INVALID,
+            400..=499 if unbilled => INVALID,
             _ => UNKNOWN,
         };
-        return Err(fail(code, status.is_client_error()));
+        return Err(fail(code, unbilled));
     }
     let value: Value = serde_json::from_slice(&bytes).map_err(|_| fail(UNKNOWN, false))?;
     let text = value["text"]
@@ -239,6 +240,7 @@ mod tests {
             (400, true),
             (401, true),
             (402, true),
+            (408, false),
             (429, true),
             (500, false),
             (307, false),
@@ -264,7 +266,10 @@ mod tests {
             .await
             .err()
             .unwrap();
-            assert_eq!(error.unbilled, unbilled);
+            assert_eq!(error.unbilled, unbilled, "HTTP {status}");
+            if status == 408 {
+                assert_eq!(error.code, UNKNOWN);
+            }
             assert!(error.request_id.is_none());
             assert!(!format!("{error:?}").contains("do-not-leak-this-key"));
         }

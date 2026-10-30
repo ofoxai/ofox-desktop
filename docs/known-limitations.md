@@ -39,10 +39,9 @@ audio acceptance have not yet been performed. Speech previews start with the
 reply source text, including Markdown, and can be edited before generation.
 Ogg Opus output checks container framing/CRCs and duration; full Opus decoding
 is device-dependent. Unsupported codecs offer save without paid conversion;
-native WKWebView playback/save acceptance remains pending. Opening stored audio
-history from a cold offline catalog is still gated by the composer entry points
-and needs final-stage review; the private playback/save paths themselves need
-no model call. See [audio design](assistant-audio.md).
+native WKWebView playback/save acceptance remains pending. Stored audio history is available from the conversation menu even when the
+model catalog or Pi runtime is unavailable; playback and save make no new model
+request. See [audio design](assistant-audio.md).
 
 ## Assistant backup and restore (2026-10-28)
 

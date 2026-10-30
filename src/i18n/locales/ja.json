@@ -5439,6 +5439,13 @@
       "download_failed": "ダウンロード失敗",
       "query_expired": "照会期限切れ",
       "error": "エラー"
-    }
+    },
+    "audioHistoryTitle": "音声の履歴",
+    "audioHistoryHint": "保存済みの音声をローカルで再生・保存します。履歴を開いてもモデルへのリクエストは発生しません。",
+    "audioHistoryNoFile": "このリクエストには保存済み音声がありません。",
+    "audioHistoryOutput": "生成済み音声",
+    "audioHistoryOriginal": "保持した元の音声",
+    "audioHistoryItem": "保存済み音声 {{number}}",
+    "audioHistoryEmpty": "保存済み音声の履歴はまだありません。"
   }
 }

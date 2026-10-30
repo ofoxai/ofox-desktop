@@ -52,6 +52,7 @@ import { VideoBlock } from "./VideoBlock";
 import { VideoParams, defaultVideoParams } from "./VideoParams";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AssistantContextUsage } from "./AssistantContextUsage";
+import { AssistantAudioHistory } from "./AssistantAudioHistory";
 import { AssistantAudioInput } from "./AssistantAudioInput";
 import { AssistantSpeechOutput } from "./AssistantSpeechOutput";
 import { AssistantQueue } from "./AssistantQueue";
@@ -251,7 +252,11 @@ function AssistantWorkspace() {
   const openEdits = useRef(0);
   const usageLabelId = useId();
   const [requestScope, setRequestScope] = useState<string | null>(null);
+  const [audioHistoryScope, setAudioHistoryScope] = useState<string | null>(
+    null,
+  );
   const requestScopeKey = `${bootstrap?.owner}:${bootstrap?.authorityGeneration}:${detail?.session.id}`;
+  const audioHistoryKey = `${requestScopeKey}:${assistant.selectionKey}`;
   const requests =
     requestScope === requestScopeKey ? assistantRequests(detail) : [];
   const newConversationButton = useRef<HTMLButtonElement>(null);
@@ -1046,6 +1051,24 @@ function AssistantWorkspace() {
                 >
                   {t("assistant.requestRecords")}
                 </DropdownMenuItem>
+                {(detail?.audioOperations?.length ?? 0) > 0 && (
+                  <DropdownMenuItem
+                    disabled={Boolean(
+                      run ||
+                        busy ||
+                        assistant.loading ||
+                        trashed ||
+                        queueCount > 0 ||
+                        detail?.session.id !== assistant.selectedId,
+                    )}
+                    onSelect={() => {
+                      menuAction.current = () =>
+                        setAudioHistoryScope(audioHistoryKey);
+                    }}
+                  >
+                    {t("assistant.audioHistoryTitle")}
+                  </DropdownMenuItem>
+                )}
                 {usage && (
                   <>
                     <DropdownMenuLabel
@@ -1939,6 +1962,29 @@ function AssistantWorkspace() {
           });
         }}
       />
+      {interactionActive &&
+        audioHistoryScope === audioHistoryKey &&
+        bootstrap &&
+        detail &&
+        detail.session.id === assistant.selectedId &&
+        !trashed &&
+        !run &&
+        !busy &&
+        !assistant.loading &&
+        queueCount === 0 && (
+          <AssistantAudioHistory
+            key={audioHistoryKey}
+            target={{
+              sessionId: detail.session.id,
+              expectedOwner: bootstrap.owner,
+              expectedGeneration: bootstrap.authorityGeneration,
+            }}
+            history={detail.audioOperations ?? []}
+            attachments={detail.attachments}
+            returnFocusRef={menuTrigger}
+            onClose={() => setAudioHistoryScope(null)}
+          />
+        )}
       <AssistantRequestDetails
         requests={requests}
         returnFocusRef={menuTrigger}

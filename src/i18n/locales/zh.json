@@ -5439,6 +5439,13 @@
       "download_failed": "下载失败",
       "query_expired": "查询已过期",
       "error": "错误"
-    }
+    },
+    "audioHistoryTitle": "音频历史",
+    "audioHistoryHint": "在本机播放或保存已有音频。打开历史不会重新调用模型。",
+    "audioHistoryNoFile": "这次请求没有保存音频文件。",
+    "audioHistoryOutput": "已生成音频",
+    "audioHistoryOriginal": "已保留的原音频",
+    "audioHistoryItem": "已存音频 {{number}}",
+    "audioHistoryEmpty": "还没有已存音频历史。"
   }
 }
