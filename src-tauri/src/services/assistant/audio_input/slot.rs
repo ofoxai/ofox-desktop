@@ -19,6 +19,56 @@ struct Pending {
     input: Input,
 }
 impl Slot {
+    fn checked(
+        &mut self,
+        authority: &DeleteRequest,
+        id: &str,
+        now: Instant,
+    ) -> Result<&Pending, String> {
+        self.expire(id, now);
+        let pending = self
+            .pending
+            .as_ref()
+            .filter(|v| v.id == id)
+            .ok_or(super::super::audio::INPUT_UNAVAILABLE)?;
+        if pending.owner != authority.expected_owner
+            || pending.generation != authority.expected_generation
+            || pending.session_id != authority.session_id
+        {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        Ok(pending)
+    }
+    pub(in crate::services::assistant) fn preview(
+        &mut self,
+        authority: &DeleteRequest,
+        id: &str,
+        now: Instant,
+    ) -> Result<Preview, String> {
+        let pending = self.checked(authority, id, now)?;
+        Ok(Preview {
+            input_id: pending.id.clone(),
+            name: pending.input.name.clone(),
+            size_bytes: pending.input.bytes.len() as u64,
+            info: pending.input.info.clone(),
+        })
+    }
+    pub(in crate::services::assistant) fn take(
+        &mut self,
+        authority: &DeleteRequest,
+        id: &str,
+        now: Instant,
+    ) -> Result<Input, String> {
+        self.checked(authority, id, now)?;
+        let pending = self
+            .pending
+            .take()
+            .ok_or(super::super::audio::INPUT_UNAVAILABLE)?;
+        if let Some(timer) = self.timer.take() {
+            timer.abort();
+        }
+        Ok(pending.input)
+    }
     pub(super) fn put(&mut self, authority: &DeleteRequest, input: Input, now: Instant) -> Preview {
         self.clear();
         let id = uuid::Uuid::new_v4().to_string();

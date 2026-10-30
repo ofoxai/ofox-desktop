@@ -26,6 +26,7 @@ import {
   Paperclip,
   Pencil,
   Minimize2,
+  Mic,
   Pin,
   PinOff,
   Square,
@@ -50,6 +51,7 @@ import { VideoBlock } from "./VideoBlock";
 import { VideoParams, defaultVideoParams } from "./VideoParams";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AssistantContextUsage } from "./AssistantContextUsage";
+import { AssistantAudioInput } from "./AssistantAudioInput";
 import { AssistantQueue } from "./AssistantQueue";
 import { MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES } from "./useMessageQueue";
 import { AttachmentList } from "./AssistantAttachments";
@@ -188,6 +190,8 @@ function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
   const { detail, bootstrap, run, busy } = assistant;
+  const [audioDialog, setAudioDialog] =
+    useState<Awaited<ReturnType<typeof assistant.prepareAudio>>>(null);
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [backupDialog, setBackupDialog] = useState<{
@@ -206,6 +210,9 @@ function AssistantWorkspace() {
   const lengthHintId = useId();
   const queueHintId = useId();
   const interactionActive = useInteractionActive();
+  useEffect(() => {
+    if (!interactionActive) setAudioDialog(null);
+  }, [interactionActive]);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   // The view is more than a screen above the end of the conversation, and
@@ -340,7 +347,11 @@ function AssistantWorkspace() {
   const imageMode = composerModel?.kind === "image";
   const videoMode = composerModel?.kind === "video";
   const queueCount = assistant.queue?.messages.length ?? 0;
-  const queueMode = !imageMode && !videoMode && Boolean(run || queueCount);
+  const queueMode =
+    !imageMode &&
+    !videoMode &&
+    !session?.audioOnly &&
+    Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
   const canQueue = assistant.queueAvailable && !files.length && !queueFull;
   const [videoParams, setVideoParams] = useState<AssistantVideoRequest>({
@@ -1534,6 +1545,26 @@ function AssistantWorkspace() {
                       </Button>
                       {!imageMode &&
                         !videoMode &&
+                        bootstrap?.audioModels?.some(
+                          (model) =>
+                            model.kind === "transcription" && model.audio,
+                        ) && (
+                          <Button
+                            variant="icon"
+                            aria-label={t("assistant.audio.title")}
+                            title={t("assistant.audio.title")}
+                            disabled={!writable || queueCount > 0}
+                            onClick={() => {
+                              void assistant.prepareAudio().then((target) => {
+                                if (target) setAudioDialog(target);
+                              });
+                            }}
+                          >
+                            <Mic aria-hidden className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                      {!imageMode &&
+                        !videoMode &&
                         (showSearchNote ? (
                           <Tooltip>
                             {/* The wrapper takes the hover while the switch is off. */}
@@ -1703,6 +1734,26 @@ function AssistantWorkspace() {
           )}
         </div>
       </section>
+      {interactionActive &&
+        audioDialog &&
+        audioDialog.expectedOwner === bootstrap?.owner &&
+        audioDialog.expectedGeneration === bootstrap.authorityGeneration &&
+        audioDialog.sessionId === assistant.selectedId &&
+        audioDialog.selectionKey === assistant.selectionKey &&
+        !trashed && (
+          <AssistantAudioInput
+            key={`${audioDialog.expectedOwner}:${audioDialog.expectedGeneration}:${audioDialog.sessionId}:${audioDialog.selectionKey}`}
+            target={audioDialog}
+            models={bootstrap.audioModels ?? []}
+            rememberedModel={bootstrap.rememberedModels?.transcription}
+            history={detail?.audioOperations}
+            onInsert={(text) => assistant.insertAudioDraft(audioDialog, text)}
+            onClose={() => {
+              setAudioDialog(null);
+              requestAnimationFrame(focusComposer);
+            }}
+          />
+        )}
       <ConfirmDialog
         isOpen={videoQuoteOpen}
         title={t("assistant.video.confirmTitle")}

@@ -23,6 +23,10 @@ const HOST_ONLY = new Set([
 
 /** Codes the renderer raises itself. */
 const RENDERER_CODES = [
+  "assistant_microphone_denied",
+  "assistant_microphone_unavailable",
+  "assistant_recording_interrupted",
+  "assistant_audio_empty",
   "assistant_session_loading",
   "assistant_request_expired",
 ];

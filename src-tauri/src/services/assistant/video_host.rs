@@ -448,7 +448,7 @@ impl AssistantHost {
             }
         })
         .await?;
-        self.release_video_run(run);
+        self.release_run(run);
         if self.ensure_current(&run.identity, generation).await.is_ok() {
             if let Some(message) = detail.messages.iter().find(|m| m.id == run.message_id) {
                 self.emit(run, "message", json!({"message":message}));

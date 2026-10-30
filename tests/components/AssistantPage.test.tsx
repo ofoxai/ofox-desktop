@@ -223,6 +223,154 @@ const toasted = () =>
 
 afterEach(() => vi.unstubAllEnvs());
 
+it("audio insertion preserves the newest draft and rejects a changed selection", async () => {
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() =>
+    expect(hook.result.current.detail?.session.id).toBe(session.id),
+  );
+  let target: Awaited<ReturnType<typeof hook.result.current.prepareAudio>>;
+  await act(async () => {
+    target = await hook.result.current.prepareAudio();
+  });
+  expect(target!).not.toBeNull();
+  act(() => hook.result.current.setDraft("新写的内容"));
+  act(() =>
+    expect(hook.result.current.insertAudioDraft(target!, "识别结果")).toBe(
+      true,
+    ),
+  );
+  expect(hook.result.current.draft).toBe("新写的内容\n识别结果");
+  act(() => hook.result.current.select(null));
+  act(() =>
+    expect(hook.result.current.insertAudioDraft(target!, "迟到结果")).toBe(
+      false,
+    ),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("audio state events hold a run without a phantom chat bubble and reject another authority", async () => {
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() =>
+    expect(hook.result.current.detail?.session.id).toBe(session.id),
+  );
+  const payload = {
+    type: "audio_state",
+    sessionId: session.id,
+    runId: "audio-run",
+    operationId: "audio-op",
+    data: {
+      owner: capabilities.owner,
+      generation: capabilities.authorityGeneration,
+      running: true,
+      updatedAt: 2,
+      result: {
+        operationId: "audio-op",
+        runId: "audio-run",
+        kind: "transcription",
+        model: "openai/gpt-transcribe",
+        status: "submitting",
+        audio: { text: null },
+      },
+      usage: {},
+    },
+  } as unknown as AssistantEvent;
+  act(() => mocks.listener?.(structuredClone(payload)));
+  expect(hook.result.current.run?.runId).toBe("audio-run");
+  expect(hook.result.current.stream).toBeNull();
+  expect(hook.result.current.detail?.messages).toEqual([]);
+  const wrong = structuredClone(payload) as typeof payload;
+  if (wrong.type === "audio_state") {
+    wrong.data.owner = "other";
+    wrong.data.running = false;
+  }
+  act(() => mocks.listener?.(wrong));
+  expect(hook.result.current.run?.runId).toBe("audio-run");
+  if (payload.type === "audio_state") {
+    payload.data.running = false;
+    payload.data.result.status = "completed";
+    payload.data.result.audio.text = "完成";
+  }
+  act(() => mocks.listener?.(structuredClone(payload)));
+  expect(hook.result.current.run).toBeNull();
+  expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
+    "完成",
+  );
+  // A duplicate terminal event must not replace the already accepted result.
+  if (payload.type === "audio_state")
+    payload.data.result.audio.text = "重复的旧结果";
+  act(() => mocks.listener?.(structuredClone(payload)));
+  expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
+    "完成",
+  );
+});
+
+it("audio completion preserves a newer chat run and its usage", async () => {
+  current.session.activeRun = { runId: "new-chat", operationId: "new-op" };
+  current.usage = { estimatedCostUsd: "2" };
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.run?.runId).toBe("new-chat"));
+  act(() =>
+    mocks.listener?.({
+      type: "audio_state",
+      sessionId: session.id,
+      runId: "old-audio",
+      operationId: "old-op",
+      data: {
+        owner: capabilities.owner,
+        generation: 1,
+        running: false,
+        updatedAt: 1,
+        result: {
+          operationId: "old-op",
+          runId: "old-audio",
+          kind: "transcription",
+          model: "openai/gpt-transcribe",
+          status: "completed",
+          audio: { text: "识别结果" },
+        },
+        usage: { estimatedCostUsd: "1" },
+      },
+    } as unknown as AssistantEvent),
+  );
+  expect(hook.result.current.run?.runId).toBe("new-chat");
+  expect(hook.result.current.detail?.session.audioOnly).toBeUndefined();
+  expect(hook.result.current.detail?.usage).toEqual({ estimatedCostUsd: "2" });
+  expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
+    "识别结果",
+  );
+});
+
+it("audio entry opens only when dedicated transcription models are available", async () => {
+  mocks.bootstrap.mockResolvedValue({
+    ...capabilities,
+    audioModels: [
+      {
+        ...model("openai/gpt-transcribe", "GPT Transcribe"),
+        kind: "transcription",
+        audio: {
+          pricing: { unit: "seconds", inputAudioPerSecond: "0.000075" },
+        },
+      },
+    ],
+  });
+  render(page());
+  await userEvent.click(
+    await screen.findByRole("button", { name: "Voice input" }),
+  );
+  expect(
+    await screen.findByRole("dialog", { name: "Voice input" }),
+  ).toBeVisible();
+  expect(screen.getByRole("button", { name: "Record" })).toBeEnabled();
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
 beforeEach(async () => {
   Element.prototype.scrollIntoView = vi.fn();
   i18n.addResourceBundle("en", "translation", en, true, true);

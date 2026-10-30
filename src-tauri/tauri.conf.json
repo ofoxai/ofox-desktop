@@ -54,7 +54,10 @@
       "../docs/licenses/SYMPHONIA-NOTICE.md": "licenses/SYMPHONIA-NOTICE.md",
       "src/services/MAGPIE_LICENSE": "src/services/MAGPIE_LICENSE",
       "src/session_manager/MAGPIE_LICENSE": "src/session_manager/MAGPIE_LICENSE",
-      "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE"
+      "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE",
+      "infoplist/en.lproj/InfoPlist.strings": "en.lproj/InfoPlist.strings",
+      "infoplist/zh-Hans.lproj/InfoPlist.strings": "zh-Hans.lproj/InfoPlist.strings",
+      "infoplist/ja.lproj/InfoPlist.strings": "ja.lproj/InfoPlist.strings"
     },
     "icon": [
       "icons/32x32.png",

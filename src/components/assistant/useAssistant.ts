@@ -9,6 +9,7 @@ import {
   assistantApi,
   assistantErrorCode,
   type AssistantAttachment,
+  type AssistantPasteTarget,
   type AssistantImageRequest,
   type AssistantVideoRequest,
   type AssistantMediaQuote,
@@ -202,6 +203,8 @@ export function useAssistant(enabled: boolean) {
   const [matches, setMatches] = useState<Record<string, string>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<AssistantSessionDetail | null>(null);
+  const detailRef = useRef(detail);
+  detailRef.current = detail;
   const [draft, setDraftState] = useState("");
   const [attachments, setAttachmentsState] = useState<AssistantAttachment[]>(
     [],
@@ -225,6 +228,7 @@ export function useAssistant(enabled: boolean) {
     () => new Set(),
   );
   const [compacting, setCompacting] = useState(false);
+  const audioFinished = useRef(new Set<string>());
   const [error, setErrorCode] = useState<AssistantError | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const setError = useCallback((value: AssistantError | null) => {
@@ -972,6 +976,92 @@ export function useAssistant(enabled: boolean) {
         // The identity generation this event arrived under: a list read it
         // asks for is fenced on it.
         const generation = epoch.current;
+        if (event.type === "audio_state") {
+          const {
+            owner,
+            generation: authority,
+            running,
+            result,
+            usage,
+          } = event.data;
+          const identity = bootstrapRef.current;
+          if (
+            signedOut.current ||
+            !identity ||
+            owner !== identity.owner ||
+            authority !== identity.authorityGeneration ||
+            result?.operationId !== event.operationId ||
+            result.runId !== event.runId ||
+            result.kind !== "transcription" ||
+            !result.audio
+          )
+            return;
+          const key = `${owner}:${authority}:${event.sessionId}:${event.operationId}`;
+          if (audioFinished.current.has(key)) return;
+          if (!running) {
+            audioFinished.current.add(key);
+            if (audioFinished.current.size > 512)
+              audioFinished.current.delete(
+                audioFinished.current.values().next().value!,
+              );
+            notifyFinish({
+              sessionId: event.sessionId,
+              status: result.status === "completed" ? "completed" : "error",
+            });
+          }
+          void refreshSessionsRef.current(generation);
+          if (selectedRef.current !== event.sessionId) return;
+          detailSequence.current++;
+          const active = { runId: event.runId, operationId: event.operationId };
+          if (running) {
+            if (
+              (!runRef.current || runRef.current.runId === event.runId) &&
+              (!detailRef.current ||
+                detailRef.current.session.updatedAt <= event.data.updatedAt)
+            ) {
+              setRun(active);
+              setStream(null);
+            }
+          } else if (runRef.current?.runId === event.runId) setRun(null);
+          setDetail((old) => {
+            if (old?.session.id !== event.sessionId) return old;
+            const newer =
+              old.session.updatedAt > event.data.updatedAt ||
+              (old.session.activeRun &&
+                old.session.activeRun.runId !== event.runId);
+            const activeRun = running
+              ? newer
+                ? old.session.activeRun
+                : active
+              : newer
+                ? old.session.activeRun
+                : null;
+            return {
+              ...old,
+              usage: newer ? old.usage : usage,
+              session: {
+                ...old.session,
+                activeRun,
+                updatedAt: Math.max(
+                  old.session.updatedAt,
+                  event.data.updatedAt,
+                ),
+                audioOnly: newer
+                  ? old.session.audioOnly
+                  : activeRun
+                    ? true
+                    : undefined,
+              },
+              audioOperations: [
+                ...(old.audioOperations ?? []).filter(
+                  (item) => item.operationId !== event.operationId,
+                ),
+                result,
+              ],
+            };
+          });
+          return;
+        }
         if (event.type === "media_progress") {
           const {
             owner,
@@ -1442,6 +1532,62 @@ export function useAssistant(enabled: boolean) {
     setNewWebSearch,
     showError,
   ]);
+
+  const prepareAudio = useCallback(async () => {
+    if (
+      operationBusyRef.current ||
+      transferInFlight.current ||
+      runRef.current ||
+      loading ||
+      showTrashRef.current
+    )
+      return null;
+    const generation = epoch.current;
+    setBusy(true);
+    try {
+      const session = await ensureSession();
+      if (
+        !mounted.current ||
+        generation !== epoch.current ||
+        selectedRef.current !== session.id
+      )
+        return null;
+      return {
+        sessionId: session.id,
+        ...requireIdentity(bootstrapRef.current),
+        selectionKey: selectionSequence.current,
+      };
+    } catch (reason) {
+      if (generation === epoch.current) showError(reason);
+      return null;
+    } finally {
+      if (mounted.current && generation === epoch.current) setBusy(false);
+    }
+  }, [ensureSession, loading, setBusy, showError]);
+
+  const insertAudioDraft = useCallback(
+    (target: AssistantPasteTarget & { selectionKey: number }, text: string) => {
+      const identity = bootstrapRef.current;
+      if (
+        signedOut.current ||
+        selectedRef.current !== target.sessionId ||
+        selectionSequence.current !== target.selectionKey ||
+        identity?.owner !== target.expectedOwner ||
+        identity.authorityGeneration !== target.expectedGeneration ||
+        detail?.session.deletedAt != null
+      )
+        return false;
+      const draft = draftRef.current;
+      const next = `${draft}${draft && !draft.endsWith("\n") ? "\n" : ""}${text}`;
+      if (new TextEncoder().encode(next).length > MAX_MESSAGE_BYTES) {
+        showError("assistant_message_too_large");
+        return false;
+      }
+      setDraft(next);
+      return true;
+    },
+    [detail?.session.deletedAt, setDraft, showError],
+  );
 
   const create = useCallback(async () => {
     if (busy) return;
@@ -2889,6 +3035,8 @@ export function useAssistant(enabled: boolean) {
 
   return {
     bootstrap,
+    prepareAudio,
+    insertAudioDraft,
     newModelId,
     chooseNewModel,
     quoteVideo,

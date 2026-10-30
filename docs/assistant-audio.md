@@ -8,7 +8,8 @@ Long meeting workflows and full-duplex realtime conversation are later work.
 
 Speech input is separate from the conversation's selected chat model. The user
 records or imports an audio file, starts transcription and reviews the text in
-the composer before sending it. An audio operation never fabricates a chat turn
+an editable transcription field before explicitly inserting it into the composer.
+Insertion appends to the latest draft; it never replaces existing text. An audio operation never fabricates a chat turn
 or automatically sends recognized words. A late result cannot overwrite a newer
 draft or insert into a different account/conversation. Offer the saved result
 for explicit insertion when its original draft/selection is no longer current.
@@ -88,7 +89,14 @@ Implement capability metadata/preferences, bounded import, transcription,
 recording UI, synthesis, playback/storage, then stability work. Tests must cover
 both apexes, denial/cancel/stale-owner paths, uncertain charging, old backups and
 repeated playback without a request. UI covers zh/en/ja, both themes, keyboard
-focus and 900px layouts. Native macOS microphone/play/save and approved small
+focus and 900px layouts. The recording/ASR implementation uses a bundled AudioWorklet and 16 kHz mono
+PCM WAV. Auto, Chinese, English and Japanese are available; Chinese adds the
+fixed Simplified Chinese hint only on profiles that support a prompt. Source
+bytes are consumed once by the Rust request and discarded after completion.
+The transcript and frozen usage/pricing/request ID remain in the separate
+operation ledger, accessible from Voice input. Keep-original history is pending.
+
+Native macOS microphone/play/save and approved small
 live samples require separate evidence and per-request billing reconciliation.
 Windows native acceptance remains explicitly deferred.
 

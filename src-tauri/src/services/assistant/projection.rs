@@ -111,7 +111,31 @@ pub(super) fn settle_interrupted(
     record: &mut SessionRecord,
     entries: Option<&Value>,
 ) -> Result<(), String> {
-    mark_cost_unknown(&mut record.usage);
+    let proven_unsent_audio = record
+        .operations
+        .iter()
+        .filter(|op| op.status == OperationStatus::Running)
+        .all(|op| {
+            op.media
+                .as_ref()
+                .is_some_and(|m| m.kind == "transcription" && m.status == "not_sent")
+        })
+        && record
+            .operations
+            .iter()
+            .any(|op| op.status == OperationStatus::Running)
+        && record.session.active_run.as_ref().is_none_or(|active| {
+            record.operations.iter().any(|op| {
+                op.run_id == active.run_id
+                    && op
+                        .media
+                        .as_ref()
+                        .is_some_and(|m| m.kind == "transcription" && m.status == "not_sent")
+            })
+        });
+    if !proven_unsent_audio {
+        mark_cost_unknown(&mut record.usage);
+    }
     let interrupted: HashSet<String> = record
         .operations
         .iter()
@@ -589,7 +613,7 @@ pub(super) fn recount_usage(record: &mut SessionRecord, entries: &[Value]) {
         .operations
         .iter()
         .filter_map(|op| op.media.as_ref())
-        .filter(|media| media.status != "submitting")
+        .filter(|media| media.status != "submitting" && media.status != "not_sent")
         .collect();
     if media.is_empty() {
         return;

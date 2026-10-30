@@ -167,6 +167,7 @@ mod assistant_wiring_tests {
                 "assistant_steer",
                 "assistant_stop",
                 "assistant_switch_version",
+                "assistant_transcribe_audio",
                 "assistant_update_session",
                 "assistant_usage_summary",
             ]
@@ -1888,6 +1889,7 @@ pub fn run() {
             commands::assistant_compact,
             commands::assistant_pick_attachments,
             commands::assistant_pick_audio,
+            commands::assistant_transcribe_audio,
             commands::assistant_import_audio,
             commands::assistant_discard_audio,
             commands::assistant_import_drop,

@@ -90,6 +90,7 @@ pub struct SessionRecord {
 impl SessionRecord {
     pub fn into_detail(self) -> Detail {
         Detail {
+            audio_operations: super::audio::results(&self.operations),
             session: self.session,
             messages: self.messages,
             attachments: self.attachments,
@@ -240,6 +241,7 @@ impl AssistantStore {
         let at = now();
         let record = SessionRecord {
             session: Session {
+                audio_only: None,
                 context_usage: None,
                 compacting: None,
                 id: id(),
@@ -2422,6 +2424,7 @@ mod tests {
     fn record_for(sid: &str) -> SessionRecord {
         SessionRecord {
             session: Session {
+                audio_only: None,
                 context_usage: None,
                 compacting: None,
                 id: sid.into(),
@@ -3155,5 +3158,68 @@ mod tests {
         assert_eq!(merged["speechModelId"], "mine");
         assert_eq!(merged["transcriptionModelId"], "recognizer");
         assert_eq!(merged["modelId"], "chat");
+    }
+    fn transcription_operation(status: &str, running: bool) -> Operation {
+        serde_json::from_value(json!({"id":id(),"runId":id(),"status":if running {"running"} else {"completed"},"media":{
+            "kind":"transcription","model":"openai/gpt-transcribe","apex":"ofox.io","params":{"language":"zh"},"status":status,"cost":"0.000675",
+            "audio":{"pricing":{"unit":"seconds","inputAudioPerSecond":"0.000075"},"text":"下午三点开会。","usage":{"type":"duration","seconds":9},"requestId":"req_test_123"}
+        }})).unwrap()
+    }
+    #[test]
+    fn audio_transcription_is_kept_as_a_separate_result_without_a_phantom_chat_message() {
+        let (_dir, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |r| {
+                r.session.draft = "未发送的草稿".into();
+                r.operations
+                    .push(transcription_operation("completed", false));
+                Ok(())
+            })
+            .unwrap();
+        let detail = serde_json::to_value(store.load_detail(&sid).unwrap()).unwrap();
+        assert_eq!(
+            detail["audioOperations"][0]["audio"]["text"],
+            "下午三点开会。"
+        );
+        assert_eq!(
+            detail["audioOperations"][0]["audio"]["requestId"],
+            "req_test_123"
+        );
+        assert_eq!(detail["session"]["draft"], "未发送的草稿");
+        assert_eq!(detail["session"]["modelId"], "test/model");
+        assert_eq!(detail["messages"], json!([]));
+        assert_eq!(detail["attachments"], json!([]));
+    }
+    #[test]
+    fn audio_request_cancelled_before_submission_is_not_counted_as_a_paid_attempt() {
+        let (_dir, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |r| {
+                r.operations
+                    .push(transcription_operation("not_sent", false));
+                super::super::projection::recount_usage(r, &[]);
+                Ok(())
+            })
+            .unwrap();
+        let usage = store.load_record(&sid).unwrap().usage;
+        assert_eq!(usage["modelRequests"], 0);
+        assert_ne!(usage["usageCoverage"], "incomplete");
+    }
+    #[test]
+    fn audio_recovery_keeps_a_proven_unsent_attempt_unbilled() {
+        let (_dir, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        store
+            .mutate(&sid, |r| {
+                r.operations.push(transcription_operation("not_sent", true));
+                super::super::projection::settle_interrupted(r, None)?;
+                Ok(())
+            })
+            .unwrap();
+        let record = store.load_record(&sid).unwrap();
+        assert_eq!(record.operations[0].status, OperationStatus::Interrupted);
+        assert_ne!(record.usage["usageCoverage"], "incomplete");
     }
 }

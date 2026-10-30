@@ -5,7 +5,7 @@
 use crate::ofox_api_keys::{self, ApiKeyError, AssistantKeyStatus, FetchMode};
 use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
-    attachments, audio_input, catalog,
+    attachments, audio, audio_input, catalog,
     host::{blocking, Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
@@ -37,6 +37,14 @@ type Host<'a> = State<'a, Arc<AssistantHost>>;
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_bootstrap(host: Host<'_>) -> Result<Value, String> {
     host.bootstrap().await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_transcribe_audio(
+    host: Host<'_>,
+    request: audio::TranscribeRequest,
+) -> Result<audio::ResultRecord, String> {
+    host.transcribe_audio(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

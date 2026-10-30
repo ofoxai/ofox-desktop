@@ -10,6 +10,8 @@ use serde_json::Value;
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<super::audio::Trace>,
     pub kind: String,
     pub model: String,
     pub params: Value,
@@ -69,6 +71,9 @@ impl ContextUsage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    /// Live audio task, never resumed from a saved snapshot.
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub audio_only: Option<bool>,
     /// Live runtime state only; never resumed from a saved record/backup.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub compacting: Option<bool>,
@@ -285,6 +290,8 @@ pub enum OperationStatus {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub audio_operations: Vec<super::audio::ResultRecord>,
     pub session: Session,
     pub messages: Vec<Message>,
     pub attachments: Vec<Attachment>,
@@ -703,6 +710,7 @@ mod tests {
     #[test]
     fn detail_carries_no_run_ledger() {
         let detail = Detail {
+            audio_operations: vec![],
             session: serde_json::from_value(minimal_session()).unwrap(),
             messages: vec![],
             attachments: vec![],

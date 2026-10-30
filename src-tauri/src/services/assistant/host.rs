@@ -74,6 +74,10 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    /// Blocking proxy-aware audio transport; tests inject a direct local client.
+    fn audio_client(&self) -> Result<reqwest::Client, String> {
+        crate::proxy::http_client::assistant_media_client()
+    }
     /// The signed-in account and the current region; [`SIGN_IN_REQUIRED`]
     /// when nobody is signed in.
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>>;
@@ -138,6 +142,7 @@ pub struct RunControl {
     pub operation_id: String,
     pub message_id: String,
     pub(super) compact_only: bool,
+    pub(super) audio_only: bool,
     compacting: AtomicBool,
     pub(super) live_reply: Mutex<Option<String>>,
     pub(super) live_runs: Mutex<HashSet<String>>,
@@ -158,6 +163,7 @@ impl RunControl {
             operation_id: request.operation_id.clone(),
             message_id: id(),
             compact_only: false,
+            audio_only: false,
             compacting: AtomicBool::new(false),
             live_reply: Mutex::new(None),
             live_runs: Mutex::new(HashSet::new()),
@@ -908,6 +914,7 @@ impl AssistantHost {
                 .filter(|r| r.identity.owner == owner)
                 .cloned()
         });
+        session.audio_only = active.as_ref().filter(|run| run.audio_only).map(|_| true);
         session.compacting = active
             .as_ref()
             .filter(|run| run.compact_only || run.compacting.load(Ordering::SeqCst))
@@ -1164,7 +1171,7 @@ impl AssistantHost {
         self.schedule_video_resume();
     }
 
-    pub(super) fn release_video_run(&self, control: &RunControl) {
+    pub(super) fn release_run(&self, control: &RunControl) {
         let mut runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
         if runs
             .get(&control.session_id)

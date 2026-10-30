@@ -32,7 +32,10 @@
       "../src/assets/library-logos/NOTICE.md": "_up_/src/assets/library-logos/NOTICE.md",
       "src/services/MAGPIE_LICENSE": "src/services/MAGPIE_LICENSE",
       "src/session_manager/MAGPIE_LICENSE": "src/session_manager/MAGPIE_LICENSE",
-      "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE"
+      "src/native_tools/MAGPIE_LICENSE": "src/native_tools/MAGPIE_LICENSE",
+      "infoplist/en.lproj/InfoPlist.strings": null,
+      "infoplist/zh-Hans.lproj/InfoPlist.strings": null,
+      "infoplist/ja.lproj/InfoPlist.strings": null
     }
   }
 }

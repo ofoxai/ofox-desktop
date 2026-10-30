@@ -147,6 +147,34 @@ export interface AssistantAudioInput {
   channels: number;
 }
 
+export interface AssistantAudioResult {
+  operationId: string;
+  runId: string;
+  kind: "transcription";
+  model: string;
+  apex?: string | null;
+  params: { language?: string | null; inputName?: string };
+  status: "not_sent" | "submitting" | "completed" | "rejected" | "unknown";
+  cost: string | null;
+  submittedAt?: number | null;
+  audio: {
+    pricing: AssistantAudioCapabilities["pricing"];
+    input: Omit<AssistantAudioInput, "inputId" | "name" | "sizeBytes"> | null;
+    text: string | null;
+    usage: Record<string, unknown> | null;
+    requestId: string | null;
+    requestIdSource: string | null;
+    errorCode: string | null;
+  };
+}
+export interface AssistantTranscribeRequest
+  extends AssistantPasteTarget,
+    AssistantRunRef {
+  inputId: string;
+  modelId: string;
+  language?: "zh" | "en" | "ja";
+}
+
 /** The most characters the custom instructions may have. */
 export const MAX_ASSISTANT_INSTRUCTIONS = 4000;
 
@@ -234,6 +262,7 @@ export interface AssistantContextUsage {
 }
 
 export interface AssistantSession {
+  audioOnly?: boolean;
   contextUsage?: AssistantContextUsage | null;
   /** Current runtime state; never restored from disk. */
   compacting?: boolean;
@@ -462,6 +491,7 @@ export interface AssistantRestoreReport {
 }
 
 export interface AssistantSessionDetail {
+  audioOperations?: AssistantAudioResult[];
   session: AssistantSession;
   messages: AssistantMessage[];
   attachments: AssistantAttachment[];
@@ -634,6 +664,17 @@ export interface AssistantSwitchVersionRequest {
  * stop) and `run_end` last.
  */
 export type AssistantRunEvent =
+  | {
+      type: "audio_state";
+      data: {
+        owner: string;
+        generation: number;
+        running: boolean;
+        updatedAt: number;
+        result: AssistantAudioResult;
+        usage: AssistantUsage;
+      };
+    }
   | {
       type: "steer_applied";
       data: { messageId: string; messages: AssistantMessage[] };
@@ -869,6 +910,8 @@ export const assistantApi = {
     invoke<AssistantAudioInput | null>("assistant_pick_audio", { request }),
   discardAudio: (request: AssistantPasteTarget & { inputId: string }) =>
     invoke<boolean>("assistant_discard_audio", { request }),
+  transcribe: (request: AssistantTranscribeRequest) =>
+    invoke<AssistantAudioResult>("assistant_transcribe_audio", { request }),
   /** Recording bytes use the same authority headers as a pasted file. */
   importAudio: async (file: File, target: AssistantPasteTarget) => {
     if (file.size > MAX_PASTED_FILE_BYTES)
@@ -1037,6 +1080,13 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_audio_unsupported: "audioUnsupported",
   assistant_audio_invalid: "audioInvalid",
   assistant_audio_too_long: "audioTooLong",
+  assistant_audio_input_unavailable: "audioInputUnavailable",
+  assistant_audio_invalid_params: "audioInvalidParams",
+  assistant_audio_outcome_unknown: "audioOutcomeUnknown",
+  assistant_microphone_denied: "microphoneDenied",
+  assistant_microphone_unavailable: "microphoneUnavailable",
+  assistant_recording_interrupted: "recordingInterrupted",
+  assistant_audio_empty: "audioEmpty",
   assistant_attachment_too_many: "attachmentTooMany",
   assistant_attachment_too_large: "attachmentTooLarge",
   assistant_attachment_total_too_large: "attachmentTotalTooLarge",

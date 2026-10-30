@@ -5,7 +5,7 @@ pub(super) use slot::Slot;
 mod host;
 use super::attachments;
 pub use host::{DiscardRequest, Preview};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 pub const MAX_BYTES: usize = 25 * 1024 * 1024;
@@ -14,7 +14,7 @@ pub const UNSUPPORTED: &str = "assistant_audio_unsupported";
 pub const INVALID: &str = "assistant_audio_invalid";
 pub const TOO_LONG: &str = "assistant_audio_too_long";
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Info {
     pub mime_type: String,

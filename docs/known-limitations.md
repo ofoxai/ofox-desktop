@@ -4,8 +4,8 @@ This ledger preserves the accepted non-blocking findings from the implementation
 
 ## Assistant audio foundation (2026-10-30)
 
-The audio catalog and private native import APIs are implemented; recording,
-transcription, synthesis and playback controls are still in progress. Import
+The audio catalog, bounded import, recording and editable ASR draft controls
+are implemented. Synthesis, playback and keep-original history are pending. Import
 accepts short PCM RIFF WAV and Layer III MP3 only, mono/stereo at 8–48 kHz,
 up to 25 MiB and five minutes. Float/extensible WAV, FLAC and Ogg input are
 outside this first release. Unsubmitted inputs are temporary memory buffers,

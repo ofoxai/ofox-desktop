@@ -25,6 +25,23 @@ fn every_platform_bundles_the_audio_decoder_license_and_source_notice() {
     }
 }
 
+#[test]
+fn microphone_permission_localizations_are_at_the_macos_resource_root_only() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let macos = expanded_resource_entries(&resource_config("tauri.conf.json"));
+    let windows = expanded_resource_entries(&resource_config("tauri.windows.conf.json"));
+    for locale in ["en", "zh-Hans", "ja"] {
+        let relative = format!("{locale}.lproj/InfoPlist.strings");
+        let source = root
+            .join("infoplist")
+            .join(&relative)
+            .canonicalize()
+            .unwrap();
+        assert!(macos.contains(&(source.clone(), PathBuf::from(&relative))));
+        assert!(windows.iter().all(|(entry, _)| entry != &source));
+    }
+}
+
 /// Fields that intentionally differ on Windows: no overlay title bar there.
 const PLATFORM_FIELDS: [&str; 2] = ["title", "titleBarStyle"];
 
