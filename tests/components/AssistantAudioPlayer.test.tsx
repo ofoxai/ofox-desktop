@@ -75,6 +75,39 @@ it("opens a stored result without autoplay or loading audio bytes", () => {
   expect(api.synthesize).not.toHaveBeenCalled();
   expect(screen.getByRole("button", { name: "Play audio" })).toBeEnabled();
 });
+it("keeps the validated duration until the decoder provides a positive finite duration", async () => {
+  const view = render(<AssistantAudioPlayer {...props} />);
+  const audio = view.container.querySelector("audio")!;
+  await userEvent.click(screen.getByRole("button", { name: "Play audio" }));
+  Object.defineProperty(audio, "duration", { configurable: true, value: 0 });
+  fireEvent.loadedMetadata(audio);
+  expect(screen.getByRole("timer")).toHaveTextContent("0:00 / 0:04");
+  Object.defineProperty(audio, "duration", { value: Infinity });
+  fireEvent.durationChange(audio);
+  expect(screen.getByRole("timer")).toHaveTextContent("0:00 / 0:04");
+  Object.defineProperty(audio, "duration", { value: 5 });
+  fireEvent.durationChange(audio);
+  expect(screen.getByRole("timer")).toHaveTextContent("0:00 / 0:05");
+  Object.defineProperty(audio, "duration", { value: Infinity });
+  fireEvent.durationChange(audio);
+  expect(screen.getByRole("timer")).toHaveTextContent("0:00 / 0:05");
+  await userEvent.click(screen.getByRole("button", { name: "Stop audio" }));
+  Object.defineProperty(audio, "duration", { value: 99 });
+  fireEvent.durationChange(audio);
+  expect(screen.getByRole("timer")).toHaveTextContent("0:00 / 0:05");
+  expect(api.synthesize).not.toHaveBeenCalled();
+  expect(api.transcribe).not.toHaveBeenCalled();
+});
+it("keeps a zero decoder duration unknown when no validated duration was saved", async () => {
+  const view = render(
+    <AssistantAudioPlayer {...props} durationMs={undefined} />,
+  );
+  const audio = view.container.querySelector("audio")!;
+  await userEvent.click(screen.getByRole("button", { name: "Play audio" }));
+  Object.defineProperty(audio, "duration", { value: 0 });
+  fireEvent.loadedMetadata(audio);
+  expect(screen.getByRole("timer")).toHaveTextContent("0:00 / --:--");
+});
 it("plays, pauses, stops and replays the same private file without another model request", async () => {
   const user = userEvent.setup();
   const view = render(<AssistantAudioPlayer {...props} />);

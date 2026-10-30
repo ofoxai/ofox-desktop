@@ -108,7 +108,9 @@ Failed publication rolls back the file and retains an unknown operation receipt.
 Completed ledger outputs survive orphan cleanup and ordinary backup/restore.
 Stored results now expose explicit play/pause/stop and native save controls.
 Opening a result does not load or autoplay audio. The player releases its source
-on stop, result/account/generation change, inactive page and unmount. Replaying,
+on stop, result/account/generation change, inactive page and unmount. A zero or
+invalid decoder duration keeps the validated saved duration; missing duration
+stays unknown, and later positive decoder metadata updates it. Replaying,
 read failures and saving do not request synthesis or silently convert formats.
 The device probes codec support; unsupported output remains available to save.
 The scoped protocol allows bounded full/range reads up to 50 MiB and preserves

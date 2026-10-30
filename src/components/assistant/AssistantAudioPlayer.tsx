@@ -19,6 +19,7 @@ export interface AssistantAudioPlayerProps {
 }
 const seconds = (value: number) =>
   Number.isFinite(value) && value >= 0 && value <= 3600 ? value : null;
+const durationSeconds = (value: number) => (value > 0 ? seconds(value) : null);
 const stamp = (value: number | null) =>
   value == null
     ? "--:--"
@@ -56,7 +57,8 @@ export function AssistantAudioPlayer({
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [elapsed, setElapsed] = useState(0);
-  const fallback = durationMs == null ? null : seconds(durationMs / 1000);
+  const fallback =
+    durationMs == null ? null : durationSeconds(durationMs / 1000);
   const [duration, setDuration] = useState(fallback);
   const [playError, setPlayError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
@@ -91,6 +93,11 @@ export function AssistantAudioPlayer({
   }, [url, codec, active, disabled, fallback]);
   const follows = (element: HTMLAudioElement) =>
     active && !disabled && element.getAttribute("src") === url;
+  const updateDuration = (element: HTMLAudioElement) => {
+    if (!follows(element)) return;
+    const value = durationSeconds(element.duration);
+    if (value !== null) setDuration(value);
+  };
   const play = async () => {
     const element = audio.current;
     if (!element || !active || disabled || pending || !available) return;
@@ -172,10 +179,8 @@ export function AssistantAudioPlayer({
         ref={audio}
         preload="none"
         className="hidden"
-        onLoadedMetadata={(event) => {
-          if (follows(event.currentTarget))
-            setDuration(seconds(event.currentTarget.duration) ?? fallback);
-        }}
+        onLoadedMetadata={(event) => updateDuration(event.currentTarget)}
+        onDurationChange={(event) => updateDuration(event.currentTarget)}
         onTimeUpdate={(event) => {
           if (follows(event.currentTarget))
             setElapsed(seconds(event.currentTarget.currentTime) ?? 0);
