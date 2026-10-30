@@ -1806,6 +1806,7 @@ function AssistantWorkspace() {
             target={speechDialog.target}
             models={bootstrap.audioModels ?? []}
             rememberedModel={bootstrap.rememberedModels?.speech}
+            speechPreferences={bootstrap.speechPreferences}
             initialText={speechDialog.text}
             sourceMessageId={speechDialog.sourceMessageId}
             history={detail?.audioOperations}

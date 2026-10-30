@@ -566,4 +566,41 @@ mod tests {
             assert_eq!(store.list(false, "").unwrap().sessions.len(), 1);
         }
     }
+    #[test]
+    fn independent_audio_stays_in_its_original_conversation_and_is_not_rebilled_by_a_fork() {
+        let (_root, store, mut record, entries) = fixture();
+        let aid = id();
+        let original = store
+            .attachment_root(&record.session.id)
+            .unwrap()
+            .join(&aid);
+        write_bytes(&original, b"audio").unwrap();
+        record.attachments.push(serde_json::from_value(json!({"id":aid,"name":"audio.wav","mimeType":"audio/wav","sizeBytes":5,"status":"ready","origin":"audio-input"})).unwrap());
+        record.operations.push(serde_json::from_value(json!({"id":id(),"runId":id(),"status":"completed","media":{"kind":"transcription","model":"test/asr","params":{"keepOriginal":true},"status":"completed","cost":"0.1","inputIds":[aid],"audio":{"pricing":{"unit":"seconds"},"text":"Audio stays here"}}})).unwrap());
+        super::super::super::projection::recount_usage(&mut record, &entries);
+        store
+            .mutate(&record.session.id, |r| {
+                *r = record.clone();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.usage_summary().unwrap()["estimatedCostUsd"], "0.35");
+        let stage = store.stage_fork(&record.session.id).unwrap();
+        write_bytes(&stage.native_path(), b"copy\n").unwrap();
+        let fork = stage
+            .publish(record.clone(), &entries, "fork", || Ok(()))
+            .unwrap();
+        assert!(fork.operations.iter().all(|o| o.media.is_none()));
+        assert!(!fork.attachments.iter().any(|a| a.id == aid));
+        assert!(original.exists());
+        assert_eq!(store.usage_summary().unwrap()["estimatedCostUsd"], "0.35");
+        assert_eq!(
+            store
+                .load_record(&record.session.id)
+                .unwrap()
+                .operations
+                .len(),
+            2
+        );
+    }
 }

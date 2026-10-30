@@ -110,6 +110,21 @@ impl AssistantHost {
         self.ensure_current(&identity, request.expected_generation)
             .await?;
         self.remember_key(&key);
+        request.scrub(&self.known_keys());
+        request.check(&record, &model)?;
+        if let Some((voice, format)) = request.speech_choice() {
+            blocking({
+                let store = store.clone();
+                let host = self.clone();
+                let model = model.id.clone();
+                let generation = request.expected_generation;
+                move || {
+                    host.admit(generation)?;
+                    store.remember_speech_choices(&model, &voice, &format)
+                }
+            })
+            .await?;
+        }
         let send: SendRequest = serde_json::from_value(json!({
             "sessionId": request.session_id,
             "runId": request.run_id,
@@ -120,8 +135,10 @@ impl AssistantHost {
         let mut control = RunControl::new(identity.clone(), &send, key.clone());
         control.audio_only = true;
         let control = Arc::new(control);
-        request.scrub(&self.known_keys());
-        let mut media = request.media(&model, preview, &identity.apex)?;
+        let mut media = scrub_media(
+            request.media(&model, preview, &identity.apex)?,
+            &self.known_keys(),
+        )?;
         let chat_model = record.session.model_id;
         blocking({
             let store = store.clone();
@@ -130,6 +147,8 @@ impl AssistantHost {
             let control = control.clone();
             let media = media.clone();
             let generation = request.expected_generation;
+            let check = request.clone();
+            let model = model.clone();
             move || {
                 drop(navigation);
                 host.register_run(control.clone(), generation, || {
@@ -140,6 +159,7 @@ impl AssistantHost {
                         if r.session.model_id != chat_model || r.session.active_run.is_some() {
                             return Err("assistant_session_busy".into());
                         }
+                        check.check(r, &model)?;
                         store::ensure_new_operation(r, &control.operation_id)?;
                         if r.operations.iter().any(|op| op.run_id == control.run_id) {
                             return Err("assistant_stale_operation".into());
@@ -170,8 +190,10 @@ impl AssistantHost {
         self.track(control.run_id.clone(), async move {
             let _history = history;
             let mut output = None;
+            let mut original = None;
             let attempted = async {
-                let input = input?;
+                let mut input = input?;
+                if let Some(input)=&mut input {input.name=super::super::host::scrub_secrets(&input.name,&host.known_keys());}
                 host.ensure_current(&done.identity, request.expected_generation).await?;
                 host.validate_run(&done)?;
                 // Durable submission intent precedes the network boundary. Recovery
@@ -209,6 +231,7 @@ impl AssistantHost {
                         request_id_source: None,
                     }),
                 };
+                if request.keep_original() { original = input; }
                 let trace = media.audio.as_mut().ok_or(INVALID)?;
                 match result {
                     Ok(response) => {
@@ -239,13 +262,7 @@ impl AssistantHost {
                     trace.error_code = Some(code);
                 }
             }
-            let mut encoded = serde_json::to_value(&media).map_err(|_| INVALID.to_owned());
-            if let Ok(value) = &mut encoded {
-                super::super::host::scrub_secrets_in(value, &host.known_keys());
-            }
-            let saved = match encoded.and_then(|value| {
-                serde_json::from_value::<MediaRecord>(value).map_err(|_| INVALID.into())
-            }) {
+            let saved = match scrub_media(media,&host.known_keys()) {
                 Ok(mut media) => blocking({
                     let done = done.clone();
                     let store = store.clone();
@@ -273,6 +290,17 @@ impl AssistantHost {
                             let code = published.err().unwrap_or_else(|| UNKNOWN.into());
                             media.status = "unknown".into(); media.cost = None; media.outputs.clear();
                             if let Some(trace) = &mut media.audio {trace.output = None; trace.error_code = Some(code);}
+                        }
+                        if let Some(input) = original {
+                            let published = crate::services::assistant::attachments::retained_audio(&store, &sid, &mut media, &input, |record, media| {
+                                host.admit(generation)?;
+                                if !record.session.active_run.as_ref().is_some_and(|run|run.run_id==done.run_id && run.operation_id==done.operation_id) {return Err("assistant_stale_operation".into());}
+                                if record.session.deleted_at.is_some() {return Err("assistant_session_deleted".into());}
+                                finish(record, media)
+                            });
+                            if published.is_ok() { return published; }
+                            media.input_ids.clear();
+                            if let Some(trace) = &mut media.audio {trace.original_error = Some(published.err().unwrap_or_else(|| UNKNOWN.into()));}
                         }
                         store.mutate(&sid, |record| finish(record, &media))
                     }
@@ -335,7 +363,7 @@ mod tests {
     use std::{
         path::PathBuf,
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             Mutex,
         },
     };
@@ -348,6 +376,8 @@ mod tests {
         identity: Mutex<Identity>,
         gateway: String,
         keys: AtomicUsize,
+        key: Mutex<String>,
+        fill_quota_on_key: AtomicBool,
         events: Mutex<Vec<Event>>,
     }
     impl Environment for Env {
@@ -356,14 +386,19 @@ mod tests {
         }
         fn api_key<'a>(
             &'a self,
-            _: &'a Identity,
+            identity: &'a Identity,
             _: Option<&'a str>,
             admit: &'a Admit<'a>,
         ) -> BoxFuture<'a, Result<String, String>> {
             Box::pin(async move {
                 admit()?;
                 self.keys.fetch_add(1, Ordering::SeqCst);
-                Ok("synthetic-audio-key-123456".into())
+                if self.fill_quota_on_key.swap(false, Ordering::SeqCst) {
+                    let store = store::AssistantStore::for_owner(&self.root, &identity.owner)?;
+                    let sid = store.list(false, "")?.sessions[0].id.clone();
+                    store.mutate(&sid,|r|{r.attachments.push(serde_json::from_value(json!({"id":id(),"name":"late.bin","mimeType":"application/octet-stream","sizeBytes":500*1024*1024,"status":"ready"})).unwrap());Ok(())})?;
+                }
+                Ok(self.key.lock().unwrap().clone())
             })
         }
         fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
@@ -425,6 +460,8 @@ mod tests {
             }),
             gateway: server.uri(),
             keys: AtomicUsize::new(0),
+            key: Mutex::new("synthetic-audio-key-123456".into()),
+            fill_quota_on_key: AtomicBool::new(false),
             events: Mutex::default(),
         });
         let host = AssistantHost::new(env.clone());
@@ -444,7 +481,7 @@ mod tests {
         let input = host
             .import_audio(
                 authority,
-                "speech.mp3".into(),
+                "synthetic-audio-key-123456.mp3".into(),
                 include_bytes!("../../../../tests/fixtures/assistant-audio/tone-16k-mono.mp3")
                     .to_vec(),
             )
@@ -459,6 +496,7 @@ mod tests {
             operation_id: id(),
             model_id: "openai/gpt-transcribe".into(),
             language: Some("zh".into()),
+            keep_original: false,
         };
         (root, server, env, host, request)
     }
@@ -474,6 +512,8 @@ mod tests {
             let store = host.store(&request.expected_owner).unwrap();
             let record = store.load_record(&request.session_id).unwrap();
             assert!(record.messages.is_empty());
+            assert!(record.attachments.is_empty());
+            assert!(result.media.input_ids.is_empty());
             assert_eq!(record.session.draft, "保留的草稿");
             assert_eq!(record.session.model_id, "test/chat");
             assert!(record.session.active_run.is_none());
@@ -518,42 +558,52 @@ mod tests {
     }
     #[tokio::test]
     async fn audio_host_cancellation_keeps_the_submitted_outcome_unknown_and_never_replays() {
-        let (_root, server, _env, host, request) = fixture("ofox.io").await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_delay(std::time::Duration::from_secs(2))
-                    .set_body_json(json!({"text":"too late"})),
-            )
-            .expect(1)
-            .mount(&server)
-            .await;
-        let running = tokio::spawn({
-            let host = host.clone();
-            let request = request.clone();
-            async move { host.transcribe_audio(request).await }
-        });
-        for _ in 0..200 {
-            if !server.received_requests().await.unwrap().is_empty() {
-                break;
+        for keep in [false, true] {
+            let (_root, server, _env, host, mut request) = fixture("ofox.io").await;
+            request.keep_original = keep;
+            Mock::given(method("POST"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(std::time::Duration::from_secs(2))
+                        .set_body_json(json!({"text":"too late"})),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let running = tokio::spawn({
+                let host = host.clone();
+                let request = request.clone();
+                async move { host.transcribe_audio(request).await }
+            });
+            for _ in 0..200 {
+                if !server.received_requests().await.unwrap().is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let mut session = host
+                .store(&request.expected_owner)
+                .unwrap()
+                .load_record(&request.session_id)
+                .unwrap()
+                .session;
+            host.decorate(&request.expected_owner, &mut session);
+            assert_eq!(session.audio_only, Some(true));
+            host.cancel_session(&request.session_id);
+            let result = running.await.unwrap().unwrap();
+            assert_eq!(result.media.status, "unknown");
+            assert!(result.media.cost.is_none());
+            let trace = result.media.audio.as_ref().unwrap();
+            assert!(trace.text.is_none());
+            if keep {
+                assert_eq!(result.media.input_ids.len(), 1);
+                assert!(trace.original_error.is_none());
+            } else {
+                assert!(result.media.input_ids.is_empty());
+            }
+            assert!(host.transcribe_audio(request).await.is_err());
+            assert_eq!(server.received_requests().await.unwrap().len(), 1);
         }
-        let mut session = host
-            .store(&request.expected_owner)
-            .unwrap()
-            .load_record(&request.session_id)
-            .unwrap()
-            .session;
-        host.decorate(&request.expected_owner, &mut session);
-        assert_eq!(session.audio_only, Some(true));
-        host.cancel_session(&request.session_id);
-        let result = running.await.unwrap().unwrap();
-        assert_eq!(result.media.status, "unknown");
-        assert!(result.media.cost.is_none());
-        assert!(result.media.audio.unwrap().text.is_none());
-        assert!(host.transcribe_audio(request).await.is_err());
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
     #[tokio::test]
     async fn speech_host_refuses_invalid_parameters_before_keys_and_never_changes_chat() {
@@ -678,5 +728,165 @@ mod tests {
             .unwrap()
             .iter()
             .all(|event| event.data["running"] == true));
+    }
+    #[tokio::test]
+    async fn audio_retention_review_original_name_is_scrubbed_on_both_apexes() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (_root, server, _env, host, request) = fixture(apex).await;
+            let mut raw = serde_json::json!({"sessionId":request.session_id,"expectedOwner":request.expected_owner,"expectedGeneration":request.expected_generation,"inputId":request.input_id,"runId":request.run_id,"operationId":request.operation_id,"modelId":request.model_id,"keepOriginal":true});
+            raw["language"] = json!("en");
+            let request: TranscribeRequest = serde_json::from_value(raw).unwrap();
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/transcriptions"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(
+                        json!({"text":"Hello","usage":{"type":"duration","seconds":1}}),
+                    ),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = host.transcribe_audio(request.clone()).await.unwrap();
+            assert_eq!(result.media.status, "completed");
+            assert_eq!(result.media.input_ids.len(), 1);
+            assert!(result.media.outputs.is_empty());
+            let store = host.store(&request.expected_owner).unwrap();
+            let record = store.load_record(&request.session_id).unwrap();
+            assert!(record.messages.is_empty());
+            assert_eq!(record.attachments.len(), 1);
+            assert_eq!(record.attachments[0].origin.as_deref(), Some("audio-input"));
+            assert!(!serde_json::to_string(&record)
+                .unwrap()
+                .contains("synthetic-audio-key-123456"));
+            let path = store
+                .attachment_root(&request.session_id)
+                .unwrap()
+                .join(&result.media.input_ids[0]);
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                include_bytes!("../../../../tests/fixtures/assistant-audio/tone-16k-mono.mp3")
+            );
+            store
+                .cleanup_orphan_attachments(&request.session_id)
+                .unwrap();
+            assert!(path.exists());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+    }
+    #[tokio::test]
+    async fn original_audio_failure_keeps_transcript_and_usage_estimate_without_replay() {
+        let (_root, server, env, host, mut request) = fixture("ofox.io").await;
+        request.keep_original = true;
+        let store = host.store(&request.expected_owner).unwrap();
+        std::fs::write(
+            store.attachment_root(&request.session_id).unwrap(),
+            b"blocked directory",
+        )
+        .unwrap();
+        Mock::given(method("POST")).and(path("/v1/audio/transcriptions")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"text":"Transcript remains available","usage":{"type":"duration","seconds":1}}))).expect(1).mount(&server).await;
+        let result = host.transcribe_audio(request.clone()).await.unwrap();
+        assert_eq!(result.media.status, "completed");
+        assert_eq!(result.media.cost.as_deref(), Some("0.000075"));
+        assert!(result.media.input_ids.is_empty());
+        let trace = result.media.audio.as_ref().unwrap();
+        assert_eq!(trace.text.as_deref(), Some("Transcript remains available"));
+        assert!(trace.original_error.is_some());
+        assert!(host.transcribe_audio(request).await.is_err());
+        assert_eq!(env.keys.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn original_audio_quota_refuses_before_minting_a_key() {
+        let (_root, _server, env, host, mut request) = fixture("ofox.ai").await;
+        request.keep_original = true;
+        let store = host.store(&request.expected_owner).unwrap();
+        store.mutate(&request.session_id,|r|{r.attachments.push(serde_json::from_value(json!({"id":id(),"name":"existing.bin","mimeType":"application/octet-stream","sizeBytes":500*1024*1024,"status":"ready"})).unwrap());Ok(())}).unwrap();
+        assert_eq!(
+            host.transcribe_audio(request).await.unwrap_err(),
+            "assistant_attachment_total_too_large"
+        );
+        assert_eq!(env.keys.load(Ordering::SeqCst), 0);
+    }
+    #[tokio::test]
+    async fn audio_review_original_names_are_scrubbed_before_events_and_multipart_upload() {
+        let (_root, server, env, host, request) = fixture("ofox.io").await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_secs(5))
+                    .set_body_json(json!({"text":"Hello","usage":{"type":"duration","seconds":1}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let running = tokio::spawn({
+            let host = host.clone();
+            let request = request.clone();
+            async move { host.transcribe_audio(request).await }
+        });
+        for _ in 0..200 {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let record = host
+            .store(&request.expected_owner)
+            .unwrap()
+            .load_record(&request.session_id)
+            .unwrap();
+        assert!(record.session.active_run.is_some());
+        assert!(!serde_json::to_string(&record)
+            .unwrap()
+            .contains("synthetic-audio-key-123456"));
+        host.cancel_session(&request.session_id);
+        assert_eq!(running.await.unwrap().unwrap().media.status, "unknown");
+        let shown: String = env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.data.to_string())
+            .collect();
+        assert!(!shown.contains("synthetic-audio-key-123456"));
+        let requests = server.received_requests().await.unwrap();
+        assert!(!String::from_utf8_lossy(&requests[0].body).contains("synthetic-audio-key-123456"));
+    }
+    #[tokio::test]
+    async fn audio_review_a_newly_minted_key_cannot_be_saved_as_a_voice_preference() {
+        let (_root, server, env, host, asr) = fixture("ofox.ai").await;
+        *env.key.lock().unwrap() = "SyntheticSecretAscii".into();
+        let request:SpeechRequest=serde_json::from_value(json!({"sessionId":asr.session_id,"expectedOwner":asr.expected_owner,"expectedGeneration":asr.expected_generation,"runId":id(),"operationId":id(),"modelId":"google/gemini-3.8-flash-tts","input":"Hello","voice":"SyntheticSecretAscii","responseFormat":"wav"})).unwrap();
+        let _ = host.synthesize_audio(request).await;
+        let store = host.store(&asr.expected_owner).unwrap();
+        assert!(!store
+            .speech_preferences()
+            .unwrap()
+            .to_string()
+            .contains("SyntheticSecretAscii"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+    #[tokio::test]
+    async fn audio_review_quota_changed_during_key_fetch_is_checked_again_before_submission() {
+        for speech in [false, true] {
+            let (_root, server, env, host, mut asr) = fixture("ofox.io").await;
+            env.fill_quota_on_key.store(true, Ordering::SeqCst);
+            let result = if speech {
+                let request:SpeechRequest=serde_json::from_value(json!({"sessionId":asr.session_id,"expectedOwner":asr.expected_owner,"expectedGeneration":asr.expected_generation,"runId":id(),"operationId":id(),"modelId":"google/gemini-3.8-flash-tts","input":"Hello","voice":"Kore","responseFormat":"wav"})).unwrap();
+                host.synthesize_audio(request).await
+            } else {
+                asr.keep_original = true;
+                host.transcribe_audio(asr).await
+            };
+            assert!(result.is_err());
+            assert!(server.received_requests().await.unwrap().is_empty());
+            assert_eq!(env.keys.load(Ordering::SeqCst), 1);
+        }
     }
 }

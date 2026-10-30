@@ -159,6 +159,7 @@ export interface AssistantAudioResult {
     [key: string]: unknown;
   };
   outputs?: string[];
+  inputIds?: string[];
   status: "not_sent" | "submitting" | "completed" | "rejected" | "unknown";
   cost: string | null;
   submittedAt?: number | null;
@@ -178,6 +179,7 @@ export interface AssistantAudioResult {
     requestId: string | null;
     requestIdSource: string | null;
     errorCode: string | null;
+    originalError?: string | null;
   };
 }
 export interface AssistantTranscribeRequest
@@ -185,6 +187,7 @@ export interface AssistantTranscribeRequest
     AssistantRunRef {
   inputId: string;
   modelId: string;
+  keepOriginal?: boolean;
   language?: "zh" | "en" | "ja";
 }
 
@@ -226,7 +229,13 @@ export const DEFAULT_ASSISTANT_PREFERENCES: AssistantPreferences = {
 /** A model catalog the backend could not read: some models are missing. */
 export type AssistantCatalogSource = "v1" | "anthropic";
 
+export type AssistantSpeechPreferences = Record<
+  string,
+  { voice?: string; format?: string }
+>;
+
 export interface AssistantBootstrap {
+  speechPreferences?: AssistantSpeechPreferences;
   rememberedModels?: Partial<Record<AssistantModelKind, string | null>>;
   /** The signed-in account as the backend keys its data (64 hex). */
   owner: string;
@@ -946,6 +955,7 @@ export const assistantApi = {
         inputId: request.inputId,
         modelId: request.modelId,
         ...(request.language ? { language: request.language } : {}),
+        ...(request.keepOriginal ? { keepOriginal: true } : {}),
       },
     }),
   synthesize: (request: AssistantSpeechRequest) =>

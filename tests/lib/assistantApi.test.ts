@@ -69,6 +69,27 @@ describe("private audio import commands", () => {
     });
   });
 
+  it("forwards an explicit keep-original choice without renderer-only metadata", async () => {
+    await assistantApi.transcribe({
+      ...target,
+      inputId: "audio",
+      modelId: "asr",
+      runId: "run",
+      operationId: "op",
+      keepOriginal: true,
+    });
+    expect(invoke).toHaveBeenLastCalledWith("assistant_transcribe_audio", {
+      request: {
+        ...target,
+        inputId: "audio",
+        modelId: "asr",
+        runId: "run",
+        operationId: "op",
+        keepOriginal: true,
+      },
+    });
+  });
+
   it("whitelists speech fields and never forwards renderer selection metadata", async () => {
     const request = {
       ...target,

@@ -131,6 +131,8 @@ struct Prefs {
     transcription_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Map::is_empty")]
+    speech_preferences: Map<String, Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auto_title: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,7 +150,26 @@ impl Prefs {
             .instructions
             .as_deref()
             .is_none_or(|text| text.chars().count() <= MAX_INSTRUCTIONS_CHARS);
-        (prefs.version == FORMAT_VERSION && fits).then_some((prefs, object))
+        let choices_fit = prefs.speech_preferences.len() <= 128
+            && serde_json::to_vec(&prefs.speech_preferences)
+                .ok()
+                .is_some_and(|v| v.len() <= 64 * 1024)
+            && prefs.speech_preferences.iter().all(|(id, value)| {
+                !id.is_empty()
+                    && id.len() <= 256
+                    && value.as_object().is_some_and(|o| {
+                        ["voice", "format"].iter().all(|field| {
+                            o.get(*field).is_none_or(|v| {
+                                v.as_str().is_some_and(|s| {
+                                    !s.is_empty()
+                                        && s.len() <= 64
+                                        && !s.chars().any(char::is_control)
+                                })
+                            })
+                        })
+                    })
+            });
+        (prefs.version == FORMAT_VERSION && fits && choices_fit).then_some((prefs, object))
     }
 
     /// The file's bytes: `object` (what it held, unknown fields included)
@@ -158,7 +179,20 @@ impl Prefs {
             return Err(UNAVAILABLE.into());
         };
         object.extend(known);
-        serde_json::to_vec(&object).map_err(|_| UNAVAILABLE.into())
+        let bytes = serde_json::to_vec(&object).map_err(|_| UNAVAILABLE)?;
+        if Self::parse(&bytes).is_none() {
+            return Err(INVALID_PREFERENCES.into());
+        }
+        Ok(bytes)
+    }
+    /// Unknown fields stay local and never become portable data.
+    fn portable(mut self) -> Self {
+        for value in self.speech_preferences.values_mut() {
+            if let Some(object) = value.as_object_mut() {
+                object.retain(|key, _| matches!(key.as_str(), "voice" | "format"));
+            }
+        }
+        self
     }
 
     /// Take each field of `other` that this one does not have; true when
@@ -171,8 +205,26 @@ impl Prefs {
             }
             taken
         }
+        let mut choices_filled = false;
+        for (id, value) in &other.speech_preferences {
+            let mine = self
+                .speech_preferences
+                .entry(id.clone())
+                .or_insert_with(|| json!({}));
+            if let (Some(mine), Some(theirs)) = (mine.as_object_mut(), value.as_object()) {
+                for field in ["voice", "format"] {
+                    if !mine.contains_key(field) {
+                        if let Some(v) = theirs.get(field) {
+                            mine.insert(field.into(), v.clone());
+                            choices_filled = true;
+                        }
+                    }
+                }
+            }
+        }
         // `|`, not `||`: every field is filled.
-        fill(&mut self.model_id, &other.model_id)
+        choices_filled
+            | fill(&mut self.model_id, &other.model_id)
             | fill(&mut self.image_model_id, &other.image_model_id)
             | fill(&mut self.video_model_id, &other.video_model_id)
             | fill(&mut self.speech_model_id, &other.speech_model_id)
@@ -466,8 +518,11 @@ impl AssistantStore {
                     .operations
                     .iter()
                     .filter_map(|op| op.media.as_ref())
-                    .filter(|media| media.kind == "speech" && media.audio.is_some())
-                    .flat_map(|media| media.outputs.iter().cloned()),
+                    .filter(|media| {
+                        matches!(media.kind.as_str(), "speech" | "transcription")
+                            && media.audio.is_some()
+                    })
+                    .flat_map(|media| media.outputs.iter().chain(media.input_ids.iter()).cloned()),
             )
             .collect();
         let before = record.attachments.len();
@@ -537,6 +592,50 @@ impl AssistantStore {
                 self.update_prefs(|prefs| prefs.transcription_model_id = Some(model_id.into()))
             }
         }
+    }
+
+    pub fn remember_speech_choices(
+        &self,
+        model: &str,
+        voice: &str,
+        format: &str,
+    ) -> Result<(), String> {
+        if model.is_empty()
+            || model.len() > 256
+            || voice.is_empty()
+            || voice.len() > 64
+            || !voice.bytes().all(|c| c.is_ascii_alphanumeric())
+            || !matches!(format, "wav" | "mp3" | "opus")
+        {
+            return Err(INVALID_PREFERENCES.into());
+        }
+        self.update_prefs(|prefs| {
+            let entry = prefs
+                .speech_preferences
+                .entry(model.to_owned())
+                .or_insert_with(|| json!({}));
+            let object = entry
+                .as_object_mut()
+                .expect("prefs parse validates objects");
+            object.insert("voice".into(), json!(voice));
+            object.insert("format".into(), json!(format));
+        })
+    }
+    pub fn speech_preferences(&self) -> Result<Value, String> {
+        let prefs = self.read_prefs()?.unwrap_or_default();
+        Ok(Value::Object(
+            prefs
+                .speech_preferences
+                .into_iter()
+                .map(|(id, value)| {
+                    let choices = ["voice", "format"]
+                        .into_iter()
+                        .filter_map(|key| value.get(key).map(|v| (key.to_owned(), v.clone())))
+                        .collect();
+                    (id, Value::Object(choices))
+                })
+                .collect(),
+        ))
     }
 
     pub fn remembered_models(&self) -> Result<Value, String> {
@@ -3229,5 +3328,37 @@ mod tests {
         let record = store.load_record(&sid).unwrap();
         assert_eq!(record.operations[0].status, OperationStatus::Interrupted);
         assert_ne!(record.usage["usageCoverage"], "incomplete");
+    }
+    #[test]
+    fn speech_preferences_restore_fills_each_missing_field_and_keeps_unknown_local_fields() {
+        let (mut current, object) = Prefs::parse(br#"{"version":1,"speechPreferences":{"gemini":{"voice":"Puck","future":true},"eleven":{"format":"opus"}},"unknown":{"keep":true}}"#).unwrap();
+        let (archive, _) = Prefs::parse(br#"{"version":1,"speechPreferences":{"gemini":{"voice":"Kore","format":"wav"},"eleven":{"voice":"AZnzlk1XvdvUeBnXmlld","format":"mp3"},"third":{"voice":"Kore","format":"wav"}}}"#).unwrap();
+        assert!(current.fill_from(&archive));
+        let merged: Value = serde_json::from_slice(&current.to_bytes(object).unwrap()).unwrap();
+        assert_eq!(
+            merged["speechPreferences"]["gemini"],
+            json!({"voice":"Puck","format":"wav","future":true})
+        );
+        assert_eq!(
+            merged["speechPreferences"]["eleven"],
+            json!({"voice":"AZnzlk1XvdvUeBnXmlld","format":"opus"})
+        );
+        assert_eq!(merged["speechPreferences"]["third"]["format"], "wav");
+        assert_eq!(merged["unknown"]["keep"], true);
+        assert!(!current.fill_from(&archive));
+    }
+    #[test]
+    fn audio_retention_review_preferences_refuse_an_oversized_merge_before_writing() {
+        let mut source = json!({"version":1,"speechPreferences":{}});
+        for i in 0..128 {
+            source["speechPreferences"][format!("model-{i}")] = json!({"voice":"Kore"});
+        }
+        let (mut prefs, object) = Prefs::parse(&serde_json::to_vec(&source).unwrap()).unwrap();
+        let (archive, _) = Prefs::parse(
+            br#"{"version":1,"speechPreferences":{"additional":{"voice":"Puck","format":"wav"}}}"#,
+        )
+        .unwrap();
+        assert!(prefs.fill_from(&archive));
+        assert!(prefs.to_bytes(object).is_err());
     }
 }

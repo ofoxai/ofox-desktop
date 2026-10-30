@@ -302,6 +302,69 @@ pub(super) fn audio_room(record: &SessionRecord) -> Result<(), String> {
     check_room(record, 1, super::speech::MAX_OUTPUT_BYTES as u64)
 }
 
+/// Reserve the bounded original before crossing the paid boundary.
+pub(super) fn original_audio_room(record: &SessionRecord) -> Result<(), String> {
+    check_room(record, 1, super::audio_input::MAX_BYTES as u64)
+}
+/// Retention is explicit and belongs to a submitted ASR ledger, never chat turns.
+pub(super) fn retained_audio<T>(
+    store: &AssistantStore,
+    sid: &str,
+    media: &mut MediaRecord,
+    input: &super::audio_input::Input,
+    commit: impl FnOnce(&mut SessionRecord, &MediaRecord) -> Result<T, String>,
+) -> Result<T, String> {
+    if media.kind != "transcription"
+        || media.submitted_at.is_none()
+        || input.bytes.is_empty()
+        || input.bytes.len() > super::audio_input::MAX_BYTES
+        || !matches!(input.info.mime_type.as_str(), "audio/wav" | "audio/mpeg")
+    {
+        return Err(UNSUPPORTED.into());
+    }
+    store.with_attachment_lock(sid, || {
+        let item = Attachment {
+            id: id(),
+            name: media
+                .params
+                .get("inputName")
+                .and_then(serde_json::Value::as_str)
+                .map(clean_name)
+                .unwrap_or_else(|| "audio".into()),
+            mime_type: input.info.mime_type.clone(),
+            size_bytes: input.bytes.len() as u64,
+            status: "ready".into(),
+            reason: None,
+            preview_url: None,
+            details: None,
+            origin: Some("audio-input".into()),
+            source_message_id: None,
+        };
+        let target = store.attachment_dir(sid)?.join(&item.id);
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(WRITE_FAILED.into());
+        }
+        check_capacity(&store.load_record(sid)?, 1, item.size_bytes)?;
+        let mut txn = FileTxn::new();
+        let result = (|| {
+            txn.write_with_mode(&target, &input.bytes, 0o600)
+                .map_err(|_| WRITE_FAILED)?;
+            media.input_ids = vec![item.id.clone()];
+            store.mutate(sid, |record| {
+                check_capacity(record, 1, item.size_bytes)?;
+                let value = commit(record, media)?;
+                record.attachments.push(item);
+                Ok(value)
+            })
+        })();
+        if result.is_err() {
+            let _ = txn.rollback();
+            media.input_ids.clear();
+        }
+        result
+    })
+}
+
 /// Publish an independent audio file and its ledger references atomically.
 pub(super) fn generated_audio<T>(
     store: &AssistantStore,
@@ -1506,6 +1569,80 @@ mod tests {
             )
             .unwrap(),
             bytes
+        );
+    }
+    #[test]
+    fn original_audio_publication_rolls_back_and_round_trips_with_speech_and_usage() {
+        let (_root, store, sid) = fixture();
+        let input = super::super::audio_input::Input::from_bytes(
+            "original.wav",
+            super::super::speech::tests::wav(1),
+        )
+        .unwrap();
+        let mut asr:MediaRecord=serde_json::from_value(json!({"kind":"transcription","model":"openai/gpt-transcribe","apex":"ofox.io","submittedAt":1,"params":{"inputName":"original.wav","keepOriginal":true},"status":"completed","cost":"0.000075","audio":{"input":input.info,"pricing":{"unit":"seconds","inputAudioPerSecond":"0.000075"},"text":"Saved transcript","usage":{"type":"duration","seconds":1},"requestId":"req_original"}})).unwrap();
+        let failed: Result<(), String> = retained_audio(&store, &sid, &mut asr, &input, |_, _| {
+            Err("assistant_identity_changed".into())
+        });
+        assert_eq!(failed.unwrap_err(), "assistant_identity_changed");
+        assert!(asr.input_ids.is_empty());
+        assert!(copies(&store, &sid).is_empty());
+        retained_audio(&store, &sid, &mut asr, &input, |record, media| {
+            record.operations.push(Operation {
+                id: id(),
+                run_id: id(),
+                status: OperationStatus::Completed,
+                search_price: None,
+                media: Some(media.clone()),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let output = super::super::speech::tests::wav(2);
+        let info = super::super::speech::inspect("wav", &output).unwrap();
+        let mut speech:MediaRecord=serde_json::from_value(json!({"kind":"speech","model":"google/gemini-3.8-flash-tts","apex":"ofox.io","params":{"voice":"Kore","responseFormat":"wav"},"status":"completed","audio":{"pricing":{"unit":"tokens"},"text":"Saved speech","output":info}})).unwrap();
+        generated_audio(
+            &store,
+            &sid,
+            &mut speech,
+            &output,
+            &info,
+            |record, media| {
+                record.operations.push(Operation {
+                    id: id(),
+                    run_id: id(),
+                    status: OperationStatus::Completed,
+                    search_price: None,
+                    media: Some(media.clone()),
+                });
+                super::super::projection::recount_usage(record, &[]);
+                Ok(())
+            },
+        )
+        .unwrap();
+        store.cleanup_orphan_attachments(&sid).unwrap();
+        assert_eq!(copies(&store, &sid).len(), 2);
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("audio-original.zip");
+        assert_eq!(store.backup(&archive, &[], || Ok(())).unwrap().sessions, 1);
+        let fresh = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(fresh.path(), &"ef".repeat(32)).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        let loaded = restored.load_record(&sid).unwrap();
+        assert!(loaded.messages.is_empty());
+        assert_eq!(loaded.operations.len(), 2);
+        assert_eq!(loaded.usage["modelRequests"], 2);
+        assert!(loaded.usage["estimatedCostUsd"].is_null());
+        assert_eq!(loaded.operations[0].media.as_ref().unwrap(), &asr);
+        assert_eq!(loaded.operations[1].media.as_ref().unwrap(), &speech);
+        let root = restored.attachment_root(&sid).unwrap();
+        assert_eq!(fs::read(root.join(&asr.input_ids[0])).unwrap(), input.bytes);
+        assert_eq!(fs::read(root.join(&speech.outputs[0])).unwrap(), output);
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().skipped,
+            1
         );
     }
 }

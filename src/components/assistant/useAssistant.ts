@@ -229,6 +229,18 @@ export function useAssistant(enabled: boolean) {
   );
   const [compacting, setCompacting] = useState(false);
   const audioFinished = useRef(new Set<string>());
+  const audioPreferenceTime = useRef<{
+    identity: string;
+    revision: number;
+    times: Partial<Record<"speech" | "transcription", number>>;
+    models: Partial<
+      Record<"speech" | "transcription", { revision: number; model: string }>
+    >;
+    choices: Record<
+      string,
+      { revision: number; voice: string; format: string }
+    >;
+  }>({ identity: "", revision: 0, times: {}, models: {}, choices: {} });
   const [error, setErrorCode] = useState<AssistantError | null>(null);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const setError = useCallback((value: AssistantError | null) => {
@@ -455,7 +467,8 @@ export function useAssistant(enabled: boolean) {
     // once more: read it again instead of leaving the page disabled.
     for (let attempt = 0; ; attempt += 1) {
       try {
-        const value = await assistantApi.bootstrap();
+        const audioRevision = audioPreferenceTime.current.revision;
+        const value = { ...(await assistantApi.bootstrap()) };
         if (!mounted.current || generation !== epoch.current) return null;
         const previous = bootstrapRef.current;
         if (
@@ -464,6 +477,28 @@ export function useAssistant(enabled: boolean) {
             previous.authorityGeneration !== value.authorityGeneration)
         )
           messageQueue.clear();
+        if (
+          previous?.owner === value.owner &&
+          previous.authorityGeneration === value.authorityGeneration &&
+          audioPreferenceTime.current.revision !== audioRevision
+        ) {
+          const cache = audioPreferenceTime.current;
+          for (const kind of ["speech", "transcription"] as const) {
+            const update = cache.models[kind];
+            if (update && update.revision > audioRevision)
+              value.rememberedModels = {
+                ...value.rememberedModels,
+                [kind]: update.model,
+              };
+          }
+          for (const [model, choice] of Object.entries(cache.choices)) {
+            if (choice.revision > audioRevision)
+              value.speechPreferences = {
+                ...value.speechPreferences,
+                [model]: { voice: choice.voice, format: choice.format },
+              };
+          }
+        }
         bootstrapRef.current = value;
         setBootstrap(value);
         return value;
@@ -998,6 +1033,64 @@ export function useAssistant(enabled: boolean) {
             return;
           const key = `${owner}:${authority}:${event.sessionId}:${event.operationId}`;
           if (audioFinished.current.has(key)) return;
+          // Native admission saved these choices before this submitted event.
+          // Completion order is not preference order across conversations.
+          const preferenceIdentity = `${owner}:${authority}`;
+          if (audioPreferenceTime.current.identity !== preferenceIdentity)
+            audioPreferenceTime.current = {
+              identity: preferenceIdentity,
+              revision: 0,
+              times: {},
+              models: {},
+              choices: {},
+            };
+          const preferenceKind = result.kind;
+          if (
+            running &&
+            result.status === "submitting" &&
+            Number.isFinite(event.data.updatedAt) &&
+            event.data.updatedAt >=
+              (audioPreferenceTime.current.times[preferenceKind] ?? -Infinity)
+          ) {
+            audioPreferenceTime.current.revision++;
+            audioPreferenceTime.current.times[preferenceKind] =
+              event.data.updatedAt;
+            const params = result.params ?? {};
+            const choice =
+              preferenceKind === "speech" &&
+              typeof params.voice === "string" &&
+              /^[A-Za-z0-9]{1,64}$/.test(params.voice) &&
+              typeof params.responseFormat === "string" &&
+              ["wav", "mp3", "opus"].includes(params.responseFormat)
+                ? { voice: params.voice, format: params.responseFormat }
+                : null;
+            audioPreferenceTime.current.models[preferenceKind] = {
+              revision: audioPreferenceTime.current.revision,
+              model: result.model,
+            };
+            if (choice)
+              audioPreferenceTime.current.choices[result.model] = {
+                revision: audioPreferenceTime.current.revision,
+                ...choice,
+              };
+            const next = {
+              ...identity,
+              rememberedModels: {
+                ...identity.rememberedModels,
+                [preferenceKind]: result.model,
+              },
+              ...(choice
+                ? {
+                    speechPreferences: {
+                      ...identity.speechPreferences,
+                      [result.model]: choice,
+                    },
+                  }
+                : {}),
+            };
+            bootstrapRef.current = next;
+            setBootstrap(next);
+          }
           if (!running) {
             audioFinished.current.add(key);
             if (audioFinished.current.size > 512)

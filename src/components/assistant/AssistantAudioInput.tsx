@@ -9,6 +9,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { Switch } from "@/components/ui/switch";
+import { AssistantAudioPlayer } from "./AssistantAudioPlayer";
 import { Button } from "@/components/ui/button";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { Textarea } from "@/components/ui/textarea";
@@ -65,6 +67,7 @@ export function AssistantAudioInput({
       options[0]?.id ??
       "",
   );
+  const [keepOriginal, setKeepOriginal] = useState(false);
   const [language, setLanguage] = useState("auto");
   const [input, setInput] = useState<AudioInput | null>(null);
   const inputNow = useRef<AudioInput | null>(null);
@@ -256,6 +259,7 @@ export function AssistantAudioInput({
         ...run,
         modelId,
         inputId: inputNow.current.inputId,
+        ...(keepOriginal ? { keepOriginal: true } : {}),
         ...(language === "auto"
           ? {}
           : { language: language as "zh" | "en" | "ja" }),
@@ -422,6 +426,18 @@ export function AssistantAudioInput({
           <p className="text-note text-ink-muted">
             {t("assistant.audio.languageHint")}
           </p>
+          <label className="flex items-center gap-2 text-note text-ink">
+            <Switch
+              checked={keepOriginal}
+              onCheckedChange={setKeepOriginal}
+              disabled={busy}
+              aria-label={t("assistant.audio.keepOriginal")}
+            />
+            {t("assistant.audio.keepOriginal")}
+          </label>
+          <p className="text-note text-ink-muted">
+            {t("assistant.audio.keepOriginalHint")}
+          </p>
           {input && (
             <p className="text-note text-ink-muted">
               {estimate === null
@@ -484,6 +500,20 @@ export function AssistantAudioInput({
                           : "assistant_audio_outcome_unknown"),
                     ),
                   )}
+                </p>
+              )}
+              {result.inputIds?.[0] && result.audio.input && (
+                <AssistantAudioPlayer
+                  key={`${result.operationId}:${result.inputIds[0]}`}
+                  target={target}
+                  attachmentId={result.inputIds[0]}
+                  mimeType={result.audio.input.mimeType}
+                  durationMs={result.audio.input.durationMs}
+                />
+              )}
+              {result.audio.originalError && (
+                <p role="alert" className="text-note text-danger">
+                  {t("assistant.audio.originalFailed")}
                 </p>
               )}
               <p className="text-note text-ink-muted">

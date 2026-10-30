@@ -20,12 +20,14 @@ import {
   type AssistantModel,
   type AssistantPasteTarget,
   type AssistantRunRef,
+  type AssistantSpeechPreferences,
 } from "@/lib/api/assistant";
 import { AssistantAudioPlayer } from "./AssistantAudioPlayer";
 export interface AssistantSpeechOutputProps {
   target: AssistantPasteTarget;
   models: readonly AssistantModel[];
   rememberedModel?: string | null;
+  speechPreferences?: AssistantSpeechPreferences;
   initialText: string;
   sourceMessageId?: string;
   history?: readonly AssistantAudioResult[];
@@ -40,6 +42,7 @@ export function AssistantSpeechOutput({
   target,
   models,
   rememberedModel,
+  speechPreferences = {},
   initialText,
   sourceMessageId,
   history = [],
@@ -50,10 +53,28 @@ export function AssistantSpeechOutput({
   const available = models.filter((m) => m.kind === "speech" && m.audio);
   const initial =
     available.find((m) => m.id === rememberedModel) ?? available[0];
+  const choices = useRef<AssistantSpeechPreferences>({ ...speechPreferences });
+  const choice = (m: AssistantModel | undefined) => {
+    const saved = m ? choices.current[m.id] : undefined;
+    const validVoice =
+      m?.audio?.voiceKind === "id" ? /^[A-Za-z0-9]{20}$/ : /^[A-Za-z]{1,64}$/;
+    return {
+      voice:
+        saved?.voice && validVoice.test(saved.voice)
+          ? saved.voice
+          : (m?.audio?.suggestedVoices[0] ?? ""),
+      format:
+        saved?.format &&
+        saved.format !== "pcm" &&
+        m?.audio?.responseFormats.includes(saved.format)
+          ? saved.format
+          : (m?.audio?.defaultFormat ?? "wav"),
+    };
+  };
   const [modelId, setModelId] = useState(initial?.id ?? "");
   const model = available.find((m) => m.id === modelId);
-  const [voice, setVoice] = useState(initial?.audio?.suggestedVoices[0] ?? "");
-  const [format, setFormat] = useState(initial?.audio?.defaultFormat ?? "wav");
+  const [voice, setVoice] = useState(() => choice(initial).voice);
+  const [format, setFormat] = useState(() => choice(initial).format);
   const [language, setLanguage] = useState("auto");
   const [text, setText] = useState(initialText);
   const [source, setSource] = useState(sourceMessageId);
@@ -84,9 +105,10 @@ export function AssistantSpeechOutput({
   }, [target.expectedOwner, target.expectedGeneration, target.sessionId]);
   const changeModel = (id: string) => {
     const next = available.find((m) => m.id === id);
+    choices.current[modelId] = { voice, format };
     setModelId(id);
-    setVoice(next?.audio?.suggestedVoices[0] ?? "");
-    setFormat(next?.audio?.defaultFormat ?? "wav");
+    setVoice(choice(next).voice);
+    setFormat(choice(next).format);
     setInstructions("");
     setError(null);
     setResult(null);

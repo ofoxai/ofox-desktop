@@ -7,12 +7,15 @@ This ledger preserves the accepted non-blocking findings from the implementation
 The audio catalog, bounded import, recording and editable ASR draft controls
 are implemented. Speech synthesis now has independent preview/parameter controls
 and private binary publication. Stored output now has play/pause/stop and native
-save controls without another model request; keep-original history is pending.
-Import
+save controls without another model request. Keep original is an explicit,
+initially-off ASR option; retained originals use private history attachments and
+whole-conversation backups. Independent audio operations remain in their source
+conversation when forking native chat history. Import
 accepts short PCM RIFF WAV and Layer III MP3 only, mono/stereo at 8–48 kHz,
 up to 25 MiB and five minutes. Float/extensible WAV, FLAC and Ogg input are
 outside this first release. Unsubmitted inputs are temporary memory buffers,
-excluded from chat attachments and backups. Native microphone and live-gateway
+excluded from chat attachments and backups. A retention failure keeps the
+transcript and billing facts with a warning; it never resubmits the request. Native microphone and live-gateway
 audio acceptance have not yet been performed. Speech previews start with the
 reply source text, including Markdown, and can be edited before generation.
 Ogg Opus output checks container framing/CRCs and duration; full Opus decoding

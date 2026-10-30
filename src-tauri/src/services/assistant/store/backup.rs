@@ -570,7 +570,10 @@ impl AssistantStore {
                 &mut manifest,
                 &mut total,
                 PREFS_FILE.into(),
-                clean_json(serde_json::to_vec(&value).map_err(|_| FAILED)?, secrets)?,
+                clean_json(
+                    serde_json::to_vec(&value.portable()).map_err(|_| FAILED)?,
+                    secrets,
+                )?,
                 false,
             )?;
         }
@@ -2260,8 +2263,13 @@ mod tests {
         store
             .remember_model_kind("asr/archive", Kind::Transcription)
             .unwrap();
+        store
+            .remember_speech_choices("google/gemini-3.8-flash-tts", "Kore", "wav")
+            .unwrap();
         let (_output, archive) = backed_up(&store);
         let (_target, restored) = profile(&store.owner);
+        restored.ensure_root().unwrap();
+        fs::write(restored.root.join(PREFS_FILE),br#"{"version":1,"future":true,"speechPreferences":{"google/gemini-3.8-flash-tts":{"voice":"Puck","futureChoice":true}}}"#).unwrap();
         restored
             .remember_model_kind("speech/local", Kind::Speech)
             .unwrap();
@@ -2270,5 +2278,53 @@ mod tests {
         assert_eq!(remembered["speech"], "speech/local");
         assert_eq!(remembered["transcription"], "asr/archive");
         assert_eq!(remembered["chat"], "test/model");
+        assert_eq!(
+            restored.speech_preferences().unwrap()["google/gemini-3.8-flash-tts"],
+            json!({"voice":"Puck","format":"wav"})
+        );
+        let local: Value =
+            serde_json::from_slice(&fs::read(restored.root.join(PREFS_FILE)).unwrap()).unwrap();
+        assert_eq!(local["future"], true);
+        assert_eq!(
+            local["speechPreferences"]["google/gemini-3.8-flash-tts"]["futureChoice"],
+            true
+        );
+    }
+    #[test]
+    fn audio_retention_review_backup_excludes_unknown_nested_preferences() {
+        let (_root, store, _sid, _aid) = seeded();
+        fs::write(store.root.join(PREFS_FILE),serde_json::to_vec(&json!({"version":1,"speechPreferences":{"google/gemini-3.8-flash-tts":{"voice":"Kore","format":"wav","unknownCredential":"must-not-export-nested"}}})).unwrap()).unwrap();
+        let (_out, archive) = backed_up(&store);
+        let bytes = members_of(&archive)
+            .into_iter()
+            .find(|(name, _)| name == PREFS_FILE)
+            .unwrap()
+            .1;
+        assert!(!String::from_utf8_lossy(&bytes).contains("must-not-export-nested"));
+        assert!(
+            String::from_utf8_lossy(&fs::read(store.root.join(PREFS_FILE)).unwrap())
+                .contains("must-not-export-nested")
+        );
+    }
+    #[test]
+    fn audio_review_portable_preferences_still_restore_after_managed_key_redaction() {
+        let (_root, store, _sid, _aid) = seeded();
+        store
+            .remember_speech_choices("google/gemini-3.8-flash-tts", "SyntheticSecretAscii", "wav")
+            .unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("redacted-prefs.zip");
+        store
+            .backup(&archive, &["SyntheticSecretAscii".into()], || Ok(()))
+            .unwrap();
+        let (_target, restored) = profile(&store.owner);
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        assert_eq!(
+            restored.speech_preferences().unwrap()["google/gemini-3.8-flash-tts"]["voice"],
+            crate::redact::REDACTED
+        );
     }
 }

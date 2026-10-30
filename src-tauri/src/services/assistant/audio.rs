@@ -27,6 +27,15 @@ pub struct Trace {
     pub request_id: Option<String>,
     pub request_id_source: Option<String>,
     pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_error: Option<String>,
+}
+
+/// Scrub before publication as well as after receiving a provider response.
+fn scrub_media(media: MediaRecord, secrets: &[String]) -> Result<MediaRecord, String> {
+    let mut value = serde_json::to_value(media).map_err(|_| INVALID)?;
+    super::host::scrub_secrets_in(&mut value, secrets);
+    serde_json::from_value(value).map_err(|_| INVALID.into())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -64,6 +73,8 @@ pub struct TranscribeRequest {
     pub operation_id: String,
     pub model_id: String,
     pub language: Option<String>,
+    #[serde(default)]
+    pub keep_original: bool,
 }
 impl TranscribeRequest {
     pub(super) fn validate(&self) -> Result<(), String> {

@@ -38,7 +38,16 @@ fn open_file(
         .into_iter()
         .find(|f| {
             f.id == aid
-                && f.origin.as_deref() == Some("generated")
+                && (f.origin.as_deref() == Some("generated")
+                    || (f.origin.as_deref() == Some("audio-input")
+                        && matches!(f.mime_type.as_str(), "audio/wav" | "audio/mpeg")
+                        && record.operations.iter().any(|op| {
+                            op.media.as_ref().is_some_and(|media| {
+                                media.kind == "transcription"
+                                    && media.audio.is_some()
+                                    && media.input_ids.contains(&f.id)
+                            })
+                        })))
                 && matches!(
                     f.mime_type.as_str(),
                     "image/png"
@@ -539,5 +548,27 @@ mod tests {
             );
             assert!(!rejected.exists());
         }
+    }
+    #[test]
+    fn audio_retention_review_protocol_requires_a_retained_asr_ledger_reference() {
+        let (_root, store, owner, sid, aid) = fixture();
+        store
+            .mutate(&sid, |r| {
+                r.attachments[0].mime_type = "audio/wav".into();
+                r.attachments[0].origin = Some("audio-input".into());
+                Ok(())
+            })
+            .unwrap();
+        let req = request(&owner, &sid, &aid);
+        assert_eq!(serve(&store, &owner, 7, &req).status(), 404);
+        store.mutate(&sid,|r| {r.operations.push(serde_json::from_value(json!({"id":id(),"runId":id(),"status":"completed","media":{"kind":"transcription","model":"test/asr","params":{},"status":"completed","inputIds":[aid],"audio":{"pricing":{"unit":"seconds"}}}})).unwrap());Ok(())}).unwrap();
+        assert_eq!(serve(&store, &owner, 7, &req).status(), 200);
+        store
+            .mutate(&sid, |r| {
+                r.operations[0].media.as_mut().unwrap().kind = "speech".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(serve(&store, &owner, 7, &req).status(), 404);
     }
 }

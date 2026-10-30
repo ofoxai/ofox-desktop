@@ -7917,3 +7917,90 @@ it("restores an admitted compaction from the host's transient session state", as
   expect(hook.result.current.run).toEqual(current.session.activeRun);
   expect(hook.result.current.stream).toBeNull();
 });
+
+it("remembers authoritative audio choices on submission without older completions replacing newer choices", async () => {
+  mocks.bootstrap.mockResolvedValueOnce({
+    ...capabilities,
+    rememberedModels: { chat: "old-chat", image: "old-image" },
+    speechPreferences: { untouched: { voice: "old" } },
+  });
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  let resolveBootstrap!: (value: AssistantBootstrap) => void;
+  mocks.bootstrap.mockReturnValueOnce(
+    new Promise<AssistantBootstrap>((resolve) => {
+      resolveBootstrap = resolve;
+    }),
+  );
+  let refreshed!: ReturnType<typeof hook.result.current.loadBootstrap>;
+  act(() => {
+    refreshed = hook.result.current.loadBootstrap();
+  });
+  const event = (
+    id: string,
+    model: string,
+    updatedAt: number,
+    running = true,
+  ) =>
+    ({
+      type: "audio_state",
+      sessionId: session.id,
+      runId: id,
+      operationId: id,
+      data: {
+        owner: capabilities.owner,
+        generation: capabilities.authorityGeneration,
+        running,
+        updatedAt,
+        result: {
+          operationId: id,
+          runId: id,
+          kind: "speech",
+          model,
+          status: running ? "submitting" : "completed",
+          params: { voice: "Puck", responseFormat: "wav" },
+          audio: { text: null },
+        },
+        usage: {},
+      },
+    }) as unknown as AssistantEvent;
+  act(() => mocks.listener?.(event("first", "gemini-old", 2)));
+  expect(hook.result.current.bootstrap?.rememberedModels?.speech).toBe(
+    "gemini-old",
+  );
+  expect(
+    hook.result.current.bootstrap?.speechPreferences?.["gemini-old"],
+  ).toEqual({ voice: "Puck", format: "wav" });
+  act(() => mocks.listener?.(event("second", "gemini-new", 4)));
+  act(() => mocks.listener?.(event("third", "gemini-old", 3)));
+  act(() => mocks.listener?.(event("first", "gemini-old", 9, false)));
+  expect(hook.result.current.bootstrap?.rememberedModels?.speech).toBe(
+    "gemini-new",
+  );
+  await act(async () => {
+    resolveBootstrap({
+      ...structuredClone(capabilities),
+      rememberedModels: { chat: "fresh-chat", image: "fresh-image" },
+      speechPreferences: { untouched: { voice: "fresh" } },
+    });
+    await refreshed;
+  });
+  expect(hook.result.current.bootstrap?.rememberedModels?.speech).toBe(
+    "gemini-new",
+  );
+  expect(hook.result.current.bootstrap?.rememberedModels?.chat).toBe(
+    "fresh-chat",
+  );
+  expect(hook.result.current.bootstrap?.rememberedModels?.image).toBe(
+    "fresh-image",
+  );
+  expect(
+    hook.result.current.bootstrap?.speechPreferences?.untouched.voice,
+  ).toBe("fresh");
+  const wrong = event("fourth", "wrong", 10);
+  if (wrong.type === "audio_state") wrong.data.generation++;
+  act(() => mocks.listener?.(wrong));
+  expect(hook.result.current.bootstrap?.rememberedModels?.speech).toBe(
+    "gemini-new",
+  );
+});

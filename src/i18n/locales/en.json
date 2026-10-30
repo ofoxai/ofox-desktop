@@ -4888,7 +4888,7 @@
       "discardRecording": "Discard recording",
       "waiting": "Waiting for microphone permission…",
       "recording": "Recording {{seconds}} s",
-      "hint": "Up to five minutes. Audio is temporary until you request transcription.",
+      "hint": "Up to five minutes. By default, audio is temporary and discarded after transcription.",
       "limit": "Recording stopped at the limit. Review it before transcribing.",
       "inputInfo": "{{seconds}} s · {{size}}",
       "model": "Transcription model",
@@ -4917,7 +4917,10 @@
       "completed": "Completed",
       "unknown": "Outcome unknown",
       "rejected": "Request refused",
-      "notSent": "Not submitted"
+      "notSent": "Not submitted",
+      "keepOriginal": "Keep original audio in history and backups",
+      "keepOriginalHint": "Off by default. Only a submitted request can retain its original audio; cancelling before submission discards it.",
+      "originalFailed": "Transcription finished, but the original audio could not be retained. Do not transcribe again just to save it."
     },
     "errors": {
       "generic": "The assistant ran into a problem. Please try again.",

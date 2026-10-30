@@ -34,9 +34,9 @@ impl AssistantHost {
         };
         let models = merged.conversation_models();
         let default_model_id = self.default_model(&identity.owner, &merged).await?;
-        let remembered_models = blocking({
+        let (remembered_models, speech_preferences) = blocking({
             let store = self.store(&identity.owner)?;
-            move || store.remembered_models()
+            move || Ok((store.remembered_models()?, store.speech_preferences()?))
         })
         .await
         .unwrap_or_default();
@@ -59,6 +59,7 @@ impl AssistantHost {
             "audioModels": merged.audio_models(),
             "defaultModelId": default_model_id,
             "rememberedModels": remembered_models,
+            "speechPreferences": speech_preferences,
             "modelUnavailableReason": model_error,
             // Catalog sources that could not be read: some models are missing.
             "partial": merged.partial,

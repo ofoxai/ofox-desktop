@@ -64,7 +64,11 @@ navigation, account change and unmount.
 Use independent audio model preferences. Voice/format choices belong to a
 synthesis model, and never replace chat/image/video preferences. Saved values
 remain owner-scoped; restore fills only fields never saved on this machine.
-A future settings writer must preserve unknown fields and damaged-file refusal.
+The settings writer preserves unknown local fields and refuses damaged files.
+Per-model voice/format choices are saved after a validated request, restored
+field by field, and fall back when a model no longer supports a saved value.
+Submitted events keep an open page current; late completions and older catalog
+reads cannot replace newer choices or unrelated freshly read preferences.
 
 Reuse the host's run admission, authority fences and per-conversation exclusion,
 without an artificial user/reply bubble, as manual compaction does. Persist an
@@ -120,9 +124,23 @@ repeated playback without a request. UI covers zh/en/ja, both themes, keyboard
 focus and 900px layouts. The recording/ASR implementation uses a bundled AudioWorklet and 16 kHz mono
 PCM WAV. Auto, Chinese, English and Japanese are available; Chinese adds the
 fixed Simplified Chinese hint only on profiles that support a prompt. Source
-bytes are consumed once by the Rust request and discarded after completion.
+bytes are consumed once by the Rust request. By default they are discarded at
+completion. Keep original is an explicit, initially-off choice for this dialog;
+it atomically retains the original as a private 0600 ledger attachment only
+after submission. Pre-submission cancellation discards the recording; submitted
+cancellation remains unknown without replay and can retain the chosen original.
+A retention failure keeps the transcript and charge facts with a visible warning,
+without another transcription. Retained originals can be played/saved from ASR
+history through the same private protocol.
 The transcript and frozen usage/pricing/request ID remain in the separate
-operation ledger, accessible from Voice input. Keep-original history is pending.
+operation ledger, accessible from Voice input. Whole-conversation ZIP backups
+preserve retained originals, generated speech, text, frozen prices and unknown
+usage; restore keeps local saved choices and fills only missing preference fields.
+Unknown preference fields remain local and are excluded from portable archives.
+Independent audio operations belong to their source conversation. Forks copy
+native/message-linked history and exclude independent audio receipts/files;
+the source keeps its result and cost, avoiding a false branch association or
+billing the same request again.
 
 Native macOS microphone/play/save and approved small
 live samples require separate evidence and per-request billing reconciliation.

@@ -8,10 +8,12 @@ use crate::services::assistant::{
     store::SessionRecord,
 };
 use std::time::Instant;
+#[derive(Clone)]
 pub(super) enum Payload {
     Transcription(TranscribeRequest),
     Speech(SpeechRequest),
 }
+#[derive(Clone)]
 pub(super) struct Job {
     pub session_id: String,
     pub expected_owner: String,
@@ -83,7 +85,19 @@ impl Job {
                 .map(Some),
         }
     }
+    pub fn keep_original(&self) -> bool {
+        matches!(&self.payload, Payload::Transcription(r) if r.keep_original)
+    }
+    pub fn speech_choice(&self) -> Option<(String, String)> {
+        match &self.payload {
+            Payload::Speech(r) => Some((r.voice.clone(), r.response_format.clone())),
+            _ => None,
+        }
+    }
     pub fn check(&self, record: &SessionRecord, model: &Model) -> Result<(), String> {
+        if self.keep_original() {
+            crate::services::assistant::attachments::original_audio_room(record)?;
+        }
         if let Payload::Speech(r) = &self.payload {
             r.body(model)?;
             if let Some(mid) = &r.source_message_id {
@@ -122,7 +136,7 @@ impl Job {
                 let p = preview.ok_or(INPUT_UNAVAILABLE)?;
                 (
                     "transcription",
-                    serde_json::json!({"language":r.language,"inputName":p.name}),
+                    serde_json::json!({"language":r.language,"inputName":p.name,"keepOriginal":r.keep_original}),
                     None,
                     None,
                     Some(p.info),
@@ -154,6 +168,7 @@ impl Job {
                 request_id: None,
                 request_id_source: None,
                 error_code: None,
+                original_error: None,
                 estimate,
                 output: None,
             }),

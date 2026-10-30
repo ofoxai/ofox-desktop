@@ -4888,7 +4888,7 @@
       "discardRecording": "取消录音",
       "waiting": "正在等待麦克风权限…",
       "recording": "正在录音 {{seconds}} 秒",
-      "hint": "最长 5 分钟。点击转写前，音频仅临时保留。",
+      "hint": "最长 5 分钟。默认仅临时保留音频，转写结束后丢弃。",
       "limit": "录音已达到上限并停止，请检查后再转写。",
       "inputInfo": "{{seconds}} 秒 · {{size}}",
       "model": "转写模型",
@@ -4917,7 +4917,10 @@
       "completed": "已完成",
       "unknown": "结果未知",
       "rejected": "请求被拒绝",
-      "notSent": "未提交"
+      "notSent": "未提交",
+      "keepOriginal": "在历史和备份中保留原音频",
+      "keepOriginalHint": "默认关闭。仅已提交的请求会保留原音频；提交前取消会丢弃。",
+      "originalFailed": "转写已结束，但未能保留原音频。请勿仅为保存原音频而重复转写。"
     },
     "errors": {
       "generic": "助手遇到了问题，请重试。",
