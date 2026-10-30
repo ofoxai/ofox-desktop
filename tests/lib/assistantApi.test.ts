@@ -33,6 +33,15 @@ beforeEach(() => {
   invoke.mockReset();
 });
 
+it("keeps default bootstrap IPC unchanged and requests catalog refresh only explicitly", async () => {
+  await assistantApi.bootstrap();
+  expect(invoke).toHaveBeenLastCalledWith("assistant_bootstrap");
+  await assistantApi.bootstrap(true);
+  expect(invoke).toHaveBeenLastCalledWith("assistant_bootstrap", {
+    refreshCatalog: true,
+  });
+});
+
 describe("private audio import commands", () => {
   const target = {
     sessionId: "session",

@@ -3,6 +3,7 @@
 //! `session.json`. The application side (sign-in, the assistant key, the model
 //! catalog, where files live, where events go) comes in through
 //! [`Environment`], so the host runs the same against the app and in tests.
+mod catalog_refresh;
 use super::{
     catalog,
     drops::DropSlot,
@@ -235,6 +236,9 @@ pub struct AssistantHost {
     navigating: Arc<Mutex<HashSet<String>>>,
     /// Each catalog source of each apex, as last read.
     models: Mutex<HashMap<(String, catalog::Source), CachedSource>>,
+    pub(super) catalog_revision: Arc<AtomicU64>,
+    catalog_pending: Arc<Mutex<HashSet<String>>>,
+    catalog_locks: CatalogLocks,
     /// The files last dropped on the window, waiting for the renderer's
     /// token (see [`super::drops`]).
     pub(super) drops: Mutex<DropSlot>,
@@ -273,6 +277,38 @@ struct CachedSource {
     rows: Option<(std::time::Instant, Vec<catalog::Model>)>,
     /// When a read last failed since then, and its error.
     failed: Option<(std::time::Instant, String)>,
+}
+
+type CatalogLocks = Mutex<HashMap<(String, catalog::Source), Arc<tokio::sync::Mutex<()>>>>;
+pub(super) struct CatalogSnapshot {
+    pub catalog: catalog::Catalog,
+    pub error: Option<String>,
+    pub revision: u64,
+    pub refreshing: bool,
+    pub failed: Vec<catalog::Source>,
+}
+impl CachedSource {
+    fn reuse(&self, read: CatalogRead) -> Option<Result<Vec<catalog::Model>, String>> {
+        if read == CatalogRead::Fresh {
+            return None;
+        }
+        if let Some((failed, error)) = &self.failed {
+            return if read == CatalogRead::Send && failed.elapsed() < FAILED_SOURCE_RETRY {
+                Some(
+                    self.rows
+                        .as_ref()
+                        .map(|(_, rows)| rows.clone())
+                        .ok_or_else(|| error.clone()),
+                )
+            } else {
+                None
+            };
+        }
+        self.rows
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < MODELS_TTL)
+            .map(|(_, rows)| Ok(rows.clone()))
+    }
 }
 
 /// A session held by [`AssistantHost::begin_navigation`] until this drops.
@@ -595,6 +631,9 @@ impl AssistantHost {
             recovered: Mutex::default(),
             runs: Mutex::default(),
             models: Mutex::default(),
+            catalog_revision: Arc::new(AtomicU64::new(0)),
+            catalog_pending: Arc::default(),
+            catalog_locks: Mutex::default(),
             drops: Mutex::default(),
             audio_inputs: Mutex::default(),
             audio_importing: tokio::sync::Mutex::new(()),
@@ -689,6 +728,7 @@ impl AssistantHost {
         source: catalog::Source,
         read: CatalogRead,
     ) -> Result<Vec<catalog::Model>, String> {
+        let begun = std::time::Instant::now();
         let key = (apex.to_owned(), source);
         let cached = self
             .models
@@ -697,16 +737,40 @@ impl AssistantHost {
             .get(&key)
             .cloned()
             .unwrap_or_default();
-        if read != CatalogRead::Fresh {
-            if let Some((fetched, models)) = &cached.rows {
-                if fetched.elapsed() < MODELS_TTL {
-                    return Ok(models.clone());
+        if let Some(result) = cached.reuse(read) {
+            return result;
+        }
+        let lock = self
+            .catalog_locks
+            .lock()
+            .map_err(|_| STATE)?
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone();
+        let _source = match (read, cached.failed.as_ref(), cached.rows.as_ref()) {
+            (CatalogRead::Page, Some(_), Some((_, rows))) => {
+                match tokio::time::timeout(PAGE_RETRY_WITH_COPY, lock.lock_owned()).await {
+                    Ok(guard) => guard,
+                    Err(_) => return Ok(rows.clone()),
                 }
             }
+            _ => lock.lock_owned().await,
+        };
+        let cached = self
+            .models
+            .lock()
+            .map_err(|_| STATE)?
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(result) = cached.reuse(read) {
+            return result;
         }
-        if let (CatalogRead::Send, Some((failed, error))) = (read, &cached.failed) {
-            if failed.elapsed() < FAILED_SOURCE_RETRY {
-                return cached.rows.map(|(_, models)| models).ok_or(error.clone());
+        if read == CatalogRead::Fresh {
+            if let Some((at, rows)) = &cached.rows {
+                if *at >= begun {
+                    return Ok(rows.clone());
+                }
             }
         }
         let fetch = self.env.models(apex, source);
@@ -721,6 +785,7 @@ impl AssistantHost {
         let now = std::time::Instant::now();
         let mut cache = self.models.lock().map_err(|_| STATE)?;
         let entry = cache.entry(key).or_default();
+        self.catalog_revision.fetch_add(1, Ordering::SeqCst);
         match fetched {
             Ok(models) => {
                 *entry = CachedSource {
@@ -751,6 +816,7 @@ impl AssistantHost {
     fn forget_models(&self, apex: &str) {
         if let Ok(mut models) = self.models.lock() {
             models.retain(|(cached, _), _| cached != apex);
+            self.catalog_revision.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -2145,6 +2211,8 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        apex: Mutex<String>,
+        catalog_apexes: Mutex<Vec<String>>,
         config: PathBuf,
         catalog: Mutex<Vec<String>>,
         /// `/v1` fetches.
@@ -2164,7 +2232,11 @@ mod tests {
 
     impl Environment for FixedEnvironment {
         fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
-            Box::pin(async { Ok(identity()) })
+            Box::pin(async {
+                let mut value = identity();
+                value.apex = self.apex.lock().unwrap().clone();
+                Ok(value)
+            })
         }
         fn api_key<'a>(
             &'a self,
@@ -2179,10 +2251,11 @@ mod tests {
         }
         fn models<'a>(
             &'a self,
-            _: &'a str,
+            apex: &'a str,
             source: catalog::Source,
         ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
             Box::pin(async move {
+                self.catalog_apexes.lock().unwrap().push(apex.to_owned());
                 let (fetches, ids) = match source {
                     catalog::Source::V1 => (&self.fetches, &self.catalog),
                     catalog::Source::Anthropic => (&self.anthropic_fetches, &self.anthropic),
@@ -2243,6 +2316,8 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            apex: Mutex::new("ofox.ai".into()),
+            catalog_apexes: Mutex::default(),
             config: config.path().to_path_buf(),
             catalog: Mutex::new(vec!["test/model".into()]),
             fetches: AtomicU64::new(0),
@@ -4966,5 +5041,230 @@ while read line; do :; done"#,
             })
             .await
             .unwrap());
+    }
+    #[tokio::test]
+    async fn cache_first_page_returns_a_stale_copy_before_a_hanging_source() {
+        let (_config, env, host) = fixture_with_env();
+        *env.anthropic.lock().unwrap() = vec!["anthropic/claude-test".into()];
+        host.models("ofox.ai").await.unwrap();
+        age_catalogs(&host);
+        env.hanging
+            .lock()
+            .unwrap()
+            .insert(catalog::Source::Anthropic);
+        let boot = tokio::time::timeout(Duration::from_secs(1), host.bootstrap_cached(false))
+            .await
+            .expect("cached page must not wait for a source timeout")
+            .unwrap();
+        assert_eq!(boot["models"][1]["id"], "anthropic/claude-test");
+        assert_eq!(boot["catalogRefreshing"], true);
+        let again = tokio::time::timeout(Duration::from_secs(1), host.bootstrap_cached(false))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(again["catalogRefreshing"], true);
+        for _ in 0..100 {
+            if env.anthropic_fetches.load(Ordering::SeqCst) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(
+            env.anthropic_fetches.load(Ordering::SeqCst),
+            2,
+            "reopening must share one refresh"
+        );
+        let receipt = host.begin_logout();
+        host.finish_logout(receipt);
+    }
+    #[tokio::test]
+    async fn cache_first_cold_page_publishes_the_healthy_source_before_the_other_finishes() {
+        let (_config, env, host) = fixture_with_env();
+        env.hanging
+            .lock()
+            .unwrap()
+            .insert(catalog::Source::Anthropic);
+        let boot = tokio::time::timeout(Duration::from_secs(1), host.bootstrap_cached(false))
+            .await
+            .expect("cold page should open before sources finish")
+            .unwrap();
+        assert_eq!(boot["catalogRefreshing"], true);
+        for _ in 0..100 {
+            if env.events.lock().unwrap().iter().any(|e| {
+                e.r#type == "catalog_state"
+                    && e.data["catalog"]["models"]
+                        .as_array()
+                        .is_some_and(|m| m.iter().any(|m| m["id"] == "test/model"))
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let events = env.events.lock().unwrap();
+        let event = events
+            .iter()
+            .find(|e| {
+                e.r#type == "catalog_state"
+                    && e.data["catalog"]["models"]
+                        .as_array()
+                        .is_some_and(|m| m.iter().any(|m| m["id"] == "test/model"))
+            })
+            .expect("healthy source must publish while another is pending");
+        assert_eq!(event.data["owner"], identity().owner);
+        assert_eq!(event.data["generation"], host.generation());
+        assert_eq!(event.data["catalog"]["catalogRefreshing"], true);
+        drop(events);
+        let receipt = host.begin_logout();
+        host.finish_logout(receipt);
+    }
+    async fn wait_catalog_work(host: &AssistantHost) {
+        for _ in 0..200 {
+            if host.background.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("catalog background work did not settle");
+    }
+    #[tokio::test]
+    async fn cache_first_failed_cold_sources_obey_cooldown_and_explicit_retry() {
+        let (_config, env, host) = fixture_with_env();
+        env.down
+            .lock()
+            .unwrap()
+            .extend([catalog::Source::V1, catalog::Source::Anthropic]);
+        host.bootstrap_cached(false).await.unwrap();
+        wait_catalog_work(&host).await;
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(env.anthropic_fetches.load(Ordering::SeqCst), 1);
+        let again = host.bootstrap_cached(false).await.unwrap();
+        assert_eq!(again["catalogRefreshing"], false);
+        assert!(again["modelUnavailableReason"].is_string());
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 1);
+        host.bootstrap_cached(true).await.unwrap();
+        wait_catalog_work(&host).await;
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 2);
+        assert_eq!(env.anthropic_fetches.load(Ordering::SeqCst), 2);
+        env.down.lock().unwrap().clear();
+        host.bootstrap_cached(true).await.unwrap();
+        wait_catalog_work(&host).await;
+        let recovered = host.bootstrap_cached(false).await.unwrap();
+        assert_eq!(recovered["models"][0]["id"], "test/model");
+        assert_eq!(recovered["catalogRefreshFailed"], json!([]));
+    }
+    #[tokio::test]
+    async fn cache_first_explicit_retry_refetches_a_valid_but_empty_catalog() {
+        let (_config, env, host) = fixture_with_env();
+        env.catalog.lock().unwrap().clear();
+        host.bootstrap_cached(false).await.unwrap();
+        wait_catalog_work(&host).await;
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 1);
+        env.catalog.lock().unwrap().push("recovered/model".into());
+        host.bootstrap_cached(true).await.unwrap();
+        wait_catalog_work(&host).await;
+        assert_eq!(
+            host.bootstrap_cached(false).await.unwrap()["models"][0]["id"],
+            "recovered/model"
+        );
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 2);
+    }
+    #[tokio::test]
+    async fn cache_first_region_change_uses_only_selected_apex_rows_and_events() {
+        let (_config, env, host) = fixture_with_env();
+        host.models("ofox.ai").await.unwrap();
+        age_catalogs(&host);
+        env.hanging
+            .lock()
+            .unwrap()
+            .insert(catalog::Source::Anthropic);
+        host.bootstrap_cached(false).await.unwrap();
+        *env.apex.lock().unwrap() = "ofox.io".into();
+        *env.catalog.lock().unwrap() = vec!["io/model".into()];
+        env.hanging.lock().unwrap().clear();
+        host.cancel_all();
+        let generation = host.generation();
+        let boot = host.bootstrap_cached(false).await.unwrap();
+        assert!(!boot["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "test/model"));
+        wait_catalog_work(&host).await;
+        let events = env.events.lock().unwrap();
+        let current: Vec<_> = events
+            .iter()
+            .filter(|e| e.r#type == "catalog_state" && e.data["generation"] == generation)
+            .collect();
+        assert!(current.iter().any(|e| e.data["catalog"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "io/model")));
+        assert!(current.iter().all(|e| !e.data["catalog"]["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["id"] == "test/model")));
+        assert!(env
+            .catalog_apexes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|apex| apex == "ofox.io"));
+    }
+    #[tokio::test]
+    async fn cache_first_shutdown_aborts_pending_fetches_and_releases_locks() {
+        let (_config, env, host) = fixture_with_env();
+        env.hanging
+            .lock()
+            .unwrap()
+            .extend([catalog::Source::V1, catalog::Source::Anthropic]);
+        host.bootstrap_cached(false).await.unwrap();
+        for _ in 0..100 {
+            if env.fetches.load(Ordering::SeqCst) > 0
+                && env.anthropic_fetches.load(Ordering::SeqCst) > 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        tokio::time::timeout(Duration::from_secs(1), host.shutdown())
+            .await
+            .unwrap();
+        assert!(host.catalog_pending.lock().unwrap().is_empty());
+        assert_eq!(host.background.load(Ordering::SeqCst), 0);
+        assert!(host
+            .catalog_locks
+            .lock()
+            .unwrap()
+            .values()
+            .all(|lock| lock.try_lock().is_ok()));
+    }
+    #[tokio::test(start_paused = true)]
+    async fn cache_first_send_and_refresh_source_reads_share_one_fetch_and_failure_cooldown() {
+        let (_config, env, host) = fixture_with_env();
+        env.hanging
+            .lock()
+            .unwrap()
+            .insert(catalog::Source::Anthropic);
+        let (first, second) = tokio::join!(host.models("ofox.ai"), host.models("ofox.ai"));
+        assert!(first.is_ok());
+        assert!(second.is_ok());
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(env.anthropic_fetches.load(Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn cache_first_read_only_refresh_can_run_before_paid_admission_reopens() {
+        let (_config, env, host) = fixture_with_env();
+        let receipt = host.begin_logout();
+        host.finish_logout(receipt);
+        assert!(host.ensure_accepting_runs().is_err());
+        host.bootstrap_cached(false).await.unwrap();
+        wait_catalog_work(&host).await;
+        assert_eq!(env.fetches.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            host.bootstrap_cached(false).await.unwrap()["models"][0]["id"],
+            "test/model"
+        );
     }
 }

@@ -4293,6 +4293,7 @@ describe("web search", () => {
     await waitFor(() =>
       expect(screen.getByText(/Web search is unavailable/)).toBeVisible(),
     );
+    expect(mocks.bootstrap).toHaveBeenLastCalledWith(true);
     await userEvent.click(toggle());
     expect(toggle()).toHaveAttribute("aria-pressed", "false");
     expect(toggle()).toBeDisabled();
@@ -8003,4 +8004,125 @@ it("remembers authoritative audio choices on submission without older completion
   expect(hook.result.current.bootstrap?.rememberedModels?.speech).toBe(
     "gemini-new",
   );
+});
+
+it("subscribes before opening a cache-first bootstrap so initial catalog updates cannot be lost", async () => {
+  let ready!: () => void;
+  mocks.subscribe.mockImplementationOnce(
+    (listener: (event: AssistantEvent) => void) => {
+      mocks.listener = listener;
+      return new Promise<() => void>((resolve) => {
+        ready = () => resolve(() => {});
+      });
+    },
+  );
+  const hook = renderHook(() => useAssistant(true));
+  expect(mocks.bootstrap).not.toHaveBeenCalled();
+  await act(async () => ready());
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  expect(mocks.bootstrap).toHaveBeenCalledTimes(1);
+});
+it("replays an early catalog update over an older bootstrap and refuses stale or foreign catalog events", async () => {
+  let resolveBoot!: (value: AssistantBootstrap) => void;
+  mocks.bootstrap.mockReturnValueOnce(
+    new Promise<AssistantBootstrap>((resolve) => {
+      resolveBoot = resolve;
+    }),
+  );
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(mocks.listener).toBeDefined());
+  const fresh = {
+    ...capabilities.models[0],
+    id: "fresh/model",
+    name: "Fresh model",
+  };
+  const update = {
+    type: "catalog_state",
+    sessionId: "",
+    runId: "",
+    operationId: "",
+    data: {
+      owner: capabilities.owner,
+      generation: capabilities.authorityGeneration,
+      catalog: {
+        models: [fresh],
+        audioModels: [],
+        defaultModelId: fresh.id,
+        search: capabilities.search,
+        partial: [],
+        modelUnavailableReason: null,
+        catalogRevision: 3,
+        catalogRefreshing: false,
+        catalogRefreshFailed: [],
+      },
+    },
+  } as unknown as AssistantEvent;
+  act(() => mocks.listener?.(structuredClone(update)));
+  await act(async () =>
+    resolveBoot({
+      ...capabilities,
+      catalogRevision: 1,
+      catalogRefreshing: true,
+    }),
+  );
+  expect(hook.result.current.bootstrap?.models[0].id).toBe("fresh/model");
+  expect(hook.result.current.bootstrap?.catalogRefreshing).toBe(false);
+  const older = structuredClone(update) as any;
+  older.data.catalog.catalogRevision = 2;
+  older.data.catalog.models = capabilities.models;
+  act(() => mocks.listener?.(older));
+  const foreign = structuredClone(update) as any;
+  foreign.data.owner = "other";
+  foreign.data.catalog.catalogRevision = 4;
+  act(() => mocks.listener?.(foreign));
+  expect(hook.result.current.bootstrap?.models[0].id).toBe("fresh/model");
+});
+
+it("shows cold catalog progress and offers an explicit retry after a source refresh fails", async () => {
+  mocks.bootstrap.mockResolvedValueOnce({
+    ...capabilities,
+    models: [],
+    defaultModelId: null,
+    catalogRevision: 1,
+    catalogRefreshing: true,
+    catalogRefreshFailed: [],
+  });
+  render(page());
+  expect(await screen.findByText("Loading the model catalog…")).toBeVisible();
+  expect(
+    screen.getByRole("button", { name: "Retry model catalog" }),
+  ).toBeDisabled();
+  const data = {
+    owner: capabilities.owner,
+    generation: capabilities.authorityGeneration,
+    catalog: {
+      models: capabilities.models,
+      audioModels: [],
+      defaultModelId: capabilities.defaultModelId,
+      modelUnavailableReason: null,
+      partial: [],
+      search: capabilities.search,
+      catalogRevision: 2,
+      catalogRefreshing: false,
+      catalogRefreshFailed: ["anthropic"],
+    },
+  };
+  act(() =>
+    mocks.listener?.({
+      type: "catalog_state",
+      sessionId: "",
+      runId: "",
+      operationId: "",
+      data,
+    } as AssistantEvent),
+  );
+  expect(
+    screen.getByText(
+      "Some catalog sources could not be refreshed. Showing the last available models.",
+    ),
+  ).toBeVisible();
+  await userEvent.click(
+    screen.getByRole("button", { name: "Retry model catalog" }),
+  );
+  await waitFor(() => expect(mocks.bootstrap).toHaveBeenLastCalledWith(true));
 });

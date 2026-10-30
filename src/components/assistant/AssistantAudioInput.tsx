@@ -58,7 +58,8 @@ export function AssistantAudioInput({
 }: AssistantAudioInputProps) {
   const { t, i18n } = useTranslation();
   const ids = useId();
-  const options = models.filter(
+  const pendingModels = useRef<readonly AssistantModel[] | null>(null);
+  const options = (pendingModels.current ?? models).filter(
     (model) => model.kind === "transcription" && model.audio,
   );
   const [modelId, setModelId] = useState(
@@ -95,6 +96,7 @@ export function AssistantAudioInput({
   };
   const release = () => {
     generation.current++;
+    pendingModels.current = null;
     permission.current?.abort();
     permission.current = null;
     recording.current?.cancel();
@@ -242,6 +244,7 @@ export function AssistantAudioInput({
     if (phaseNow.current !== "idle" || !inputNow.current || !currentModel)
       return;
     const epoch = generation.current;
+    pendingModels.current = models;
     const run = {
       runId: crypto.randomUUID(),
       operationId: crypto.randomUUID(),
@@ -273,6 +276,7 @@ export function AssistantAudioInput({
     } finally {
       if (own(epoch)) {
         request.current = null;
+        pendingModels.current = null;
         setPhase("idle");
       }
     }

@@ -50,7 +50,10 @@ export function AssistantSpeechOutput({
 }: AssistantSpeechOutputProps) {
   const { t } = useTranslation();
   const ids = useId();
-  const available = models.filter((m) => m.kind === "speech" && m.audio);
+  const pendingModels = useRef<readonly AssistantModel[] | null>(null);
+  const available = (pendingModels.current ?? models).filter(
+    (m) => m.kind === "speech" && m.audio,
+  );
   const initial =
     available.find((m) => m.id === rememberedModel) ?? available[0];
   const choices = useRef<AssistantSpeechPreferences>({ ...speechPreferences });
@@ -88,6 +91,7 @@ export function AssistantSpeechOutput({
   const generation = useRef(0);
   const release = () => {
     generation.current++;
+    pendingModels.current = null;
     const active = request.current;
     if (active && !stopSent.current) {
       stopSent.current = true;
@@ -166,6 +170,7 @@ export function AssistantSpeechOutput({
   const generate = async () => {
     if (!valid || request.current) return;
     const epoch = generation.current;
+    pendingModels.current = models;
     const active = {
       runId: crypto.randomUUID(),
       operationId: crypto.randomUUID(),
@@ -198,6 +203,7 @@ export function AssistantSpeechOutput({
     } finally {
       if (epoch === generation.current) {
         request.current = null;
+        pendingModels.current = null;
         setBusy(false);
       }
     }

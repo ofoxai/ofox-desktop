@@ -15,6 +15,7 @@ import {
   type AssistantMediaQuote,
   type AssistantBackupReport,
   type AssistantBootstrap,
+  type AssistantCatalogSnapshot,
   type AssistantEvent,
   type AssistantMessage,
   type AssistantPreferences,
@@ -37,6 +38,26 @@ import {
   type QueueTicket,
 } from "./useMessageQueue";
 
+function subscriptionReadiness() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+function catalogPatch(catalog: AssistantCatalogSnapshot) {
+  return {
+    models: catalog.models,
+    audioModels: catalog.audioModels,
+    defaultModelId: catalog.defaultModelId,
+    modelUnavailableReason: catalog.modelUnavailableReason,
+    partial: catalog.partial,
+    search: catalog.search,
+    catalogRevision: catalog.catalogRevision,
+    catalogRefreshing: catalog.catalogRefreshing,
+    catalogRefreshFailed: catalog.catalogRefreshFailed,
+  };
+}
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
 /** A backup or restore refused because a reply or a file import is going on. */
@@ -228,6 +249,12 @@ export function useAssistant(enabled: boolean) {
     () => new Set(),
   );
   const [compacting, setCompacting] = useState(false);
+  const listenerReady = useRef<ReturnType<typeof subscriptionReadiness> | null>(
+    null,
+  );
+  if (!listenerReady.current) listenerReady.current = subscriptionReadiness();
+  const bootstrapSequence = useRef(0);
+  const catalogEvents = useRef(new Map<string, AssistantCatalogSnapshot>());
   const audioFinished = useRef(new Set<string>());
   const audioPreferenceTime = useRef<{
     identity: string;
@@ -461,56 +488,91 @@ export function useAssistant(enabled: boolean) {
   );
 
   /** The backend's authority now, or null when it could not be read. */
-  const loadBootstrap = useCallback(async () => {
-    const generation = epoch.current;
-    // A sign-in that completes while this read runs moves the authority on
-    // once more: read it again instead of leaving the page disabled.
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const audioRevision = audioPreferenceTime.current.revision;
-        const value = { ...(await assistantApi.bootstrap()) };
-        if (!mounted.current || generation !== epoch.current) return null;
-        const previous = bootstrapRef.current;
-        if (
-          previous &&
-          (previous.owner !== value.owner ||
-            previous.authorityGeneration !== value.authorityGeneration)
-        )
-          messageQueue.clear();
-        if (
-          previous?.owner === value.owner &&
-          previous.authorityGeneration === value.authorityGeneration &&
-          audioPreferenceTime.current.revision !== audioRevision
-        ) {
-          const cache = audioPreferenceTime.current;
-          for (const kind of ["speech", "transcription"] as const) {
-            const update = cache.models[kind];
-            if (update && update.revision > audioRevision)
-              value.rememberedModels = {
-                ...value.rememberedModels,
-                [kind]: update.model,
-              };
-          }
-          for (const [model, choice] of Object.entries(cache.choices)) {
-            if (choice.revision > audioRevision)
-              value.speechPreferences = {
-                ...value.speechPreferences,
-                [model]: { voice: choice.voice, format: choice.format },
-              };
-          }
-        }
-        bootstrapRef.current = value;
-        setBootstrap(value);
-        return value;
-      } catch (reason) {
-        const code = assistantErrorCode(reason);
-        if (attempt === 0 && code === IDENTITY_CHANGED) continue;
-        // Not through showError: a failed read must not ask for itself again.
-        if (mounted.current && generation === epoch.current) setError(code);
+  const loadBootstrap = useCallback(
+    async (refreshCatalog = false) => {
+      const generation = epoch.current;
+      const sequence = ++bootstrapSequence.current;
+      const audioRevision = audioPreferenceTime.current.revision;
+      await listenerReady.current!.promise;
+      if (
+        !mounted.current ||
+        generation !== epoch.current ||
+        sequence !== bootstrapSequence.current
+      )
         return null;
+      // A sign-in that completes while this read runs moves the authority on
+      // once more: read it again instead of leaving the page disabled.
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          const value = { ...(await assistantApi.bootstrap(refreshCatalog)) };
+          if (
+            !mounted.current ||
+            generation !== epoch.current ||
+            sequence !== bootstrapSequence.current
+          )
+            return null;
+          const previous = bootstrapRef.current;
+          const pending = catalogEvents.current.get(
+            `${value.owner}:${value.authorityGeneration}`,
+          );
+          if (
+            pending &&
+            pending.catalogRevision >= (value.catalogRevision ?? 0)
+          )
+            Object.assign(value, catalogPatch(pending));
+          if (
+            previous?.owner === value.owner &&
+            previous.authorityGeneration === value.authorityGeneration &&
+            (previous.catalogRevision ?? 0) > (value.catalogRevision ?? 0)
+          )
+            Object.assign(
+              value,
+              catalogPatch(
+                previous as AssistantBootstrap & AssistantCatalogSnapshot,
+              ),
+            );
+          if (
+            previous &&
+            (previous.owner !== value.owner ||
+              previous.authorityGeneration !== value.authorityGeneration)
+          )
+            messageQueue.clear();
+          if (
+            previous?.owner === value.owner &&
+            previous.authorityGeneration === value.authorityGeneration &&
+            audioPreferenceTime.current.revision !== audioRevision
+          ) {
+            const cache = audioPreferenceTime.current;
+            for (const kind of ["speech", "transcription"] as const) {
+              const update = cache.models[kind];
+              if (update && update.revision > audioRevision)
+                value.rememberedModels = {
+                  ...value.rememberedModels,
+                  [kind]: update.model,
+                };
+            }
+            for (const [model, choice] of Object.entries(cache.choices)) {
+              if (choice.revision > audioRevision)
+                value.speechPreferences = {
+                  ...value.speechPreferences,
+                  [model]: { voice: choice.voice, format: choice.format },
+                };
+            }
+          }
+          bootstrapRef.current = value;
+          setBootstrap(value);
+          return value;
+        } catch (reason) {
+          const code = assistantErrorCode(reason);
+          if (attempt === 0 && code === IDENTITY_CHANGED) continue;
+          // Not through showError: a failed read must not ask for itself again.
+          if (mounted.current && generation === epoch.current) setError(code);
+          return null;
+        }
       }
-    }
-  }, [messageQueue]);
+    },
+    [messageQueue],
+  );
   reloadAuthority.current = () => void loadBootstrap();
 
   /**
@@ -839,6 +901,7 @@ export function useAssistant(enabled: boolean) {
       setAttachments([]);
       setBootstrap(null);
       bootstrapRef.current = null;
+      catalogEvents.current.clear();
       videoProgress.current.clear();
       videoNotices.current.clear();
       confirmedQuote.current = null;
@@ -986,6 +1049,7 @@ export function useAssistant(enabled: boolean) {
     if (!enabled) return;
     let disposed = false;
     let off: (() => void) | undefined;
+    const readiness = listenerReady.current!;
     // The model is at work (it writes, thinks or calls a tool): the run read
     // its files first, even if an outcome never came in.
     const doneReading = (runId: string) =>
@@ -1011,6 +1075,38 @@ export function useAssistant(enabled: boolean) {
         // The identity generation this event arrived under: a list read it
         // asks for is fenced on it.
         const generation = epoch.current;
+        if (event.type === "catalog_state") {
+          const { owner, generation: authority, catalog } = event.data;
+          const current = bootstrapRef.current;
+          if (
+            signedOut.current ||
+            !Number.isSafeInteger(catalog?.catalogRevision) ||
+            catalog.catalogRevision < 0 ||
+            !Array.isArray(catalog.models) ||
+            typeof catalog.catalogRefreshing !== "boolean" ||
+            (current &&
+              (owner !== current.owner ||
+                authority !== current.authorityGeneration))
+          )
+            return;
+          const key = `${owner}:${authority}`;
+          const saved = catalogEvents.current.get(key);
+          if (saved && saved.catalogRevision > catalog.catalogRevision) return;
+          catalogEvents.current.set(key, catalog);
+          if (catalogEvents.current.size > 8)
+            catalogEvents.current.delete(
+              catalogEvents.current.keys().next().value!,
+            );
+          if (
+            current &&
+            catalog.catalogRevision >= (current.catalogRevision ?? 0)
+          ) {
+            const next = { ...current, ...catalogPatch(catalog) };
+            bootstrapRef.current = next;
+            setBootstrap(next);
+          }
+          return;
+        }
         if (event.type === "audio_state") {
           const {
             owner,
@@ -1447,15 +1543,20 @@ export function useAssistant(enabled: boolean) {
         }
       })
       .then((unsubscribe) => {
+        readiness.resolve();
         if (disposed) unsubscribe();
         else {
           off = unsubscribe;
           setConnected(true);
         }
       })
-      .catch(showError);
+      .catch((reason) => {
+        readiness.resolve();
+        if (!disposed) showError(reason);
+      });
     return () => {
       disposed = true;
+      listenerReady.current = subscriptionReadiness();
       // Words received before a new subscription still belong on screen.
       flushDeltas();
       off?.();

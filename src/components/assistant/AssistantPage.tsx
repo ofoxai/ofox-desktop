@@ -472,7 +472,7 @@ function AssistantWorkspace() {
   useEffect(settleFocus);
 
   useShellRefresh("assistant", async () => {
-    await assistant.loadBootstrap();
+    await assistant.loadBootstrap(true);
     await assistant.refreshSessions();
     if (assistant.selectedId)
       await assistant.refreshDetail(assistant.selectedId);
@@ -1071,6 +1071,36 @@ function AssistantWorkspace() {
             </DropdownMenu>
           )}
         </header>
+        {bootstrap &&
+          (bootstrap.catalogRefreshing ||
+            bootstrap.catalogRefreshFailed?.length ||
+            bootstrap.modelUnavailableReason) && (
+            <div
+              role="status"
+              className="flex items-center justify-between gap-3 border-b border-line px-4 py-2 text-note text-ink-muted"
+            >
+              {bootstrap.catalogRefreshing ? (
+                <span>
+                  {t(
+                    bootstrap.models.length
+                      ? "assistant.catalog.refreshing"
+                      : "assistant.catalog.loading",
+                  )}
+                </span>
+              ) : bootstrap.models.length > 0 ? (
+                <span>{t("assistant.catalog.failed")}</span>
+              ) : (
+                <span />
+              )}
+              <Button
+                variant="ghost"
+                disabled={bootstrap.catalogRefreshing}
+                onClick={() => void assistant.loadBootstrap(true)}
+              >
+                {t("assistant.catalog.retry")}
+              </Button>
+            </div>
+          )}
         {bootstrap?.modelUnavailableReason && (
           <p
             role="status"
@@ -1092,7 +1122,7 @@ function AssistantWorkspace() {
             <Button
               variant="ghost"
               className="mt-1"
-              onClick={() => void assistant.loadBootstrap()}
+              onClick={() => void assistant.loadBootstrap(true)}
             >
               {t("common.retry")}
             </Button>

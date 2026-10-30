@@ -4,7 +4,7 @@ use super::{
     attachments, catalog,
     host::{
         blocking, local_gateway_allowed, native_entries, navigate_native, read_optional, restore,
-        session_key, AssistantHost, Identity, RunControl,
+        session_key, AssistantHost, CatalogSnapshot, Identity, RunControl,
     },
     projection::merge_native,
     store::{self, SessionList, SessionRecord},
@@ -22,28 +22,63 @@ const MAX_MESSAGE_BYTES: usize = 128_000;
 const VERSION_UNAVAILABLE: &str = "assistant_version_unavailable";
 
 impl AssistantHost {
-    /// Everything the assistant page needs to open. Never mints a key.
+    /// Open on cached public metadata; refresh without holding the UI response.
+    pub async fn bootstrap_cached(self: &Arc<Self>, refresh: bool) -> Result<Value, String> {
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        self.refresh_catalog(identity.clone(), generation, refresh)?;
+        let snapshot = self.cached_catalog(&identity, generation)?;
+        self.bootstrap_snapshot(identity, generation, snapshot)
+            .await
+    }
+    /// Explicit full-read callers retain source retry and timeout semantics.
     pub async fn bootstrap(&self) -> Result<Value, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
-        // The user opened the page, retried or refreshed: a source that
-        // failed moments ago is asked again (its last rows still stand in).
-        let (merged, model_error) = match self.page_models(&identity.apex).await {
-            Ok(merged) => (merged, None),
-            Err(error) => (catalog::Catalog::default(), Some(error)),
+        let (catalog, error) = match self.page_models(&identity.apex).await {
+            Ok(c) => (c, None),
+            Err(e) => (catalog::Catalog::default(), Some(e)),
         };
-        let models = merged.conversation_models();
-        let default_model_id = self.default_model(&identity.owner, &merged).await?;
-        let (remembered_models, speech_preferences) = blocking({
+        let snapshot = CatalogSnapshot {
+            failed: catalog.partial.clone(),
+            catalog,
+            error,
+            revision: self
+                .catalog_revision
+                .load(std::sync::atomic::Ordering::SeqCst),
+            refreshing: false,
+        };
+        self.bootstrap_snapshot(identity, generation, snapshot)
+            .await
+    }
+    async fn catalog_fields(
+        &self,
+        owner: &str,
+        snapshot: CatalogSnapshot,
+    ) -> Result<Value, String> {
+        let default = self.default_model(owner, &snapshot.catalog).await?;
+        Ok(
+            json!({"models":snapshot.catalog.conversation_models(),"audioModels":snapshot.catalog.audio_models(),"defaultModelId":default,
+            "modelUnavailableReason":snapshot.error,"partial":snapshot.catalog.partial,"search":search_status(&snapshot.catalog.models),
+            "catalogRevision":snapshot.revision,"catalogRefreshing":snapshot.refreshing,"catalogRefreshFailed":snapshot.failed}),
+        )
+    }
+    async fn bootstrap_snapshot(
+        &self,
+        identity: Identity,
+        generation: u64,
+        snapshot: CatalogSnapshot,
+    ) -> Result<Value, String> {
+        let mut value = self.catalog_fields(&identity.owner, snapshot).await?;
+        let (remembered, speech) = blocking({
             let store = self.store(&identity.owner)?;
             move || Ok((store.remembered_models()?, store.speech_preferences()?))
         })
         .await
         .unwrap_or_default();
-        let search = search_status(&merged.models);
         let runtime = match self.runtime() {
-            Ok(runtime) => json!({"available": true, "reason": null, "version": runtime.version}),
-            Err(reason) => json!({"available": false, "reason": reason, "version": null}),
+            Ok(r) => json!({"available":true,"reason":null,"version":r.version}),
+            Err(reason) => json!({"available":false,"reason":reason,"version":null}),
         };
         let key = if self.env.key_ready(&identity).await {
             "ready"
@@ -51,21 +86,34 @@ impl AssistantHost {
             "missing"
         };
         self.ensure_current(&identity, generation).await?;
-        Ok(json!({
-            "owner": identity.owner,
-            "authorityGeneration": generation,
-            "runtime": runtime,
-            "models": models,
-            "audioModels": merged.audio_models(),
-            "defaultModelId": default_model_id,
-            "rememberedModels": remembered_models,
-            "speechPreferences": speech_preferences,
-            "modelUnavailableReason": model_error,
-            // Catalog sources that could not be read: some models are missing.
-            "partial": merged.partial,
-            "key": {"status": key},
-            "search": search,
-        }))
+        let object = value.as_object_mut().ok_or(super::host::PROTOCOL)?;
+        object.insert("owner".into(), json!(identity.owner));
+        object.insert("authorityGeneration".into(), json!(generation));
+        object.insert("runtime".into(), runtime);
+        object.insert("key".into(), json!({"status":key}));
+        object.insert("rememberedModels".into(), remembered);
+        object.insert("speechPreferences".into(), speech);
+        Ok(value)
+    }
+    pub(super) async fn publish_catalog(
+        &self,
+        identity: &Identity,
+        generation: u64,
+    ) -> Result<(), String> {
+        self.ensure_current(identity, generation).await?;
+        let snapshot = self.cached_catalog(identity, generation)?;
+        let catalog = self.catalog_fields(&identity.owner, snapshot).await?;
+        self.ensure_current(identity, generation).await?;
+        let mut data = json!({"owner":identity.owner,"generation":generation,"catalog":catalog});
+        super::host::scrub_secrets_in(&mut data, &self.known_keys());
+        self.env.emit(Event {
+            session_id: String::new(),
+            run_id: String::new(),
+            operation_id: String::new(),
+            r#type: "catalog_state".into(),
+            data,
+        });
+        Ok(())
     }
 
     pub async fn list_sessions(&self, deleted: bool, search: &str) -> Result<SessionList, String> {

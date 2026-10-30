@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -247,4 +247,116 @@ it("restores each model's in-dialog voice and format when switching models", asy
     "Zephyr",
   );
   expect(api.synthesize).not.toHaveBeenCalled();
+});
+
+it("keeps an active speech request's model, format and estimate frozen during catalog refresh", async () => {
+  let settle!: (value: unknown) => void;
+  api.synthesize.mockReturnValue(
+    new Promise((resolve) => {
+      settle = resolve;
+    }),
+  );
+  const current = speech.map((m) =>
+    m.id === speech[1].id
+      ? {
+          ...m,
+          audio: {
+            ...m.audio!,
+            pricing: { ...m.audio!.pricing, inputTextPerCharacter: "0.0002" },
+          },
+        }
+      : m,
+  );
+  const props = {
+    target,
+    models: current,
+    rememberedModel: speech[1].id,
+    initialText: "Hello",
+    onClose: () => {},
+  };
+  const view = render(<AssistantSpeechOutput {...props} />);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Generate speech" }),
+  );
+  const changed = current.map((m) =>
+    m.id === speech[1].id
+      ? {
+          ...m,
+          name: "Updated provider",
+          audio: {
+            ...m.audio!,
+            responseFormats: ["wav"],
+            pricing: { ...m.audio!.pricing, inputTextPerCharacter: "0.02" },
+          },
+        }
+      : m,
+  );
+  view.rerender(<AssistantSpeechOutput {...props} models={changed} />);
+  expect(
+    screen.getByRole("combobox", { name: "Speech model" }),
+  ).toHaveTextContent("ElevenLabs");
+  expect(
+    screen.getByRole("combobox", { name: "Audio format" }),
+  ).toHaveTextContent("MP3");
+  expect(screen.getByText(/Estimated price: \$0.001\./)).toBeVisible();
+  expect(api.synthesize).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    settle({
+      operationId: "op",
+      runId: "run",
+      kind: "speech",
+      status: "unknown",
+      params: {},
+      cost: null,
+      audio: { errorCode: "assistant_audio_outcome_unknown" },
+    }),
+  );
+});
+it("keeps an active transcription's model and duration quote frozen during catalog refresh", async () => {
+  let settle!: (value: unknown) => void;
+  api.transcribe.mockReturnValue(
+    new Promise((resolve) => {
+      settle = resolve;
+    }),
+  );
+  const props = {
+    target,
+    models: [asr],
+    onInsert: () => true,
+    onClose: () => {},
+  };
+  const view = render(<AssistantAudioInput {...props} />);
+  await userEvent.click(screen.getByRole("button", { name: "Import audio" }));
+  await userEvent.click(screen.getByRole("button", { name: "Transcribe" }));
+  view.rerender(
+    <AssistantAudioInput
+      {...props}
+      models={[
+        {
+          ...asr,
+          name: "Updated ASR",
+          audio: {
+            ...asr.audio!,
+            pricing: { ...asr.audio!.pricing, inputAudioPerSecond: "0.5" },
+          },
+        },
+      ]}
+    />,
+  );
+  expect(
+    screen.getByRole("combobox", { name: "Transcription model" }),
+  ).toHaveTextContent("GPT Transcribe");
+  expect(screen.getByText(/Approximately \$0.000075 /)).toBeVisible();
+  expect(api.transcribe).toHaveBeenCalledTimes(1);
+  await act(async () =>
+    settle({
+      operationId: "op",
+      runId: "run",
+      kind: "transcription",
+      status: "unknown",
+      params: {},
+      cost: null,
+      audio: { errorCode: "assistant_audio_outcome_unknown" },
+    }),
+  );
 });

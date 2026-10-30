@@ -235,6 +235,9 @@ export type AssistantSpeechPreferences = Record<
 >;
 
 export interface AssistantBootstrap {
+  catalogRevision?: number;
+  catalogRefreshing?: boolean;
+  catalogRefreshFailed?: AssistantCatalogSource[];
   speechPreferences?: AssistantSpeechPreferences;
   rememberedModels?: Partial<Record<AssistantModelKind, string | null>>;
   /** The signed-in account as the backend keys its data (64 hex). */
@@ -259,6 +262,20 @@ export interface AssistantBootstrap {
   /** Left out by a backend without web search: read as unavailable. */
   search?: AssistantSearchStatus;
 }
+
+export type AssistantCatalogSnapshot = Pick<
+  AssistantBootstrap,
+  | "models"
+  | "audioModels"
+  | "defaultModelId"
+  | "modelUnavailableReason"
+  | "partial"
+  | "search"
+> & {
+  catalogRevision: number;
+  catalogRefreshing: boolean;
+  catalogRefreshFailed: AssistantCatalogSource[];
+};
 
 /**
  * Whether runs can search the web: only while the catalog prices the search
@@ -699,6 +716,14 @@ export interface AssistantSwitchVersionRequest {
  */
 export type AssistantRunEvent =
   | {
+      type: "catalog_state";
+      data: {
+        owner: string;
+        generation: number;
+        catalog: AssistantCatalogSnapshot;
+      };
+    }
+  | {
       type: "audio_state";
       data: {
         owner: string;
@@ -860,7 +885,12 @@ export const ASSISTANT_DROP_EVENT = "assistant:drop";
 
 /** The backend derives account, organization and region; callers never supply owner IDs. */
 export const assistantApi = {
-  bootstrap: () => invoke<AssistantBootstrap>("assistant_bootstrap"),
+  bootstrap: (refreshCatalog = false) =>
+    refreshCatalog
+      ? invoke<AssistantBootstrap>("assistant_bootstrap", {
+          refreshCatalog: true,
+        })
+      : invoke<AssistantBootstrap>("assistant_bootstrap"),
   usageSummary: () => invoke<AssistantUsage>("assistant_usage_summary"),
   /** `null` when the save dialog was cancelled. */
   backup: (request: AssistantTransferRequest) =>

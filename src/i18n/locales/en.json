@@ -5396,6 +5396,12 @@
       "unsupported": "This device cannot play this audio format. You can save the file instead.",
       "blocked": "Playback was blocked. Click Play to try again, or save the file.",
       "failed": "Unable to play this saved audio. You can try playback again or save the file; no new speech will be generated."
+    },
+    "catalog": {
+      "loading": "Loading the model catalog…",
+      "refreshing": "Updating models; the displayed models remain available.",
+      "failed": "Some catalog sources could not be refreshed. Showing the last available models.",
+      "retry": "Retry model catalog"
     }
   }
 }

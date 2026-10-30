@@ -2,6 +2,15 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant catalog cache (2026-10-30)
+
+Assistant catalog caching is in memory. A restart opens an asynchronous cold
+load rather than reusing disk metadata; healthy sources can arrive independently.
+Automatic failure retry has a thirty-second cooldown and successful rows have a
+ten-minute TTL. Explicit Retry is available, including after a valid empty list.
+See [catalog behavior](assistant-catalog.md). Native application acceptance of this
+iteration remains pending; sandbox/browser results do not validate Windows.
+
 ## Assistant audio foundation (2026-10-30)
 
 The audio catalog, bounded import, recording and editable ASR draft controls
@@ -20,7 +29,10 @@ audio acceptance have not yet been performed. Speech previews start with the
 reply source text, including Markdown, and can be edited before generation.
 Ogg Opus output checks container framing/CRCs and duration; full Opus decoding
 is device-dependent. Unsupported codecs offer save without paid conversion;
-native WKWebView playback/save acceptance remains pending. See [audio design](assistant-audio.md).
+native WKWebView playback/save acceptance remains pending. Opening stored audio
+history from a cold offline catalog is still gated by the composer entry points
+and needs final-stage review; the private playback/save paths themselves need
+no model call. See [audio design](assistant-audio.md).
 
 ## Assistant backup and restore (2026-10-28)
 
