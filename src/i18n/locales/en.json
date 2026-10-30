@@ -4949,8 +4949,8 @@
       "thinkingLevelUnavailable": "This model doesn't offer that thinking level. Choose another one.",
       "attachmentUnavailable": "An attached file is no longer available. Attach the file again, then send your message again.",
       "audioInputUnavailable": "The temporary audio is no longer available. Record or import it again.",
-      "audioInvalidParams": "This model or language is unavailable for transcription. Review the audio settings.",
-      "audioOutcomeUnknown": "The transcription outcome is unknown and may have been charged. It will not be submitted again automatically.",
+      "audioInvalidParams": "This audio model or one of its settings is unavailable. Review your choices.",
+      "audioOutcomeUnknown": "The audio request outcome is unknown and may have been charged. It will not be submitted again automatically.",
       "microphoneDenied": "Microphone access was denied. Allow it in system settings or import an audio file.",
       "microphoneUnavailable": "A supported microphone could not be opened. Check the device or import an audio file.",
       "recordingInterrupted": "Recording was interrupted and discarded. Record again or import an audio file.",
@@ -5356,6 +5356,31 @@
     "contextUnknown": "Usage will be updated after the next reply.",
     "contextNearFull": "Compact context to leave room for the next replies.",
     "compact": "Compact context",
-    "compactCost": "Uses the selected model and may incur a charge."
+    "compactCost": "Uses the selected model and may incur a charge.",
+    "speech": {
+      "title": "Generate speech",
+      "read": "Read aloud…",
+      "hint": "Review the text, voice and format before generating. Speech uses a separate model and does not send a chat message.",
+      "text": "Text to speak",
+      "generate": "Generate speech",
+      "model": "Speech model",
+      "format": "Audio format",
+      "voiceId": "Voice ID",
+      "voiceName": "Voice name",
+      "voiceIdHint": "Use a 20-character ElevenLabs voice ID. Voice names such as alloy are not supported.",
+      "voiceNameHint": "Use a Google voice name, for example Kore, Puck or Zephyr.",
+      "style": "Tone and style",
+      "length": "{{count}} / {{limit}} characters",
+      "styleLength": "Style: {{count}} / {{limit}} characters",
+      "estimate": "Estimated price: {{amount}}. Actual cost needs a usage receipt.",
+      "unknownEstimate": "Price cannot be estimated from the available text and catalog rates.",
+      "generating": "Generating speech…",
+      "generated": "Speech generated",
+      "unknownCost": "Actual cost is unknown; the audio response did not include usage.",
+      "outputInfo": "{{seconds}} s · {{size}} KiB",
+      "history": "Saved speech results",
+      "historyItem": "Speech result {{number}}",
+      "stop": "Stop generating speech"
+    }
   }
 }

@@ -3,7 +3,7 @@
 //! prices and capabilities the runtime and the model picker need.
 //! Conversations use the chat models only (see [`Catalog::conversation_models`]).
 mod audio;
-pub use audio::{AudioBillingUnit, AudioCapabilities, AudioPricing};
+pub use audio::{AudioBillingUnit, AudioCapabilities, AudioFamily, AudioPricing};
 
 use super::thinking::{self, AnthropicCompat, LevelMap};
 use rust_decimal::Decimal;

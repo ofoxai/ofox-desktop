@@ -1,15 +1,15 @@
 //! Authority-fenced explicit transcription runs.
 use super::*;
 use crate::services::assistant::{
-    catalog::Kind,
     host::{
         blocking, load_native, session_key, AssistantHost, RunControl, IDENTITY_CHANGED, PROTOCOL,
     },
     projection::recount_usage,
+    speech::SpeechRequest,
     store,
 };
 use serde_json::json;
-use std::{sync::Arc, time::Instant};
+use std::sync::Arc;
 
 impl AssistantHost {
     pub async fn transcribe_audio(
@@ -17,6 +17,21 @@ impl AssistantHost {
         request: TranscribeRequest,
     ) -> Result<ResultRecord, String> {
         request.validate()?;
+        self.audio_job(request.into()).await
+    }
+
+    pub async fn synthesize_audio(
+        self: &Arc<Self>,
+        request: SpeechRequest,
+    ) -> Result<ResultRecord, String> {
+        request.validate()?;
+        self.audio_job(request.into()).await
+    }
+
+    async fn audio_job(
+        self: &Arc<Self>,
+        mut request: super::job::Job,
+    ) -> Result<ResultRecord, String> {
         self.admit(request.expected_generation)?;
         let identity = self.identity().await?;
         if identity.owner != request.expected_owner {
@@ -49,21 +64,16 @@ impl AssistantHost {
         {
             return Err("assistant_stale_operation".into());
         }
-        let preview = self
-            .audio_inputs
-            .lock()
-            .map_err(|_| "assistant_state_unavailable")?
-            .preview(&request.authority(), &request.input_id, Instant::now())?;
+        let preview = request.preview(self)?;
         let model = self
             .models(&identity.apex)
             .await?
             .models
             .into_iter()
-            .find(|m| {
-                m.id == request.model_id && m.kind == Kind::Transcription && m.audio.is_some()
-            })
+            .find(|m| m.id == request.model_id && m.kind == request.kind() && m.audio.is_some())
             .ok_or(INVALID)?;
-        let pricing = model.audio.as_ref().ok_or(INVALID)?.pricing.clone();
+        request.check(&record, &model)?;
+        let kind = request.kind();
         blocking({
             let store = store.clone();
             let model = model.id.clone();
@@ -71,7 +81,7 @@ impl AssistantHost {
             let generation = request.expected_generation;
             move || {
                 host.admit(generation)?;
-                store.remember_model_kind(&model, Kind::Transcription)
+                store.remember_model_kind(&model, kind)
             }
         })
         .await?;
@@ -110,24 +120,8 @@ impl AssistantHost {
         let mut control = RunControl::new(identity.clone(), &send, key.clone());
         control.audio_only = true;
         let control = Arc::new(control);
-        let mut media = MediaRecord {
-            kind: "transcription".into(),
-            model: model.id.clone(),
-            apex: Some(identity.apex.clone()),
-            params: json!({"language":request.language,"inputName":preview.name}),
-            status: "not_sent".into(),
-            cost: Some("0".into()),
-            audio: Some(Trace {
-                pricing,
-                input: Some(preview.info),
-                text: None,
-                usage: Value::Null,
-                request_id: None,
-                request_id_source: None,
-                error_code: None,
-            }),
-            ..Default::default()
-        };
+        request.scrub(&self.known_keys());
+        let mut media = request.media(&model, preview, &identity.apex)?;
         let chat_model = record.session.model_id;
         blocking({
             let store = store.clone();
@@ -168,19 +162,14 @@ impl AssistantHost {
             }
         })
         .await?;
-        let input = self
-            .audio_inputs
-            .lock()
-            .map_err(|_| "assistant_state_unavailable".to_owned())
-            .and_then(|mut slot| {
-                slot.take(&request.authority(), &request.input_id, Instant::now())
-            });
+        let input = request.take(self);
         let (tx, rx) = tokio::sync::oneshot::channel();
         let host = self.clone();
         let done = control.clone();
         let sid = request.session_id.clone();
         self.track(control.run_id.clone(), async move {
             let _history = history;
+            let mut output = None;
             let attempted = async {
                 let input = input?;
                 host.ensure_current(&done.identity, request.expected_generation).await?;
@@ -212,7 +201,7 @@ impl AssistantHost {
                 let mut cancelled = done.cancel.subscribe();
                 let result = tokio::select! {
                     biased;
-                    result = http::transcribe(&client, &gateway, &key, &model, &input, request.language.as_deref()) => result,
+                    result = request.perform(&client, &gateway, &key, &model, input.as_ref()) => result,
                     _ = cancelled.wait_for(|value| *value) => Err(http::Failure {
                         code: UNKNOWN,
                         unbilled: false,
@@ -224,9 +213,9 @@ impl AssistantHost {
                 match result {
                     Ok(response) => {
                         media.status = "completed".into();
-                        media.cost = cost(&trace.pricing, &response.usage)
-                            .map(|amount| amount.normalize().to_string());
-                        trace.text = Some(response.text);
+                        media.cost = if media.kind == "transcription" { cost(&trace.pricing, &response.usage).map(|amount| amount.normalize().to_string()) } else { None };
+                        trace.text = response.text;
+                        if let Some((bytes, info)) = response.output { trace.output = Some(info.clone()); output = Some((bytes, info)); }
                         trace.usage = response.usage;
                         trace.request_id = response.request_id;
                         trace.request_id_source = response.request_id_source;
@@ -257,33 +246,36 @@ impl AssistantHost {
             let saved = match encoded.and_then(|value| {
                 serde_json::from_value::<MediaRecord>(value).map_err(|_| INVALID.into())
             }) {
-                Ok(media) => blocking({
+                Ok(mut media) => blocking({
                     let done = done.clone();
                     let store = store.clone();
                     let sid = sid.clone();
-                    move || store.mutate(&sid, |r| {
-                        let op = r.operations.iter_mut()
-                            .find(|op| op.id == done.operation_id)
-                            .ok_or("assistant_stale_operation")?;
-                        op.status = if media.status == "completed" {
-                            OperationStatus::Completed
-                        } else if done.cancelled() {
-                            OperationStatus::Cancelled
-                        } else {
-                            OperationStatus::Failed
+                    let host = host.clone();
+                    let generation = request.expected_generation;
+                    move || {
+                        let finish = |r: &mut store::SessionRecord, media: &MediaRecord| {
+                            let op = r.operations.iter_mut().find(|op| op.id == done.operation_id).ok_or("assistant_stale_operation")?;
+                            op.status = if media.status == "completed" { OperationStatus::Completed } else if done.cancelled() { OperationStatus::Cancelled } else { OperationStatus::Failed };
+                            op.media = Some(media.clone());
+                            if r.session.active_run.as_ref().is_some_and(|active| active.run_id == done.run_id) { r.session.active_run = None; }
+                            r.session.updated_at = now();
+                            recount_usage(r, &entries);
+                            Ok((ResultRecord { operation_id: done.operation_id.clone(), run_id: done.run_id.clone(), media: media.clone() }, r.usage.clone(), r.session.updated_at))
                         };
-                        op.media = Some(media.clone());
-                        if r.session.active_run.as_ref().is_some_and(|active| active.run_id == done.run_id) {
-                            r.session.active_run = None;
+                        if let Some((bytes, info)) = output {
+                            let published = crate::services::assistant::attachments::generated_audio(&store, &sid, &mut media, &bytes, &info, |record, media| {
+                                host.admit(generation)?;
+                                host.validate_run(&done)?;
+                                if record.session.deleted_at.is_some() {return Err("assistant_session_deleted".into());}
+                                finish(record, media)
+                            });
+                            if published.is_ok() { return published; }
+                            let code = published.err().unwrap_or_else(|| UNKNOWN.into());
+                            media.status = "unknown".into(); media.cost = None; media.outputs.clear();
+                            if let Some(trace) = &mut media.audio {trace.output = None; trace.error_code = Some(code);}
                         }
-                        r.session.updated_at = now();
-                        recount_usage(r, &entries);
-                        Ok((ResultRecord {
-                            operation_id: done.operation_id.clone(),
-                            run_id: done.run_id.clone(),
-                            media,
-                        }, r.usage.clone(), r.session.updated_at))
-                    })
+                        store.mutate(&sid, |record| finish(record, &media))
+                    }
                 }).await,
                 Err(error) => Err(error),
             };
@@ -385,7 +377,7 @@ mod tests {
             Box::pin(async move {
                 Ok(if source == catalog::Source::V1 {
                     catalog::parse_models(
-                        json!({"data":[{"id":"test/chat","context_length":32768,"supported_endpoints":["chat/completions"]},{"id":"openai/gpt-transcribe","supported_endpoints":["audio/transcriptions"],"pricing":{"input_audio_per_second":"0.000075"}}]}),
+                        json!({"data":[{"id":"google/gemini-3.8-flash-tts","supported_endpoints":["audio/speech"],"pricing":{"prompt":"0.000001","output_audio":"0.00002"}},{"id":"elevenlabs/eleven_v4","supported_endpoints":["audio/speech"],"pricing":{"input_text_per_character":"0.0002"}},{"id":"test/chat","context_length":32768,"supported_endpoints":["chat/completions"]},{"id":"openai/gpt-transcribe","supported_endpoints":["audio/transcriptions"],"pricing":{"input_audio_per_second":"0.000075"}}]}),
                         source,
                     )
                 } else {
@@ -562,5 +554,129 @@ mod tests {
         assert!(result.media.audio.unwrap().text.is_none());
         assert!(host.transcribe_audio(request).await.is_err());
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    }
+    #[tokio::test]
+    async fn speech_host_refuses_invalid_parameters_before_keys_and_never_changes_chat() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (_root, server, env, host, asr) = fixture(apex).await;
+            let request:crate::services::assistant::speech::SpeechRequest=serde_json::from_value(json!({
+            "sessionId":asr.session_id,"expectedOwner":asr.expected_owner,"expectedGeneration":asr.expected_generation,
+            "runId":id(),"operationId":id(),"modelId":"google/gemini-3.8-flash-tts","input":"请朗读。","voice":"Kore","responseFormat":"wav"
+        })).unwrap();
+            let mut invalid = request.clone();
+            invalid.response_format = "mp3".into();
+            assert!(host.synthesize_audio(invalid).await.is_err());
+            assert_eq!(env.keys.load(Ordering::SeqCst), 0);
+            let mut invalid_source = request.clone();
+            invalid_source.source_message_id = Some(id());
+            assert_eq!(
+                host.synthesize_audio(invalid_source).await.unwrap_err(),
+                "assistant_message_not_found"
+            );
+            let mut stale = request.clone();
+            stale.expected_generation += 1;
+            assert_eq!(
+                host.synthesize_audio(stale).await.unwrap_err(),
+                IDENTITY_CHANGED
+            );
+            assert_eq!(env.keys.load(Ordering::SeqCst), 0);
+            let bytes = crate::services::assistant::speech::tests::wav(1);
+            Mock::given(method("POST"))
+                .and(path("/v1/audio/speech"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .insert_header("Content-Type", "audio/wav")
+                        .set_body_bytes(bytes),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let result = host.synthesize_audio(request.clone()).await.unwrap();
+            assert_eq!(result.media.kind, "speech");
+            assert_eq!(result.media.status, "completed");
+            assert!(result.media.cost.is_none());
+            let store = host.store(&request.expected_owner).unwrap();
+            let record = store.load_record(&request.session_id).unwrap();
+            assert_eq!(record.session.model_id, "test/chat");
+            assert_eq!(record.session.draft, "保留的草稿");
+            assert!(record.messages.is_empty());
+            assert!(record.session.active_run.is_none());
+            assert_eq!(record.attachments.len(), 1);
+            assert_eq!(record.attachments[0].mime_type, "audio/wav");
+            let path = store
+                .attachment_dir(&request.session_id)
+                .unwrap()
+                .join(&result.media.outputs[0]);
+            assert!(path.is_file());
+            store
+                .cleanup_orphan_attachments(&request.session_id)
+                .unwrap();
+            assert!(path.is_file());
+            assert_eq!(record.usage["usageCoverage"], "incomplete");
+            assert_eq!(
+                store.remembered_models().unwrap()["speech"],
+                request.model_id
+            );
+            assert!(host.synthesize_audio(request).await.is_err());
+            assert_eq!(env.keys.load(Ordering::SeqCst), 1);
+        }
+    }
+    #[tokio::test]
+    async fn speech_host_cancellation_is_unknown_and_rejects_concurrent_and_stale_requests() {
+        let (_root, server, env, host, asr) = fixture("ofox.io").await;
+        let request:SpeechRequest=serde_json::from_value(json!({"sessionId":asr.session_id,"expectedOwner":asr.expected_owner,"expectedGeneration":asr.expected_generation,"runId":id(),"operationId":id(),"modelId":"elevenlabs/eleven_v4","input":"Hello","voice":"21m00Tcm4TlvDq8ikWAM","responseFormat":"mp3"})).unwrap();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "audio/mpeg")
+                    .set_body_bytes(
+                        include_bytes!(
+                            "../../../../tests/fixtures/assistant-audio/tone-16k-mono.mp3"
+                        )
+                        .to_vec(),
+                    )
+                    .set_delay(std::time::Duration::from_secs(2)),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let running = tokio::spawn({
+            let host = host.clone();
+            let request = request.clone();
+            async move { host.synthesize_audio(request).await }
+        });
+        for _ in 0..200 {
+            if !server.received_requests().await.unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut concurrent = request.clone();
+        concurrent.operation_id = id();
+        concurrent.run_id = id();
+        assert_eq!(
+            host.synthesize_audio(concurrent).await.unwrap_err(),
+            "assistant_session_busy"
+        );
+        host.cancel_all();
+        let result = running.await.unwrap().unwrap();
+        assert_eq!(result.media.status, "unknown");
+        assert!(result.media.outputs.is_empty());
+        assert!(result.media.cost.is_none());
+        assert!(host.synthesize_audio(request.clone()).await.is_err());
+        assert_eq!(env.keys.load(Ordering::SeqCst), 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        let record = host
+            .store(&request.expected_owner)
+            .unwrap()
+            .load_record(&request.session_id)
+            .unwrap();
+        assert!(record.attachments.is_empty());
+        assert!(env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.data["running"] == true));
     }
 }

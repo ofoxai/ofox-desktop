@@ -251,63 +251,66 @@ it("audio insertion preserves the newest draft and rejects a changed selection",
   expect(mocks.send).not.toHaveBeenCalled();
 });
 
-it("audio state events hold a run without a phantom chat bubble and reject another authority", async () => {
-  const hook = renderHook(() => useAssistant(true));
-  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
-  act(() => hook.result.current.select(session.id));
-  await waitFor(() =>
-    expect(hook.result.current.detail?.session.id).toBe(session.id),
-  );
-  const payload = {
-    type: "audio_state",
-    sessionId: session.id,
-    runId: "audio-run",
-    operationId: "audio-op",
-    data: {
-      owner: capabilities.owner,
-      generation: capabilities.authorityGeneration,
-      running: true,
-      updatedAt: 2,
-      result: {
-        operationId: "audio-op",
-        runId: "audio-run",
-        kind: "transcription",
-        model: "openai/gpt-transcribe",
-        status: "submitting",
-        audio: { text: null },
+it.each(["transcription", "speech"])(
+  "audio state events (%s) hold a run without a phantom chat bubble and reject another authority",
+  async (kind) => {
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() =>
+      expect(hook.result.current.detail?.session.id).toBe(session.id),
+    );
+    const payload = {
+      type: "audio_state",
+      sessionId: session.id,
+      runId: "audio-run",
+      operationId: "audio-op",
+      data: {
+        owner: capabilities.owner,
+        generation: capabilities.authorityGeneration,
+        running: true,
+        updatedAt: 2,
+        result: {
+          operationId: "audio-op",
+          runId: "audio-run",
+          kind,
+          model: "audio-model",
+          status: "submitting",
+          audio: { text: null },
+        },
+        usage: {},
       },
-      usage: {},
-    },
-  } as unknown as AssistantEvent;
-  act(() => mocks.listener?.(structuredClone(payload)));
-  expect(hook.result.current.run?.runId).toBe("audio-run");
-  expect(hook.result.current.stream).toBeNull();
-  expect(hook.result.current.detail?.messages).toEqual([]);
-  const wrong = structuredClone(payload) as typeof payload;
-  if (wrong.type === "audio_state") {
-    wrong.data.owner = "other";
-    wrong.data.running = false;
-  }
-  act(() => mocks.listener?.(wrong));
-  expect(hook.result.current.run?.runId).toBe("audio-run");
-  if (payload.type === "audio_state") {
-    payload.data.running = false;
-    payload.data.result.status = "completed";
-    payload.data.result.audio.text = "完成";
-  }
-  act(() => mocks.listener?.(structuredClone(payload)));
-  expect(hook.result.current.run).toBeNull();
-  expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
-    "完成",
-  );
-  // A duplicate terminal event must not replace the already accepted result.
-  if (payload.type === "audio_state")
-    payload.data.result.audio.text = "重复的旧结果";
-  act(() => mocks.listener?.(structuredClone(payload)));
-  expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
-    "完成",
-  );
-});
+    } as unknown as AssistantEvent;
+    act(() => mocks.listener?.(structuredClone(payload)));
+    expect(hook.result.current.run?.runId).toBe("audio-run");
+    expect(hook.result.current.stream).toBeNull();
+    expect(hook.result.current.detail?.messages).toEqual([]);
+    const wrong = structuredClone(payload) as typeof payload;
+    if (wrong.type === "audio_state") {
+      wrong.data.owner = "other";
+      wrong.data.running = false;
+    }
+    act(() => mocks.listener?.(wrong));
+    expect(hook.result.current.run?.runId).toBe("audio-run");
+    if (payload.type === "audio_state") {
+      payload.data.running = false;
+      payload.data.result.status = "completed";
+      payload.data.result.audio.text = "完成";
+    }
+    act(() => mocks.listener?.(structuredClone(payload)));
+    expect(hook.result.current.run).toBeNull();
+    expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
+      "完成",
+    );
+    // A duplicate terminal event must not replace the already accepted result.
+    if (payload.type === "audio_state")
+      payload.data.result.audio.text = "重复的旧结果";
+    act(() => mocks.listener?.(structuredClone(payload)));
+    expect(hook.result.current.detail?.audioOperations?.[0].audio.text).toBe(
+      "完成",
+    );
+  },
+);
 
 it("audio completion preserves a newer chat run and its usage", async () => {
   current.session.activeRun = { runId: "new-chat", operationId: "new-op" };
@@ -368,6 +371,74 @@ it("audio entry opens only when dedicated transcription models are available", a
     await screen.findByRole("dialog", { name: "Voice input" }),
   ).toBeVisible();
   expect(screen.getByRole("button", { name: "Record" })).toBeEnabled();
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("speech generation opens from the composer without changing the chat draft", async () => {
+  mocks.bootstrap.mockResolvedValue({
+    ...capabilities,
+    audioModels: [
+      {
+        ...model("google/gemini-3.8-flash-tts", "Gemini TTS"),
+        kind: "speech",
+        audio: {
+          family: "gemini-tts",
+          suggestedVoices: ["Kore"],
+          responseFormats: ["wav", "pcm"],
+          defaultFormat: "wav",
+          pricing: { unit: "tokens" },
+        },
+      },
+    ],
+  });
+  await openConversation();
+  fireEvent.change(composer(), { target: { value: "Keep this draft" } });
+  await userEvent.click(
+    screen.getByRole("button", { name: "Generate speech" }),
+  );
+  expect(
+    await screen.findByRole("dialog", { name: "Generate speech" }),
+  ).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "Text to speak" })).toHaveValue(
+    "Keep this draft",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(composer()).toHaveValue("Keep this draft");
+  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+it("completed assistant replies expose a read-aloud preview using an independent speech model", async () => {
+  mocks.bootstrap.mockResolvedValue({
+    ...capabilities,
+    audioModels: [
+      {
+        ...model("google/gemini-3.8-flash-tts", "Gemini TTS"),
+        kind: "speech",
+        audio: {
+          family: "gemini-tts",
+          suggestedVoices: ["Kore"],
+          responseFormats: ["wav"],
+          defaultFormat: "wav",
+          pricing: { unit: "tokens" },
+        },
+      },
+    ],
+  });
+  current.messages = [
+    {
+      id: "read-reply",
+      role: "assistant",
+      content: "A completed reply",
+      status: "completed",
+      createdAt: 1,
+      runId: "read-run",
+    },
+  ];
+  await openConversation();
+  await userEvent.click(screen.getByRole("button", { name: "Read aloud…" }));
+  expect(
+    await screen.findByRole("textbox", { name: "Text to speak" }),
+  ).toHaveValue("A completed reply");
   expect(mocks.send).not.toHaveBeenCalled();
 });
 

@@ -4949,8 +4949,8 @@
       "thinkingLevelUnavailable": "このモデルではその思考レベルを使えません。別のレベルを選んでください。",
       "attachmentUnavailable": "添付ファイルが利用できなくなりました。ファイルをもう一度添付してから、メッセージを送り直してください。",
       "audioInputUnavailable": "一時音声を利用できません。録音または読み込みをやり直してください。",
-      "audioInvalidParams": "このモデルまたは言語では文字起こしを利用できません。音声設定を確認してください。",
-      "audioOutcomeUnknown": "文字起こしの結果は不明で、課金された可能性があります。自動で再送信しません。",
+      "audioInvalidParams": "この音声モデルまたは設定を利用できません。選択内容を確認してください。",
+      "audioOutcomeUnknown": "音声リクエストの結果は不明で、課金された可能性があります。自動的には再送信しません。",
       "microphoneDenied": "マイクへのアクセスが拒否されました。システム設定で許可するか、音声ファイルを読み込んでください。",
       "microphoneUnavailable": "対応するマイクを開けませんでした。機器を確認するか、音声ファイルを読み込んでください。",
       "recordingInterrupted": "録音が中断され、破棄されました。録音または読み込みをやり直してください。",
@@ -5356,6 +5356,31 @@
     "contextUnknown": "次の返信後に使用量が更新されます。",
     "contextNearFull": "コンテキストを整理して、次の返信の余裕を確保できます。",
     "compact": "コンテキストを整理",
-    "compactCost": "選択中のモデルを使用し、料金が発生する場合があります。"
+    "compactCost": "選択中のモデルを使用し、料金が発生する場合があります。",
+    "speech": {
+      "title": "音声を生成",
+      "read": "読み上げ…",
+      "hint": "生成前にテキスト、声、形式を確認してください。専用の音声モデルを使用し、チャットは送信しません。",
+      "text": "読み上げるテキスト",
+      "generate": "音声を生成",
+      "model": "音声モデル",
+      "format": "音声形式",
+      "voiceId": "ボイス ID",
+      "voiceName": "ボイス名",
+      "voiceIdHint": "20文字の ElevenLabs ボイス ID を入力してください。alloy などのボイス名には対応していません。",
+      "voiceNameHint": "Kore、Puck、Zephyr などの Google ボイス名を入力してください。",
+      "style": "口調とスタイル",
+      "length": "{{count}} / {{limit}} 文字",
+      "styleLength": "スタイル：{{count}} / {{limit}} 文字",
+      "estimate": "推定価格：{{amount}}。実際の料金は使用量の記録で確認します。",
+      "unknownEstimate": "テキストとカタログ価格だけでは料金を推定できません。",
+      "generating": "音声を生成中…",
+      "generated": "音声を生成しました",
+      "unknownCost": "実際の料金は不明です。音声レスポンスに使用量が含まれていません。",
+      "outputInfo": "{{seconds}} 秒 · {{size}} KiB",
+      "history": "保存した音声結果",
+      "historyItem": "音声結果 {{number}}",
+      "stop": "音声生成を停止"
+    }
   }
 }

@@ -52,6 +52,41 @@ describe("private audio import commands", () => {
     });
   });
 
+  it("keeps renderer selection tokens out of the strict native transcription payload", async () => {
+    const request = {
+      ...target,
+      selectionKey: 12,
+      inputId: "audio",
+      modelId: "asr",
+      runId: "run",
+      operationId: "op",
+      language: "zh" as const,
+    };
+    await assistantApi.transcribe(request);
+    const { selectionKey, ...native } = request;
+    expect(invoke).toHaveBeenCalledWith("assistant_transcribe_audio", {
+      request: native,
+    });
+  });
+
+  it("whitelists speech fields and never forwards renderer selection metadata", async () => {
+    const request = {
+      ...target,
+      selectionKey: 12,
+      input: "Hello",
+      voice: "Kore",
+      responseFormat: "wav",
+      modelId: "tts",
+      runId: "run",
+      operationId: "op",
+    };
+    await assistantApi.synthesize(request);
+    const { selectionKey, ...native } = request;
+    expect(invoke).toHaveBeenCalledWith("assistant_synthesize_audio", {
+      request: native,
+    });
+  });
+
   it("uploads recording bytes with authority headers and never a source path", async () => {
     const file = fileOf(new Uint8Array([1, 2, 3]), "録音.wav", "audio/wav");
     invoke.mockResolvedValue({ inputId: "input", durationMs: 250 });

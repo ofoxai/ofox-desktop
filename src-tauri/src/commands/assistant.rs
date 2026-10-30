@@ -7,6 +7,7 @@ use crate::ofox_auth::{OfoxAuthManager, OfoxAuthStatus};
 use crate::services::assistant::{
     attachments, audio, audio_input, catalog,
     host::{blocking, Admit, BoxFuture, Environment, Identity, KEY_REJECTED, SIGN_IN_REQUIRED},
+    speech,
     store::{self, BackupReport, RestoreReport, SessionList},
     types::{
         Attachment, CompactRequest, CreateRequest, DeleteRequest, Detail, EmptyTrashReport,
@@ -45,6 +46,14 @@ pub async fn assistant_transcribe_audio(
     request: audio::TranscribeRequest,
 ) -> Result<audio::ResultRecord, String> {
     host.transcribe_audio(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_synthesize_audio(
+    host: Host<'_>,
+    request: speech::SpeechRequest,
+) -> Result<audio::ResultRecord, String> {
+    host.synthesize_audio(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

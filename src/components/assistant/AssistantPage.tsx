@@ -27,6 +27,7 @@ import {
   Pencil,
   Minimize2,
   Mic,
+  Volume2,
   Pin,
   PinOff,
   Square,
@@ -52,6 +53,7 @@ import { VideoParams, defaultVideoParams } from "./VideoParams";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AssistantContextUsage } from "./AssistantContextUsage";
 import { AssistantAudioInput } from "./AssistantAudioInput";
+import { AssistantSpeechOutput } from "./AssistantSpeechOutput";
 import { AssistantQueue } from "./AssistantQueue";
 import { MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES } from "./useMessageQueue";
 import { AttachmentList } from "./AssistantAttachments";
@@ -192,6 +194,20 @@ function AssistantWorkspace() {
   const { detail, bootstrap, run, busy } = assistant;
   const [audioDialog, setAudioDialog] =
     useState<Awaited<ReturnType<typeof assistant.prepareAudio>>>(null);
+  const [speechDialog, setSpeechDialog] = useState<{
+    target: NonNullable<Awaited<ReturnType<typeof assistant.prepareAudio>>>;
+    text: string;
+    sourceMessageId?: string;
+  } | null>(null);
+  const speechAvailable = Boolean(
+    bootstrap?.audioModels?.some(
+      (model) => model.kind === "speech" && model.audio,
+    ),
+  );
+  const openSpeech = async (text: string, sourceMessageId?: string) => {
+    const target = await assistant.prepareAudio();
+    if (target) setSpeechDialog({ target, text, sourceMessageId });
+  };
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [backupDialog, setBackupDialog] = useState<{
@@ -211,7 +227,10 @@ function AssistantWorkspace() {
   const queueHintId = useId();
   const interactionActive = useInteractionActive();
   useEffect(() => {
-    if (!interactionActive) setAudioDialog(null);
+    if (!interactionActive) {
+      setAudioDialog(null);
+      setSpeechDialog(null);
+    }
   }, [interactionActive]);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -1274,6 +1293,13 @@ function AssistantWorkspace() {
                           onRetry={retryable(message) ? retryReply : undefined}
                           onSwitchVersion={switchVersion}
                           onFork={forkMessage}
+                          onSpeak={
+                            speechAvailable
+                              ? (messageId, text) => {
+                                  void openSpeech(text, messageId);
+                                }
+                              : undefined
+                          }
                           onQuote={
                             !assistant.busy && !assistant.showTrash
                               ? quoteText
@@ -1563,6 +1589,17 @@ function AssistantWorkspace() {
                             <Mic aria-hidden className="h-3.5 w-3.5" />
                           </Button>
                         )}
+                      {!imageMode && !videoMode && speechAvailable && (
+                        <Button
+                          variant="icon"
+                          aria-label={t("assistant.speech.title")}
+                          title={t("assistant.speech.title")}
+                          disabled={!writable || queueCount > 0}
+                          onClick={() => void openSpeech(assistant.draft)}
+                        >
+                          <Volume2 aria-hidden className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                       {!imageMode &&
                         !videoMode &&
                         (showSearchNote ? (
@@ -1746,10 +1783,34 @@ function AssistantWorkspace() {
             target={audioDialog}
             models={bootstrap.audioModels ?? []}
             rememberedModel={bootstrap.rememberedModels?.transcription}
-            history={detail?.audioOperations}
+            history={detail?.audioOperations?.filter(
+              (item) => item.kind === "transcription",
+            )}
             onInsert={(text) => assistant.insertAudioDraft(audioDialog, text)}
             onClose={() => {
               setAudioDialog(null);
+              requestAnimationFrame(focusComposer);
+            }}
+          />
+        )}
+      {interactionActive &&
+        speechDialog &&
+        speechDialog.target.expectedOwner === bootstrap?.owner &&
+        speechDialog.target.expectedGeneration ===
+          bootstrap.authorityGeneration &&
+        speechDialog.target.sessionId === assistant.selectedId &&
+        speechDialog.target.selectionKey === assistant.selectionKey &&
+        !trashed && (
+          <AssistantSpeechOutput
+            key={`${speechDialog.target.expectedOwner}:${speechDialog.target.expectedGeneration}:${speechDialog.target.sessionId}:${speechDialog.target.selectionKey}`}
+            target={speechDialog.target}
+            models={bootstrap.audioModels ?? []}
+            rememberedModel={bootstrap.rememberedModels?.speech}
+            initialText={speechDialog.text}
+            sourceMessageId={speechDialog.sourceMessageId}
+            history={detail?.audioOperations}
+            onClose={() => {
+              setSpeechDialog(null);
               requestAnimationFrame(focusComposer);
             }}
           />

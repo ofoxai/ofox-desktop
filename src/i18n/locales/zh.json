@@ -4949,8 +4949,8 @@
       "thinkingLevelUnavailable": "这个模型不支持该思考程度，请换一个。",
       "attachmentUnavailable": "有附件已不可用。请重新附加该文件，然后重新发送消息。",
       "audioInputUnavailable": "临时音频已不可用，请重新录音或导入。",
-      "audioInvalidParams": "此模型或语言暂不支持转写，请检查语音设置。",
-      "audioOutcomeUnknown": "转写结果未知，可能已计费。不会自动重新提交。",
+      "audioInvalidParams": "当前音频模型或某项设置不可用，请检查后再试。",
+      "audioOutcomeUnknown": "音频请求结果未知，可能已计费。不会自动重新提交。",
       "microphoneDenied": "麦克风权限被拒绝，请在系统设置中允许访问，或导入音频文件。",
       "microphoneUnavailable": "无法打开支持的麦克风，请检查设备，或导入音频文件。",
       "recordingInterrupted": "录音已中断并丢弃，请重新录音或导入音频文件。",
@@ -5356,6 +5356,31 @@
     "contextUnknown": "将在下一次回复后更新用量。",
     "contextNearFull": "整理上下文，为后续回复留出空间。",
     "compact": "整理上下文",
-    "compactCost": "使用当前模型整理，可能产生相应费用。"
+    "compactCost": "使用当前模型整理，可能产生相应费用。",
+    "speech": {
+      "title": "生成语音",
+      "read": "朗读…",
+      "hint": "先检查文字、音色和格式，再生成语音。使用独立的语音模型，不会发送聊天消息。",
+      "text": "朗读文字",
+      "generate": "生成语音",
+      "model": "语音模型",
+      "format": "音频格式",
+      "voiceId": "音色 ID",
+      "voiceName": "音色名称",
+      "voiceIdHint": "请输入 20 位 ElevenLabs 音色 ID，不支持 alloy 等音色名称。",
+      "voiceNameHint": "请输入 Google 音色名称，例如 Kore、Puck 或 Zephyr。",
+      "style": "语气与风格",
+      "length": "{{count}} / {{limit}} 字",
+      "styleLength": "风格说明：{{count}} / {{limit}} 字",
+      "estimate": "预估价格：{{amount}}。实际费用需要用量凭据确认。",
+      "unknownEstimate": "现有文字和目录价格不足以估算费用。",
+      "generating": "正在生成语音…",
+      "generated": "语音已生成",
+      "unknownCost": "实际费用未知：音频响应未包含用量。",
+      "outputInfo": "{{seconds}} 秒 · {{size}} KiB",
+      "history": "已保存的语音结果",
+      "historyItem": "语音结果 {{number}}",
+      "stop": "停止生成语音"
+    }
   }
 }

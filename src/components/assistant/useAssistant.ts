@@ -992,7 +992,7 @@ export function useAssistant(enabled: boolean) {
             authority !== identity.authorityGeneration ||
             result?.operationId !== event.operationId ||
             result.runId !== event.runId ||
-            result.kind !== "transcription" ||
+            !["transcription", "speech"].includes(result.kind) ||
             !result.audio
           )
             return;

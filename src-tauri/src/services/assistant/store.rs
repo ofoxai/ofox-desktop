@@ -461,6 +461,14 @@ impl AssistantStore {
                     .flat_map(|m| &m.attachments)
                     .map(|a| a.id.clone()),
             )
+            .chain(
+                record
+                    .operations
+                    .iter()
+                    .filter_map(|op| op.media.as_ref())
+                    .filter(|media| media.kind == "speech" && media.audio.is_some())
+                    .flat_map(|media| media.outputs.iter().cloned()),
+            )
             .collect();
         let before = record.attachments.len();
         record.attachments.retain(|a| known.contains(&a.id));

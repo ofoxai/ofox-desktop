@@ -66,26 +66,40 @@ impl Input {
         })
     }
 }
+/// Generated speech has its own byte/duration budget; imports keep the short limit.
+pub(super) fn inspect_generated(format: &str, bytes: &[u8]) -> Result<Info, String> {
+    match format {
+        "wav" if bytes.starts_with(b"RIFF") => wav(bytes, 3600),
+        "mp3" => mp3::inspect(bytes, 3600),
+        _ => Err(UNSUPPORTED.into()),
+    }
+}
 fn inspect(bytes: &[u8]) -> Result<Info, String> {
     if bytes.starts_with(b"RIFF") {
-        wav(bytes)
+        wav(bytes, MAX_SECONDS)
     } else if bytes.starts_with(b"ID3")
         || bytes.starts_with(&[0xff, 0xfb])
         || bytes
             .get(..2)
             .is_some_and(|b| b[0] == 0xff && b[1] & 0xe0 == 0xe0)
     {
-        mp3::inspect(bytes)
+        mp3::inspect(bytes, MAX_SECONDS)
     } else {
         Err(UNSUPPORTED.into())
     }
 }
 
-fn info(mime: &str, frames: u64, rate: u32, channels: u16) -> Result<Info, String> {
+fn info_with_limit(
+    mime: &str,
+    frames: u64,
+    rate: u32,
+    channels: u16,
+    max_seconds: u64,
+) -> Result<Info, String> {
     if frames == 0 || !(8000..=48000).contains(&rate) || !(1..=2).contains(&channels) {
         return Err(INVALID.into());
     }
-    if frames > rate as u64 * MAX_SECONDS {
+    if frames > rate as u64 * max_seconds {
         return Err(TOO_LONG.into());
     }
     Ok(Info {
@@ -98,7 +112,7 @@ fn info(mime: &str, frames: u64, rate: u32, channels: u16) -> Result<Info, Strin
 
 /// PCM RIFF/WAVE only. Check the full container rather than trusting a
 /// duration field, byte rate, file extension or decoder's permissive EOF.
-fn wav(bytes: &[u8]) -> Result<Info, String> {
+fn wav(bytes: &[u8], max_seconds: u64) -> Result<Info, String> {
     let word = |at: usize| -> Result<u32, String> {
         Ok(u32::from_le_bytes(
             bytes
@@ -173,7 +187,13 @@ fn wav(bytes: &[u8]) -> Result<Info, String> {
     if data % block as usize != 0 {
         return Err(INVALID.into());
     }
-    info("audio/wav", (data / block as usize) as u64, rate, channels)
+    info_with_limit(
+        "audio/wav",
+        (data / block as usize) as u64,
+        rate,
+        channels,
+        max_seconds,
+    )
 }
 #[cfg(test)]
 mod tests {

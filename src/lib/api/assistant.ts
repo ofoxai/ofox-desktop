@@ -150,15 +150,28 @@ export interface AssistantAudioInput {
 export interface AssistantAudioResult {
   operationId: string;
   runId: string;
-  kind: "transcription";
+  kind: "transcription" | "speech";
   model: string;
   apex?: string | null;
-  params: { language?: string | null; inputName?: string };
+  params: {
+    language?: string | null;
+    inputName?: string;
+    [key: string]: unknown;
+  };
+  outputs?: string[];
   status: "not_sent" | "submitting" | "completed" | "rejected" | "unknown";
   cost: string | null;
   submittedAt?: number | null;
   audio: {
     pricing: AssistantAudioCapabilities["pricing"];
+    estimate?: string | null;
+    output?: {
+      mimeType: string;
+      sizeBytes: number;
+      durationMs: number;
+      sampleRate: number;
+      channels: number;
+    } | null;
     input: Omit<AssistantAudioInput, "inputId" | "name" | "sizeBytes"> | null;
     text: string | null;
     usage: Record<string, unknown> | null;
@@ -173,6 +186,18 @@ export interface AssistantTranscribeRequest
   inputId: string;
   modelId: string;
   language?: "zh" | "en" | "ja";
+}
+
+export interface AssistantSpeechRequest
+  extends AssistantPasteTarget,
+    AssistantRunRef {
+  modelId: string;
+  input: string;
+  voice: string;
+  responseFormat: string;
+  language?: "zh" | "en" | "ja";
+  instructions?: string;
+  sourceMessageId?: string;
 }
 
 /** The most characters the custom instructions may have. */
@@ -911,7 +936,37 @@ export const assistantApi = {
   discardAudio: (request: AssistantPasteTarget & { inputId: string }) =>
     invoke<boolean>("assistant_discard_audio", { request }),
   transcribe: (request: AssistantTranscribeRequest) =>
-    invoke<AssistantAudioResult>("assistant_transcribe_audio", { request }),
+    invoke<AssistantAudioResult>("assistant_transcribe_audio", {
+      request: {
+        sessionId: request.sessionId,
+        expectedOwner: request.expectedOwner,
+        expectedGeneration: request.expectedGeneration,
+        runId: request.runId,
+        operationId: request.operationId,
+        inputId: request.inputId,
+        modelId: request.modelId,
+        ...(request.language ? { language: request.language } : {}),
+      },
+    }),
+  synthesize: (request: AssistantSpeechRequest) =>
+    invoke<AssistantAudioResult>("assistant_synthesize_audio", {
+      request: {
+        sessionId: request.sessionId,
+        expectedOwner: request.expectedOwner,
+        expectedGeneration: request.expectedGeneration,
+        runId: request.runId,
+        operationId: request.operationId,
+        modelId: request.modelId,
+        input: request.input,
+        voice: request.voice,
+        responseFormat: request.responseFormat,
+        ...(request.language ? { language: request.language } : {}),
+        ...(request.instructions ? { instructions: request.instructions } : {}),
+        ...(request.sourceMessageId
+          ? { sourceMessageId: request.sourceMessageId }
+          : {}),
+      },
+    }),
   /** Recording bytes use the same authority headers as a pasted file. */
   importAudio: async (file: File, target: AssistantPasteTarget) => {
     if (file.size > MAX_PASTED_FILE_BYTES)

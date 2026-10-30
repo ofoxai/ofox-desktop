@@ -22,7 +22,9 @@ The first release plays Gemini WAV and ElevenLabs MP3/WAV/Opus. Raw PCM is a
 provider capability, not directly playable until framing is implemented.
 
 Product limits for the first short-audio release are 25 MiB / five minutes per
-input, 4,000 Unicode characters per synthesis and 50 MiB per generated result.
+input, 4,000 Unicode characters per synthesis and 50 MiB per generated result. Generated
+audio validation also bounds decoded duration at one hour; it does not reuse the
+five-minute input limit.
 These are application limits, not advertised provider limits. Do not silently
 truncate or split a request. Recording produces a bounded mono WAV rather than
 assuming every gateway accepts a browser's default recording container.
@@ -82,6 +84,26 @@ History/backup/cleanup must include every retained audio-operation reference.
 Audio bytes use the owner/generation-scoped private media protocol and bounded
 range reads; native save is atomic and rechecks authority after the picker.
 Audio model calls do not receive private standing chat instructions.
+
+## Speech synthesis implementation
+
+The speech preview accepts a completed reply or explicitly edited text. It keeps
+its model independent of chat and validates voice name/ID, language, format and
+optional tone instructions against the exact provider profile. Gemini language
+codes are cmn-CN/en-US/ja-JP; ElevenLabs uses zh/en/ja. Only WAV is enabled for
+Gemini, and MP3/WAV/Ogg Opus for ElevenLabs; raw PCM and SSE are not enabled.
+A changed reply preview loses its original-reply attribution before submission.
+
+Requests use one explicit operation, without automatic key refresh or retry.
+A submitted cancellation/unknown response remains unknown. Binary success does
+not establish actual usage: a character price can be shown as an estimate, while
+actual cost stays unknown. Standing chat instructions are never sent. Response
+status, MIME, bounded bytes and actual WAV/MP3 or Ogg Opus container structure
+are checked before atomic publication to the private attachment directory.
+Failed publication rolls back the file and retains an unknown operation receipt.
+Completed ledger outputs survive orphan cleanup and ordinary backup/restore.
+Playback/save/reuse controls and extended history preferences are subsequent
+steps, with native and live billing acceptance still separate.
 
 ## Delivery and acceptance
 

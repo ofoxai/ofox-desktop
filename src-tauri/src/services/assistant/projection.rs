@@ -116,9 +116,9 @@ pub(super) fn settle_interrupted(
         .iter()
         .filter(|op| op.status == OperationStatus::Running)
         .all(|op| {
-            op.media
-                .as_ref()
-                .is_some_and(|m| m.kind == "transcription" && m.status == "not_sent")
+            op.media.as_ref().is_some_and(|m| {
+                matches!(m.kind.as_str(), "transcription" | "speech") && m.status == "not_sent"
+            })
         })
         && record
             .operations
@@ -127,10 +127,10 @@ pub(super) fn settle_interrupted(
         && record.session.active_run.as_ref().is_none_or(|active| {
             record.operations.iter().any(|op| {
                 op.run_id == active.run_id
-                    && op
-                        .media
-                        .as_ref()
-                        .is_some_and(|m| m.kind == "transcription" && m.status == "not_sent")
+                    && op.media.as_ref().is_some_and(|m| {
+                        matches!(m.kind.as_str(), "transcription" | "speech")
+                            && m.status == "not_sent"
+                    })
             })
         });
     if !proven_unsent_audio {

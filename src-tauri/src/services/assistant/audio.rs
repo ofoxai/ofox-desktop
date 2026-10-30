@@ -1,6 +1,7 @@
 //! Explicit audio tools share the conversation's run ledger, never its turns.
 mod host;
 mod http;
+mod job;
 use super::{audio_input::Info, catalog::AudioPricing, types::*};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -15,6 +16,10 @@ pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct Trace {
     pub pricing: AudioPricing,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<super::speech::OutputInfo>,
     pub input: Option<Info>,
     pub text: Option<String>,
     #[serde(default)]
@@ -36,10 +41,9 @@ pub(super) fn results(operations: &[Operation]) -> Vec<ResultRecord> {
     operations
         .iter()
         .filter_map(|op| {
-            let media = op
-                .media
-                .as_ref()
-                .filter(|m| m.kind == "transcription" && m.audio.is_some())?;
+            let media = op.media.as_ref().filter(|m| {
+                matches!(m.kind.as_str(), "transcription" | "speech") && m.audio.is_some()
+            })?;
             Some(ResultRecord {
                 operation_id: op.id.clone(),
                 run_id: op.run_id.clone(),
@@ -62,13 +66,6 @@ pub struct TranscribeRequest {
     pub language: Option<String>,
 }
 impl TranscribeRequest {
-    pub(super) fn authority(&self) -> DeleteRequest {
-        DeleteRequest {
-            session_id: self.session_id.clone(),
-            expected_owner: self.expected_owner.clone(),
-            expected_generation: self.expected_generation,
-        }
-    }
     pub(super) fn validate(&self) -> Result<(), String> {
         for id in [
             &self.session_id,

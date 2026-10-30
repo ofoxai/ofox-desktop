@@ -5,12 +5,17 @@ This ledger preserves the accepted non-blocking findings from the implementation
 ## Assistant audio foundation (2026-10-30)
 
 The audio catalog, bounded import, recording and editable ASR draft controls
-are implemented. Synthesis, playback and keep-original history are pending. Import
+are implemented. Speech synthesis now has independent preview/parameter controls
+and private binary publication; playback/save controls and keep-original history
+are pending. Import
 accepts short PCM RIFF WAV and Layer III MP3 only, mono/stereo at 8–48 kHz,
 up to 25 MiB and five minutes. Float/extensible WAV, FLAC and Ogg input are
 outside this first release. Unsubmitted inputs are temporary memory buffers,
 excluded from chat attachments and backups. Native microphone and live-gateway
-audio acceptance have not yet been performed. See [audio design](assistant-audio.md).
+audio acceptance have not yet been performed. Speech previews start with the
+reply source text, including Markdown, and can be edited before generation.
+Ogg Opus output checks container framing/CRCs and duration; full Opus decoding
+and platform playback support still need the player/native acceptance steps. See [audio design](assistant-audio.md).
 
 ## Assistant backup and restore (2026-10-28)
 

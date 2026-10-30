@@ -26,3 +26,5 @@ mod video_http;
 mod web;
 
 pub use host::AssistantHost;
+
+pub mod speech;

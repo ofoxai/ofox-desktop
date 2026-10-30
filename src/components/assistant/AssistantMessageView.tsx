@@ -7,6 +7,7 @@ import {
   MoreHorizontal,
   GitFork,
   Pencil,
+  Volume2,
   RotateCcw,
 } from "lucide-react";
 import type {
@@ -224,6 +225,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onSwitchVersion,
   onFork,
   onQuote,
+  onSpeak,
   immutable = false,
   mediaBlock,
 }: {
@@ -259,6 +261,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onSwitchVersion?: (messageId: string) => void;
   onFork?: (messageId: string) => void;
   onQuote?: (text: string) => void;
+  onSpeak?: (messageId: string, text: string) => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -524,6 +527,24 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
               )}
+              {onSpeak &&
+                !immutable &&
+                message.role === "assistant" &&
+                message.status === "completed" &&
+                !message.superseded &&
+                !message.media &&
+                message.content.trim() && (
+                  <Button
+                    variant="icon"
+                    className="h-6 w-6"
+                    aria-label={t("assistant.speech.read")}
+                    title={t("assistant.speech.read")}
+                    disabled={disabled}
+                    onClick={() => onSpeak(message.id, message.content)}
+                  >
+                    <Volume2 aria-hidden className="h-3.5 w-3.5" />
+                  </Button>
+                )}
               {!isUser && branchable && !retryCard && (
                 <Button
                   variant="icon"

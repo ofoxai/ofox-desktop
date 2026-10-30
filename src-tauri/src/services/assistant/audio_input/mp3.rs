@@ -1,6 +1,6 @@
 //! Bound and check every Layer III frame before decoding; metadata duration
 //! and a decoder's tolerant EOF/resynchronization cannot prove a whole file.
-use super::{info, Info, INVALID, MAX_SECONDS, TOO_LONG};
+use super::{info_with_limit, Info, INVALID, TOO_LONG};
 use symphonia::core::{
     codecs::audio::AudioDecoderOptions,
     formats::{probe::Hint, FormatOptions, TrackType},
@@ -86,7 +86,7 @@ fn frame(bytes: &[u8]) -> Result<Frame, String> {
     })
 }
 
-pub(super) fn inspect(bytes: &[u8]) -> Result<Info, String> {
+pub(super) fn inspect(bytes: &[u8], max_seconds: u64) -> Result<Info, String> {
     let bytes = payload(bytes)?;
     let mut offset = 0usize;
     let mut frames = 0u64;
@@ -104,7 +104,7 @@ pub(super) fn inspect(bytes: &[u8]) -> Result<Info, String> {
         frames += f.samples;
         // At most one encoder-information frame and padding may be trimmed
         // by gapless decoding. Still bound CPU before allocating a decoder.
-        if frames > f.rate as u64 * (MAX_SECONDS + 1) {
+        if frames > f.rate as u64 * (max_seconds + 1) {
             return Err(TOO_LONG.into());
         }
     }
@@ -141,12 +141,12 @@ pub(super) fn inspect(bytes: &[u8]) -> Result<Info, String> {
             return Err(INVALID.into());
         }
         decoded += buffer.frames() as u64;
-        if decoded > rate as u64 * MAX_SECONDS {
+        if decoded > rate as u64 * max_seconds {
             return Err(TOO_LONG.into());
         }
     }
     if decoder.finalize().verify_ok == Some(false) {
         return Err(INVALID.into());
     }
-    info("audio/mpeg", decoded, rate, channels)
+    info_with_limit("audio/mpeg", decoded, rate, channels, max_seconds)
 }
