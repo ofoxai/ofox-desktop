@@ -2,6 +2,9 @@
 //! `/anthropic/v1/models`, every row classified by kind, with the capacity,
 //! prices and capabilities the runtime and the model picker need.
 //! Conversations use the chat models only (see [`Catalog::conversation_models`]).
+mod audio;
+pub use audio::AudioCapabilities;
+
 use super::thinking::{self, AnthropicCompat, LevelMap};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -109,6 +112,8 @@ pub struct Model {
     pub image: Option<ImageCapabilities>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub video: Option<VideoCapabilities>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioCapabilities>,
 }
 
 fn assumed_tools() -> bool {
@@ -580,6 +585,7 @@ fn parse_model(item: &Value, source: Source) -> Option<Model> {
         created: created(item),
         image: (kind == Kind::Image).then(|| image_capabilities(item, &endpoints)),
         video: (kind == Kind::Video).then(|| video_capabilities(item)),
+        audio: audio::capabilities(id, kind, pricing),
         supported_endpoints: endpoints,
     })
 }
@@ -599,6 +605,15 @@ impl Catalog {
         self.models
             .iter()
             .filter(|m| m.for_conversations())
+            .cloned()
+            .collect()
+    }
+
+    /// Audio tools use a separate picker and never replace the chat model.
+    pub fn audio_models(&self) -> Vec<Model> {
+        self.models
+            .iter()
+            .filter(|model| model.audio.is_some())
             .cloned()
             .collect()
     }
@@ -1736,5 +1751,87 @@ mod tests {
         unique.sort();
         unique.dedup();
         assert_eq!(unique.len(), PREFERRED_MODEL_IDS.len());
+    }
+    #[test]
+    fn audio_profiles_preserve_provider_formats_and_real_billing_units() {
+        let rows = json!({"data":[
+            {"id":"google/gemini-3.8-flash-tts","supported_endpoints":["/v1/audio/speech"],"pricing":{"prompt":"0.0000005","output_audio":"0.000009"}},
+            {"id":"elevenlabs/eleven_v4","supported_endpoints":["/v1/audio/speech"],"pricing":{"prompt":"0","completion":"0","input_text_per_character":"0.00008"}},
+            {"id":"openai/gpt-transcribe","supported_endpoints":["/v1/audio/transcriptions"],"pricing":{"prompt":"0","completion":"0","input_audio_per_second":"0.000075"}},
+            {"id":"openai/gpt-4o-mini-transcribe","supported_endpoints":["/v1/audio/transcriptions"],"pricing":{"prompt":"0.00000125","completion":"0.000005","audio":"0.000003"}},
+            {"id":"elevenlabs/scribe_v2","supported_endpoints":["/v1/audio/transcriptions"],"pricing":{"input_audio_per_second":"0.0000611111"}}
+        ]});
+        let models = v1(rows);
+        let values: Vec<Value> = models
+            .iter()
+            .map(|m| serde_json::to_value(m).unwrap())
+            .collect();
+        assert_eq!(values[0]["audio"]["responseFormats"], json!(["wav", "pcm"]));
+        assert_eq!(values[0]["audio"]["voiceKind"], "name");
+        assert_eq!(values[0]["audio"]["pricing"]["unit"], "tokens");
+        assert_eq!(values[0]["audio"]["pricing"]["outputAudioPerMillion"], "9");
+        assert_eq!(
+            values[1]["audio"]["responseFormats"],
+            json!(["mp3", "opus", "wav", "pcm"])
+        );
+        assert_eq!(values[1]["audio"]["voiceKind"], "id");
+        assert_eq!(values[1]["audio"]["pricing"]["unit"], "characters");
+        assert_eq!(
+            values[1]["audio"]["pricing"]["inputTextPerCharacter"],
+            "0.00008"
+        );
+        assert_eq!(values[2]["audio"]["pricing"]["unit"], "seconds");
+        assert_eq!(
+            values[2]["audio"]["pricing"]["inputAudioPerSecond"],
+            "0.000075"
+        );
+        assert_eq!(values[3]["audio"]["pricing"]["inputAudioPerMillion"], "3");
+        assert_eq!(values[3]["audio"]["responseFormats"], json!(["json"]));
+        assert_eq!(values[4]["audio"]["wordTimestamps"], true);
+        assert!(models.iter().all(|m| !m.for_conversations()));
+    }
+
+    #[test]
+    fn audio_profiles_do_not_enable_lookalikes_or_invent_missing_prices() {
+        let rows = v1(json!({"data":[
+            {"id":"google/gemini-3.8-flash-tts","supported_endpoints":["audio/speech"],"pricing":{"output_audio":"-1","prompt":"not-a-price"}},
+            {"id":"google/unknown-tts","supported_endpoints":["audio/speech"]},
+            {"id":"openai/gpt-transcribe-preview","supported_endpoints":["audio/transcriptions"]},
+            {"id":"google/gemini-3.8-flash-tts","supported_endpoints":["audio/transcriptions"]}
+        ]}));
+        assert_eq!(rows.len(), 4);
+        let first = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(first["audio"]["responseFormats"], json!(["wav", "pcm"]));
+        assert!(first["audio"]["pricing"]["outputAudioPerMillion"].is_null());
+        assert!(first["audio"]["pricing"]["inputTextPerMillion"].is_null());
+        for model in &rows[1..] {
+            assert!(serde_json::to_value(model).unwrap().get("audio").is_none());
+        }
+    }
+    #[test]
+    fn audio_profiles_cover_the_current_public_catalog_without_chat_fallback() {
+        let rows = v1(serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant-catalog/audio-models.json"
+        ))
+        .unwrap());
+        assert_eq!(rows.len(), 10);
+        assert_eq!(rows.iter().filter(|m| m.kind == Kind::Speech).count(), 6);
+        assert_eq!(
+            rows.iter()
+                .filter(|m| m.kind == Kind::Transcription)
+                .count(),
+            4
+        );
+        assert!(rows
+            .iter()
+            .all(|m| m.audio.is_some() && !m.for_conversations()));
+        let diarize = rows
+            .iter()
+            .find(|m| m.id == "openai/gpt-4o-transcribe-diarize")
+            .unwrap();
+        assert!(
+            !diarize.audio.as_ref().unwrap().prompt,
+            "do not enable an optional prompt without a documented contract for diarize"
+        );
     }
 }

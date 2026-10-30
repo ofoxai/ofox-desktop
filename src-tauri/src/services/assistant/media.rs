@@ -371,7 +371,7 @@ mod tests {
         );
         assert_eq!(
             store.remembered_models().unwrap(),
-            json!({"chat":"test/chat","image":"test/image","video":"test/video"})
+            json!({"chat":"test/chat","image":"test/image","video":"test/video", "speech":null, "transcription":null})
         );
     }
     #[test]

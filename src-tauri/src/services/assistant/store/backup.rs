@@ -2250,4 +2250,25 @@ mod tests {
             .restore(&again, &[], || Ok(()))
             .unwrap();
     }
+    #[test]
+    fn audio_models_round_trip_in_backups_and_keep_existing_local_choices() {
+        use super::super::super::catalog::Kind;
+        let (_source, store, _sid, _) = seeded();
+        store
+            .remember_model_kind("speech/archive", Kind::Speech)
+            .unwrap();
+        store
+            .remember_model_kind("asr/archive", Kind::Transcription)
+            .unwrap();
+        let (_output, archive) = backed_up(&store);
+        let (_target, restored) = profile(&store.owner);
+        restored
+            .remember_model_kind("speech/local", Kind::Speech)
+            .unwrap();
+        restored.restore(&archive, &[], || Ok(())).unwrap();
+        let remembered = restored.remembered_models().unwrap();
+        assert_eq!(remembered["speech"], "speech/local");
+        assert_eq!(remembered["transcription"], "asr/archive");
+        assert_eq!(remembered["chat"], "test/model");
+    }
 }

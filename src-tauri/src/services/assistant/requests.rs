@@ -56,6 +56,7 @@ impl AssistantHost {
             "authorityGeneration": generation,
             "runtime": runtime,
             "models": models,
+            "audioModels": merged.audio_models(),
             "defaultModelId": default_model_id,
             "rememberedModels": remembered_models,
             "modelUnavailableReason": model_error,

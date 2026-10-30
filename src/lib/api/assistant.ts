@@ -55,6 +55,8 @@ export interface AssistantModel {
   image?: AssistantImageCapabilities;
   /** Video models only. */
   video?: AssistantVideoCapabilities;
+  /** Dedicated audio tools; never a conversation model. */
+  audio?: AssistantAudioCapabilities;
 }
 
 export type AssistantModelKind =
@@ -107,6 +109,33 @@ export interface AssistantVideoCapabilities {
   fromPricePerSecond: string | null;
 }
 
+/** Audio rates are USD decimals; token rates are per million tokens. */
+export interface AssistantAudioCapabilities {
+  family:
+    | "gemini-tts"
+    | "elevenlabs-tts"
+    | "gpt-transcription"
+    | "elevenlabs-transcription";
+  responseFormats: string[];
+  defaultFormat: string;
+  voiceKind: "name" | "id" | null;
+  /** Documented examples, not an exhaustive provider voice list. */
+  suggestedVoices: string[];
+  instructions: boolean;
+  prompt: boolean;
+  language: boolean;
+  wordTimestamps: boolean;
+  pricing: {
+    unit: "tokens" | "seconds" | "characters";
+    inputAudioPerSecond: string | null;
+    inputTextPerCharacter: string | null;
+    inputTextPerMillion: string | null;
+    inputAudioPerMillion: string | null;
+    outputTextPerMillion: string | null;
+    outputAudioPerMillion: string | null;
+  };
+}
+
 /** The most characters the custom instructions may have. */
 export const MAX_ASSISTANT_INSTRUCTIONS = 4000;
 
@@ -134,7 +163,7 @@ export const DEFAULT_ASSISTANT_PREFERENCES: AssistantPreferences = {
 export type AssistantCatalogSource = "v1" | "anthropic";
 
 export interface AssistantBootstrap {
-  rememberedModels?: Partial<Record<"chat" | "image" | "video", string | null>>;
+  rememberedModels?: Partial<Record<AssistantModelKind, string | null>>;
   /** The signed-in account as the backend keys its data (64 hex). */
   owner: string;
   /** Bumped by every sign-in, sign-out, region change and auth expiry. */
@@ -145,6 +174,8 @@ export interface AssistantBootstrap {
     version: string | null;
   };
   models: AssistantModel[];
+  /** Dedicated tool models, separate from the conversation model picker. */
+  audioModels?: AssistantModel[];
   defaultModelId: string | null;
   /** A catalog code when the model list could not be loaded. */
   modelUnavailableReason: string | null;

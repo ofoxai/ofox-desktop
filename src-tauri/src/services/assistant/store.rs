@@ -125,6 +125,10 @@ struct Prefs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     video_model_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    speech_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcription_model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auto_title: Option<bool>,
@@ -170,6 +174,11 @@ impl Prefs {
         fill(&mut self.model_id, &other.model_id)
             | fill(&mut self.image_model_id, &other.image_model_id)
             | fill(&mut self.video_model_id, &other.video_model_id)
+            | fill(&mut self.speech_model_id, &other.speech_model_id)
+            | fill(
+                &mut self.transcription_model_id,
+                &other.transcription_model_id,
+            )
             | fill(&mut self.instructions, &other.instructions)
             | fill(&mut self.auto_title, &other.auto_title)
             | fill(&mut self.notify_on_finish, &other.notify_on_finish)
@@ -511,13 +520,20 @@ impl AssistantStore {
             Kind::Chat => self.remember_model(model_id),
             Kind::Image => self.update_prefs(|prefs| prefs.image_model_id = Some(model_id.into())),
             Kind::Video => self.update_prefs(|prefs| prefs.video_model_id = Some(model_id.into())),
-            _ => Ok(()),
+            Kind::Speech => {
+                self.update_prefs(|prefs| prefs.speech_model_id = Some(model_id.into()))
+            }
+            Kind::Transcription => {
+                self.update_prefs(|prefs| prefs.transcription_model_id = Some(model_id.into()))
+            }
         }
     }
 
     pub fn remembered_models(&self) -> Result<Value, String> {
         let prefs = self.read_prefs()?.unwrap_or_default();
-        Ok(json!({"chat":prefs.model_id,"image":prefs.image_model_id,"video":prefs.video_model_id}))
+        Ok(
+            json!({"chat":prefs.model_id,"image":prefs.image_model_id,"video":prefs.video_model_id,"speech":prefs.speech_model_id,"transcription":prefs.transcription_model_id}),
+        )
     }
 
     pub fn remembered_model(&self) -> Result<Option<String>, String> {
@@ -3101,5 +3117,43 @@ mod tests {
             .unwrap()
             .context_usage
             .is_none());
+    }
+    #[test]
+    fn audio_models_are_remembered_independently_without_replacing_chat_or_media() {
+        let (_temp, store) = fixture();
+        store.remember_model("chat").unwrap();
+        store
+            .remember_model_kind("image", super::super::catalog::Kind::Image)
+            .unwrap();
+        store
+            .remember_model_kind("video", super::super::catalog::Kind::Video)
+            .unwrap();
+        store
+            .remember_model_kind("speech", super::super::catalog::Kind::Speech)
+            .unwrap();
+        store
+            .remember_model_kind("transcription", super::super::catalog::Kind::Transcription)
+            .unwrap();
+        let remembered = store.remembered_models().unwrap();
+        assert_eq!(remembered["speech"], "speech");
+        assert_eq!(remembered["transcription"], "transcription");
+        assert_eq!(remembered["chat"], "chat");
+        assert_eq!(remembered["image"], "image");
+        assert_eq!(remembered["video"], "video");
+    }
+
+    #[test]
+    fn audio_preferences_restore_only_fills_models_never_saved_on_this_machine() {
+        let (mut current, object) =
+            Prefs::parse(br#"{"version":1,"modelId":"chat","speechModelId":"mine"}"#).unwrap();
+        let (archive, _) = Prefs::parse(
+            br#"{"version":1,"speechModelId":"archived","transcriptionModelId":"recognizer"}"#,
+        )
+        .unwrap();
+        assert!(current.fill_from(&archive));
+        let merged: Value = serde_json::from_slice(&current.to_bytes(object).unwrap()).unwrap();
+        assert_eq!(merged["speechModelId"], "mine");
+        assert_eq!(merged["transcriptionModelId"], "recognizer");
+        assert_eq!(merged["modelId"], "chat");
     }
 }

@@ -4754,4 +4754,33 @@ while read line; do :; done"#,
         let _ = sentinel.kill();
         let _ = sentinel.wait();
     }
+    #[tokio::test]
+    async fn audio_bootstrap_keeps_tool_models_out_of_chat_and_never_mints_a_key() {
+        let (_config, env, host) = fixture_with_env();
+        let audio = catalog::parse_models(
+            json!({"data":[{"id":"google/gemini-3.8-flash-tts","supported_endpoints":["/v1/audio/speech"],"pricing":{"prompt":"0.0000005","output_audio":"0.000009"}}]}),
+            catalog::Source::V1,
+        );
+        env.media.lock().unwrap().extend(audio);
+        host.store(&identity().owner)
+            .unwrap()
+            .remember_model_kind("google/gemini-3.8-flash-tts", catalog::Kind::Speech)
+            .unwrap();
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["audioModels"].as_array().map(Vec::len), Some(1));
+        assert_eq!(boot["audioModels"][0]["audio"]["defaultFormat"], "wav");
+        assert_eq!(boot["models"].as_array().unwrap().len(), 1);
+        assert_eq!(boot["defaultModelId"], "test/model");
+        assert_eq!(
+            boot["rememberedModels"]["speech"],
+            "google/gemini-3.8-flash-tts"
+        );
+        assert_eq!(boot["key"]["status"], "missing");
+        let create =
+            serde_json::from_value(json!({"modelId":"google/gemini-3.8-flash-tts"})).unwrap();
+        assert_eq!(
+            host.create_session(create).await.unwrap_err(),
+            MODEL_UNAVAILABLE
+        );
+    }
 }
