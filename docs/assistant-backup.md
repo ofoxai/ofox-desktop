@@ -110,7 +110,7 @@ hashes are checked before imported sessions become visible.
 The native validator checks the pinned Pi SDK 1.4.0 session-3 entry shapes,
 parent links, message content, run/operation lineage and saved native entry IDs.
 Generated image/video replies can reference `ofox-desktop-media` custom entries
-when the saved record identifies an assistant media reply and its run lineage
+when the saved record identifies a reply with role `media` and its run lineage
 agrees. Unrelated custom entries cannot stand in for saved replies. Original
 media operations and prices are preserved on restore.
 Image JSONL lines can exceed 8 MiB and are bounded by the native-file limit.

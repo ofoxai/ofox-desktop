@@ -1009,7 +1009,7 @@ mod tests {
             record.operations = serde_json::from_value(json!([{"id":operation,"runId":run,"status":"completed","media":media}])).unwrap();
             record.messages = serde_json::from_value(json!([
                 {"id":id(),"role":"user","content":"Create synthetic media","createdAt":1,"status":"completed","nativeEntryId":"media-user","runId":run},
-                {"id":id(),"role":"assistant","content":"Saved media","createdAt":2,"status":"completed","nativeEntryId":"media-result","runId":run,"media":media}
+                {"id":id(),"role":"media","content":"Saved media","createdAt":2,"status":"completed","nativeEntryId":"media-result","runId":run,"media":media}
             ])).unwrap();
             Ok(())
         }).unwrap();
@@ -1032,11 +1032,13 @@ mod tests {
 
     #[test]
     fn native_media_message_backups_round_trip_without_losing_lineage_or_rebilling() {
-        for kind in ["image", "video"] {
+        for (kind, exclude_videos) in [("image", false), ("video", false), ("video", true)] {
             let (_tmp, store, sid) = seeded_native_media(kind);
             let out = tempfile::tempdir().unwrap();
             let archive = out.path().join("media.zip");
-            let report = store.backup(&archive, &[], || Ok(())).unwrap();
+            let report = store
+                .backup_with_options(&archive, &[], exclude_videos, || Ok(()))
+                .unwrap();
             assert_eq!((report.sessions, report.skipped), (1, 0), "{kind}");
             let target = tempfile::tempdir().unwrap();
             let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
@@ -1052,6 +1054,19 @@ mod tests {
                 copy.messages[1].native_entry_id
             );
             assert_eq!(source.messages[1].media, copy.messages[1].media);
+            assert_eq!(copy.messages[1].role, "media");
+            assert_eq!(
+                copy.attachments[0].status,
+                if exclude_videos { "missing" } else { "ready" }
+            );
+            assert_eq!(
+                restored
+                    .attachment_dir(&sid)
+                    .unwrap()
+                    .join(&copy.attachments[0].id)
+                    .exists(),
+                !exclude_videos
+            );
             assert_eq!(
                 restored.restore(&archive, &[], || Ok(())).unwrap().skipped,
                 1
@@ -1066,6 +1081,7 @@ mod tests {
             "missing-media",
             "wrong-kind",
             "wrong-role",
+            "assistant-role",
             "no-lineage",
             "wrong-run",
         ] {
@@ -1085,6 +1101,7 @@ mod tests {
                             record.messages[1].media.as_mut().unwrap().kind = "speech".into()
                         }
                         "wrong-role" => record.messages[1].role = "user".into(),
+                        "assistant-role" => record.messages[1].role = "assistant".into(),
                         "no-lineage" => {
                             lines[3]["parentId"] = Value::Null;
                             record.messages[1].run_id = None;

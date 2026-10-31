@@ -249,14 +249,14 @@ pub(super) fn validate(
                 let valid = text(&item["customType"])
                     && content(&item["content"], "custom")
                     && item["display"].is_boolean();
-                // The runtime projects this marker as media; the saved UI
-                // message is an assistant reply. Other custom entries cannot
+                // Runtime projection and saved replies both use the media
+                // role for this marker. Other custom entries cannot
                 // satisfy a saved reply's native reference.
                 if valid
                     && item["customType"] == "ofox-desktop-media"
                     && record.messages.iter().any(|message| {
                         message.native_entry_id.as_deref() == Some(id)
-                            && message.role == "assistant"
+                            && message.role == "media"
                             && message.media.as_ref().is_some_and(|media| {
                                 matches!(media.kind.as_str(), "image" | "video")
                             })
@@ -265,7 +265,7 @@ pub(super) fn validate(
                     if entry.run.is_none() {
                         return Err(INVALID.into());
                     }
-                    entry.role = Some("assistant".into());
+                    entry.role = Some("media".into());
                 }
                 valid
             }
