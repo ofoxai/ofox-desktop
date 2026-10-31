@@ -49,4 +49,7 @@ Tests use local TLS servers, public test-only certificates and temporary homes.
 They verify the checked CONNECT/SOCKS addresses, original TLS/Host, credential
 separation, proxy failure/bypass, bounds, rejected certificates, cancellation,
 orphans and backup exclusion. They do not validate a real proxy installation or
-native Windows behavior. Final macOS/live acceptance remains a separate gate.
+native Windows behavior. Approved macOS/live acceptance exercised an expired
+upstream URL without generation replay, then one separately approved fresh video
+through successful download, playback and native save. See
+[acceptance evidence and limits](assistant-audio-acceptance.md).

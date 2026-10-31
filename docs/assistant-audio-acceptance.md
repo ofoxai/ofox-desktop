@@ -1,10 +1,9 @@
 # Assistant audio acceptance
 
-Date: October 31, 2026. Scope: Fizzy #1364, audio and stability changes after
+Dates: October 31–November 1, 2026. Scope: Fizzy #1364, audio and stability changes after
 `42616e3d`, with application code through `bcff8fd9`. This records macOS QA
-evidence, not a Windows or every-provider certification. Final card acceptance
-still awaits a successful live download using a non-expired video URL, or an
-explicit decision to retain that limitation.
+evidence, not a Windows or every-provider certification. The approved native
+audio, billing, persistence and live video-download checks are complete.
 
 ## Native audio
 
@@ -78,9 +77,26 @@ HTTP 403, `Request has expired`. The native download failed safely, retaining
 the job, cost and existing cache, without generating another video. Cached video
 played to four seconds; its 840,772-byte native save matched the original hash
 and used permissions 0600. The temporary failure scenario was then restored
-to the original record and file hashes. A fresh successful download through
-the new pinned transport remains unverified; no new generation was authorized
-by the existing-video approval.
+to the original record and file hashes. That existing-video approval did not
+authorize new generation.
+
+On November 1, the user separately approved one new four-second, nominal 480p,
+silent lake video through ofox.io using Seedance 2.0 Mini, within USD 0.20 and
+without automatic retry. The native quote was USD 0.08. Exactly one generation
+completed and downloaded through the new pinned transport. Native playback
+reached the end, and the native save matched the 758,006-byte private attachment
+with permissions 0600. The owner's download-staging directory was empty after
+publication. File inspection found H.264, 864×496, 4.041667 seconds and no audio
+track; the actual provider dimensions differ from the nominal request label.
+
+Returned usage was four video seconds and USD 0.08, matching the final activity
+row's USD 0.08000000 after its estimate marker disappeared. Only the new and old
+lake-video rows appeared under this model filter. The new row's visible request
+ID prefix matched the native job ID, with the same model and submission minute;
+the full billing UUID was not verified. This is per-request evidence rather
+than an account-balance difference. No additional audio or video generation was
+submitted. These live checks do not certify every real proxy configuration;
+the direct/proxy variants retain their local TLS and regression coverage.
 
 ## Gates and execution limits
 
