@@ -8,8 +8,9 @@ Assistant catalog caching is in memory. A restart opens an asynchronous cold
 load rather than reusing disk metadata; healthy sources can arrive independently.
 Automatic failure retry has a thirty-second cooldown and successful rows have a
 ten-minute TTL. Explicit Retry is available, including after a valid empty list.
-See [catalog behavior](assistant-catalog.md). Native application acceptance of this
-iteration remains pending; sandbox/browser results do not validate Windows.
+See [catalog behavior](assistant-catalog.md). macOS cold startup and region
+switching were exercised in the temporary QA application; sandbox/browser
+results do not validate Windows.
 
 ## Assistant request records (2026-10-30)
 
@@ -19,7 +20,11 @@ unavailable, and an interrupted response may never publish a receipt. Search
 currently exposes usage rather than a platform request ID. Estimates and returned
 video costs remain separate from unverified actual charges; binary speech without
 usage never proves billing. See [request records](assistant-request-records.md).
-Native and real audio invoice acceptance remains pending.
+The approved macOS audio samples have [per-request invoice evidence](assistant-audio-acceptance.md).
+Header request IDs differ from billing record IDs, so reconciliation uses the
+same account, model and submission time rather than claiming an exact ID join.
+Observed speech debits were lower than the catalog estimates; their cause is
+unverified and a binary response still does not establish actual cost.
 
 ## Assistant audio foundation (2026-10-30)
 
@@ -34,12 +39,14 @@ accepts short PCM RIFF WAV and Layer III MP3 only, mono/stereo at 8–48 kHz,
 up to 25 MiB and five minutes. Float/extensible WAV, FLAC and Ogg input are
 outside this first release. Unsubmitted inputs are temporary memory buffers,
 excluded from chat attachments and backups. A retention failure keeps the
-transcript and billing facts with a warning; it never resubmits the request. Native microphone and live-gateway
-audio acceptance have not yet been performed. Speech previews start with the
+transcript and billing facts with a warning; it never resubmits the request.
+Approved macOS microphone and dual-apex live samples were exercised; see
+[acceptance scope and deviations](assistant-audio-acceptance.md). Speech previews start with the
 reply source text, including Markdown, and can be edited before generation.
 Ogg Opus output checks container framing/CRCs and duration; full Opus decoding
-is device-dependent. Unsupported codecs offer save without paid conversion;
-native WKWebView playback/save acceptance remains pending. Stored audio history is available from the conversation menu even when the
+is device-dependent. Unsupported codecs offer save without paid conversion.
+macOS WKWebView played and saved local WAV/MP3/Opus fixtures and real WAV results;
+this does not validate every provider/codec or Windows. Stored audio history is available from the conversation menu even when the
 model catalog or Pi runtime is unavailable; playback and save make no new model
 request. See [audio design](assistant-audio.md).
 

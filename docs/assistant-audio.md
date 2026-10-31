@@ -37,13 +37,13 @@ therefore scoped to documented exact model IDs and matching endpoints. An
 unknown future audio model remains unavailable until its contract is supported.
 Suggested voices are examples, not a claim of an exhaustive provider voice list.
 
-| Family | Request/output | Billing basis |
-| --- | --- | --- |
-| Gemini TTS | Named voice; WAV/PCM; tone instructions | Text/audio token rates |
-| ElevenLabs Eleven v4 | Provider voice ID; MP3/Opus/WAV/PCM | Input characters |
-| GPT Transcribe | Multipart audio; JSON text/usage | Input audio seconds |
-| GPT mini/diarize transcription | Multipart audio; JSON text/usage | Recorded token categories |
-| ElevenLabs Scribe v2 | Multipart audio; JSON/verbose JSON | Input audio seconds |
+| Family                         | Request/output                          | Billing basis             |
+| ------------------------------ | --------------------------------------- | ------------------------- |
+| Gemini TTS                     | Named voice; WAV/PCM; tone instructions | Text/audio token rates    |
+| ElevenLabs Eleven v4           | Provider voice ID; MP3/Opus/WAV/PCM     | Input characters          |
+| GPT Transcribe                 | Multipart audio; JSON text/usage        | Input audio seconds       |
+| GPT mini/diarize transcription | Multipart audio; JSON text/usage        | Recorded token categories |
+| ElevenLabs Scribe v2           | Multipart audio; JSON/verbose JSON      | Input audio seconds       |
 
 Rates come from the selected apex catalog and are stored with an operation.
 Missing, malformed, negative or overflowing prices remain unknown. Token rates
@@ -115,7 +115,8 @@ read failures and saving do not request synthesis or silently convert formats.
 The device probes codec support; unsupported output remains available to save.
 The scoped protocol allows bounded full/range reads up to 50 MiB and preserves
 no-store, regular-file, authority and atomic-save checks. Native WKWebView and
-live billing acceptance remain separate; extended history preferences follow.
+live billing evidence, including its limits, are recorded in
+[audio acceptance](assistant-audio-acceptance.md).
 
 ## Delivery and acceptance
 
@@ -147,8 +148,8 @@ native/message-linked history and exclude independent audio receipts/files;
 the source keeps its result and cost, avoiding a false branch association or
 billing the same request again.
 
-Native macOS microphone/play/save and approved small
-live samples require separate evidence and per-request billing reconciliation.
+Native macOS microphone/play/save, approved small live samples and per-request
+billing reconciliation have separate [acceptance evidence](assistant-audio-acceptance.md).
 Windows native acceptance remains explicitly deferred.
 
 Sources checked October 30, 2026:
