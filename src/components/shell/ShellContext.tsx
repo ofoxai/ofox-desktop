@@ -10,7 +10,12 @@ import {
   type ReactNode,
 } from "react";
 
-export type ShellPage = "tools" | "sessions" | "library" | "usage";
+export type ShellPage =
+  | "tools"
+  | "sessions"
+  | "library"
+  | "usage"
+  | "assistant";
 
 /** The header's tabs, in order. */
 export const SHELL_PAGES: readonly ShellPage[] = [
@@ -18,6 +23,7 @@ export const SHELL_PAGES: readonly ShellPage[] = [
   "sessions",
   "library",
   "usage",
+  "assistant",
 ];
 
 /** The id of a page's panel, for the tab's `aria-controls`. */
@@ -249,6 +255,11 @@ export function useShell(): ShellContextValue {
   const shell = useContext(ShellContext);
   if (!shell) throw new Error("useShell must be used inside <ShellProvider>");
   return shell;
+}
+
+/** The console's frame, or null outside one (a page rendered on its own). */
+export function useOptionalShell(): ShellContextValue | null {
+  return useContext(ShellContext);
 }
 
 /**

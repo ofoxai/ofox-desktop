@@ -52,6 +52,22 @@ fn client_id() -> &'static str {
 
 const TOKEN_REFRESH_BUFFER_MS: i64 = 60_000;
 
+/// 连不上 IDP / OpenAPI 时最多等多久。只管建连这一段：那时什么都还没发出去，
+/// 放弃不会丢任何东西。请求发出后不设总超时——刷新请求可能已经让服务器轮换了
+/// 一次性的 refresh token，中途取消就丢了它，会话随之过期。
+const AUTH_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// 登录、刷新、查用户和余额共用的 HTTP client，见 [`AUTH_CONNECT_TIMEOUT`]。
+fn auth_http_client(connect_timeout: std::time::Duration) -> Client {
+    Client::builder()
+        .connect_timeout(connect_timeout)
+        .build()
+        .unwrap_or_else(|error| {
+            log::warn!("[OfoxAuth] HTTP client without a connect timeout: {error}");
+            Client::new()
+        })
+}
+
 // ==================== Data Structures ====================
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -336,7 +352,7 @@ impl OfoxAuthManager {
             auth_state: Arc::new(RwLock::new(OfoxAuthState::LoggedOut)),
             refresh_lock: tokio::sync::Mutex::new(()),
             pending_device_codes: Arc::new(RwLock::new(HashMap::new())),
-            http_client: Client::new(),
+            http_client: auth_http_client(AUTH_CONNECT_TIMEOUT),
             app_handle: Arc::new(RwLock::new(None)),
             secret_store,
             keychain_denied: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -939,6 +955,31 @@ impl OfoxAuthManager {
         *self.auth_state.write().await = OfoxAuthState::Active;
     }
 
+    /// 测试用：放一个一小时内不过期的 access token，`get_valid_access_token` 不走网络。
+    #[cfg(test)]
+    pub(crate) async fn set_access_token_for_test(&self, token: &str) {
+        *self.access_token.write().await = Some(CachedAccessToken {
+            token: token.into(),
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 3_600_000,
+        });
+    }
+
+    /// 测试用：access token 快过期、有 refresh token，`get_valid_access_token` 要先刷新。
+    #[cfg(test)]
+    pub(crate) async fn set_expiring_access_token_for_test(&self, token: &str) {
+        *self.access_token.write().await = Some(CachedAccessToken {
+            token: token.into(),
+            expires_at_ms: chrono::Utc::now().timestamp_millis() + 10_000,
+        });
+        *self.refresh_token.write().await = Some("refresh-token-for-test".into());
+    }
+
+    /// 测试用：占住刷新单飞锁，模拟一次进行中的刷新；放开前要刷新的调用都在等。
+    #[cfg(test)]
+    pub(crate) async fn hold_refresh_for_test(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.refresh_lock.lock().await
+    }
+
     /// Snapshot the current auth state and cached user info — the data the
     /// frontend needs to decide between "show profile", "show expired banner",
     /// and "show login page".
@@ -1440,6 +1481,31 @@ mod tests {
         }
         manager.set_state(OfoxAuthState::Active).await;
         manager
+    }
+
+    /// 建连超时只管连接：请求发出去以后回得再慢也等（刷新请求可能已经让服务器
+    /// 轮换了一次性的 refresh token，中途放弃就丢了它）。
+    #[tokio::test]
+    async fn the_connect_timeout_never_cuts_off_a_slow_answer() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/oauth/token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(600)),
+            )
+            .mount(&server)
+            .await;
+
+        let client = auth_http_client(std::time::Duration::from_millis(100));
+        let response = client
+            .post(format!("{}/api/oauth/token", server.uri()))
+            .send()
+            .await
+            .expect("an answer slower than the connect timeout still arrives");
+        assert_eq!(response.status(), 200);
     }
 
     #[tokio::test]

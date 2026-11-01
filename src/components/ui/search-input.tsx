@@ -57,6 +57,8 @@ export const SearchInput = React.forwardRef<HTMLInputElement, SearchInputProps>(
           onKeyDown={(event) => {
             onKeyDown?.(event);
             if (event.defaultPrevented) return;
+            // The Escape that cancels an IME candidate is not ours.
+            if (event.nativeEvent.isComposing || event.keyCode === 229) return;
             if (event.key === "Escape" && value) {
               event.preventDefault();
               event.stopPropagation();

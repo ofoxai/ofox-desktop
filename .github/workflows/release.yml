@@ -36,7 +36,7 @@ concurrency:
   cancel-in-progress: false # 发版过程不中断
 
 env:
-  NODE_VERSION: "20"
+  NODE_VERSION: "22.23.4"
   PNPM_VERSION: "10.12.3"
 
 jobs:
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.23.4"
       - name: Require successful Windows Probe for this exact commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -388,7 +388,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.23.4"
       - name: Download candidate installers
         uses: actions/download-artifact@v8
         with:
@@ -442,7 +442,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22.23.4"
       - name: Download verified release inputs
         uses: actions/download-artifact@v8
         with:

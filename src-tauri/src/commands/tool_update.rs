@@ -257,10 +257,13 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
 pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
     validate_executable_name(tool)?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
+    let home = crate::config::get_home_dir();
     let mut command = Command::new(shell);
     command.args(["-l", "-i", "-c", &format!(
         "printf '\\n__OFOX_BIN__%s\\n' \"$(command -v {tool})\"; printf '__OFOX_PATH__%s\\n' \"$PATH\""
-    )]);
+    )])
+    // A new terminal starts in the home folder; fnm/mise would switch Node in a project folder.
+    .current_dir(&home);
     let output = bounded_output(command).await?;
     let (path, search_path) = shell_resolution(&output)?;
     let path = PathBuf::from(path);
@@ -268,7 +271,7 @@ pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeEr
         return Err("Executable disappeared after the launch shell lookup".into());
     }
     let real = match std::fs::canonicalize(&path) {
-        Ok(real) => real,
+        Ok(real) => super::node_launcher::resolve_real(&path, real, &home),
         Err(error) => {
             return Ok(Installation {
                 real: path.clone(),
@@ -804,6 +807,9 @@ async fn perform_update<F: Fn(&str, &str)>(tool: &str, emit: F) -> Result<Update
             "The launch PATH changed during update; inspect the active installation".into(),
         );
     }
+    // Point the fnm/nvm launcher at the updated install (fizzy #1351).
+    #[cfg(unix)]
+    super::node_launcher::reconcile(tool).await;
     if install.error.is_some() {
         return Ok(UpdateResult {
             status: "repaired".into(),

@@ -75,6 +75,7 @@ pub use mcp::{
     sync_single_server_to_gemini, sync_single_server_to_hermes, sync_single_server_to_opencode,
 };
 pub use provider::{Provider, ProviderMeta};
+pub use services::assistant;
 pub use services::library::{
     apply_operation as apply_resource_operation, delete_mcp_draft, preview_mcp_resource,
     recover_operation as recover_resource_operation, save_mcp_draft,
@@ -98,7 +99,7 @@ use std::sync::Arc;
 use tauri::image::Image;
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::RunEvent;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Listener, Manager};
 
 fn redact_url_for_log(url_str: &str) -> String {
     match url::Url::parse(url_str) {
@@ -111,6 +112,68 @@ fn redact_url_for_log(url_str: &str) -> String {
 
 fn deeplink_error_view(url_str: &str, _error: &crate::AppError) -> serde_json::Value {
     serde_json::json!({"url":redact_url_for_log(url_str),"error":"deeplink.invalidLink"})
+}
+
+#[cfg(test)]
+mod assistant_wiring_tests {
+    /// Chat and its attachment intake (S2 picker, dropped and pasted files)
+    /// only: no approval, memory, export, purge, backup or usage command
+    /// reaches the renderer.
+    #[test]
+    fn only_the_chat_assistant_commands_are_registered() {
+        let source = include_str!("lib.rs");
+        // The last one: this test's own text names the macro too.
+        let handler = source
+            .rsplit_once("tauri::generate_handler![")
+            .unwrap()
+            .1
+            .split_once("]);")
+            .unwrap()
+            .0;
+        let mut registered: Vec<_> = handler
+            .lines()
+            .map(|line| line.trim().trim_end_matches(','))
+            .filter_map(|line| line.strip_prefix("commands::"))
+            .filter(|name| name.starts_with("assistant_"))
+            .collect();
+        registered.sort_unstable();
+        assert_eq!(
+            registered,
+            [
+                "assistant_backup",
+                "assistant_bootstrap",
+                "assistant_cancel_video",
+                "assistant_compact",
+                "assistant_create_session",
+                "assistant_delete_session",
+                "assistant_discard_audio",
+                "assistant_empty_trash",
+                "assistant_export_markdown",
+                "assistant_fork",
+                "assistant_get_preferences",
+                "assistant_get_session",
+                "assistant_import_audio",
+                "assistant_import_drop",
+                "assistant_import_pasted",
+                "assistant_list_sessions",
+                "assistant_pick_attachments",
+                "assistant_pick_audio",
+                "assistant_quote_media",
+                "assistant_restore",
+                "assistant_resume_video",
+                "assistant_save_media",
+                "assistant_send",
+                "assistant_set_preferences",
+                "assistant_steer",
+                "assistant_stop",
+                "assistant_switch_version",
+                "assistant_synthesize_audio",
+                "assistant_transcribe_audio",
+                "assistant_update_session",
+                "assistant_usage_summary",
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -285,10 +348,23 @@ pub fn run() {
     }
 
     let builder = builder
+        .register_asynchronous_uri_scheme_protocol("assistant-media", |ctx,request,responder| {
+            let host=ctx.app_handle().try_state::<Arc<services::assistant::AssistantHost>>().map(|host|host.inner().clone());
+            tauri::async_runtime::spawn(async move {
+                let response=match host {
+                    Some(host)=>host.media_response(request).await,
+                    None=>tauri::http::Response::builder().status(403).body(Vec::<u8>::new()).unwrap(),
+                };
+                responder.respond(response);
+            });
+        })
         // 注册 deep-link 插件（处理 macOS AppleEvent 和其他平台的深链接）
         .plugin(tauri_plugin_deep_link::init())
         // 拦截窗口关闭：根据设置决定是否最小化到托盘
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(drag) = event {
+                commands::handle_assistant_drag_drop(window.app_handle(), drag);
+            }
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let settings = crate::settings::get_settings();
 
@@ -1067,6 +1143,21 @@ pub fn run() {
                 log::info!("✓ OfoxAuthManager initialized");
             }
 
+            // 内置助手：运行由 host 管理。登录失效/恢复、切换地区时取消进行中的运行；
+            // 上次进程没跑完（崩溃）的对话在启动时收尾。
+            {
+                let host = services::assistant::AssistantHost::new(Arc::new(
+                    commands::AssistantEnvironment::new(app.handle().clone()),
+                ));
+                for event in ["ofox-auth-expired", "ofox-auth-restored", "ofox-apex-changed"] {
+                    let host = host.clone();
+                    app.listen(event, move |_| host.cancel_all());
+                }
+                let recovering = host.clone();
+                tauri::async_runtime::spawn(async move { recovering.recover_all().await });
+                app.manage(host);
+            }
+
             // 每次启动按出口 IP 探测区域；结果变了就切换（会清旧域登录态，所以放在
             // OfoxAuthState 注册之后）。再安全迁移各工具现存的 OFox 网关地址。
             let apex_handle = app.handle().clone();
@@ -1084,6 +1175,11 @@ pub fn run() {
                     }
                 }
             });
+
+            // 之前装在 fnm/nvm 某个 Node 版本里的 npm 工具补上启动脚本，进入锁定了
+            // 别的 Node 版本的目录也能用（fizzy #1351）。
+            #[cfg(unix)]
+            tauri::async_runtime::spawn(commands::node_launcher::reconcile_all());
 
             // 异常退出恢复 + 代理状态自动恢复
             let app_handle = app.handle().clone();
@@ -1774,6 +1870,37 @@ pub fn run() {
             commands::manage_tool::check_ofox_model_compatibility,
             commands::show_main_window,
             tray_popover::fit_tray_popover,
+            commands::assistant_backup,
+            commands::assistant_restore,
+            commands::assistant_bootstrap,
+            commands::assistant_list_sessions,
+            commands::assistant_create_session,
+            commands::assistant_get_session,
+            commands::assistant_update_session,
+            commands::assistant_usage_summary,
+            commands::assistant_get_preferences,
+            commands::assistant_set_preferences,
+            commands::assistant_delete_session,
+            commands::assistant_empty_trash,
+            commands::assistant_export_markdown,
+            commands::assistant_save_media,
+            commands::assistant_quote_media,
+            commands::assistant_cancel_video,
+            commands::assistant_resume_video,
+            commands::assistant_send,
+            commands::assistant_stop,
+            commands::assistant_steer,
+            commands::assistant_switch_version,
+            commands::assistant_fork,
+            commands::assistant_compact,
+            commands::assistant_pick_attachments,
+            commands::assistant_pick_audio,
+            commands::assistant_transcribe_audio,
+            commands::assistant_synthesize_audio,
+            commands::assistant_import_audio,
+            commands::assistant_discard_audio,
+            commands::assistant_import_drop,
+            commands::assistant_import_pasted,
         ]);
 
     let app = builder
@@ -1781,6 +1908,14 @@ pub fn run() {
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
+        // macOS 的「退出」可能不经 ExitRequested 直接到 Exit：在这个同步回调里
+        // 收尾助手的运行（取消、等保存、结束子进程），之后事件循环就没了。
+        if let Some(host) = app_handle.try_state::<Arc<services::assistant::AssistantHost>>() {
+            if host.handle_terminal_exit(&event) {
+                return;
+            }
+        }
+
         // 处理退出请求（所有平台）
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             // code 为 None 表示运行时自动触发（如隐藏窗口的 WebView 被回收导致无存活窗口），
@@ -1795,6 +1930,9 @@ pub fn run() {
 
             log::info!("收到用户主动退出请求 (code={code:?})，开始清理...");
             api.prevent_exit();
+            if let Some(host) = app_handle.try_state::<Arc<services::assistant::AssistantHost>>() {
+                host.begin_shutdown();
+            }
 
             let app_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -1873,6 +2011,9 @@ pub fn run() {
 /// 确保 Claude Code/Codex/Gemini 的配置不会处于损坏状态。
 /// 使用 stop_with_restore_keep_state 保留 settings 表中的代理状态，下次启动时自动恢复。
 pub async fn cleanup_before_exit(app_handle: &tauri::AppHandle) {
+    if let Some(host) = app_handle.try_state::<Arc<services::assistant::AssistantHost>>() {
+        host.shutdown().await;
+    }
     if let Some(state) = app_handle.try_state::<store::AppState>() {
         let proxy_service = &state.proxy_service;
 

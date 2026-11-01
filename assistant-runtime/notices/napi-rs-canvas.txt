@@ -1,0 +1,371 @@
+@napi-rs/canvas 1.0.13
+======================
+
+Ofox Desktop's assistant runtime renders PDF pages that have no extractable
+text with @napi-rs/canvas, a Node.js binding for the Skia graphics library.
+
+- runtime/node_modules/@napi-rs/canvas/ is MIT licensed:
+  Copyright (c) 2020 lynweklm@gmail.com (full text in its LICENSE file and
+  at the end of this notice).
+- runtime/node_modules/@napi-rs/canvas-<platform>/ holds the native addon
+  (skia.<platform>.node). It statically links Skia and the components below.
+  The sbom.cdx.json file next to the addon lists every linked component with
+  its version and license.
+
+The sections below give the notices those components require.
+
+
+1. Mozilla Public License 2.0 components
+----------------------------------------
+
+The addon contains these Rust crates, unmodified, under the Mozilla Public
+License, v. 2.0:
+
+  cssparser 0.38.0         https://crates.io/crates/cssparser/0.38.0
+  cssparser-macros 0.7.0   https://crates.io/crates/cssparser-macros/0.7.0
+  dtoa-short 0.3.5         https://crates.io/crates/dtoa-short/0.3.5
+  selectors 0.41.0         https://crates.io/crates/selectors/0.41.0
+
+Their Source Code Form is available from the pages above and from
+https://github.com/servo/rust-cssparser, https://github.com/upsuper/dtoa-short
+and https://github.com/servo/stylo.
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this file,
+  You can obtain one at https://mozilla.org/MPL/2.0/.
+
+
+2. FreeType
+-----------
+
+FreeType (commit 264b5fbf5b912b39f98d038bf75d39be0a73f21b) is used under the
+FreeType License (FTL):
+
+  Portions of this software are copyright (c) 2026 The FreeType Project
+  (https://freetype.org). All rights reserved.
+
+
+3. ICU
+------
+
+ICU (commit d578f2e8b7bd5938e21cfb6bf15c079e0aa5b738). ICU 58 and later are
+also covered by the Unicode License V3 in section 6.
+
+  COPYRIGHT AND PERMISSION NOTICE
+
+  Copyright (c) 1995-2016 International Business Machines Corporation and
+  others
+
+  All rights reserved.
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of this software and associated documentation files (the "Software"),
+  to deal in the Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, and/or sell
+  copies of the Software, and to permit persons to whom the Software is
+  furnished to do so, provided that the above copyright notice(s) and this
+  permission notice appear in all copies of the Software and that both the
+  above copyright notice(s) and this permission notice appear in supporting
+  documentation.
+
+  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF THIRD PARTY
+  RIGHTS. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS
+  NOTICE BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL
+  DAMAGES, OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR
+  PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS
+  ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS
+  SOFTWARE.
+
+  Except as contained in this notice, the name of a copyright holder shall
+  not be used in advertising or otherwise to promote the sale, use or other
+  dealings in this Software without prior written authorization of the
+  copyright holder.
+
+
+4. libjpeg-turbo (IJG)
+----------------------
+
+libjpeg-turbo (commit e14cbfaa85529d47f9f55b0f104a579c1061f9ad) is covered by
+the IJG License, the BSD-3-Clause license below and, for its SIMD extensions,
+the zlib License in section 7.
+
+  This software is based in part on the work of the Independent JPEG Group.
+
+  Copyright (C)2009-2024 D. R. Commander. All Rights Reserved.
+  Copyright (C)2015 Viktor Szathmary. All Rights Reserved.
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+  - Redistributions of source code must retain the above copyright notice,
+    this list of conditions and the following disclaimer.
+  - Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in the
+    documentation and/or other materials provided with the distribution.
+  - Neither the name of the libjpeg-turbo Project nor the names of its
+    contributors may be used to endorse or promote products derived from
+    this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS", AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+5. libpng
+---------
+
+libpng (commit d5515b5b8be3901aac04e5bd8bd5c89f287bcd33):
+
+  PNG Reference Library License version 2
+  ---------------------------------------
+
+  Copyright (c) 1995-2025 The PNG Reference Library Authors.
+  Copyright (c) 2018-2025 Cosmin Truta.
+  Copyright (c) 2000-2002, 2004, 2006-2018 Glenn Randers-Pehrson.
+  Copyright (c) 1996-1997 Andreas Dilger.
+  Copyright (c) 1995-1996 Guy Eric Schalnat, Group 42, Inc.
+
+  The software is supplied "as is", without warranty of any kind, express
+  or implied, including, without limitation, the warranties of
+  merchantability, fitness for a particular purpose, title, and
+  non-infringement. In no event shall the Copyright owners, or anyone
+  distributing the software, be liable for any damages or other liability,
+  whether in contract, tort or otherwise, arising from, out of, or in
+  connection with the software, or the use or other dealings in the
+  software, even if advised of the possibility of such damage.
+
+  Permission is hereby granted to use, copy, modify, and distribute this
+  software, or portions hereof, for any purpose, without fee, subject to
+  the following restrictions:
+
+   1. The origin of this software must not be misrepresented; you must not
+      claim that you wrote the original software. If you use this software
+      in a product, an acknowledgment in the product documentation would be
+      appreciated, but is not required.
+
+   2. Altered source versions must be plainly marked as such, and must not
+      be misrepresented as being the original software.
+
+   3. This Copyright notice may not be removed or altered from any source
+      or altered source distribution.
+
+
+6. Unicode
+----------
+
+ICU data (section 3) and the Rust crate unicode-ident 1.0.24
+((MIT OR Apache-2.0) AND Unicode-3.0) include Unicode data under:
+
+  UNICODE LICENSE V3
+
+  COPYRIGHT AND PERMISSION NOTICE
+
+  Copyright (c) 1991-2025 Unicode, Inc.
+
+  NOTICE TO USER: Carefully read the following legal agreement. BY
+  DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+  SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+  TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+  DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+  Permission is hereby granted, free of charge, to any person obtaining a
+  copy of data files and any associated documentation (the "Data Files") or
+  software and any associated documentation (the "Software") to deal in the
+  Data Files or Software without restriction, including without limitation
+  the rights to use, copy, modify, merge, publish, distribute, and/or sell
+  copies of the Data Files or Software, and to permit persons to whom the
+  Data Files or Software are furnished to do so, provided that either (a)
+  this copyright and permission notice appear with all copies of the Data
+  Files or Software, or (b) this copyright and permission notice appear in
+  associated Documentation.
+
+  THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+  KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+  MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+  THIRD PARTY RIGHTS.
+
+  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+  BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+  OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+  WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+  ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+  FILES OR SOFTWARE.
+
+  Except as contained in this notice, the name of a copyright holder shall
+  not be used in advertising or otherwise to promote the sale, use or other
+  dealings in these Data Files or Software without prior written
+  authorization of the copyright holder.
+
+
+7. zlib License components
+--------------------------
+
+zlib (commit 646b7f569718921d7d4b5b8e22572ff6c76f2596), the libjpeg-turbo
+SIMD extensions and the Rust crate foldhash 0.2.0 (Copyright (c) 2024 Orson
+Peters) are used under the zlib License:
+
+  Copyright (C) 1995-2024 Jean-loup Gailly and Mark Adler
+
+  This software is provided 'as-is', without any express or implied
+  warranty. In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+     claim that you wrote the original software. If you use this software
+     in a product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not
+     be misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source
+     distribution.
+
+  Jean-loup Gailly        Mark Adler
+  jloup@gzip.org          madler@alumni.caltech.edu
+
+
+8. Other linked components
+--------------------------
+
+  Skia                        BSD-3-Clause  Copyright (c) 2011 Google Inc.
+  libwebp (845d5476a866)      BSD-3-Clause  Copyright (c) 2010, Google Inc.
+  libjxl (332feb17d173)       BSD-3-Clause  Copyright (c) the JPEG XL
+                                            Project Authors
+  libavif 1.0.4               BSD-2-Clause  Copyright 2019 Joe Drago
+  libaom 3.11.0               BSD-2-Clause  Copyright (c) 2016, Alliance for
+                                            Open Media
+  highway (457c891775a7)      Apache-2.0    Copyright Google LLC
+  wuffs (e3f919ccfe3e)        Apache-2.0    Copyright The Wuffs Authors
+  codespan-reporting 0.13.1   Apache-2.0
+  libloading 0.9.0            ISC           Copyright (c) 2015, Simonas
+                                            Kazlauskas
+
+The remaining Rust crates are licensed under MIT, Apache-2.0, Unlicense or
+Zlib terms (several offer a choice among them); sbom.cdx.json lists each
+crate with its license. The Apache License 2.0 text is in pdfjs-dist.txt in
+this directory.
+
+BSD-3-Clause, for the components marked above:
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+  3. Neither the name of the copyright holder nor the names of its
+     contributors may be used to endorse or promote products derived from
+     this software without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+BSD-2-Clause, for the components marked above:
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are
+  met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
+  IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+  THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+  PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+  CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+  EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+  PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+
+9. @napi-rs/canvas MIT License
+------------------------------
+
+MIT License
+
+Copyright (c) 2020 lynweklm@gmail.com
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+src/svg_doc/broken_image.png is Chromium's broken-image icon
+(third_party/blink/public/default_100_percent/blink/broken_image.png),
+used under the Chromium license:
+
+Copyright 2015 The Chromium Authors
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+   * Redistributions of source code must retain the above copyright
+notice, this list of conditions and the following disclaimer.
+   * Redistributions in binary form must reproduce the above
+copyright notice, this list of conditions and the following disclaimer
+in the documentation and/or other materials provided with the
+distribution.
+   * Neither the name of Google LLC nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

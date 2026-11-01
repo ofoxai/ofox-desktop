@@ -19,11 +19,26 @@ export interface MenuSelectOption<T extends string = string> {
   count?: React.ReactNode;
   /** Drawn at 13px before the label, in the menu and on the trigger. */
   icon?: React.ReactNode;
+  /**
+   * Compact detail at the right of the label, such as a model's context and
+   * prices. The option then keeps to one line: the label is cut short first.
+   */
+  meta?: string;
+  /** The option's tooltip, for the detail its row leaves out. */
+  title?: string;
+  /**
+   * Options that share a `group` sit under one heading, `groupLabel`, in the
+   * order the groups first appear; options with none stay where they are.
+   */
+  group?: string;
+  groupLabel?: string;
   disabled?: boolean;
 }
 
 export interface MenuSelectProps<T extends string> {
   value: T;
+  /** Preferred highlight when the current value belongs to a different group. */
+  highlightValue?: T;
   /** Called only when the user picks an option other than `value`. */
   onChange: (value: T) => void;
   options: ReadonlyArray<MenuSelectOption<T>>;
@@ -43,6 +58,10 @@ export interface MenuSelectProps<T extends string> {
   disabled?: boolean;
   /** Replaces the chosen option's label on the trigger. */
   valueLabel?: string;
+  /** The trigger's tooltip, such as the full name `valueLabel` shortens. */
+  triggerTitle?: string;
+  /** Classes for the menu, such as a larger `max-h-*`. */
+  menuClassName?: string;
 }
 
 /**
@@ -85,7 +104,7 @@ function filterOptions<T extends string>(
     .filter(
       ({ option }) =>
         !q ||
-        `${option.label} ${option.note ?? ""} ${option.value}`
+        `${option.label} ${option.note ?? ""} ${option.value} ${option.groupLabel ?? ""}`
           .toLocaleLowerCase()
           .includes(q),
     );
@@ -97,6 +116,68 @@ function firstKey<T extends string>(items: Indexed<T>[]): string {
   return first ? itemKey(first.index) : "";
 }
 
+interface Section<T extends string> {
+  /** Undefined for options outside any group. */
+  group?: string;
+  label?: string;
+  items: Indexed<T>[];
+}
+
+/**
+ * The options as the menu draws them: each group once, at the place of its
+ * first option, and every ungrouped option on its own.
+ */
+function toSections<T extends string>(items: Indexed<T>[]): Section<T>[] {
+  const sections: Section<T>[] = [];
+  const byGroup = new Map<string, Section<T>>();
+  for (const item of items) {
+    const { group, groupLabel } = item.option;
+    if (group === undefined) {
+      sections.push({ items: [item] });
+      continue;
+    }
+    let section = byGroup.get(group);
+    if (!section) {
+      section = { group, label: groupLabel ?? group, items: [] };
+      byGroup.set(group, section);
+      sections.push(section);
+    }
+    section.items.push(item);
+  }
+  return sections;
+}
+
+/**
+ * Scroll `list` so `item` is in its middle (`center`) or just inside it
+ * (`nearest`). From offsets, so the menu's opening animation (a scale) does
+ * not skew it; the list is the items' offset parent.
+ */
+function scrollIntoList(
+  list: HTMLElement,
+  item: HTMLElement,
+  block: "center" | "nearest",
+) {
+  const top = item.offsetTop;
+  const bottom = top + item.offsetHeight;
+  if (block === "center") {
+    list.scrollTop = top - (list.clientHeight - item.offsetHeight) / 2;
+  } else if (top < list.scrollTop) {
+    list.scrollTop = top;
+  } else if (bottom > list.scrollTop + list.clientHeight) {
+    list.scrollTop = bottom - list.clientHeight;
+  }
+}
+
+/** What a query leaves, in the order the menu draws it (and arrows through it). */
+function inMenuOrder<T extends string>(
+  options: ReadonlyArray<MenuSelectOption<T>>,
+  query: string,
+): Indexed<T>[] {
+  return toSections(filterOptions(options, query)).flatMap(
+    (section) => section.items,
+  );
+}
+
 /**
  * The app's own dropdown (magpie's proto menu): a trigger that reads as a
  * combobox and a frosted menu of ticked options. ↑/↓ wrap, Home/End jump,
@@ -105,6 +186,7 @@ function firstKey<T extends string>(items: Indexed<T>[]): string {
  */
 export function MenuSelect<T extends string>({
   value,
+  highlightValue,
   onChange,
   options,
   placeholder,
@@ -118,6 +200,8 @@ export function MenuSelect<T extends string>({
   id,
   disabled = false,
   valueLabel,
+  triggerTitle,
+  menuClassName,
 }: MenuSelectProps<T>) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
@@ -131,30 +215,37 @@ export function MenuSelect<T extends string>({
   const [listId, setListId] = React.useState<string>();
   const listRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
+  const headRef = React.useRef<HTMLDivElement>(null);
   const itemRefs = React.useRef(new Map<string, HTMLDivElement>());
+  // Where the list goes the next time the highlight is followed: the chosen
+  // option to the middle when the menu opens; back to the top, where the
+  // first match is, after the query changes. Otherwise cmdk keeps the
+  // highlighted option in view as the arrows move it.
+  const pendingScroll = React.useRef<"center" | "top" | null>(null);
 
   const chosen = options.find((option) => option.value === value);
-  const shown = React.useMemo(
-    () => filterOptions(options, query),
+  const sections = React.useMemo(
+    () => toSections(filterOptions(options, query)),
     [options, query],
   );
 
   const handleOpenChange = (next: boolean) => {
     if (next) {
+      pendingScroll.current = "center";
       setQuery("");
       // Both searchable and plain menus open on the current selection.
       const at = options.findIndex(
         (option) => option.value === value && !option.disabled,
       );
-      const all = filterOptions(options, "");
-      setActive(at >= 0 ? itemKey(at) : firstKey(all));
+      setActive(at >= 0 ? itemKey(at) : firstKey(inMenuOrder(options, "")));
     }
     setOpen(next);
   };
 
   const handleQuery = (next: string) => {
+    pendingScroll.current = "top";
     setQuery(next);
-    setActive(firstKey(filterOptions(options, next)));
+    setActive(firstKey(inMenuOrder(options, next)));
   };
 
   // Without a filter, focus rides on the highlighted option itself, as in
@@ -163,11 +254,20 @@ export function MenuSelect<T extends string>({
   // stays in the field, which points at the option instead.
   const followHighlight = React.useCallback(() => {
     const item = itemRefs.current.get(active);
-    setListId(listRef.current?.id);
+    const list = listRef.current;
+    setListId(list?.id);
+    // The list mounts a render after the menu opens: until then the scroll
+    // waits.
+    if (list && pendingScroll.current) {
+      const block = pendingScroll.current === "center" ? "center" : "nearest";
+      if (pendingScroll.current === "top") list.scrollTop = 0;
+      pendingScroll.current = null;
+      if (item) scrollIntoList(list, item, block);
+    }
     if (searchable) {
       setActiveId(item?.id);
     } else {
-      (item ?? listRef.current)?.focus({ preventScroll: true });
+      (item ?? list)?.focus({ preventScroll: true });
     }
   }, [active, searchable]);
 
@@ -177,9 +277,95 @@ export function MenuSelect<T extends string>({
     if (open) followHighlight();
   }, [open, followHighlight, query]);
 
+  React.useLayoutEffect(() => {
+    if (
+      open &&
+      !inMenuOrder(options, query).some(
+        ({ index }) => itemKey(index) === active,
+      )
+    ) {
+      setActive(firstKey(inMenuOrder(options, query)));
+    }
+    if (open) followHighlight();
+  }, [open, options, query, active, followHighlight]);
+
+  React.useLayoutEffect(() => {
+    if (!open) return;
+    setQuery("");
+    const preferred = options.findIndex(
+      (option) =>
+        !option.disabled &&
+        option.value ===
+          (options.some((o) => o.value === value) ? value : highlightValue),
+    );
+    setActive(
+      preferred >= 0 ? itemKey(preferred) : firstKey(inMenuOrder(options, "")),
+    );
+    // A different kind or refreshed catalog starts its own search/highlight.
+  }, [options, highlightValue]);
+
   const choose = (option: MenuSelectOption<T>) => {
     setOpen(false);
     if (option.value !== value) onChange(option.value);
+  };
+
+  const renderItem = ({ option, index }: Indexed<T>) => {
+    const checked = option.value === value;
+    const title = (
+      <span className="truncate text-nav font-medium leading-4">
+        {option.label}
+      </span>
+    );
+    return (
+      <CommandPrimitive.Item
+        key={option.value}
+        ref={(node) => {
+          if (node) itemRefs.current.set(itemKey(index), node);
+          else itemRefs.current.delete(itemKey(index));
+        }}
+        tabIndex={-1}
+        value={itemKey(index)}
+        disabled={option.disabled}
+        onSelect={() => choose(option)}
+        data-checked={checked || undefined}
+        title={option.title}
+        className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 focus-visible:outline-none data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
+      >
+        <span
+          aria-hidden
+          className="grid h-4 w-3.5 flex-none place-items-center text-ink"
+        >
+          {checked && <Check className="h-3 w-3" strokeWidth={1.9} />}
+        </span>
+        {option.icon && (
+          <span aria-hidden className={ICON_BOX}>
+            {option.icon}
+          </span>
+        )}
+        <span className="grid min-w-0 flex-1 gap-px">
+          {option.meta ? (
+            <span className="flex min-w-0 items-baseline gap-2">
+              {title}
+              <span className="ml-auto flex-none text-note leading-4 tabular-nums text-ink-ctl">
+                {option.meta}
+              </span>
+            </span>
+          ) : (
+            title
+          )}
+          {option.note && (
+            <span className="truncate text-note leading-[15px] text-ink-muted">
+              {option.note}
+            </span>
+          )}
+        </span>
+        {option.count != null && (
+          <span className="flex-none pl-2 text-note leading-4 tabular-nums text-ink-faint">
+            {option.count}
+          </span>
+        )}
+      </CommandPrimitive.Item>
+    );
   };
 
   return (
@@ -194,6 +380,7 @@ export function MenuSelect<T extends string>({
           aria-label={ariaLabel}
           aria-expanded={open}
           aria-haspopup="listbox"
+          title={triggerTitle}
           disabled={disabled}
           onKeyDown={(event) => {
             if (
@@ -227,7 +414,29 @@ export function MenuSelect<T extends string>({
         </button>
       </PopoverTrigger>
       <PopoverContent
-        onKeyDown={menuTab.onKeyDown}
+        onKeyDownCapture={(event) => {
+          const headStop = headRef.current?.querySelector<HTMLElement>(
+            'button[tabindex="0"]:not(:disabled), input:not(:disabled)',
+          );
+          if (event.key === "Tab" && searchable && headStop) {
+            if (event.shiftKey && event.target === inputRef.current) {
+              event.preventDefault();
+              event.stopPropagation();
+              headStop.focus();
+              return;
+            }
+            if (
+              !event.shiftKey &&
+              headRef.current?.contains(event.target as Node)
+            ) {
+              event.preventDefault();
+              event.stopPropagation();
+              inputRef.current?.focus();
+              return;
+            }
+          }
+          menuTab.onKeyDown(event);
+        }}
         onCloseAutoFocus={menuTab.onCloseAutoFocus}
         // A listbox popup, not a dialog: the trigger says so with
         // aria-haspopup, and the list inside carries the options.
@@ -237,7 +446,10 @@ export function MenuSelect<T extends string>({
         sideOffset={5}
         collisionPadding={8}
         style={{ width }}
-        className="flex max-h-[min(360px,70vh)] max-w-[calc(100vw-16px)] flex-col overflow-hidden border border-line"
+        className={cn(
+          "flex max-h-[min(360px,70vh)] max-w-[calc(100vw-16px)] flex-col overflow-hidden border border-line",
+          menuClassName,
+        )}
         onOpenAutoFocus={(event) => {
           // cmdk listens for keys on its root, so focus has to start inside
           // it: on the filter, else on the highlighted option.
@@ -254,7 +466,10 @@ export function MenuSelect<T extends string>({
           className="flex min-h-0 flex-1 flex-col outline-none"
         >
           {head && (
-            <div className="px-2 pb-[5px] pt-1.5 text-note text-ink-muted">
+            <div
+              ref={headRef}
+              className="px-2 pb-[5px] pt-1.5 text-note text-ink-muted"
+            >
               {head}
             </div>
           )}
@@ -284,54 +499,22 @@ export function MenuSelect<T extends string>({
           <CommandPrimitive.List
             ref={listRef}
             label={ariaLabel}
-            className="min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none focus-visible:outline-none [&_[cmdk-list-sizer]]:grid [&_[cmdk-list-sizer]]:gap-px"
+            className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain outline-none focus-visible:outline-none [&_[cmdk-list-sizer]]:grid [&_[cmdk-list-sizer]]:gap-px"
           >
             <CommandPrimitive.Empty className="px-2 pb-1.5 pt-2 text-note text-ink-muted">
               {t("common.noMatches")}
             </CommandPrimitive.Empty>
-            {shown.map(({ option, index }) => {
-              const checked = option.value === value;
+            {sections.map((section) => {
+              if (section.group === undefined)
+                return renderItem(section.items[0]);
               return (
-                <CommandPrimitive.Item
-                  key={option.value}
-                  ref={(node) => {
-                    if (node) itemRefs.current.set(itemKey(index), node);
-                    else itemRefs.current.delete(itemKey(index));
-                  }}
-                  tabIndex={-1}
-                  value={itemKey(index)}
-                  disabled={option.disabled}
-                  onSelect={() => choose(option)}
-                  data-checked={checked || undefined}
-                  className="flex w-full cursor-default select-none items-start gap-[7px] rounded-ctl px-2 pb-[7px] pt-1.5 text-left text-ink outline-none transition-colors duration-100 focus-visible:outline-none data-[disabled=true]:opacity-45 data-[selected=true]:bg-pill"
+                <CommandPrimitive.Group
+                  key={`group-${section.group}`}
+                  heading={section.label}
+                  className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-0.5 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-note [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group-heading]]:text-ink-ctl [&_[cmdk-group-items]]:grid [&_[cmdk-group-items]]:gap-px"
                 >
-                  <span
-                    aria-hidden
-                    className="grid h-4 w-3.5 flex-none place-items-center text-ink"
-                  >
-                    {checked && <Check className="h-3 w-3" strokeWidth={1.9} />}
-                  </span>
-                  {option.icon && (
-                    <span aria-hidden className={ICON_BOX}>
-                      {option.icon}
-                    </span>
-                  )}
-                  <span className="grid min-w-0 flex-1 gap-px">
-                    <span className="truncate text-nav font-medium leading-4">
-                      {option.label}
-                    </span>
-                    {option.note && (
-                      <span className="truncate text-note leading-[15px] text-ink-muted">
-                        {option.note}
-                      </span>
-                    )}
-                  </span>
-                  {option.count != null && (
-                    <span className="flex-none pl-2 text-note leading-4 tabular-nums text-ink-faint">
-                      {option.count}
-                    </span>
-                  )}
-                </CommandPrimitive.Item>
+                  {section.items.map(renderItem)}
+                </CommandPrimitive.Group>
               );
             })}
           </CommandPrimitive.List>

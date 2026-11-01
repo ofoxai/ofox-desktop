@@ -32,6 +32,8 @@ pub struct LogoutReport {
     /// 服务器上没能吊销的（例如没联网）：这些 key 还能用，直到这个账号下次登录时
     /// 被自动删掉，要提醒用户。
     pub not_revoked: Vec<String>,
+    /// 内置助手的 key 没能在服务器上吊销，同 `not_revoked`。
+    pub assistant_not_revoked: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -118,9 +120,11 @@ pub async fn stop_for_logout(manager: &Arc<RwLock<OfoxAuthManager>>) -> LogoutRe
         .into_iter()
         .map(|tool| tool.as_str().to_string())
         .collect();
+    let assistant_not_revoked = !crate::ofox_api_keys::stop_assistant_key_for_logout(manager).await;
     LogoutReport {
         stopped,
         not_revoked,
+        assistant_not_revoked,
     }
 }
 
@@ -135,6 +139,7 @@ pub async fn reconcile(
         return report;
     };
     crate::ofox_api_keys::adopt_unowned_keys(&owner);
+    crate::ofox_api_keys::reconcile_assistant_key(&owner).await;
     crate::ofox_api_keys::delete_queued_keys(&owner, manager).await;
     let store = crate::ofox_secret::default_store();
     for meta in settings::list_api_key_metas() {
@@ -381,6 +386,70 @@ mod tests {
             settings::list_keys_to_delete(),
             [crate::settings::KeyToDelete {
                 key_id: "key-b".into(),
+                owner: Some(org("org_b")),
+            }]
+        );
+    }
+
+    /// 登录着、但没有能用的 access token：吊销请求发不出去，也不会走网络。
+    async fn signed_in_as_org_a_offline() -> Arc<RwLock<OfoxAuthManager>> {
+        let user: crate::ofox_auth::OfoxUserInfo = serde_json::from_str(
+            r#"{"id":"user_a","email":"a@example.com","name":"A","org_id":"org_a"}"#,
+        )
+        .unwrap();
+        let manager = OfoxAuthManager::new_with_secret_store(
+            crate::config::get_app_config_dir(),
+            Arc::new(crate::ofox_secret::InMemoryStore::new()),
+        );
+        manager.set_signed_in_for_test(user).await;
+        Arc::new(RwLock::new(manager))
+    }
+
+    fn assistant_key_of(owner: KeyOwner) -> crate::settings::AssistantKeyMeta {
+        crate::settings::AssistantKeyMeta {
+            key_id: "assistant-key".into(),
+            owner: Some(owner),
+            created_at: 1,
+            revoked: false,
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn logging_out_also_stops_the_assistant_key() {
+        let _home = crate::settings::TempSettingsHome::new();
+        let manager = signed_in_as_org_a_offline().await;
+        settings::set_assistant_key_meta(Some(assistant_key_of(org("org_a")))).unwrap();
+
+        let report = stop_for_logout(&manager).await;
+
+        assert!(report.assistant_not_revoked);
+        assert!(report.stopped.is_empty() && report.not_revoked.is_empty());
+        assert!(settings::get_assistant_key_meta().unwrap().revoked);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [crate::settings::KeyToDelete {
+                key_id: "assistant-key".into(),
+                owner: Some(org("org_a")),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn signing_in_as_another_account_drops_the_assistant_key() {
+        let _home = crate::settings::TempSettingsHome::new();
+        let db = Database::memory().expect("db");
+        let manager = signed_in_as_org_a_offline().await;
+        settings::set_assistant_key_meta(Some(assistant_key_of(org("org_b")))).unwrap();
+
+        reconcile(&db, &manager).await;
+
+        assert_eq!(settings::get_assistant_key_meta(), None);
+        assert_eq!(
+            settings::list_keys_to_delete(),
+            [crate::settings::KeyToDelete {
+                key_id: "assistant-key".into(),
                 owner: Some(org("org_b")),
             }]
         );

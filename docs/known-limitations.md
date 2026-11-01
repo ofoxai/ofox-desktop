@@ -2,6 +2,100 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant catalog cache (2026-10-30)
+
+Assistant catalog caching is in memory. A restart opens an asynchronous cold
+load rather than reusing disk metadata; healthy sources can arrive independently.
+Automatic failure retry has a thirty-second cooldown and successful rows have a
+ten-minute TTL. Explicit Retry is available, including after a valid empty list.
+See [catalog behavior](assistant-catalog.md). macOS cold startup and region
+switching were exercised in the temporary QA application; sandbox/browser
+results do not validate Windows.
+
+## Assistant request records (2026-10-30)
+
+New requests preserve bounded gateway header identifiers, outcomes, usage and
+frozen pricing evidence for inspection. Missing/legacy identifiers remain
+unavailable, and an interrupted response may never publish a receipt. Search
+currently exposes usage rather than a platform request ID. Estimates and returned
+video costs remain separate from unverified actual charges; binary speech without
+usage never proves billing. See [request records](assistant-request-records.md).
+The approved macOS audio samples have [per-request invoice evidence](assistant-audio-acceptance.md).
+Header request IDs differ from billing record IDs, so reconciliation uses the
+same account, model and submission time rather than claiming an exact ID join.
+Observed speech debits were lower than the catalog estimates; their cause is
+unverified and a binary response still does not establish actual cost.
+
+## Assistant audio foundation (2026-10-30)
+
+The audio catalog, bounded import, recording and editable ASR draft controls
+are implemented. Speech synthesis now has independent preview/parameter controls
+and private binary publication. Stored output now has play/pause/stop and native
+save controls without another model request. Keep original is an explicit,
+initially-off ASR option; retained originals use private history attachments and
+whole-conversation backups. Independent audio operations remain in their source
+conversation when forking native chat history. Import
+accepts short PCM RIFF WAV and Layer III MP3 only, mono/stereo at 8–48 kHz,
+up to 25 MiB and five minutes. Float/extensible WAV, FLAC and Ogg input are
+outside this first release. Unsubmitted inputs are temporary memory buffers,
+excluded from chat attachments and backups. A retention failure keeps the
+transcript and billing facts with a warning; it never resubmits the request.
+Approved macOS microphone and dual-apex live samples were exercised; see
+[acceptance scope and deviations](assistant-audio-acceptance.md). Speech previews start with the
+reply source text, including Markdown, and can be edited before generation.
+Ogg Opus output checks container framing/CRCs and duration; full Opus decoding
+is device-dependent. Unsupported codecs offer save without paid conversion.
+macOS WKWebView played and saved local WAV/MP3/Opus fixtures and real WAV results;
+this does not validate every provider/codec or Windows. Stored audio history is available from the conversation menu even when the
+model catalog or Pi runtime is unavailable; playback and save make no new model
+request. See [audio design](assistant-audio.md).
+
+## Assistant backup and restore (2026-10-28)
+
+Complete ZIP backups are owner-scoped and preserve stored run prices. Restore
+adds missing sessions, skips exact matches and refuses same-ID differences;
+it does not merge or overwrite conversations. Valid imports remain when a later
+publication fails. Archives are unencrypted, bounded and validated against the
+pinned Ofox/Pi history format; arbitrary Pi CLI histories and SDK-only empty
+compaction/root-branch sentinels are not supported. Known managed keys are
+excluded, but arbitrary secrets pasted into documents cannot be inferred.
+See [backup contract](assistant-backup.md) and [native acceptance](assistant-acceptance.md).
+Subsequent [macOS native acceptance](assistant-native-acceptance.md) covers the
+real Tauri controls, file dialogs and bundled runtime with local mock services.
+Windows is deferred at the user’s request. Search prices remain estimates from
+the saved catalog: the account balance endpoint cannot reconcile individual requests.
+
+## Assistant saved failures and attachment edits (2026-10-28)
+
+On `feat/assistant-chat`, new failed replies retain a localized reason across
+restarts. Older records without `errorCode` remain readable but cannot recover a
+reason that was never saved. Removing a file from an edited turn preserves the
+original version and its file; it is not permanent deletion or storage cleanup.
+This increment has macOS automated coverage and a 900 × 600 mock-backend renderer
+check, not native Windows or real-gateway acceptance. S4's remaining scope and
+verification evidence are recorded in [assistant progress](assistant-s4-progress.md).
+
+## Assistant Office text extraction (2026-10-28)
+
+DOCX reads body/table text only; headers, footers, footnotes/endnotes and comments
+are not included. XLSX values are unformatted cached values; formulas are not
+recalculated. PPTX includes slide text and notes in presentation order. Embedded
+images, charts, objects and layouts are excluded in all three formats. Localized
+text-only/partial warnings accompany model input and attachment chips. Legacy
+`.doc` is deliberately unsupported after malformed-file assessment of
+word-extractor 1.0.4; users are directed to docx or PDF. Bounds, license evidence,
+fixtures and platform verification limits are in the [Office audit](assistant-office.md).
+
+## Assistant conversation forks (2026-10-30)
+
+Forks copy local native context and historical usage without calling a provider.
+An unresolved video job must finish before that part of the conversation can be
+forked. Files explicitly excluded from a backup remain missing in its forks.
+Ordinary failures clean unpublished staging folders; a hard application kill can
+leave an ignored private `.fork-*` folder, which is never shown as a conversation
+or resumed as provider work. Fork and quote behavior has local mock-gateway and
+renderer coverage on macOS; native Windows acceptance remains deferred.
+
 ## Request dashboard alignment
 
 - Cache-inclusive totals apply to Requests only. Overview and session-analysis
@@ -207,3 +301,11 @@ The loading/discovery changes are verified on macOS; Windows discovery/install p
 The live skills.sh search probe returned a page-sized count and ignored offset. The discovery view currently requests up to 40 public results per keyword; narrow the keyword for other matches. Full configured repository catalogs use local pagination. No claim of exhaustive or unlimited skills.sh pagination is made.
 
 The locally rebuilt macOS app (1.3.7) was signed, installed and verified as the sole installed Ofox bundle. After the user handled the first-launch Keychain prompt, the original window remained blank; normal quit/relaunch restored the renderer. This is the previously observed startup limitation above, not an established root-cause fix. Installed-window checks then verified real repository search, partial-repository failure/retry feedback, 40 skills.sh matches for a public keyword, actual nested-path resolution before collection, and Escape focus restoration. The 7-day analysis (375 sessions / 48.1M tokens) switched back to today (15 sessions / about 5M tokens) with a matching displayed date. Native sync/query progress was visible; GUI automation round trips are not a page-latency benchmark. Some old Codex source paths no longer exist, so partial/stale-source warnings remain appropriate; the existing generation consistency check can also reject a scan during live updates. No real skill installation, Agent configuration test writes or credential changes were performed. The separate 900px light/dark checks used synthetic UI data. Windows remains unverified.
+
+### Assistant media acceptance and downloads
+
+Assistant video downloads use unsigned HTTPS URLs returned by the selected Ofox gateway, without gateway credentials, cookies or redirects. Download hosts and every DNS answer must be public; direct sockets, HTTP/HTTPS CONNECT and SOCKS5/5h tunnels use checked literal addresses while TLS/SNI and Host retain the original name. An explicit proxy failure never falls back to direct. All-fake-IP answers in 198.18.0.0/15 use the same fixed Alibaba public DNS-over-HTTPS infrastructure as web reading; other private/mixed answers are refused. A failed resolver/proxy/certificate check keeps the known job available for download retry without generation replay. See [download transport](assistant-media-downloads.md). Image generation returns bounded base64 data and does not download arbitrary output URLs.
+
+New download partials use private owner-scoped staging, are excluded from backups and are removed on cancellation/normal exit or the next owner recovery/download. Windows may retain a busy path until its open handle closes. Anonymous temporary files left by older app versions cannot be identified safely and are not retroactively deleted. Transport and cleanup have local fixture coverage; native Windows execution and this iteration's final macOS/live acceptance remain pending.
+
+Image editing accepts PNG, JPEG and WebP up to 15 MiB. [Ofox editing documentation](https://ofox.ai/docs/develop/models/gpt-image/image-edit) lists PNG/JPEG in its prerequisites but also WebP in its format guidance; the [upstream GPT Image API](https://developers.openai.com/api/reference/resources/images/methods/edit) explicitly supports WebP. WebP request construction is covered by local tests; its provider acceptance has not been separately billed and tested.

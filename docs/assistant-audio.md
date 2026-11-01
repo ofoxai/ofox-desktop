@@ -1,0 +1,161 @@
+# Assistant audio iteration
+
+Scope: Fizzy #1364, following the validated chat/image/video assistant. This
+iteration adds recorded/file speech input and explicit text-to-speech output.
+Long meeting workflows and full-duplex realtime conversation are later work.
+
+## User flow
+
+Speech input is separate from the conversation's selected chat model. The user
+records or imports an audio file, starts transcription and reviews the text in
+an editable transcription field before explicitly inserting it into the composer.
+Insertion appends to the latest draft; it never replaces existing text. An audio operation never fabricates a chat turn
+or automatically sends recognized words. A late result cannot overwrite a newer
+draft or insert into a different account/conversation. Offer the saved result
+for explicit insertion when its original draft/selection is no longer current.
+
+Speech output starts from a completed reply or explicitly supplied text. Model,
+voice and output format are selected independently of chat. Generated audio can
+be played, paused, stopped and saved; playing a stored result makes no model
+request. Generating a different voice is a new, explicitly charged operation.
+The first release plays Gemini WAV and ElevenLabs MP3/WAV/Opus. Raw PCM is a
+provider capability, not directly playable until framing is implemented.
+
+Product limits for the first short-audio release are 25 MiB / five minutes per
+input, 4,000 Unicode characters per synthesis and 50 MiB per generated result. Generated
+audio validation also bounds decoded duration at one hour; it does not reuse the
+five-minute input limit.
+These are application limits, not advertised provider limits. Do not silently
+truncate or split a request. Recording produces a bounded mono WAV rather than
+assuming every gateway accepts a browser's default recording container.
+
+## Capability and pricing contract
+
+The public catalogs classify speech and transcription but, in the audited
+snapshot, provide no voice/format attribute blocks. Supported profiles are
+therefore scoped to documented exact model IDs and matching endpoints. An
+unknown future audio model remains unavailable until its contract is supported.
+Suggested voices are examples, not a claim of an exhaustive provider voice list.
+
+| Family                         | Request/output                          | Billing basis             |
+| ------------------------------ | --------------------------------------- | ------------------------- |
+| Gemini TTS                     | Named voice; WAV/PCM; tone instructions | Text/audio token rates    |
+| ElevenLabs Eleven v4           | Provider voice ID; MP3/Opus/WAV/PCM     | Input characters          |
+| GPT Transcribe                 | Multipart audio; JSON text/usage        | Input audio seconds       |
+| GPT mini/diarize transcription | Multipart audio; JSON text/usage        | Recorded token categories |
+| ElevenLabs Scribe v2           | Multipart audio; JSON/verbose JSON      | Input audio seconds       |
+
+Rates come from the selected apex catalog and are stored with an operation.
+Missing, malformed, negative or overflowing prices remain unknown. Token rates
+must retain their text/audio distinction; zero text-token prices do not make a
+duration- or character-billed request free. A binary speech response need not
+include measurable usage: retain a known estimate separately from actual usage,
+and keep actual cost unknown unless a trustworthy receipt establishes it.
+No cost is inferred from account-wide balance changes.
+
+## Ownership, persistence and cancellation
+
+Rust owns credentials and all gateway requests, using the selected apex builders
+and existing proxy transport. The renderer supplies bounded input/attachment IDs,
+never arbitrary source paths or provider URLs. Microphone permission is requested
+only after a recording gesture; tracks and buffers are released on cancel,
+navigation, account change and unmount.
+
+Use independent audio model preferences. Voice/format choices belong to a
+synthesis model, and never replace chat/image/video preferences. Saved values
+remain owner-scoped; restore fills only fields never saved on this machine.
+The settings writer preserves unknown local fields and refuses damaged files.
+Per-model voice/format choices are saved after a validated request, restored
+field by field, and fall back when a model no longer supports a saved value.
+Submitted events keep an open page current; late completions and older catalog
+reads cannot replace newer choices or unrelated freshly read preferences.
+
+Reuse the host's run admission, authority fences and per-conversation exclusion,
+without an artificial user/reply bubble, as manual compaction does. Persist an
+audio ledger operation before crossing the paid request boundary. Its model,
+input, price and IDs are frozen. A cancelled/unknown submitted request is never
+automatically replayed. Cached playback can continue independently; creating a
+new audio result requires an idle conversation in the first release.
+
+Persist transcription text, generated-audio references, parameters and billing
+facts with the operation. Original recordings are temporary by default; an
+explicit keep-original choice retains them as private history attachments.
+Before submission, the host keeps one temporary audio input in memory. A new
+successful import replaces it; discard, authority revocation and a 15-minute
+expiry release it. Concurrent validation is refused to bound decoder memory.
+Unsubmitted raw input is never written into chat drafts or backup archives.
+History/backup/cleanup must include every retained audio-operation reference.
+Audio bytes use the owner/generation-scoped private media protocol and bounded
+range reads; native save is atomic and rechecks authority after the picker.
+Audio model calls do not receive private standing chat instructions.
+
+## Speech synthesis implementation
+
+The speech preview accepts a completed reply or explicitly edited text. It keeps
+its model independent of chat and validates voice name/ID, language, format and
+optional tone instructions against the exact provider profile. Gemini language
+codes are cmn-CN/en-US/ja-JP; ElevenLabs uses zh/en/ja. Only WAV is enabled for
+Gemini, and MP3/WAV/Ogg Opus for ElevenLabs; raw PCM and SSE are not enabled.
+A changed reply preview loses its original-reply attribution before submission.
+
+Requests use one explicit operation, without automatic key refresh or retry.
+A submitted cancellation/unknown response remains unknown. Binary success does
+not establish actual usage: a character price can be shown as an estimate, while
+actual cost stays unknown. Standing chat instructions are never sent. Response
+status, MIME, bounded bytes and actual WAV/MP3 or Ogg Opus container structure
+are checked before atomic publication to the private attachment directory.
+Failed publication rolls back the file and retains an unknown operation receipt.
+Completed ledger outputs survive orphan cleanup and ordinary backup/restore.
+Stored results now expose explicit play/pause/stop and native save controls.
+Opening a result does not load or autoplay audio. The player releases its source
+on stop, result/account/generation change, inactive page and unmount. A zero or
+invalid decoder duration keeps the validated saved duration; missing duration
+stays unknown, and later positive decoder metadata updates it. Replaying,
+read failures and saving do not request synthesis or silently convert formats.
+The device probes codec support; unsupported output remains available to save.
+The scoped protocol allows bounded full/range reads up to 50 MiB and preserves
+no-store, regular-file, authority and atomic-save checks. Native WKWebView and
+live billing evidence, including its limits, are recorded in
+[audio acceptance](assistant-audio-acceptance.md).
+
+## Delivery and acceptance
+
+Implement capability metadata/preferences, bounded import, transcription,
+recording UI, synthesis, playback/storage, then stability work. Tests must cover
+both apexes, denial/cancel/stale-owner paths, uncertain charging, old backups and
+repeated playback without a request. UI covers zh/en/ja, both themes, keyboard
+focus and 900px layouts. The recording/ASR implementation uses a bundled AudioWorklet and 16 kHz mono
+PCM WAV. Auto, Chinese, English and Japanese are available; Chinese adds the
+fixed Simplified Chinese hint only on profiles that support a prompt. Source
+bytes are consumed once by the Rust request. By default they are discarded at
+completion. Keep original is an explicit, initially-off choice for this dialog;
+it atomically retains the original as a private 0600 ledger attachment only
+after submission. Pre-submission cancellation discards the recording; submitted
+cancellation remains unknown without replay and can retain the chosen original.
+A retention failure keeps the transcript and charge facts with a visible warning,
+without another transcription. Retained originals can be played/saved from ASR
+history through the same private protocol.
+The transcript and frozen usage/pricing/request ID remain in the separate
+operation ledger, accessible from Voice input and the conversation menu’s Audio
+history. The local history view needs no model catalog or Pi runtime, opens no
+audio source before a play gesture, and releases the previous player when
+switching saved records. Whole-conversation ZIP backups
+preserve retained originals, generated speech, text, frozen prices and unknown
+usage; restore keeps local saved choices and fills only missing preference fields.
+Unknown preference fields remain local and are excluded from portable archives.
+Independent audio operations belong to their source conversation. Forks copy
+native/message-linked history and exclude independent audio receipts/files;
+the source keeps its result and cost, avoiding a false branch association or
+billing the same request again.
+
+Native macOS microphone/play/save, approved small live samples and per-request
+billing reconciliation have separate [acceptance evidence](assistant-audio-acceptance.md).
+Windows native acceptance remains explicitly deferred.
+
+Sources checked October 30, 2026:
+
+- [Speech endpoint](https://ofox.ai/docs/api/openai/audio-speech)
+- [Transcription endpoint](https://ofox.ai/docs/api/openai/audio-transcriptions)
+- [Gemini TTS](https://ofox.ai/docs/develop/models/gemini-tts)
+- [ElevenLabs](https://ofox.ai/docs/develop/models/elevenlabs)
+- [GPT transcription](https://ofox.ai/docs/develop/models/gpt-transcribe)

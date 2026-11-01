@@ -19,18 +19,29 @@ export function fmtTokenCount(value: number): string {
   if (value >= 1e3) return `${(value / 1e3).toFixed(1)}K`;
   return String(value);
 }
-/** Bytes as magpie writes them: base 1000, one decimal only below 10. */
-export function fmtBytes(value: number): string {
-  for (const [scale, unit] of [
-    [1e9, "GB"],
-    [1e6, "MB"],
-    [1e3, "KB"],
+function bytesIn(base: number, value: number): string {
+  for (const [power, unit] of [
+    [3, "GB"],
+    [2, "MB"],
+    [1, "KB"],
   ] as const) {
+    const scale = base ** power;
     if (value < scale) continue;
     const n = value / scale;
     return `${n < 10 ? n.toFixed(1) : Math.round(n)} ${unit}`;
   }
   return `${value} B`;
+}
+/** Bytes as magpie writes them: base 1000, one decimal only below 10. */
+export function fmtBytes(value: number): string {
+  return bytesIn(1000, value);
+}
+/**
+ * Bytes in base 1024, as limits given in binary megabytes are written (the
+ * assistant's 25 MB per file): a file at the limit reads as the limit.
+ */
+export function fmtBinaryBytes(value: number): string {
+  return bytesIn(1024, value);
 }
 export function fmtCost(value?: number | null): string {
   if (value == null || !Number.isFinite(value)) return "—";

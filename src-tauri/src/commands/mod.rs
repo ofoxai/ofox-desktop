@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+mod assistant;
 mod auth;
 mod balance;
 mod catalog_lifecycle;
@@ -27,6 +28,8 @@ mod misc;
 mod model_fetch;
 mod model_profiles;
 pub(crate) mod model_selection;
+#[cfg(unix)]
+pub(crate) mod node_launcher;
 pub(crate) mod node_requirement;
 pub(crate) mod ofox_apex;
 pub(crate) mod ofox_api_keys;
@@ -60,6 +63,7 @@ mod webdav_sync;
 mod window;
 mod workspace;
 
+pub use assistant::*;
 pub use auth::*;
 pub use balance::*;
 pub use catalog_lifecycle::*;

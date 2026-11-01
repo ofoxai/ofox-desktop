@@ -89,6 +89,9 @@ pub enum Slot {
     ApiKey {
         tool: BindableTool,
     },
+    /// 内置助手专用的 ofox API key。跟工具 key 同一个 service，account 是
+    /// `assistant-key`——不会撞上任何工具名。
+    AssistantKey,
 }
 
 impl Slot {
@@ -96,7 +99,7 @@ impl Slot {
     fn service(self) -> &'static str {
         match self {
             Slot::AccessToken | Slot::RefreshToken => SERVICE_OAUTH,
-            Slot::ApiKey { .. } => SERVICE_APIKEY,
+            Slot::ApiKey { .. } | Slot::AssistantKey => SERVICE_APIKEY,
         }
     }
 
@@ -109,6 +112,7 @@ impl Slot {
             Slot::AccessToken => "access_token",
             Slot::RefreshToken => "refresh_token",
             Slot::ApiKey { tool } => tool.as_str(),
+            Slot::AssistantKey => "assistant-key",
         }
     }
 }
@@ -426,6 +430,26 @@ mod file_store_tests {
         assert_eq!(
             store.load(api_key(AppType::Codex)).unwrap().as_deref(),
             Some("codex-key")
+        );
+    }
+
+    /// 助手 key 跟工具 key 同在 apikey service 下：account 不能撞上任何工具名，
+    /// 否则会互相覆盖。
+    #[test]
+    fn assistant_key_is_an_api_key_entry_no_tool_can_collide_with() {
+        assert_eq!(Slot::AssistantKey.service(), SERVICE_APIKEY);
+        assert_eq!(Slot::AssistantKey.account(), "assistant-key");
+        assert!("assistant-key".parse::<BindableTool>().is_err());
+        assert!(serde_json::from_str::<BindableTool>("\"assistant-key\"").is_err());
+
+        let (store, _dir) = store();
+        store.save(api_key(AppType::Claude), "claude-key").unwrap();
+        store.save(Slot::AssistantKey, "assistant-value").unwrap();
+        store.clear(api_key(AppType::Claude)).unwrap();
+
+        assert_eq!(
+            store.load(Slot::AssistantKey).unwrap().as_deref(),
+            Some("assistant-value")
         );
     }
 

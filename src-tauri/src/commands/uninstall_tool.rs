@@ -1066,6 +1066,11 @@ pub(crate) async fn uninstall<E: Effects>(
     if let Err(error) = effects.execute(&plan.action, &log).await {
         emit_line(sink, STEP_REMOVE, &error);
     }
+    // A launcher left pointing at the removed install would still answer for the tool.
+    #[cfg(unix)]
+    if let Err(error) = super::node_launcher::prune(tool, &home) {
+        emit_line(sink, STEP_REMOVE, &error);
+    }
     // Ask the machine, not the exit code: a second copy elsewhere still counts.
     let (status, remaining_path) = match effects.inspect(tool).await {
         Ok(Inspection::NotInstalled) => (UninstallStatus::Removed, None),

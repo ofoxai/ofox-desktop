@@ -1,0 +1,315 @@
+{
+  "data": [
+    {
+      "type": "model",
+      "id": "anthropic/claude-haiku-5.5",
+      "display_name": "Anthropic: Claude Haiku 5.5",
+      "created_at": "2026-10-09T04:54:25Z",
+      "owned_by": "bedrock",
+      "canonical_slug": "claude-haiku-5-5",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "claude",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.0000001",
+        "completion": "0.0000005",
+        "input_cache_read": "0.00000001",
+        "input_cache_write_5m": "0.000000125",
+        "input_cache_write_1h": "0.0000002",
+        "web_search": "0.015"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "expiration_date": null,
+      "is_deprecated": false,
+      "aliases": [
+        "claude-haiku-5-5",
+        "claude-haiku-5.5",
+        "anthropic/claude-haiku-latest",
+        "claude-haiku-latest"
+      ]
+    },
+    {
+      "type": "model",
+      "id": "anthropic/claude-sonnet-5.5",
+      "display_name": "Anthropic: Claude Sonnet 5.5",
+      "created_at": "2026-09-29T01:41:19Z",
+      "owned_by": "bedrock",
+      "canonical_slug": "claude-sonnet-5-5",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "claude",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000002",
+        "completion": "0.00001",
+        "input_cache_read": "0.0000002",
+        "input_cache_write_5m": "0.0000025",
+        "input_cache_write_1h": "0.000004",
+        "web_search": "0.015"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "expiration_date": null,
+      "is_deprecated": false,
+      "aliases": [
+        "claude-sonnet-5-5",
+        "claude-sonnet-5.5",
+        "claude-sonnet-latest",
+        "anthropic/claude-sonnet-latest"
+      ]
+    },
+    {
+      "type": "model",
+      "id": "anthropic/claude-opus-5.5",
+      "display_name": "Anthropic: Claude Opus 5.5",
+      "created_at": "2026-09-22T18:08:33Z",
+      "owned_by": "bedrock",
+      "canonical_slug": "claude-opus-5-5",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "claude",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.000004",
+        "completion": "0.00002",
+        "input_cache_read": "0.0000002",
+        "input_cache_write_5m": "0.000005",
+        "input_cache_write_1h": "0.000008",
+        "web_search": "0.015"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "expiration_date": null,
+      "is_deprecated": false,
+      "aliases": [
+        "claude-opus-5-5",
+        "claude-opus-5.5",
+        "claude-opus-latest",
+        "anthropic/claude-opus-latest"
+      ]
+    },
+    {
+      "type": "model",
+      "id": "anthropic/claude-fable-5.1",
+      "display_name": "Anthropic: Claude Fable 5.1",
+      "created_at": "2026-09-02T10:51:04Z",
+      "owned_by": "bedrock",
+      "canonical_slug": "claude-fable-5-1",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text+image+file->text",
+        "input_modalities": [
+          "text",
+          "image",
+          "file"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "claude",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00001",
+        "completion": "0.00005",
+        "input_cache_read": "0.00000025",
+        "input_cache_write_5m": "0.0000125",
+        "input_cache_write_1h": "0.00002",
+        "web_search": "0.01"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "expiration_date": null,
+      "is_deprecated": false,
+      "aliases": [
+        "claude-fable-5-1",
+        "claude-fable-5-1-20260901",
+        "claude-fable-5.1",
+        "claude-fable-latest",
+        "anthropic/claude-fable-latest"
+      ]
+    },
+    {
+      "type": "model",
+      "id": "deepseek/deepseek-v4-flash-0423",
+      "display_name": "DeepSeek V4 Flash 0423",
+      "created_at": "2026-04-24T04:45:10Z",
+      "owned_by": "deepseek",
+      "canonical_slug": "deepseek-v4-flash-20260423",
+      "context_length": 1000000,
+      "architecture": {
+        "modality": "text->text",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "deepseek",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000019",
+        "completion": "0.00000051",
+        "input_cache_read": "0.000000028",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 1000000,
+        "max_completion_tokens": 384000,
+        "is_moderated": false
+      },
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format"
+      ],
+      "expiration_date": null,
+      "is_deprecated": false,
+      "aliases": [
+        "deepseek-v4-flash-0423",
+        "deepseek-v4-flash-20260423",
+        "deepseek-v4-flash-20260424"
+      ]
+    },
+    {
+      "type": "model",
+      "id": "openai/gpt-5.4-mini",
+      "display_name": "OpenAI: GPT-5.4 Mini",
+      "created_at": "2026-03-18T01:56:46Z",
+      "owned_by": "azure",
+      "canonical_slug": "gpt-5.4-mini-2026-03-17",
+      "context_length": 400000,
+      "architecture": {
+        "modality": "text+image->text",
+        "input_modalities": [
+          "text",
+          "image"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "pricing": {
+        "prompt": "0.00000075",
+        "completion": "0.0000045",
+        "input_cache_read": "0.000000075",
+        "output_image": "0.000032",
+        "web_search": "0.014"
+      },
+      "top_provider": {
+        "context_length": 400000,
+        "max_completion_tokens": 128000,
+        "is_moderated": false
+      },
+      "supported_parameters": [
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "tools",
+        "tool_choice",
+        "response_format",
+        "reasoning"
+      ],
+      "expiration_date": null,
+      "is_deprecated": false,
+      "aliases": [
+        "gpt-5.4-mini"
+      ]
+    }
+  ],
+  "has_more": false,
+  "first_id": "anthropic/claude-haiku-5.5",
+  "last_id": "openai/gpt-5.4-mini"
+}

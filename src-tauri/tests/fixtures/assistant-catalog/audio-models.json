@@ -1,0 +1,311 @@
+{
+  "data": [
+    {
+      "id": "elevenlabs/eleven_v4",
+      "name": "ElevenLabs Eleven v4",
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "provider_options"
+      ],
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "input_text_per_character": "0.00008"
+      }
+    },
+    {
+      "id": "elevenlabs/scribe_v2",
+      "name": "ElevenLabs Scribe v2",
+      "architecture": {
+        "modality": "audio->text",
+        "input_modalities": [
+          "audio"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/transcriptions"
+      ],
+      "supported_parameters": [
+        "file",
+        "language",
+        "response_format",
+        "provider_options"
+      ],
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "input_audio_per_second": "0.0000611111"
+      }
+    },
+    {
+      "id": "google/gemini-2.5-flash-lite-preview-tts",
+      "name": "Gemini 2.5 Flash Lite Preview TTS",
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "instructions"
+      ],
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.00001",
+        "output_audio": "0.00001"
+      }
+    },
+    {
+      "id": "google/gemini-2.5-flash-tts",
+      "name": "Gemini 2.5 Flash TTS",
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "instructions"
+      ],
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.00001",
+        "output_audio": "0.00001"
+      }
+    },
+    {
+      "id": "google/gemini-2.5-pro-tts",
+      "name": "Gemini 2.5 Pro TTS",
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "instructions"
+      ],
+      "pricing": {
+        "prompt": "0.000001",
+        "completion": "0.00002",
+        "output_audio": "0.00002"
+      }
+    },
+    {
+      "id": "google/gemini-3.8-flash-lite-tts",
+      "name": "Gemini 3.8 Flash-Lite TTS",
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "instructions"
+      ],
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.000006",
+        "output_audio": "0.000006"
+      }
+    },
+    {
+      "id": "google/gemini-3.8-flash-tts",
+      "name": "Gemini 3.8 Flash TTS",
+      "architecture": {
+        "modality": "text->audio",
+        "input_modalities": [
+          "text"
+        ],
+        "output_modalities": [
+          "audio"
+        ],
+        "tokenizer": "unknown",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/speech"
+      ],
+      "supported_parameters": [
+        "input",
+        "voice",
+        "response_format",
+        "speed",
+        "stream_format",
+        "language_code",
+        "instructions"
+      ],
+      "pricing": {
+        "prompt": "0.0000005",
+        "completion": "0.000009",
+        "output_audio": "0.000009"
+      }
+    },
+    {
+      "id": "openai/gpt-4o-mini-transcribe",
+      "name": "OpenAI: GPT 4o Mini Transcribe",
+      "architecture": {
+        "modality": "audio->text",
+        "input_modalities": [
+          "audio"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/transcriptions"
+      ],
+      "supported_parameters": [
+        "file",
+        "language",
+        "response_format"
+      ],
+      "pricing": {
+        "prompt": "0.00000125",
+        "completion": "0.000005",
+        "audio": "0.000003",
+        "web_search": "0.014"
+      }
+    },
+    {
+      "id": "openai/gpt-4o-transcribe-diarize",
+      "name": "OpenAI: GPT 4o Transcribe Diarize",
+      "architecture": {
+        "modality": "audio->text",
+        "input_modalities": [
+          "audio"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/transcriptions"
+      ],
+      "supported_parameters": [
+        "file",
+        "language",
+        "response_format"
+      ],
+      "pricing": {
+        "prompt": "0.0000025",
+        "completion": "0.00001",
+        "audio": "0.000006",
+        "web_search": "0.014"
+      }
+    },
+    {
+      "id": "openai/gpt-transcribe",
+      "name": "OpenAI: GPT Transcribe",
+      "architecture": {
+        "modality": "audio->text",
+        "input_modalities": [
+          "audio"
+        ],
+        "output_modalities": [
+          "text"
+        ],
+        "tokenizer": "gpt",
+        "instruct_type": null
+      },
+      "supported_endpoints": [
+        "/v1/audio/transcriptions"
+      ],
+      "supported_parameters": [
+        "file",
+        "language",
+        "response_format"
+      ],
+      "pricing": {
+        "prompt": "0",
+        "completion": "0",
+        "input_audio_per_second": "0.000075"
+      }
+    }
+  ]
+}

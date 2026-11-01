@@ -11,7 +11,7 @@ import { MenuSelect } from "@/components/ui/menu-select";
 import { SegmentedControl, SegmentedNav } from "@/components/ui/segmented";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
-import { useUsageOverview } from "@/hooks/useUsageOverview";
+import { accountIdentity, useUsageOverview } from "@/hooks/useUsageOverview";
 import {
   canRefreshUsageNow,
   useUsageVisibility,
@@ -46,6 +46,7 @@ import { formatUsageEstimate } from "@/lib/usageEstimate";
 import { formatCalendarDate } from "@/lib/calendarDate";
 import { UsageFilterToolbar, type UsageFilterChip } from "./UsageFilterToolbar";
 import { BalanceTrendCard } from "./BalanceTrendCard";
+import { ASSISTANT_USAGE_KEY, AssistantUsageCard } from "./AssistantUsageCard";
 import { UsageKpis } from "./UsageKpis";
 import { UsageBars } from "./UsageBars";
 import { UsageBreakdownList } from "./UsageBreakdownList";
@@ -394,6 +395,7 @@ export function UsagePage({
   }, [visible, interval]);
   const manualRefresh = () => {
     manualRequested.current = true;
+    void queryClient.invalidateQueries({ queryKey: ASSISTANT_USAGE_KEY });
     return coordinator.current?.request("manual") ?? Promise.resolve();
   };
   useShellRefresh("usage", manualRefresh);
@@ -851,6 +853,12 @@ export function UsagePage({
           spending={state.spending.data}
           recharge={() => open(ofoxWalletUrl(apex))}
         />
+        {account.user && (
+          <AssistantUsageCard
+            identity={accountIdentity(account.user, apex)}
+            enabled={visible && effectiveTab === "overview"}
+          />
+        )}
         <p className="pt-1 text-note font-medium text-ink-muted">
           {t("usageWorkbench.localHistory")}
         </p>

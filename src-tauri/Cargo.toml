@@ -1,7 +1,7 @@
 [package]
 name = "ofox-desktop"
 default-run = "ofox-desktop"
-version = "1.3.8"
+version = "1.4.0"
 description = "All-in-One AI Tool Manager - Ofox Desktop"
 authors = ["Jason Young"]
 license = "MIT"
@@ -46,7 +46,7 @@ dirs = "5.0"
 keyring = "4"
 toml = "0.8"
 toml_edit = "0.22"
-reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks"] }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream", "socks", "multipart"] }
 arboard = "3.6"
 flate2 = "1"
 brotli = "7"
@@ -76,6 +76,8 @@ libc = "0.2"
 rquickjs = { version = "0.8", features = ["array-buffer", "classes"] }
 thiserror = "2.0"
 anyhow = "1.0"
+# The assistant backup check (services/assistant/store/backup.rs, checked_entries)
+# mirrors zip 2.4.2's end-of-directory fallback; re-review it when upgrading zip.
 zip = "2.2"
 serde_yaml = "0.9"
 # Token-level tag checks use the same parser already pinned by serde_yaml.
@@ -83,6 +85,10 @@ unsafe-libyaml = "0.2.11"
 zstd = "0.13"
 tempfile = "3"
 url = "2.5"
+# Decodes the pasted file's name header (already in the lockfile through url).
+percent-encoding = "2.3"
+# Strict short-MP3 validation before transcription; other codecs stay disabled.
+symphonia = { version = "=0.6.1", default-features = false, features = ["mp3"] }
 auto-launch = "0.5"
 once_cell = "1.21.3"
 base64 = "0.22"
@@ -125,6 +131,8 @@ strip = "symbols"
 [dev-dependencies]
 serial_test = "3"
 tempfile = "3"
+# Paused clocks (`start_paused`) for tests of timeouts.
+tokio = { version = "1", features = ["test-util"] }
 # `/openapi/api-keys` 端点的客户端契约测试用——拦截 reqwest 请求、注入
 # 201/401/403/5xx 响应，验证 `ofox_api_keys::call_create_endpoint` 的错误分类。
 wiremock = "0.6"

@@ -260,6 +260,10 @@ async fn run_installer(
 
     let status = child.wait().await.map_err(|e| e.to_string())?;
     let code = status.code().unwrap_or(-1);
+    // npm 工具装在 fnm/nvm 的某个 Node 版本里时，写启动脚本（fizzy #1351）。
+    if code == 0 && super::tool_update::npm_package(&tool_id).is_some() {
+        super::node_launcher::reconcile(&tool_id).await;
+    }
 
     let _ = app.emit(
         "install-tool-done",
@@ -295,10 +299,10 @@ where
 ///   - 打包后 (.app)：脚本在 `<bundle>/Contents/Resources/_up_/scripts/installer/`
 ///   - dev 模式：脚本在 `<CARGO_MANIFEST_DIR>/../scripts/installer/`
 ///
-/// **`_up_` 前缀是必须的**：tauri.conf.json 里资源声明为
-/// `"../scripts/installer/**/*"`，Tauri 打包时会把路径里的 `..` 转义成字面
-/// 目录名 `_up_`（`tauri_utils::resources` 的 `resource_relpath` 规则），
-/// 所以 bundle 里的真实布局是 `Resources/_up_/scripts/...` 而**不是**
+/// **`_up_` 前缀是必须的**：tauri.conf.json 里资源映射为
+/// `"../scripts/installer/": "_up_/scripts/installer/"`，沿用 Tauri 列表写法
+/// 把路径里的 `..` 转义成字面目录名 `_up_` 的布局（`tauri_utils::resources` 的
+/// `resource_relpath` 规则），所以 bundle 里的真实布局是 `Resources/_up_/scripts/...` 而**不是**
 /// `Resources/scripts/...`。历史上这里只查了不带 `_up_` 的路径，导致正式版
 /// 点"安装"必定 Err("找不到 init.sh")，而前端 catch 只打 console —— 表现为
 /// 按钮点了完全没反应。不带 `_up_` 的候选仍保留，兼容将来资源声明改成不带

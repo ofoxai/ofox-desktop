@@ -1,0 +1,194 @@
+{
+  "background": false,
+  "completed_at": 1793092945,
+  "created_at": 1793092941,
+  "error": null,
+  "frequency_penalty": 0,
+  "id": "resp_0d1c9bd75d2ddddf006ae06d4d262881979c042301ddbfb38a::VSyTKGo3tnZfzc8iydXU7U_QoZbRSuqa78hjvzn0YCUBBN4_G3aYk4KffKXswZcJqrE",
+  "incomplete_details": null,
+  "instructions": null,
+  "max_output_tokens": 2000,
+  "max_tool_calls": null,
+  "metadata": {},
+  "model": "openai/gpt-5-nano",
+  "object": "response",
+  "output": [
+    {
+      "content": [],
+      "encrypted_content": null,
+      "id": "rs_0d1c9bd75d2ddddf006ae06d4d7bec81978ab9f3ca0cb423db::uC989JrfiWC1wPy_OUFtrmm-Q5XRv78Bq-lMnb6e6zxefcV0BC8GToq4HZq95-6bneE",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "action": {
+        "queries": [
+          "Tauri 2 latest stable release version",
+          "Tauri stable release version 2"
+        ],
+        "query": "Tauri 2 latest stable release version",
+        "sources": [
+          {
+            "type": "url",
+            "url": "https://v2.tauri.app/release/"
+          },
+          {
+            "type": "url",
+            "url": "https://v2.tauri.app/"
+          },
+          {
+            "type": "url",
+            "url": "https://v2.tauri.app/blog/tauri-20/"
+          },
+          {
+            "type": "url",
+            "url": "https://github.com/tauri-apps/tauri/releases"
+          },
+          {
+            "type": "url",
+            "url": "https://tauri.app/release/tauri/v2.11.5/"
+          },
+          {
+            "type": "url",
+            "url": "https://tleapps.com/version/tauri/tauri-2-11-5/"
+          },
+          {
+            "type": "url",
+            "url": "https://tauri.app/release/cli/"
+          },
+          {
+            "type": "url",
+            "url": "https://tauri.app/release/tauri/v2.0.0/"
+          },
+          {
+            "type": "url",
+            "url": "https://docs.rs/crate/tauri/latest/builds"
+          },
+          {
+            "type": "url",
+            "url": "https://github.com/tauri-apps/tauri"
+          },
+          {
+            "type": "url",
+            "url": "https://unixgaming.org/tauri-desktop-app-tutorial-2026/"
+          },
+          {
+            "type": "url",
+            "url": "https://rustify.rs/articles/rust-tauri-v2-desktop-app-tutorial-2026"
+          },
+          {
+            "type": "url",
+            "url": "https://releasealert.dev/github/tauri-apps/tauri"
+          },
+          {
+            "type": "url",
+            "url": "https://v2.tauri.org.cn/"
+          },
+          {
+            "type": "url",
+            "url": "https://en.wikipedia.org/wiki/Tauri_%28software_framework%29"
+          }
+        ],
+        "type": "search"
+      },
+      "id": "ws_0d1c9bd75d2ddddf006ae06d4db49c819791fb90fa6028ea5d",
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "content": [],
+      "encrypted_content": null,
+      "id": "rs_0d1c9bd75d2ddddf006ae06d4f535481978db34ed423e84b72::XfZNFPfhPcabmhW6jDX7Ty0yuQuLtUnjOVqjzRyad5la3CJiq2dIxUQ7uNQhlJo2fok",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "action": {
+        "type": "open_page",
+        "url": "https://github.com/tauri-apps/tauri/releases"
+      },
+      "id": "ws_0d1c9bd75d2ddddf006ae06d503a8481979353b545763428f7",
+      "status": "completed",
+      "type": "web_search_call"
+    },
+    {
+      "content": [],
+      "encrypted_content": null,
+      "id": "rs_0d1c9bd75d2ddddf006ae06d50a534819798285ef2787b6046::o4QGME7HwYo1zc6Vz8QjCSjHYqH-f4fFqkDC8FzC8XkNEFpKM4n4dZ4zX3mw5p0uGbk",
+      "summary": [],
+      "type": "reasoning"
+    },
+    {
+      "content": [
+        {
+          "annotations": [
+            {
+              "end_index": 74,
+              "start_index": 14,
+              "title": "Releases · tauri-apps/tauri - GitHub",
+              "type": "url_citation",
+              "url": "https://github.com/tauri-apps/tauri/releases"
+            }
+          ],
+          "logprobs": [],
+          "text": "Tauri 2.12.5. ([github.com](https://github.com/tauri-apps/tauri/releases))",
+          "type": "output_text"
+        }
+      ],
+      "id": "msg_0d1c9bd75d2ddddf006ae06d515e248197b3e62078a5ba5526",
+      "role": "assistant",
+      "status": "completed",
+      "type": "message"
+    }
+  ],
+  "parallel_tool_calls": true,
+  "presence_penalty": 0,
+  "previous_response_id": null,
+  "prompt_cache_key": null,
+  "prompt_cache_retention": "in_memory",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "low",
+    "mode": "standard"
+  },
+  "safety_identifier": null,
+  "service_tier": "default",
+  "status": "completed",
+  "store": true,
+  "temperature": 1,
+  "text": {
+    "format": {
+      "type": "text"
+    },
+    "verbosity": "medium"
+  },
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "search_content_types": ["text"],
+      "search_context_size": "low",
+      "type": "web_search",
+      "user_location": {
+        "country": "US",
+        "type": "approximate"
+      }
+    }
+  ],
+  "top_logprobs": 0,
+  "top_p": 1,
+  "truncation": "disabled",
+  "usage": {
+    "input_tokens": 9640,
+    "input_tokens_details": {
+      "cache_write_tokens": 0,
+      "cached_read_tokens": 4096,
+      "cached_tokens": 4096,
+      "cached_write_tokens": 0
+    },
+    "output_tokens": 333,
+    "output_tokens_details": {
+      "reasoning_tokens": 192
+    },
+    "total_tokens": 9973
+  }
+}
