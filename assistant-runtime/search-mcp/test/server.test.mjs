@@ -20,19 +20,29 @@ const BUNDLE = fileURLToPath(
   new URL("../dist/ofox-search-mcp.mjs", import.meta.url),
 );
 
-async function isolatedBundle(t) {
+async function isolatedBundle(t, beforeRemove = async () => {}) {
   await stat(BUNDLE).catch(() => {
     throw new Error("dist/ofox-search-mcp.mjs is missing: run `npm run build`");
   });
   const dir = await mkdtemp(path.join(tmpdir(), "ofox-search-mcp-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    await beforeRemove();
+    await rm(dir, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 50,
+    });
+  });
   const copy = path.join(dir, "ofox-search-mcp.mjs");
   await copyFile(BUNDLE, copy);
   return { dir, copy };
 }
 
 async function connect(t, env) {
-  const { dir, copy } = await isolatedBundle(t);
+  const client = new Client({ name: "bundle-test", version: "0.0.0" });
+  // Windows keeps a running child's working directory locked.
+  const { dir, copy } = await isolatedBundle(t, () => client.close());
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [copy],
@@ -42,9 +52,7 @@ async function connect(t, env) {
   });
   let stderr = "";
   transport.stderr.on("data", (chunk) => (stderr += chunk));
-  const client = new Client({ name: "bundle-test", version: "0.0.0" });
   await client.connect(transport);
-  t.after(() => client.close());
   return { client, stderr: () => stderr };
 }
 
@@ -218,6 +226,9 @@ test("the bundle sends web_search through the proxy named in its environment", a
       upstream.pipe(client);
       client.pipe(upstream);
     });
+    // Closing either side during teardown may reset the other on Windows.
+    client.on("error", () => upstream.destroy());
+    upstream.on("error", () => client.destroy());
     sockets.add(upstream);
   });
   proxy.listen(0, "127.0.0.1");

@@ -2441,7 +2441,10 @@ async function thinkingRun(t, name, input, extra = {}) {
   const result = await runtime.run({ ...params, model: input, ...extra });
   assert.equal(result.status, "completed", name);
   assert.equal(bodies.length, 1, name);
-  const dir = JSON.stringify(path.dirname(params.sessionFile)).slice(1, -1);
+  // Pi uses forward slashes in the prompt even on Windows.
+  const dir = JSON.stringify(
+    path.dirname(params.sessionFile).replaceAll("\\", "/"),
+  ).slice(1, -1);
   return {
     raw: bodies[0]
       .split(dir)
