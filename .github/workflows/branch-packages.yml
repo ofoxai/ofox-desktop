@@ -168,7 +168,7 @@ jobs:
           NODE
       - name: Upload branch installer
         id: upload
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: branch-packages-${{ matrix.platform }}-${{ github.sha }}
           path: dist-release/
