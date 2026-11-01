@@ -2208,7 +2208,6 @@ pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
 
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
