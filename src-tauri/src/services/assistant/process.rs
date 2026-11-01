@@ -220,6 +220,11 @@ pub(crate) mod windows_fixture {
                 .arg(&sentinel_ready)
                 .arg(&nonce)
                 .env_clear()
+                // Windows Node needs SystemRoot for CSPRNG initialization.
+                .env(
+                    "SystemRoot",
+                    std::env::var_os("SystemRoot").expect("Windows SystemRoot is available"),
+                )
                 .current_dir(&directory)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())

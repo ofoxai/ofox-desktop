@@ -5,7 +5,7 @@ $fixtureRepo = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $fixtureNode = Join-Path $fixtureRepo "assistant-runtime/resources/node/node.exe"
 $fixtureSource = Join-Path $fixtureRepo "src-tauri/tests/fixtures/assistant-process.mjs"
 
-function Invoke-FixtureProbe([string]$Role, [bool]$PreserveSystemRoot) {
+function Invoke-FixtureProbe([string]$Role) {
     $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ("ofox-process-" + [guid]::NewGuid() + " 空 格")
     [IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
     $fixtureScript = Join-Path $fixtureRoot "process fixture.mjs"
@@ -25,9 +25,10 @@ function Invoke-FixtureProbe([string]$Role, [bool]$PreserveSystemRoot) {
         $fixtureInfo.RedirectStandardOutput = $true
         $fixtureInfo.RedirectStandardError = $true
         $fixtureInfo.Environment.Clear()
-        if ($PreserveSystemRoot) {
-            $fixtureInfo.Environment["SystemRoot"] = [Environment]::GetEnvironmentVariable("SystemRoot")
-        }
+        # Match the Rust sentinel: retain only this non-secret OS requirement.
+        $fixtureSystemRoot = [Environment]::GetEnvironmentVariable("SystemRoot")
+        if ([string]::IsNullOrEmpty($fixtureSystemRoot)) { throw "Windows SystemRoot is unavailable" }
+        $fixtureInfo.Environment["SystemRoot"] = $fixtureSystemRoot
         foreach ($fixtureArg in @($fixtureScript, $Role, $fixtureReady, $fixtureNonce)) {
             $fixtureInfo.ArgumentList.Add($fixtureArg)
         }
@@ -62,7 +63,7 @@ function Invoke-FixtureProbe([string]$Role, [bool]$PreserveSystemRoot) {
         return [pscustomobject]@{
             Role = $Role
             Ready = $fixtureOk
-            PreserveSystemRoot = $PreserveSystemRoot
+            PreserveSystemRoot = $true
             ExitCode = $fixtureProcess.ExitCode
             Stderr = $fixtureError.GetAwaiter().GetResult()
             Stdout = $fixtureOutput.GetAwaiter().GetResult()
@@ -79,12 +80,9 @@ function Invoke-FixtureProbe([string]$Role, [bool]$PreserveSystemRoot) {
 }
 
 foreach ($fixtureRole in @("sentinel", "parent")) {
-    $fixtureResult = Invoke-FixtureProbe $fixtureRole $false
+    $fixtureResult = Invoke-FixtureProbe $fixtureRole
     $fixtureResult | ConvertTo-Json -Compress | Write-Host
     if (-not $fixtureResult.Ready) {
-        # Compare one essential OS variable without inheriting any credentials.
-        $fixtureControl = Invoke-FixtureProbe $fixtureRole $true
-        $fixtureControl | ConvertTo-Json -Compress | Write-Host
-        throw "The current Rust process fixture failed startup; inspect the exit code and stderr above."
+        throw "The Rust process fixture failed startup; inspect the exit code and stderr above."
     }
 }
