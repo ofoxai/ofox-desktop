@@ -73,7 +73,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-aarch64
-            os: macos-14
+            os: macos-15
             r2_prefix: release/mac/arm
             ext: dmg
           # Windows：暂不签名的 NSIS 安装包（按用户安装，签名等证书到位后再加）
@@ -382,7 +382,7 @@ jobs:
     name: Verify signed and notarized artifacts (including dry runs)
     needs: build
     environment: release
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
@@ -425,7 +425,7 @@ jobs:
     needs: [build, verify-artifacts]
     environment: release
     # Only publish the exact bytes approved by verify-artifacts; never re-sign/repack here.
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     permissions:
       contents: write # 创建 GitHub Release、上传附件

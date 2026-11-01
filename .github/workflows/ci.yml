@@ -121,7 +121,8 @@ jobs:
 
   backend-macos:
     name: Backend Checks (macOS)
-    runs-on: macos-14
+    # macOS 14 runners retire on 2026-11-02; macos-15 retains Apple Silicon.
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
