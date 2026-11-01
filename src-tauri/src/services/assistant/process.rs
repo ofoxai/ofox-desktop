@@ -209,29 +209,7 @@ pub(crate) mod windows_fixture {
             let script = directory.join("process fixture.mjs");
             std::fs::write(
                 &script,
-                r#"
-import { spawn } from 'node:child_process';
-import { writeFileSync, renameSync } from 'node:fs';
-const [role, ready, nonce] = process.argv.slice(2);
-const publish = data => {
-  writeFileSync(ready + '.partial', JSON.stringify({ nonce, ...data }));
-  renameSync(ready + '.partial', ready);
-};
-setInterval(() => {}, 1000);
-if (role === 'sentinel') publish({ role, pid: process.pid });
-else if (role === 'child') process.send({ nonce, pid: process.pid, parent: process.ppid });
-else if (role === 'parent') {
-  const child = spawn(process.execPath, [import.meta.filename, 'child', ready, nonce], {
-    windowsHide: true, stdio: ['ignore', 'ignore', 'ignore', 'ipc']
-  });
-  child.once('error', () => process.exit(2));
-  child.once('message', message => {
-    if (message.nonce !== nonce || message.pid !== child.pid || message.parent !== process.pid)
-      process.exit(3);
-    publish({ role, parent: process.pid, child: child.pid });
-  });
-} else process.exit(4);
-"#,
+                include_str!("../../../tests/fixtures/assistant-process.mjs"),
             )
             .unwrap();
             let nonce = uuid::Uuid::new_v4().to_string();
@@ -278,7 +256,8 @@ else if (role === 'parent') {
                 }
                 assert!(
                     std::time::Instant::now() < end,
-                    "fixture never became ready"
+                    "fixture never became ready: {}",
+                    path.display()
                 );
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -295,18 +274,37 @@ else if (role === 'parent') {
                 .current_dir(&self.directory);
             command
         }
-        pub(crate) fn observe_owned(&mut self) {
-            let record = self.read_ready(&self.ready);
-            assert_eq!(record["role"], "parent");
-            let parent = u32::try_from(record["parent"].as_u64().unwrap()).unwrap();
-            let child = u32::try_from(record["child"].as_u64().unwrap()).unwrap();
-            assert!(parent > 1 && child > 1);
-            assert_ne!(parent, child);
-            assert_ne!(parent, self.sentinel.id());
-            assert_ne!(child, self.sentinel.id());
-            self.owned.push(OwnedProcess::open(parent));
-            self.owned.push(OwnedProcess::open(child));
-            self.assert_owned_alive();
+        pub(crate) async fn observe_owned(&mut self, managed: &mut Child) {
+            let observed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let record = self.read_ready(&self.ready);
+                assert_eq!(record["role"], "parent");
+                let parent = u32::try_from(record["parent"].as_u64().unwrap()).unwrap();
+                let child = u32::try_from(record["child"].as_u64().unwrap()).unwrap();
+                assert!(parent > 1 && child > 1);
+                assert_ne!(parent, child);
+                assert_ne!(parent, self.sentinel.id());
+                assert_ne!(child, self.sentinel.id());
+                self.owned.push(OwnedProcess::open(parent));
+                self.owned.push(OwnedProcess::open(child));
+                self.assert_owned_alive();
+            }));
+            if let Err(failure) = observed {
+                // Preserve the failure while exposing startup errors from the
+                // owned fixture instead of reporting only a readiness timeout.
+                managed.stop().await;
+                if let Some(stderr) = managed.take_stderr() {
+                    if let Ok(Ok(bytes)) =
+                        tokio::time::timeout(Duration::from_secs(1), bounded_output(stderr, 8192))
+                            .await
+                    {
+                        eprintln!(
+                            "Managed fixture stderr: {}",
+                            String::from_utf8_lossy(&bytes)
+                        );
+                    }
+                }
+                std::panic::resume_unwind(failure);
+            }
         }
         pub(crate) fn assert_owned_alive(&mut self) {
             assert_eq!(self.owned.len(), 2);
@@ -496,7 +494,7 @@ mod tests {
         let sandbox = crate::test_sandbox::sandbox();
         let mut fixture = windows_fixture::Fixture::new(sandbox.home());
         let mut child = Child::spawn(fixture.command()).unwrap();
-        fixture.observe_owned();
+        fixture.observe_owned(&mut child).await;
         tokio::time::timeout(Duration::from_secs(10), child.stop())
             .await
             .unwrap();
@@ -515,7 +513,7 @@ mod tests {
         let mut child = Child::spawn(fixture.command()).unwrap();
         // Readiness and live native handles first, so "never started" cannot
         // pass for "stopped".
-        fixture.observe_owned();
+        fixture.observe_owned(&mut child).await;
         // The host's deadline passes while the tree still runs, then it stops it.
         assert!(
             tokio::time::timeout(Duration::from_millis(500), child.child.wait())
@@ -536,8 +534,8 @@ mod tests {
     async fn windows_dropping_managed_child_stops_its_owned_tree() {
         let sandbox = crate::test_sandbox::sandbox();
         let mut fixture = windows_fixture::Fixture::new(sandbox.home());
-        let child = Child::spawn(fixture.command()).unwrap();
-        fixture.observe_owned();
+        let mut child = Child::spawn(fixture.command()).unwrap();
+        fixture.observe_owned(&mut child).await;
         drop(child);
         fixture.assert_owned_stopped();
     }

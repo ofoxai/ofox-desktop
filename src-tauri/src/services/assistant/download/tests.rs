@@ -375,6 +375,7 @@ async fn download_failed_status_redirect_encoding_size_and_invalid_video_leave_n
 }
 #[tokio::test]
 async fn download_cancel_drops_the_open_partial_file_and_owned_connection() {
+    const FIRST_CHUNK: &[u8] = b"\0\0\0\x18ftypmp42fixture";
     let (tls, acceptor) = fixture_tls();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -382,7 +383,7 @@ async fn download_cancel_drops_the_open_partial_file_and_owned_connection() {
         let (tcp, _) = listener.accept().await.unwrap();
         let mut io = acceptor.accept(tcp).await.unwrap();
         let _ = headers(&mut io).await;
-        let body = b"\0\0\0\x18ftypmp42fixture";
+        let body = FIRST_CHUNK;
         io.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
             .await
             .unwrap();
@@ -417,7 +418,12 @@ async fn download_cancel_drops_the_open_partial_file_and_owned_connection() {
             if dir.exists()
                 && std::fs::read_dir(&dir)
                     .unwrap()
-                    .any(|f| f.unwrap().metadata().unwrap().len() > 0)
+                    // Windows directory-entry metadata may lag the open writer.
+                    // Observe the actual payload before cancelling the download.
+                    .any(|f| {
+                        std::fs::read(f.unwrap().path())
+                            .is_ok_and(|bytes| bytes.as_slice() == FIRST_CHUNK)
+                    })
             {
                 break;
             }
@@ -427,7 +433,7 @@ async fn download_cancel_drops_the_open_partial_file_and_owned_connection() {
     .await
     .unwrap();
     task.abort();
-    let _ = task.await;
+    assert!(task.await.unwrap_err().is_cancelled());
     tokio::time::timeout(std::time::Duration::from_secs(3), async {
         while std::fs::read_dir(&dir).unwrap().next().is_some() {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
