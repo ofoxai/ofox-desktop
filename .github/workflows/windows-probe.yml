@@ -39,6 +39,14 @@ jobs:
         with:
           node-version: "22.23.4"
 
+      # Match the release hook's Git Bash PATH before any warm Node stamp can
+      # hide a ZIP extraction failure behind a successful PowerShell prepare.
+      - name: Prepare bundled Node from Git Bash
+        shell: bash
+        run: |
+          test ! -e assistant-runtime/resources/node/source.json
+          node scripts/assistant-prepare.mjs --node-only
+
       # pwsh fails a step only on its last native exit code: one command per step.
       - name: Install isolated assistant dependencies
         run: node scripts/assistant-prepare.mjs --install-only

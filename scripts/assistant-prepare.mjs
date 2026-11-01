@@ -91,7 +91,18 @@ async function prepareNode() {
   const extraction = path.join(cache, `extract-${target}`);
   await rm(extraction, { recursive: true, force: true });
   await mkdir(extraction, { recursive: true });
-  execFileSync("tar", ["-xf", archive, "-C", extraction], { stdio: "inherit" });
+  let tar = "tar";
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+    if (!systemRoot || !path.win32.isAbsolute(systemRoot))
+      throw new Error(
+        "An absolute Windows SystemRoot is required to extract bundled Node",
+      );
+    // Git Bash prepends GNU tar, which treats drive-letter paths as remote
+    // hosts and cannot unpack ZIPs. Windows' bsdtar supports the Node archive.
+    tar = path.win32.join(systemRoot, "System32", "tar.exe");
+  }
+  execFileSync(tar, ["-xf", archive, "-C", extraction], { stdio: "inherit" });
   const prefix = `node-v${manifest.version}-${process.platform === "win32" ? "win" : process.platform}-${process.arch}`;
   await mkdir(nodeDirectory, { recursive: true });
   await copyFile(path.join(extraction, prefix, download.executable), node);

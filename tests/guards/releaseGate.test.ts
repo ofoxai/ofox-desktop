@@ -3,6 +3,41 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 
 describe("release verification", () => {
+  it.each(["ci.yml", "branch-packages.yml", "release.yml"])(
+    "%s uses supported Apple Silicon runners for every macOS job",
+    (filename) => {
+      // macOS 14 brownouts cancel jobs before startup; the image retires on
+      // 2026-11-02: https://github.com/actions/runner-images/issues/13518.
+      const workflow = readFileSync(`.github/workflows/${filename}`, "utf8");
+      const runners = [
+        ...workflow.matchAll(/(?:runs-on|os): (macos-[\w-]+)/g),
+      ].map((match) => match[1]);
+      expect(runners.length).toBeGreaterThan(0);
+      expect(new Set(runners)).toEqual(new Set(["macos-15"]));
+    },
+  );
+
+  it("checks cold Windows Node extraction under Git Bash before expensive native checks", () => {
+    const workflow = readFileSync(
+      ".github/workflows/windows-probe.yml",
+      "utf8",
+    );
+    const prepare = workflow.indexOf(
+      "name: Prepare bundled Node from Git Bash",
+    );
+    const install = workflow.indexOf(
+      "name: Install isolated assistant dependencies",
+    );
+    expect(prepare).toBeGreaterThan(-1);
+    expect(prepare).toBeLessThan(install);
+    const step = workflow.slice(prepare, install);
+    expect(step).toContain("shell: bash");
+    expect(step).toContain(
+      "test ! -e assistant-runtime/resources/node/source.json",
+    );
+    expect(step).toContain("node scripts/assistant-prepare.mjs --node-only");
+  });
+
   it.skipIf(process.platform === "win32")(
     "preserves existing macOS keychain paths containing spaces",
     () => {
