@@ -1,7 +1,8 @@
 # Assistant audio acceptance
 
 Dates: October 31–November 1, 2026. Scope: Fizzy #1364, audio and stability changes after
-`42616e3d`, with application code through `bcff8fd9`. This records macOS QA
+`42616e3d`, with runtime changes through `bcff8fd9` and the subsequent macOS
+microphone packaging correction described below. This records macOS QA
 evidence, not a Windows or every-provider certification. The approved native
 audio, billing, persistence and live video-download checks are complete.
 
@@ -98,9 +99,18 @@ than an account-balance difference. No additional audio or video generation was
 submitted. These live checks do not certify every real proxy configuration;
 the direct/proxy variants retain their local TLS and regression coverage.
 
+## Hardened macOS packaging
+
+Developer ID builds explicitly retain Hardened Runtime and declare its audio-input
+entitlement in `Entitlements.plist`, alongside the localized microphone purpose.
+The packaging regression requires both settings; a purpose string alone does not
+declare this resource access. System permission is still requested only after a
+recording gesture. See [Apple's audio-input entitlement](https://developer.apple.com/documentation/bundleresources/entitlements/com.apple.security.device.audio-input).
+This check does not substitute for microphone testing of the final signed artifact.
+
 ## Gates and execution limits
 
-Final code gates passed: 2,714 frontend tests in 220 files; 3,847 Rust tests
+Final gates after the packaging correction passed: 2,715 frontend tests in 220 files; 3,847 Rust tests
 passed with 16 ignored, plus all integration suites; runtime 216 and search 85.
 Typecheck, Prettier, renderer build, rustfmt and all-target Clippy with warnings
 denied passed. Fixes had failing regression tests before implementation.
