@@ -827,6 +827,19 @@ mod tests {
     }
 
     #[test]
+    fn journal_key_uses_a_dedicated_build_isolated_service() {
+        let expected = if cfg!(debug_assertions) {
+            "ai.ofox.desktop.dev.assistant-journal"
+        } else {
+            "ai.ofox.desktop.assistant-journal"
+        };
+        assert_eq!(Slot::AssistantJournalKey.service(), expected);
+        assert_ne!(Slot::AssistantJournalKey.service(), SERVICE_OAUTH);
+        assert_ne!(Slot::AssistantJournalKey.service(), SERVICE_APIKEY);
+        assert_eq!(Slot::AssistantJournalKey.account(), "snapshot-encryption");
+    }
+
+    #[test]
     fn slot_account_uses_tool_slug_for_api_key() {
         // account 字段必须跟 AppType slug 一致——`security find-generic-password`
         // 排障时这是用户能看到的字段。

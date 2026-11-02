@@ -45,6 +45,39 @@ pub fn read_only(command: &str, powershell: bool) -> bool {
     }
 }
 
+/// Explicit install/update/removal syntax always gets individual approval,
+/// including when nested in a quoted shell command. This is not a sandbox or
+/// a claim to infer the effects of arbitrary programs.
+pub fn irreversible(command: &str) -> bool {
+    let words: Vec<_> = command
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    words
+        .iter()
+        .any(|w| matches!(w.as_str(), "install" | "uninstall" | "upgrade" | "update"))
+        || words.windows(2).any(|w| {
+            matches!(
+                w[0].as_str(),
+                "npm" | "pnpm" | "yarn" | "pip" | "pip3" | "brew" | "winget" | "scoop" | "choco"
+            ) && matches!(w[1].as_str(), "i" | "add" | "remove" | "rm")
+        })
+}
+
+/// Block direct attempts to read protected stores even in FullAccess. Arbitrary
+/// programs still run with the user's OS rights; this is intentionally not a sandbox.
+pub fn forbidden(command: &str) -> bool {
+    command
+        .split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ';' | '|' | '&'))
+        .any(|token| {
+            matches!(token, "security" | "secret-tool" | "cmdkey" | "cmdkey.exe")
+                || (!token.starts_with("https://")
+                    && !token.starts_with("http://")
+                    && super::scope::sensitive_path(token))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,37 +160,4 @@ mod tests {
             assert!(!read_only(command, true), "{command}");
         }
     }
-}
-
-/// Explicit install/update/removal syntax always gets individual approval,
-/// including when nested in a quoted shell command. This is not a sandbox or
-/// a claim to infer the effects of arbitrary programs.
-pub fn irreversible(command: &str) -> bool {
-    let words: Vec<_> = command
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
-    words
-        .iter()
-        .any(|w| matches!(w.as_str(), "install" | "uninstall" | "upgrade" | "update"))
-        || words.windows(2).any(|w| {
-            matches!(
-                w[0].as_str(),
-                "npm" | "pnpm" | "yarn" | "pip" | "pip3" | "brew" | "winget" | "scoop" | "choco"
-            ) && matches!(w[1].as_str(), "i" | "add" | "remove" | "rm")
-        })
-}
-
-/// Block direct attempts to read protected stores even in FullAccess. Arbitrary
-/// programs still run with the user's OS rights; this is intentionally not a sandbox.
-pub fn forbidden(command: &str) -> bool {
-    command
-        .split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | ';' | '|' | '&'))
-        .any(|token| {
-            matches!(token, "security" | "secret-tool" | "cmdkey" | "cmdkey.exe")
-                || (!token.starts_with("https://")
-                    && !token.starts_with("http://")
-                    && super::scope::sensitive_path(token))
-        })
 }

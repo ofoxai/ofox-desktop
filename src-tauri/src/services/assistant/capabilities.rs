@@ -50,9 +50,9 @@ pub fn local_config() -> Definition {
             max_tool_calls: 60,
             completion_retries: 2,
         },
-        // Product configuration placeholder; never request a nonexistent model.
-        recommended_model: "RECOMMENDED_LOCAL_CONFIG_MODEL",
-        suitable_models: &[],
+        // User-selected model, using the canonical ID in both regional catalogs.
+        recommended_model: "openai/gpt-6.1-sol",
+        suitable_models: &["openai/gpt-6.1-sol"],
         skill: "skills/local-config/SKILL.md",
     }
 }

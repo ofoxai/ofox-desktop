@@ -178,3 +178,13 @@ macOS 另有默认忽略的真实 fnm 验收测试
 `--ignored --nocapture` 运行。测试复制两个 Node 和 OpenCode 到临时 HOME，
 复现问题文件夹切换 Node 后找不到工具，并验证四档权限、修复、原文件夹验证和重启还原；
 它不安装工具，不修改原有 fnm 目录。
+
+原生凭据库验收由 Windows 检查脚本单独执行（不包含在默认忽略测试中）：
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib os_keychain_restores_encrypted_snapshot_in_a_new_process -- --ignored --nocapture
+```
+
+测试用独立 Credential Manager 条目，让两个独立进程分别写入快照和读取密钥还原，
+结束后删除测试条目。macOS 同名测试显式创建临时钥匙串，不依赖临时 HOME 的默认钥匙串，
+不读取或修改应用已有密钥；生产 debug/prod 服务名的隔离由另一个单元测试约束。

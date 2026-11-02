@@ -102,7 +102,7 @@ export class LocalTask {
     const key = JSON.stringify([args.tool, folder]);
     if (name === "diagnose_in_folder" && !this.targets.has(key))
       this.targets.set(key, { tool: args.tool, folder, verified: false });
-    if (result.changed === true) {
+    if (result.changed === true || result.requiresVerification === true) {
       this.changed = true;
       for (const target of this.targets.values()) target.verified = false;
     }

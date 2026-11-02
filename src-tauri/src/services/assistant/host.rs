@@ -1696,7 +1696,10 @@ impl AssistantHost {
                 let result = self.dispatch_tool(control, &value["params"]).await;
                 let reply = frame(&match result {
                     Ok(result) => json!({"id":value["id"],"result":result}),
-                    Err(code) => json!({"id":value["id"],"error":{"code":code,"message":code}}),
+                    Err(code) => {
+                        let code = local::tool_failure(&code, &self.known_keys());
+                        json!({"id":value["id"],"error":{"code":code,"message":code}})
+                    }
                 })?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {

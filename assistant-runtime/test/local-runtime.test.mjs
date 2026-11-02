@@ -247,6 +247,31 @@ test("a partially failed repair still requires verification and never completes 
   assert.equal(f.requests.length, 5);
 });
 
+test("a failed shell repair cannot bypass the original-folder verification gate", async (t) => {
+  const shell = process.platform === "win32" ? "powershell" : "bash";
+  const f = await fixture(
+    t,
+    [
+      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
+      () => call(shell, { command: "repair", folder: "/problem" }),
+      reply,
+      reply,
+      reply,
+    ],
+    (name, args) =>
+      name === shell
+        ? {
+            output: "repair partially failed",
+            exitCode: 1,
+            requiresVerification: true,
+          }
+        : { folder: args.folder, verified: false },
+  );
+  const result = await f.run();
+  assert.equal(result.errorCode, "assistant_verification_required");
+  assert.equal(f.requests.length, 5);
+});
+
 for (const [name, usage] of [
   [
     "unknown cache pricing",

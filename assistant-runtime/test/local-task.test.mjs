@@ -96,6 +96,21 @@ test("plans cap steps, Unicode length, status and one active step", () => {
     assert.throws(() => validatePlan(steps));
 });
 
+test("a host-reported command side effect invalidates earlier folder verification", () => {
+  const task = new LocalTask(limits);
+  const target = { tool: "codex", folder: "/problem" };
+  task.observe("diagnose_in_folder", target, { verified: false });
+  task.observe("verify_in_folder", target, { verified: true });
+  task.observe(
+    "bash",
+    { command: "repair", folder: "/problem" },
+    { requiresVerification: true },
+  );
+  assert.equal(task.needsVerification, true);
+  task.observe("verify_in_folder", target, { verified: true });
+  assert.equal(task.needsVerification, false);
+});
+
 test("paid search contributes to the same budget and missing prices fail closed", () => {
   const task = new LocalTask(limits);
   task.addSearchUsage(

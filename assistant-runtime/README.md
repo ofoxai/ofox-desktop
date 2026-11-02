@@ -664,7 +664,10 @@ prices fail closed. The budget is checked between requests: an already-issued
 provider request can exceed $1, so this is not an exact provider billing cap.
 A successful host mutation or a failed operation with recorded partial changes
 invalidates prior verification. A failure to record the mutation outcome blocks
-automatic retries as an unknown outcome. Completion requires
+automatic retries as an unknown outcome. Verification is required after
+arbitrary shell commands too: Rust marks commands outside the
+read-only whitelist as possibly changing configuration, even on a nonzero exit.
+It does not claim that those arbitrary side effects are journaled. Completion requires
 `verify_in_folder` succeeding after the last mutation in every folder originally
 diagnosed, for the same tool. Up to two hidden custom-message continuations ask
 for verification; unresolved verification ends with a stable error. Assistant
@@ -672,8 +675,9 @@ prose never satisfies the gate. Hidden continuations are not user messages.
 
 Only the user's toggle or tool-page entry enables the capability. Ordinary chat
 can render `[[enable_local_config]]` as a user-operated button. The recommended
-model and suitable-model allowlist live in Rust's capability definition; the
-placeholder is never sent as a model ID. Until configured, the UI retains the
-current model and explains why. Permission modes, approvals and folder grants
+model and suitable-model allowlist live in Rust's capability definition. Both
+currently select `openai/gpt-6.1-sol`, the canonical catalog ID of the chosen
+`gpt-6.1-sol` alias. If the model is unavailable, the UI retains the current
+model and explains why. Permission modes, approvals and folder grants
 are host memory only. Session details expose the current permission for display
 without writing it into session files, forks or backups.

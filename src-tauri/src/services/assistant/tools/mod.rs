@@ -16,3 +16,6 @@ pub mod transaction;
 
 #[cfg(all(test, target_os = "macos"))]
 mod acceptance;
+
+#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+mod keychain_acceptance;

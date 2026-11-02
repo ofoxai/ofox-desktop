@@ -134,6 +134,7 @@ try {
         $bypass = if ($existingBypass) { "$existingBypass,127.0.0.1,localhost,::1" } else { "127.0.0.1,localhost,::1" }
         [Environment]::SetEnvironmentVariable("NO_PROXY", $bypass, "Process")
         Invoke-VerificationStep "windows-rust-tests" $cargo @("test", "--manifest-path", "src-tauri/Cargo.toml", "--", "--test-threads=1")
+        Invoke-VerificationStep "assistant-native-keychain" $cargo @("test", "--manifest-path", "src-tauri/Cargo.toml", "--lib", "os_keychain_restores_encrypted_snapshot_in_a_new_process", "--", "--ignored", "--nocapture")
     } finally {
         foreach ($name in $savedEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")

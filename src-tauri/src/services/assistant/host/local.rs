@@ -30,6 +30,13 @@ type CallResult = (String, Option<Result<Value, String>>);
 #[derive(Default)]
 pub(super) struct Calls(pub Mutex<HashMap<String, CallResult>>);
 
+pub(super) fn tool_failure(message: &str, known_keys: &[String]) -> String {
+    if message.contains("-----BEGIN ") && message.contains("PRIVATE KEY-----") {
+        return "assistant_local_unavailable".into();
+    }
+    scrub_secrets(&crate::redact::scrub(message), known_keys)
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ApprovalRequest {
@@ -696,5 +703,25 @@ impl AssistantHost {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn tool_failure_redacts_credentials_before_crossing_the_runtime_boundary() {
+        let known = "known-tool-credential-do-not-forward".to_string();
+        let message = format!("writer failed: {known}; api_key=third-party-canary");
+        let safe = super::tool_failure(&message, std::slice::from_ref(&known));
+        assert!(!safe.contains(&known));
+        assert!(!safe.contains("third-party-canary"));
+        assert_eq!(
+            super::tool_failure("assistant_restore_conflict", &[]),
+            "assistant_restore_conflict"
+        );
+        assert_eq!(
+            super::tool_failure("-----BEGIN RSA PRIVATE KEY----- canary", &[]),
+            "assistant_local_unavailable"
+        );
     }
 }

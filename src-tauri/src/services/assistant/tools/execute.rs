@@ -70,7 +70,10 @@ pub async fn run(command: &str, folder: &Path, home: &Path, timeout: u64) -> Res
             }
         }
         Ok::<_, String>(
-            json!({"output":output,"exitCode":status.code(),"truncated":output.len()<text.len()||out.len()==24576||err.len()==24576}),
+            json!({"output":output,"exitCode":status.code(),"truncated":output.len()<text.len()||out.len()==24576||err.len()==24576,
+                // Arbitrary commands can change configuration even when they
+                // exit unsuccessfully. Do not let them bypass the folder gate.
+                "requiresVerification":!super::commands::read_only(command,cfg!(windows))}),
         )
     };
     match tokio::time::timeout(Duration::from_secs(timeout.clamp(1, 600)), operation).await {
@@ -85,6 +88,16 @@ pub async fn run(command: &str, folder: &Path, home: &Path, timeout: u64) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn only_read_only_commands_can_preserve_previous_verification() {
+        let root = tempfile::tempdir().unwrap();
+        let read = if cfg!(windows) { "Get-Location" } else { "pwd" };
+        let result = run(read, root.path(), root.path(), 20).await.unwrap();
+        assert_eq!(result["requiresVerification"], false);
+        let result = run("exit 1", root.path(), root.path(), 20).await.unwrap();
+        assert_eq!(result["exitCode"], 1);
+        assert_eq!(result["requiresVerification"], true);
+    }
     #[cfg(windows)]
     #[tokio::test]
     async fn powershell_execution_uses_unicode_folder_and_redacts_bounded_output() {
@@ -94,6 +107,7 @@ mod tests {
             .unwrap();
         let result=run("Get-Location | Select-Object -ExpandProperty Path; Write-Output '中文'; Write-Output 'api_key=do-not-return-this'; Write-Output ('x' * 200000)",root.path(),root.path(),20).await.unwrap();
         let output = result["output"].as_str().unwrap();
+        assert!(output.contains(root.path().to_str().unwrap()));
         assert!(output.contains("中文"));
         assert!(!output.contains("do-not-return-this"));
         assert!(output.len() <= 32768);

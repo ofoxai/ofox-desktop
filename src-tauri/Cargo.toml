@@ -140,3 +140,6 @@ tokio = { version = "1", features = ["test-util"] }
 # `/openapi/api-keys` 端点的客户端契约测试用——拦截 reqwest 请求、注入
 # 201/401/403/5xx 响应，验证 `ofox_api_keys::call_create_endpoint` 的错误分类。
 wiremock = "0.6"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+security-framework = "=3.7.0"
