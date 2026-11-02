@@ -65,23 +65,27 @@ fn main() {
     let builtin = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
         .join("System32/WindowsPowerShell/v1.0/Modules");
     let paths: Vec<_> = std::env::split_paths(original.as_deref().unwrap_or_default()).collect();
-    // Only module directory paths from this ephemeral CI runner; no full environment.
-    println!("module_directories={paths:?}");
-    let mut cases = vec![("original".to_string(), paths.clone())];
-    let mut first = vec![builtin.clone()];
-    first.extend(paths.clone());
-    cases.push(("builtin_first".into(), first));
-    let mut last = paths.clone();
-    last.push(builtin.clone());
-    cases.push(("builtin_last".into(), last));
-    for (index, path) in paths.iter().enumerate() {
-        cases.push((format!("entry_{index}_only"), vec![path.clone()]));
-    }
-    for (label, module_paths) in cases {
-        std::env::set_var("PSModulePath", std::env::join_paths(module_paths).unwrap());
-        println!("CASE {label}");
-        let result = rt.block_on(execute::run("Get-Location", &home, &home, 8));
-        println!("actual_execute_result={result:?}");
+    for (label, first) in [
+        (
+            "native_builtin_first",
+            PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("Modules"),
+        ),
+        ("mixed_builtin_first", builtin),
+    ] {
+        let mut modules = vec![first];
+        modules.extend(paths.clone());
+        std::env::set_var("PSModulePath", std::env::join_paths(modules).unwrap());
+        let directory = home.join(format!("{label} 中文"));
+        std::fs::create_dir_all(&directory).unwrap();
+        for command in ["Get-Location", "Get-Location | Select-Object -ExpandProperty Path; Write-Output '中文'; Write-Output ('x' * 200000)"] {
+            println!("CASE {label} unicode_large={}",command.len()>20);
+            let result = rt.block_on(execute::run(command, &directory, &directory, 8));
+            println!("actual_execute_result={:?}", result.as_ref().map(|v| (v["exitCode"].clone(),v["output"].as_str().unwrap().len(),v["truncated"].clone())));
+        }
     }
     std::fs::remove_dir_all(home).unwrap();
 }
