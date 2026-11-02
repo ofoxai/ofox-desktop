@@ -45,7 +45,7 @@ function noProxyEntries(noProxy) {
 
 /**
  * Whether NO_PROXY sends `url` around the proxy. The same matching as
- * undici 8.10.2's EnvHttpProxyAgent, which routes web_search: `*` alone
+ * undici 8.12.2's EnvHttpProxyAgent, which routes web_search: `*` alone
  * bypasses everything, an entry matches its host and every subdomain (with
  * or without a leading `.` or `*.`), and an entry's port must match.
  */
@@ -69,7 +69,7 @@ export function bypassesProxy(url, noProxy = "") {
 }
 
 /**
- * Proxy failures before any tunnel exists, as undici 8.10.2 reports them
+ * Proxy failures before any tunnel exists, as undici 8.12.2 reports them
  * (the rule of assistant-runtime/src/runtime.mjs): the proxy refused CONNECT
  * (a bare UND_ERR_ABORTED is not one), it closed or failed TLS while
  * connecting, or SOCKS5 failed. Nothing reached the target.

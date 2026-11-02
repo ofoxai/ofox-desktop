@@ -44,7 +44,7 @@ server reads no other proxy variables. The URL is never logged or echoed,
 and diagnostics drop any `user:password@` part of a URL. `socks5h` means
 `socks5`.
 
-- `web_search` uses undici (pinned, 8.10.2, the version the runtime ships)
+- `web_search` uses undici (pinned, 8.12.2, the version the runtime ships)
   with an `EnvHttpProxyAgent`, like the runtime's model requests: it tunnels
   to the gateway unless `OFOX_NO_PROXY` matches it. A proxy that refuses or
   fails before its tunnel opens (refused CONNECT, connection or TLS failure
