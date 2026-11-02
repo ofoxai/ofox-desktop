@@ -95,7 +95,7 @@ function beforeConnecting({ code, syscall }) {
   );
 }
 
-// Proxy failures before the tunnel to Ofox exists, as undici 8.10.2 reports
+// Proxy failures before the tunnel to Ofox exists, as undici 8.12.2 reports
 // them: the proxy refused CONNECT (a bare UND_ERR_ABORTED stays unknown), it
 // closed or failed TLS while connecting, or SOCKS5 failed. What such an error
 // wraps happened between this machine and the proxy.
