@@ -27,7 +27,6 @@ fn checked_entries(reader: &mut (impl Read + Seek), max_entries: usize) -> ZipRe
     const LOCATOR: usize = 20;
     const RECORD64: usize = 56;
     const HEADER: usize = 46;
-    const LOCAL: usize = 30;
     // Bound directory bytes independently of compressed member sizes.
     let max_directory = (max_entries as u64)
         .saturating_mul(2048)
@@ -121,20 +120,11 @@ fn checked_entries(reader: &mut (impl Read + Seek), max_entries: usize) -> ZipRe
     while at < headers.len() {
         let header = headers.get(at..at + HEADER).ok_or_else(invalid)?;
         let field = |from: usize, size: usize| little_endian(&header[from..from + size]);
-        let local = field(42, 4);
-        if header[..4] != *b"PK\x01\x02"
-            || local
-                .checked_add(LOCAL as u64)
-                .is_none_or(|end| end > start)
-        {
+        if header[..4] != *b"PK\x01\x02" {
             return Err(invalid());
         }
-        let block = read_at(reader, local, LOCAL)?;
-        let data =
-            local + (LOCAL as u64) + little_endian(&block[26..28]) + little_endian(&block[28..30]);
-        if block[..4] != *b"PK\x03\x04" || data > start {
-            return Err(invalid());
-        }
+        // ZIP64 may move the local offset into an extra field. Resolve and
+        // validate local headers only after bounded ZIP metadata parsing.
         at += HEADER + field(28, 2) as usize + field(30, 2) as usize + field(32, 2) as usize;
         found += 1;
     }

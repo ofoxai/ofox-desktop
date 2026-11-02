@@ -214,3 +214,21 @@ fn refuses_an_extra_footer_signature_near_the_parser_window_boundary() {
     let bytes = writer.finish().unwrap().into_inner();
     assert!(cc_switch_lib::zip_security::open(Cursor::new(bytes), 10).is_err());
 }
+
+#[test]
+fn reads_a_small_archive_with_a_zip64_local_header_offset() {
+    let mut bytes = stored_archive();
+    let central = bytes.windows(4).position(|b| b == b"PK\x01\x02").unwrap();
+    bytes[central + 42..central + 46].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[central + 30..central + 32].copy_from_slice(&12u16.to_le_bytes());
+    let extra = [1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let end = bytes.len() - 22;
+    bytes.splice(end..end, extra);
+    let end = bytes.len() - 22;
+    let size = u32::from_le_bytes(bytes[end + 12..end + 16].try_into().unwrap()) + 12;
+    bytes[end + 12..end + 16].copy_from_slice(&size.to_le_bytes());
+    // Prove the fixture is valid independently of the application preflight.
+    let mut archive = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    assert_eq!(archive.by_name("safe.txt").unwrap().header_start(), 0);
+    assert_eq!(read_payload(bytes).unwrap(), b"test archive payload");
+}
