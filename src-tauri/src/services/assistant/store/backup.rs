@@ -677,15 +677,17 @@ impl AssistantStore {
             return Err(TOO_LARGE.into());
         }
         let count = checked_entries(&mut file)?;
-        let mut zip = zip::ZipArchive::new(file).map_err(|_| INVALID)?;
+        let mut zip = crate::zip_security::open(file, MAX_FILES).map_err(|_| INVALID)?;
         if zip.len() as u64 != count {
             return Err(INVALID.into());
         }
+        crate::zip_security::validate_headers(&mut zip).map_err(|_| INVALID)?;
         let mut names = HashSet::new();
         let mut declared = 0u64;
         for index in 0..zip.len() {
             let entry = zip.by_index(index).map_err(|_| INVALID)?;
-            let max = limit(entry.name())?;
+            let name = entry.name().map_err(|_| INVALID)?;
+            let max = limit(&name)?;
             if !entry.is_file()
                 || entry
                     .unix_mode()
@@ -694,7 +696,7 @@ impl AssistantStore {
                 return Err(INVALID.into());
             }
             // Unique: the crate keeps one entry per name and the count matched.
-            names.insert(entry.name().to_string());
+            names.insert(name.into_owned());
             declared = declared.checked_add(entry.size()).ok_or(TOO_LARGE)?;
             if entry.size() > max || declared > MAX_TOTAL {
                 return Err(TOO_LARGE.into());
@@ -1325,6 +1327,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_inconsistent_zip_headers_before_restoring_sessions() {
+        let (_source, store, _sid, _attachment) = seeded();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("inconsistent.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        assert_eq!(&bytes[..4], b"PK\x03\x04");
+        bytes[30] ^= 1;
+        fs::write(&archive, bytes).unwrap();
+
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap_err(),
+            INVALID
+        );
+        assert!(restored.list(false, "").unwrap().sessions.is_empty());
+    }
+
+    #[test]
     fn backup_roundtrip_keeps_native_history_drafts_files_usage_and_operation_prices() {
         let (_source, store, sid, attachment) = seeded();
         let output = tempfile::tempdir().unwrap();
@@ -1336,6 +1358,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(fs::File::open(&archive).unwrap()).unwrap();
         assert!(!zip
             .file_names()
+            .map(Result::unwrap)
             .any(|name| name.contains("runtime-settings") || name.contains("auth.json")));
         let mut manifest = String::new();
         zip.by_name("manifest.json")
@@ -1902,7 +1925,7 @@ mod tests {
         let mut writer = zip::ZipWriter::new(fs::File::create(&changed).unwrap());
         for i in 0..old.len() {
             let mut entry = old.by_index(i).unwrap();
-            let name = entry.name().to_string();
+            let name = entry.name().unwrap().into_owned();
             let mut bytes = Vec::new();
             entry.read_to_end(&mut bytes).unwrap();
             if name.ends_with("/session.json") {
@@ -1990,7 +2013,7 @@ mod tests {
         let mut entries = BTreeMap::new();
         for i in 0..zip.len() {
             let mut file = zip.by_index(i).unwrap();
-            let name = file.name().to_string();
+            let name = file.name().unwrap().into_owned();
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).unwrap();
             entries.insert(name, bytes);
@@ -2105,7 +2128,7 @@ mod tests {
                 let mut file = zip.by_index(i).unwrap();
                 let mut bytes = Vec::new();
                 file.read_to_end(&mut bytes).unwrap();
-                (file.name().to_string(), bytes)
+                (file.name().unwrap().into_owned(), bytes)
             })
             .collect()
     }
@@ -2113,7 +2136,7 @@ mod tests {
     fn write_zip(path: &Path, members: &[(String, Vec<u8>)], zip64: bool) {
         let mut writer = zip::ZipWriter::new(fs::File::create(path).unwrap());
         if zip64 {
-            writer.set_zip64_comment(Some(""));
+            writer.set_raw_zip64_extensible_data_sector(Box::default());
         }
         for (name, bytes) in members {
             writer.start_file(name.as_str(), options()).unwrap();

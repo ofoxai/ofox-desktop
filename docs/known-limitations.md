@@ -309,3 +309,11 @@ Assistant video downloads use unsigned HTTPS URLs returned by the selected Ofox 
 New download partials use private owner-scoped staging, are excluded from backups and are removed on cancellation/normal exit or the next owner recovery/download. Windows may retain a busy path until its open handle closes. Anonymous temporary files left by older app versions cannot be identified safely and are not retroactively deleted. Transport and cleanup have local fixture coverage; native Windows execution and this iteration's final macOS/live acceptance remain pending.
 
 Image editing accepts PNG, JPEG and WebP up to 15 MiB. [Ofox editing documentation](https://ofox.ai/docs/develop/models/gpt-image/image-edit) lists PNG/JPEG in its prerequisites but also WebP in its format guidance; the [upstream GPT Image API](https://developers.openai.com/api/reference/resources/images/methods/edit) explicitly supports WebP. WebP request construction is covered by local tests; its provider acceptance has not been separately billed and tested.
+
+## GLib dependency on Linux (2026-11-02)
+
+Linux GTK3/Tauri still resolves `glib` 0.18.5. [GHSA-wrw7-89jp-8q8g](https://github.com/advisories/GHSA-wrw7-89jp-8q8g) affects its `VariantStrIter` implementation and is fixed in the incompatible 0.20 line. The official [0.18 maintenance source](https://github.com/gtk-rs/gtk-rs-core/blob/42b9caf98e03ded086362d9653ca58fe94dc8658/glib/src/variant_iter.rs) still contains the affected immutable out-pointer. A compatible upstream backport or GTK dependency migration is needed. This alert remains unresolved; application-level reachability has not been established. The inspected macOS and Windows dependency graphs do not enable this GTK/GLib path.
+
+## ZIP import metadata bounds
+
+ZIP imports require single-disk archives with zero archive offset and an unambiguous end record. Archives with another end-record signature in the final 128 KiB, over 32 MiB of central metadata (lower limits apply to smaller imports), or over 1 MiB of ZIP64 extensible metadata are rejected before metadata allocation. This intentionally excludes ambiguous/polyglot or unusually metadata-heavy archives; ordinary stored, deflated, Unicode-name and legacy ZIP64 archives have compatibility fixtures.

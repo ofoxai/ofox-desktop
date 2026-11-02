@@ -140,6 +140,7 @@ mod backup_tests {
         let zip = zip::ZipArchive::new(fs::File::open(archive).unwrap()).unwrap();
         assert!(!zip
             .file_names()
+            .map(Result::unwrap)
             .any(|name| name.contains(".downloads") || name.ends_with(".part")));
     }
 }

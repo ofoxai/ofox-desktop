@@ -5580,7 +5580,12 @@ describe("the sidebar", () => {
         })),
       ),
     );
-    const formatter = vi.spyOn(Intl, "DateTimeFormat");
+    const DateTimeFormat = Intl.DateTimeFormat;
+    const formatter = vi
+      .spyOn(Intl, "DateTimeFormat")
+      .mockImplementation(function (locales, options) {
+        return new DateTimeFormat(locales, options);
+      });
     try {
       const rendered = render(page());
       await screen.findByRole("button", { name: "Conversation c" });

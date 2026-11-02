@@ -557,3 +557,12 @@ success details above, `{code:"unknown_outcome", error:{code:
 missing token counts, else `complete`; the projection's `usageCoverage`
 includes it. The host prices searches itself, so search usage is reported
 only here and in `tool_end`, never in `usage` events or entries.
+
+## Production SDK dependencies
+
+The runtime keeps Pi SDK 1.4.0 and overrides its external `minimatch` dependency
+to 11.0.1. Production pruning removes Pi's standalone CLI/RPC bundles and
+launchers, which embed their own dependency copies, while preserving the
+unbundled SDK and its license files. The desktop uses in-process SDK sessions;
+standalone CLI/RPC entry points are outside this packaged runtime. Production
+smoke checks verify the SDK, native canvas, PDF and history paths after pruning.
