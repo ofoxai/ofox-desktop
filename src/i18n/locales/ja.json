@@ -5027,7 +5027,14 @@
       "localFolderInvalid": "有効なフォルダーを選択してください。",
       "localPathDenied": "パスが無効か、保護されたデータが含まれています。",
       "localScanLimit": "検索上限に達しました。対象フォルダーを絞ってください。",
-      "localUnavailable": "ローカル診断を利用できません。ランタイムのインストールを確認してください。"
+      "localUnavailable": "ローカル診断を利用できません。ランタイムのインストールを確認してください。",
+      "localCommandUnknown": "コマンドは停止しましたが、結果を確認できません。再試行する前に変更を確認してください。",
+      "localJournalUnavailable": "暗号化された変更履歴を読み取りまたは保存できません。追加の変更を停止しました。",
+      "localRepairFailed": "ツールを自動修復できませんでした。設定と接続状態を確認してください。",
+      "localRestoreConflict": "操作後にファイルまたは接続設定が変更されました。編集内容を保護するため復元を停止しました。",
+      "localSecretWrite": "この編集は非表示の認証情報を変更します。専用の設定操作を使用してください。",
+      "localWriteFailed": "設定を書き込めませんでした。再試行する前に変更履歴を確認してください。",
+      "localPlatformUnsupported": "この操作は現在のプラットフォームでは利用できません。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",

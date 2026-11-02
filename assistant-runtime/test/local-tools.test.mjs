@@ -119,3 +119,45 @@ test("bundled local config skill loads in a private agent workspace", async () =
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("local edit keeps Pi matching and diff while writes go to Rust with the observed text", async () => {
+  const { calls, tools } = fixture((name) =>
+    name === "stat"
+      ? { exists: true, file: true }
+      : name === "read"
+        ? "model=old\n"
+        : { changed: true },
+  );
+  const result = await tools
+    .find((t) => t.name === "edit")
+    .execute("edit-1", {
+      path: "config",
+      edits: [{ oldText: "model=old", newText: "model=new" }],
+    });
+  assert.match(result.details.diff, /model=new/);
+  const write = calls.find((c) => c.name === "edit");
+  assert.equal(write.args.content, "model=new\n");
+  assert.equal(write.args.expected, "model=old\n");
+});
+
+test("local shell uses host cwd and bounded output without exporting Pi environment", async () => {
+  const { calls, tools } = fixture(() => ({
+    exitCode: 0,
+    output: "version 1.2.3",
+    truncated: false,
+  }));
+  const result = await tools
+    .find((t) => t.name === "bash")
+    .execute("exec-1", {
+      command: "node --version",
+      folder: "/problem",
+      intent: "Check version",
+    });
+  assert.match(result.content[0].text, /1.2.3/);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].args, {
+    command: "node --version",
+    folder: "/problem",
+    timeout: 60,
+  });
+});

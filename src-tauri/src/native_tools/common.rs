@@ -510,6 +510,12 @@ pub(super) fn plan(
 }
 
 pub(super) fn commit(db: &Database, tool: &str, record: &Record) -> Result<(), String> {
+    let _io = crate::config_io::lock();
+    let _journal = crate::services::assistant::tools::transaction::begin(
+        Some(db),
+        tool,
+        record.files.iter().map(|f| f.path.clone()).collect(),
+    )?;
     let mut next = record.clone();
     let mut txn = FileTxn::new();
     let result = (|| {

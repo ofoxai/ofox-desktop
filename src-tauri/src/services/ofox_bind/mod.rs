@@ -772,6 +772,16 @@ pub(crate) async fn persist_bound_settings(
     crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    let mut journal_paths = model_state::revision_paths(tool);
+    if tool == Tool::Codex {
+        journal_paths.push(crate::codex_config::get_codex_auth_path());
+    }
+    let _journal = crate::services::assistant::tools::transaction::begin(
+        Some(db),
+        tool.app().as_str(),
+        journal_paths,
+    )?;
+
     crate::model_selection::check_write_revision(db, tool.record_key())?;
     let current = db
         .get_provider_by_id(tool.provider_id(), tool.app().as_str())
@@ -915,6 +925,16 @@ async fn bind_inner(
     crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    let mut journal_paths = model_state::revision_paths(tool);
+    if tool == Tool::Codex {
+        journal_paths.push(crate::codex_config::get_codex_auth_path());
+    }
+    let _journal = crate::services::assistant::tools::transaction::begin(
+        Some(db),
+        tool.app().as_str(),
+        journal_paths,
+    )?;
+
     if require_existing {
         require_existing_ofox_config(tool)?;
         let health = status::inspect_managed_fields(db, tool, Some(api_key))
@@ -997,6 +1017,11 @@ pub(crate) async fn restore_missing_binding(
     crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
     let _file_locks = file_locks(tool);
+    let _journal = crate::services::assistant::tools::transaction::begin(
+        Some(db),
+        tool.app().as_str(),
+        model_state::revision_paths(tool),
+    )?;
     let health = status::inspect(db, tool, Some(api_key))
         .map_err(|_| "无法确认配置缺失，已停止恢复，请检查文件权限和格式。".to_string())?;
     if health.status != status::BindingStatus::Missing {

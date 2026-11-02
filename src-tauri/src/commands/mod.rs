@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 mod assistant;
+mod assistant_local;
 mod auth;
 mod balance;
 mod catalog_lifecycle;

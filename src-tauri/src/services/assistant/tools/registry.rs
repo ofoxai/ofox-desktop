@@ -49,6 +49,40 @@ pub fn get(name: &str) -> Result<Tool, String> {
             irreversible: false,
         });
     }
+    const WRITE: &[&str] = &[
+        "write",
+        "edit",
+        "repair_launcher",
+        "rebind_tool",
+        "set_tool_model",
+    ];
+    if let Some(name) = WRITE.iter().find(|known| **known == name) {
+        return Ok(Tool {
+            name,
+            category: Category::WriteConfig,
+            retry_safe: false,
+            reversible: true,
+            structured: !matches!(*name, "write" | "edit"),
+            irreversible: false,
+        });
+    }
+    const EXEC: &[&str] = &[
+        "bash",
+        "powershell",
+        "install_tool",
+        "update_tool",
+        "uninstall_tool",
+    ];
+    if let Some(name) = EXEC.iter().find(|known| **known == name) {
+        return Ok(Tool {
+            name,
+            category: Category::Exec,
+            retry_safe: false,
+            reversible: false,
+            structured: !matches!(*name, "bash" | "powershell"),
+            irreversible: !matches!(*name, "bash" | "powershell"),
+        });
+    }
     match name {
         #[cfg(test)]
         "probe_write" => Ok(Tool {
@@ -95,7 +129,8 @@ pub fn validate_args(tool: Tool, args: &Value) -> Result<(), String> {
                 Ok(())
             }
         }
-        "tool_status" => {
+        "tool_status" | "repair_launcher" | "rebind_tool" | "install_tool" | "update_tool"
+        | "uninstall_tool" => {
             let args: ToolArgs = decode(args)?;
             supported_tool(&args.tool).map(|_| ())
         }
@@ -103,6 +138,39 @@ pub fn validate_args(tool: Tool, args: &Value) -> Result<(), String> {
             let args: FolderArgs = decode(args)?;
             path_ok(&args.folder)?;
             supported_tool(&args.tool).map(|_| ())
+        }
+        "write" | "edit" => {
+            let args: WriteArgs = decode(args)?;
+            path_ok(&args.path)?;
+            if args.content.len() > 384 * 1024
+                || args.expected.as_ref().is_some_and(|s| s.len() > 384 * 1024)
+            {
+                Err("assistant_invalid_tool".into())
+            } else {
+                Ok(())
+            }
+        }
+        "bash" | "powershell" => {
+            let args: ExecArgs = decode(args)?;
+            path_ok(&args.folder)?;
+            if args.command.is_empty()
+                || args.command.len() > 16000
+                || !(1..=600).contains(&args.timeout)
+                || (tool.name == "powershell") != cfg!(windows)
+            {
+                Err("assistant_invalid_tool".into())
+            } else {
+                Ok(())
+            }
+        }
+        "set_tool_model" => {
+            let args: ModelArgs = decode(args)?;
+            supported_tool(&args.tool)?;
+            if args.model.is_empty() || args.model.len() > 256 {
+                Err("assistant_invalid_tool".into())
+            } else {
+                Ok(())
+            }
         }
         "request_folder" => {
             if args.as_object().is_some_and(|a| a.is_empty()) {
@@ -181,4 +249,25 @@ pub struct ToolArgs {
 pub struct FolderArgs {
     pub tool: String,
     pub folder: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WriteArgs {
+    pub path: String,
+    pub content: String,
+    pub expected: Option<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecArgs {
+    pub command: String,
+    pub folder: String,
+    pub timeout: u64,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelArgs {
+    pub tool: String,
+    pub model: String,
 }

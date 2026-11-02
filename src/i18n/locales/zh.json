@@ -5027,7 +5027,14 @@
       "localFolderInvalid": "请选择有效的文件夹。",
       "localPathDenied": "此路径无效或包含受保护的数据。",
       "localScanLimit": "扫描已达到上限，请缩小文件夹范围。",
-      "localUnavailable": "本机诊断暂不可用，请检查运行时安装。"
+      "localUnavailable": "本机诊断暂不可用，请检查运行时安装。",
+      "localCommandUnknown": "命令停止，但无法确认执行结果。请先检查影响，再决定是否重试。",
+      "localJournalUnavailable": "无法读取或保存加密改动记录，已停止继续修改。",
+      "localRepairFailed": "无法自动修复此工具，请检查配置和绑定状态。",
+      "localRestoreConflict": "文件或绑定设置在此操作后有变化。为保留这些编辑，已停止还原。",
+      "localSecretWrite": "此编辑会改变已脱敏的凭据，请使用结构化配置操作。",
+      "localWriteFailed": "无法写入配置，请先查看改动记录，再决定是否重试。",
+      "localPlatformUnsupported": "当前平台不支持此操作。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",

@@ -32,6 +32,10 @@ pub fn stat(scope: &Scope, path: &Path, outside: bool) -> Result<Value, String> 
 }
 
 pub fn read(scope: &Scope, path: &Path, outside: bool) -> Result<String, String> {
+    Ok(crate::redact::scrub(&read_original(scope, path, outside)?).into_owned())
+}
+
+pub(crate) fn read_original(scope: &Scope, path: &Path, outside: bool) -> Result<String, String> {
     let path = checked(scope, path, outside)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -62,7 +66,7 @@ pub fn read(scope: &Scope, path: &Path, outside: bool) -> Result<String, String>
     if text.contains('\0') || (text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----")) {
         return Err("assistant_path_denied".into());
     }
-    Ok(crate::redact::scrub(&text).into_owned())
+    Ok(text)
 }
 
 pub fn list(scope: &Scope, path: &Path, limit: usize, outside: bool) -> Result<Vec<Value>, String> {

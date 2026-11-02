@@ -4,11 +4,13 @@ use crate::services::assistant::{
     capabilities,
     tools::{
         approval::{Binding, Choice},
+        commands,
         context::LocalPaths,
-        diagnostics, files,
+        diagnostics, editing, execute, files, journal,
         policy::{self, Decision, PermissionMode},
         registry,
         scope::{Access, Scope},
+        transaction,
     },
 };
 use serde::Deserialize;
@@ -21,6 +23,8 @@ pub(super) struct LocalState {
     grants: HashSet<String>,
     folders: Vec<PathBuf>,
 }
+
+pub(super) static MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 type CallResult = (String, Option<Result<Value, String>>);
 #[derive(Default)]
@@ -153,7 +157,10 @@ impl AssistantHost {
         if call.tool_call_id.is_empty() || call.tool_call_id.len() > 200 {
             return Err("assistant_invalid_tool".into());
         }
-        let tool = registry::get(&call.name)?;
+        let mut tool = registry::get(&call.name)?;
+        if matches!(tool.name, "bash" | "powershell") {
+            tool.irreversible = commands::irreversible(call.args["command"].as_str().unwrap_or(""));
+        }
         registry::validate_args(tool, &call.args)?;
         let record = blocking({
             let store = self.store(&run.identity.owner)?;
@@ -242,7 +249,14 @@ impl AssistantHost {
             args,
             signature,
             call_id,
-            tool.operation(access == Access::Inside, access == Access::Forbidden, false),
+            tool.operation(
+                access == Access::Inside,
+                access == Access::Forbidden
+                    || (matches!(tool.name, "bash" | "powershell")
+                        && commands::forbidden(args["command"].as_str().unwrap_or(""))),
+                matches!(tool.name, "bash" | "powershell")
+                    && commands::read_only(args["command"].as_str().unwrap_or(""), cfg!(windows)),
+            ),
         )
         .await?;
         self.validate_run(run)?;
@@ -255,6 +269,120 @@ impl AssistantHost {
         let outside = access == Access::Outside;
         let operation = async {
             match tool.name {
+                "repair_launcher" | "rebind_tool" | "set_tool_model" => {
+                    let selected = registry::supported_tool(
+                        args["tool"].as_str().ok_or("assistant_invalid_tool")?,
+                    )?;
+                    let _guard = MUTATIONS.lock().await;
+                    let key = self.env.local_journal_key().await?;
+                    self.validate_run(run)?;
+                    if self.identity().await? != run.identity {
+                        return Err(IDENTITY_CHANGED.into());
+                    }
+                    let journal = journal::Journal::open(
+                        &self.local_changes_dir(&run.identity.owner, &run.session_id)?,
+                        &key,
+                        &session_key(&run.identity.owner, &run.session_id),
+                    )?;
+                    let previous_changes = journal.changes().len();
+                    let context = Arc::new(transaction::Context {
+                        journal: Mutex::new(journal),
+                        tool: selected.as_str().into(),
+                        apex: Some(run.identity.apex.clone()),
+                        operation: tool.name.into(),
+                        scope,
+                        cancel: run.cancel.subscribe(),
+                        deadline: run.deadline,
+                        error: Mutex::new(None),
+                        observed: AtomicBool::new(false),
+                    });
+                    let result = transaction::ACTIVE
+                        .scope(
+                            context.clone(),
+                            self.env.local_mutate(
+                                tool.name,
+                                selected,
+                                args["model"].as_str(),
+                                call_id,
+                            ),
+                        )
+                        .await;
+                    if let Some(error) = context.error.lock().map_err(|_| STATE)?.clone() {
+                        return Err(error);
+                    }
+                    let mut result = result?;
+                    if !context.observed.load(Ordering::SeqCst) {
+                        return Err("assistant_journal_unavailable".into());
+                    }
+                    let changes: Vec<_> = context
+                        .journal
+                        .lock()
+                        .map_err(|_| STATE)?
+                        .changes()
+                        .into_iter()
+                        .skip(previous_changes)
+                        .collect();
+                    result["changed"] = json!(changes.iter().any(|change| change.changed));
+                    result["changes"] = json!(changes);
+                    Ok(result)
+                }
+                "install_tool" | "update_tool" | "uninstall_tool" => {
+                    let selected = registry::supported_tool(
+                        args["tool"].as_str().ok_or("assistant_invalid_tool")?,
+                    )?;
+                    self.env
+                        .local_mutate(tool.name, selected, None, call_id)
+                        .await
+                }
+                "bash" | "powershell" => {
+                    let a: registry::ExecArgs = registry::decode(args)?;
+                    execute::run(&a.command, &path, &paths.home, a.timeout).await
+                }
+                "write" | "edit" => {
+                    let a: registry::WriteArgs = registry::decode(args)?;
+                    let _guard = MUTATIONS.lock().await;
+                    let key = self.env.local_journal_key().await?;
+                    self.validate_run(run)?;
+                    if self.identity().await? != run.identity {
+                        return Err(IDENTITY_CHANGED.into());
+                    }
+                    let directory = self.local_changes_dir(&run.identity.owner, &run.session_id)?;
+                    let context = session_key(&run.identity.owner, &run.session_id);
+                    // This small transaction is synchronous: cancellation cannot detach
+                    // a background writer after the host declares the run stopped.
+                    let _bindings = crate::services::ofox_bind::BIND_LOCK.lock().await;
+                    let _workbuddy = crate::workbuddy_config::CONFIG_LOCK.lock().await;
+                    self.validate_run(run)?;
+                    if self.identity().await? != run.identity {
+                        return Err(IDENTITY_CHANGED.into());
+                    }
+                    let _io = crate::config_io::lock();
+                    if scope.check(&path)?.path != path {
+                        return Err("assistant_restore_conflict".into());
+                    }
+                    let original = if path.exists() {
+                        files::read_original(&scope, &path, outside)?
+                    } else {
+                        String::new()
+                    };
+                    if a.expected
+                        .as_ref()
+                        .is_some_and(|old| *old != crate::redact::scrub(&original))
+                    {
+                        return Err("assistant_restore_conflict".into());
+                    }
+                    let content = editing::preserve_credentials(&original, &a.content)?;
+                    let mut journal = journal::Journal::open(&directory, &key, &context)?;
+                    let id =
+                        journal.prepare(tool.name, std::slice::from_ref(&path), Value::Null)?;
+                    let result = crate::config::atomic_write(&path, content.as_bytes())
+                        .map_err(|_| "assistant_write_failed".to_string());
+                    journal.finish(&id, Value::Null)?;
+                    result?;
+                    Ok(
+                        json!({"changed":journal.changes().last().is_some_and(|change|change.changed),"changeId":id,"path":path}),
+                    )
+                }
                 "read" | "stat" | "ls" | "find" | "grep" => {
                     let args = args.clone();
                     blocking(move || match tool.name {
@@ -326,6 +454,62 @@ impl AssistantHost {
         scrub(&mut result);
         scrub_secrets_in(&mut result, &self.known_keys());
         Ok(result)
+    }
+
+    pub async fn local_changes(
+        &self,
+        request: DeleteRequest,
+        restore: bool,
+    ) -> Result<Vec<journal::Change>, String> {
+        let identity = self.identity().await?;
+        self.ensure_current(&identity, request.expected_generation)
+            .await?;
+        if identity.owner != request.expected_owner {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        let _navigation = if restore {
+            Some(self.begin_navigation(&request.session_id)?)
+        } else {
+            None
+        };
+        let directory = self.local_changes_dir(&identity.owner, &request.session_id)?;
+        if !directory.join("journal.enc").exists() {
+            return Ok(vec![]);
+        }
+        let _guard = MUTATIONS.lock().await;
+        let key = self.env.local_journal_key().await?;
+        self.ensure_current(&identity, request.expected_generation)
+            .await?;
+        let mut journal = journal::Journal::open(
+            &directory,
+            &key,
+            &session_key(&identity.owner, &request.session_id),
+        )?;
+        if restore {
+            let _bindings = crate::services::ofox_bind::BIND_LOCK.lock().await;
+            let _workbuddy = crate::workbuddy_config::CONFIG_LOCK.lock().await;
+            self.ensure_current(&identity, request.expected_generation)
+                .await?;
+            self.env.local_restore(&mut journal)?;
+        }
+        Ok(journal.changes())
+    }
+
+    pub(super) fn local_changes_dir(&self, owner: &str, sid: &str) -> Result<PathBuf, String> {
+        if self
+            .store(owner)?
+            .load_record(sid)?
+            .session
+            .deleted_at
+            .is_some()
+        {
+            return Err("assistant_session_deleted".into());
+        }
+        Ok(
+            super::super::store::owner_dir(&self.env.config_dir(), owner)?
+                .join(sid)
+                .join("changes"),
+        )
     }
 
     pub(super) async fn local_scope(

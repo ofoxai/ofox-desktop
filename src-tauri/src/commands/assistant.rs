@@ -515,6 +515,53 @@ fn runtime_dir_for(
 }
 
 impl Environment for AssistantEnvironment {
+    fn local_mutate<'a>(
+        &'a self,
+        name: &'a str,
+        tool: crate::app_config::BindableTool,
+        model: Option<&'a str>,
+        operation: &'a str,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            super::assistant_local::mutate(&self.app, name, tool, model, operation)
+                .await
+                .map_err(|error| {
+                    if error.starts_with("assistant_") || error == "unknown_outcome" {
+                        error
+                    } else {
+                        "assistant_local_repair_failed".into()
+                    }
+                })
+        })
+    }
+    fn local_restore(
+        &self,
+        journal: &mut crate::services::assistant::tools::journal::Journal,
+    ) -> Result<(), String> {
+        let _io = crate::config_io::lock();
+        let state = self.app.state::<crate::store::AppState>();
+        use crate::services::assistant::tools::db_state;
+        journal.restore_with(
+            |before| {
+                db_state::capture(
+                    &state.db,
+                    before["scope"]
+                        .as_str()
+                        .ok_or("assistant_journal_unavailable")?,
+                )
+            },
+            |before, after| db_state::restore(&state.db, before, after),
+        )
+    }
+    fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
+        Box::pin(async {
+            crate::services::assistant::host::blocking(
+                crate::services::assistant::tools::journal::system_key,
+            )
+            .await
+        })
+    }
+
     fn local_paths(
         &self,
     ) -> BoxFuture<'_, Result<crate::services::assistant::tools::context::LocalPaths, String>> {
@@ -1015,4 +1062,19 @@ pub async fn assistant_local_folder(
         Some(folder) => host.add_local_folder(authority, folder).await.map(Some),
         None => Ok(None),
     }
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_local_changes(
+    host: Host<'_>,
+    request: DeleteRequest,
+) -> Result<Vec<crate::services::assistant::tools::journal::Change>, String> {
+    host.local_changes(request, false).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_restore_local_changes(
+    host: Host<'_>,
+    request: DeleteRequest,
+) -> Result<Vec<crate::services::assistant::tools::journal::Change>, String> {
+    host.local_changes(request, true).await
 }

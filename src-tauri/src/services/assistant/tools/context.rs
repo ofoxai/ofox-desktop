@@ -46,6 +46,9 @@ pub async fn application_paths(runtime: PathBuf) -> Result<LocalPaths, String> {
         ".zprofile",
         ".bashrc",
         ".bash_profile",
+        ".bash_login",
+        ".config/fish/config.fish",
+        ".config/fish/conf.d/ofox-desktop.fish",
         ".profile",
     ]
     .iter()

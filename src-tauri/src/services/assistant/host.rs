@@ -76,6 +76,22 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    fn local_mutate<'a>(
+        &'a self,
+        _name: &'a str,
+        _tool: crate::app_config::BindableTool,
+        _model: Option<&'a str>,
+        _operation: &'a str,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async { Err("assistant_local_unavailable".into()) })
+    }
+    fn local_restore(&self, journal: &mut super::tools::journal::Journal) -> Result<(), String> {
+        journal.restore_files()
+    }
+    fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
+        Box::pin(async { Err("assistant_key_storage_unavailable".into()) })
+    }
+
     fn local_paths(&self) -> BoxFuture<'_, Result<super::tools::context::LocalPaths, String>> {
         Box::pin(async { Err("assistant_local_unavailable".into()) })
     }
@@ -2235,6 +2251,72 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn local_write_journals_and_restores_only_after_the_run_ends() {
+        use super::local::PermissionRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create_with_capabilities(
+                "test/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        host.set_permission(PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAccess,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let file = env.config.join("config/settings");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "original").unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let args = json!({"path":file,"content":"repaired","expected":"original"});
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"write-1","name":"edit","args":args});
+        let result = host.dispatch_tool(&run, &call).await.unwrap();
+        assert_eq!(result["changed"], true);
+        let authority = || DeleteRequest {
+            session_id: sid.clone(),
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        assert_eq!(
+            host.local_changes(authority(), true).await.unwrap_err(),
+            SESSION_BUSY
+        );
+        host.release_run(&run);
+        let changes = host.local_changes(authority(), false).await.unwrap();
+        assert_eq!(changes.len(), 1);
+        std::fs::write(&file, "user changed").unwrap();
+        assert_eq!(
+            host.local_changes(authority(), true).await.unwrap_err(),
+            "assistant_restore_conflict"
+        );
+        std::fs::write(&file, "repaired").unwrap();
+        assert!(host
+            .local_changes(authority(), true)
+            .await
+            .unwrap()
+            .iter()
+            .all(|c| c.restored));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+    }
+
+    #[tokio::test]
     async fn local_folder_grant_is_user_bound_and_reads_are_scrubbed() {
         let (_tmp, env, host) = fixture_with_env();
         let store = host.store(&identity().owner).unwrap();
@@ -2510,6 +2592,10 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
+            Box::pin(async { Ok(zeroize::Zeroizing::new([7; 32])) })
+        }
+
         fn local_paths(
             &self,
         ) -> BoxFuture<'_, Result<super::super::tools::context::LocalPaths, String>> {

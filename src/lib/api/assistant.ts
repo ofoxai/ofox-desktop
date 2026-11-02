@@ -312,6 +312,15 @@ export interface AssistantContextUsage {
   contextWindow: number;
 }
 
+export interface AssistantLocalChange {
+  id: string;
+  operation: string;
+  paths: string[];
+  restored: boolean;
+  outcomeKnown: boolean;
+  changed: boolean;
+}
+
 export type AssistantPermissionMode =
   | "readOnly"
   | "ask"
@@ -982,6 +991,19 @@ export const assistantApi = {
     modelPicked?: boolean;
     webSearch: boolean;
   }) => invoke<AssistantSession>("assistant_create_session", { request }),
+  localChanges: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<AssistantLocalChange[]>("assistant_local_changes", { request }),
+  restoreLocalChanges: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) =>
+    invoke<AssistantLocalChange[]>("assistant_restore_local_changes", {
+      request,
+    }),
   localFolder: (request: {
     sessionId: string;
     expectedOwner: string;
@@ -1242,6 +1264,13 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_path_denied: "localPathDenied",
   assistant_scan_limit: "localScanLimit",
   assistant_local_unavailable: "localUnavailable",
+  assistant_command_outcome_unknown: "localCommandUnknown",
+  assistant_journal_unavailable: "localJournalUnavailable",
+  assistant_local_repair_failed: "localRepairFailed",
+  assistant_restore_conflict: "localRestoreConflict",
+  assistant_secret_write_denied: "localSecretWrite",
+  assistant_write_failed: "localWriteFailed",
+  assistant_platform_unsupported: "localPlatformUnsupported",
 
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",

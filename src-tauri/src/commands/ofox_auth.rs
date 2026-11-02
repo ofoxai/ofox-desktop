@@ -205,7 +205,7 @@ pub async fn ofox_request_reauth(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 取要写到工具配置里的 LLM 凭据（keychain 命中直接用，否则向 Ofox 签发）。
 /// 取要写进工具配置的 key。失败原因里可能有服务端回显的 key，抹掉再往外传。
-async fn acquire_bind_token(
+pub(crate) async fn acquire_bind_token(
     key_tool: crate::app_config::BindableTool,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
 ) -> Result<String, String> {

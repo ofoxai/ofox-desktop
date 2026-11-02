@@ -5027,7 +5027,14 @@
       "localFolderInvalid": "Choose a valid folder.",
       "localPathDenied": "This path is invalid or contains protected data.",
       "localScanLimit": "The scan reached its limit. Choose a narrower folder.",
-      "localUnavailable": "Local diagnosis is unavailable. Check the runtime installation."
+      "localUnavailable": "Local diagnosis is unavailable. Check the runtime installation.",
+      "localCommandUnknown": "The command stopped without a confirmed outcome. Check its effects before retrying.",
+      "localJournalUnavailable": "The encrypted change record could not be read or saved. No further changes were made.",
+      "localRepairFailed": "The tool could not be repaired automatically. Check its configuration and binding status.",
+      "localRestoreConflict": "Files or binding settings have changed since this operation. Restore stopped to preserve those edits.",
+      "localSecretWrite": "This edit would alter hidden credentials. Use a structured configuration operation.",
+      "localWriteFailed": "The configuration could not be written. Check the change list before retrying.",
+      "localPlatformUnsupported": "This operation is unavailable on this platform."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",

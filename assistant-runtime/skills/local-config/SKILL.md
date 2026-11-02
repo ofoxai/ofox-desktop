@@ -52,3 +52,13 @@ success when the structured result confirms it. Otherwise describe what failed
 and what remains. Use the change journal to show what changed and offer restore;
 restore must detect edits made since the repair. A command succeeding elsewhere
 is not proof that the original problem is fixed.
+
+`edit` works on scrubbed text. Keep credential-bearing lines unchanged. If a
+change returns `assistant_secret_write_denied`, use `rebind_tool` or
+`set_tool_model`; never replace a hidden credential with the redaction marker.
+Rebinding preserves existing model choices and refuses conflicting user edits.
+Model changes validate the current region's catalog without a paid probe.
+
+`bash` (macOS) or `powershell` (Windows) accepts a `folder` for its working
+directory. Its output is bounded and redacted by Rust. An unknown command
+outcome is not evidence of failure: do not automatically repeat side effects.

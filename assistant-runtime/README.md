@@ -609,3 +609,36 @@ generation and session. Picker results, pasted paths and single-directory drops
 are canonicalized by Rust. Dropped paths remain behind one-use host tokens until
 authorized. Grants are memory-only, and diagnostic probes use the supplied
 folder as their working directory.
+
+### Local writes and restoration
+
+Pi write/edit and shell tools use host-backed operations. Edit sends the scrubbed
+text it observed alongside its proposed result; Rust rejects stale text and
+preserves unchanged credential-bearing lines. Changing or deleting a hidden
+credential through generic text editing is refused: use a structured binding or
+model operation. Parent directory creation is part of the journaled host write,
+not a Node filesystem operation.
+
+Structured operations reuse the application writers. Snapshot guards run inside
+the binding/launcher writers' locks and include tool-scoped binding/provider DB
+state and provider selection. Model changes use catalog metadata without paid
+compatibility probes. Rebinding preserves existing native and WorkBuddy model
+choices, and conflicting user-managed settings are refused.
+
+Each session's `changes/journal.enc` uses authenticated AES-256-GCM encryption
+with account/session associated data and a fresh random nonce per save. Its key
+uses the dedicated `assistant-journal` OS keychain service, with a separate debug
+service, **including in debug builds** (it never uses the debug credential file
+store). Snapshots persist across restart and stay local; conversation backups
+and forks do not carry machine restoration authority. The journal checks the
+whole file/state chain before restoring; interrupted restoration can resume,
+while an operation whose outcome was never recorded needs manual inspection.
+
+Shell processes belong to an owned process group or Windows Job and are killed
+on cancellation or timeout. Rust drains bounded output, redacts it, and sends
+at most 32 KiB / 800 lines, below Pi's temporary-output spill thresholds. No
+plaintext shell output temp file is written by Node. Protected path and store
+commands are refused directly, but arbitrary executables have the user's OS
+rights: command recognition is deliberately not an OS sandbox. Install/update/
+uninstall tools require individual confirmation and do not promise rollback;
+an installer opened in an external terminal can continue independently.

@@ -4,6 +4,10 @@ import {
   createReadToolDefinition,
   createLsToolDefinition,
   createFindToolDefinition,
+  createWriteToolDefinition,
+  createEditToolDefinition,
+  createBashToolDefinition,
+  createPowerShellToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 
 const textResult = (value) => ({
@@ -56,13 +60,26 @@ export function localTools(runtime, context) {
             stats.set(file, await host("stat", { path: file }));
           return stats.get(file);
         };
+        const observed = new Map();
         const operations = {
           access: async (file) => {
             if (!(await stat(file)).exists)
               throw new Error("assistant_file_unreadable");
           },
-          readFile: async (file) =>
-            Buffer.from(await host("read", { path: file }), "utf8"),
+          readFile: async (file) => {
+            const text = await host("read", { path: file });
+            observed.set(file, text);
+            return Buffer.from(text, "utf8");
+          },
+          // Parent creation belongs to the host's journaled write transaction.
+          mkdir: async () => {},
+          writeFile: async (file, content) => {
+            await host(sample.name, {
+              path: file,
+              content,
+              expected: observed.get(file) ?? null,
+            });
+          },
           detectImageMimeType: async () => null,
           exists: async (file) => (await stat(file)).exists,
           stat: async (file) => {
@@ -97,7 +114,62 @@ export function localTools(runtime, context) {
     ),
     make((operations) => createLsToolDefinition(cwd, { operations })),
     make((operations) => createFindToolDefinition(cwd, { operations })),
+    make((operations) => createWriteToolDefinition(cwd, { operations })),
+    make((operations) => createEditToolDefinition(cwd, { operations })),
   ];
+  const shellFactory =
+    context.params.localConfig.platform === "windows"
+      ? createPowerShellToolDefinition
+      : createBashToolDefinition;
+  const shellSample = shellFactory(cwd, {
+    operations: {},
+    exposeSessionEnvironment: false,
+  });
+  tools.push(
+    runtime.wrapTool(
+      context,
+      shellSample.name,
+      shellSample.description,
+      Type.Object({
+        ...shellSample.parameters.properties,
+        folder: Type.Optional(Type.String()),
+        intent: Type.Optional(Type.String({ maxLength: 200 })),
+      }),
+      async (args, signal, id) => {
+        const folder = path.resolve(cwd, args.folder ?? ".");
+        const operations = {
+          exec: async (command, requested, options) => {
+            const result = await runtime.hostTool(
+              context,
+              shellSample.name,
+              {
+                command,
+                folder: requested,
+                timeout: Math.min(
+                  600,
+                  Math.max(1, Math.floor(options.timeout ?? 60)),
+                ),
+              },
+              options.signal,
+              id,
+            );
+            // Rust caps output below Pi's spill thresholds (32 KiB / 800 lines),
+            // so Pi never creates a plaintext output temp file in the runtime.
+            options.onData(Buffer.from(result.output, "utf8"));
+            return { exitCode: result.exitCode };
+          },
+        };
+        return shellFactory(folder, {
+          operations,
+          exposeSessionEnvironment: false,
+        }).execute(
+          id,
+          { command: args.command, timeout: args.timeout },
+          signal,
+        );
+      },
+    ),
+  );
   const direct = (name, description, properties, transform = (args) => args) =>
     runtime.wrapTool(
       context,
@@ -146,6 +218,27 @@ export function localTools(runtime, context) {
         (args) => ({ ...args, folder: path.resolve(cwd, args.folder) }),
       ),
     );
+  for (const name of [
+    "repair_launcher",
+    "rebind_tool",
+    "install_tool",
+    "update_tool",
+    "uninstall_tool",
+  ])
+    tools.push(
+      direct(
+        name,
+        "Perform a host-managed tool operation. Installation, updates and removal always need individual approval and cannot be undone.",
+        { tool: Type.String() },
+      ),
+    );
+  tools.push(
+    direct(
+      "set_tool_model",
+      "Set a supported model from the current region's catalog, preserving credentials and unrelated settings.",
+      { tool: Type.String(), model: Type.String() },
+    ),
+  );
   tools.push(
     direct(
       "request_folder",
