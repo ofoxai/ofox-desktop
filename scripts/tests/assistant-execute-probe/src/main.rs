@@ -9,8 +9,13 @@ mod execute;
 #[path = "../../../../src-tauri/src/services/assistant/process.rs"]
 pub mod process;
 #[cfg(windows)]
-#[path = "../../../../src-tauri/src/redact.rs"]
-mod redact;
+mod redact {
+    // This startup diagnostic only runs Get-Location in its own temp directory.
+    // Redaction happens after process exit and is covered by the app test suite.
+    pub fn scrub(value: &str) -> String {
+        value.to_owned()
+    }
+}
 #[cfg(windows)]
 #[path = "../../../../src-tauri/src/services/assistant/tools/scope.rs"]
 mod scope;
