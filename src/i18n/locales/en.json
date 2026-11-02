@@ -5040,7 +5040,9 @@
       "localCostLimit": "The $1 task limit was reached. A request already in progress may exceed the limit.",
       "localVerificationRequired": "Changes have not been verified successfully in the original problem folder.",
       "localInvalidPlan": "The task plan is invalid.",
-      "localCostUnavailable": "This model or search has no reliable price. Choose a priced model to use local configuration within the task budget."
+      "localCostUnavailable": "This model or search has no reliable price. Choose a priced model to use local configuration within the task budget.",
+      "localPartialChange": "Some changes were made before the repair failed. Review the changes and verify in the original folder.",
+      "localMutationUnknown": "The change outcome could not be confirmed. Check the files before retrying."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",

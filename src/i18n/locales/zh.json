@@ -5040,7 +5040,9 @@
       "localCostLimit": "本轮已达到 1 美元费用上限。已发出的请求可能使最终费用超过上限。",
       "localVerificationRequired": "改动尚未在原问题文件夹中验证成功。",
       "localInvalidPlan": "任务步骤格式无效。",
-      "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。"
+      "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。",
+      "localPartialChange": "修复失败前已产生部分改动。请检查改动记录，并在原问题文件夹中验证。",
+      "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",

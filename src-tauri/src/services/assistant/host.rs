@@ -526,6 +526,7 @@ fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure
             "assistant_verification_required",
             "assistant_tool_limit",
             "assistant_command_outcome_unknown",
+            "assistant_mutation_outcome_unknown",
         ],
     ) {
         return Failure {

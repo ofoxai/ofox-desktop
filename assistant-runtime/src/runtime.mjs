@@ -1272,6 +1272,10 @@ export class AssistantRuntime {
                   details: safe,
                 };
           } catch (error) {
+            if (
+              /\bassistant_local_partial_change\b/.test(String(error.message))
+            )
+              context.localTask?.observe(name, args, { changed: true });
             const details =
               publishDetails &&
               error.details &&
@@ -1540,6 +1544,19 @@ export class AssistantRuntime {
               secrets,
             );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
+            if (
+              context.localTask &&
+              !unbilled(result) &&
+              (usageCoverage(result.usage) !== "complete" ||
+                (result.usage?.cacheRead > 0 &&
+                  !knownPrice(params.model.cost?.cacheRead)) ||
+                (result.usage?.cacheWrite > 0 &&
+                  !knownPrice(params.model.cost?.cacheWrite)) ||
+                !knownPrice(result.usage?.cost?.total))
+            )
+              // Do not throw after recording a request: the stream catch path
+              // records transport failures and would duplicate this receipt.
+              context.localTask.stopped ??= "assistant_cost_unavailable";
             context.localTask?.addUsage(result.usage);
             if (context.localTask)
               this.notify(context, "task_status", {

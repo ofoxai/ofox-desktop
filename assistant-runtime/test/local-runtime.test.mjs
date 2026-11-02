@@ -45,7 +45,9 @@ const call = (name, args) =>
       usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
     },
   ]);
-const reply = () =>
+const reply = (
+  usage = { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+) =>
   sse([
     {
       choices: [
@@ -54,7 +56,7 @@ const reply = () =>
     },
     {
       choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      usage,
     },
   ]);
 async function fixture(t, turns, host, extra = {}) {
@@ -93,7 +95,7 @@ async function fixture(t, turns, host, extra = {}) {
     prompt: "Fix the tool",
     localConfig: {
       cwd: root,
-      platform: process.platform,
+      platform: process.platform === "win32" ? "windows" : "macos",
       skillPath: fileURLToPath(
         new URL("../skills/local-config/SKILL.md", import.meta.url),
       ),
@@ -223,3 +225,58 @@ test("paid usage stops additional model requests and preserves the completed req
   assert.equal(result.errorCode, "assistant_cost_limit");
   assert.ok(result.entries.some((e) => e.role === "request"));
 });
+
+test("a partially failed repair still requires verification and never completes from prose alone", async (t) => {
+  const f = await fixture(
+    t,
+    [
+      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
+      () => call("rebind_tool", { tool: "codex" }),
+      reply,
+      reply,
+      reply,
+    ],
+    (name, args) => {
+      if (name === "rebind_tool")
+        throw new Error("assistant_local_partial_change");
+      return { folder: args.folder, verified: false };
+    },
+  );
+  const result = await f.run();
+  assert.equal(result.errorCode, "assistant_verification_required");
+  assert.equal(f.requests.length, 5);
+});
+
+for (const [name, usage] of [
+  [
+    "unknown cache pricing",
+    {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      prompt_tokens_details: { cached_tokens: 8 },
+    },
+  ],
+  ["missing token usage", undefined],
+])
+  test(`${name} stops the local task without duplicating its request receipt`, async (t) => {
+    const f = await fixture(
+      t,
+      [() => reply(usage === undefined ? {} : usage)],
+      () => ({}),
+      {
+        model: {
+          id: "test/local",
+          supportedEndpoints: ["openai"],
+          contextWindow: 32000,
+          maxOutputTokens: 1024,
+          pricingKnown: true,
+          cost: { input: 1, output: 1 },
+        },
+      },
+    );
+    const result = await f.run();
+    assert.equal(result.errorCode, "assistant_cost_unavailable");
+    assert.equal(f.requests.length, 1);
+    assert.equal(result.entries.filter((e) => e.role === "request").length, 1);
+  });

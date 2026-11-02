@@ -387,7 +387,11 @@ impl Journal {
             file.restore()?;
         }
         for (before, after) in states.values() {
-            restore_state(before, after)?;
+            // A crash may occur after this scope was restored but before the
+            // ledger commit. Do not invoke its mutation callback twice.
+            if read_state(before)? != *before {
+                restore_state(before, after)?;
+            }
         }
         for entry in &mut self.ledger.entries {
             entry.restored = true;
@@ -438,6 +442,51 @@ pub fn key_from_store(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interrupted_restore_resumes_already_restored_database_state() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("changes");
+        let state = std::cell::RefCell::new(serde_json::json!({"scope":"tool","value":"before"}));
+        let before = state.borrow().clone();
+        let after = serde_json::json!({"scope":"tool","value":"after"});
+        let mut journal = Journal::open(&dir, &[8; 32], "test").unwrap();
+        let id = journal.prepare("rebind", &[], before.clone()).unwrap();
+        *state.borrow_mut() = after.clone();
+        journal.finish(&id, after.clone()).unwrap();
+        assert!(journal
+            .restore_with(
+                |_| Ok(state.borrow().clone()),
+                |original, _| {
+                    *state.borrow_mut() = original.clone();
+                    Err(FAILED.into())
+                }
+            )
+            .is_err());
+        drop(journal);
+        let mut journal = Journal::open(&dir, &[8; 32], "test").unwrap();
+        journal
+            .restore_with(
+                |_| Ok(state.borrow().clone()),
+                |_, expected| {
+                    assert_eq!(*state.borrow(), *expected);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert!(journal.changes().iter().all(|c| c.restored));
+        assert_eq!(*state.borrow(), before);
+    }
+    #[test]
+    fn unfinished_restore_refuses_new_mutation_snapshots() {
+        let root = tempfile::tempdir().unwrap();
+        let mut journal = Journal::open(&root.path().join("changes"), &[8; 32], "test").unwrap();
+        journal.ledger.restoring = true;
+        journal.save().unwrap();
+        assert!(journal
+            .prepare("write", &[], serde_json::Value::Null)
+            .is_err());
+    }
+
     #[test]
     fn journal_key_store_reuses_a_persistent_key_without_using_assistant_credentials() {
         use crate::ofox_secret::{InMemoryStore, SecretStore, Slot};

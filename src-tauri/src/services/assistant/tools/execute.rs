@@ -17,7 +17,13 @@ pub async fn run(command: &str, folder: &Path, home: &Path, timeout: u64) -> Res
             std::path::PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe"),
         );
         let script=format!("[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; {command}");
-        p.args(["-NoLogo", "-NonInteractive", "-Command", &script]);
+        p.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ]);
         p
     };
     process::clean_environment(&mut process);
@@ -27,24 +33,28 @@ pub async fn run(command: &str, folder: &Path, home: &Path, timeout: u64) -> Res
         .env("USERPROFILE", home);
     let mut child = Child::spawn(process)?;
     drop(child.take_stdin());
-    let stdout = child.take_stdout().ok_or("assistant_runtime_stdio")?;
-    let stderr = child.take_stderr().ok_or("assistant_runtime_stdio")?;
+    let stdout = child
+        .take_stdout()
+        .ok_or("assistant_command_outcome_unknown")?;
+    let stderr = child
+        .take_stderr()
+        .ok_or("assistant_command_outcome_unknown")?;
     let operation = async {
         let (out, err, status) = tokio::join!(
             process::bounded_output(stdout, 24576),
             process::bounded_output(stderr, 24576),
             child.child.wait()
         );
-        let out = out.map_err(|_| "assistant_runtime_stdio")?;
-        let err = err.map_err(|_| "assistant_runtime_stdio")?;
-        let status = status.map_err(|_| "assistant_runtime_stdio")?;
+        let out = out.map_err(|_| "assistant_command_outcome_unknown")?;
+        let err = err.map_err(|_| "assistant_command_outcome_unknown")?;
+        let status = status.map_err(|_| "assistant_command_outcome_unknown")?;
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&out),
             String::from_utf8_lossy(&err)
         );
         if text.contains("-----BEGIN ") && text.contains("PRIVATE KEY-----") {
-            return Err("assistant_path_denied".into());
+            return Err("assistant_command_outcome_unknown".into());
         }
         let clean = crate::redact::scrub(&text);
         let mut output = String::new();
@@ -75,6 +85,38 @@ pub async fn run(command: &str, folder: &Path, home: &Path, timeout: u64) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_execution_uses_unicode_folder_and_redacts_bounded_output() {
+        let root = tempfile::Builder::new()
+            .prefix("ofox 中文 ")
+            .tempdir()
+            .unwrap();
+        let result=run("Get-Location | Select-Object -ExpandProperty Path; Write-Output '中文'; Write-Output 'api_key=do-not-return-this'; Write-Output ('x' * 200000)",root.path(),root.path(),20).await.unwrap();
+        let output = result["output"].as_str().unwrap();
+        assert!(output.contains("中文"));
+        assert!(!output.contains("do-not-return-this"));
+        assert!(output.len() <= 32768);
+        assert_eq!(result["exitCode"], 0);
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn powershell_timeout_stops_before_late_write() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(
+            run(
+                "Start-Sleep -Seconds 5; Set-Content -LiteralPath late -Value bad",
+                root.path(),
+                root.path(),
+                1
+            )
+            .await
+            .unwrap_err(),
+            "assistant_command_outcome_unknown"
+        );
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!root.path().join("late").exists());
+    }
     #[cfg(unix)]
     #[tokio::test]
     async fn execution_uses_requested_folder_and_bounds_redacted_output() {

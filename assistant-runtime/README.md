@@ -633,9 +633,14 @@ store). Snapshots persist across restart and stay local; conversation backups
 and forks do not carry machine restoration authority. The journal checks the
 whole file/state chain before restoring; interrupted restoration can resume,
 while an operation whose outcome was never recorded needs manual inspection.
+Restoration skips database state that already matches the original snapshot,
+and an unfinished restoration blocks new snapshots. File snapshots preserve
+Unix modes or the Windows read-only attribute, not a full Windows ACL.
 
 Shell processes belong to an owned process group or Windows Job and are killed
-on cancellation or timeout. Rust drains bounded output, redacts it, and sends
+on cancellation or timeout. Windows uses system PowerShell with `-NoProfile`;
+folder diagnostics separately probe the user's shell environment. Rust drains
+bounded output, redacts it, and sends
 at most 32 KiB / 800 lines, below Pi's temporary-output spill thresholds. No
 plaintext shell output temp file is written by Node. Protected path and store
 commands are refused directly, but arbitrary executables have the user's OS
@@ -657,7 +662,9 @@ step. `task_plan` and `task_status` are bounded engine-independent host events.
 Known model and search prices contribute to the same round budget. Missing
 prices fail closed. The budget is checked between requests: an already-issued
 provider request can exceed $1, so this is not an exact provider billing cap.
-A successful host mutation invalidates prior verification. Completion requires
+A successful host mutation or a failed operation with recorded partial changes
+invalidates prior verification. A failure to record the mutation outcome blocks
+automatic retries as an unknown outcome. Completion requires
 `verify_in_folder` succeeding after the last mutation in every folder originally
 diagnosed, for the same tool. Up to two hidden custom-message continuations ask
 for verification; unresolved verification ends with a stable error. Assistant

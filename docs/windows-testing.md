@@ -153,3 +153,28 @@ cargo test --release --manifest-path src-tauri/Cargo.toml --lib session_analytic
 ```
 
 该命令不读取真实会话，不能替代原生扫描或UI延迟验收。
+
+## 助手本机配置
+
+Windows Probe 对 `feat/assistant-*` 分支启用完整 Rust、运行时和生产资源检查。
+完整 Rust 测试包含 PowerShell 中文及空格路径、输出脱敏与截断、超时后禁止延迟写入，
+以及权限白名单、敏感路径、加密快照、中断还原、双区域绑定和区域切换隔离。
+运行时测试覆盖 Windows PowerShell operations 到 Rust 的回调转发。
+排查时可单独运行（不能替代完整门禁）：
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib services::assistant::tools
+```
+
+Shell 执行使用系统 Windows PowerShell、`-NoProfile` 和 Windows Job。
+测试使用临时目录及测试凭据，不需要启动桌面应用或调用付费模型。
+macOS 上通过的路径策略和回调测试不能证明 Windows 原生进程行为；
+复审时须核对同一提交的 Windows Probe 结果。文件还原保存只读属性，不保存完整 ACL。
+
+macOS 另有默认忽略的真实 fnm 验收测试
+`real_fnm_problem_folder_repair_verify_and_restart_restore_in_four_modes`。
+设置 `OFOX_TEST_FNM`、`OFOX_TEST_NODE_OLD`、`OFOX_TEST_NODE_NEW` 和
+`OFOX_TEST_OPENCODE` 为本机现有可执行文件后，用 `cargo test` 的
+`--ignored --nocapture` 运行。测试复制两个 Node 和 OpenCode 到临时 HOME，
+复现问题文件夹切换 Node 后找不到工具，并验证四档权限、修复、原文件夹验证和重启还原；
+它不安装工具，不修改原有 fnm 目录。

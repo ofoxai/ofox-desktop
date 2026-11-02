@@ -1289,6 +1289,8 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_scan_limit: "localScanLimit",
   assistant_local_unavailable: "localUnavailable",
   assistant_command_outcome_unknown: "localCommandUnknown",
+  assistant_mutation_outcome_unknown: "localMutationUnknown",
+  assistant_local_partial_change: "localPartialChange",
   assistant_journal_unavailable: "localJournalUnavailable",
   assistant_local_repair_failed: "localRepairFailed",
   assistant_restore_conflict: "localRestoreConflict",

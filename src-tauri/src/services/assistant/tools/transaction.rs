@@ -181,6 +181,122 @@ mod tests {
         }
     }
     #[tokio::test]
+    #[serial_test::serial]
+    async fn classic_and_workbuddy_bindings_restore_original_files_and_state_on_both_apexes() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            for tool in ["claude", "workbuddy"] {
+                let sandbox = crate::test_sandbox::sandbox();
+                let home = sandbox.home();
+                crate::settings::mutate_settings(|s| s.ofox_apex = Some(apex.into())).unwrap();
+                let db = Database::memory().unwrap();
+                let file = if tool == "claude" {
+                    home.join(".claude/settings.json")
+                } else {
+                    crate::workbuddy_config::models_path()
+                };
+                let original = if tool == "claude" {
+                    r#"{"env":{"ANTHROPIC_API_KEY":"third-party-credential"},"theme":"dark"}"#
+                } else {
+                    r#"[{"id":"personal","apiKey":"third-party-credential"}]"#
+                };
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, original).unwrap();
+                if tool == "claude" {
+                    db.save_provider("claude",&crate::provider::Provider::with_id("ofox-claude".into(),"Ofox".into(),serde_json::json!({"env":{"ANTHROPIC_AUTH_TOKEN":"","ANTHROPIC_MODEL":"test/model"}}),None)).unwrap();
+                }
+                let before = db_state::capture(&db, tool).unwrap();
+                let ctx = context(home, tool);
+                ACTIVE
+                    .scope(ctx.clone(), async {
+                        if tool == "claude" {
+                            crate::services::ofox_bind::bind(
+                                &db,
+                                crate::services::ofox_bind::Tool::Claude,
+                                "claude",
+                                "sk-of-test",
+                            )
+                            .await
+                        } else {
+                            crate::workbuddy_config::sync_selected_models(
+                                &db,
+                                "sk-of-test",
+                                &[crate::workbuddy_config::WorkBuddyModelSelection {
+                                    id: "test/model".into(),
+                                    name: "Test".into(),
+                                    supports_tool_call: true,
+                                    supports_images: false,
+                                    supports_reasoning: false,
+                                    supported_endpoints: None,
+                                }],
+                            )
+                            .await
+                        }
+                    })
+                    .await
+                    .unwrap();
+                assert!(ctx.error.lock().unwrap().is_none());
+                assert!(ctx.observed.load(Ordering::SeqCst));
+                assert!(std::fs::read_to_string(&file).unwrap().contains(apex));
+                drop(ctx);
+                let mut journal =
+                    Journal::open(&home.join("changes"), &[3; 32], "isolated/test").unwrap();
+                journal
+                    .restore_with(
+                        |state| db_state::capture(&db, state["scope"].as_str().unwrap()),
+                        |before, after| db_state::restore(&db, before, after),
+                    )
+                    .unwrap();
+                assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+                assert_eq!(db_state::capture(&db, tool).unwrap(), before);
+            }
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn first_resolution_and_region_switch_fence_a_frozen_transaction() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let sandbox = crate::test_sandbox::sandbox();
+            let home = sandbox.home();
+            assert!(!crate::settings::get_settings()
+                .ofox_apex_resolved
+                .unwrap_or(false));
+            crate::settings::mutate_settings(|s| {
+                s.ofox_apex = Some(apex.into());
+                s.ofox_apex_resolved = Some(true);
+            })
+            .unwrap();
+            let mut ctx = context(home, "pi");
+            Arc::get_mut(&mut ctx).unwrap().apex = Some(apex.into());
+            ACTIVE
+                .scope(ctx.clone(), async { check_active() })
+                .await
+                .unwrap();
+            crate::settings::mutate_settings(|s| {
+                s.ofox_apex = Some(
+                    if apex == "ofox.ai" {
+                        "ofox.io"
+                    } else {
+                        "ofox.ai"
+                    }
+                    .into(),
+                )
+            })
+            .unwrap();
+            assert_eq!(
+                ACTIVE
+                    .scope(ctx.clone(), async {
+                        begin(None, "pi", vec![home.join("config")]).map(|_| ())
+                    })
+                    .await
+                    .unwrap_err(),
+                "assistant_identity_changed"
+            );
+            assert!(ctx.journal.lock().unwrap().changes().is_empty());
+            assert!(!home.join("config").exists());
+        }
+    }
+
+    #[tokio::test]
     async fn cancelled_transaction_refuses_snapshot_and_mutation() {
         let home = tempfile::tempdir().unwrap();
         let ctx = context(home.path(), "pi");

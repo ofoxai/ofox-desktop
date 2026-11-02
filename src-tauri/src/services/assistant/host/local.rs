@@ -330,13 +330,7 @@ impl AssistantHost {
                             ),
                         )
                         .await;
-                    if let Some(error) = context.error.lock().map_err(|_| STATE)?.clone() {
-                        return Err(error);
-                    }
-                    let mut result = result?;
-                    if !context.observed.load(Ordering::SeqCst) {
-                        return Err("assistant_journal_unavailable".into());
-                    }
+                    let finish_failed = context.error.lock().map_err(|_| STATE)?.is_some();
                     let changes: Vec<_> = context
                         .journal
                         .lock()
@@ -345,6 +339,19 @@ impl AssistantHost {
                         .into_iter()
                         .skip(previous_changes)
                         .collect();
+                    if finish_failed {
+                        return Err("assistant_mutation_outcome_unknown".into());
+                    }
+                    let mut result = match result {
+                        Ok(value) => value,
+                        Err(error) if !changes.iter().any(|change| change.changed) => {
+                            return Err(error)
+                        }
+                        Err(_) => return Err("assistant_local_partial_change".into()),
+                    };
+                    if !context.observed.load(Ordering::SeqCst) {
+                        return Err("assistant_journal_unavailable".into());
+                    }
                     result["changed"] = json!(changes.iter().any(|change| change.changed));
                     result["changes"] = json!(changes);
                     Ok(result)
@@ -400,7 +407,17 @@ impl AssistantHost {
                         journal.prepare(tool.name, std::slice::from_ref(&path), Value::Null)?;
                     let result = crate::config::atomic_write(&path, content.as_bytes())
                         .map_err(|_| "assistant_write_failed".to_string());
-                    journal.finish(&id, Value::Null)?;
+                    journal
+                        .finish(&id, Value::Null)
+                        .map_err(|_| "assistant_mutation_outcome_unknown")?;
+                    if result.is_err()
+                        && journal
+                            .changes()
+                            .last()
+                            .is_some_and(|change| change.changed)
+                    {
+                        return Err("assistant_local_partial_change".into());
+                    }
                     result?;
                     Ok(
                         json!({"changed":journal.changes().last().is_some_and(|change|change.changed),"changeId":id,"path":path}),

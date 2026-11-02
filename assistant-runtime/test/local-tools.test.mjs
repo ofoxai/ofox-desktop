@@ -1,8 +1,11 @@
 import test from "node:test";
+import path from "node:path";
+import os from "node:os";
+const HOST_ROOT = path.join(os.tmpdir(), "host-only-folder");
 import assert from "node:assert/strict";
 import { localTools } from "../src/local-tools.mjs";
 
-function fixture(reply) {
+function fixture(reply, platform = "macos") {
   const calls = [];
   const runtime = {
     hostTool: async (context, name, args, signal, toolCallId) => {
@@ -19,7 +22,7 @@ function fixture(reply) {
   return {
     calls,
     tools: localTools(runtime, {
-      params: { localConfig: { cwd: "/host-only-folder" } },
+      params: { localConfig: { cwd: HOST_ROOT, platform } },
     }),
   };
 }
@@ -36,7 +39,8 @@ test("local read retains Pi line selection while every filesystem access goes to
   assert.ok(
     calls.some(
       (c) =>
-        c.name === "read" && c.args.path === "/host-only-folder/config.json",
+        c.name === "read" &&
+        c.args.path === path.join(HOST_ROOT, "config.json"),
     ),
   );
   assert.equal(new Set(calls.map((c) => c.toolCallId)).size, calls.length);
@@ -150,14 +154,36 @@ test("local shell uses host cwd and bounded output without exporting Pi environm
     .find((t) => t.name === "bash")
     .execute("exec-1", {
       command: "node --version",
-      folder: "/problem",
+      folder: path.join(HOST_ROOT, "problem"),
       intent: "Check version",
     });
   assert.match(result.content[0].text, /1.2.3/);
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].args, {
     command: "node --version",
-    folder: "/problem",
+    folder: path.join(HOST_ROOT, "problem"),
     timeout: 60,
+  });
+});
+
+test("PowerShell forwarding uses host authority, cwd and timeout on every platform", async () => {
+  const { calls, tools } = fixture(
+    () => ({ exitCode: 0, output: "中文 version", truncated: false }),
+    "windows",
+  );
+  assert.ok(!tools.some((t) => t.name === "bash"));
+  const result = await tools
+    .find((t) => t.name === "powershell")
+    .execute("ps-1", {
+      command: "Get-Location",
+      folder: HOST_ROOT,
+      timeout: 12,
+      intent: "Inspect current folder",
+    });
+  assert.match(result.content[0].text, /中文/);
+  assert.deepEqual(calls[0].args, {
+    command: "Get-Location",
+    folder: HOST_ROOT,
+    timeout: 12,
   });
 });
