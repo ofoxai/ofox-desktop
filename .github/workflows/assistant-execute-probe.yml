@@ -14,6 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Exercise production execute implementation
-        shell: ${{ matrix.shell }}
+      - name: Exercise production executor from PowerShell 7
+        if: matrix.shell == 'pwsh'
+        shell: pwsh
+        run: cargo run --manifest-path scripts/tests/assistant-execute-probe/Cargo.toml --locked
+      - name: Exercise production executor from Windows PowerShell
+        if: matrix.shell == 'powershell'
+        shell: powershell
         run: cargo run --manifest-path scripts/tests/assistant-execute-probe/Cargo.toml --locked
