@@ -27,6 +27,24 @@ pub async fn run(command: &str, folder: &Path, home: &Path, timeout: u64) -> Res
         p
     };
     process::clean_environment(&mut process);
+    #[cfg(windows)]
+    {
+        // Resolve Windows PowerShell's built-in commands before inherited
+        // module directories (which may come from PowerShell 7 or another host).
+        // Keep the other entries so explicitly requested user modules still work.
+        let modules = std::path::Path::new(process.as_std().get_program())
+            .parent()
+            .ok_or("assistant_process_start_failed")?
+            .join("Modules");
+        let mut paths = vec![modules];
+        if let Some(inherited) = std::env::var_os("PSModulePath") {
+            paths.extend(std::env::split_paths(&inherited));
+        }
+        process.env(
+            "PSModulePath",
+            std::env::join_paths(paths).map_err(|_| "assistant_process_start_failed")?,
+        );
+    }
     process
         .current_dir(folder)
         .env("HOME", home)
