@@ -232,3 +232,25 @@ fn reads_a_small_archive_with_a_zip64_local_header_offset() {
     assert_eq!(archive.by_name("safe.txt").unwrap().header_start(), 0);
     assert_eq!(read_payload(bytes).unwrap(), b"test archive payload");
 }
+
+#[test]
+fn portable_writer_preserves_unix_execution_metadata_on_every_host() {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, mode) in [("readme.txt", 0o644), ("run.sh", 0o755)] {
+        writer
+            .start_file(
+                name,
+                cc_switch_lib::zip_security::portable_options().unix_permissions(mode),
+            )
+            .unwrap();
+        writer.write_all(b"portable metadata").unwrap();
+    }
+    let mut archive =
+        cc_switch_lib::zip_security::open(Cursor::new(writer.finish().unwrap().into_inner()), 2)
+            .unwrap();
+    for (name, mode) in [("readme.txt", 0o644), ("run.sh", 0o755)] {
+        let entry = archive.by_name(name).unwrap();
+        assert_eq!(entry.system(), zip::System::Unix);
+        assert_eq!(entry.unix_mode().unwrap() & 0o777, mode);
+    }
+}

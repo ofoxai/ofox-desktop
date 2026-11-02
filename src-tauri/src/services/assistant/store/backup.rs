@@ -415,7 +415,7 @@ fn validate_session(
 }
 
 fn options() -> zip::write::SimpleFileOptions {
-    zip::write::SimpleFileOptions::default()
+    crate::zip_security::portable_options()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o600)
 }

@@ -158,3 +158,9 @@ pub fn open<R: Read + Seek>(mut reader: R, max_entries: usize) -> ZipResult<zip:
 pub fn validate_headers<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> ZipResult<()> {
     archive.validate_header_consistency()
 }
+
+/// Archive modes represent portable skill execution intent, including on Windows.
+/// ZIP 9 defaults to DOS metadata on that host, which loses Unix execution bits.
+pub fn portable_options() -> zip::write::SimpleFileOptions {
+    zip::write::SimpleFileOptions::default().system(zip::System::Unix)
+}

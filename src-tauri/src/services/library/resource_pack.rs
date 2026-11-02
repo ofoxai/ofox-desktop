@@ -195,7 +195,7 @@ fn zip_pack(pack: &Pack, skills: &[u8]) -> Result<Vec<u8>, AppError> {
         return Err(error("packTooLarge"));
     }
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default()
+    let options = crate::zip_security::portable_options()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o600)
         .last_modified_time(zip::DateTime::default());
