@@ -7,7 +7,22 @@ mod commands;
 mod execute;
 #[cfg(windows)]
 #[path = "../../../../src-tauri/src/services/assistant/process.rs"]
-pub mod process;
+mod original_process;
+#[cfg(windows)]
+pub mod process {
+    pub use crate::original_process::{bounded_output, Child};
+    pub fn clean_environment(command: &mut tokio::process::Command) {
+        crate::original_process::clean_environment(command);
+        for name in std::env::var("OFOX_PROBE_SYSTEM_VARS")
+            .unwrap_or_default()
+            .split(';')
+        {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
+}
 #[cfg(windows)]
 mod redact {
     // This startup diagnostic only runs Get-Location in its own temp directory.
@@ -43,35 +58,33 @@ fn main() {
             .as_ref()
             .is_some_and(|v| v.to_string_lossy().contains('%'))
     );
-    for threaded in [false, true] {
-        let rt = if threaded {
-            tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(2)
-                .enable_all()
-                .build()
-                .unwrap()
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (label, extra) in [
+        ("inherited", ""),
+        ("program_files", "ProgramFiles"),
+        ("system_drive", "SystemDrive"),
+        ("both", "ProgramFiles;SystemDrive"),
+        ("program_files_family", "ProgramFiles;ProgramFiles(x86);ProgramW6432;CommonProgramFiles;CommonProgramFiles(x86);CommonProgramW6432"),
+        ("system_paths", "SystemDrive;ProgramData;ProgramFiles;ProgramFiles(x86);ProgramW6432;CommonProgramFiles;CommonProgramFiles(x86);CommonProgramW6432"),
+        ("builtin_only", ""),
+        ("unset_module_path_system_paths", "SystemDrive;ProgramData;ProgramFiles;ProgramFiles(x86);ProgramW6432;CommonProgramFiles;CommonProgramFiles(x86);CommonProgramW6432"),
+    ] {
+        if label == "builtin_only" {
+            std::env::set_var("PSModulePath", PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/Modules"));
+        } else if label == "unset_module_path_system_paths" {
+            std::env::remove_var("PSModulePath");
+        } else if let Some(value) = original.as_ref() {
+            std::env::set_var("PSModulePath", value);
         } else {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap()
-        };
-        for builtin in [false, true] {
-            if builtin {
-                std::env::set_var(
-                    "PSModulePath",
-                    PathBuf::from(std::env::var_os("SystemRoot").unwrap())
-                        .join("System32/WindowsPowerShell/v1.0/Modules"),
-                );
-            } else if let Some(value) = original.as_ref() {
-                std::env::set_var("PSModulePath", value)
-            } else {
-                std::env::remove_var("PSModulePath")
-            }
-            println!("CASE threaded={threaded} builtin_module_path={builtin}");
-            let result = rt.block_on(execute::run("Get-Location", &home, &home, 8));
-            println!("actual_execute_result={result:?}");
+            std::env::remove_var("PSModulePath");
         }
+        std::env::set_var("OFOX_PROBE_SYSTEM_VARS", extra);
+        println!("CASE {label}");
+        let result = rt.block_on(execute::run("Get-Location", &home, &home, 8));
+        println!("actual_execute_result={result:?}");
     }
     std::fs::remove_dir_all(home).unwrap();
 }
