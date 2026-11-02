@@ -125,7 +125,17 @@ mod tests {
             .unwrap();
         let result=run("Get-Location | Select-Object -ExpandProperty Path; Write-Output '中文'; Write-Output 'api_key=do-not-return-this'; Write-Output ('x' * 200000)",root.path(),root.path(),20).await.unwrap();
         let output = result["output"].as_str().unwrap();
-        assert!(output.contains(root.path().to_str().unwrap()));
+        // PowerShell may omit the verbatim prefix that Rust's temporary path
+        // carries. Check the actual directory identity, not its spelling.
+        let reported_folder = output
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .expect("PowerShell reports its working directory");
+        assert_eq!(
+            std::fs::canonicalize(reported_folder)
+                .expect("PowerShell reports an existing working directory"),
+            std::fs::canonicalize(root.path()).unwrap()
+        );
         assert!(output.contains("中文"));
         assert!(!output.contains("do-not-return-this"));
         assert!(output.len() <= 32768);

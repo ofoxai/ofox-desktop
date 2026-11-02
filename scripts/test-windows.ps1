@@ -133,8 +133,10 @@ try {
         $existingBypass = $savedEnvironment["NO_PROXY"]
         $bypass = if ($existingBypass) { "$existingBypass,127.0.0.1,localhost,::1" } else { "127.0.0.1,localhost,::1" }
         [Environment]::SetEnvironmentVariable("NO_PROXY", $bypass, "Process")
-        Invoke-VerificationStep "windows-rust-tests" $cargo @("test", "--manifest-path", "src-tauri/Cargo.toml", "--", "--test-threads=1")
+        # Check native persistence independently before the full suite so a
+        # later unrelated regression cannot hide the OS credential result.
         Invoke-VerificationStep "assistant-native-keychain" $cargo @("test", "--manifest-path", "src-tauri/Cargo.toml", "--lib", "os_keychain_restores_encrypted_snapshot_in_a_new_process", "--", "--ignored", "--nocapture")
+        Invoke-VerificationStep "windows-rust-tests" $cargo @("test", "--manifest-path", "src-tauri/Cargo.toml", "--", "--test-threads=1")
     } finally {
         foreach ($name in $savedEnvironment.Keys) {
             [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], "Process")
