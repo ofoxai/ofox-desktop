@@ -11,25 +11,32 @@ async fn main() {
     for suffix in ["AppData/Roaming", "AppData/Local"] {
         std::fs::create_dir_all(home.join(suffix)).unwrap();
     }
-    for (label, managed, enriched) in [
-        ("raw-filtered", false, false),
-        ("job-filtered", true, false),
-        ("raw-system-paths", false, true),
-        ("job-system-paths", true, true),
+    for (label, managed, filtered, isolated, encoding) in [
+        ("raw-inherited", false, false, false, true),
+        ("raw-isolated", false, false, true, true),
+        ("raw-filtered-system", false, true, true, true),
+        ("job-filtered-system", true, true, true, true),
+        ("raw-filtered-no-encoding", false, true, true, false),
+        ("raw-filtered-real-home", false, true, false, true),
     ] {
         let root = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
         let mut command = tokio::process::Command::new(
             root.join("System32/WindowsPowerShell/v1.0/powershell.exe"),
         );
-        command.args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; Write-Output 'shell-probe-ok'"]);
-        process::clean_environment(&mut command);
-        command
-            .current_dir(&home)
-            .env("HOME", &home)
-            .env("USERPROFILE", &home)
-            .env("APPDATA", home.join("AppData/Roaming"))
-            .env("LOCALAPPDATA", home.join("AppData/Local"));
-        if enriched {
+        let script = if encoding {
+            "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); $OutputEncoding = [Console]::OutputEncoding; Write-Output 'shell-probe-ok'"
+        } else {
+            "Write-Output 'shell-probe-ok'"
+        };
+        command.args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ]);
+        if filtered {
+            process::clean_environment(&mut command);
             for name in [
                 "SystemDrive",
                 "ProgramData",
@@ -37,11 +44,35 @@ async fn main() {
                 "ProgramFiles(x86)",
                 "CommonProgramFiles",
                 "CommonProgramFiles(x86)",
+                "PUBLIC",
+                "ALLUSERSPROFILE",
+                "USERNAME",
+                "USERDOMAIN",
+                "USERDOMAIN_ROAMINGPROFILE",
+                "LOGONSERVER",
+                "COMPUTERNAME",
+                "HOMEDRIVE",
+                "HOMEPATH",
+                "OS",
+                "PROCESSOR_ARCHITECTURE",
+                "PROCESSOR_IDENTIFIER",
+                "PROCESSOR_LEVEL",
+                "PROCESSOR_REVISION",
+                "NUMBER_OF_PROCESSORS",
+                "PSModulePath",
             ] {
                 if let Some(value) = std::env::var_os(name) {
                     command.env(name, value);
                 }
             }
+        }
+        command.current_dir(&home);
+        if isolated {
+            command
+                .env("HOME", &home)
+                .env("USERPROFILE", &home)
+                .env("APPDATA", home.join("AppData/Roaming"))
+                .env("LOCALAPPDATA", home.join("AppData/Local"));
         }
         println!("CASE {label}");
         if managed {

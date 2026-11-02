@@ -2408,11 +2408,13 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+        let granted = host
+            .add_dropped_local_folder(authority(), token.clone())
+            .await
+            .unwrap();
         assert_eq!(
-            host.add_dropped_local_folder(authority(), token.clone())
-                .await
-                .unwrap(),
-            std::fs::canonicalize(folder).unwrap().to_string_lossy()
+            std::fs::canonicalize(granted).unwrap(),
+            std::fs::canonicalize(folder).unwrap()
         );
         assert!(host
             .add_dropped_local_folder(authority(), token)
