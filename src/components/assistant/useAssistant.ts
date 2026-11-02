@@ -1727,6 +1727,44 @@ export function useAssistant(enabled: boolean) {
     showError,
   ]);
 
+  const addLocalFolder = useCallback(
+    async (folder?: string, token?: string) => {
+      const generation = epoch.current;
+      const sid = selectedRef.current;
+      if (
+        !sid ||
+        !detailRef.current?.session.capabilities.some(
+          (c) => c.id === "local_config",
+        )
+      )
+        return false;
+      try {
+        const identity = bootstrapRef.current;
+        if (!identity?.owner) return false;
+        const selected = await assistantApi.localFolder({
+          sessionId: sid,
+          expectedOwner: identity.owner,
+          expectedGeneration: identity.authorityGeneration,
+          folder,
+          token,
+        });
+        if (
+          !selected ||
+          generation !== epoch.current ||
+          sid !== selectedRef.current
+        )
+          return false;
+        setDraft([draftRef.current, selected].filter(Boolean).join("\n"));
+        return true;
+      } catch (reason) {
+        if (generation === epoch.current && sid === selectedRef.current)
+          showError(reason);
+        return false;
+      }
+    },
+    [setDraft, showError],
+  );
+
   const prepareAudio = useCallback(async () => {
     if (
       operationBusyRef.current ||
@@ -3261,6 +3299,10 @@ export function useAssistant(enabled: boolean) {
     thinking: liveThinking,
     webSearch,
     setWebSearch,
+    localConfig:
+      detail?.session.capabilities.some((c) => c.id === "local_config") ??
+      false,
+    addLocalFolder,
     webSearchWaits,
     searchSkipped,
     search,

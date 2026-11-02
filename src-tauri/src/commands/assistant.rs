@@ -397,11 +397,12 @@ pub fn handle_assistant_drag_drop(app: &tauri::AppHandle, event: &DragDropEvent)
     };
     let (host, app, paths) = (host.inner().clone(), app.clone(), paths.clone());
     tauri::async_runtime::spawn(async move {
+        let folder = paths.len() == 1 && paths[0].is_dir();
         match host.accept_drop(paths).await {
             Ok(Some((token, count))) => {
                 let _ = app.emit(
                     ASSISTANT_DROP_EVENT,
-                    serde_json::json!({ "token": token, "count": count }),
+                    serde_json::json!({ "token": token, "count": count, "folder": folder }),
                 );
             }
             Ok(None) => {}
@@ -514,6 +515,40 @@ fn runtime_dir_for(
 }
 
 impl Environment for AssistantEnvironment {
+    fn local_paths(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::services::assistant::tools::context::LocalPaths, String>> {
+        Box::pin(async move {
+            crate::services::assistant::tools::context::application_paths(self.runtime_dir()?).await
+        })
+    }
+    fn local_binding_status(
+        &self,
+        tool: crate::app_config::BindableTool,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            let state = self.app.state::<crate::store::AppState>();
+            let status = if crate::app_config::BindableTool::native(tool.as_str()).is_some() {
+                crate::native_tools::binding_status(&state.db, tool).await
+            } else if tool == crate::app_config::BindableTool::WorkBuddy {
+                crate::workbuddy_config::binding_status(&state.db).await
+            } else {
+                let (binding, _) = crate::services::ofox_bind::tool_for(tool.as_str())
+                    .ok_or("assistant_invalid_tool")?;
+                let key = crate::ofox_secret::default_store()
+                    .load(crate::ofox_secret::Slot::ApiKey { tool })
+                    .map_err(|_| "assistant_key_storage_unavailable")?;
+                crate::services::ofox_bind::status::binding_status(
+                    &state.db,
+                    binding,
+                    key.as_deref(),
+                )
+                .await
+            };
+            serde_json::to_value(status).map_err(|_| "assistant_local_unavailable".into())
+        })
+    }
+
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
         Box::pin(async move {
             let status = self.auth()?.read().await.get_auth_status().await;
@@ -939,4 +974,45 @@ pub async fn assistant_set_permission(
     request: crate::services::assistant::host::local::PermissionRequest,
 ) -> Result<crate::services::assistant::tools::policy::PermissionMode, String> {
     host.set_permission(request).await
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocalFolderRequest {
+    session_id: String,
+    expected_owner: String,
+    expected_generation: u64,
+    folder: Option<String>,
+    token: Option<String>,
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_local_folder(
+    app: tauri::AppHandle,
+    host: Host<'_>,
+    request: LocalFolderRequest,
+) -> Result<Option<String>, String> {
+    let authority = DeleteRequest {
+        session_id: request.session_id,
+        expected_owner: request.expected_owner,
+        expected_generation: request.expected_generation,
+    };
+    if request.folder.is_some() && request.token.is_some() {
+        return Err("assistant_invalid_folder".into());
+    }
+    if let Some(token) = request.token {
+        return host
+            .add_dropped_local_folder(authority, token)
+            .await
+            .map(Some);
+    }
+    let folder = match request.folder {
+        Some(folder) => Some(folder),
+        None => super::config::pick_directory(app, None)
+            .await
+            .map_err(|_| "assistant_invalid_folder")?,
+    };
+    match folder {
+        Some(folder) => host.add_local_folder(authority, folder).await.map(Some),
+        None => Ok(None),
+    }
 }

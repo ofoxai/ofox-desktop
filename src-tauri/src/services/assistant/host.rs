@@ -76,6 +76,16 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    fn local_paths(&self) -> BoxFuture<'_, Result<super::tools::context::LocalPaths, String>> {
+        Box::pin(async { Err("assistant_local_unavailable".into()) })
+    }
+    fn local_binding_status(
+        &self,
+        _tool: crate::app_config::BindableTool,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async { Ok(json!({"status":"unknown"})) })
+    }
+
     /// Blocking proxy-aware audio transport; tests inject a direct local client.
     fn audio_client(&self) -> Result<reqwest::Client, String> {
         crate::proxy::http_client::assistant_media_client()
@@ -2225,6 +2235,83 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn local_folder_grant_is_user_bound_and_reads_are_scrubbed() {
+        let (_tmp, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store
+            .create_with_capabilities(
+                "test/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        let folder = env.config.join("project");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("config.json"),
+            r#"{"api_key":"sk-test-sensitive-value-123456789"}"#,
+        )
+        .unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let authority = || DeleteRequest {
+            session_id: sid.clone(),
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        let mut stale = authority();
+        stale.expected_generation += 1;
+        assert_eq!(
+            host.add_local_folder(stale, folder.to_string_lossy().into())
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        host.add_local_folder(authority(), folder.to_string_lossy().into())
+            .await
+            .unwrap();
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"read-1","name":"read","args":{"path":folder.join("config.json")}});
+        let text = host.dispatch_tool(&run, &params).await.unwrap().to_string();
+        assert!(!text.contains("sensitive-value"));
+        assert!(!env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.r#type == "approval"));
+        let forbidden = env.config.join(".ssh");
+        std::fs::create_dir_all(&forbidden).unwrap();
+        assert!(host
+            .add_local_folder(authority(), forbidden.to_string_lossy().into())
+            .await
+            .is_err());
+        let (token, _) = host
+            .accept_drop(vec![folder.clone()])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            host.add_dropped_local_folder(authority(), token.clone())
+                .await
+                .unwrap(),
+            std::fs::canonicalize(folder).unwrap().to_string_lossy()
+        );
+        assert!(host
+            .add_dropped_local_folder(authority(), token)
+            .await
+            .is_err());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
     async fn local_tools_approval_dispatch_deduplicates_and_rejects_stale_authority() {
         use super::local::ApprovalRequest;
         let (_tmp, env, host) = fixture_with_env();
@@ -2423,6 +2510,18 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn local_paths(
+            &self,
+        ) -> BoxFuture<'_, Result<super::super::tools::context::LocalPaths, String>> {
+            Box::pin(async {
+                Ok(super::super::tools::context::LocalPaths {
+                    home: self.config.clone(),
+                    config_roots: vec![self.config.join("config")],
+                    shell_files: vec![self.config.join(".zshrc")],
+                    skill: self.config.join("skills/SKILL.md"),
+                })
+            })
+        }
         fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
             Box::pin(async {
                 let mut value = identity();

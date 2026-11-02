@@ -46,6 +46,7 @@ import {
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
 import { useAssistant, type VideoConfirmation } from "./useAssistant";
+import { AssistantFolder } from "./AssistantFolder";
 import { ImageParams } from "./ImageParams";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
@@ -820,8 +821,12 @@ function AssistantWorkspace() {
   // and only while this page is the one on screen.
   const { dragging } = useFileDrop({
     ready: interactionActive && writable,
-    onDrop: (token) =>
-      void assistant.dropAttachments(token).then(focusComposerIfLost),
+    onDrop: (token, folder) =>
+      void (
+        folder && assistant.localConfig
+          ? assistant.addLocalFolder(undefined, token)
+          : assistant.dropAttachments(token)
+      ).then(focusComposerIfLost),
     onError: assistant.showError,
   });
   const moveToTrash = () => {
@@ -1163,6 +1168,12 @@ function AssistantWorkspace() {
               {t("common.retry")}
             </Button>
           </div>
+        )}
+        {assistant.localConfig && session && !session.deletedAt && (
+          <AssistantFolder
+            key={session.id}
+            onChoose={assistant.addLocalFolder}
+          />
         )}
         {/* While a delete dialog is open it shows the failure itself: a
             banner behind it would be announced a second time. */}

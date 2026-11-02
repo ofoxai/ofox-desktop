@@ -18,6 +18,9 @@ pub(crate) fn tool_start_event(data: &Value) -> Result<Value, String> {
         "web_search" => Some("query"),
         "web_fetch" => Some("url"),
         "read_attachment" => Some("id"),
+        "read" | "write" | "edit" | "ls" | "find" | "grep" => Some("path"),
+        "tool_status" | "repair_launcher" | "rebind_tool" | "set_tool_model" => Some("tool"),
+        "diagnose_in_folder" | "verify_in_folder" => Some("folder"),
         _ => None,
     };
     let mut args = Map::new();
@@ -26,7 +29,14 @@ pub(crate) fn tool_start_event(data: &Value) -> Result<Value, String> {
     {
         args.insert(key.into(), json!(value));
     }
-    Ok(json!({"name": name, "toolCallId": call, "args": args}))
+    let mut shown = json!({"name": name, "toolCallId": call, "args": args});
+    if let Some(intent) = data["args"]["intent"].as_str() {
+        shown["intent"] = json!(crate::redact::scrub(intent)
+            .chars()
+            .take(200)
+            .collect::<String>());
+    }
+    Ok(shown)
 }
 
 /// A tool failure's code: the runtime's `details.code`, else the head of its

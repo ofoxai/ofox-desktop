@@ -569,6 +569,14 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
+        let local_config = if super::capabilities::enabled(&record.session.capabilities) {
+            let paths = self.env.local_paths().await?;
+            Some(
+                json!({"cwd":paths.home,"skillPath":paths.skill,"definition":super::capabilities::local_config()}),
+            )
+        } else {
+            None
+        };
         self.remember_key(&key);
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
         control.local_enabled = super::capabilities::enabled(&record.session.capabilities);
@@ -622,6 +630,9 @@ impl AssistantHost {
             "regenerateEntryId": branch.regenerate_entry,
         });
         if let Some(params) = params.as_object_mut() {
+            if let Some(local_config) = local_config {
+                params.insert("localConfig".into(), local_config);
+            }
             params.extend(attachment_params(
                 &record,
                 &attachment_root,

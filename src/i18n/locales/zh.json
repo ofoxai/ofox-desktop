@@ -5021,7 +5021,13 @@
       "toolInvalid": "工具参数无效。",
       "toolCallConflict": "此工具调用编号已用于不同的操作。",
       "toolLimit": "本轮工具调用已达上限。",
-      "operationDenied": "此操作未获授权。"
+      "operationDenied": "此操作未获授权。",
+      "localFileUnreadable": "无法将此文件读取为文本。",
+      "localFileTooLarge": "文件超出了本机诊断的大小限制。",
+      "localFolderInvalid": "请选择有效的文件夹。",
+      "localPathDenied": "此路径无效或包含受保护的数据。",
+      "localScanLimit": "扫描已达到上限，请缩小文件夹范围。",
+      "localUnavailable": "本机诊断暂不可用，请检查运行时安装。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5455,6 +5461,12 @@
     "audioHistoryOutput": "已生成音频",
     "audioHistoryOriginal": "已保留的原音频",
     "audioHistoryItem": "已存音频 {{number}}",
-    "audioHistoryEmpty": "还没有已存音频历史。"
+    "audioHistoryEmpty": "还没有已存音频历史。",
+    "local": {
+      "folderHint": "选择、拖入或粘贴出现问题的文件夹。发送选中的路径后继续诊断。",
+      "chooseFolder": "选择文件夹",
+      "folderPath": "出现问题的文件夹路径",
+      "useFolder": "使用文件夹"
+    }
   }
 }

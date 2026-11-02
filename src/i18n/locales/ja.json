@@ -5021,7 +5021,13 @@
       "toolInvalid": "ツールの引数が無効です。",
       "toolCallConflict": "このツール呼び出し ID は別の操作に使用されています。",
       "toolLimit": "このターンのツール呼び出し上限に達しました。",
-      "operationDenied": "この操作は許可されませんでした。"
+      "operationDenied": "この操作は許可されませんでした。",
+      "localFileUnreadable": "このファイルをテキストとして読み取れません。",
+      "localFileTooLarge": "ファイルがローカル診断のサイズ制限を超えています。",
+      "localFolderInvalid": "有効なフォルダーを選択してください。",
+      "localPathDenied": "パスが無効か、保護されたデータが含まれています。",
+      "localScanLimit": "検索上限に達しました。対象フォルダーを絞ってください。",
+      "localUnavailable": "ローカル診断を利用できません。ランタイムのインストールを確認してください。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
@@ -5455,6 +5461,12 @@
     "audioHistoryOutput": "生成済み音声",
     "audioHistoryOriginal": "保持した元の音声",
     "audioHistoryItem": "保存済み音声 {{number}}",
-    "audioHistoryEmpty": "保存済み音声の履歴はまだありません。"
+    "audioHistoryEmpty": "保存済み音声の履歴はまだありません。",
+    "local": {
+      "folderHint": "問題が起きるフォルダーを選択、ドロップ、またはパスを貼り付けてください。パスを送信すると診断を続けます。",
+      "chooseFolder": "フォルダーを選択",
+      "folderPath": "問題が起きるフォルダーのパス",
+      "useFolder": "このフォルダーを使用"
+    }
   }
 }

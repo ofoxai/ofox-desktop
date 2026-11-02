@@ -588,3 +588,24 @@ launchers, which embed their own dependency copies, while preserving the
 unbundled SDK and its license files. The desktop uses in-process SDK sessions;
 standalone CLI/RPC entry points are outside this packaged runtime. Production
 smoke checks verify the SDK, native canvas, PDF and history paths after pruning.
+
+### Local configuration reads
+
+A host-issued `localConfig` run parameter registers scoped `read`, `ls`, `find`,
+`grep`, tool diagnostics and folder requests. Pi's read/list/find definitions
+retain their output formatting, with every filesystem operation overridden by
+an engine-neutral host callback. Grep is implemented by Rust and never starts
+`rg` in Node. Host reads are bounded, reject sensitive paths (including resolved
+symlink targets), and redact credentials before returning text. Directory scans
+honor ignore files and never follow symlinks.
+
+The bundled `skills/local-config/SKILL.md` is copied into the production runtime.
+The loader uses `noSkills: true` **with** `additionalSkillPaths`: Pi 1.4.0 still
+loads those explicit files, while disabling its global/project discovery. A
+private `cwd` and `agentDir` alone do not prevent discovery of user Skills.
+
+Folder grants come only from a renderer action bound to the account, authority
+generation and session. Picker results, pasted paths and single-directory drops
+are canonicalized by Rust. Dropped paths remain behind one-use host tokens until
+authorized. Grants are memory-only, and diagnostic probes use the supplied
+folder as their working directory.

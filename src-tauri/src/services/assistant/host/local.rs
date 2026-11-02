@@ -4,8 +4,11 @@ use crate::services::assistant::{
     capabilities,
     tools::{
         approval::{Binding, Choice},
+        context::LocalPaths,
+        diagnostics, files,
         policy::{self, Decision, PermissionMode},
         registry,
+        scope::{Access, Scope},
     },
 };
 use serde::Deserialize;
@@ -16,6 +19,7 @@ pub(super) struct LocalState {
     mode: PermissionMode,
     // Exact tool + arguments, never a wildcard for arbitrary commands/paths.
     grants: HashSet<String>,
+    folders: Vec<PathBuf>,
 }
 
 type CallResult = (String, Option<Result<Value, String>>);
@@ -120,13 +124,12 @@ impl AssistantHost {
         if let Some(run) = runs.get(&request.session_id) {
             run.cancel.send_replace(true);
         }
-        self.local_states.lock().map_err(|_| STATE)?.insert(
-            session_key(&identity.owner, &request.session_id),
-            LocalState {
-                mode: request.mode,
-                ..Default::default()
-            },
-        );
+        let mut states = self.local_states.lock().map_err(|_| STATE)?;
+        let state = states
+            .entry(session_key(&identity.owner, &request.session_id))
+            .or_default();
+        state.mode = request.mode;
+        state.grants.clear();
         Ok(request.mode)
     }
 
@@ -206,23 +209,202 @@ impl AssistantHost {
         signature: &str,
         call_id: &str,
     ) -> Result<Value, String> {
+        if tool.name == "probe_write" && cfg!(test) {
+            self.authorize_local(
+                run,
+                tool,
+                args,
+                signature,
+                call_id,
+                tool.operation(true, false, false),
+            )
+            .await?;
+            return Ok(json!({"approved":true}));
+        }
+        if tool.name == "request_folder" {
+            self.emit(run, "folder_request", json!({"toolCallId":call_id}));
+            return Ok(
+                json!({"waitingForUser":true,"instruction":"Ask the user to choose the problem folder using the folder card, then continue."}),
+            );
+        }
+        let (paths, scope) = self
+            .local_scope(&run.identity.owner, &run.session_id)
+            .await?;
+        let requested = args["path"]
+            .as_str()
+            .or_else(|| args["folder"].as_str())
+            .map(PathBuf::from);
+        let checked = requested.as_ref().map(|p| scope.check(p)).transpose()?;
+        let access = checked.as_ref().map_or(Access::Inside, |p| p.access);
         self.authorize_local(
             run,
             tool,
             args,
             signature,
             call_id,
-            tool.operation(true, false, false),
+            tool.operation(access == Access::Inside, access == Access::Forbidden, false),
         )
         .await?;
         self.validate_run(run)?;
         if self.identity().await? != run.identity {
             return Err(IDENTITY_CHANGED.into());
         }
-        match tool.name {
-            "probe_write" if cfg!(test) => Ok(json!({"approved":true})),
-            _ => Err("assistant_unknown_tool".into()),
+        let path = checked
+            .map(|p| p.path)
+            .unwrap_or_else(|| paths.home.clone());
+        let outside = access == Access::Outside;
+        let operation = async {
+            match tool.name {
+                "read" | "stat" | "ls" | "find" | "grep" => {
+                    let args = args.clone();
+                    blocking(move || match tool.name {
+                        "read" => Ok(json!(files::read(&scope, &path, outside)?)),
+                        "stat" => files::stat(&scope, &path, outside),
+                        "ls" => Ok(json!(files::list(
+                            &scope,
+                            &path,
+                            registry::decode::<registry::ListArgs>(&args)?.limit,
+                            outside
+                        )?)),
+                        "find" => {
+                            let a: registry::SearchArgs = registry::decode(&args)?;
+                            Ok(json!(files::find(
+                                &scope, &path, &a.pattern, a.limit, outside
+                            )?))
+                        }
+                        "grep" => {
+                            let a: registry::SearchArgs = registry::decode(&args)?;
+                            Ok(json!(files::grep(
+                                &scope, &path, &a.pattern, a.limit, outside
+                            )?))
+                        }
+                        _ => Err("assistant_unknown_tool".into()),
+                    })
+                    .await
+                }
+                "tool_status" | "diagnose_in_folder" | "verify_in_folder" => {
+                    let tool = registry::supported_tool(
+                        args["tool"].as_str().ok_or("assistant_invalid_tool")?,
+                    )?;
+                    let mut result = diagnostics::probe(tool, &path, &paths.home).await;
+                    if args.get("folder").is_some() {
+                        result["folderMetadata"] = blocking(move || {
+                            Ok(diagnostics::folder_metadata(&scope, &path, outside))
+                        })
+                        .await?;
+                    } else {
+                        result["binding"] = self.env.local_binding_status(tool).await?;
+                        result["configPath"] = json!(crate::commands::get_tool_config_file_path(
+                            tool.as_str().into()
+                        )
+                        .map_err(|_| "assistant_local_unavailable")?);
+                    }
+                    Ok(result)
+                }
+                _ => Err("assistant_unknown_tool".into()),
+            }
+        };
+        let mut cancel = run.cancel.subscribe();
+        let mut result = tokio::select! {
+            biased;
+            _=cancel.changed()=>return Err(CANCELLED.into()),
+            _=tokio::time::sleep_until(run.deadline)=>return Err("assistant_run_timeout".into()),
+            result=operation=>result?,
+        };
+        self.validate_run(run)?;
+        if self.identity().await? != run.identity {
+            return Err(IDENTITY_CHANGED.into());
         }
+        fn scrub(value: &mut Value) {
+            match value {
+                Value::String(text) => *text = crate::redact::scrub(text).into_owned(),
+                Value::Array(items) => items.iter_mut().for_each(scrub),
+                Value::Object(items) => items.values_mut().for_each(scrub),
+                _ => {}
+            }
+        }
+        scrub(&mut result);
+        scrub_secrets_in(&mut result, &self.known_keys());
+        Ok(result)
+    }
+
+    pub(super) async fn local_scope(
+        &self,
+        owner: &str,
+        sid: &str,
+    ) -> Result<(LocalPaths, Scope), String> {
+        let paths = self.env.local_paths().await?;
+        let folders = self
+            .local_states
+            .lock()
+            .map_err(|_| STATE)?
+            .get(&session_key(owner, sid))
+            .map(|s| s.folders.clone())
+            .unwrap_or_default();
+        let scope = paths.scope(&folders)?;
+        Ok((paths, scope))
+    }
+
+    pub async fn add_dropped_local_folder(
+        &self,
+        authority: DeleteRequest,
+        token: String,
+    ) -> Result<String, String> {
+        let identity = self.identity().await?;
+        self.ensure_current(&identity, authority.expected_generation)
+            .await?;
+        if identity.owner != authority.expected_owner {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        let paths = self.drops.lock().map_err(|_| STATE)?.take(
+            &token,
+            &identity.owner,
+            authority.expected_generation,
+            std::time::Instant::now(),
+        )?;
+        if paths.len() != 1 || !paths[0].is_dir() {
+            return Err("assistant_invalid_folder".into());
+        }
+        self.add_local_folder(authority, paths[0].to_string_lossy().into_owned())
+            .await
+    }
+
+    pub async fn add_local_folder(
+        &self,
+        authority: DeleteRequest,
+        folder: String,
+    ) -> Result<String, String> {
+        let identity = self.identity().await?;
+        self.ensure_current(&identity, authority.expected_generation)
+            .await?;
+        if identity.owner != authority.expected_owner {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        let record = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = authority.session_id.clone();
+            move || store.load_record(&sid)
+        })
+        .await?;
+        if !capabilities::enabled(&record.session.capabilities) {
+            return Err("assistant_capability_disabled".into());
+        }
+        let (_, mut scope) = self
+            .local_scope(&identity.owner, &authority.session_id)
+            .await?;
+        let folder = scope.add_folder(Path::new(&folder))?;
+        let _runs = self.runs.lock().map_err(|_| STATE)?;
+        if self.generation() != authority.expected_generation {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        let mut states = self.local_states.lock().map_err(|_| STATE)?;
+        let state = states
+            .entry(session_key(&identity.owner, &authority.session_id))
+            .or_default();
+        if !state.folders.contains(&folder) {
+            state.folders.push(folder.clone());
+        }
+        Ok(folder.to_string_lossy().into_owned())
     }
 
     async fn authorize_local(

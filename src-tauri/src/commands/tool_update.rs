@@ -215,6 +215,14 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
 
 #[cfg(target_os = "windows")]
 pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
+    probe_executable_in(tool, &crate::config::get_home_dir()).await
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) async fn probe_executable_in(
+    tool: &str,
+    folder: &Path,
+) -> Result<Installation, ProbeError> {
     validate_executable_name(tool)?;
     let path = super::windows_tools::find_tool(tool).ok_or(ProbeError::NotFound)?;
     let search_path = super::windows_tools::effective_path()
@@ -233,7 +241,7 @@ pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeEr
         }
     };
     let mut command = super::misc::version_command(&path);
-    command.env("PATH", &search_path);
+    command.env("PATH", &search_path).current_dir(folder);
     let (version, error) = executable_version(bounded_output(command).await);
     Ok(Installation {
         path,
@@ -255,6 +263,14 @@ pub(crate) async fn probe(tool: &str) -> Result<Installation, ProbeError> {
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeError> {
+    probe_executable_in(tool, &crate::config::get_home_dir()).await
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) async fn probe_executable_in(
+    tool: &str,
+    folder: &Path,
+) -> Result<Installation, ProbeError> {
     validate_executable_name(tool)?;
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let home = crate::config::get_home_dir();
@@ -263,7 +279,7 @@ pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeEr
         "printf '\\n__OFOX_BIN__%s\\n' \"$(command -v {tool})\"; printf '__OFOX_PATH__%s\\n' \"$PATH\""
     )])
     // A new terminal starts in the home folder; fnm/mise would switch Node in a project folder.
-    .current_dir(&home);
+    .current_dir(folder);
     let output = bounded_output(command).await?;
     let (path, search_path) = shell_resolution(&output)?;
     let path = PathBuf::from(path);
@@ -283,7 +299,10 @@ pub(crate) async fn probe_executable(tool: &str) -> Result<Installation, ProbeEr
         }
     };
     let mut command = Command::new(&path);
-    command.arg("--version").env("PATH", &search_path);
+    command
+        .arg("--version")
+        .env("PATH", &search_path)
+        .current_dir(folder);
     let output = bounded_output(command).await;
     let (version, error) = executable_version(output);
     Ok(Installation {

@@ -5021,7 +5021,13 @@
       "toolInvalid": "The tool arguments are invalid.",
       "toolCallConflict": "This tool call was already submitted with different arguments.",
       "toolLimit": "The tool limit for this turn was reached.",
-      "operationDenied": "This operation was denied."
+      "operationDenied": "This operation was denied.",
+      "localFileUnreadable": "This file cannot be read as text.",
+      "localFileTooLarge": "The file exceeds the local diagnosis size limit.",
+      "localFolderInvalid": "Choose a valid folder.",
+      "localPathDenied": "This path is invalid or contains protected data.",
+      "localScanLimit": "The scan reached its limit. Choose a narrower folder.",
+      "localUnavailable": "Local diagnosis is unavailable. Check the runtime installation."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5455,6 +5461,12 @@
     "audioHistoryOutput": "Generated audio",
     "audioHistoryOriginal": "Retained original audio",
     "audioHistoryItem": "Saved audio {{number}}",
-    "audioHistoryEmpty": "No saved audio history yet."
+    "audioHistoryEmpty": "No saved audio history yet.",
+    "local": {
+      "folderHint": "Select, drop, or paste the folder where the tool fails. Send the selected path to continue diagnosis.",
+      "chooseFolder": "Choose folder",
+      "folderPath": "Problem folder path",
+      "useFolder": "Use folder"
+    }
   }
 }

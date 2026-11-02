@@ -325,6 +325,10 @@ if (process.argv.includes("--node-only")) {
   await cp(path.join(runtime, "src"), path.join(production, "src"), {
     recursive: true,
   });
+  await rm(path.join(production, "skills"), { recursive: true, force: true });
+  await cp(path.join(runtime, "skills"), path.join(production, "skills"), {
+    recursive: true,
+  });
   // Notices for third-party code the npm packages ship without them, such as
   // the libraries compiled into the native canvas addon. Copied every time,
   // like the source, because they change without the lockfile.

@@ -713,6 +713,7 @@ export type AssistantDragState = "enter" | "leave";
  * replaced by the next drop) and how many files it stands for.
  */
 export interface AssistantDrop {
+  folder?: boolean;
   token: string;
   count: number;
 }
@@ -854,6 +855,7 @@ export type AssistantRunEvent =
         expectedGeneration: number;
       };
     }
+  | { type: "folder_request"; data: { toolCallId: string } }
   | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A tool call of the run's reply. `args` holds only what may be shown:
@@ -866,6 +868,7 @@ export type AssistantRunEvent =
         name: string;
         toolCallId: string;
         args: Record<string, string>;
+        intent?: string;
       };
     }
   /**
@@ -979,6 +982,13 @@ export const assistantApi = {
     modelPicked?: boolean;
     webSearch: boolean;
   }) => invoke<AssistantSession>("assistant_create_session", { request }),
+  localFolder: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+    folder?: string;
+    token?: string;
+  }) => invoke<string | null>("assistant_local_folder", { request }),
   respondApproval: (request: {
     sessionId: string;
     runId: string;
@@ -1225,6 +1235,13 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_tool_call_conflict: "toolCallConflict",
   assistant_tool_limit: "toolLimit",
   assistant_operation_denied: "operationDenied",
+  assistant_file_unreadable: "localFileUnreadable",
+  assistant_file_too_large: "localFileTooLarge",
+  assistant_invalid_folder: "localFolderInvalid",
+  assistant_invalid_path: "localPathDenied",
+  assistant_path_denied: "localPathDenied",
+  assistant_scan_limit: "localScanLimit",
+  assistant_local_unavailable: "localUnavailable",
 
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",
