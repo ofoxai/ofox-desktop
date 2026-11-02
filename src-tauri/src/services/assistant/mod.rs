@@ -3,6 +3,7 @@
 pub mod attachments;
 pub mod audio;
 pub mod audio_input;
+pub mod capabilities;
 pub mod catalog;
 mod context;
 mod download;
@@ -20,6 +21,7 @@ mod requests;
 pub mod store;
 pub mod thinking;
 mod title;
+pub mod tools;
 mod transfers;
 pub mod types;
 pub mod video;

@@ -713,3 +713,19 @@ it("starts manual compaction with the frozen authority and independent run ids",
   await assistantApi.compact(request);
   expect(invoke).toHaveBeenCalledWith("assistant_compact", { request });
 });
+
+it("forwards local capability choices without persisting permission grants", async () => {
+  const capabilities = [{ id: "local_config", version: 1 }];
+  await assistantApi.createSession({
+    webSearch: false,
+    assistantId: "ofox",
+    capabilities,
+  });
+  expect(invoke).toHaveBeenLastCalledWith("assistant_create_session", {
+    request: { webSearch: false, assistantId: "ofox", capabilities },
+  });
+  await assistantApi.updateSession({ sessionId: "session", capabilities: [] });
+  expect(invoke).toHaveBeenLastCalledWith("assistant_update_session", {
+    request: { sessionId: "session", capabilities: [] },
+  });
+});

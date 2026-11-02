@@ -77,6 +77,10 @@ impl ContextUsage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    #[serde(default = "super::capabilities::default_assistant_id")]
+    pub assistant_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<super::capabilities::CapabilityRef>,
     /// Live audio task, never resumed from a saved snapshot.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub audio_only: Option<bool>,
@@ -345,6 +349,10 @@ pub struct SetPreferencesRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRequest {
+    #[serde(default = "super::capabilities::default_assistant_id")]
+    pub assistant_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<super::capabilities::CapabilityRef>,
     /// The catalog's default (or the remembered choice) when absent.
     pub model_id: Option<String>,
     /// The user picked `model_id` rather than taking the default shown: it is
@@ -358,6 +366,8 @@ pub struct CreateRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRequest {
+    pub assistant_id: Option<String>,
+    pub capabilities: Option<Vec<super::capabilities::CapabilityRef>>,
     pub session_id: String,
     /// Checked by the host against the signed-in owner, not by the store.
     pub expected_owner: Option<String>,

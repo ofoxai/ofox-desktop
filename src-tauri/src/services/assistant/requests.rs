@@ -221,7 +221,12 @@ impl AssistantHost {
         let kind = self.model(&identity.apex, &selected).await?.kind;
         self.ensure_current(&identity, generation).await?;
         let detail = blocking(move || {
-            let detail = store.create(&selected, request.web_search)?;
+            let detail = store.create_with_capabilities(
+                &selected,
+                request.web_search,
+                &request.assistant_id,
+                &request.capabilities,
+            )?;
             if remember {
                 store.remember_model_kind(&selected, kind)?;
             }
@@ -321,8 +326,12 @@ impl AssistantHost {
         {
             *text = super::host::scrub_secrets(text, &keys);
         }
-        let stops_run = request.model_id.is_some() || request.deleted == Some(true);
+        let stops_run = request.model_id.is_some()
+            || request.deleted == Some(true)
+            || request.capabilities.is_some()
+            || request.assistant_id.is_some();
         let sid = request.session_id.clone();
+        let changes_capabilities = request.capabilities.is_some() || request.assistant_id.is_some();
         self.ensure_current(&identity, generation).await?;
         let (mut session, remembered) = blocking({
             let store = self.store(&identity.owner)?;
@@ -348,6 +357,9 @@ impl AssistantHost {
         // the choice failed.
         if stops_run {
             self.cancel_session(&sid);
+        }
+        if changes_capabilities {
+            self.clear_local_permission(&identity.owner, &sid);
         }
         remembered?;
         self.decorate(&identity.owner, &mut session);
@@ -558,7 +570,9 @@ impl AssistantHost {
         self.ensure_current(&identity, generation).await?;
 
         self.remember_key(&key);
-        let control = Arc::new(RunControl::new(identity.clone(), &request, key.clone()));
+        let mut control = RunControl::new(identity.clone(), &request, key.clone());
+        control.local_enabled = super::capabilities::enabled(&record.session.capabilities);
+        let control = Arc::new(control);
         let text = super::host::scrub_secrets(&request.text, std::slice::from_ref(&key));
         blocking({
             let host = self.clone();
@@ -595,6 +609,8 @@ impl AssistantHost {
             "runId": request.run_id,
             "operationId": request.operation_id,
             "sessionFile": native_file,
+            "assistantId": record.session.assistant_id,
+            "capabilities": record.session.capabilities,
             "model": model.for_runtime(thinking_level.is_some()),
             "apiKey": key,
             "apex": identity.apex,

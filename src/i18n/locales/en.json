@@ -5012,7 +5012,16 @@
       "forkFailed": "The conversation could not be forked. Try again.",
       "forkUnavailable": "This message cannot be forked. Refresh the conversation.",
       "forkPendingMedia": "Wait for the video task to finish before forking this part of the conversation.",
-      "compactUnavailable": "There is no conversation context to compact with this model."
+      "compactUnavailable": "There is no conversation context to compact with this model.",
+      "approvalExpired": "This confirmation has expired.",
+      "approvalTimeout": "The confirmation timed out.",
+      "capabilityDisabled": "Enable local configuration to use this tool.",
+      "fullAccessConfirmation": "Confirm full access before switching to this permission level.",
+      "capabilityInvalid": "This assistant capability is unavailable.",
+      "toolInvalid": "The tool arguments are invalid.",
+      "toolCallConflict": "This tool call was already submitted with different arguments.",
+      "toolLimit": "The tool limit for this turn was reached.",
+      "operationDenied": "This operation was denied."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",

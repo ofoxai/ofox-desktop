@@ -76,6 +76,8 @@ const session: AssistantSession = {
   id: "session-a",
   title: "My conversation",
   titleSource: "auto",
+  assistantId: "ofox",
+  capabilities: [],
   modelId: "balanced",
   webSearch: false,
   draft: "",

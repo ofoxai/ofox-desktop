@@ -312,7 +312,21 @@ export interface AssistantContextUsage {
   contextWindow: number;
 }
 
+export type AssistantPermissionMode =
+  | "readOnly"
+  | "ask"
+  | "autoConfig"
+  | "fullAccess";
+export type AssistantApprovalChoice = "once" | "session" | "deny";
+
+export interface AssistantCapabilityRef {
+  id: string;
+  version: number;
+}
+
 export interface AssistantSession {
+  assistantId: string;
+  capabilities: AssistantCapabilityRef[];
   audioOnly?: boolean;
   contextUsage?: AssistantContextUsage | null;
   /** Current runtime state; never restored from disk. */
@@ -567,6 +581,8 @@ export interface AssistantSessionDetail {
 }
 
 export interface AssistantUpdateRequest {
+  assistantId?: string;
+  capabilities?: AssistantCapabilityRef[];
   sessionId: string;
   expectedOwner?: string;
   expectedGeneration?: number;
@@ -825,6 +841,20 @@ export type AssistantRunEvent =
     }
   /** The conversation's running totals, not this run's. */
   | { type: "usage"; data: { usage: AssistantUsage } }
+  | {
+      type: "approval";
+      data: {
+        approvalId: string;
+        toolCallId: string;
+        name: string;
+        category: "read" | "write_config" | "exec" | "network" | "paid";
+        details: string;
+        allowSession: boolean;
+        expectedOwner: string;
+        expectedGeneration: number;
+      };
+    }
+  | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A tool call of the run's reply. `args` holds only what may be shown:
    * `query` (web_search), `url` (web_fetch) or `id` (read_attachment).
@@ -942,11 +972,30 @@ export const assistantApi = {
     },
   ) => invoke<AssistantPreferences>("assistant_set_preferences", { request }),
   createSession: (request: {
+    assistantId?: string;
+    capabilities?: AssistantCapabilityRef[];
     modelId?: string;
     /** The user picked `modelId`: it is remembered even while some models are missing. */
     modelPicked?: boolean;
     webSearch: boolean;
   }) => invoke<AssistantSession>("assistant_create_session", { request }),
+  respondApproval: (request: {
+    sessionId: string;
+    runId: string;
+    operationId: string;
+    approvalId: string;
+    choice: AssistantApprovalChoice;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<void>("assistant_respond_approval", { request }),
+  setPermission: (request: {
+    sessionId: string;
+    mode: AssistantPermissionMode;
+    confirmedFullAccess?: boolean;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) =>
+    invoke<AssistantPermissionMode>("assistant_set_permission", { request }),
   getSession: (sessionId: string) =>
     invoke<AssistantSessionDetail>("assistant_get_session", { sessionId }),
   updateSession: (request: AssistantUpdateRequest) =>
@@ -1166,6 +1215,17 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_session_busy: "sessionBusy",
   assistant_transfer_busy: "transferBusy",
   assistant_operation_already_submitted: "runChanged",
+  assistant_approval_expired: "approvalExpired",
+  assistant_approval_timeout: "approvalTimeout",
+  assistant_capability_disabled: "capabilityDisabled",
+  assistant_full_access_confirmation_required: "fullAccessConfirmation",
+  assistant_invalid_assistant: "capabilityInvalid",
+  assistant_invalid_capability: "capabilityInvalid",
+  assistant_invalid_tool: "toolInvalid",
+  assistant_tool_call_conflict: "toolCallConflict",
+  assistant_tool_limit: "toolLimit",
+  assistant_operation_denied: "operationDenied",
+
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",
   assistant_session_deleted: "sessionMissing",

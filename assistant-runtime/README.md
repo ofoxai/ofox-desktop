@@ -239,6 +239,28 @@ run without replaying an uncertain paid or mutating operation. Identical
 tool-call IDs are deduplicated within a run and conflicting arguments are
 rejected.
 
+## Local configuration host authority
+
+Sessions now carry `assistantId` (legacy default `ofox`) and versioned
+`capabilities` (legacy default `[]`). `local_config` version 1 is the initial
+host capability. Its policy, limits and model recommendation placeholder live
+in Rust. Unknown capability versions cannot authorize a callback. Each run
+freezes its initial capability choice; a UI capability change cancels the run.
+
+Local callbacks use the existing `tool` frame above. The host validates the
+run identity, registered name, strict arguments and session capability before
+claiming a call ID. A repeated ID returns its saved result; changed arguments
+are refused and a still-pending claim returns `unknown_outcome`. The probe
+operation is test-only and is never shipped as a model tool.
+
+Permission modes and session grants are memory-only. Their default is
+`autoConfig`; changing permissions cancels the current run, and entering
+`fullAccess` requires explicit UI confirmation. Approval events bind the
+confirmation to owner, generation, session, run and operation. Responses are
+`once`, `session` or `deny`; session grants cover the exact operation signature.
+Irreversible operations cannot receive a reusable grant. Approvals expire on
+cancellation or after at most 120 seconds and emit `approval_end`.
+
 ## Attachments
 
 The host copies imported files into a private directory per conversation and

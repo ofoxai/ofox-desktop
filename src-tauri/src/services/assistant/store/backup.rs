@@ -808,7 +808,7 @@ impl AssistantStore {
                 let lock = file_lock(&root.join(sid).join(SESSION_FILE));
                 let _guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
                 admit()?;
-                match self.local_copy(sid, &manifest, secrets) {
+                match self.local_copy(sid, &manifest, secrets, staging.path()) {
                     Local::Same => return Ok(Placed::Skipped),
                     Local::Different => return Ok(Placed::Conflict),
                     Local::Missing => {}
@@ -907,7 +907,13 @@ impl AssistantStore {
     /// The local conversation `sid` against the archive's copy, compared as a
     /// backup would archive it. Anything that keeps them from comparing equal
     /// makes it different.
-    fn local_copy(&self, sid: &str, manifest: &Manifest, secrets: &[String]) -> Local {
+    fn local_copy(
+        &self,
+        sid: &str,
+        manifest: &Manifest,
+        secrets: &[String],
+        staged: &Path,
+    ) -> Local {
         match real_dir(&self.root.join(sid)) {
             Ok(false) => return Local::Missing,
             Ok(true) => {}
@@ -926,9 +932,30 @@ impl AssistantStore {
                 };
                 // Archives made before blanking and repair hold the raw bytes.
                 if digest(&bytes) != *expected
-                    && digest(&archived(name, bytes, secrets)?) != *expected
+                    && digest(&archived(name, bytes.clone(), secrets)?) != *expected
                 {
-                    return Ok(false);
+                    // Defaults added to Session must compare semantically with
+                    // older archives; actual user choices still conflict.
+                    let same_session = if name == &format!("{sid}/{SESSION_FILE}") {
+                        let saved = read_file(&staged.join(name), MAX_RECORD)?.ok_or(INVALID)?;
+                        let mut current: Value =
+                            serde_json::from_slice(&archived(name, bytes, secrets)?)
+                                .map_err(|_| INVALID)?;
+                        let mut previous: Value =
+                            serde_json::from_slice(&archived(name, saved, secrets)?)
+                                .map_err(|_| INVALID)?;
+                        for value in [&mut current, &mut previous] {
+                            let session = value["session"].as_object_mut().ok_or(INVALID)?;
+                            session.entry("assistantId").or_insert(json!("ofox"));
+                            session.entry("capabilities").or_insert(json!([]));
+                        }
+                        current == previous
+                    } else {
+                        false
+                    };
+                    if !same_session {
+                        return Ok(false);
+                    }
                 }
             }
             let native = format!("{sid}/{NATIVE_HISTORY_FILE}");
@@ -948,6 +975,55 @@ impl AssistantStore {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
+
+    #[test]
+    fn local_capabilities_old_backup_matches_default_fields_but_not_user_changes() {
+        let (_tmp, store, sid) = fixture();
+        let out = tempfile::tempdir().unwrap();
+        let archive = out.path().join("current.zip");
+        store.backup(&archive, &[], || Ok(())).unwrap();
+        let name = format!("{sid}/{SESSION_FILE}");
+        let mut members = members_of(&archive);
+        let bytes = &members
+            .iter()
+            .find(|(member, _)| *member == name)
+            .unwrap()
+            .1;
+        let mut old: Value = serde_json::from_slice(bytes).unwrap();
+        old["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("assistantId");
+        old["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("capabilities");
+        replace_member(&mut members, &name, serde_json::to_vec(&old).unwrap());
+        let older = out.path().join("older.zip");
+        write_zip(&older, &members, false);
+        let report = store.restore(&older, &[], || Ok(())).unwrap();
+        assert_eq!((report.skipped, report.conflicts), (1, 0));
+        let update = serde_json::from_value(
+            json!({"sessionId":sid,"capabilities":[{"id":"local_config","version":1}]}),
+        )
+        .unwrap();
+        store.update(&update, || Ok(())).unwrap();
+        let report = store.restore(&older, &[], || Ok(())).unwrap();
+        assert_eq!((report.skipped, report.conflicts), (0, 1));
+        let enabled = out.path().join("enabled.zip");
+        store.backup(&enabled, &[], || Ok(())).unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&enabled, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(restored.load_record(&sid).unwrap().session).unwrap()
+                ["capabilities"],
+            json!([{"id":"local_config","version":1}])
+        );
+    }
 
     fn fixture() -> (tempfile::TempDir, AssistantStore, String) {
         let tmp = tempfile::tempdir().unwrap();

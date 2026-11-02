@@ -105,6 +105,8 @@ const conversation = (
   id,
   title,
   titleSource: "auto",
+  assistantId: "ofox",
+  capabilities: [],
   modelId: "balanced",
   webSearch: false,
   draft: "",

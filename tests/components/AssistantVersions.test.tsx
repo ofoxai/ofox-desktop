@@ -91,6 +91,8 @@ const session: AssistantSession = {
   id: "session-a",
   title: "Rewrites",
   titleSource: "auto",
+  assistantId: "ofox",
+  capabilities: [],
   modelId: "balanced",
   webSearch: false,
   draft: "",

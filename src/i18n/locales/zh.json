@@ -5012,7 +5012,16 @@
       "forkFailed": "无法分叉对话，请重试。",
       "forkUnavailable": "此消息暂时无法分叉，请刷新对话。",
       "forkPendingMedia": "请等待视频任务结束后再从这部分对话分叉。",
-      "compactUnavailable": "当前模型没有可整理的对话上下文。"
+      "compactUnavailable": "当前模型没有可整理的对话上下文。",
+      "approvalExpired": "此确认已失效。",
+      "approvalTimeout": "等待确认超时。",
+      "capabilityDisabled": "请先开启本机配置能力。",
+      "fullAccessConfirmation": "切换到完全访问前，请确认授权。",
+      "capabilityInvalid": "此助手能力暂不可用。",
+      "toolInvalid": "工具参数无效。",
+      "toolCallConflict": "此工具调用编号已用于不同的操作。",
+      "toolLimit": "本轮工具调用已达上限。",
+      "operationDenied": "此操作未获授权。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",

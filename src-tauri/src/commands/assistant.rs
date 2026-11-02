@@ -924,3 +924,19 @@ pub async fn assistant_resume_video(
 ) -> Result<(), String> {
     host.resume_video(request).await
 }
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_respond_approval(
+    host: Host<'_>,
+    request: crate::services::assistant::host::local::ApprovalRequest,
+) -> Result<(), String> {
+    host.respond_approval(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_set_permission(
+    host: Host<'_>,
+    request: crate::services::assistant::host::local::PermissionRequest,
+) -> Result<crate::services::assistant::tools::policy::PermissionMode, String> {
+    host.set_permission(request).await
+}

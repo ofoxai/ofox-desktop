@@ -4,6 +4,7 @@
 //! catalog, where files live, where events go) comes in through
 //! [`Environment`], so the host runs the same against the app and in tests.
 mod catalog_refresh;
+pub mod local;
 use super::{
     catalog,
     drops::DropSlot,
@@ -137,6 +138,8 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    local_calls: local::Calls,
+    pub(super) local_enabled: bool,
     pub identity: Identity,
     pub session_id: String,
     pub run_id: String,
@@ -158,6 +161,8 @@ pub struct RunControl {
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
+            local_calls: local::Calls::default(),
+            local_enabled: false,
             identity,
             session_id: request.session_id.clone(),
             run_id: request.run_id.clone(),
@@ -251,6 +256,8 @@ pub struct AssistantHost {
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
+    local_states: Mutex<HashMap<String, local::LocalState>>,
+    local_approvals: super::tools::approval::Broker,
     /// Background work at it (see [`Self::track`]), such as a title.
     background: Arc<AtomicU64>,
     /// When shutdown aborts what is still at work, once it began.
@@ -642,6 +649,8 @@ impl AssistantHost {
             video_polling: Arc::default(),
             video_revocation: watch::channel(0).0,
             keys: Mutex::default(),
+            local_states: Mutex::default(),
+            local_approvals: super::tools::approval::Broker::default(),
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
         })
@@ -1257,6 +1266,10 @@ impl AssistantHost {
             .generation
             .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
+        self.local_states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         // What was dropped belongs to the authority that just ended.
         self.drops
             .lock()
@@ -1633,10 +1646,12 @@ impl AssistantHost {
                 self.on_event(control, &value["params"], attempt).await?;
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
-                // Chat registers no tools; refuse at once so the runtime never waits.
-                let reply = frame(
-                    &json!({"jsonrpc":"2.0","id":value["id"],"error":{"code":-32000,"message":"assistant_unknown_tool"}}),
-                )?;
+                attempt.progressed = true;
+                let result = self.dispatch_tool(control, &value["params"]).await;
+                let reply = frame(&match result {
+                    Ok(result) => json!({"id":value["id"],"result":result}),
+                    Err(code) => json!({"id":value["id"],"error":{"code":code,"message":code}}),
+                })?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {
                 attempt.answered = true;
@@ -1703,14 +1718,14 @@ impl AssistantHost {
                 attempt.projection.end_thinking();
                 // As for text: the query is the model's, the keys are not.
                 scrub_secrets_in(&mut data, &control.secrets());
-                let mut shown = web::tool_start_event(&data)?;
+                let mut shown = super::tools::events::tool_start_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 self.emit(control, kind, shown);
             }
             "tool_end" => {
                 attempt.progressed = true;
                 scrub_secrets_in(&mut data, &control.secrets());
-                let mut shown = web::tool_end_event(&data)?;
+                let mut shown = super::tools::events::tool_end_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 if data["name"] == "web_search" && data["success"] == true {
                     let found = web::search_sources(&control.run_id, &data["details"]);
@@ -2208,6 +2223,181 @@ pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_tools_approval_dispatch_deduplicates_and_rejects_stale_authority() {
+        use super::local::ApprovalRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+            "toolCallId":"probe-1","name":"probe_write","args":{"command":"synthetic"}});
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            "assistant_capability_disabled"
+        );
+        store
+            .update(
+                &serde_json::from_value(
+                    json!({"sessionId":sid,"capabilities":[{"id":"local_config","version":1}]}),
+                )
+                .unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let task = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            let params = params.clone();
+            async move { host.dispatch_tool(&run, &params).await }
+        });
+        let approval = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = env
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e.r#type == "approval")
+                    .cloned()
+                {
+                    break event.data;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let response = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+            "approvalId":approval["approvalId"],"choice":"once","expectedOwner":identity().owner,"expectedGeneration":host.generation()});
+        let mut stale = response.clone();
+        stale["expectedGeneration"] = json!(host.generation() + 1);
+        assert_eq!(
+            host.respond_approval(serde_json::from_value::<ApprovalRequest>(stale).unwrap())
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        host.respond_approval(serde_json::from_value(response).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), json!({"approved":true}));
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap(),
+            json!({"approved":true})
+        );
+        let mut conflict = params.clone();
+        conflict["args"]["command"] = json!("different");
+        assert_eq!(
+            host.dispatch_tool(&run, &conflict).await.unwrap_err(),
+            "assistant_tool_call_conflict"
+        );
+        let mut malformed = params.clone();
+        malformed["args"]["unexpected"] = json!(true);
+        assert_eq!(
+            host.dispatch_tool(&run, &malformed).await.unwrap_err(),
+            "assistant_invalid_tool"
+        );
+        run.cancel.send_replace(true);
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            CANCELLED
+        );
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_tools_jsonl_callback_waits_for_approval_and_returns_result() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (_tmp, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let capabilities: Vec<super::super::capabilities::CapabilityRef> =
+            serde_json::from_value(json!([{"id":"local_config","version":1}])).unwrap();
+        let sid = store
+            .create_with_capabilities("test/model", false, "ofox", &capabilities)
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let (host_pipe, runtime_pipe) = tokio::io::duplex(8192);
+        let (output, mut input) = tokio::io::split(host_pipe);
+        let peer_run = run.clone();
+        let peer = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(runtime_pipe);
+            let mut read = BufReader::new(read);
+            let mut line = String::new();
+            read.read_line(&mut line).await.unwrap();
+            let start: Value = serde_json::from_str(&line).unwrap();
+            let params = json!({"sessionId":peer_run.session_id,"runId":peer_run.run_id,"operationId":peer_run.operation_id,"toolCallId":"rpc-probe","name":"probe_write","args":{"command":"synthetic"}});
+            write
+                .write_all(
+                    &frame(&json!({"id":"tool-probe","method":"tool","params":params})).unwrap(),
+                )
+                .await
+                .unwrap();
+            line.clear();
+            read.read_line(&mut line).await.unwrap();
+            let reply: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(reply["id"], "tool-probe");
+            assert_eq!(reply["result"], json!({"approved":true}));
+            write
+                .write_all(
+                    &frame(&json!({"id":start["id"],"error":{"message":"synthetic end"}})).unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let confirmer = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            async move {
+                let approval = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Some(event) = env
+                            .events
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|e| e.r#type == "approval")
+                            .cloned()
+                        {
+                            break event.data;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                host.respond_approval(serde_json::from_value(json!({"sessionId":run.session_id,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval["approvalId"],"choice":"once","expectedOwner":identity().owner,"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            }
+        });
+        let mut output = BufReader::new(output);
+        let mut buffer = Vec::new();
+        let mut attempt = Attempt::default();
+        let (_sender, mut commands) = mpsc::channel(1);
+        let result = host
+            .converse(
+                &run,
+                &json!({}),
+                false,
+                "request",
+                (&mut input, &mut output, &mut buffer),
+                (&mut attempt, &mut commands),
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code, "assistant_runtime_failed");
+        assert!(attempt.progressed);
+        peer.await.unwrap();
+        confirmer.await.unwrap();
+        host.release_run(&run);
+    }
 
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key

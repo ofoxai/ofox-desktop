@@ -170,6 +170,8 @@ beforeEach(async () => {
       id: "session-queue",
       title: "Queue conversation",
       titleSource: "user",
+      assistantId: "ofox",
+      capabilities: [],
       modelId: "chat-model",
       webSearch: false,
       draft: "",

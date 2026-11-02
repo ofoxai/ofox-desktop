@@ -334,6 +334,8 @@ mod tests {
             context_window: 32000,
         });
         record.session.draft = "private draft".into();
+        record.session.capabilities =
+            serde_json::from_value(json!([{"id":"local_config","version":1}])).unwrap();
         record.attachments = vec![serde_json::from_value(json!({
             "id":aid,"name":"hello.txt","mimeType":"text/plain","sizeBytes":5,"status":"ready"
         }))
@@ -378,6 +380,8 @@ mod tests {
             .publish(record.clone(), &entries, "fork title", || Ok(()))
             .unwrap();
         assert_ne!(fork.session.id, record.session.id);
+        assert_eq!(fork.session.assistant_id, "ofox");
+        assert_eq!(fork.session.capabilities, record.session.capabilities);
         assert_eq!(fork.messages.len(), 2);
         assert!(fork.session.draft.is_empty());
         assert!(fork.session.context_usage.is_none());

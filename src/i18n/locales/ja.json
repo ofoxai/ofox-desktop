@@ -5012,7 +5012,16 @@
       "forkFailed": "会話を分岐できませんでした。もう一度お試しください。",
       "forkUnavailable": "このメッセージは分岐できません。会話を更新してください。",
       "forkPendingMedia": "この部分から分岐するには、動画タスクの完了をお待ちください。",
-      "compactUnavailable": "このモデルで整理できる会話コンテキストがありません。"
+      "compactUnavailable": "このモデルで整理できる会話コンテキストがありません。",
+      "approvalExpired": "この確認は無効になりました。",
+      "approvalTimeout": "確認がタイムアウトしました。",
+      "capabilityDisabled": "このツールを使うにはローカル設定を有効にしてください。",
+      "fullAccessConfirmation": "フルアクセスに切り替える前に権限を確認してください。",
+      "capabilityInvalid": "このアシスタント機能は利用できません。",
+      "toolInvalid": "ツールの引数が無効です。",
+      "toolCallConflict": "このツール呼び出し ID は別の操作に使用されています。",
+      "toolLimit": "このターンのツール呼び出し上限に達しました。",
+      "operationDenied": "この操作は許可されませんでした。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
