@@ -92,6 +92,8 @@ impl SessionRecord {
     pub fn into_detail(self) -> Detail {
         let usage = super::provenance::with_media(self.usage.clone(), &self);
         Detail {
+            pending_approvals: vec![],
+            permission_mode: Default::default(),
             audio_operations: super::audio::results(&self.operations),
             session: self.session,
             messages: self.messages,

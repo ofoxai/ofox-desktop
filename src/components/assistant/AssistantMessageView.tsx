@@ -226,6 +226,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onFork,
   onQuote,
   onSpeak,
+  onEnableLocal,
   immutable = false,
   mediaBlock,
 }: {
@@ -262,6 +263,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onFork?: (messageId: string) => void;
   onQuote?: (text: string) => void;
   onSpeak?: (messageId: string, text: string) => void;
+  onEnableLocal?: () => void;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
@@ -364,6 +366,17 @@ export const AssistantMessageView = memo(function AssistantMessageView({
             value={text}
             onChange={(event) => setText(event.target.value)}
           />
+          {!isUser &&
+            message.content.includes("[[enable_local_config]]") &&
+            onEnableLocal && (
+              <Button
+                variant="outline"
+                disabled={disabled || streaming || immutable}
+                onClick={onEnableLocal}
+              >
+                {t("assistant.local.enable")}
+              </Button>
+            )}
           {files.length > 0 && (
             <>
               <AttachmentList
@@ -428,7 +441,14 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                 onQuote={!isUser && !immutable ? onQuote : undefined}
               >
                 <MessageMarkdown
-                  content={message.content}
+                  content={
+                    !isUser
+                      ? message.content.replaceAll(
+                          "[[enable_local_config]]",
+                          "",
+                        )
+                      : message.content
+                  }
                   highlight={highlight}
                   syntaxHighlight
                   // Only replies draw math; a question shows as it was typed

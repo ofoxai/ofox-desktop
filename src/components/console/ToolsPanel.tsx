@@ -10,7 +10,10 @@ import {
   modelNotes,
 } from "@/components/model-picker/QuickModelPicker";
 import NodeUpgradeDialog from "@/components/tools/NodeUpgradeDialog";
-import { useShellRefresh } from "@/components/shell/ShellContext";
+import {
+  useOptionalShell,
+  useShellRefresh,
+} from "@/components/shell/ShellContext";
 import { TOOL_META } from "@/config/toolMeta";
 import { useBoundTools, type BoundTool } from "@/hooks/useBoundTools";
 import { useInlineToolUpdates } from "@/hooks/useInlineToolUpdates";
@@ -90,6 +93,7 @@ export function ToolsPanel({
   } = useBoundTools(boundTools, account);
   // 顶栏的刷新在工具页 = 重新检测工具并检查更新。
   const catalog = useRef<InstallCatalogHandle>(null);
+  const shell = useOptionalShell();
   useShellRefresh("tools", async () => {
     await Promise.all([refreshList(), catalog.current?.refresh()]);
   });
@@ -158,6 +162,7 @@ export function ToolsPanel({
       <BoundToolRow
         key={tool.id}
         tool={tool}
+        onAssistant={shell ? () => shell.locateAssistant(tool.id) : undefined}
         subline={[
           tool.id === "chatgpt"
             ? t("modelCompatibility.chatgptCodexMode")

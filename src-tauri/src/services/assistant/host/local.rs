@@ -54,6 +54,26 @@ pub struct PermissionRequest {
 }
 
 impl AssistantHost {
+    pub(crate) fn local_permission(&self, owner: &str, sid: &str) -> PermissionMode {
+        self.local_states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session_key(owner, sid))
+            .map(|state| state.mode)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn local_pending_approvals(&self, owner: &str, sid: &str) -> Vec<Value> {
+        let runs = self.runs.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(run) = runs
+            .get(sid)
+            .filter(|run| run.identity.owner == owner && !run.cancelled())
+        else {
+            return vec![];
+        };
+        self.local_approvals.outstanding(&self.local_binding(run)).into_iter().map(|data|json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"approval","data":data})).collect()
+    }
+
     pub(crate) fn clear_local_permission(&self, owner: &str, sid: &str) {
         self.local_states
             .lock()
@@ -192,7 +212,10 @@ impl AssistantHost {
                     .clone()
                     .unwrap_or_else(|| Err("unknown_outcome".into()));
             }
-            if calls.len() >= capabilities::local_config().limits.max_tool_calls {
+            // Pi read/edit issue multiple callbacks for one model tool call.
+            // The runtime counts model calls; this is the independent host
+            // callback ceiling (stat/read/write), not that model budget.
+            if calls.len() >= capabilities::local_config().limits.max_tool_calls * 4 {
                 return Err("assistant_tool_limit".into());
             }
             calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
@@ -622,7 +645,10 @@ impl AssistantHost {
                 let binding = self.local_binding(run);
                 let (id, pending) = self.local_approvals.request(binding.clone())?;
                 let safe = crate::redact::scrub(&args.to_string()).into_owned();
-                self.emit(run, "approval", json!({"approvalId":id,"toolCallId":call_id,"name":tool.name,"category":tool.category,"details":safe,"allowSession":!tool.irreversible,"expectedOwner":binding.owner,"expectedGeneration":binding.generation}));
+                let mut display = json!({"approvalId":id,"toolCallId":call_id,"name":tool.name,"category":tool.category,"details":safe,"allowSession":!tool.irreversible,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
+                scrub_secrets_in(&mut display, &self.known_keys());
+                self.local_approvals.describe(&id, display.clone());
+                self.emit(run, "approval", display);
                 let timeout = run
                     .deadline
                     .saturating_duration_since(tokio::time::Instant::now())

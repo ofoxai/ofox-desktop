@@ -5034,7 +5034,13 @@
       "localRestoreConflict": "文件或绑定设置在此操作后有变化。为保留这些编辑，已停止还原。",
       "localSecretWrite": "此编辑会改变已脱敏的凭据，请使用结构化配置操作。",
       "localWriteFailed": "无法写入配置，请先查看改动记录，再决定是否重试。",
-      "localPlatformUnsupported": "当前平台不支持此操作。"
+      "localPlatformUnsupported": "当前平台不支持此操作。",
+      "localRepeatLimit": "同一操作重复次数已达上限，请换一种方式处理。",
+      "localDurationLimit": "本轮已达到 15 分钟时间上限。",
+      "localCostLimit": "本轮已达到 1 美元费用上限。已发出的请求可能使最终费用超过上限。",
+      "localVerificationRequired": "改动尚未在原问题文件夹中验证成功。",
+      "localInvalidPlan": "任务步骤格式无效。",
+      "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5473,7 +5479,61 @@
       "folderHint": "选择、拖入或粘贴出现问题的文件夹。发送选中的路径后继续诊断。",
       "chooseFolder": "选择文件夹",
       "folderPath": "出现问题的文件夹路径",
-      "useFolder": "使用文件夹"
+      "useFolder": "使用文件夹",
+      "title": "本机配置",
+      "permission": "权限",
+      "roundCost": "本轮费用：${{cost}}",
+      "plan": "任务步骤",
+      "approval": "确认操作",
+      "allowOnce": "仅允许这次",
+      "allowSession": "本对话内允许",
+      "deny": "拒绝",
+      "changes": "改动记录（{{count}}）",
+      "restore": "还原本对话的改动",
+      "fullTitle": "允许完全访问？",
+      "fullMessage": "助手可以使用你的系统权限执行命令和修改文件。此选择仅对当前对话有效，重启应用后恢复默认值。安装、更新和卸载仍需单独确认。",
+      "toolEntry": "用不了？让助手看看",
+      "toolPrompt": "帮我诊断并修复 {{tool}}。请先询问出问题的文件夹，修复后在该文件夹中验证。",
+      "modelSwitched": "已切换到推荐的配置任务模型，你可以手动换回。",
+      "modelUnconfigured": "尚未配置推荐的配置任务模型，或该模型暂不可用。继续使用当前模型。",
+      "enable": "开启本机配置",
+      "boundary": "助手可以在允许的范围内检查本机配置。请提供出问题的文件夹。",
+      "modes": {
+        "readOnly": "只读诊断",
+        "ask": "逐次确认",
+        "autoConfig": "自动配置",
+        "fullAccess": "完全访问"
+      },
+      "steps": {
+        "pending": "待处理",
+        "in_progress": "进行中",
+        "completed": "已完成"
+      },
+      "warnings": {
+        "repeat_warning": "同一操作已重复三次，助手应调整处理方式。",
+        "verification_required": "改动仍需在原问题文件夹中验证。",
+        "folder_required": "请选择或粘贴出问题的文件夹。",
+        "stopped": "已达到任务限制，请检查结果后再继续。"
+      },
+      "operations": {
+        "read": "读取文件",
+        "write": "写入配置",
+        "edit": "编辑配置",
+        "ls": "查看文件夹",
+        "find": "查找文件",
+        "grep": "搜索文件",
+        "bash": "执行命令",
+        "powershell": "执行 PowerShell 命令",
+        "tool_status": "检查工具",
+        "diagnose_in_folder": "在文件夹中诊断",
+        "verify_in_folder": "在文件夹中验证",
+        "repair_launcher": "修复启动器",
+        "rebind_tool": "修复绑定",
+        "set_tool_model": "设置工具模型",
+        "install_tool": "安装工具",
+        "update_tool": "更新工具",
+        "uninstall_tool": "卸载工具"
+      }
     }
   }
 }

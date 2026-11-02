@@ -235,6 +235,12 @@ export type AssistantSpeechPreferences = Record<
 >;
 
 export interface AssistantBootstrap {
+  localConfigDefinition?: {
+    id: string;
+    version: number;
+    recommendedModel: string;
+    suitableModels: string[];
+  };
   catalogRevision?: number;
   catalogRefreshing?: boolean;
   catalogRefreshFailed?: AssistantCatalogSource[];
@@ -582,6 +588,8 @@ export interface AssistantRestoreReport {
 }
 
 export interface AssistantSessionDetail {
+  pendingApprovals?: Extract<AssistantEvent, { type: "approval" }>[];
+  permissionMode?: AssistantPermissionMode;
   audioOperations?: AssistantAudioResult[];
   session: AssistantSession;
   messages: AssistantMessage[];
@@ -765,6 +773,16 @@ export interface AssistantSwitchVersionRequest {
  * stop) and `run_end` last.
  */
 export type AssistantRunEvent =
+  | {
+      type: "task_plan";
+      data: {
+        steps: {
+          step: string;
+          status: "pending" | "in_progress" | "completed";
+        }[];
+      };
+    }
+  | { type: "task_status"; data: { cost?: number; warning?: string } }
   | {
       type: "catalog_state";
       data: {
@@ -1256,6 +1274,12 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_invalid_tool: "toolInvalid",
   assistant_tool_call_conflict: "toolCallConflict",
   assistant_tool_limit: "toolLimit",
+  assistant_repeat_limit: "localRepeatLimit",
+  assistant_duration_limit: "localDurationLimit",
+  assistant_cost_limit: "localCostLimit",
+  assistant_cost_unavailable: "localCostUnavailable",
+  assistant_verification_required: "localVerificationRequired",
+  assistant_invalid_plan: "localInvalidPlan",
   assistant_operation_denied: "operationDenied",
   assistant_file_unreadable: "localFileUnreadable",
   assistant_file_too_large: "localFileTooLarge",

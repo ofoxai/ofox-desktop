@@ -5034,7 +5034,13 @@
       "localRestoreConflict": "操作後にファイルまたは接続設定が変更されました。編集内容を保護するため復元を停止しました。",
       "localSecretWrite": "この編集は非表示の認証情報を変更します。専用の設定操作を使用してください。",
       "localWriteFailed": "設定を書き込めませんでした。再試行する前に変更履歴を確認してください。",
-      "localPlatformUnsupported": "この操作は現在のプラットフォームでは利用できません。"
+      "localPlatformUnsupported": "この操作は現在のプラットフォームでは利用できません。",
+      "localRepeatLimit": "同じ操作の繰り返しが上限に達しました。別の方法を試してください。",
+      "localDurationLimit": "今回の作業が15分の上限に達しました。",
+      "localCostLimit": "今回の費用が1ドルの上限に達しました。送信済みのリクエストにより上限を超える場合があります。",
+      "localVerificationRequired": "元のフォルダーで変更の検証が成功していません。",
+      "localInvalidPlan": "作業手順の形式が無効です。",
+      "localCostUnavailable": "このモデルまたは検索の価格情報がなく、費用上限を確認できません。価格情報のあるモデルを選択してください。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
@@ -5473,7 +5479,61 @@
       "folderHint": "問題が起きるフォルダーを選択、ドロップ、またはパスを貼り付けてください。パスを送信すると診断を続けます。",
       "chooseFolder": "フォルダーを選択",
       "folderPath": "問題が起きるフォルダーのパス",
-      "useFolder": "このフォルダーを使用"
+      "useFolder": "このフォルダーを使用",
+      "title": "ローカル設定",
+      "permission": "権限",
+      "roundCost": "今回の費用：${{cost}}",
+      "plan": "作業手順",
+      "approval": "操作の確認",
+      "allowOnce": "今回のみ許可",
+      "allowSession": "このチャットで許可",
+      "deny": "拒否",
+      "changes": "変更履歴（{{count}}）",
+      "restore": "このチャットの変更を元に戻す",
+      "fullTitle": "フルアクセスを許可しますか？",
+      "fullMessage": "アシスタントはユーザーのシステム権限でコマンドを実行し、ファイルを変更できます。この設定は現在のチャットのみ有効で、アプリを再起動すると既定値に戻ります。インストール、更新、削除には個別の確認が必要です。",
+      "toolEntry": "動かない？アシスタントに相談",
+      "toolPrompt": "{{tool}} の問題を診断して修正してください。問題が起きるフォルダーを確認し、修正後にそのフォルダーで検証してください。",
+      "modelSwitched": "設定作業に推奨されるモデルに切り替えました。手動で戻すこともできます。",
+      "modelUnconfigured": "推奨モデルが未設定、または利用できません。現在のモデルを使います。",
+      "enable": "ローカル設定を有効にする",
+      "boundary": "許可された範囲でローカル設定を確認できます。問題が起きるフォルダーを指定してください。",
+      "modes": {
+        "readOnly": "読み取り専用の診断",
+        "ask": "毎回確認",
+        "autoConfig": "自動設定",
+        "fullAccess": "フルアクセス"
+      },
+      "steps": {
+        "pending": "未着手",
+        "in_progress": "進行中",
+        "completed": "完了"
+      },
+      "warnings": {
+        "repeat_warning": "同じ操作が3回繰り返されました。別の方法を試す必要があります。",
+        "verification_required": "変更後、元のフォルダーでの検証が必要です。",
+        "folder_required": "問題が起きるフォルダーを選択するか、パスを入力してください。",
+        "stopped": "作業の上限に達しました。結果を確認してから続行してください。"
+      },
+      "operations": {
+        "read": "ファイルを読む",
+        "write": "設定を書き込む",
+        "edit": "設定を編集",
+        "ls": "フォルダーを表示",
+        "find": "ファイルを探す",
+        "grep": "ファイルを検索",
+        "bash": "シェルコマンドを実行",
+        "powershell": "PowerShellコマンドを実行",
+        "tool_status": "ツールを確認",
+        "diagnose_in_folder": "フォルダーで診断",
+        "verify_in_folder": "フォルダーで検証",
+        "repair_launcher": "ランチャーを修復",
+        "rebind_tool": "連携を修復",
+        "set_tool_model": "ツールのモデルを設定",
+        "install_tool": "ツールをインストール",
+        "update_tool": "ツールを更新",
+        "uninstall_tool": "ツールを削除"
+      }
     }
   }
 }

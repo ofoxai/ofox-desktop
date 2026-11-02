@@ -48,6 +48,9 @@ export interface ShellContextValue {
   libraryLocation: { kind: "mcp" | "skills"; request: number } | null;
   locateLibrary: (kind: "mcp" | "skills") => void;
   consumeLibraryLocation: (request: number) => void;
+  assistantLocation: { tool: string; request: number } | null;
+  locateAssistant: (tool: string) => void;
+  consumeAssistantLocation: (request: number) => void;
   /** Pages opened at least once. They stay mounted, hidden, after. */
   visited: ReadonlySet<ShellPage>;
   openSettings: () => void;
@@ -88,6 +91,8 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   const [sessionLocation, setSessionLocation] =
     useState<ShellContextValue["sessionLocation"]>(null);
   const locationSequence = useRef(0);
+  const [assistantLocation, setAssistantLocation] =
+    useState<ShellContextValue["assistantLocation"]>(null);
   const [usageLocation, setUsageLocation] =
     useState<ShellContextValue["usageLocation"]>(null);
   const [libraryLocation, setLibraryLocation] =
@@ -134,6 +139,23 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
           leaveGuards.current.delete(page);
       };
     },
+    [],
+  );
+  const locateAssistant = useCallback(
+    (tool: string) =>
+      navigate("assistant", () =>
+        setAssistantLocation({
+          tool: tool === "chatgpt" ? "codex" : tool,
+          request: ++locationSequence.current,
+        }),
+      ),
+    [navigate],
+  );
+  const consumeAssistantLocation = useCallback(
+    (request: number) =>
+      setAssistantLocation((current) =>
+        current?.request === request ? null : current,
+      ),
     [],
   );
   const locateSession = useCallback(
@@ -208,6 +230,9 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       active,
       setActive,
       registerLeaveGuard,
+      assistantLocation,
+      locateAssistant,
+      consumeAssistantLocation,
       sessionLocation,
       locateSession,
       consumeSessionLocation,
@@ -228,6 +253,9 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       active,
       setActive,
       registerLeaveGuard,
+      assistantLocation,
+      locateAssistant,
+      consumeAssistantLocation,
       sessionLocation,
       locateSession,
       consumeSessionLocation,

@@ -301,6 +301,10 @@ pub enum OperationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<Value>,
+    /// Presentation only; never stored in a session or portable backup.
+    pub permission_mode: super::tools::policy::PermissionMode,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_operations: Vec<super::audio::ResultRecord>,
     pub session: Session,
     pub messages: Vec<Message>,
@@ -726,6 +730,8 @@ mod tests {
     #[test]
     fn detail_carries_no_run_ledger() {
         let detail = Detail {
+            pending_approvals: vec![],
+            permission_mode: Default::default(),
             audio_operations: vec![],
             session: serde_json::from_value(minimal_session()).unwrap(),
             messages: vec![],
@@ -735,7 +741,16 @@ mod tests {
         let value = serde_json::to_value(detail).unwrap();
         let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["attachments", "messages", "session", "usage"]);
+        assert_eq!(
+            keys,
+            [
+                "attachments",
+                "messages",
+                "permissionMode",
+                "session",
+                "usage"
+            ]
+        );
     }
 
     #[test]

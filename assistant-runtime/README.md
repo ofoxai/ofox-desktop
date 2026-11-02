@@ -642,3 +642,31 @@ commands are refused directly, but arbitrary executables have the user's OS
 rights: command recognition is deliberately not an OS sandbox. Install/update/
 uninstall tools require individual confirmation and do not promise rollback;
 an installer opened in an external terminal can continue independently.
+
+### Local task lifecycle
+
+The Rust capability definition supplies repetition (warn 3 / stop 5), 900-second,
+$1 and 60-step limits. Ordinary chat retains its 20-tool limit. Local calls count
+model operations; the host separately bounds the multiple stat/read/write
+callbacks an SDK operation needs. The final step sends `toolChoice: none` and
+removes dynamic tool declarations; execution also refuses late tool calls.
+Repeated-operation identity excludes intent and normalizes argument order.
+`updatePlan` validates at most 12 steps / 40 Unicode characters, with one active
+step. `task_plan` and `task_status` are bounded engine-independent host events.
+
+Known model and search prices contribute to the same round budget. Missing
+prices fail closed. The budget is checked between requests: an already-issued
+provider request can exceed $1, so this is not an exact provider billing cap.
+A successful host mutation invalidates prior verification. Completion requires
+`verify_in_folder` succeeding after the last mutation in every folder originally
+diagnosed, for the same tool. Up to two hidden custom-message continuations ask
+for verification; unresolved verification ends with a stable error. Assistant
+prose never satisfies the gate. Hidden continuations are not user messages.
+
+Only the user's toggle or tool-page entry enables the capability. Ordinary chat
+can render `[[enable_local_config]]` as a user-operated button. The recommended
+model and suitable-model allowlist live in Rust's capability definition; the
+placeholder is never sent as a model ID. Until configured, the UI retains the
+current model and explains why. Permission modes, approvals and folder grants
+are host memory only. Session details expose the current permission for display
+without writing it into session files, forks or backups.

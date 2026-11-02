@@ -12,6 +12,8 @@ const SOURCES = [
     .map((name) => `../../src-tauri/src/services/assistant/${name}`),
   "../../src-tauri/src/commands/assistant.rs",
   "../../src-tauri/src/commands/assistant_local.rs",
+  "../../assistant-runtime/src/local-task.mjs",
+  "../../assistant-runtime/src/runtime.mjs",
 ];
 
 /** Codes the host uses only inside itself; none reaches the renderer. */

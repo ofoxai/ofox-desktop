@@ -31,6 +31,10 @@ import type {
 
 const mocks = vi.hoisted(() => ({
   bootstrap: vi.fn(),
+  localChanges: vi.fn(),
+  restoreLocalChanges: vi.fn(),
+  setPermission: vi.fn(),
+  respondApproval: vi.fn(),
   listSessions: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
@@ -459,6 +463,10 @@ beforeEach(async () => {
     usage: {},
   };
   mocks.bootstrap.mockResolvedValue(capabilities);
+  mocks.localChanges.mockResolvedValue([]);
+  mocks.restoreLocalChanges.mockResolvedValue([]);
+  mocks.setPermission.mockImplementation(async r=>r.mode);
+  mocks.respondApproval.mockResolvedValue(undefined);
   mocks.getPreferences.mockResolvedValue({
     instructions: "",
     autoTitle: true,
@@ -8290,4 +8298,42 @@ it("does not offer audio history when there is no saved audio operation", async 
   await openConversation();
   await openConversationMenu();
   expect(screen.queryByRole("menuitem", { name: "Audio history" })).toBeNull();
+});
+
+describe('local configuration capability',()=>{
+ it('starts disabled and only an explicit user toggle persists it in a new conversation',async()=>{
+  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
+  expect(hook.result.current.localConfig).toBe(false);
+  await act(async()=>{await hook.result.current.setLocalConfig(true);});
+  expect(hook.result.current.localConfig).toBe(true);
+  act(()=>hook.result.current.setDraft('Diagnose codex'));
+  await act(async()=>{await hook.result.current.send();});
+  expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
+ });
+ it('switches an unsuitable model only when the configured recommendation exists in the catalog',async()=>{
+  mocks.bootstrap.mockResolvedValue({...capabilities,localConfigDefinition:{id:'local_config',version:1,recommendedModel:capabilities.models[1].id,suitableModels:[]}});
+  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
+  await act(async()=>{await hook.result.current.setLocalConfig(true);});
+  expect(hook.result.current.newModelId).toBe(capabilities.models[1].id);
+ });
+});
+
+it('local permission display uses host memory after a renderer remount and approvals expire with their run',async()=>{
+ current.session.capabilities=[{id:'local_config',version:1}];current.permissionMode='readOnly';current.session.activeRun={runId:'local-run',operationId:'local-op'};
+ const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
+ act(()=>hook.result.current.select(session.id));await waitFor(()=>expect(hook.result.current.run?.runId).toBe('local-run'));
+ expect(hook.result.current.localMode).toBe('readOnly');
+ act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval',data:{approvalId:'approval-1',toolCallId:'tool-1',name:'bash',category:'exec',details:'run diagnostic',allowSession:true,expectedOwner:capabilities.owner,expectedGeneration:1}} as AssistantEvent));
+ expect(hook.result.current.localApprovals).toHaveLength(1);
+ await act(async()=>{await hook.result.current.respondLocalApproval('approval-1','once');});
+ expect(mocks.respondApproval).toHaveBeenCalledWith(expect.objectContaining({sessionId:session.id,runId:'local-run',operationId:'local-op',expectedGeneration:1,choice:'once'}));
+ act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval_end',data:{approvalId:'approval-1'}} as AssistantEvent));
+ expect(hook.result.current.localApprovals).toHaveLength(0);
+});
+it('tool-page entry creates a separate enabled conversation with tool context, without sending a model request',async()=>{
+ const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
+ await act(async()=>{await hook.result.current.startLocalConfig('Diagnose codex in the problem folder');});
+ expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
+ expect(mocks.updateSession).toHaveBeenCalledWith(expect.objectContaining({draft:'Diagnose codex in the problem folder'}));
+ expect(mocks.send).not.toHaveBeenCalled();
 });

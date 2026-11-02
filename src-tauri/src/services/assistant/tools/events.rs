@@ -70,3 +70,69 @@ pub(crate) fn tool_end_event(data: &Value) -> Result<Value, String> {
     let code = if success { None } else { failure_code(data) };
     Ok(json!({"name": name, "toolCallId": call, "success": success, "code": code}))
 }
+
+/// Only bounded task presentation crosses the engine-neutral event boundary.
+pub(crate) fn task_event(kind: &str, data: &Value) -> Result<Value, String> {
+    if kind == "task_plan" {
+        let steps = data["steps"].as_array().ok_or(PROTOCOL)?;
+        if steps.len() > 12 {
+            return Err(PROTOCOL.into());
+        }
+        let mut active = 0;
+        let mut shown = Vec::new();
+        for step in steps {
+            let text = step["step"].as_str().ok_or(PROTOCOL)?;
+            let status = step["status"].as_str().ok_or(PROTOCOL)?;
+            if text.trim().is_empty()
+                || text.chars().count() > 40
+                || !matches!(status, "pending" | "in_progress" | "completed")
+            {
+                return Err(PROTOCOL.into());
+            }
+            active += usize::from(status == "in_progress");
+            shown.push(json!({"step":crate::redact::scrub(text),"status":status}));
+        }
+        if active > 1 {
+            return Err(PROTOCOL.into());
+        }
+        return Ok(json!({"steps":shown}));
+    }
+    let mut shown = Map::new();
+    if let Some(warning) = data.get("warning") {
+        let warning = warning.as_str().ok_or(PROTOCOL)?;
+        if !matches!(
+            warning,
+            "repeat_warning" | "verification_required" | "stopped"
+        ) {
+            return Err(PROTOCOL.into());
+        }
+        shown.insert("warning".into(), json!(warning));
+    }
+    if let Some(cost) = data.get("cost") {
+        let cost = cost
+            .as_f64()
+            .filter(|c| c.is_finite() && *c >= 0.0)
+            .ok_or(PROTOCOL)?;
+        shown.insert("cost".into(), json!(cost));
+    }
+    Ok(Value::Object(shown))
+}
+
+#[cfg(test)]
+mod task_tests {
+    use super::*;
+    #[test]
+    fn task_events_are_bounded_and_do_not_publish_arbitrary_fields() {
+        assert!(task_event("task_plan", &json!({"steps":[{"step":"x","status":"in_progress"},{"step":"y","status":"in_progress"}]})).is_err());
+        assert!(task_event(
+            "task_plan",
+            &json!({"steps":[{"step":"x".repeat(41),"status":"pending"}]})
+        )
+        .is_err());
+        let shown=task_event("task_plan", &json!({"steps":[{"step":"api_key=do-not-display","status":"pending","secret":"hidden"}]})).unwrap();
+        assert!(!shown.to_string().contains("do-not-display"));
+        assert!(!shown.to_string().contains("hidden"));
+        assert!(task_event("task_status", &json!({"warning":"arbitrary words"})).is_err());
+        assert!(task_event("task_status", &json!({"cost":-1})).is_err());
+    }
+}

@@ -1,4 +1,5 @@
 import path from "node:path";
+import { validatePlan } from "./local-task.mjs";
 import { Type } from "typebox";
 import {
   createReadToolDefinition,
@@ -244,6 +245,32 @@ export function localTools(runtime, context) {
       "request_folder",
       "Ask the user to select or provide the folder where the tool fails. Never invent a folder.",
       {},
+    ),
+  );
+  tools.push(
+    runtime.wrapTool(
+      context,
+      "updatePlan",
+      "Keep a concise task plan, at most 12 steps and one in progress.",
+      Type.Object({
+        steps: Type.Array(
+          Type.Object({
+            step: Type.String({ maxLength: 40 }),
+            status: Type.Union([
+              Type.Literal("pending"),
+              Type.Literal("in_progress"),
+              Type.Literal("completed"),
+            ]),
+          }),
+          { maxItems: 12 },
+        ),
+        intent: Type.Optional(Type.String({ maxLength: 200 })),
+      }),
+      async (args) => {
+        const steps = validatePlan(args.steps);
+        runtime.notify(context, "task_plan", { steps });
+        return textResult({ steps });
+      },
     ),
   );
   return tools;

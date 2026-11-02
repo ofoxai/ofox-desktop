@@ -5034,7 +5034,13 @@
       "localRestoreConflict": "Files or binding settings have changed since this operation. Restore stopped to preserve those edits.",
       "localSecretWrite": "This edit would alter hidden credentials. Use a structured configuration operation.",
       "localWriteFailed": "The configuration could not be written. Check the change list before retrying.",
-      "localPlatformUnsupported": "This operation is unavailable on this platform."
+      "localPlatformUnsupported": "This operation is unavailable on this platform.",
+      "localRepeatLimit": "Repeated operation limit reached. Try a different approach.",
+      "localDurationLimit": "The 15-minute task limit was reached.",
+      "localCostLimit": "The $1 task limit was reached. A request already in progress may exceed the limit.",
+      "localVerificationRequired": "Changes have not been verified successfully in the original problem folder.",
+      "localInvalidPlan": "The task plan is invalid.",
+      "localCostUnavailable": "This model or search has no reliable price. Choose a priced model to use local configuration within the task budget."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5473,7 +5479,61 @@
       "folderHint": "Select, drop, or paste the folder where the tool fails. Send the selected path to continue diagnosis.",
       "chooseFolder": "Choose folder",
       "folderPath": "Problem folder path",
-      "useFolder": "Use folder"
+      "useFolder": "Use folder",
+      "title": "Local configuration",
+      "permission": "Permission",
+      "roundCost": "This round: ${{cost}}",
+      "plan": "Task steps",
+      "approval": "Approve operation",
+      "allowOnce": "Allow once",
+      "allowSession": "Allow in this conversation",
+      "deny": "Deny",
+      "changes": "Changes ({{count}})",
+      "restore": "Restore this conversation’s changes",
+      "fullTitle": "Allow full access?",
+      "fullMessage": "The assistant can execute commands and modify files with your system permissions. This choice lasts for this conversation until the app restarts. Installation, updates and removal still require separate approval.",
+      "toolEntry": "Not working? Ask the assistant",
+      "toolPrompt": "Help me diagnose and fix {{tool}}. Ask me for the folder where it fails, and verify there after any repair.",
+      "modelSwitched": "Switched to the recommended configuration model. You can change it back.",
+      "modelUnconfigured": "A recommended configuration model has not been configured or is unavailable. Your current model is unchanged.",
+      "enable": "Enable local configuration",
+      "boundary": "The assistant can inspect local configuration within the allowed scope. Provide the folder where the problem occurs.",
+      "modes": {
+        "readOnly": "Read-only diagnosis",
+        "ask": "Ask each time",
+        "autoConfig": "Automatic configuration",
+        "fullAccess": "Full access"
+      },
+      "steps": {
+        "pending": "Pending",
+        "in_progress": "In progress",
+        "completed": "Completed"
+      },
+      "warnings": {
+        "repeat_warning": "This operation has repeated three times. The assistant should change approach.",
+        "verification_required": "Changes still need verification in the original problem folder.",
+        "folder_required": "Choose or paste the folder where the problem occurs.",
+        "stopped": "A task limit was reached. Review the result before continuing."
+      },
+      "operations": {
+        "read": "Read file",
+        "write": "Write configuration",
+        "edit": "Edit configuration",
+        "ls": "List folder",
+        "find": "Find files",
+        "grep": "Search files",
+        "bash": "Run shell command",
+        "powershell": "Run PowerShell command",
+        "tool_status": "Inspect tool",
+        "diagnose_in_folder": "Diagnose in folder",
+        "verify_in_folder": "Verify in folder",
+        "repair_launcher": "Repair launcher",
+        "rebind_tool": "Repair binding",
+        "set_tool_model": "Set tool model",
+        "install_tool": "Install tool",
+        "update_tool": "Update tool",
+        "uninstall_tool": "Uninstall tool"
+      }
     }
   }
 }

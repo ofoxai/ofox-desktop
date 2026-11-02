@@ -90,6 +90,10 @@ impl AssistantHost {
         object.insert("owner".into(), json!(identity.owner));
         object.insert("authorityGeneration".into(), json!(generation));
         object.insert("runtime".into(), runtime);
+        object.insert(
+            "localConfigDefinition".into(),
+            json!(super::capabilities::local_config()),
+        );
         object.insert("key".into(), json!({"status":key}));
         object.insert("rememberedModels".into(), remembered);
         object.insert("speechPreferences".into(), speech);
@@ -280,6 +284,8 @@ impl AssistantHost {
         }
         self.ensure_current(&identity, generation).await?;
         self.decorate(&identity.owner, &mut detail.session);
+        detail.permission_mode = self.local_permission(&identity.owner, sid);
+        detail.pending_approvals = self.local_pending_approvals(&identity.owner, sid);
         if detail.session.active_run.is_none() {
             for message in &mut detail.messages {
                 if message.status == "streaming" {
@@ -572,7 +578,7 @@ impl AssistantHost {
         let local_config = if super::capabilities::enabled(&record.session.capabilities) {
             let paths = self.env.local_paths().await?;
             Some(
-                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config()}),
+                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price}),
             )
         } else {
             None
@@ -580,6 +586,14 @@ impl AssistantHost {
         self.remember_key(&key);
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
         control.local_enabled = super::capabilities::enabled(&record.session.capabilities);
+        if control.local_enabled {
+            control.deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(
+                    super::capabilities::local_config()
+                        .limits
+                        .max_duration_seconds,
+                );
+        }
         let control = Arc::new(control);
         let text = super::host::scrub_secrets(&request.text, std::slice::from_ref(&key));
         blocking({

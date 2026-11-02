@@ -516,6 +516,25 @@ fn blocked_input_code(detail: &str) -> Option<&str> {
 /// search with an unknown outcome ended (the runtime's
 /// `search_outcome_unknown: …`) may have been billed whatever else it says.
 fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure {
+    if let Some(code) = leading_code(
+        &detail,
+        &[
+            "assistant_repeat_limit",
+            "assistant_duration_limit",
+            "assistant_cost_limit",
+            "assistant_cost_unavailable",
+            "assistant_verification_required",
+            "assistant_tool_limit",
+            "assistant_command_outcome_unknown",
+        ],
+    ) {
+        return Failure {
+            code: code.into(),
+            detail: None,
+            unbilled: !progressed && result["errorKind"] == "not_sent",
+            native: None,
+        };
+    }
     if leading_code(&detail, &["search_outcome_unknown"]).is_some() {
         return Failure {
             code: SEARCH_OUTCOME_UNKNOWN.into(),
@@ -1736,6 +1755,11 @@ impl AssistantHost {
                     .compacting
                     .store(kind == "compaction_start", Ordering::SeqCst);
                 self.emit(control, kind, data);
+            }
+            "task_plan" | "task_status" if control.local_enabled => {
+                scrub_secrets_in(&mut data, &control.secrets());
+                let shown = super::tools::events::task_event(kind, &data)?;
+                self.emit(control, kind, shown);
             }
             "tool_start" => {
                 // The model's tool call has been answered with tokens, and the

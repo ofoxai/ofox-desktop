@@ -26,6 +26,7 @@ pub enum Choice {
 
 struct Pending {
     binding: Binding,
+    display: Option<serde_json::Value>,
     sender: oneshot::Sender<Choice>,
 }
 #[derive(Default)]
@@ -40,8 +41,36 @@ impl Broker {
         self.pending
             .lock()
             .map_err(|_| "assistant_state_unavailable")?
-            .insert(id.clone(), Pending { binding, sender });
+            .insert(
+                id.clone(),
+                Pending {
+                    binding,
+                    sender,
+                    display: None,
+                },
+            );
         Ok((id, receiver))
+    }
+
+    /// A reconnect can display outstanding requests without granting anything.
+    pub fn describe(&self, id: &str, display: serde_json::Value) {
+        if let Some(pending) = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(id)
+        {
+            pending.display = Some(display);
+        }
+    }
+    pub fn outstanding(&self, binding: &Binding) -> Vec<serde_json::Value> {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter(|p| p.binding == *binding && !p.sender.is_closed())
+            .filter_map(|p| p.display.clone())
+            .collect()
     }
 
     pub fn respond(&self, id: &str, binding: &Binding, choice: Choice) -> Result<(), String> {
@@ -107,10 +136,14 @@ mod tests {
             generation: 1,
         };
         let (id, pending) = broker.request(binding.clone()).unwrap();
+        broker.describe(&id, serde_json::json!({"approvalId":id}));
+        assert_eq!(broker.outstanding(&binding).len(), 1);
         let mut stale = binding.clone();
         stale.generation += 1;
+        assert!(broker.outstanding(&stale).is_empty());
         assert!(broker.respond(&id, &stale, Choice::Once).is_err());
         broker.respond(&id, &binding, Choice::Once).unwrap();
+        assert!(broker.outstanding(&binding).is_empty());
         assert!(broker.respond(&id, &binding, Choice::Once).is_err());
         assert_eq!(
             broker
