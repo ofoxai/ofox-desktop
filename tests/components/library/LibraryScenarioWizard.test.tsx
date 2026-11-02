@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi, type Mock } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import {
@@ -28,7 +28,7 @@ vi.mock("@/components/library/LibraryBatchReview", () => ({
   },
 }));
 let epoch: number;
-let changed: ReturnType<typeof vi.fn>;
+let changed: Mock<() => Promise<unknown>>;
 const recipeIds: Record<LibraryKind, string[]> = {
   instructions: ["coding"],
   mcp: ["context7"],
@@ -80,7 +80,7 @@ function data(kind: LibraryKind): LibraryData {
 beforeEach(() => {
   i18n.addResourceBundle("zh", "translation", zh, true, true);
   epoch = 5;
-  changed = vi.fn().mockResolvedValue(undefined);
+  changed = vi.fn<() => Promise<unknown>>().mockResolvedValue(undefined);
   reviews.kinds = [];
   reviews.notify = undefined;
   vi.spyOn(libraryApi, "list").mockImplementation(async (kind) => data(kind));

@@ -22,6 +22,7 @@
     "yauzl": "3.4.0"
   },
   "overrides": {
-    "undici": "$undici"
+    "undici": "$undici",
+    "minimatch": "11.0.1"
   }
 }

@@ -103,7 +103,7 @@ fn zip_skill_artifacts_filtered(
     let mut entry_count = 1usize;
     let mut writer =
         zip::ZipWriter::new(fs::File::create(dest).map_err(|e| AppError::io(dest, e))?);
-    let options = zip::write::SimpleFileOptions::default()
+    let options = crate::zip_security::portable_options()
         .compression_method(zip::CompressionMethod::Deflated)
         .last_modified_time(zip::DateTime::default())
         .unix_permissions(0o644);

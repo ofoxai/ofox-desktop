@@ -56,6 +56,7 @@ mod tray;
 mod tray_popover;
 mod usage_script;
 mod workbuddy_config;
+pub mod zip_security;
 
 pub use app_config::{AppType, InstalledSkill, McpApps, McpServer, MultiAppConfig, SkillApps};
 pub use codex_config::{get_codex_auth_path, get_codex_config_path, write_codex_live_atomic};

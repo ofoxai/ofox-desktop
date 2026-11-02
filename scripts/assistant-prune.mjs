@@ -7,8 +7,15 @@ import path from "node:path";
 // decoders that the legacy build does not import, and standard fonts that are
 // read only when standardFontDataUrl is set, which the runtime never does.
 // The legacy build and the cmaps, iccs and wasm it reads stay.
+// The application loads Pi's unbundled SDK, not its standalone CLI/RPC entry.
+// The standalone bundle embeds its own dependencies, so npm overrides cannot
+// patch it. Keep it and its launchers out of the production application.
 export const UNUSED_PACKAGE_PATHS = [
   "@earendil-works/pi-coding-agent/examples",
+  "@earendil-works/pi-coding-agent/dist/bundle",
+  ".bin/pi",
+  ".bin/pi.cmd",
+  ".bin/pi.ps1",
   "pdfjs-dist/build",
   "pdfjs-dist/web",
   "pdfjs-dist/image_decoders",

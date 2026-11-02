@@ -671,7 +671,7 @@ async fn download_with_mode<T: Transport>(
     let entries = selected(&tree, &prefix, limits)?;
     let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for entry in entries {
-        let options = zip::write::SimpleFileOptions::default()
+        let options = crate::zip_security::portable_options()
             .compression_method(zip::CompressionMethod::Stored)
             .unix_permissions(if entry.mode == "100755" || entry.kind == "tree" {
                 0o755

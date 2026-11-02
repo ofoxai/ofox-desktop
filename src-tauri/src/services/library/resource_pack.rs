@@ -195,7 +195,7 @@ fn zip_pack(pack: &Pack, skills: &[u8]) -> Result<Vec<u8>, AppError> {
         return Err(error("packTooLarge"));
     }
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    let options = zip::write::SimpleFileOptions::default()
+    let options = crate::zip_security::portable_options()
         .compression_method(zip::CompressionMethod::Deflated)
         .unix_permissions(0o600)
         .last_modified_time(zip::DateTime::default());
@@ -314,15 +314,17 @@ fn prepare(raw: &[u8]) -> Result<Prepared, AppError> {
     if raw.len() as u64 > artifacts::PACKAGE_MAX_BYTES {
         return Err(error("packTooLarge"));
     }
-    let mut zip = zip::ZipArchive::new(Cursor::new(raw)).map_err(|_| error("packInvalid"))?;
+    let mut zip =
+        crate::zip_security::open(Cursor::new(raw), 2).map_err(|_| error("packInvalid"))?;
     if zip.len() != 2 {
         return Err(error("packInvalid"));
     }
+    crate::zip_security::validate_headers(&mut zip).map_err(|_| error("packInvalid"))?;
     let mut files = BTreeMap::new();
     let mut total = 0u64;
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).map_err(|_| error("packInvalid"))?;
-        let name = entry.name().to_string();
+        let name = entry.name().map_err(|_| error("packInvalid"))?.into_owned();
         if !["resources.json", "skill-artifacts.zip"].contains(&name.as_str())
             || entry.is_dir()
             || entry
@@ -796,6 +798,7 @@ mod tests {
             let mut entry = nested.by_index(i).unwrap();
             assert!(!entry
                 .name()
+                .unwrap()
                 .starts_with(&format!("artifacts/{unselected_hash}/")));
             let mut decoded = Vec::new();
             entry.read_to_end(&mut decoded).unwrap();
@@ -804,7 +807,7 @@ mod tests {
                     .windows(unselected_sentinel.len())
                     .any(|bytes| bytes == unselected_sentinel),
                 "unselected payload in {}",
-                entry.name()
+                entry.name().unwrap()
             );
         }
     }
@@ -885,6 +888,26 @@ mod tests {
         .unwrap();
         assert_eq!(again["imported"], 0);
     }
+    #[test]
+    #[serial_test::serial]
+    fn rejects_inconsistent_zip_headers_before_previewing_resources() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let source = fixture();
+        let mut raw = export(&source).unwrap();
+        let destination = Database::memory().unwrap();
+        assert!(preview(&destination, &raw).is_ok());
+        assert_eq!(&raw[..4], b"PK\x03\x04");
+        raw[30] ^= 1;
+
+        assert!(preview(&destination, &raw).is_err());
+        assert!(destination
+            .library_snapshot()
+            .unwrap()
+            .definitions
+            .instructions
+            .is_empty());
+    }
+
     #[test]
     #[serial_test::serial]
     fn malformed_or_changed_packs_never_write_partial_definitions() {

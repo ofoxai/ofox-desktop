@@ -780,7 +780,7 @@ mod tests {
     }
     fn download(body: &str, executable: bool, path: &str) -> (ExtractedDir, String) {
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        let opts = crate::zip_security::portable_options().unix_permissions(0o644);
         writer.start_file(format!("{path}/SKILL.md"), opts).unwrap();
         writer
             .write_all(format!("---\nname: sample\ndescription: Fixture\n---\n{body}").as_bytes())
@@ -1211,7 +1211,7 @@ mod tests {
                 writer
                     .start_file(
                         format!("nested/sample/{}", entry.path),
-                        zip::write::SimpleFileOptions::default()
+                        crate::zip_security::portable_options()
                             .unix_permissions(if entry.executable { 0o755 } else { 0o644 }),
                     )
                     .unwrap();
@@ -1278,7 +1278,7 @@ mod tests {
                 .unwrap();
         }
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts = zip::write::SimpleFileOptions::default().unix_permissions(0o644);
+        let opts = crate::zip_security::portable_options().unix_permissions(0o644);
         for row in db.get_all_installed_skills().unwrap().values() {
             writer
                 .start_file(format!("nested/{}/SKILL.md", row.directory), opts)

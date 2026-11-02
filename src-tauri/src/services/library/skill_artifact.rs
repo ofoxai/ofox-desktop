@@ -565,11 +565,13 @@ fn extract_zip_limits(
     if raw.len() as u64 > max_bytes {
         return Err(error("skillTooLarge"));
     }
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(raw))
+    let mut archive = crate::zip_security::open(std::io::Cursor::new(raw), max_entries)
         .map_err(|_| error("skillArchiveInvalid"))?;
     if archive.len() > max_entries {
         return Err(error("skillTooLarge"));
     }
+    crate::zip_security::validate_headers(&mut archive)
+        .map_err(|_| error("skillArchiveInvalid"))?;
     let tmp = tempfile::tempdir().map_err(|_| error("skillWriteFailed"))?;
     let mut seen = BTreeMap::new();
     let mut explicit = std::collections::BTreeSet::new();
@@ -659,4 +661,31 @@ fn extract_zip_limits(
         normalized_mode(&dest, executable, false)?;
     }
     Ok(ExtractedDir { tmp, execution })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+
+    #[test]
+    fn rejects_inconsistent_zip_headers_before_extracting_skill_files() {
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file("SKILL.md", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(b"Test skill content").unwrap();
+        let mut raw = writer.finish().unwrap().into_inner();
+        let extracted = extract_zip(&raw, false).unwrap();
+        assert_eq!(
+            fs::read(extracted.path().join("SKILL.md")).unwrap(),
+            b"Test skill content"
+        );
+        assert!(extract_artifact_package(&raw).is_ok());
+        assert_eq!(&raw[..4], b"PK\x03\x04");
+        raw[30] ^= 1;
+
+        assert!(extract_zip(&raw, false).is_err());
+        assert!(extract_artifact_package(&raw).is_err());
+    }
 }

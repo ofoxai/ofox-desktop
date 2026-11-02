@@ -51,7 +51,7 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.23.4"
       - name: Require successful Windows Probe for this exact commit
@@ -155,7 +155,7 @@ jobs:
           exit 1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
 
@@ -303,7 +303,7 @@ jobs:
 
       - name: Upload notarization submission (macOS)
         if: runner.os == 'macOS'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: notary-${{ matrix.platform }}
           path: notary/submission-id
@@ -354,7 +354,7 @@ jobs:
         run: node scripts/release-artifacts.mjs record-build
 
       - name: Upload build provenance
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: provenance-${{ matrix.platform }}
           path: build-provenance.json
@@ -362,7 +362,7 @@ jobs:
           retention-days: 7
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: build-${{ matrix.platform }}
           path: dist-release/*
@@ -386,7 +386,7 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.23.4"
       - name: Download candidate installers
@@ -413,7 +413,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: node scripts/release-artifacts.mjs verify
       - name: Upload verified immutable release inputs
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: verified-release-${{ github.sha }}
           path: artifacts/
@@ -440,7 +440,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22.23.4"
       - name: Download verified release inputs

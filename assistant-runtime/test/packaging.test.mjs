@@ -71,6 +71,39 @@ test("production pruning drops unused PDF.js builds, viewers, decoders and fonts
     assert.equal(await exists(path.join(modules, kept)), true, kept);
 });
 
+test("production pruning removes standalone SDK CLI bundles and launchers while preserving the SDK", async (t) => {
+  const production = await mkdtemp(path.join(tmpdir(), "ofox-sdk-prune-"));
+  t.after(() => rm(production, { recursive: true, force: true }));
+  const modules = path.join(production, "node_modules");
+  const sdk = "@earendil-works/pi-coding-agent";
+  const removed = [
+    `${sdk}/dist/bundle/cli.js`,
+    `${sdk}/dist/bundle/rpc-entry.js`,
+    `${sdk}/dist/bundle/chunks/legacy.js`,
+    ".bin/pi",
+    ".bin/pi.cmd",
+    ".bin/pi.ps1",
+  ];
+  const kept = [
+    `${sdk}/dist/index.js`,
+    `${sdk}/dist/core/sdk.js`,
+    `${sdk}/LICENSE`,
+    ".bin/other-tool",
+  ];
+  for (const filename of [...removed, ...kept]) {
+    const target = path.join(modules, filename);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, "fixture");
+  }
+
+  await pruneProduction(production);
+
+  for (const filename of removed)
+    assert.equal(await exists(path.join(modules, filename)), false, filename);
+  for (const filename of kept)
+    assert.equal(await exists(path.join(modules, filename)), true, filename);
+});
+
 test("the runtime pins PDF.js, the native canvas and the MCP client and the bounded Office parsers", async () => {
   const runtime = new URL("../", import.meta.url);
   const manifest = JSON.parse(
