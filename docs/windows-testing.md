@@ -188,3 +188,5 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib os_keychain_restores_encry
 测试用独立 Credential Manager 条目，让两个独立进程分别写入快照和读取密钥还原，
 结束后删除测试条目。macOS 同名测试显式创建临时钥匙串，不依赖临时 HOME 的默认钥匙串，
 不读取或修改应用已有密钥；生产 debug/prod 服务名的隔离由另一个单元测试约束。
+
+Windows 助手命令会保留 `PSModulePath`。Windows PowerShell 5.1 在其余环境已过滤时，缺少此变量可能在脚本执行前挂起；命令执行回归覆盖简单命令、Unicode 路径、限量输出与超时清理，环境过滤测试仍要求凭据变量被剔除。

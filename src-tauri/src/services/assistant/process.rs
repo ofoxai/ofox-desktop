@@ -136,6 +136,10 @@ pub fn clean_environment(command: &mut tokio::process::Command) {
         "LC_ALL",
         "PATHEXT",
         "COMSPEC",
+        // PowerShell 5.1 can hang before executing even Get-Location when its
+        // module search path is removed from an otherwise filtered environment.
+        #[cfg(windows)]
+        "PSModulePath",
     ];
     let env: Vec<_> = allowed
         .iter()
@@ -365,6 +369,12 @@ mod tests {
         assert!(!keys
             .iter()
             .any(|key| key == "ANTHROPIC_API_KEY" || key == "OFOX_ACCESS_TOKEN"));
+        #[cfg(windows)]
+        assert_eq!(
+            keys.iter()
+                .any(|key| key.eq_ignore_ascii_case("PSModulePath")),
+            std::env::var_os("PSModulePath").is_some()
+        );
     }
 
     /// A shell whose background descendant first writes `ready`, then, unless
