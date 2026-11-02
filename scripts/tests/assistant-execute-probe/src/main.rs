@@ -62,26 +62,23 @@ fn main() {
         .enable_all()
         .build()
         .unwrap();
-    for (label, extra) in [
-        ("inherited", ""),
-        ("program_files", "ProgramFiles"),
-        ("system_drive", "SystemDrive"),
-        ("both", "ProgramFiles;SystemDrive"),
-        ("program_files_family", "ProgramFiles;ProgramFiles(x86);ProgramW6432;CommonProgramFiles;CommonProgramFiles(x86);CommonProgramW6432"),
-        ("system_paths", "SystemDrive;ProgramData;ProgramFiles;ProgramFiles(x86);ProgramW6432;CommonProgramFiles;CommonProgramFiles(x86);CommonProgramW6432"),
-        ("builtin_only", ""),
-        ("unset_module_path_system_paths", "SystemDrive;ProgramData;ProgramFiles;ProgramFiles(x86);ProgramW6432;CommonProgramFiles;CommonProgramFiles(x86);CommonProgramW6432"),
-    ] {
-        if label == "builtin_only" {
-            std::env::set_var("PSModulePath", PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32/WindowsPowerShell/v1.0/Modules"));
-        } else if label == "unset_module_path_system_paths" {
-            std::env::remove_var("PSModulePath");
-        } else if let Some(value) = original.as_ref() {
-            std::env::set_var("PSModulePath", value);
-        } else {
-            std::env::remove_var("PSModulePath");
-        }
-        std::env::set_var("OFOX_PROBE_SYSTEM_VARS", extra);
+    let builtin = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+        .join("System32/WindowsPowerShell/v1.0/Modules");
+    let paths: Vec<_> = std::env::split_paths(original.as_deref().unwrap_or_default()).collect();
+    // Only module directory paths from this ephemeral CI runner; no full environment.
+    println!("module_directories={paths:?}");
+    let mut cases = vec![("original".to_string(), paths.clone())];
+    let mut first = vec![builtin.clone()];
+    first.extend(paths.clone());
+    cases.push(("builtin_first".into(), first));
+    let mut last = paths.clone();
+    last.push(builtin.clone());
+    cases.push(("builtin_last".into(), last));
+    for (index, path) in paths.iter().enumerate() {
+        cases.push((format!("entry_{index}_only"), vec![path.clone()]));
+    }
+    for (label, module_paths) in cases {
+        std::env::set_var("PSModulePath", std::env::join_paths(module_paths).unwrap());
         println!("CASE {label}");
         let result = rt.block_on(execute::run("Get-Location", &home, &home, 8));
         println!("actual_execute_result={result:?}");
