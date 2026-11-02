@@ -1,0 +1,19 @@
+name: Assistant Windows Execute Probe
+on:
+  push:
+    branches: ["feat/assistant-*"]
+  workflow_dispatch:
+jobs:
+  execute-probe:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [pwsh, powershell]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Exercise production execute implementation
+        shell: ${{ matrix.shell }}
+        run: cargo run --manifest-path scripts/tests/assistant-execute-probe/Cargo.toml --locked
