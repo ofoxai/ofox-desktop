@@ -4986,6 +4986,7 @@
       "mediaModelUnavailable": "这个生成模型暂不可用，请在输入框下方换一个。",
       "mediaImageTurnLimit": "每次回答最多生成 4 张图片，需要更多请再发一次。",
       "mediaDeclined": "你取消了这次生成，未产生费用。",
+      "mediaSpeechTurnLimit": "每次回答最多生成 3 段语音，需要更多请再发一次。",
       "mediaInvalidParams": "此模型不支持所选媒体参数。",
       "mediaOutcomeUnknown": "此媒体请求可能已计费，但无法确认结果。再次提交前请查看使用记录。",
       "mediaSafetyRejected": "图像请求未通过提供方的安全检查，请修改提示词或输入图片后重试。",

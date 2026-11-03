@@ -4986,6 +4986,7 @@
       "mediaModelUnavailable": "This generation model is not available. Choose another one under the composer.",
       "mediaImageTurnLimit": "One reply makes at most 4 images. Ask again for more.",
       "mediaDeclined": "You declined this generation, so nothing was charged.",
+      "mediaSpeechTurnLimit": "One reply makes at most 3 speech files. Ask again for more.",
       "mediaInvalidParams": "This model does not support the selected media parameters.",
       "mediaOutcomeUnknown": "The media request may have been charged, but its result could not be confirmed. Check your activity before submitting again.",
       "mediaSafetyRejected": "The image request was rejected by the provider’s safety checks. Change the prompt or input image and try again.",

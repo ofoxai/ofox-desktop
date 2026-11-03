@@ -1367,6 +1367,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_model_unavailable: "mediaModelUnavailable",
   assistant_media_image_turn_limit: "mediaImageTurnLimit",
   assistant_media_declined: "mediaDeclined",
+  assistant_media_speech_turn_limit: "mediaSpeechTurnLimit",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",

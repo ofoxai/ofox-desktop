@@ -5748,6 +5748,38 @@ fn a_chat_model_generates_an_image_with_the_conversation_defaults_on_both_apexes
             assert_eq!(detail.usage["mediaCostUsd"], "0.02");
             let events = generation_events(&env, &run);
             assert!(events.iter().any(|e| e["generation"]["status"] == "completed" && e["attachments"].as_array().is_some_and(|a| a.len() == 1)));
+            // Regenerate with another prompt from the result card: no chat
+            // model, a second generation on the same reply.
+            gateway.reply(Reply::Json(200, json!({"data":[{"b64_json":PNG_1X1}]})));
+            let started = host
+                .regenerate_media(serde_json::from_value(json!({
+                    "sessionId": sid, "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                    "operationId": types::id(), "messageId": reply.id, "toolCallId": made.tool_call_id,
+                    "prompt": "a blue square, larger", "model": "test/image",
+                    "params": {"size": "1024x1024", "quality": "low"},
+                })).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(started["status"], "started");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let again = loop {
+                let detail = host.get_session(&sid).await.unwrap();
+                let shown = detail.messages.into_iter().find(|m| m.id == reply.id).unwrap();
+                if shown.generations.len() == 2 && shown.generations[1].status == "completed" && detail.session.active_run.is_none() {
+                    break shown;
+                }
+                assert!(Instant::now() < deadline, "the regeneration did not finish: {:?}", shown.generations);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            let calls = gateway.requests();
+            assert_eq!(calls.len(), 4, "one more image request and no chat request");
+            assert_eq!(calls[3].path, "/v1/images/generations");
+            assert_eq!(calls[3].body["prompt"], "a blue square, larger");
+            assert_eq!(again.attachments.len(), 2);
+            assert_eq!(again.generations[1].prompt.as_deref(), Some("a blue square, larger"));
+            let detail = host.get_session(&sid).await.unwrap();
+            assert_eq!(detail.usage["mediaCostUsd"], "0.04");
+            assert_eq!(again.usage.as_ref().unwrap()["mediaCostUsd"], "0.04");
             assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
             host.shutdown().await;
         }
@@ -5904,6 +5936,32 @@ fn a_video_asks_first_and_a_declined_one_is_never_submitted() {
         assert_eq!(
             reply.status, "completed",
             "the reply's own status stays its chat run's"
+        );
+        // A video made again from its card answers with the estimate first,
+        // and is never submitted without it.
+        let regenerate =
+            |confirmed: Value| -> cc_switch_lib::assistant::media_tools::RegenerateRequest {
+                serde_json::from_value(json!({
+                "sessionId": sid, "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                "operationId": types::id(), "messageId": reply.id, "toolCallId": video.tool_call_id,
+                "prompt": "the square spins faster", "model": "test/video",
+                "params": {"duration": 4}, "confirmedCostUsd": confirmed,
+            })).unwrap()
+            };
+        let quoted = host
+            .regenerate_media(regenerate(Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(quoted["needsConfirmation"], true);
+        assert_eq!(quoted["estimatedCostUsd"], "0.12");
+        assert_eq!(
+            gateway
+                .requests()
+                .iter()
+                .filter(|r| r.path == "/v1/videos")
+                .count(),
+            1,
+            "nothing submitted before the estimate is confirmed"
         );
         host.shutdown().await;
     });

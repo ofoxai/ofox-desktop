@@ -3,6 +3,7 @@
 //! conversation (the tool's arguments) wins over a default; a default the
 //! chosen model does not offer is left out rather than refused.
 pub(super) mod host;
+pub use host::RegenerateRequest;
 
 use super::{
     catalog::{Kind, Model},
@@ -19,6 +20,9 @@ pub const SPEECH: &str = "generate_speech";
 
 /// The most images one run may make, across all of its calls.
 pub const MAX_IMAGES_PER_RUN: usize = 4;
+/// The most speech files one run may make.
+pub const MAX_SPEECH_PER_RUN: usize = 3;
+pub const SPEECH_LIMIT: &str = "assistant_media_speech_turn_limit";
 /// The longest prompt a generation sends, in characters.
 pub const MAX_PROMPT_CHARS: usize = 4_000;
 

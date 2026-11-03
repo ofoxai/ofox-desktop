@@ -37,7 +37,11 @@ type Inputs = Vec<(&'static str, String)>;
 /// started, and what it has made so far.
 pub(in crate::services::assistant) struct MediaRun {
     pub defaults: MediaDefaults,
+    /// A regeneration the user started from a result card: its parameters
+    /// and cost were confirmed there, without the chat model.
+    direct: bool,
     images: AtomicUsize,
+    speech: AtomicUsize,
     calls: Mutex<HashMap<String, CallRecord>>,
     /// Submitted videos, polled once the run ends: (reply, tool call,
     /// authority generation).
@@ -48,7 +52,9 @@ impl MediaRun {
     pub fn new(defaults: MediaDefaults) -> Self {
         Self {
             defaults,
+            direct: false,
             images: AtomicUsize::new(0),
+            speech: AtomicUsize::new(0),
             calls: Mutex::new(HashMap::new()),
             polls: Mutex::new(vec![]),
         }
@@ -418,9 +424,10 @@ impl AssistantHost {
             "generateAudio": request.generate_audio, "materials": plan,
             "estimatedCostUsd": estimate,
         });
-        if !self
-            .confirm_generation(run, call_id, VIDEO, details)
-            .await?
+        if !media.direct
+            && !self
+                .confirm_generation(run, call_id, VIDEO, details)
+                .await?
         {
             return Err(refuse(
                 DECLINED,
@@ -547,6 +554,17 @@ impl AssistantHost {
         )?
         .clone();
         let choice = speech_choice(&model, defaults, &args)?;
+        media
+            .speech
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |made| {
+                (made < MAX_SPEECH_PER_RUN).then_some(made + 1)
+            })
+            .map_err(|_| {
+                refuse(
+                    SPEECH_LIMIT,
+                    format!("at most {MAX_SPEECH_PER_RUN} speech files per reply"),
+                )
+            })?;
         let text = scrub_secrets(&choice.text, &run.secrets());
         let request = SpeechRequest {
             session_id: run.session_id.clone(),
@@ -673,6 +691,223 @@ impl AssistantHost {
         }))
     }
 
+    /// Make a result card's generation again with changed parameters,
+    /// without the chat model. A video first answers with its estimate; it is
+    /// submitted once the request carries that estimate as confirmed. The new
+    /// result is added to the same reply.
+    pub async fn regenerate_media(
+        self: &Arc<Self>,
+        request: RegenerateRequest,
+    ) -> Result<Value, String> {
+        use crate::services::assistant::{
+            host::IDENTITY_CHANGED,
+            store,
+            types::{id, Operation, OperationStatus, RunRef, SendRequest},
+        };
+        for value in [
+            &request.session_id,
+            &request.operation_id,
+            &request.message_id,
+        ] {
+            validate_id(value)?;
+        }
+        self.ensure_accepting_runs()?;
+        let identity = self.identity().await?;
+        let generation = request.expected_generation;
+        if identity.owner != request.expected_owner || self.generation() != generation {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        self.ensure_idle(&request.session_id)?;
+        let record = blocking({
+            let store = self.store(&identity.owner)?;
+            let sid = request.session_id.clone();
+            move || store.load_record(&sid)
+        })
+        .await?;
+        if record.session.deleted_at.is_some() {
+            return Err("assistant_session_deleted".into());
+        }
+        store::ensure_new_operation(&record, &request.operation_id)?;
+        let source = record
+            .messages
+            .iter()
+            .find(|m| m.id == request.message_id)
+            .and_then(|m| m.media_for(request.tool_call_id.as_deref()))
+            .cloned()
+            .ok_or(INVALID)?;
+        let args = regeneration_args(&source, &request)?;
+        if let Regeneration::Video(args) = &args {
+            let catalog = self.models(&identity.apex).await?;
+            let model = pick_model(&catalog.models, Kind::Video, args.model.as_deref(), None)?;
+            let materials = {
+                let record = record.clone();
+                let root = self
+                    .store(&identity.owner)?
+                    .attachment_root(&request.session_id)?;
+                let ids = args.material_ids.clone();
+                blocking(move || read_materials(&record, root, &ids))
+                    .await?
+                    .1
+            };
+            let plan = materials::plan(&materials, args.material_use)
+                .map_err(|code| refuse(&code, material_hint(&code)))?;
+            let (_, video) = video_request(model, None, args, &plan)?;
+            let estimate = self
+                .env
+                .provider_prices(&identity.apex, &model.id)
+                .await
+                .ok()
+                .and_then(|data| video::estimate(&data, &video))
+                .map(|n| n.normalize().to_string());
+            if request.confirmed_cost_usd != estimate
+                || estimate.is_none() && !request.confirm_unknown_cost
+            {
+                return Ok(json!({"needsConfirmation": true, "estimatedCostUsd": estimate}));
+            }
+        }
+        let key = self
+            .env
+            .api_key(&identity, None, &|| self.admit(generation))
+            .await?;
+        self.ensure_current(&identity, generation).await?;
+        self.remember_key(&key);
+        let run_id = id();
+        let send: SendRequest = serde_json::from_value(json!({
+            "sessionId": request.session_id, "runId": run_id,
+            "operationId": request.operation_id, "text": "",
+        }))
+        .map_err(|_| INVALID)?;
+        let mut control = RunControl::new(identity.clone(), &send, key);
+        control.message_id = request.message_id.clone();
+        control.media = Some(MediaRun {
+            direct: true,
+            ..MediaRun::new(record.session.media.clone())
+        });
+        let control = Arc::new(control);
+        blocking({
+            let host = self.clone();
+            let store = self.store(&identity.owner)?;
+            let control = control.clone();
+            move || {
+                host.register_run(control.clone(), generation, || {
+                    store.mutate(&control.session_id, |record| {
+                        if record.session.deleted_at.is_some() {
+                            return Err("assistant_session_deleted".into());
+                        }
+                        if record.session.active_run.is_some() {
+                            return Err("assistant_session_busy".into());
+                        }
+                        store::ensure_new_operation(record, &control.operation_id)?;
+                        record.operations.push(Operation {
+                            id: control.operation_id.clone(),
+                            run_id: control.run_id.clone(),
+                            status: OperationStatus::Running,
+                            media: None,
+                            search_price: None,
+                        });
+                        record.session.active_run = Some(RunRef {
+                            run_id: control.run_id.clone(),
+                            operation_id: control.operation_id.clone(),
+                        });
+                        Ok(())
+                    })
+                })
+            }
+        })
+        .await?;
+        let call_id = format!("regen-{}", id());
+        let host = self.clone();
+        let done = control.clone();
+        let call = call_id.clone();
+        self.track(format!("regenerate:{}", control.run_id), async move {
+            let media = done.media.as_ref().expect("direct media run");
+            let mid = done.message_id.clone();
+            let outcome = match args {
+                Regeneration::Image(args) => host.tool_image(&done, media, &mid, &call, args).await,
+                Regeneration::Video(args) => host.tool_video(&done, media, &mid, &call, args).await,
+                Regeneration::Speech(args) => {
+                    host.tool_speech(&done, media, &mid, &call, args).await
+                }
+            };
+            if outcome.is_err() {
+                let _ = host
+                    .settle_generation(&done, &mid, &call, "unknown", None)
+                    .await;
+            }
+            host.end_regeneration(&done, outcome.is_ok()).await;
+        });
+        Ok(json!({"status": "started", "toolCallId": call_id}))
+    }
+
+    /// Settle a regeneration's operation, recount the conversation and
+    /// publish the reply; then poll a video it submitted.
+    async fn end_regeneration(self: &Arc<Self>, run: &Arc<RunControl>, completed: bool) {
+        use crate::services::assistant::{
+            host::{load_native, session_key},
+            projection::recount_usage,
+            types::OperationStatus,
+        };
+        let saved = async {
+            let _history = self
+                .native_lock(&session_key(&run.identity.owner, &run.session_id))?
+                .lock_owned()
+                .await;
+            let store = self.store(&run.identity.owner)?;
+            let file = {
+                let store = store.clone();
+                let sid = run.session_id.clone();
+                blocking(move || store.native_history_path(&sid)).await?
+            };
+            let entries = if file.is_file() {
+                load_native(&self.runtime()?, &file).await?
+            } else {
+                json!([])
+            };
+            let run = run.clone();
+            blocking(move || {
+                store.mutate(&run.session_id, |record| {
+                    if let Some(op) = record
+                        .operations
+                        .iter_mut()
+                        .find(|op| op.id == run.operation_id)
+                    {
+                        op.status = if completed {
+                            OperationStatus::Completed
+                        } else {
+                            OperationStatus::Failed
+                        };
+                    }
+                    if record
+                        .session
+                        .active_run
+                        .as_ref()
+                        .is_some_and(|active| active.run_id == run.run_id)
+                    {
+                        record.session.active_run = None;
+                    }
+                    recount_usage(record, entries.as_array().ok_or(PROTOCOL)?);
+                    record.session.updated_at = now();
+                    Ok(())
+                })?;
+                store.load_detail(&run.session_id)
+            })
+            .await
+        }
+        .await;
+        self.release_run(run);
+        match saved {
+            Ok(detail) => {
+                if let Some(message) = detail.messages.iter().find(|m| m.id == run.message_id) {
+                    self.emit(run, "message", json!({ "message": message }));
+                }
+                self.emit(run, "session", json!({ "session": detail.session }));
+                self.emit(run, "usage", json!({ "usage": detail.usage }));
+            }
+            Err(error) => log::warn!("[Assistant] could not save a regeneration: {error}"),
+        }
+        self.start_media_polls(run);
+    }
+
     async fn load(&self, run: &RunControl) -> Result<SessionRecord, String> {
         let store = self.store(&run.identity.owner)?;
         let sid = run.session_id.clone();
@@ -770,15 +1005,24 @@ impl AssistantHost {
         self.emit(run, "generation", data);
     }
 
-    /// Three videos at a time per account, as for direct video turns.
+    /// One video at a time per conversation and three per account, as for
+    /// direct video turns.
     async fn check_video_slots(&self, run: &RunControl) -> Result<(), String> {
         let store = self.store(&run.identity.owner)?;
+        let sid = run.session_id.clone();
         blocking(move || {
             let mut sessions = store.list(false, "")?.sessions;
             sessions.extend(store.list(true, "")?.sessions);
             let mut count = 0;
             for session in sessions {
-                count += video::occupied_slots(&store.load_record(&session.id)?);
+                let jobs = video::occupied_slots(&store.load_record(&session.id)?);
+                if session.id == sid && jobs > 0 {
+                    return Err(refuse(
+                        "assistant_media_video_limit",
+                        "a video of this conversation is still being generated; wait for it to finish",
+                    ));
+                }
+                count += jobs;
             }
             if count >= 3 {
                 Err(refuse(
@@ -1013,4 +1257,91 @@ fn video_params(request: &VideoRequest, plan: &Plan) -> Value {
     let mut params = serde_json::to_value(request).unwrap_or_else(|_| json!({}));
     params["references"] = json!(plan.references);
     params
+}
+
+/// A request to make a result card's generation again.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RegenerateRequest {
+    pub session_id: String,
+    pub expected_owner: String,
+    pub expected_generation: u64,
+    pub operation_id: String,
+    pub message_id: String,
+    /// The generation to start from; `None` for a direct media turn's own.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
+    pub prompt: String,
+    pub model: String,
+    /// What changes: image `size`, `quality`, `n`; video `duration`,
+    /// `resolution`, `aspectRatio`, `generateAudio`, `materialUse`; speech
+    /// `voice`, `format`, `language`, `style`.
+    #[serde(default)]
+    pub params: Value,
+    /// For a video: the estimate the user confirmed.
+    #[serde(default)]
+    pub confirmed_cost_usd: Option<String>,
+    /// For a video without an estimate: the user accepted an unknown cost.
+    #[serde(default)]
+    pub confirm_unknown_cost: bool,
+}
+
+enum Regeneration {
+    Image(ImageArgs),
+    Video(VideoArgs),
+    Speech(SpeechArgs),
+}
+
+/// The tool arguments that make `source` again with the request's changes,
+/// from the same files.
+fn regeneration_args(
+    source: &MediaRecord,
+    request: &RegenerateRequest,
+) -> Result<Regeneration, String> {
+    let text = |key: &str| request.params[key].as_str().map(str::to_owned);
+    let model = Some(request.model.clone());
+    Ok(match source.kind.as_str() {
+        "image" => Regeneration::Image(ImageArgs {
+            prompt: request.prompt.clone(),
+            model,
+            size: text("size"),
+            quality: text("quality"),
+            n: request.params["n"]
+                .as_u64()
+                .and_then(|n| u8::try_from(n).ok()),
+            image_ids: source.input_ids.iter().take(1).cloned().collect(),
+        }),
+        "video" => {
+            let material_use = match request.params.get("materialUse") {
+                Some(value) => serde_json::from_value(value.clone()).map_err(|_| INVALID)?,
+                None if source.params["firstFrameId"].is_string() => materials::Use::Frames,
+                None if source.params["references"]
+                    .as_array()
+                    .is_some_and(|r| !r.is_empty()) =>
+                {
+                    materials::Use::Reference
+                }
+                None => materials::Use::Auto,
+            };
+            Regeneration::Video(VideoArgs {
+                prompt: request.prompt.clone(),
+                model,
+                duration: request.params["duration"].as_u64(),
+                resolution: text("resolution"),
+                aspect_ratio: text("aspectRatio"),
+                generate_audio: request.params["generateAudio"].as_bool(),
+                material_ids: source.input_ids.clone(),
+                material_use,
+            })
+        }
+        "speech" => Regeneration::Speech(SpeechArgs {
+            text: request.prompt.clone(),
+            model,
+            voice: text("voice"),
+            format: text("format"),
+            language: text("language"),
+            style: text("style"),
+        }),
+        _ => return Err(INVALID.into()),
+    })
 }
