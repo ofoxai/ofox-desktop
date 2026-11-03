@@ -129,6 +129,12 @@ pub(crate) fn ensure(
 ) -> Result<(), String> {
     let _lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let launcher = launcher_dir(home).join(tool);
+    let _io = crate::config_io::lock();
+    let mut journal_paths = rc_files(home, shell);
+    journal_paths.extend([launcher.clone(), launcher_dir(home).join(PATH_RECORD)]);
+    let _journal =
+        crate::services::assistant::tools::transaction::begin(None, tool, journal_paths)?;
+
     let Some(prefix) = pinned_prefix(tool, install) else {
         return prune_locked(&launcher);
     };
@@ -368,6 +374,57 @@ mod tests {
             .env("PATH", "/usr/bin:/bin")
             .output()
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn assistant_launcher_journal_restores_shell_and_path_record_after_restart() {
+        use crate::services::assistant::tools::{
+            journal::Journal,
+            scope::Scope,
+            transaction::{Context, ACTIVE},
+        };
+        use std::sync::{atomic::AtomicBool, Arc};
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path();
+        let install = codex(root);
+        let original = "# my shell configuration\n";
+        write(&root.join(".zshrc"), original, 0o644);
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let ctx = Arc::new(Context {
+            journal: Mutex::new(
+                Journal::open(&root.join("changes"), &[9; 32], "launcher/session").unwrap(),
+            ),
+            tool: "codex".into(),
+            apex: None,
+            operation: "repair_launcher".into(),
+            scope: Scope::new(root.into(), vec![root.into()], vec![]).unwrap(),
+            cancel,
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(60),
+            error: Mutex::new(None),
+            observed: AtomicBool::new(false),
+        });
+        ACTIVE
+            .scope(ctx.clone(), async {
+                ensure("codex", &install, root, "/bin/zsh")
+            })
+            .await
+            .unwrap();
+        assert!(ctx.error.lock().unwrap().is_none());
+        assert!(launcher_dir(root).join("codex").exists());
+        assert!(std::fs::read_to_string(root.join(".zshrc"))
+            .unwrap()
+            .contains(DIR));
+        drop(ctx);
+        Journal::open(&root.join("changes"), &[9; 32], "launcher/session")
+            .unwrap()
+            .restore_files()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(".zshrc")).unwrap(),
+            original
+        );
+        assert!(!launcher_dir(root).join("codex").exists());
+        assert!(!launcher_dir(root).join(PATH_RECORD).exists());
     }
 
     #[test]

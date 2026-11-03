@@ -19,7 +19,7 @@ use crate::services::ofox_bind::status::{BindingStatus, ToolBindingStatus};
 
 const BACKUP_VERSION: u32 = 2;
 const BACKUP_KEY: &str = "workbuddy";
-static CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static CONFIG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn endpoint_url() -> String {
     format!("{}/v1/chat/completions", crate::ofox_apex::gateway_base())
@@ -443,6 +443,12 @@ async fn persist_binding_state(
     models: &[Value],
     state: &WorkBuddyBindingState,
 ) -> Result<(), String> {
+    let _io = crate::config_io::lock();
+    let _journal = crate::services::assistant::tools::transaction::begin(
+        Some(db),
+        "workbuddy",
+        vec![path.into()],
+    )?;
     let state_json =
         serde_json::to_string(state).map_err(|e| format!("序列化 WorkBuddy 绑定备份失败：{e}"))?;
     let mut txn = FileTxn::new();

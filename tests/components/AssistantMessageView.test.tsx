@@ -1,3 +1,4 @@
+import { cloneElement } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -172,6 +173,21 @@ describe("assistant transcript rendering", () => {
       expect(screen.queryByText(errorCode)).not.toBeInTheDocument();
     },
   );
+
+  it("offers turning on local configuration from a reply without showing the marker", async () => {
+    const onEnableLocal = vi.fn();
+    render(
+      cloneElement(
+        view({ content: "I need local access. [[enable_local_config]]" }),
+        { onEnableLocal },
+      ),
+    );
+    expect(markdown).toHaveBeenLastCalledWith("I need local access. ");
+    await userEvent.click(
+      screen.getByRole("button", { name: en.assistant.local.enable }),
+    );
+    expect(onEnableLocal).toHaveBeenCalledOnce();
+  });
 
   it("keeps old failed messages readable when they have no saved reason", () => {
     render(view({ status: "error" }));
@@ -932,4 +948,30 @@ it("offers fork for a saved reply and keeps it unavailable while busy", async ()
   expect(
     screen.getByRole("button", { name: "Message actions" }),
   ).toBeDisabled();
+});
+
+it("shows a local run's progress only while the reply streams", () => {
+  const reply = (status: AssistantMessage["status"]) => (
+    <TooltipProvider>
+      <AssistantMessageView
+        message={{
+          id: "m",
+          role: "assistant",
+          content: "Looking",
+          createdAt: 1,
+          status,
+        }}
+        taskProgress={<p>Reading the Codex config</p>}
+        disabled
+        onEdit={async () => false}
+        onRegenerate={() => undefined}
+      />
+    </TooltipProvider>
+  );
+  const shown = render(reply("streaming"));
+  expect(
+    within(screen.getByRole("article")).getByText("Reading the Codex config"),
+  ).toBeVisible();
+  shown.rerender(reply("completed"));
+  expect(screen.queryByText("Reading the Codex config")).toBeNull();
 });

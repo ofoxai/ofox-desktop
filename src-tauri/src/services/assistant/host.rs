@@ -4,6 +4,7 @@
 //! catalog, where files live, where events go) comes in through
 //! [`Environment`], so the host runs the same against the app and in tests.
 mod catalog_refresh;
+pub mod local;
 use super::{
     catalog,
     drops::DropSlot,
@@ -75,6 +76,37 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    fn local_mutate<'a>(
+        &'a self,
+        _name: &'a str,
+        _tool: crate::app_config::BindableTool,
+        _model: Option<&'a str>,
+        _operation: &'a str,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async { Err("assistant_local_unavailable".into()) })
+    }
+    fn local_restore(&self, journal: &mut super::tools::journal::Journal) -> Result<(), String> {
+        journal.restore_files()
+    }
+    fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
+        Box::pin(async { Err("assistant_key_storage_unavailable".into()) })
+    }
+
+    fn local_paths(&self) -> BoxFuture<'_, Result<super::tools::context::LocalPaths, String>> {
+        Box::pin(async { Err("assistant_local_unavailable".into()) })
+    }
+    fn local_binding_status(
+        &self,
+        _tool: crate::app_config::BindableTool,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async { Ok(json!({"status":"unknown"})) })
+    }
+    /// Whether the tool's Ofox key is already stored locally. Rebinding without
+    /// one issues a new account key, which no journal restore can undo.
+    fn local_key_cached(&self, _tool: crate::app_config::BindableTool) -> bool {
+        false
+    }
+
     /// Blocking proxy-aware audio transport; tests inject a direct local client.
     fn audio_client(&self) -> Result<reqwest::Client, String> {
         crate::proxy::http_client::assistant_media_client()
@@ -137,6 +169,8 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    local_calls: local::Calls,
+    pub(super) local_enabled: bool,
     pub identity: Identity,
     pub session_id: String,
     pub run_id: String,
@@ -158,6 +192,8 @@ pub struct RunControl {
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
+            local_calls: local::Calls::default(),
+            local_enabled: false,
             identity,
             session_id: request.session_id.clone(),
             run_id: request.run_id.clone(),
@@ -251,6 +287,8 @@ pub struct AssistantHost {
     /// Every assistant key this process handed to a run: a draft or a title
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
+    local_states: Mutex<HashMap<String, local::LocalState>>,
+    local_approvals: super::tools::approval::Broker,
     /// Background work at it (see [`Self::track`]), such as a title.
     background: Arc<AtomicU64>,
     /// When shutdown aborts what is still at work, once it began.
@@ -483,6 +521,26 @@ fn blocked_input_code(detail: &str) -> Option<&str> {
 /// search with an unknown outcome ended (the runtime's
 /// `search_outcome_unknown: …`) may have been billed whatever else it says.
 fn provider_failure(result: &Value, detail: String, progressed: bool) -> Failure {
+    if let Some(code) = leading_code(
+        &detail,
+        &[
+            "assistant_repeat_limit",
+            "assistant_duration_limit",
+            "assistant_cost_limit",
+            "assistant_cost_unavailable",
+            "assistant_verification_required",
+            "assistant_tool_limit",
+            "assistant_command_outcome_unknown",
+            "assistant_mutation_outcome_unknown",
+        ],
+    ) {
+        return Failure {
+            code: code.into(),
+            detail: None,
+            unbilled: !progressed && result["errorKind"] == "not_sent",
+            native: None,
+        };
+    }
     if leading_code(&detail, &["search_outcome_unknown"]).is_some() {
         return Failure {
             code: SEARCH_OUTCOME_UNKNOWN.into(),
@@ -642,6 +700,8 @@ impl AssistantHost {
             video_polling: Arc::default(),
             video_revocation: watch::channel(0).0,
             keys: Mutex::default(),
+            local_states: Mutex::default(),
+            local_approvals: super::tools::approval::Broker::default(),
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
         })
@@ -1257,6 +1317,10 @@ impl AssistantHost {
             .generation
             .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
+        self.local_states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         // What was dropped belongs to the authority that just ended.
         self.drops
             .lock()
@@ -1633,10 +1697,9 @@ impl AssistantHost {
                 self.on_event(control, &value["params"], attempt).await?;
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
-                // Chat registers no tools; refuse at once so the runtime never waits.
-                let reply = frame(
-                    &json!({"jsonrpc":"2.0","id":value["id"],"error":{"code":-32000,"message":"assistant_unknown_tool"}}),
-                )?;
+                attempt.progressed = true;
+                let result = self.dispatch_tool(control, &value["params"]).await;
+                let reply = tool_reply(&value["id"], result, &self.known_keys())?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {
                 attempt.answered = true;
@@ -1696,6 +1759,11 @@ impl AssistantHost {
                     .store(kind == "compaction_start", Ordering::SeqCst);
                 self.emit(control, kind, data);
             }
+            "task_plan" | "task_status" if control.local_enabled => {
+                scrub_secrets_in(&mut data, &control.secrets());
+                let shown = super::tools::events::task_event(kind, &data)?;
+                self.emit(control, kind, shown);
+            }
             "tool_start" => {
                 // The model's tool call has been answered with tokens, and the
                 // tool may cost something: never repeat this attempt.
@@ -1703,14 +1771,14 @@ impl AssistantHost {
                 attempt.projection.end_thinking();
                 // As for text: the query is the model's, the keys are not.
                 scrub_secrets_in(&mut data, &control.secrets());
-                let mut shown = web::tool_start_event(&data)?;
+                let mut shown = super::tools::events::tool_start_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 self.emit(control, kind, shown);
             }
             "tool_end" => {
                 attempt.progressed = true;
                 scrub_secrets_in(&mut data, &control.secrets());
-                let mut shown = web::tool_end_event(&data)?;
+                let mut shown = super::tools::events::tool_end_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 if data["name"] == "web_search" && data["success"] == true {
                     let found = web::search_sources(&control.run_id, &data["details"]);
@@ -1759,6 +1827,7 @@ impl AssistantHost {
         attempt.projection.end_thinking();
         self.flush(control, &mut attempt.projection).await?;
         let result = &value["result"];
+        self.keep_local_task(control, result);
         if control.compact_only
             && result["errorCode"] == "assistant_compact_unavailable"
             && result["errorKind"] == "not_sent"
@@ -2071,6 +2140,32 @@ pub(super) fn frame(value: &Value) -> Result<Vec<u8>, String> {
     Ok(line)
 }
 
+/// The runtime drops input lines over 1 MiB, so a larger tool result would
+/// never settle its pending call; it becomes an error the model can act on.
+const RUNTIME_LINE_LIMIT: usize = 1024 * 1024;
+
+pub(super) fn tool_reply(
+    id: &Value,
+    result: Result<Value, String>,
+    known_keys: &[String],
+) -> Result<Vec<u8>, String> {
+    let error = |code: &str| {
+        let code = local::tool_failure(code, known_keys);
+        frame(&json!({"id":id,"error":{"code":code,"message":code}}))
+    };
+    match result {
+        Ok(result) => {
+            let reply = frame(&json!({"id":id,"result":result}))?;
+            if reply.len() > RUNTIME_LINE_LIMIT {
+                error("assistant_result_too_large")
+            } else {
+                Ok(reply)
+            }
+        }
+        Err(code) => error(&code),
+    }
+}
+
 pub(super) async fn write_line<W: AsyncWrite + Unpin>(
     input: &mut W,
     line: &[u8],
@@ -2209,6 +2304,505 @@ pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn local_write_journals_and_restores_only_after_the_run_ends() {
+        use super::local::PermissionRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create_with_capabilities(
+                "test/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        host.set_permission(PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let file = env.config.join("config/settings");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "original").unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let args = json!({"path":file,"content":"repaired","expected":"original"});
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"write-1","name":"edit","args":args});
+        let result = host.dispatch_tool(&run, &call).await.unwrap();
+        assert_eq!(result["changed"], true);
+        let authority = || DeleteRequest {
+            session_id: sid.clone(),
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        };
+        assert_eq!(
+            host.local_changes(authority(), true).await.unwrap_err(),
+            SESSION_BUSY
+        );
+        host.release_run(&run);
+        let changes = host.local_changes(authority(), false).await.unwrap();
+        assert_eq!(changes.len(), 1);
+        std::fs::write(&file, "user changed").unwrap();
+        assert_eq!(
+            host.local_changes(authority(), true).await.unwrap_err(),
+            "assistant_restore_conflict"
+        );
+        std::fs::write(&file, "repaired").unwrap();
+        assert!(host
+            .local_changes(authority(), true)
+            .await
+            .unwrap()
+            .iter()
+            .all(|c| c.restored));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "original");
+    }
+
+    #[tokio::test]
+    async fn local_reads_anywhere_run_without_approval_but_stay_scrubbed_and_protected() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let folder = env.config.join("project");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("config.json"),
+            r#"{"api_key":"sk-test-sensitive-value-123456789"}"#,
+        )
+        .unwrap();
+        let read = |id: &str, path: PathBuf| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"read","args":{"path":path}});
+        let text = host
+            .dispatch_tool(&run, &read("read-1", folder.join("config.json")))
+            .await
+            .unwrap()
+            .to_string();
+        assert!(!text.contains("sensitive-value"));
+        let key = env.config.join(".ssh/id_ed25519");
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        std::fs::write(&key, "private").unwrap();
+        assert_eq!(
+            host.dispatch_tool(&run, &read("read-2", key))
+                .await
+                .unwrap_err(),
+            "assistant_operation_denied"
+        );
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    /// A local-config session with one registered run in the default mode.
+    fn local_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create_with_capabilities(
+                "test/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        (sid, run)
+    }
+
+    fn approvals(env: &FixedEnvironment) -> Vec<Value> {
+        env.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.r#type == "approval")
+            .map(|e| e.data.clone())
+            .collect()
+    }
+
+    /// Dispatches one call and answers the approval it raises with `choice`.
+    async fn dispatch_answering(
+        host: &Arc<AssistantHost>,
+        env: &Arc<FixedEnvironment>,
+        run: &Arc<RunControl>,
+        params: Value,
+        choice: &str,
+    ) -> (Value, Result<Value, String>) {
+        let seen = approvals(env).len();
+        let task = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            async move { host.dispatch_tool(&run, &params).await }
+        });
+        let approval = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(data) = approvals(env).get(seen) {
+                    break data.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        host.respond_approval(serde_json::from_value(json!({"sessionId":run.session_id,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval["approvalId"],"choice":choice,"expectedOwner":identity().owner,"expectedGeneration":host.generation()})).unwrap())
+            .await
+            .unwrap();
+        (approval, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn local_read_only_commands_from_home_run_without_approval() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let (name, command) = if cfg!(windows) {
+            ("powershell", "Get-Location")
+        } else {
+            ("bash", "pwd")
+        };
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"pwd-1","name":name,"args":{"command":command,"folder":env.config,"timeout":30}});
+        let result = host.dispatch_tool(&run, &params).await.unwrap();
+        assert_eq!(result["exitCode"], 0, "{result}");
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_session_grant_covers_config_changes_and_one_program() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        std::fs::create_dir_all(env.config.join("config")).unwrap();
+        let write = |id: &str, file: &str| {
+            call(
+                id,
+                "write",
+                json!({"path":env.config.join("config").join(file),"content":"new","expected":null}),
+            )
+        };
+        let (approval, first) =
+            dispatch_answering(&host, &env, &run, write("w-1", "a.txt"), "session").await;
+        assert_eq!(approval["allowSession"], true);
+        assert_eq!(first.unwrap()["changed"], true);
+        // The grant is the whole configuration-change category.
+        host.dispatch_tool(&run, &write("w-2", "b.txt"))
+            .await
+            .unwrap();
+        assert_eq!(approvals(&env).len(), 1);
+        let (shell, echo, other) = if cfg!(windows) {
+            ("powershell", "Write-Output one", "Get-Date")
+        } else {
+            ("bash", "echo one", "date")
+        };
+        let exec = |id: &str, command: &str| {
+            call(
+                id,
+                shell,
+                json!({"command":command,"folder":env.config,"timeout":30}),
+            )
+        };
+        let (_, ran) = dispatch_answering(&host, &env, &run, exec("e-1", echo), "session").await;
+        assert_eq!(ran.unwrap()["exitCode"], 0);
+        host.dispatch_tool(&run, &exec("e-2", &format!("{echo} two")))
+            .await
+            .unwrap();
+        assert_eq!(approvals(&env).len(), 2);
+        // Another program asks again.
+        let (_, denied) = dispatch_answering(&host, &env, &run, exec("e-3", other), "deny").await;
+        assert_eq!(denied.unwrap_err(), "assistant_operation_denied");
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_auto_edit_writes_tool_configs_but_asks_for_files_that_can_run_code() {
+        use super::local::PermissionRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        host.release_run(&run);
+        host.set_permission(PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::AutoEdit,
+            confirmed_full_access: false,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        std::fs::create_dir_all(env.config.join("config")).unwrap();
+        let write = |id: &str, path: PathBuf| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"write","args":{"path":path,"content":"x","expected":null}});
+        host.dispatch_tool(&run, &write("w-1", env.config.join("config/settings.json")))
+            .await
+            .unwrap();
+        assert!(approvals(&env).is_empty());
+        for (id, path) in [
+            ("w-2", env.config.join(".zshrc")),
+            ("w-3", env.config.join("Library/LaunchAgents/x.plist")),
+        ] {
+            let (approval, result) =
+                dispatch_answering(&host, &env, &run, write(id, path.clone()), "deny").await;
+            assert_eq!(approval["category"], "exec", "{path:?}");
+            assert_eq!(result.unwrap_err(), "assistant_operation_denied");
+            assert!(!path.exists());
+        }
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_rebind_that_may_issue_a_new_key_asks_like_a_command_until_full_auto() {
+        use super::local::PermissionRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let rebind = |id: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"rebind_tool","args":{"tool":"codex"}});
+        let (approval, result) = dispatch_answering(&host, &env, &run, rebind("r-1"), "deny").await;
+        assert_eq!(approval["category"], "exec");
+        assert_eq!(result.unwrap_err(), "assistant_operation_denied");
+        host.release_run(&run);
+        host.set_permission(PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let run = control(&sid);
+        let mut run = run;
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"r-2","name":"rebind_tool","args":{"tool":"codex"}});
+        // The test environment has no binding writer; no approval was asked.
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            "assistant_local_unavailable"
+        );
+        assert_eq!(approvals(&env).len(), 1);
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_pending_verification_is_kept_for_the_next_run_of_the_conversation() {
+        let (_tmp, _env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let owner = identity().owner;
+        let pending =
+            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":false}]});
+        host.keep_local_task(&run, &json!({"localTaskState":pending}));
+        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        // A run that ends without reporting keeps the debt; one that verified clears it.
+        host.keep_local_task(&run, &json!({"status":"error"}));
+        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        host.keep_local_task(&run, &json!({"localTaskState":null}));
+        assert_eq!(host.local_task_state(&owner, &sid), Value::Null);
+        host.release_run(&run);
+    }
+
+    #[test]
+    fn local_tool_replies_over_the_runtime_line_limit_become_an_error() {
+        let id = json!("tool-1");
+        let small = super::tool_reply(&id, Ok(json!("short")), &[]).unwrap();
+        assert!(String::from_utf8(small).unwrap().contains("short"));
+        let large = super::tool_reply(&id, Ok(json!("中".repeat(400_000))), &[]).unwrap();
+        assert!(large.len() < 1024);
+        let text = String::from_utf8(large).unwrap();
+        assert!(text.contains("assistant_result_too_large"), "{text}");
+        assert!(text.contains("tool-1"));
+    }
+
+    #[tokio::test]
+    async fn local_tools_approval_dispatch_deduplicates_and_rejects_stale_authority() {
+        use super::local::ApprovalRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+            "toolCallId":"probe-1","name":"probe_write","args":{"command":"synthetic"}});
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            "assistant_capability_disabled"
+        );
+        store
+            .update(
+                &serde_json::from_value(
+                    json!({"sessionId":sid,"capabilities":[{"id":"local_config","version":1}]}),
+                )
+                .unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let task = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            let params = params.clone();
+            async move { host.dispatch_tool(&run, &params).await }
+        });
+        let approval = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(event) = env
+                    .events
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|e| e.r#type == "approval")
+                    .cloned()
+                {
+                    break event.data;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let response = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+            "approvalId":approval["approvalId"],"choice":"once","expectedOwner":identity().owner,"expectedGeneration":host.generation()});
+        let mut stale = response.clone();
+        stale["expectedGeneration"] = json!(host.generation() + 1);
+        assert_eq!(
+            host.respond_approval(serde_json::from_value::<ApprovalRequest>(stale).unwrap())
+                .await
+                .unwrap_err(),
+            IDENTITY_CHANGED
+        );
+        host.respond_approval(serde_json::from_value(response).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), json!({"approved":true}));
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap(),
+            json!({"approved":true})
+        );
+        let mut conflict = params.clone();
+        conflict["args"]["command"] = json!("different");
+        assert_eq!(
+            host.dispatch_tool(&run, &conflict).await.unwrap_err(),
+            "assistant_tool_call_conflict"
+        );
+        let mut malformed = params.clone();
+        malformed["args"]["unexpected"] = json!(true);
+        assert_eq!(
+            host.dispatch_tool(&run, &malformed).await.unwrap_err(),
+            "assistant_invalid_tool"
+        );
+        run.cancel.send_replace(true);
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            CANCELLED
+        );
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_tools_jsonl_callback_waits_for_approval_and_returns_result() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let (_tmp, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let capabilities: Vec<super::super::capabilities::CapabilityRef> =
+            serde_json::from_value(json!([{"id":"local_config","version":1}])).unwrap();
+        let sid = store
+            .create_with_capabilities("test/model", false, "ofox", &capabilities)
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let (host_pipe, runtime_pipe) = tokio::io::duplex(8192);
+        let (output, mut input) = tokio::io::split(host_pipe);
+        let peer_run = run.clone();
+        let peer = tokio::spawn(async move {
+            let (read, mut write) = tokio::io::split(runtime_pipe);
+            let mut read = BufReader::new(read);
+            let mut line = String::new();
+            read.read_line(&mut line).await.unwrap();
+            let start: Value = serde_json::from_str(&line).unwrap();
+            let params = json!({"sessionId":peer_run.session_id,"runId":peer_run.run_id,"operationId":peer_run.operation_id,"toolCallId":"rpc-probe","name":"probe_write","args":{"command":"synthetic"}});
+            write
+                .write_all(
+                    &frame(&json!({"id":"tool-probe","method":"tool","params":params})).unwrap(),
+                )
+                .await
+                .unwrap();
+            line.clear();
+            read.read_line(&mut line).await.unwrap();
+            let reply: Value = serde_json::from_str(&line).unwrap();
+            assert_eq!(reply["id"], "tool-probe");
+            assert_eq!(reply["result"], json!({"approved":true}));
+            write
+                .write_all(
+                    &frame(&json!({"id":start["id"],"error":{"message":"synthetic end"}})).unwrap(),
+                )
+                .await
+                .unwrap();
+        });
+        let confirmer = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            async move {
+                let approval = tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        if let Some(event) = env
+                            .events
+                            .lock()
+                            .unwrap()
+                            .iter()
+                            .find(|e| e.r#type == "approval")
+                            .cloned()
+                        {
+                            break event.data;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                host.respond_approval(serde_json::from_value(json!({"sessionId":run.session_id,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval["approvalId"],"choice":"once","expectedOwner":identity().owner,"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            }
+        });
+        let mut output = BufReader::new(output);
+        let mut buffer = Vec::new();
+        let mut attempt = Attempt::default();
+        let (_sender, mut commands) = mpsc::channel(1);
+        let result = host
+            .converse(
+                &run,
+                &json!({}),
+                false,
+                "request",
+                (&mut input, &mut output, &mut buffer),
+                (&mut attempt, &mut commands),
+            )
+            .await;
+        assert_eq!(result.unwrap_err().code, "assistant_runtime_failed");
+        assert!(attempt.progressed);
+        peer.await.unwrap();
+        confirmer.await.unwrap();
+        host.release_run(&run);
+    }
+
     /// Signed in as one account in `ofox.ai`, files in a temp dir; a one-model
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
@@ -2233,6 +2827,22 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
+            Box::pin(async { Ok(zeroize::Zeroizing::new([7; 32])) })
+        }
+
+        fn local_paths(
+            &self,
+        ) -> BoxFuture<'_, Result<super::super::tools::context::LocalPaths, String>> {
+            Box::pin(async {
+                Ok(super::super::tools::context::LocalPaths {
+                    home: self.config.clone(),
+                    config_roots: vec![self.config.join("config")],
+                    shell_files: vec![self.config.join(".zshrc")],
+                    skill: self.config.join("skills/SKILL.md"),
+                })
+            })
+        }
         fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
             Box::pin(async {
                 let mut value = identity();

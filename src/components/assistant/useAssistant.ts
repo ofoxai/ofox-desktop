@@ -9,6 +9,9 @@ import {
   assistantApi,
   assistantErrorCode,
   type AssistantAttachment,
+  type AssistantPermissionMode,
+  type AssistantApprovalChoice,
+  type AssistantLocalChange,
   type AssistantPasteTarget,
   type AssistantImageRequest,
   type AssistantVideoRequest,
@@ -58,6 +61,11 @@ function catalogPatch(catalog: AssistantCatalogSnapshot) {
     catalogRefreshFailed: catalog.catalogRefreshFailed,
   };
 }
+type ApprovalEvent = Extract<AssistantEvent, { type: "approval" }>;
+type PlanStep = {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+};
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
 /** A backup or restore refused because a reply or a file import is going on. */
@@ -208,6 +216,17 @@ export function useAssistant(enabled: boolean) {
   const [newWebSearch, setNewWebSearchState] = useState(false);
   const newWebSearchRef = useRef(newWebSearch);
   const lastWebSearch = useRef(false);
+  const [newLocalConfig, setNewLocalConfig] = useState(false);
+  const newLocalConfigRef = useRef(false);
+  const [localModes, setLocalModes] = useState<
+    Record<string, AssistantPermissionMode>
+  >({});
+  const [localApprovals, setLocalApprovals] = useState<ApprovalEvent[]>([]);
+  const [localChanges, setLocalChanges] = useState<AssistantLocalChange[]>([]);
+  const [localPlan, setLocalPlan] = useState<PlanStep[]>([]);
+  const [localIntent, setLocalIntent] = useState<string | null>(null);
+  const [localWarning, setLocalWarning] = useState<string | null>(null);
+  const [localModelNotice, setLocalModelNotice] = useState<string | null>(null);
   // Thinking for the conversation the first message creates: it belongs to
   // the model chosen for it, so choosing another model clears it.
   const [newThinkingLevel, setNewThinkingState] =
@@ -390,7 +409,13 @@ export function useAssistant(enabled: boolean) {
 
   const setRun = useCallback((value: AssistantRunRef | null) => {
     // Another run, or none: the tools the last one started are not followed.
-    if (value?.runId !== runRef.current?.runId) setTools([]);
+    if (value?.runId !== runRef.current?.runId) {
+      setTools([]);
+      setLocalApprovals([]);
+      setLocalIntent(null);
+      setLocalPlan([]);
+      setLocalWarning(null);
+    }
     runRef.current = value;
     setRunState(value);
   }, []);
@@ -801,6 +826,10 @@ export function useAssistant(enabled: boolean) {
           files: value.session.draftAttachmentIds,
         });
         const alreadyFollowing = Boolean(runRef.current);
+        setLocalModes((old) => ({
+          ...old,
+          [sessionId]: value.permissionMode ?? "default",
+        }));
         setDetail((old) => {
           if (preparing)
             return {
@@ -822,7 +851,10 @@ export function useAssistant(enabled: boolean) {
             : value;
         });
         if (resumed && !alreadyFollowing) setStream(resumed);
-        if (!preparing) setRun(value.session.activeRun);
+        if (!preparing) {
+          setRun(value.session.activeRun);
+          setLocalApprovals(value.pendingApprovals ?? []);
+        }
         setCompacting(
           preparing
             ? pendingSends.current.get(local!.runId)?.compactOnly === true
@@ -907,6 +939,13 @@ export function useAssistant(enabled: boolean) {
       confirmedQuote.current = null;
       setChosenModel(null);
       lastWebSearch.current = false;
+      newLocalConfigRef.current = false;
+      setNewLocalConfig(false);
+      setLocalModes({});
+      setLocalChanges([]);
+      setLocalPlan([]);
+      setLocalWarning(null);
+      setLocalModelNotice(null);
       setNewWebSearch(false);
       setNewThinking(null);
       setRunSearch(null);
@@ -1362,6 +1401,24 @@ export function useAssistant(enabled: boolean) {
         // session and event types this build does not know change nothing
         // on screen: the transcript and session are read again at run_end.
         switch (event.type) {
+          case "approval":
+            setLocalApprovals((old) => [
+              ...old.filter((a) => a.data.approvalId !== event.data.approvalId),
+              event,
+            ]);
+            return;
+          case "approval_end":
+            setLocalApprovals((old) =>
+              old.filter((a) => a.data.approvalId !== event.data.approvalId),
+            );
+            return;
+          case "task_plan":
+            setLocalPlan(event.data.steps);
+            return;
+          // The run's cost is shown with its reply, once saved.
+          case "task_status":
+            if (event.data.warning) setLocalWarning(event.data.warning);
+            return;
           case "run_start": {
             if (event.data.compactOnly) {
               setCompacting(true);
@@ -1469,6 +1526,7 @@ export function useAssistant(enabled: boolean) {
           }
           case "tool_start": {
             const { name, toolCallId } = event.data;
+            setLocalIntent(event.data.intent ?? null);
             doneReading(event.runId);
             endThinking(event.runId);
             const activity =
@@ -1601,6 +1659,12 @@ export function useAssistant(enabled: boolean) {
           attachmentDrafts.current.get(previous)?.map((file) => file.id),
         ).catch(showError);
       selectedRef.current = id;
+      newLocalConfigRef.current = false;
+      setNewLocalConfig(false);
+      setLocalModelNotice(null);
+      setLocalChanges([]);
+      setLocalPlan([]);
+      setLocalWarning(null);
       selectionSequence.current += 1;
       updateSequence.current += 1;
       createdSession.current = null;
@@ -1682,6 +1746,9 @@ export function useAssistant(enabled: boolean) {
       // Remembered even while some models are missing; a default is not.
       ...(newModelPicked ? { modelPicked: true } : {}),
       webSearch: newWebSearchRef.current,
+      ...(newLocalConfigRef.current
+        ? { capabilities: [{ id: "local_config", version: 1 }] }
+        : {}),
     });
     // A new conversation takes no thinking level when it is created: the one
     // chosen for it is saved right after, if its model still offers it.
@@ -2218,6 +2285,177 @@ export function useAssistant(enabled: boolean) {
       });
     },
     [update, setNewWebSearch],
+  );
+
+  const setLocalConfig = useCallback(
+    async (on: boolean) => {
+      if (busy || loading || runRef.current) return false;
+      const definition = bootstrapRef.current?.localConfigDefinition;
+      const currentModel = detailRef.current?.session.modelId ?? newModelId;
+      const recommended =
+        on && !definition?.suitableModels.includes(currentModel)
+          ? bootstrapRef.current?.models.find(
+              (m) =>
+                m.id === definition?.recommendedModel &&
+                (m.kind ?? "chat") === "chat" &&
+                m.tools !== false,
+            )
+          : undefined;
+      if (!selectedRef.current) {
+        newLocalConfigRef.current = on;
+        setNewLocalConfig(on);
+        if (recommended) {
+          setChosenModel(recommended.id);
+          setNewThinking(null);
+        }
+      } else {
+        const saved = await update({
+          capabilities: on ? [{ id: "local_config", version: 1 }] : [],
+          ...(recommended ? { modelId: recommended.id } : {}),
+        });
+        if (!saved) return false;
+        setLocalModes((old) => ({ ...old, [saved.id]: "default" }));
+      }
+      setLocalModelNotice(
+        on
+          ? recommended
+            ? "modelSwitched"
+            : !definition?.suitableModels.includes(currentModel)
+              ? "modelUnconfigured"
+              : null
+          : null,
+      );
+      return true;
+    },
+    [busy, loading, newModelId, update, setNewThinking],
+  );
+
+  const localConfig =
+    detail?.session.capabilities.some((c) => c.id === "local_config") ??
+    newLocalConfig;
+  useEffect(() => {
+    setLocalChanges([]);
+    if (!localConfig || !selectedId || run) return;
+    const authority = bootstrapRef.current;
+    if (!authority?.owner) return;
+    let active = true;
+    void assistantApi
+      .localChanges({ sessionId: selectedId, ...requireIdentity(authority) })
+      .then((value) => {
+        if (active) setLocalChanges(value);
+      })
+      .catch((reason) => {
+        if (active) showError(reason);
+      });
+    return () => {
+      active = false;
+    };
+  }, [localConfig, selectedId, run, showError]);
+
+  const setLocalPermission = useCallback(
+    async (mode: AssistantPermissionMode, confirmedFullAccess = false) => {
+      if (busy || loading || runRef.current) return false;
+      const generation = epoch.current;
+      try {
+        const session = await ensureSession();
+        const saved = await assistantApi.setPermission({
+          sessionId: session.id,
+          mode,
+          confirmedFullAccess,
+          ...requireIdentity(bootstrapRef.current),
+        });
+        if (generation !== epoch.current || selectedRef.current !== session.id)
+          return false;
+        setLocalModes((old) => ({ ...old, [session.id]: saved }));
+        return true;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        return false;
+      }
+    },
+    [busy, loading, ensureSession, showError],
+  );
+
+  const respondLocalApproval = useCallback(
+    async (id: string, choice: AssistantApprovalChoice) => {
+      const event = localApprovals.find((a) => a.data.approvalId === id);
+      if (!event) return false;
+      try {
+        await assistantApi.respondApproval({
+          sessionId: event.sessionId,
+          runId: event.runId,
+          operationId: event.operationId,
+          approvalId: id,
+          choice,
+          expectedOwner: event.data.expectedOwner,
+          expectedGeneration: event.data.expectedGeneration,
+        });
+        setLocalApprovals((old) => old.filter((a) => a !== event));
+        return true;
+      } catch (reason) {
+        if (selectedRef.current === event.sessionId) showError(reason);
+        return false;
+      }
+    },
+    [localApprovals, showError],
+  );
+
+  const restoreLocalChanges = useCallback(async () => {
+    const sid = selectedRef.current;
+    const generation = epoch.current;
+    if (!sid || busy || loading || runRef.current) return false;
+    setBusy(true);
+    try {
+      const value = await assistantApi.restoreLocalChanges({
+        sessionId: sid,
+        ...requireIdentity(bootstrapRef.current),
+      });
+      if (generation !== epoch.current || selectedRef.current !== sid)
+        return false;
+      setLocalChanges(value);
+      return true;
+    } catch (reason) {
+      if (generation === epoch.current && selectedRef.current === sid)
+        showError(reason);
+      return false;
+    } finally {
+      if (generation === epoch.current) setBusy(false);
+    }
+  }, [busy, loading, showError]);
+
+  const startLocalConfig = useCallback(
+    async (prompt: string) => {
+      if (busy || loading || transferInFlight.current) return false;
+      const generation = epoch.current;
+      const identity = requireIdentity(bootstrapRef.current);
+      const definition = bootstrapRef.current?.localConfigDefinition;
+      const recommended = bootstrapRef.current?.models.find(
+        (m) =>
+          m.id === definition?.recommendedModel &&
+          (m.kind ?? "chat") === "chat" &&
+          m.tools !== false,
+      );
+      try {
+        const session = await assistantApi.createSession({
+          modelId: recommended?.id ?? newModelId,
+          webSearch: false,
+          capabilities: [{ id: "local_config", version: 1 }],
+        });
+        await assistantApi.updateSession({
+          sessionId: session.id,
+          draft: prompt,
+          ...identity,
+        });
+        if (generation !== epoch.current) return false;
+        drafts.current.set(session.id, prompt);
+        select(session.id);
+        return true;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        return false;
+      }
+    },
+    [busy, loading, newModelId, select, showError],
   );
 
   /**
@@ -3261,6 +3499,19 @@ export function useAssistant(enabled: boolean) {
     thinking: liveThinking,
     webSearch,
     setWebSearch,
+    localConfig,
+    setLocalConfig,
+    startLocalConfig,
+    localModelNotice,
+    localMode: selectedId ? (localModes[selectedId] ?? "default") : "default",
+    localApprovals: localApprovals.map((e) => e.data),
+    localChanges,
+    localPlan,
+    localIntent,
+    localWarning,
+    setLocalPermission,
+    respondLocalApproval,
+    restoreLocalChanges,
     webSearchWaits,
     searchSkipped,
     search,

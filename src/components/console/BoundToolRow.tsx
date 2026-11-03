@@ -88,6 +88,7 @@ interface BoundToolRowProps {
   onAction: (action: ToolRowAction, trigger?: HTMLElement) => void;
   onManage: (trigger: HTMLElement) => void;
   onUninstall?: () => void;
+  onAssistant?: () => void;
 }
 
 /**
@@ -112,6 +113,7 @@ const ROW_FALLBACK_COLUMNS =
  */
 export default function BoundToolRow({
   tool,
+  onAssistant,
   subline = [],
   modelControl,
   hasAnalytics,
@@ -298,6 +300,16 @@ export default function BoundToolRow({
         data-column="actions"
         className="flex items-center justify-end gap-1 pr-3 max-[720px]:col-start-3 max-[720px]:row-start-1"
       >
+        {onAssistant && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={onAssistant}
+            disabled={busy}
+          >
+            {t("assistant.local.toolEntry")}
+          </Button>
+        )}
         {action && actionKey && (
           <Button
             variant={action === "install" ? "primary" : "secondary"}

@@ -46,6 +46,12 @@ import {
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
 import { useAssistant, type VideoConfirmation } from "./useAssistant";
+import {
+  LocalApprovalCard,
+  LocalChangesLine,
+  LocalConfigControl,
+  LocalTaskProgress,
+} from "./AssistantLocalConfig";
 import { ImageParams } from "./ImageParams";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
@@ -96,7 +102,10 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useShellRefresh } from "@/components/shell/ShellContext";
+import {
+  useOptionalShell,
+  useShellRefresh,
+} from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
 const STARTERS = ["summary", "writing", "explain"] as const;
@@ -194,6 +203,33 @@ export function AssistantPage({
 function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
+  const shell = useOptionalShell();
+  const localEntryPending = useRef<number | null>(null);
+  const entry = shell?.assistantLocation;
+  useEffect(() => {
+    if (
+      !entry ||
+      !assistant.bootstrap ||
+      assistant.busy ||
+      assistant.loading ||
+      localEntryPending.current === entry.request
+    )
+      return;
+    localEntryPending.current = entry.request;
+    void assistant
+      .startLocalConfig(t("assistant.local.toolPrompt", { tool: entry.tool }))
+      .then((ok) => {
+        if (ok) shell?.consumeAssistantLocation(entry.request);
+      });
+  }, [
+    entry,
+    assistant.bootstrap,
+    assistant.busy,
+    assistant.loading,
+    assistant.startLocalConfig,
+    shell,
+    t,
+  ]);
   const { detail, bootstrap, run, busy } = assistant;
   const [audioDialog, setAudioDialog] =
     useState<Awaited<ReturnType<typeof assistant.prepareAudio>>>(null);
@@ -502,7 +538,13 @@ function AssistantWorkspace() {
     if (!view) return;
     if (follow.current) view.scrollTop = view.scrollHeight;
     else setUnseenBelow(true);
-  }, [assistant.stream, messages.length]);
+  }, [
+    assistant.stream,
+    messages.length,
+    assistant.localApprovals.length,
+    assistant.localPlan,
+    assistant.localIntent,
+  ]);
   useLayoutEffect(() => {
     const input = composer.current;
     if (!input) return;
@@ -1164,6 +1206,14 @@ function AssistantWorkspace() {
             </Button>
           </div>
         )}
+        {assistant.localModelNotice && (
+          <p
+            role="status"
+            className="border-b border-line px-4 py-2 text-note text-ink-muted"
+          >
+            {t(`assistant.local.${assistant.localModelNotice}`)}
+          </p>
+        )}
         {/* While a delete dialog is open it shows the failure itself: a
             banner behind it would be announced a second time. */}
         {assistant.error !== null && !deleteDialogOpen && !emptyTrash.open && (
@@ -1245,7 +1295,11 @@ function AssistantWorkspace() {
                       )}
                       {!trashed && (
                         <p className="mt-4 text-balance text-note text-ink-muted">
-                          {t("assistant.emptyBoundary")}
+                          {t(
+                            assistant.localConfig
+                              ? "assistant.local.boundary"
+                              : "assistant.emptyBoundary",
+                          )}
                         </p>
                       )}
                       {!trashed && keyMissing && (
@@ -1260,6 +1314,13 @@ function AssistantWorkspace() {
                       const turn = versions.get(message.id);
                       return (
                         <AssistantMessageView
+                          onEnableLocal={
+                            !assistant.localConfig &&
+                            !settingsLocked &&
+                            !assistant.run
+                              ? () => void assistant.setLocalConfig(true)
+                              : undefined
+                          }
                           // The message that carries a switcher keeps its place
                           // when another version is shown, and the keyboard
                           // focus on the switcher with it.
@@ -1379,7 +1440,21 @@ function AssistantWorkspace() {
                         assistant.stream.role,
                       ) && (
                         <AssistantMessageView
+                          onEnableLocal={
+                            !assistant.localConfig &&
+                            !settingsLocked &&
+                            !assistant.run
+                              ? () => void assistant.setLocalConfig(true)
+                              : undefined
+                          }
                           message={assistant.stream}
+                          taskProgress={
+                            <LocalTaskProgress
+                              intent={assistant.localIntent}
+                              warning={assistant.localWarning}
+                              plan={assistant.localPlan}
+                            />
+                          }
                           mediaBlock={
                             assistant.stream.media?.kind === "video" ? (
                               videoBlock(assistant.stream, true)
@@ -1407,6 +1482,23 @@ function AssistantWorkspace() {
                           disabled
                           onEdit={noEdit}
                           onRegenerate={noRegenerate}
+                        />
+                      )}
+                    {assistant.localApprovals.map((approval) => (
+                      <LocalApprovalCard
+                        key={approval.approvalId}
+                        approval={approval}
+                        onRespond={assistant.respondLocalApproval}
+                      />
+                    ))}
+                    {assistant.localConfig &&
+                      !assistant.stream &&
+                      messages.length > 0 && (
+                        <LocalChangesLine
+                          key={session?.id ?? "new"}
+                          changes={assistant.localChanges}
+                          disabled={settingsLocked || !!assistant.run}
+                          onRestore={assistant.restoreLocalChanges}
                         />
                       )}
                     {assistant.compacting && (
@@ -1683,6 +1775,16 @@ function AssistantWorkspace() {
                         ) : (
                           webSearchToggle
                         ))}
+                      {!imageMode && !videoMode && (
+                        <LocalConfigControl
+                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
+                          on={assistant.localConfig}
+                          mode={assistant.localMode}
+                          disabled={settingsLocked || !!assistant.run}
+                          onToggle={(on) => void assistant.setLocalConfig(on)}
+                          onMode={assistant.setLocalPermission}
+                        />
+                      )}
                       {!imageMode && !videoMode && showSearchNote && (
                         <span id={searchNoteId} className="sr-only">
                           {searchNote}

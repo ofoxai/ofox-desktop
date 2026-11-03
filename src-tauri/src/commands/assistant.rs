@@ -397,11 +397,12 @@ pub fn handle_assistant_drag_drop(app: &tauri::AppHandle, event: &DragDropEvent)
     };
     let (host, app, paths) = (host.inner().clone(), app.clone(), paths.clone());
     tauri::async_runtime::spawn(async move {
+        let folder = paths.len() == 1 && paths[0].is_dir();
         match host.accept_drop(paths).await {
             Ok(Some((token, count))) => {
                 let _ = app.emit(
                     ASSISTANT_DROP_EVENT,
-                    serde_json::json!({ "token": token, "count": count }),
+                    serde_json::json!({ "token": token, "count": count, "folder": folder }),
                 );
             }
             Ok(None) => {}
@@ -514,6 +515,93 @@ fn runtime_dir_for(
 }
 
 impl Environment for AssistantEnvironment {
+    fn local_mutate<'a>(
+        &'a self,
+        name: &'a str,
+        tool: crate::app_config::BindableTool,
+        model: Option<&'a str>,
+        operation: &'a str,
+    ) -> BoxFuture<'a, Result<Value, String>> {
+        Box::pin(async move {
+            super::assistant_local::mutate(&self.app, name, tool, model, operation)
+                .await
+                .map_err(|error| {
+                    if error.starts_with("assistant_") || error == "unknown_outcome" {
+                        error
+                    } else {
+                        "assistant_local_repair_failed".into()
+                    }
+                })
+        })
+    }
+    fn local_restore(
+        &self,
+        journal: &mut crate::services::assistant::tools::journal::Journal,
+    ) -> Result<(), String> {
+        let _io = crate::config_io::lock();
+        let state = self.app.state::<crate::store::AppState>();
+        use crate::services::assistant::tools::db_state;
+        journal.restore_with(
+            |before| {
+                db_state::capture(
+                    &state.db,
+                    before["scope"]
+                        .as_str()
+                        .ok_or("assistant_journal_unavailable")?,
+                )
+            },
+            |before, after| db_state::restore(&state.db, before, after),
+        )
+    }
+    fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
+        Box::pin(async {
+            crate::services::assistant::host::blocking(
+                crate::services::assistant::tools::journal::system_key,
+            )
+            .await
+        })
+    }
+
+    fn local_paths(
+        &self,
+    ) -> BoxFuture<'_, Result<crate::services::assistant::tools::context::LocalPaths, String>> {
+        Box::pin(async move {
+            crate::services::assistant::tools::context::application_paths(self.runtime_dir()?).await
+        })
+    }
+    fn local_binding_status(
+        &self,
+        tool: crate::app_config::BindableTool,
+    ) -> BoxFuture<'_, Result<Value, String>> {
+        Box::pin(async move {
+            let state = self.app.state::<crate::store::AppState>();
+            let status = if crate::app_config::BindableTool::native(tool.as_str()).is_some() {
+                crate::native_tools::binding_status(&state.db, tool).await
+            } else if tool == crate::app_config::BindableTool::WorkBuddy {
+                crate::workbuddy_config::binding_status(&state.db).await
+            } else {
+                let (binding, _) = crate::services::ofox_bind::tool_for(tool.as_str())
+                    .ok_or("assistant_invalid_tool")?;
+                let key = crate::ofox_secret::default_store()
+                    .load(crate::ofox_secret::Slot::ApiKey { tool })
+                    .map_err(|_| "assistant_key_storage_unavailable")?;
+                crate::services::ofox_bind::status::binding_status(
+                    &state.db,
+                    binding,
+                    key.as_deref(),
+                )
+                .await
+            };
+            serde_json::to_value(status).map_err(|_| "assistant_local_unavailable".into())
+        })
+    }
+    fn local_key_cached(&self, tool: crate::app_config::BindableTool) -> bool {
+        // A storage error counts as missing: the rebind then asks first.
+        crate::ofox_secret::default_store()
+            .load(crate::ofox_secret::Slot::ApiKey { tool })
+            .is_ok_and(|key| key.is_some())
+    }
+
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
         Box::pin(async move {
             let status = self.auth()?.read().await.get_auth_status().await;
@@ -923,4 +1011,35 @@ pub async fn assistant_resume_video(
     request: crate::services::assistant::video::VideoActionRequest,
 ) -> Result<(), String> {
     host.resume_video(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_respond_approval(
+    host: Host<'_>,
+    request: crate::services::assistant::host::local::ApprovalRequest,
+) -> Result<(), String> {
+    host.respond_approval(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_set_permission(
+    host: Host<'_>,
+    request: crate::services::assistant::host::local::PermissionRequest,
+) -> Result<crate::services::assistant::tools::policy::PermissionMode, String> {
+    host.set_permission(request).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_local_changes(
+    host: Host<'_>,
+    request: DeleteRequest,
+) -> Result<Vec<crate::services::assistant::tools::journal::Change>, String> {
+    host.local_changes(request, false).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_restore_local_changes(
+    host: Host<'_>,
+    request: DeleteRequest,
+) -> Result<Vec<crate::services::assistant::tools::journal::Change>, String> {
+    host.local_changes(request, true).await
 }

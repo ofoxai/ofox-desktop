@@ -1189,7 +1189,7 @@ describe("Bound tool lifecycle", () => {
     expect(screen.getByText("2")).toBeVisible();
     fireEvent.click(fold);
     const row = screen.getByRole("group", { name: "WorkBuddy" });
-    expect(buttonNames(row)).toEqual(["前往下载", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "前往下载", "配置", "更多操作"]);
     expect(
       within(row).getByRole("combobox", { name: "0 个模型" }),
     ).toBeVisible();
@@ -1216,7 +1216,7 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["codex"]} />);
     const row = await screen.findByRole("group", { name: "Codex" });
     expect(within(row).getByText("检测失败")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["重新检测", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "重新检测", "配置", "更多操作"]);
     expect(
       screen.queryByRole("button", { name: /未安装工具/ }),
     ).not.toBeInTheDocument();
@@ -1243,7 +1243,7 @@ describe("Bound tool lifecycle", () => {
       ).toBeEnabled(),
     );
     expect(within(row).getByText("安装异常")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["修复安装", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "修复安装", "配置", "更多操作"]);
     fireEvent.click(within(row).getByRole("button", { name: "修复安装" }));
     expect(mocks.install).toHaveBeenCalledWith("codex");
   });
@@ -1267,7 +1267,7 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
     expect(within(row).getByText("绑定配置缺失")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["恢复绑定", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "恢复绑定", "配置", "更多操作"]);
     fireEvent.click(within(row).getByRole("button", { name: "恢复绑定" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：Claude Code");
     expect(

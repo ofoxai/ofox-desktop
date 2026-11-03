@@ -205,7 +205,7 @@ pub async fn ofox_request_reauth(app: tauri::AppHandle) -> Result<(), String> {
 
 /// 取要写到工具配置里的 LLM 凭据（keychain 命中直接用，否则向 Ofox 签发）。
 /// 取要写进工具配置的 key。失败原因里可能有服务端回显的 key，抹掉再往外传。
-async fn acquire_bind_token(
+pub(crate) async fn acquire_bind_token(
     key_tool: crate::app_config::BindableTool,
     ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
 ) -> Result<String, String> {
@@ -359,6 +359,22 @@ pub(crate) async fn bind_existing_tool_to_ofox_internal(
         crate::services::ofox_bind::tool_for(app).ok_or_else(|| "无效的应用类型".to_string())?;
     let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
     crate::services::ofox_bind::bind_existing(db, tool, holder, &token).await?;
+    crate::ofox_api_keys::mark_key_used(tool.app());
+    Ok(())
+}
+
+/// Rewrites the Ofox-managed fields of a binding the user edited, after the
+/// user approved it in the assistant. Native and WorkBuddy bindings keep
+/// their conflict: they have no field-level template to restore from.
+pub(crate) async fn reset_modified_tool_binding_internal(
+    db: &crate::database::Database,
+    ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
+    app: &str,
+) -> Result<(), String> {
+    let (tool, holder) =
+        crate::services::ofox_bind::tool_for(app).ok_or_else(|| "无效的应用类型".to_string())?;
+    let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
+    crate::services::ofox_bind::reset_modified_binding(db, tool, holder, &token).await?;
     crate::ofox_api_keys::mark_key_used(tool.app());
     Ok(())
 }

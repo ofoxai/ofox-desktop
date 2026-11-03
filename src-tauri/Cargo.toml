@@ -103,6 +103,10 @@ sha2 = "0.10"
 sha1 = "0.10"
 json5 = "0.4"
 json-five = "0.3.1"
+ignore = "0.4"
+glob = "0.3"
+aes-gcm = "0.10.3"
+zeroize = "1"
 
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
@@ -136,3 +140,6 @@ tokio = { version = "1", features = ["test-util"] }
 # `/openapi/api-keys` 端点的客户端契约测试用——拦截 reqwest 请求、注入
 # 201/401/403/5xx 响应，验证 `ofox_api_keys::call_create_endpoint` 的错误分类。
 wiremock = "0.6"
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+security-framework = "=3.7.0"

@@ -19,6 +19,7 @@ on:
       - "release/**"
       - "feat/chatgpt-**"
       - "feat/*windows*"
+      - "feat/assistant-*"
   pull_request:
   workflow_dispatch:
 

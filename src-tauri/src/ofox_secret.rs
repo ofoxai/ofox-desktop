@@ -92,6 +92,8 @@ pub enum Slot {
     /// 内置助手专用的 ofox API key。跟工具 key 同一个 service，account 是
     /// `assistant-key`——不会撞上任何工具名。
     AssistantKey,
+    /// Encryption key for local assistant snapshots; always an OS keychain entry.
+    AssistantJournalKey,
 }
 
 impl Slot {
@@ -100,6 +102,13 @@ impl Slot {
         match self {
             Slot::AccessToken | Slot::RefreshToken => SERVICE_OAUTH,
             Slot::ApiKey { .. } | Slot::AssistantKey => SERVICE_APIKEY,
+            Slot::AssistantJournalKey => {
+                if cfg!(debug_assertions) {
+                    "ai.ofox.desktop.dev.assistant-journal"
+                } else {
+                    "ai.ofox.desktop.assistant-journal"
+                }
+            }
         }
     }
 
@@ -113,6 +122,7 @@ impl Slot {
             Slot::RefreshToken => "refresh_token",
             Slot::ApiKey { tool } => tool.as_str(),
             Slot::AssistantKey => "assistant-key",
+            Slot::AssistantJournalKey => "snapshot-encryption",
         }
     }
 }
@@ -814,6 +824,19 @@ mod tests {
             .service(),
             SERVICE_APIKEY
         );
+    }
+
+    #[test]
+    fn journal_key_uses_a_dedicated_build_isolated_service() {
+        let expected = if cfg!(debug_assertions) {
+            "ai.ofox.desktop.dev.assistant-journal"
+        } else {
+            "ai.ofox.desktop.assistant-journal"
+        };
+        assert_eq!(Slot::AssistantJournalKey.service(), expected);
+        assert_ne!(Slot::AssistantJournalKey.service(), SERVICE_OAUTH);
+        assert_ne!(Slot::AssistantJournalKey.service(), SERVICE_APIKEY);
+        assert_eq!(Slot::AssistantJournalKey.account(), "snapshot-encryption");
     }
 
     #[test]

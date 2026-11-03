@@ -61,6 +61,8 @@ const conversation = (id: string, title: string): AssistantSession => ({
   id,
   title,
   titleSource: "auto",
+  assistantId: "ofox",
+  capabilities: [],
   modelId: "balanced",
   webSearch: false,
   draft: "",

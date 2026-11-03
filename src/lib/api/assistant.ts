@@ -235,6 +235,12 @@ export type AssistantSpeechPreferences = Record<
 >;
 
 export interface AssistantBootstrap {
+  localConfigDefinition?: {
+    id: string;
+    version: number;
+    recommendedModel: string;
+    suitableModels: string[];
+  };
   catalogRevision?: number;
   catalogRefreshing?: boolean;
   catalogRefreshFailed?: AssistantCatalogSource[];
@@ -312,7 +318,31 @@ export interface AssistantContextUsage {
   contextWindow: number;
 }
 
+export interface AssistantLocalChange {
+  id: string;
+  operation: string;
+  paths: string[];
+  restored: boolean;
+  outcomeKnown: boolean;
+  changed: boolean;
+}
+
+/**
+ * How much a local configuration run may do without asking: `default` asks
+ * before config changes, commands and installs; `autoEdit` only before
+ * commands and installs; `fullAuto` never asks.
+ */
+export type AssistantPermissionMode = "default" | "autoEdit" | "fullAuto";
+export type AssistantApprovalChoice = "once" | "session" | "deny";
+
+export interface AssistantCapabilityRef {
+  id: string;
+  version: number;
+}
+
 export interface AssistantSession {
+  assistantId: string;
+  capabilities: AssistantCapabilityRef[];
   audioOnly?: boolean;
   contextUsage?: AssistantContextUsage | null;
   /** Current runtime state; never restored from disk. */
@@ -559,6 +589,8 @@ export interface AssistantRestoreReport {
 }
 
 export interface AssistantSessionDetail {
+  pendingApprovals?: Extract<AssistantEvent, { type: "approval" }>[];
+  permissionMode?: AssistantPermissionMode;
   audioOperations?: AssistantAudioResult[];
   session: AssistantSession;
   messages: AssistantMessage[];
@@ -567,6 +599,8 @@ export interface AssistantSessionDetail {
 }
 
 export interface AssistantUpdateRequest {
+  assistantId?: string;
+  capabilities?: AssistantCapabilityRef[];
   sessionId: string;
   expectedOwner?: string;
   expectedGeneration?: number;
@@ -740,6 +774,16 @@ export interface AssistantSwitchVersionRequest {
  */
 export type AssistantRunEvent =
   | {
+      type: "task_plan";
+      data: {
+        steps: {
+          step: string;
+          status: "pending" | "in_progress" | "completed";
+        }[];
+      };
+    }
+  | { type: "task_status"; data: { cost?: number; warning?: string } }
+  | {
       type: "catalog_state";
       data: {
         owner: string;
@@ -825,6 +869,25 @@ export type AssistantRunEvent =
     }
   /** The conversation's running totals, not this run's. */
   | { type: "usage"; data: { usage: AssistantUsage } }
+  | {
+      type: "approval";
+      data: {
+        approvalId: string;
+        toolCallId: string;
+        name: string;
+        category: "read" | "write_config" | "exec" | "network" | "paid";
+        details: string;
+        allowSession: boolean;
+        /**
+         * The config fields the user changed that the operation sets back to
+         * the region's Ofox values, each as `file · field`.
+         */
+        overwrites?: string[];
+        expectedOwner: string;
+        expectedGeneration: number;
+      };
+    }
+  | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A tool call of the run's reply. `args` holds only what may be shown:
    * `query` (web_search), `url` (web_fetch) or `id` (read_attachment).
@@ -836,6 +899,7 @@ export type AssistantRunEvent =
         name: string;
         toolCallId: string;
         args: Record<string, string>;
+        intent?: string;
       };
     }
   /**
@@ -942,11 +1006,43 @@ export const assistantApi = {
     },
   ) => invoke<AssistantPreferences>("assistant_set_preferences", { request }),
   createSession: (request: {
+    assistantId?: string;
+    capabilities?: AssistantCapabilityRef[];
     modelId?: string;
     /** The user picked `modelId`: it is remembered even while some models are missing. */
     modelPicked?: boolean;
     webSearch: boolean;
   }) => invoke<AssistantSession>("assistant_create_session", { request }),
+  localChanges: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<AssistantLocalChange[]>("assistant_local_changes", { request }),
+  restoreLocalChanges: (request: {
+    sessionId: string;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) =>
+    invoke<AssistantLocalChange[]>("assistant_restore_local_changes", {
+      request,
+    }),
+  respondApproval: (request: {
+    sessionId: string;
+    runId: string;
+    operationId: string;
+    approvalId: string;
+    choice: AssistantApprovalChoice;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) => invoke<void>("assistant_respond_approval", { request }),
+  setPermission: (request: {
+    sessionId: string;
+    mode: AssistantPermissionMode;
+    confirmedFullAccess?: boolean;
+    expectedOwner: string;
+    expectedGeneration: number;
+  }) =>
+    invoke<AssistantPermissionMode>("assistant_set_permission", { request }),
   getSession: (sessionId: string) =>
     invoke<AssistantSessionDetail>("assistant_get_session", { sessionId }),
   updateSession: (request: AssistantUpdateRequest) =>
@@ -1166,6 +1262,40 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_session_busy: "sessionBusy",
   assistant_transfer_busy: "transferBusy",
   assistant_operation_already_submitted: "runChanged",
+  assistant_approval_expired: "approvalExpired",
+  assistant_approval_timeout: "approvalTimeout",
+  assistant_capability_disabled: "capabilityDisabled",
+  assistant_full_access_confirmation_required: "fullAccessConfirmation",
+  assistant_invalid_assistant: "capabilityInvalid",
+  assistant_invalid_capability: "capabilityInvalid",
+  assistant_invalid_tool: "toolInvalid",
+  assistant_tool_call_conflict: "toolCallConflict",
+  assistant_tool_limit: "toolLimit",
+  assistant_repeat_limit: "localRepeatLimit",
+  assistant_duration_limit: "localDurationLimit",
+  assistant_cost_limit: "localCostLimit",
+  assistant_cost_unavailable: "localCostUnavailable",
+  assistant_verification_required: "localVerificationRequired",
+  assistant_invalid_plan: "localInvalidPlan",
+  assistant_operation_denied: "operationDenied",
+  assistant_file_unreadable: "localFileUnreadable",
+  assistant_file_too_large: "localFileTooLarge",
+  assistant_invalid_path: "localPathDenied",
+  assistant_path_denied: "localPathDenied",
+  assistant_scan_limit: "localScanLimit",
+  assistant_local_unavailable: "localUnavailable",
+  assistant_command_outcome_unknown: "localCommandUnknown",
+  assistant_mutation_outcome_unknown: "localMutationUnknown",
+  assistant_local_partial_change: "localPartialChange",
+  assistant_journal_unavailable: "localJournalUnavailable",
+  assistant_local_repair_failed: "localRepairFailed",
+  assistant_restore_conflict: "localRestoreConflict",
+  assistant_secret_write_denied: "localSecretWrite",
+  assistant_write_failed: "localWriteFailed",
+  assistant_platform_unsupported: "localPlatformUnsupported",
+  assistant_tool_busy: "localToolBusy",
+  assistant_result_too_large: "localResultTooLarge",
+
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",
   assistant_session_deleted: "sessionMissing",

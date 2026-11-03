@@ -24,6 +24,8 @@ const fixture = (): AssistantSessionDetail => ({
     id: "session",
     title: "Notes [team]",
     titleSource: "user",
+    assistantId: "ofox",
+    capabilities: [],
     modelId: "test/model",
     webSearch: true,
     draft: "Continue later",

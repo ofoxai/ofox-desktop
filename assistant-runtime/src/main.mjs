@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { AssistantRuntime } from "./runtime.mjs";
+import { LINE_LIMIT, oversizedReplyId } from "./ipc.mjs";
 import { errorMessage, redact, scrubSecrets } from "./security.mjs";
 
 const pending = new Map();
@@ -82,8 +83,20 @@ process.on("SIGINT", () => {
 async function handle(line) {
   let request;
   try {
-    if (Buffer.byteLength(line) > 1024 * 1024)
+    if (Buffer.byteLength(line) > LINE_LIMIT) {
+      const id = oversizedReplyId(line);
+      const call = id && pending.get(id);
+      if (call) {
+        pending.delete(id);
+        call.reject(
+          Object.assign(new Error("assistant_result_too_large"), {
+            code: "assistant_result_too_large",
+          }),
+        );
+        return;
+      }
       throw new Error("IPC request exceeds 1 MiB");
+    }
     request = JSON.parse(line);
     if (!request || typeof request !== "object")
       throw new Error("Invalid JSON-RPC request");

@@ -77,6 +77,10 @@ impl ContextUsage {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    #[serde(default = "super::capabilities::default_assistant_id")]
+    pub assistant_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<super::capabilities::CapabilityRef>,
     /// Live audio task, never resumed from a saved snapshot.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub audio_only: Option<bool>,
@@ -297,6 +301,10 @@ pub enum OperationStatus {
 #[serde(rename_all = "camelCase")]
 pub struct Detail {
     #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pending_approvals: Vec<Value>,
+    /// Presentation only; never stored in a session or portable backup.
+    pub permission_mode: super::tools::policy::PermissionMode,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub audio_operations: Vec<super::audio::ResultRecord>,
     pub session: Session,
     pub messages: Vec<Message>,
@@ -345,6 +353,10 @@ pub struct SetPreferencesRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRequest {
+    #[serde(default = "super::capabilities::default_assistant_id")]
+    pub assistant_id: String,
+    #[serde(default)]
+    pub capabilities: Vec<super::capabilities::CapabilityRef>,
     /// The catalog's default (or the remembered choice) when absent.
     pub model_id: Option<String>,
     /// The user picked `model_id` rather than taking the default shown: it is
@@ -358,6 +370,8 @@ pub struct CreateRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateRequest {
+    pub assistant_id: Option<String>,
+    pub capabilities: Option<Vec<super::capabilities::CapabilityRef>>,
     pub session_id: String,
     /// Checked by the host against the signed-in owner, not by the store.
     pub expected_owner: Option<String>,
@@ -716,6 +730,8 @@ mod tests {
     #[test]
     fn detail_carries_no_run_ledger() {
         let detail = Detail {
+            pending_approvals: vec![],
+            permission_mode: Default::default(),
             audio_operations: vec![],
             session: serde_json::from_value(minimal_session()).unwrap(),
             messages: vec![],
@@ -725,7 +741,16 @@ mod tests {
         let value = serde_json::to_value(detail).unwrap();
         let mut keys: Vec<_> = value.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["attachments", "messages", "session", "usage"]);
+        assert_eq!(
+            keys,
+            [
+                "attachments",
+                "messages",
+                "permissionMode",
+                "session",
+                "usage"
+            ]
+        );
     }
 
     #[test]

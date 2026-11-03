@@ -90,6 +90,10 @@ impl AssistantHost {
         object.insert("owner".into(), json!(identity.owner));
         object.insert("authorityGeneration".into(), json!(generation));
         object.insert("runtime".into(), runtime);
+        object.insert(
+            "localConfigDefinition".into(),
+            json!(super::capabilities::local_config()),
+        );
         object.insert("key".into(), json!({"status":key}));
         object.insert("rememberedModels".into(), remembered);
         object.insert("speechPreferences".into(), speech);
@@ -221,7 +225,12 @@ impl AssistantHost {
         let kind = self.model(&identity.apex, &selected).await?.kind;
         self.ensure_current(&identity, generation).await?;
         let detail = blocking(move || {
-            let detail = store.create(&selected, request.web_search)?;
+            let detail = store.create_with_capabilities(
+                &selected,
+                request.web_search,
+                &request.assistant_id,
+                &request.capabilities,
+            )?;
             if remember {
                 store.remember_model_kind(&selected, kind)?;
             }
@@ -275,6 +284,8 @@ impl AssistantHost {
         }
         self.ensure_current(&identity, generation).await?;
         self.decorate(&identity.owner, &mut detail.session);
+        detail.permission_mode = self.local_permission(&identity.owner, sid);
+        detail.pending_approvals = self.local_pending_approvals(&identity.owner, sid);
         if detail.session.active_run.is_none() {
             for message in &mut detail.messages {
                 if message.status == "streaming" {
@@ -321,8 +332,12 @@ impl AssistantHost {
         {
             *text = super::host::scrub_secrets(text, &keys);
         }
-        let stops_run = request.model_id.is_some() || request.deleted == Some(true);
+        let stops_run = request.model_id.is_some()
+            || request.deleted == Some(true)
+            || request.capabilities.is_some()
+            || request.assistant_id.is_some();
         let sid = request.session_id.clone();
+        let changes_capabilities = request.capabilities.is_some() || request.assistant_id.is_some();
         self.ensure_current(&identity, generation).await?;
         let (mut session, remembered) = blocking({
             let store = self.store(&identity.owner)?;
@@ -348,6 +363,9 @@ impl AssistantHost {
         // the choice failed.
         if stops_run {
             self.cancel_session(&sid);
+        }
+        if changes_capabilities {
+            self.clear_local_permission(&identity.owner, &sid);
         }
         remembered?;
         self.decorate(&identity.owner, &mut session);
@@ -557,8 +575,26 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
+        let local_config = if super::capabilities::enabled(&record.session.capabilities) {
+            let paths = self.env.local_paths().await?;
+            Some(
+                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)}),
+            )
+        } else {
+            None
+        };
         self.remember_key(&key);
-        let control = Arc::new(RunControl::new(identity.clone(), &request, key.clone()));
+        let mut control = RunControl::new(identity.clone(), &request, key.clone());
+        control.local_enabled = super::capabilities::enabled(&record.session.capabilities);
+        if control.local_enabled {
+            control.deadline = tokio::time::Instant::now()
+                + std::time::Duration::from_secs(
+                    super::capabilities::local_config()
+                        .limits
+                        .max_duration_seconds,
+                );
+        }
+        let control = Arc::new(control);
         let text = super::host::scrub_secrets(&request.text, std::slice::from_ref(&key));
         blocking({
             let host = self.clone();
@@ -595,6 +631,8 @@ impl AssistantHost {
             "runId": request.run_id,
             "operationId": request.operation_id,
             "sessionFile": native_file,
+            "assistantId": record.session.assistant_id,
+            "capabilities": record.session.capabilities,
             "model": model.for_runtime(thinking_level.is_some()),
             "apiKey": key,
             "apex": identity.apex,
@@ -606,6 +644,9 @@ impl AssistantHost {
             "regenerateEntryId": branch.regenerate_entry,
         });
         if let Some(params) = params.as_object_mut() {
+            if let Some(local_config) = local_config {
+                params.insert("localConfig".into(), local_config);
+            }
             params.extend(attachment_params(
                 &record,
                 &attachment_root,

@@ -92,6 +92,8 @@ impl SessionRecord {
     pub fn into_detail(self) -> Detail {
         let usage = super::provenance::with_media(self.usage.clone(), &self);
         Detail {
+            pending_approvals: vec![],
+            permission_mode: Default::default(),
             audio_operations: super::audio::results(&self.operations),
             session: self.session,
             messages: self.messages,
@@ -292,9 +294,22 @@ impl AssistantStore {
 
     /// Blocking file IO: async callers run it in `spawn_blocking`.
     pub fn create(&self, model_id: &str, web_search: bool) -> Result<Detail, String> {
+        self.create_with_capabilities(model_id, web_search, "ofox", &[])
+    }
+
+    pub fn create_with_capabilities(
+        &self,
+        model_id: &str,
+        web_search: bool,
+        assistant_id: &str,
+        capabilities: &[super::capabilities::CapabilityRef],
+    ) -> Result<Detail, String> {
+        super::capabilities::validate(assistant_id, capabilities)?;
         let at = now();
         let record = SessionRecord {
             session: Session {
+                assistant_id: assistant_id.into(),
+                capabilities: capabilities.to_vec(),
                 audio_only: None,
                 context_usage: None,
                 compacting: None,
@@ -900,6 +915,17 @@ fn check_thinking_level(
 }
 
 fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(), String> {
+    let assistant_id = request
+        .assistant_id
+        .as_deref()
+        .unwrap_or(&record.session.assistant_id);
+    let capabilities = request
+        .capabilities
+        .as_deref()
+        .unwrap_or(&record.session.capabilities);
+    super::capabilities::validate(assistant_id, capabilities)?;
+    record.session.assistant_id = assistant_id.into();
+    record.session.capabilities = capabilities.to_vec();
     if let Some(title) = &request.title {
         if title.len() > MAX_TITLE_BYTES {
             return Err("assistant_title_too_long".into());
@@ -950,6 +976,8 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     let changes_the_conversation = request.title.is_some()
         || request.model_id.is_some()
         || request.web_search.is_some()
+        || request.assistant_id.is_some()
+        || request.capabilities.is_some()
         || request.thinking_level.is_some()
         || request.deleted.is_some();
     if changes_the_conversation {
@@ -1301,6 +1329,67 @@ mod tests {
     use super::*;
     use crate::settings::KeyOwner;
     use std::fs;
+
+    #[test]
+    fn local_capabilities_default_for_legacy_sessions_and_persist_user_updates() {
+        let (config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        let path = session_file(config.path(), &store, &sid);
+        let mut legacy: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        legacy["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("assistantId");
+        legacy["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("capabilities");
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let loaded = serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap();
+        assert_eq!(loaded["assistantId"], "ofox");
+        assert_eq!(loaded["capabilities"], json!([]));
+        let change = serde_json::from_value(json!({"sessionId": sid,
+            "capabilities": [{"id": "local_config", "version": 1}]}))
+        .unwrap();
+        store.update(&change, no_precondition).unwrap();
+        let saved = serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap();
+        assert_eq!(
+            saved["capabilities"],
+            json!([{"id": "local_config", "version": 1}])
+        );
+        assert!(saved.get("permissionMode").is_none());
+        let disable =
+            serde_json::from_value(json!({"sessionId": sid, "capabilities": []})).unwrap();
+        store.update(&disable, no_precondition).unwrap();
+        assert_eq!(
+            serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap()["capabilities"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn local_capabilities_reject_unknown_versions_and_duplicates_without_changing_session() {
+        let (_config, store) = fixture();
+        let sid = store.create("model", false).unwrap().session.id;
+        for capabilities in [
+            json!([{"id":"local_config","version":2}]),
+            json!([{"id":"unknown","version":1}]),
+            json!([{"id":"local_config","version":1},{"id":"local_config","version":1}]),
+        ] {
+            let before = serde_json::to_value(store.load_record(&sid).unwrap()).unwrap();
+            let change =
+                serde_json::from_value(json!({"sessionId":sid,"capabilities":capabilities}))
+                    .unwrap();
+            assert_eq!(
+                store.update(&change, no_precondition).unwrap_err(),
+                "assistant_invalid_capability"
+            );
+            assert_eq!(
+                serde_json::to_value(store.load_record(&sid).unwrap()).unwrap(),
+                before
+            );
+        }
+    }
 
     fn key_owner(user: &str, org: &str) -> KeyOwner {
         KeyOwner {
@@ -2533,6 +2622,8 @@ mod tests {
     fn record_for(sid: &str) -> SessionRecord {
         SessionRecord {
             session: Session {
+                assistant_id: "ofox".into(),
+                capabilities: vec![],
                 audio_only: None,
                 context_usage: None,
                 compacting: None,

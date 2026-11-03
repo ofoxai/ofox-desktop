@@ -442,7 +442,8 @@ fn replace_record_key(record: &mut Record, key: &str, pending: bool) -> Result<(
     }
     Ok(())
 }
-#[cfg(test)]
+// The assistant uses this with the unchanged cached key to refresh a binding.
+// Key rotations must use replace_key_with_metadata to keep keychain state coherent.
 pub(crate) async fn replace_key(
     db: &Database,
     tool: BindableTool,
@@ -575,6 +576,14 @@ pub(crate) async fn reconcile_endpoints(db: &Database) -> Result<bool, String> {
         ));
     }
     Ok(changed)
+}
+
+pub(crate) async fn reconcile_tool_endpoint(
+    db: &Database,
+    tool: BindableTool,
+) -> Result<bool, String> {
+    let _guard = BIND_LOCK.lock().await;
+    reconcile_one(db, tool)
 }
 
 fn reconcile_one(db: &Database, tool: BindableTool) -> Result<bool, String> {
