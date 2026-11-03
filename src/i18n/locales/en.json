@@ -5135,7 +5135,8 @@
       "cacheWrite": "Cache writes",
       "output": "Output tokens",
       "search": "Web search ×{{count}}",
-      "total": "This reply (estimate)"
+      "total": "This reply (estimate)",
+      "chat": "Chat model"
     },
     "replyDetails": "Reply details",
     "replyDuration": "Took {{duration}}",
@@ -5410,7 +5411,7 @@
     "compactCost": "Uses the selected model and may incur a charge.",
     "speech": {
       "title": "Generate speech",
-      "read": "Read aloud…",
+      "read": "Read aloud",
       "hint": "Review the text, voice and format before generating. Speech uses a separate model and does not send a chat message.",
       "text": "Text to speak",
       "generate": "Generate speech",
@@ -5559,6 +5560,46 @@
         "update_tool": "Update tool",
         "uninstall_tool": "Uninstall tool"
       }
+    },
+    "generation": {
+      "plus": "Add content or a feature",
+      "attach": "Add images and files",
+      "on": "On",
+      "kinds": {
+        "image": "Generate image",
+        "video": "Generate video",
+        "speech": "Generate speech"
+      },
+      "chipLabel": "{{name}}: model and parameters",
+      "remove": "Remove {{name}}",
+      "defaultsNote": "The chat model generates with this model and these parameters by default; what you say in the conversation comes first.",
+      "noModel": "No generation model is available.",
+      "model": "Model",
+      "sound": "Sound",
+      "voice": "Voice",
+      "format": "Format",
+      "silent": "Silent",
+      "withSound": "With sound",
+      "firstFrame": "First frame",
+      "firstLastFrames": "First + last frame",
+      "references": "{{count}} references",
+      "speaking": "Generating speech…",
+      "text": "Text read aloud",
+      "prompt": "Prompt sent",
+      "regenerate": "Regenerate with other parameters",
+      "regenerateTitle": "Regenerate with other parameters",
+      "regenerateNote": "Generates again with these parameters, without the chat model; the result is added under this reply.",
+      "estimate": "Estimated cost ${{cost}}",
+      "estimateUnknown": "The cost cannot be estimated right now",
+      "confirmGenerate": "Confirm and generate",
+      "generateAgain": "Generate again",
+      "confirmTitle": "Generate this video?",
+      "generate": "Generate",
+      "allowSession": "Don't ask again in this conversation",
+      "decline": "Don't generate",
+      "overLimit": "A video can use at most 9 reference images, 3 audio clips (15 seconds each at most) and 1 video. Remove the extra files.",
+      "needsTools": "This model cannot use tools, so it cannot generate images, videos or speech. Choose another model.",
+      "readAloudFailed": "Reading aloud failed. Try again later."
     }
   }
 }

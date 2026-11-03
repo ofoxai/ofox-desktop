@@ -236,7 +236,7 @@ impl AssistantHost {
                 match result {
                     Ok(response) => {
                         media.status = "completed".into();
-                        media.cost = if media.kind == "transcription" { cost(&trace.pricing, &response.usage).map(|amount| amount.normalize().to_string()) } else { None };
+                        media.cost = if media.kind == "transcription" { cost(&trace.pricing, &response.usage).map(|amount| amount.normalize().to_string()) } else { trace.estimate.clone() };
                         trace.text = response.text;
                         if let Some((bytes, info)) = response.output { trace.output = Some(info.clone()); output = Some((bytes, info)); }
                         trace.usage = response.usage;

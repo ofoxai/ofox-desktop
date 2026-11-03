@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Wrench } from "lucide-react";
 import type {
+  AssistantGenerationApproval,
   AssistantApprovalChoice,
   AssistantLocalChange,
   AssistantPermissionMode,
@@ -196,6 +197,18 @@ export function LocalApprovalCard({
     setBusy(true);
     void onRespond(approval.approvalId, choice).finally(() => setBusy(false));
   };
+  if (
+    approval.category === "generation" &&
+    typeof approval.details === "object"
+  )
+    return (
+      <GenerationApproval
+        details={approval.details}
+        busy={busy}
+        allowSession={approval.allowSession}
+        onRespond={respond}
+      />
+    );
   const overwrites = approval.overwrites ?? [];
   return (
     <div
@@ -218,7 +231,7 @@ export function LocalApprovalCard({
           </ul>
         </div>
       )}
-      {approval.details && (
+      {typeof approval.details === "string" && approval.details && (
         <details className="text-note text-ink-muted">
           <summary className="cursor-default select-none">
             {t("assistant.local.details")}
@@ -247,6 +260,103 @@ export function LocalApprovalCard({
         )}
         <Button variant="ghost" disabled={busy} onClick={() => respond("deny")}>
           {t("assistant.local.deny")}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** A paid video the model is about to make: what, and what it costs. */
+function GenerationApproval({
+  details,
+  busy,
+  allowSession,
+  onRespond,
+}: {
+  details: AssistantGenerationApproval;
+  busy: boolean;
+  allowSession: boolean;
+  onRespond: (choice: AssistantApprovalChoice) => void;
+}) {
+  const { t } = useTranslation();
+  const materials = details.materials;
+  const files = materials?.firstFrame
+    ? t(
+        materials.lastFrame
+          ? "assistant.generation.firstLastFrames"
+          : "assistant.generation.firstFrame",
+      )
+    : materials?.references?.length
+      ? t("assistant.generation.references", {
+          count: materials.references.length,
+        })
+      : "";
+  const line = [
+    details.model,
+    details.duration
+      ? t("assistant.video.seconds", { count: details.duration })
+      : "",
+    details.resolution,
+    details.aspectRatio,
+    details.generateAudio === undefined
+      ? ""
+      : details.generateAudio
+        ? t("assistant.generation.withSound")
+        : t("assistant.generation.silent"),
+    files,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return (
+    <div
+      role="group"
+      aria-label={t("assistant.generation.confirmTitle")}
+      className="mt-2 space-y-2 rounded-list border border-line bg-card-2 px-3 py-2 text-ctl"
+    >
+      <p className="font-medium text-ink">
+        {t("assistant.generation.confirmTitle")}
+      </p>
+      <p className="text-note text-ink-2">{line}</p>
+      <p className="font-medium tabular-nums text-ink">
+        {details.estimatedCostUsd
+          ? t("assistant.generation.estimate", {
+              cost: details.estimatedCostUsd,
+            })
+          : t("assistant.generation.estimateUnknown")}
+      </p>
+      {details.prompt && (
+        <details className="text-note text-ink-muted">
+          <summary className="cursor-default select-none">
+            {t("assistant.generation.prompt")}
+          </summary>
+          <p className="mt-1 whitespace-pre-wrap break-words text-ink-2">
+            {details.prompt}
+          </p>
+        </details>
+      )}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="secondary"
+          disabled={busy}
+          onClick={() => onRespond("once")}
+        >
+          {t("assistant.generation.generate")}
+        </Button>
+        {allowSession && (
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={() => onRespond("session")}
+          >
+            {t("assistant.generation.allowSession")}
+          </Button>
+        )}
+        <Button
+          variant="ghost"
+          disabled={busy}
+          onClick={() => onRespond("deny")}
+        >
+          {t("assistant.generation.decline")}
         </Button>
       </div>
     </div>

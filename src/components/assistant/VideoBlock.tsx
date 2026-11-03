@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import type {
   AssistantMessage,
   AssistantAttachment,
+  AssistantMediaStatus,
 } from "@/lib/api/assistant";
 import { assistantErrorKey, assistantMediaUrl } from "@/lib/api/assistant";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
@@ -12,6 +13,7 @@ import { ActivityLink } from "./MediaBlock";
 
 export function VideoBlock({
   message,
+  media: shown,
   sessionId,
   owner,
   generation,
@@ -21,6 +23,15 @@ export function VideoBlock({
   onResume,
 }: {
   message: AssistantMessage;
+  /** A generation of the reply; its own media when left out. */
+  media?: {
+    kind: string;
+    status: AssistantMediaStatus;
+    outputs: string[];
+    cost: string | null;
+    apex?: string | null;
+    submittedAt?: number | null;
+  };
   sessionId: string;
   owner: string;
   generation: number;
@@ -33,7 +44,7 @@ export function VideoBlock({
   const { apex, isLoading } = useOfoxApex();
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(Date.now);
-  const media = message.media;
+  const media = shown ?? message.media;
   const pending = Boolean(
     media &&
       ["submitting", "queued", "in_progress", "downloading"].includes(

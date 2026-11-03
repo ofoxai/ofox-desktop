@@ -1850,9 +1850,11 @@ export class AssistantRuntime {
             turnSelection,
             {
               vision: model.input.includes("image"),
-              // A model that takes tools can pass files on to generation.
+              // A model that takes tools can pass files on to generation;
+              // images it cannot view only while a generation chip is on.
               generation:
                 Boolean(context.params.media) && params.model?.tools !== false,
+              blindImages: Boolean(context.params.media?.hints?.length),
               imageLimit: MAX_MESSAGE_IMAGES,
               scrub: (value) => scrubSecrets(value, secrets),
               signal: context.abort.signal,

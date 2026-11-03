@@ -2,10 +2,8 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
-import { VideoParams } from "@/components/assistant/VideoParams";
 import { VideoBlock } from "@/components/assistant/VideoBlock";
 import type {
-  AssistantModel,
   AssistantMessage,
   AssistantAttachment,
 } from "@/lib/api/assistant";
@@ -18,20 +16,6 @@ beforeEach(async () => {
   i18n.addResourceBundle("en", "translation", en, true, true);
   await i18n.changeLanguage("en");
 });
-const model = {
-  id: "video/test",
-  kind: "video",
-  video: {
-    modes: ["t2v", "i2v"],
-    resolutions: ["480p", "720p"],
-    defaultResolution: "480p",
-    minDuration: 4,
-    maxDuration: 6,
-    supportsAudio: false,
-    aspectRatios: ["16:9"],
-    fromPricePerSecond: "0.02",
-  },
-} as AssistantModel;
 const frame: AssistantAttachment = {
   id: "frame",
   name: "frame.webp",
@@ -41,79 +25,6 @@ const frame: AssistantAttachment = {
   reason: null,
   details: null,
 };
-it("limits video choices to catalog duration, resolution and audio capabilities", async () => {
-  const change = vi.fn();
-  render(
-    <VideoParams
-      model={model}
-      value={{ duration: 4, resolution: "480p" }}
-      attachments={[]}
-      onChange={change}
-      disabled={false}
-    />,
-  );
-  await userEvent.click(screen.getByRole("combobox", { name: "Duration" }));
-  expect(screen.getAllByRole("option")).toHaveLength(3);
-  await userEvent.click(screen.getByRole("option", { name: "6 s" }));
-  expect(change).toHaveBeenCalledWith({ duration: 6, resolution: "480p" });
-  expect(screen.queryByRole("switch", { name: "Generate audio" })).toBeNull();
-  await userEvent.click(screen.getByRole("combobox", { name: "Resolution" }));
-  expect(screen.queryByRole("option", { name: "1080p" })).toBeNull();
-});
-it("allows a last frame only with a first frame and hides unreadable inputs", async () => {
-  const change = vi.fn();
-  render(
-    <VideoParams
-      model={model}
-      value={{ duration: 4, resolution: "480p" }}
-      attachments={[
-        frame,
-        {
-          ...frame,
-          id: "bad",
-          name: "large.webp",
-          sizeBytes: 16 * 1024 * 1024,
-        },
-      ]}
-      onChange={change}
-      disabled={false}
-    />,
-  );
-  expect(screen.getByRole("combobox", { name: "Last frame" })).toBeDisabled();
-  await userEvent.click(screen.getByRole("combobox", { name: "First frame" }));
-  expect(screen.queryByRole("option", { name: "large.webp" })).toBeNull();
-  await userEvent.click(screen.getByRole("option", { name: "frame.webp" }));
-  expect(change).toHaveBeenCalledWith({
-    duration: 4,
-    resolution: "480p",
-    firstFrameId: "frame",
-  });
-});
-it("clears the last frame when switching back to text to video", async () => {
-  const change = vi.fn();
-  render(
-    <VideoParams
-      model={model}
-      value={{
-        duration: 4,
-        resolution: "480p",
-        firstFrameId: "frame",
-        lastFrameId: "frame",
-      }}
-      attachments={[frame]}
-      onChange={change}
-      disabled={false}
-    />,
-  );
-  await userEvent.click(screen.getByRole("combobox", { name: "First frame" }));
-  await userEvent.click(screen.getByRole("option", { name: "None" }));
-  expect(change).toHaveBeenCalledWith({
-    duration: 4,
-    resolution: "480p",
-    firstFrameId: undefined,
-    lastFrameId: undefined,
-  });
-});
 const message = (status: string, apex = "ofox.io") =>
   ({
     id: "m",

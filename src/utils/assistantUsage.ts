@@ -50,6 +50,17 @@ export interface UsageBreakdown {
   /** Lines with tokens, in ofox-agent's order; `usd` null when unknown. */
   lines: { key: UsageLineKey; tokens: number; usd: number | null }[];
   search: { count: number; usd: number | null } | null;
+  /**
+   * With generations: the chat model's part (tokens and searches), apart
+   * from what each image, video or speech cost. Null without generations.
+   */
+  chat: number | null | undefined;
+  generations: {
+    key: string;
+    kind: string;
+    modelId: string | null;
+    usd: number | null;
+  }[];
   /** The reply's estimated total; null when any request's cost is unknown. */
   total: number | null;
 }
@@ -70,8 +81,17 @@ export function usageBreakdown(usage: AssistantUsage): UsageBreakdown {
     cacheWrite: usage.cacheWriteTokens ?? 0,
     output: usage.outputTokens ?? 0,
   };
+  const generated = (usage.requests ?? []).filter(
+    (request) => typeof request.toolCallId === "string",
+  );
+  // The chat model's own cost: the reply's total when nothing was generated.
+  const chat = generated.length
+    ? typeof usage.chatCostUsd === "string"
+      ? Number(usage.chatCostUsd)
+      : null
+    : total;
   const priced = (key: UsageLineKey): number | null => {
-    if (total === null) return null;
+    if (chat === null) return null;
     const amounts = (usage.requests ?? [])
       .map((request) => {
         const cost = (request.usage as { cost?: Record<string, unknown> })
@@ -93,11 +113,21 @@ export function usageBreakdown(usage: AssistantUsage): UsageBreakdown {
         ? {
             count: searches,
             usd:
-              total !== null && typeof usage.searchCostUsd === "string"
+              chat !== null && typeof usage.searchCostUsd === "string"
                 ? Number(usage.searchCostUsd)
                 : null,
           }
         : null,
+    chat: generated.length ? chat : undefined,
+    generations: generated.map((request) => ({
+      key: request.toolCallId!,
+      kind: request.kind,
+      modelId: request.modelId ?? null,
+      usd:
+        typeof request.estimatedCostUsd === "string"
+          ? Number(request.estimatedCostUsd)
+          : null,
+    })),
     total,
   };
 }

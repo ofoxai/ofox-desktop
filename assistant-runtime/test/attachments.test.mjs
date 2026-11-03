@@ -730,15 +730,21 @@ test("an abort stops a long PDF between pages", async (t) => {
   assert.equal((await store.read("long.pdf")).pageCount, 100);
 });
 
-test("with generation tools an image reaches a model that cannot view it by id only", async (t) => {
+test("while a generation chip is on, an image reaches a model that cannot view it by id only", async (t) => {
   const store = await storeWith(t, [["cat.png", onePixelPng, "image/png"]]);
   const blocked = await prepareAttachments(store, ["cat.png"], {
     vision: false,
   });
   assert.equal(blocked.blocked?.code, "assistant_vision_model_required");
+  const noChip = await prepareAttachments(store, ["cat.png"], {
+    vision: false,
+    generation: true,
+  });
+  assert.equal(noChip.blocked?.code, "assistant_vision_model_required");
   const passed = await prepareAttachments(store, ["cat.png"], {
     vision: false,
     generation: true,
+    blindImages: true,
   });
   assert.equal(passed.blocked, null);
   assert.deepEqual(passed.images, []);

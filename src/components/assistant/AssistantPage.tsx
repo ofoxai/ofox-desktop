@@ -17,17 +17,14 @@ import {
   ArrowUp,
   Download,
   Ellipsis,
-  Globe,
   Loader2,
   ListPlus,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
-  Paperclip,
   Pencil,
   Minimize2,
   Mic,
-  Volume2,
   Pin,
   PinOff,
   Square,
@@ -39,28 +36,26 @@ import {
 import {
   assistantApi,
   assistantErrorKey,
-  type AssistantImageRequest,
-  type AssistantVideoRequest,
   type AssistantMessage,
   type AssistantAttachment,
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
-import { useAssistant, type VideoConfirmation } from "./useAssistant";
+import { useAssistant } from "./useAssistant";
 import {
   LocalApprovalCard,
   LocalChangesLine,
   LocalConfigControl,
   LocalTaskProgress,
 } from "./AssistantLocalConfig";
-import { ImageParams } from "./ImageParams";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
-import { VideoParams, defaultVideoParams } from "./VideoParams";
+import { ComposerPlus } from "./ComposerPlus";
+import { GenerationCards } from "./GenerationCards";
+import { useReadAloud } from "./useReadAloud";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AssistantContextUsage } from "./AssistantContextUsage";
 import { AssistantAudioHistory } from "./AssistantAudioHistory";
 import { AssistantAudioInput } from "./AssistantAudioInput";
-import { AssistantSpeechOutput } from "./AssistantSpeechOutput";
 import { AssistantQueue } from "./AssistantQueue";
 import { MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES } from "./useMessageQueue";
 import { AttachmentList } from "./AssistantAttachments";
@@ -233,20 +228,11 @@ function AssistantWorkspace() {
   const { detail, bootstrap, run, busy } = assistant;
   const [audioDialog, setAudioDialog] =
     useState<Awaited<ReturnType<typeof assistant.prepareAudio>>>(null);
-  const [speechDialog, setSpeechDialog] = useState<{
-    target: NonNullable<Awaited<ReturnType<typeof assistant.prepareAudio>>>;
-    text: string;
-    sourceMessageId?: string;
-  } | null>(null);
-  const speechAvailable = Boolean(
-    bootstrap?.audioModels?.some(
-      (model) => model.kind === "speech" && model.audio,
-    ),
-  );
-  const openSpeech = async (text: string, sourceMessageId?: string) => {
-    const target = await assistant.prepareAudio();
-    if (target) setSpeechDialog({ target, text, sourceMessageId });
-  };
+  // A reply is read aloud in one click with the remembered voice.
+  const readAloud = useReadAloud({
+    bootstrap,
+    prepare: assistant.prepareAudio,
+  });
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [backupDialog, setBackupDialog] = useState<{
@@ -266,10 +252,7 @@ function AssistantWorkspace() {
   const queueHintId = useId();
   const interactionActive = useInteractionActive();
   useEffect(() => {
-    if (!interactionActive) {
-      setAudioDialog(null);
-      setSpeechDialog(null);
-    }
+    if (!interactionActive) setAudioDialog(null);
   }, [interactionActive]);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -355,9 +338,9 @@ function AssistantWorkspace() {
   // conversation never keeps it on when it can't be seen to work.
   const searchLocked =
     settingsLocked || (!assistant.webSearch && searchPrice === null);
-  // The switch is lit only for a search that will happen: a conversation
-  // saved with search on while it is unavailable still says "on" to
-  // assistive tech (and can be turned off), but doesn't look on.
+  // The chip is lit only for a search that will happen: a conversation
+  // saved with search on while it is unavailable still shows it (so it can
+  // be turned off), but doesn't look on.
   const searchLit = assistant.webSearch && searchPrice !== null;
   // Tool, system and other internal records stay out of the transcript, and
   // so do the versions of a turn that are not the one shown: the switcher
@@ -410,61 +393,50 @@ function AssistantWorkspace() {
   const composerModel = bootstrap?.models.find(
     (item) => item.id === (session?.modelId ?? assistant.newModelId),
   );
-  const imageMode = composerModel?.kind === "image";
-  const videoMode = composerModel?.kind === "video";
+  // A conversation that generated directly with an image or video model
+  // (before generation became the chat model's tools) opens on a chat model,
+  // with that model as its generation default.
+  const migrated = useRef<string | null>(null);
+  useEffect(() => {
+    const kind = composerModel?.kind;
+    if (!session || !composerModel || (kind !== "image" && kind !== "video"))
+      return;
+    if (migrated.current === session.id || run) return;
+    const chat = [bootstrap?.rememberedModels?.chat, bootstrap?.defaultModelId]
+      .map((id) => bootstrap?.models.find((model) => model.id === id))
+      .find((model) => model && (model.kind ?? "chat") === "chat");
+    if (!chat) return;
+    migrated.current = session.id;
+    void assistant.update({
+      modelId: chat.id,
+      media: {
+        ...session.media,
+        [kind]: { ...session.media?.[kind], model: composerModel.id },
+      },
+    });
+  }, [session, composerModel, run, bootstrap, assistant]);
+  // Every model a generation tool can use: speech models come with the
+  // audio tools.
+  const generationCatalog = useMemo(
+    () => [...(bootstrap?.models ?? []), ...(bootstrap?.audioModels ?? [])],
+    [bootstrap?.models, bootstrap?.audioModels],
+  );
   const queueCount = assistant.queue?.messages.length ?? 0;
-  const queueMode =
-    !imageMode &&
-    !videoMode &&
-    !session?.audioOnly &&
-    Boolean(run || queueCount);
+  const queueMode = !session?.audioOnly && Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
   const canQueue = assistant.queueAvailable && !files.length && !queueFull;
-  const [videoParams, setVideoParams] = useState<AssistantVideoRequest>({
-    duration: 4,
-    resolution: "",
-  });
-  const [videoConfirmation, setVideoConfirmation] =
-    useState<VideoConfirmation | null>(null);
-  useEffect(() => {
-    if (composerModel?.kind === "video")
-      setVideoParams(defaultVideoParams(composerModel));
-    // Saving the first quote assigns an id without selecting a different
-    // conversation. Keep the parameters the user is about to confirm.
-  }, [assistant.selectionKey, composerModel?.id]);
-  const videoQuoteOpen = Boolean(
-    videoConfirmation &&
-      videoConfirmation.owner === bootstrap?.owner &&
-      videoConfirmation.generation === bootstrap?.authorityGeneration &&
-      videoConfirmation.sessionId === session?.id &&
-      videoConfirmation.modelId === composerModel?.id &&
-      videoConfirmation.text === assistant.draft,
-  );
-  useEffect(() => {
-    if (videoConfirmation && !videoQuoteOpen) setVideoConfirmation(null);
-  }, [videoQuoteOpen, videoConfirmation]);
-  const frameOptions = [
-    ...new Map(
-      [...(detail?.attachments ?? []), ...files].map((file) => [file.id, file]),
-    ).values(),
-  ];
-  const [imageParams, setImageParams] = useState<AssistantImageRequest>({});
-  useEffect(() => setImageParams({}), [session?.id, composerModel?.id]);
-  const invalidImageInput =
-    imageMode &&
-    files.length > 0 &&
-    (!composerModel.image?.edits ||
-      files.length > 1 ||
-      files.some(
-        (file) =>
-          !["image/png", "image/jpeg", "image/webp"].includes(file.mimeType) ||
-          file.sizeBytes > 15 * 1024 * 1024,
-      ));
   const imagesNeedVision =
-    !imageMode &&
-    !videoMode &&
     composerModel?.supportsImages === false &&
     files.some((file) => file.mimeType.startsWith("image/"));
+  // Generation needs a model that takes tools.
+  const generationNeedsTools =
+    (assistant.media.hints?.length ?? 0) > 0 && composerModel?.tools === false;
+  // The API's reference limits, shown on the files before anything is sent.
+  const referenceOverflow =
+    assistant.media.hints?.includes("video") &&
+    (files.filter((file) => file.mimeType.startsWith("image/")).length > 9 ||
+      files.filter((file) => file.mimeType.startsWith("audio/")).length > 3 ||
+      files.filter((file) => file.mimeType.startsWith("video/")).length > 1);
   // The backend refuses a message of more than MAX_MESSAGE_BYTES of text.
   const draftBytes = useMemo(
     () => new TextEncoder().encode(assistant.draft).length,
@@ -572,21 +544,8 @@ function AssistantWorkspace() {
       if (assistant.enqueue()) focusComposer();
       return;
     }
-    if (invalidImageInput) return;
-    if (videoMode) {
-      void assistant.quoteVideo(videoParams).then((confirmation) => {
-        if (confirmation) setVideoConfirmation(confirmation);
-      });
-      return;
-    }
     follow.current = true;
-    const media = imageMode
-      ? {
-          ...imageParams,
-          ...(files[0] ? { inputAttachmentId: files[0].id } : {}),
-        }
-      : undefined;
-    void assistant.send(media ? { media } : undefined).then((sent) => {
+    void assistant.send().then((sent) => {
       if (sent) composer.current?.focus();
     });
   };
@@ -623,6 +582,38 @@ function AssistantWorkspace() {
             expectedOwner: bootstrap.owner!,
             expectedGeneration: bootstrap.authorityGeneration,
           })
+        }
+      />
+    ) : undefined;
+  const generationCards = (message: AssistantMessage, live = false) =>
+    session && bootstrap?.owner && message.generations?.length ? (
+      <GenerationCards
+        message={message}
+        sessionId={session.id}
+        owner={bootstrap.owner}
+        generation={bootstrap.authorityGeneration}
+        models={generationCatalog}
+        disabled={!available || assistant.loading || trashed}
+        onSave={(file) =>
+          assistantApi.saveMedia({
+            sessionId: session.id,
+            attachmentId: file.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+          })
+        }
+        onCancelVideo={(item) =>
+          item.status === "submitting"
+            ? assistant.stop()
+            : assistant.generationVideo("cancel", message, item)
+        }
+        onResumeVideo={(item) =>
+          assistant.generationVideo("resume", message, item)
+        }
+        onRegenerate={
+          live || !writable
+            ? undefined
+            : (item, input) => assistant.regenerateMedia(message, item, input)
         }
       />
     ) : undefined;
@@ -878,24 +869,6 @@ function AssistantWorkspace() {
     searchHighlight(assistant.search),
   );
 
-  const webSearchToggle = (
-    <Button
-      variant="ghost"
-      aria-pressed={assistant.webSearch}
-      aria-describedby={showSearchNote ? searchNoteId : undefined}
-      disabled={searchLocked}
-      onClick={() => assistant.setWebSearch(!assistant.webSearch)}
-      className={cn(
-        "shrink-0 px-2",
-        searchLit &&
-          "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
-      )}
-    >
-      <Globe aria-hidden className="h-3.5 w-3.5" />
-      {t("assistant.webSearch")}
-    </Button>
-  );
-
   return (
     <div
       ref={workspace}
@@ -981,7 +954,9 @@ function AssistantWorkspace() {
           </div>
           {Boolean(session || bootstrap?.models.length) && (
             <AssistantModelPicker
-              models={bootstrap?.models ?? []}
+              models={(bootstrap?.models ?? []).filter(
+                (model) => (model.kind ?? "chat") === "chat",
+              )}
               rememberedModels={bootstrap?.rememberedModels}
               value={session?.modelId ?? assistant.newModelId}
               onChange={(modelId) =>
@@ -1067,8 +1042,6 @@ function AssistantWorkspace() {
                     Boolean(run) ||
                     assistant.loading ||
                     sessionTrashed ||
-                    imageMode ||
-                    videoMode ||
                     !messages.length
                   }
                   onSelect={() => {
@@ -1352,59 +1325,10 @@ function AssistantWorkspace() {
                                       bootstrap.authorityGeneration,
                                   })
                                 }
-                                onUseInput={(file) => {
-                                  const target =
-                                    (composerModel?.kind === "image" &&
-                                    composerModel.image?.edits
-                                      ? composerModel
-                                      : bootstrap.models.find(
-                                          (model) =>
-                                            model.id === message.media?.model &&
-                                            model.image?.edits,
-                                        )) ??
-                                    bootstrap.models.find(
-                                      (model) =>
-                                        model.kind === "image" &&
-                                        model.image?.edits,
-                                    );
-                                  if (target)
-                                    void assistant
-                                      .useMediaInput(file, target.id)
-                                      .then((ok) => {
-                                        if (ok) focusComposer();
-                                      });
-                                }}
-                                onRegenerate={() =>
-                                  void (async () => {
-                                    const media = message.media!;
-                                    if (media.kind !== "image") return;
-                                    const question = messages.find(
-                                      (item) =>
-                                        item.role === "user" &&
-                                        item.runId === message.runId,
-                                    );
-                                    if (!question) return;
-                                    if (
-                                      session.modelId !== media.model &&
-                                      !(await actions.current.update({
-                                        modelId: media.model,
-                                      }))
-                                    )
-                                      return;
-                                    await actions.current.send({
-                                      text: question.content,
-                                      attachments:
-                                        assistant.detail?.attachments.filter(
-                                          (file) =>
-                                            media.inputIds.includes(file.id),
-                                        ),
-                                      media: media.params,
-                                    });
-                                  })()
-                                }
                               />
                             ) : undefined
                           }
+                          generations={generationCards(message)}
                           models={bootstrap?.models}
                           currentModelId={session?.modelId}
                           versions={turn}
@@ -1421,10 +1345,9 @@ function AssistantWorkspace() {
                           onSwitchVersion={switchVersion}
                           onFork={forkMessage}
                           onSpeak={
-                            speechAvailable
-                              ? (messageId, text) => {
-                                  void openSpeech(text, messageId);
-                                }
+                            readAloud.available
+                              ? (messageId, text) =>
+                                  void readAloud.speak(messageId, text)
                               : undefined
                           }
                           onQuote={
@@ -1468,11 +1391,10 @@ function AssistantWorkspace() {
                                 generation={bootstrap.authorityGeneration}
                                 disabled
                                 onSave={async () => false}
-                                onUseInput={() => {}}
-                                onRegenerate={() => {}}
                               />
                             ) : undefined
                           }
+                          generations={generationCards(assistant.stream, true)}
                           activity={assistant.activity}
                           thinking={assistant.thinking}
                           searchUnavailable={assistant.searchSkipped.has(
@@ -1598,23 +1520,6 @@ function AssistantWorkspace() {
                       removeDisabled={busy || Boolean(run) || trashed}
                     />
                   </div>
-                  {videoMode && composerModel && (
-                    <VideoParams
-                      model={composerModel}
-                      value={videoParams}
-                      attachments={frameOptions}
-                      onChange={setVideoParams}
-                      disabled={!writable}
-                    />
-                  )}
-                  {imageMode && composerModel && (
-                    <ImageParams
-                      model={composerModel}
-                      value={imageParams}
-                      onChange={setImageParams}
-                      disabled={!writable}
-                    />
-                  )}
                   <div aria-live="polite" className="shrink-0 px-3">
                     {queueMode && (queueFull || files.length > 0) && (
                       <p
@@ -1629,13 +1534,14 @@ function AssistantWorkspace() {
                         )}
                       </p>
                     )}
-                    {invalidImageInput && (
-                      <p className="text-note text-danger">
-                        {t(
-                          composerModel?.image?.edits
-                            ? "assistant.media.inputHint"
-                            : "assistant.media.noInput",
-                        )}
+                    {referenceOverflow && (
+                      <p className="mt-1.5 text-note text-danger">
+                        {t("assistant.generation.overLimit")}
+                      </p>
+                    )}
+                    {generationNeedsTools && (
+                      <p className="mt-1.5 text-note text-warn">
+                        {t("assistant.generation.needsTools")}
                       </p>
                     )}
                     {blockedFiles && (
@@ -1709,97 +1615,71 @@ function AssistantWorkspace() {
                   />
                   <div className="flex shrink-0 items-center justify-between gap-2 pb-2 pl-2 pr-3">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <Button
-                        variant="icon"
-                        aria-label={t("assistant.attach")}
-                        title={t("assistant.attach")}
-                        disabled={
-                          !writable ||
-                          queueCount > 0 ||
-                          (imageMode &&
-                            (!composerModel?.image?.edits || files.length > 0))
-                        }
-                        onClick={() =>
+                      <ComposerPlus
+                        models={generationCatalog}
+                        media={assistant.media}
+                        onMedia={assistant.setMedia}
+                        canAttach={writable && queueCount === 0}
+                        onAttach={() =>
                           // The dialog leaves focus on a button disabled while
                           // it was open: the message takes it back.
                           void assistant.pickAttachments().then(focusComposer)
                         }
-                      >
-                        <Paperclip aria-hidden className="h-3.5 w-3.5" />
-                      </Button>
-                      {!imageMode &&
-                        !videoMode &&
-                        bootstrap?.audioModels?.some(
-                          (model) =>
-                            model.kind === "transcription" && model.audio,
-                        ) && (
-                          <Button
-                            variant="icon"
-                            aria-label={t("assistant.audio.title")}
-                            title={t("assistant.audio.title")}
-                            disabled={!writable || queueCount > 0}
-                            onClick={() => {
-                              void assistant.prepareAudio().then((target) => {
-                                if (target) setAudioDialog(target);
-                              });
-                            }}
-                          >
-                            <Mic aria-hidden className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                      {!imageMode && !videoMode && speechAvailable && (
+                        webSearch={assistant.webSearch}
+                        webSearchDisabled={searchLocked}
+                        webSearchLit={searchLit}
+                        webSearchNote={showSearchNote ? searchNote : null}
+                        onWebSearch={assistant.setWebSearch}
+                        localConfig={assistant.localConfig}
+                        localDisabled={settingsLocked || !!assistant.run}
+                        onLocalConfig={(on) =>
+                          void assistant.setLocalConfig(on)
+                        }
+                        localControl={
+                          <LocalConfigControl
+                            key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
+                            on={assistant.localConfig}
+                            mode={assistant.localMode}
+                            disabled={settingsLocked || !!assistant.run}
+                            onToggle={(on) => void assistant.setLocalConfig(on)}
+                            onMode={assistant.setLocalPermission}
+                          />
+                        }
+                        disabled={!available || trashed}
+                      />
+                      {bootstrap?.audioModels?.some(
+                        (model) =>
+                          model.kind === "transcription" && model.audio,
+                      ) && (
                         <Button
                           variant="icon"
-                          aria-label={t("assistant.speech.title")}
-                          title={t("assistant.speech.title")}
+                          aria-label={t("assistant.audio.title")}
+                          title={t("assistant.audio.title")}
                           disabled={!writable || queueCount > 0}
-                          onClick={() => void openSpeech(assistant.draft)}
+                          onClick={() => {
+                            void assistant.prepareAudio().then((target) => {
+                              if (target) setAudioDialog(target);
+                            });
+                          }}
                         >
-                          <Volume2 aria-hidden className="h-3.5 w-3.5" />
+                          <Mic aria-hidden className="h-3.5 w-3.5" />
                         </Button>
                       )}
-                      {!imageMode &&
-                        !videoMode &&
-                        (showSearchNote ? (
-                          <Tooltip>
-                            {/* The wrapper takes the hover while the switch is off. */}
-                            <TooltipTrigger asChild>
-                              <span className="inline-flex shrink-0">
-                                {webSearchToggle}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              {searchNote}
-                            </TooltipContent>
-                          </Tooltip>
-                        ) : (
-                          webSearchToggle
-                        ))}
-                      {!imageMode && !videoMode && (
-                        <LocalConfigControl
-                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
-                          on={assistant.localConfig}
-                          mode={assistant.localMode}
-                          disabled={settingsLocked || !!assistant.run}
-                          onToggle={(on) => void assistant.setLocalConfig(on)}
-                          onMode={assistant.setLocalPermission}
-                        />
-                      )}
-                      {!imageMode && !videoMode && showSearchNote && (
+                      {showSearchNote && assistant.webSearch && (
                         <span id={searchNoteId} className="sr-only">
                           {searchNote}
                         </span>
                       )}
                       {/* A reply under way goes on as it began: the choice is
                       for the next message. */}
-                      {!imageMode && !videoMode && (
+                      {
                         <ThinkingMenu
                           model={composerModel}
                           level={assistant.thinkingLevel}
                           disabled={settingsLocked}
                           onChange={assistant.setThinkingLevel}
                         />
-                      )}
+                      }
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       {showLength && (
@@ -1809,7 +1689,7 @@ function AssistantWorkspace() {
                           })}
                         </span>
                       )}
-                      {!imageMode && !videoMode && (
+                      {
                         <AssistantContextUsage
                           modelId={session?.modelId ?? ""}
                           usage={
@@ -1818,7 +1698,7 @@ function AssistantWorkspace() {
                               : session?.contextUsage
                           }
                         />
-                      )}
+                      }
                       {run && queueMode && (
                         <Button
                           variant="ghost"
@@ -1882,7 +1762,7 @@ function AssistantWorkspace() {
                                 disabled={
                                   !(queueMode ? canQueue : writable) ||
                                   blockedFiles ||
-                                  invalidImageInput ||
+                                  referenceOverflow ||
                                   overLength ||
                                   (!assistant.draft.trim() && !files.length)
                                 }
@@ -1961,70 +1841,6 @@ function AssistantWorkspace() {
             }}
           />
         )}
-      {interactionActive &&
-        speechDialog &&
-        speechDialog.target.expectedOwner === bootstrap?.owner &&
-        speechDialog.target.expectedGeneration ===
-          bootstrap.authorityGeneration &&
-        speechDialog.target.sessionId === assistant.selectedId &&
-        speechDialog.target.selectionKey === assistant.selectionKey &&
-        !trashed && (
-          <AssistantSpeechOutput
-            key={`${speechDialog.target.expectedOwner}:${speechDialog.target.expectedGeneration}:${speechDialog.target.sessionId}:${speechDialog.target.selectionKey}`}
-            target={speechDialog.target}
-            models={bootstrap.audioModels ?? []}
-            rememberedModel={bootstrap.rememberedModels?.speech}
-            speechPreferences={bootstrap.speechPreferences}
-            initialText={speechDialog.text}
-            sourceMessageId={speechDialog.sourceMessageId}
-            history={detail?.audioOperations}
-            onClose={() => {
-              setSpeechDialog(null);
-              requestAnimationFrame(focusComposer);
-            }}
-          />
-        )}
-      <ConfirmDialog
-        isOpen={videoQuoteOpen}
-        title={t("assistant.video.confirmTitle")}
-        message={
-          videoConfirmation?.quote.estimatedCostUsd != null
-            ? t("assistant.video.estimate", {
-                cost: videoConfirmation.quote.estimatedCostUsd,
-              })
-            : t("assistant.video.unknownPrice")
-        }
-        details={
-          videoConfirmation && (
-            <p>
-              {composerModel?.name} ·{" "}
-              {t("assistant.video.seconds", {
-                count: videoConfirmation.video.duration,
-              })}{" "}
-              · {videoConfirmation.video.resolution}
-            </p>
-          )
-        }
-        variant="info"
-        confirmText={t(
-          videoConfirmation?.quote.estimatedCostUsd == null
-            ? "assistant.video.submitAnyway"
-            : "assistant.video.confirm",
-        )}
-        onCancel={() => setVideoConfirmation(null)}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          focusComposer();
-        }}
-        onConfirm={() => {
-          const confirmation = videoConfirmation;
-          setVideoConfirmation(null);
-          if (confirmation && videoQuoteOpen)
-            void assistant.sendVideo(confirmation).then((sent) => {
-              if (sent) focusComposer();
-            });
-        }}
-      />
       <ConfirmDialog
         isOpen={
           backupDialog !== null &&

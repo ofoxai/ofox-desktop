@@ -5135,7 +5135,8 @@
       "cacheWrite": "缓存写入",
       "output": "输出 Tokens",
       "search": "联网搜索 ×{{count}}",
-      "total": "本轮费用（估算）"
+      "total": "本轮费用（估算）",
+      "chat": "对话模型"
     },
     "replyDetails": "回复详情",
     "replyDuration": "耗时 {{duration}}",
@@ -5410,7 +5411,7 @@
     "compactCost": "使用当前模型整理，可能产生相应费用。",
     "speech": {
       "title": "生成语音",
-      "read": "朗读…",
+      "read": "朗读",
       "hint": "先检查文字、音色和格式，再生成语音。使用独立的语音模型，不会发送聊天消息。",
       "text": "朗读文字",
       "generate": "生成语音",
@@ -5559,6 +5560,46 @@
         "update_tool": "更新工具",
         "uninstall_tool": "卸载工具"
       }
+    },
+    "generation": {
+      "plus": "添加内容或功能",
+      "attach": "添加图片和文件",
+      "on": "已开启",
+      "kinds": {
+        "image": "生成图片",
+        "video": "生成视频",
+        "speech": "生成语音"
+      },
+      "chipLabel": "{{name}}：模型和参数",
+      "remove": "去掉{{name}}",
+      "defaultsNote": "对话模型生成时默认用这里的模型和参数；你在对话里明确说的参数优先。",
+      "noModel": "暂无可用的生成模型。",
+      "model": "模型",
+      "sound": "声音",
+      "voice": "音色",
+      "format": "格式",
+      "silent": "无声",
+      "withSound": "有声",
+      "firstFrame": "首帧",
+      "firstLastFrames": "首帧 + 尾帧",
+      "references": "参考素材 {{count}} 个",
+      "speaking": "正在生成语音…",
+      "text": "朗读的文字",
+      "prompt": "提交的提示词",
+      "regenerate": "改参数重新生成",
+      "regenerateTitle": "改参数重新生成",
+      "regenerateNote": "直接用这些参数重新生成，不经过对话模型；结果会加在这条回答下面。",
+      "estimate": "预估费用 ${{cost}}",
+      "estimateUnknown": "暂时无法预估费用",
+      "confirmGenerate": "确认并生成",
+      "generateAgain": "重新生成",
+      "confirmTitle": "生成这个视频？",
+      "generate": "生成",
+      "allowSession": "本对话不再询问",
+      "decline": "不生成",
+      "overLimit": "生成视频最多使用 9 张参考图、3 段音频（每段不超过 15 秒）和 1 个视频，请删掉多余的附件。",
+      "needsTools": "当前模型不能调用工具，无法生成图片、视频或语音。请换一个模型。",
+      "readAloudFailed": "朗读失败，请稍后再试。"
     }
   }
 }

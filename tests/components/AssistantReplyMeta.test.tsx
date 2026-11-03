@@ -183,6 +183,45 @@ describe("a reply's usage", () => {
     expect(popover).toHaveTextContent("Took 4.2 sec");
   });
 
+  it("shows the chat model's cost apart from each generation's", async () => {
+    render(
+      view({
+        modelId: "openai/gpt-5-mini",
+        completedAt: 2_000,
+        usage: {
+          outputTokens: 40,
+          chatCostUsd: "0.0004",
+          mediaCostUsd: "0.02",
+          estimatedCostUsd: "0.0204",
+          requests: [
+            {
+              kind: "chat",
+              status: "completed",
+              usage: { cost: { output: 0.0004 } },
+            },
+            {
+              kind: "image",
+              modelId: "openai/gpt-5-mini",
+              toolCallId: "call-1",
+              status: "completed",
+              estimatedCostUsd: "0.02",
+            },
+          ],
+        },
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Reply details" }),
+    );
+    const popover = await screen.findByRole("dialog");
+    const row = (name: string | RegExp) =>
+      within(popover).getByText(name).closest("[data-usage-line]")!;
+    expect(row("Chat model")).toHaveTextContent("$0.000400");
+    expect(row(/^Generate image/)).toHaveTextContent("GPT-5 mini");
+    expect(row(/^Generate image/)).toHaveTextContent("$0.02");
+    expect(popover).toHaveTextContent("This reply (estimate)$0.02");
+  });
+
   it("lists each line with its tokens and cost, like ofox-agent", async () => {
     render(
       view({

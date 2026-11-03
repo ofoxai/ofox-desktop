@@ -230,11 +230,14 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onEnableLocal,
   immutable = false,
   mediaBlock,
+  generations,
   taskProgress,
 }: {
   message: AssistantMessage;
   immutable?: boolean;
   mediaBlock?: React.ReactNode;
+  /** The cards of what the reply's generation tools made. */
+  generations?: React.ReactNode;
   /** A local configuration run's step, warning and plan, while it streams. */
   taskProgress?: React.ReactNode;
   activity?: AssistantActivity | null;
@@ -291,7 +294,13 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   }, [editing, onEditingChange]);
   const isUser = message.role === "user";
   const streaming = message.status === "streaming";
-  const files = message.attachments ?? [];
+  // A generation's files show on its card, not in the reply's file list.
+  const generated = new Set(
+    (message.generations ?? []).flatMap((item) => item.outputs),
+  );
+  const files = (message.attachments ?? []).filter(
+    (file) => !generated.has(file.id),
+  );
   const sources = (message.sources ?? []).flatMap(shownSource);
   const progress =
     streaming && activity ? t(`assistant.activity.${activity}`) : null;
@@ -476,6 +485,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {progress && statusLine(progress, "mt-2")}
         </>
       )}
+      {generations}
       {streaming && taskProgress}
       {retryCard ? (
         <RetryCard

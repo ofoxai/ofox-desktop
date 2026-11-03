@@ -762,7 +762,7 @@ export class AttachmentStore {
 async function prepareOne(
   store,
   id,
-  { vision, generation, room, imageLimit, scrub, signal },
+  { vision, generation, blindImages, room, imageLimit, scrub, signal },
 ) {
   const attachment = store.attachment(id);
   const header = `\n\n[User attachment: ${JSON.stringify(scrub(attachment.name))}; id=${id}`;
@@ -785,9 +785,9 @@ async function prepareOne(
   if (format === "image") {
     const image = await store.image(id, undefined, { signal });
     const details = { format, mimeType: image.mimeType };
-    // A model that cannot view images can still hand one to a generation
-    // tool; it is told it has not seen it.
-    if (!vision && generation)
+    // While the user asks for a generation, a model that cannot view images
+    // still hands one to the tool; it is told it has not seen it.
+    if (!vision && generation && blindImages)
       return {
         prompt: `${header}; an image you cannot view: rely on the user's words for what it shows, and give its id to generate_image or generate_video to use it]`,
         attached: [],
@@ -889,6 +889,7 @@ export async function prepareAttachments(
   {
     vision = false,
     generation = false,
+    blindImages = false,
     imageLimit = MAX_MESSAGE_IMAGES,
     scrub = (value) => value,
     signal,
@@ -905,6 +906,7 @@ export async function prepareAttachments(
       const prepared = await prepareOne(store, id, {
         vision,
         generation,
+        blindImages,
         room: imageLimit - images.length,
         imageLimit,
         scrub,

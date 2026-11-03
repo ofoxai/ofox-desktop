@@ -4,6 +4,7 @@ import { toast } from "sonner";
 import type {
   AssistantMessage,
   AssistantAttachment,
+  AssistantMediaStatus,
 } from "@/lib/api/assistant";
 import { assistantErrorKey, assistantMediaUrl } from "@/lib/api/assistant";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
@@ -19,6 +20,7 @@ import {
 
 export function MediaBlock({
   message,
+  media: shown,
   sessionId,
   owner,
   generation,
@@ -28,18 +30,24 @@ export function MediaBlock({
   onRegenerate,
 }: {
   message: AssistantMessage;
+  /** A generation of the reply; its own media when left out. */
+  media?: {
+    status: AssistantMediaStatus;
+    outputs: string[];
+    cost: string | null;
+  };
   sessionId: string;
   owner: string;
   generation: number;
   disabled?: boolean;
   onSave: (file: AssistantAttachment) => Promise<unknown>;
-  onUseInput: (file: AssistantAttachment) => void;
-  onRegenerate: () => void;
+  onUseInput?: (file: AssistantAttachment) => void;
+  onRegenerate?: () => void;
 }) {
   const { t } = useTranslation();
   const [large, setLarge] = useState<AssistantAttachment | null>(null);
   const [saving, setSaving] = useState(false);
-  const media = message.media;
+  const media = shown ?? message.media;
   if (!media) return null;
   const files = (message.attachments ?? []).filter((file) =>
     media.outputs.includes(file.id),
@@ -95,16 +103,18 @@ export function MediaBlock({
               >
                 {t("assistant.media.save")}
               </Button>
-              <Button
-                variant="ghost"
-                disabled={
-                  disabled ||
-                  !["image/png", "image/jpeg"].includes(file.mimeType)
-                }
-                onClick={() => onUseInput(file)}
-              >
-                {t("assistant.media.useInput")}
-              </Button>
+              {onUseInput && (
+                <Button
+                  variant="ghost"
+                  disabled={
+                    disabled ||
+                    !["image/png", "image/jpeg"].includes(file.mimeType)
+                  }
+                  onClick={() => onUseInput(file)}
+                >
+                  {t("assistant.media.useInput")}
+                </Button>
+              )}
             </div>
           </div>
         ))}
@@ -114,7 +124,7 @@ export function MediaBlock({
           {t("assistant.media.cost", { cost: media.cost })}
         </p>
       )}
-      {media.status === "completed" && (
+      {media.status === "completed" && onRegenerate && (
         <Button variant="ghost" disabled={disabled} onClick={onRegenerate}>
           {t("assistant.media.again")}
         </Button>

@@ -900,8 +900,11 @@ impl AssistantHost {
                 if let Some(message) = detail.messages.iter().find(|m| m.id == run.message_id) {
                     self.emit(run, "message", json!({ "message": message }));
                 }
-                self.emit(run, "session", json!({ "session": detail.session }));
-                self.emit(run, "usage", json!({ "usage": detail.usage }));
+                self.emit(
+                    run,
+                    "session",
+                    json!({ "session": detail.session, "usage": detail.usage }),
+                );
             }
             Err(error) => log::warn!("[Assistant] could not save a regeneration: {error}"),
         }

@@ -268,6 +268,33 @@ or one exact command (composed, path-qualified or run by an interpreter). A
 rebind that would issue a new account key asks like a command. Approvals expire
 on cancellation or after at most 120 seconds and emit `approval_end`.
 
+## Generation tools
+
+A run for a model that takes tools gets `media`:
+`{image?, video?, speech?, hints}`. Each present kind names the default model
+(`model`), the models the user may name (`models`) and what the default offers
+(image `sizes`, `qualities`, `edits`, `several`, `maxImages`; video `modes`,
+`resolutions`, `aspectRatios`, `minDuration`, `maxDuration`, `audio`; speech
+`voices`, `style`). `hints` are the composer chips (`image`, `video`, `speech`)
+the user turned on. The run then registers `generate_image`
+`{prompt, model?, size?, quality?, n?, image_ids?}`, `generate_video`
+`{prompt, model?, duration?, resolution?, aspect_ratio?, generate_audio?,
+material_ids?, material_use? (auto|frames|reference)}` and `generate_speech`
+`{text, model?, voice?, language?, style?}` for the kinds present. Each call is
+a host `tool` callback; the host fills what the model left out from the
+conversation's defaults, makes the request, keeps the files and the result on
+the reply, and answers with ids and a status only (never bytes). Their prompt
+guidelines ask the model to pass the user's description faithfully and only the
+parameters the user stated. A video answers `queued` at once; the host asks the
+user to confirm its estimate first (not in full auto) and polls it after the
+run. An unknown outcome ends the run like any paid tool.
+
+With generation tools, MP3, WAV and MP4 attachments are named as references for
+`generate_video` without being read (without the tools they are `unsupported`),
+and while a generation chip is on (`hints`), a selected image reaches a model
+without image input by id only (`partial`, `referenceOnly`); otherwise such an
+image is refused before any request, as before.
+
 ## Attachments
 
 The host copies imported files into a private directory per conversation and

@@ -5135,7 +5135,8 @@
       "cacheWrite": "キャッシュ書き込み",
       "output": "出力トークン",
       "search": "ウェブ検索 ×{{count}}",
-      "total": "今回の費用（推定）"
+      "total": "今回の費用（推定）",
+      "chat": "チャットモデル"
     },
     "replyDetails": "返信の詳細",
     "replyDuration": "所要時間 {{duration}}",
@@ -5410,7 +5411,7 @@
     "compactCost": "選択中のモデルを使用し、料金が発生する場合があります。",
     "speech": {
       "title": "音声を生成",
-      "read": "読み上げ…",
+      "read": "読み上げ",
       "hint": "生成前にテキスト、声、形式を確認してください。専用の音声モデルを使用し、チャットは送信しません。",
       "text": "読み上げるテキスト",
       "generate": "音声を生成",
@@ -5559,6 +5560,46 @@
         "update_tool": "ツールを更新",
         "uninstall_tool": "ツールを削除"
       }
+    },
+    "generation": {
+      "plus": "コンテンツや機能を追加",
+      "attach": "画像とファイルを追加",
+      "on": "オン",
+      "kinds": {
+        "image": "画像を生成",
+        "video": "動画を生成",
+        "speech": "音声を生成"
+      },
+      "chipLabel": "{{name}}：モデルとパラメータ",
+      "remove": "{{name}}を外す",
+      "defaultsNote": "チャットモデルは既定でここのモデルとパラメータで生成します。会話で明示した指定が優先されます。",
+      "noModel": "利用できる生成モデルがありません。",
+      "model": "モデル",
+      "sound": "音声",
+      "voice": "声",
+      "format": "形式",
+      "silent": "無音",
+      "withSound": "音声あり",
+      "firstFrame": "最初のフレーム",
+      "firstLastFrames": "最初 + 最後のフレーム",
+      "references": "参照素材 {{count}} 件",
+      "speaking": "音声を生成中…",
+      "text": "読み上げるテキスト",
+      "prompt": "送信したプロンプト",
+      "regenerate": "パラメータを変えて再生成",
+      "regenerateTitle": "パラメータを変えて再生成",
+      "regenerateNote": "チャットモデルを通さずにこのパラメータで再生成し、結果はこの返答の下に追加されます。",
+      "estimate": "見積もり ${{cost}}",
+      "estimateUnknown": "現在、料金を見積もれません",
+      "confirmGenerate": "確認して生成",
+      "generateAgain": "再生成",
+      "confirmTitle": "この動画を生成しますか？",
+      "generate": "生成",
+      "allowSession": "この会話では確認しない",
+      "decline": "生成しない",
+      "overLimit": "動画に使えるのは参照画像 9 枚、音声 3 本（各 15 秒以内）、動画 1 本までです。余分なファイルを外してください。",
+      "needsTools": "このモデルはツールを使えないため、画像・動画・音声を生成できません。別のモデルを選んでください。",
+      "readAloudFailed": "読み上げに失敗しました。しばらくしてからもう一度お試しください。"
     }
   }
 }
