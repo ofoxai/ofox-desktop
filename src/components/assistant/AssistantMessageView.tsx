@@ -366,17 +366,6 @@ export const AssistantMessageView = memo(function AssistantMessageView({
             value={text}
             onChange={(event) => setText(event.target.value)}
           />
-          {!isUser &&
-            message.content.includes("[[enable_local_config]]") &&
-            onEnableLocal && (
-              <Button
-                variant="outline"
-                disabled={disabled || streaming || immutable}
-                onClick={onEnableLocal}
-              >
-                {t("assistant.local.enable")}
-              </Button>
-            )}
           {files.length > 0 && (
             <>
               <AttachmentList
@@ -467,6 +456,19 @@ export const AssistantMessageView = memo(function AssistantMessageView({
               )}
             />
           )}
+          {/* The reply only offers it; turning the capability on stays the user's click. */}
+          {!isUser &&
+            message.content.includes("[[enable_local_config]]") &&
+            onEnableLocal && (
+              <Button
+                variant="outline"
+                className="mt-2"
+                disabled={disabled || streaming || immutable}
+                onClick={onEnableLocal}
+              >
+                {t("assistant.local.enable")}
+              </Button>
+            )}
           {progress && statusLine(progress, "mt-2")}
         </>
       )}

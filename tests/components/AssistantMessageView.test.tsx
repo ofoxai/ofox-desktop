@@ -1,3 +1,4 @@
+import { cloneElement } from "react";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -172,6 +173,21 @@ describe("assistant transcript rendering", () => {
       expect(screen.queryByText(errorCode)).not.toBeInTheDocument();
     },
   );
+
+  it("offers turning on local configuration from a reply without showing the marker", async () => {
+    const onEnableLocal = vi.fn();
+    render(
+      cloneElement(
+        view({ content: "I need local access. [[enable_local_config]]" }),
+        { onEnableLocal },
+      ),
+    );
+    expect(markdown).toHaveBeenLastCalledWith("I need local access. ");
+    await userEvent.click(
+      screen.getByRole("button", { name: en.assistant.local.enable }),
+    );
+    expect(onEnableLocal).toHaveBeenCalledOnce();
+  });
 
   it("keeps old failed messages readable when they have no saved reason", () => {
     render(view({ status: "error" }));

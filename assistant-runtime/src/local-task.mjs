@@ -29,8 +29,11 @@ export function validatePlan(steps) {
     throw new Error("assistant_invalid_plan");
   return steps.map((s) => ({ ...s }));
 }
+const targetKey = (tool, folder) => JSON.stringify([tool, folder]);
 export class LocalTask {
-  constructor(limits, clock = Date.now) {
+  // `state` is the host-kept snapshot of an earlier run in this conversation:
+  // a repair whose verification is still missing stays missing.
+  constructor(limits, clock = Date.now, state = null) {
     this.limits = limits;
     this.clock = clock;
     this.started = clock();
@@ -38,9 +41,22 @@ export class LocalTask {
     this.calls = 0;
     this.repeats = new Map();
     this.targets = new Map();
-    this.changed = false;
+    this.changed = state?.changed === true;
+    for (const t of Array.isArray(state?.targets) ? state.targets : [])
+      if (typeof t?.tool === "string" && typeof t?.folder === "string")
+        this.targets.set(targetKey(t.tool, t.folder), {
+          tool: t.tool,
+          folder: t.folder,
+          verified: t.verified === true,
+        });
+    this.waitingForFolder = false;
     this.retries = 0;
     this.stopped = null;
+  }
+  snapshot() {
+    return this.needsVerification
+      ? { changed: true, targets: [...this.targets.values()] }
+      : null;
   }
   stop(code) {
     this.stopped = code;
@@ -99,7 +115,13 @@ export class LocalTask {
   observe(name, args, result) {
     if (!result || typeof result !== "object") return;
     const folder = result.folder ?? args.folder;
-    const key = JSON.stringify([args.tool, folder]);
+    const key = targetKey(args.tool, folder);
+    // Asking for the folder hands the turn to the user; pushing the model on
+    // would only repeat the question. The gate resumes once a folder is used.
+    if (name === "request_folder" && result.waitingForUser === true)
+      this.waitingForFolder = true;
+    else if (name === "diagnose_in_folder" || name === "verify_in_folder")
+      this.waitingForFolder = false;
     if (name === "diagnose_in_folder" && !this.targets.has(key))
       this.targets.set(key, { tool: args.tool, folder, verified: false });
     if (result.changed === true || result.requiresVerification === true) {
@@ -119,6 +141,7 @@ export class LocalTask {
   continuation() {
     if (
       !this.needsVerification ||
+      this.waitingForFolder ||
       this.stopped ||
       this.finalStep ||
       this.retries >= this.limits.completionRetries

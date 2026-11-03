@@ -5035,6 +5035,8 @@
       "localSecretWrite": "此编辑会改变已脱敏的凭据，请使用结构化配置操作。",
       "localWriteFailed": "无法写入配置，请先查看改动记录，再决定是否重试。",
       "localPlatformUnsupported": "当前平台不支持此操作。",
+      "localToolBusy": "这个工具正在安装、更新或卸载，等它完成后再试。",
+      "localResultTooLarge": "结果太大，无法返回。请缩小搜索范围，或读取更小的文件。",
       "localRepeatLimit": "同一操作重复次数已达上限，请换一种方式处理。",
       "localDurationLimit": "本轮已达到 15 分钟时间上限。",
       "localCostLimit": "本轮已达到 1 美元费用上限。已发出的请求可能使最终费用超过上限。",
@@ -5519,6 +5521,7 @@
       },
       "operations": {
         "read": "读取文件",
+        "stat": "检查文件",
         "write": "写入配置",
         "edit": "编辑配置",
         "ls": "查看文件夹",

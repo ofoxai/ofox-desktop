@@ -578,7 +578,7 @@ impl AssistantHost {
         let local_config = if super::capabilities::enabled(&record.session.capabilities) {
             let paths = self.env.local_paths().await?;
             Some(
-                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price}),
+                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)}),
             )
         } else {
             None

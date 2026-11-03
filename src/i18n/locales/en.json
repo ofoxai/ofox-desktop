@@ -5035,6 +5035,8 @@
       "localSecretWrite": "This edit would alter hidden credentials. Use a structured configuration operation.",
       "localWriteFailed": "The configuration could not be written. Check the change list before retrying.",
       "localPlatformUnsupported": "This operation is unavailable on this platform.",
+      "localToolBusy": "The tool is already being installed, updated or removed. Try again when that finishes.",
+      "localResultTooLarge": "The result was too large to return. Narrow the search or read a smaller file.",
       "localRepeatLimit": "Repeated operation limit reached. Try a different approach.",
       "localDurationLimit": "The 15-minute task limit was reached.",
       "localCostLimit": "The $1 task limit was reached. A request already in progress may exceed the limit.",
@@ -5519,6 +5521,7 @@
       },
       "operations": {
         "read": "Read file",
+        "stat": "Check file",
         "write": "Write configuration",
         "edit": "Edit configuration",
         "ls": "List folder",

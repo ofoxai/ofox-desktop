@@ -1360,7 +1360,11 @@ export class AssistantRuntime {
       unknownOutcome: false,
       webUrls,
       localTask: params.localConfig
-        ? new LocalTask(params.localConfig.definition.limits)
+        ? new LocalTask(
+            params.localConfig.definition.limits,
+            Date.now,
+            params.localConfig.taskState ?? null,
+          )
         : null,
     };
     this.runs.set(params.runId, context);
@@ -1860,11 +1864,18 @@ export class AssistantRuntime {
         await session.prompt(prompt, { images, expandPromptTemplates: false });
       }
       await session.waitForIdle();
+      // A turn the provider failed (balance, outage) cannot be fixed by asking
+      // the model to verify: that request would fail the same way, at a cost.
+      const providerFailed = () =>
+        projection(manager, secrets)
+          .entries.filter((entry) => entry.active && entry.role === "assistant")
+          .at(-1)?.stopReason === "error";
       if (
         !compactOnly &&
         context.localTask &&
         !context.unknownOutcome &&
-        !context.abort.signal.aborted
+        !context.abort.signal.aborted &&
+        !providerFailed()
       ) {
         let continuation;
         while ((continuation = context.localTask.continuation())) {
@@ -1882,7 +1893,12 @@ export class AssistantRuntime {
             { triggerTurn: true },
           );
           await session.waitForIdle();
-          if (context.unknownOutcome || context.abort.signal.aborted) break;
+          if (
+            context.unknownOutcome ||
+            context.abort.signal.aborted ||
+            providerFailed()
+          )
+            break;
         }
       }
       const result = projection(manager, secrets);
@@ -1906,11 +1922,18 @@ export class AssistantRuntime {
         result.errorKind = last?.errorKind;
         result.errorCode = last?.errorCode;
       }
+      // A provider failure or an unknown outcome keeps its own error; missing
+      // verification only fails a run that otherwise completed, unless the
+      // run ended waiting for the user to choose the problem folder.
+      const task = context.localTask;
       const taskFailure =
-        context.localTask?.stopped ??
-        (context.localTask?.needsVerification
+        task?.stopped ??
+        (task?.needsVerification &&
+        !task.waitingForFolder &&
+        result.status === "completed"
           ? "assistant_verification_required"
           : null);
+      if (task) result.localTaskState = task.snapshot();
       if (taskFailure && result.status !== "stopped") {
         result.status = "error";
         result.errorCode = taskFailure;
@@ -1944,6 +1967,7 @@ export class AssistantRuntime {
           errorCode: code,
           errorMessage: code,
           errorKind: context.localRequests ? undefined : "not_sent",
+          localTaskState: context.localTask.snapshot(),
         };
       }
       if (

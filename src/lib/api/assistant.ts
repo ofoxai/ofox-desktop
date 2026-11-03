@@ -1297,6 +1297,8 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_secret_write_denied: "localSecretWrite",
   assistant_write_failed: "localWriteFailed",
   assistant_platform_unsupported: "localPlatformUnsupported",
+  assistant_tool_busy: "localToolBusy",
+  assistant_result_too_large: "localResultTooLarge",
 
   assistant_stale_operation: "runChanged",
   assistant_session_not_found: "sessionMissing",

@@ -22,6 +22,31 @@ pub(super) struct LocalState {
     // Exact tool + arguments, never a wildcard for arbitrary commands/paths.
     grants: HashSet<String>,
     folders: Vec<PathBuf>,
+    // A repair still waiting for verification, carried into the next run of
+    // the conversation. Memory only: a restart does not resume tasks.
+    task: Option<Value>,
+}
+
+/// Keeps only the pending-verification shape the runtime's task gate reads.
+fn task_state(value: &Value) -> Option<Value> {
+    if value.get("changed") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let targets: Vec<Value> = value["targets"]
+        .as_array()
+        .map(|targets| {
+            targets
+                .iter()
+                .take(32)
+                .filter_map(|t| {
+                    let tool = t["tool"].as_str().filter(|s| s.len() <= 64)?;
+                    let folder = t["folder"].as_str().filter(|s| s.len() <= 4096)?;
+                    Some(json!({"tool":tool,"folder":folder,"verified":t["verified"] == true}))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(json!({"changed":true,"targets":targets}))
 }
 
 pub(super) static MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -79,6 +104,32 @@ impl AssistantHost {
             return vec![];
         };
         self.local_approvals.outstanding(&self.local_binding(run)).into_iter().map(|data|json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"approval","data":data})).collect()
+    }
+
+    /// A finished run reports the verification it still owes; a run that
+    /// failed before reporting leaves the earlier state in place.
+    pub(super) fn keep_local_task(&self, run: &RunControl, result: &Value) {
+        let Some(state) = result.get("localTaskState") else {
+            return;
+        };
+        if !run.local_enabled {
+            return;
+        }
+        self.local_states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(session_key(&run.identity.owner, &run.session_id))
+            .or_default()
+            .task = task_state(state);
+    }
+
+    pub(crate) fn local_task_state(&self, owner: &str, sid: &str) -> Value {
+        self.local_states
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&session_key(owner, sid))
+            .and_then(|state| state.task.clone())
+            .unwrap_or(Value::Null)
     }
 
     pub(crate) fn clear_local_permission(&self, owner: &str, sid: &str) {
@@ -730,6 +781,27 @@ impl AssistantHost {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn local_task_state_keeps_only_a_pending_verification() {
+        assert_eq!(super::task_state(&json!(null)), None);
+        assert_eq!(super::task_state(&json!({"changed":"yes"})), None);
+        assert_eq!(
+            super::task_state(&json!({"changed":true})),
+            Some(json!({"changed":true,"targets":[]}))
+        );
+        let kept = super::task_state(&json!({"changed":true,"extra":1,"targets":[
+            {"tool":"codex","folder":"/p","verified":true,"x":1},
+            {"tool":7,"folder":"/q"},
+        ]}))
+        .unwrap();
+        assert_eq!(
+            kept,
+            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":true}]})
+        );
+    }
+
     #[test]
     fn tool_failure_redacts_credentials_before_crossing_the_runtime_boundary() {
         let known = "known-tool-credential-do-not-forward".to_string();

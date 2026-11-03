@@ -79,6 +79,36 @@ test("no-op mutations need no verification and unknown targets cannot be guessed
   );
   assert.equal(task.needsVerification, true);
 });
+test("pending verification survives into the next run and clears once verified", () => {
+  const task = new LocalTask(limits);
+  const target = { tool: "codex", folder: "/problem" };
+  task.observe("diagnose_in_folder", target, { verified: false });
+  task.observe("write", { path: "/config" }, { changed: true });
+  const next = new LocalTask(limits, Date.now, task.snapshot());
+  assert.equal(next.needsVerification, true);
+  next.observe("verify_in_folder", target, { verified: true });
+  assert.equal(next.needsVerification, false);
+  assert.equal(next.snapshot(), null);
+  for (const state of [{ changed: "yes" }, { targets: "x" }, 7, null])
+    assert.equal(
+      new LocalTask(limits, Date.now, state).needsVerification,
+      false,
+    );
+});
+test("a folder request pauses the completion gate until the user answers", () => {
+  const task = new LocalTask(limits);
+  task.observe("write", { path: "/config" }, { changed: true });
+  task.observe("request_folder", {}, { waitingForUser: true });
+  assert.equal(task.waitingForFolder, true);
+  assert.equal(task.continuation(), null);
+  task.observe(
+    "diagnose_in_folder",
+    { tool: "codex", folder: "/problem" },
+    { verified: false },
+  );
+  assert.equal(task.waitingForFolder, false);
+  assert.ok(task.continuation());
+});
 test("plans cap steps, Unicode length, status and one active step", () => {
   assert.equal(
     validatePlan([{ step: "检查配置", status: "in_progress" }]).length,

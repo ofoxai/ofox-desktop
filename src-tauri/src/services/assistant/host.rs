@@ -1827,6 +1827,7 @@ impl AssistantHost {
         attempt.projection.end_thinking();
         self.flush(control, &mut attempt.projection).await?;
         let result = &value["result"];
+        self.keep_local_task(control, result);
         if control.compact_only
             && result["errorCode"] == "assistant_compact_unavailable"
             && result["errorKind"] == "not_sent"
@@ -2556,6 +2557,23 @@ mod tests {
         let (approval, result) = dispatch_answering(&host, &env, &run, params, "deny").await;
         assert_eq!(approval["allowSession"], false);
         assert_eq!(result.unwrap_err(), "assistant_operation_denied");
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_pending_verification_is_kept_for_the_next_run_of_the_conversation() {
+        let (_tmp, _env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let owner = identity().owner;
+        let pending =
+            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":false}]});
+        host.keep_local_task(&run, &json!({"localTaskState":pending}));
+        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        // A run that ends without reporting keeps the debt; one that verified clears it.
+        host.keep_local_task(&run, &json!({"status":"error"}));
+        assert_eq!(host.local_task_state(&owner, &sid), pending);
+        host.keep_local_task(&run, &json!({"localTaskState":null}));
+        assert_eq!(host.local_task_state(&owner, &sid), Value::Null);
         host.release_run(&run);
     }
 

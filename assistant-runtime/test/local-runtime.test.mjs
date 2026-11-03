@@ -103,8 +103,57 @@ async function fixture(t, turns, host, extra = {}) {
     },
     ...extra,
   };
-  return { requests, events, calls, run: () => runtime.run(params) };
+  return { requests, events, calls, params, run: () => runtime.run(params) };
 }
+const providerFailure = () =>
+  new Response(JSON.stringify({ error: { message: "Insufficient balance" } }), {
+    status: 402,
+    headers: { "content-type": "application/json" },
+  });
+test("a provider failure after a change keeps its own error and is not retried by the verification gate", async (t) => {
+  const f = await fixture(
+    t,
+    [
+      () => call("diagnose_in_folder", { tool: "codex", folder: "/problem" }),
+      () => call("write", { path: "/configuration", content: "safe" }),
+      providerFailure,
+      reply,
+    ],
+    (name) =>
+      name === "write" ? { changed: true } : { verified: false, exists: true },
+  );
+  const result = await f.run();
+  assert.equal(result.status, "error");
+  assert.notEqual(result.errorCode, "assistant_verification_required");
+  assert.equal(f.requests.length, 3);
+  assert.equal(result.localTaskState.changed, true);
+});
+test("waiting for the problem folder ends normally and the next run still has to verify", async (t) => {
+  const first = await fixture(
+    t,
+    [
+      () => call("write", { path: "/configuration", content: "safe" }),
+      () => call("request_folder", {}),
+      reply,
+      reply,
+    ],
+    (name) =>
+      name === "request_folder" ? { waitingForUser: true } : { changed: true },
+  );
+  const waiting = await first.run();
+  assert.equal(waiting.status, "completed");
+  assert.equal(first.requests.length, 3);
+  assert.equal(waiting.localTaskState.changed, true);
+  const next = await fixture(t, [reply, reply, reply, reply], () => ({}), {
+    localConfig: {
+      ...first.params.localConfig,
+      taskState: waiting.localTaskState,
+    },
+  });
+  const result = await next.run();
+  assert.equal(result.errorCode, "assistant_verification_required");
+  assert.equal(next.requests.length, 3);
+});
 test("real Pi run stops the fifth repeated operation and emits warning before it", async (t) => {
   const f = await fixture(
     t,
