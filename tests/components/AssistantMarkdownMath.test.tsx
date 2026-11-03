@@ -68,6 +68,13 @@ describe("assistant math", () => {
     expect(container.querySelector(".katex-display")).not.toBeNull();
   });
 
+  it("draws $…$ as an inline formula, as models write it", async () => {
+    const { container } = render(message("序列长度 $n$，模型维度 $d$。"));
+    await rendered(container);
+    expect(sources(container)).toEqual(["n", "d"]);
+    expect(container.querySelector(".katex-display")).toBeNull();
+  });
+
   it("leaves $5 and $10 as plain text, even beside a real formula", async () => {
     const { container } = render(message("costs $5 and $10, $$x$$"));
     await rendered(container);

@@ -7,11 +7,19 @@ import {
 } from "@/lib/markdownMath";
 
 describe("hasMathMarkers", () => {
-  it.each(["$$x^2$$", "a \\(x\\) b", "\\[\nx\n\\]"])("sees %j", (content) => {
+  it.each(["$$x^2$$", "a \\(x\\) b", "\\[\nx\n\\]", "序列长度 $n$，维度 $d$"])("sees %j", (content) => {
     expect(hasMathMarkers(content)).toBe(true);
   });
 
-  it.each(["", "plain text", "it costs $5 and $10", "a (b) and [c]"])(
+  it.each([
+    "",
+    "plain text",
+    "it costs $5 and $10",
+    "a (b) and [c]",
+    "约 $0.014–$0.028 每次",
+    "$5,$10",
+    "price: $ 5 $",
+  ])(
     "does not see %j",
     (content) => {
       expect(hasMathMarkers(content)).toBe(false);
@@ -20,6 +28,37 @@ describe("hasMathMarkers", () => {
 });
 
 describe("rewriteMathDelimiters", () => {
+  it("writes $…$ as text math, as Pandoc reads it", () => {
+    expect(rewriteMathDelimiters("长度 $n$，输入 $X\\in\\mathbb{R}^{n\\times d}$。")).toBe(
+      "长度 $$n$$，输入 $$X\\in\\mathbb{R}^{n\\times d}$$。",
+    );
+    expect(rewriteMathDelimiters("若 $X' = PX$（$P$ 为置换）")).toBe(
+      "若 $$X' = PX$$（$$P$$ 为置换）",
+    );
+  });
+
+  it("leaves money and spaced dollars as text", () => {
+    for (const text of [
+      "it costs $5 and $10",
+      "约 $0.014–$0.028 每次",
+      "$5,$10 or $20/month",
+      "a $ b $ c",
+      "escaped \\$x\\$ stays",
+    ])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("does not close a $ formula across a blank line or inside code", () => {
+    expect(rewriteMathDelimiters("$a\n\nb$")).toBe("$a\n\nb$");
+    expect(rewriteMathDelimiters("`$x$` and $y$")).toBe("`$x$` and $$y$$");
+  });
+
+  it("keeps $$ formulas as they are", () => {
+    expect(rewriteMathDelimiters("$$a $b$ c$$ and $d$")).toBe(
+      "$$a $b$ c$$ and $$d$$",
+    );
+  });
+
   it("writes \\(…\\) as text math", () => {
     expect(rewriteMathDelimiters("area \\(\\pi r^2\\) here")).toBe(
       "area $$\\pi r^2$$ here",
