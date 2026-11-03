@@ -115,12 +115,26 @@ pub(super) fn occupies_generation_slot(status: &str) -> bool {
     active_status(status) && !matches!(status, "downloading" | "download_failed")
 }
 
+/// The videos of `record` still being generated: direct media turns and
+/// generation tool calls alike.
+pub(super) fn occupied_slots(record: &super::store::SessionRecord) -> usize {
+    record
+        .messages
+        .iter()
+        .flat_map(|message| message.all_media())
+        .filter(|media| media.kind == "video" && occupies_generation_slot(&media.status))
+        .count()
+}
+
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VideoActionRequest {
     #[serde(flatten)]
     pub authority: super::types::DeleteRequest,
     pub message_id: String,
+    /// A generation tool's video; `None` for a direct media turn.
+    #[serde(default)]
+    pub tool_call_id: Option<String>,
 }
 
 #[cfg(test)]

@@ -141,6 +141,10 @@ struct Prefs {
     auto_title: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notify_on_finish: Option<bool>,
+    /// The generation defaults a new conversation starts with. Read
+    /// leniently: a value this version cannot use is ignored, not damage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_defaults: Option<Value>,
 }
 
 impl Prefs {
@@ -318,6 +322,7 @@ impl AssistantStore {
                 title_source: Some(TitleSource::Auto),
                 model_id: model_id.into(),
                 web_search,
+                media: self.remembered_media_defaults(),
                 thinking_level: None,
                 created_at: at,
                 updated_at: at,
@@ -655,6 +660,51 @@ impl AssistantStore {
         ))
     }
 
+    /// Remember a conversation's generation defaults for the next new one;
+    /// its chips stay with the conversation.
+    pub fn remember_media_defaults(
+        &self,
+        defaults: &super::media_tools::MediaDefaults,
+    ) -> Result<(), String> {
+        let mut kept = defaults.clone();
+        kept.hints.clear();
+        let value = serde_json::to_value(kept).map_err(|_| INVALID_PREFERENCES)?;
+        self.update_prefs(|prefs| prefs.media_defaults = Some(value))
+    }
+
+    /// What a new conversation generates with: the last defaults saved, else
+    /// the media models remembered from direct media turns.
+    pub fn remembered_media_defaults(&self) -> super::media_tools::MediaDefaults {
+        use super::media_tools::{ImageDefaults, MediaDefaults, SpeechDefaults, VideoDefaults};
+        let prefs = self.read_prefs().ok().flatten().unwrap_or_default();
+        let mut defaults: MediaDefaults = prefs
+            .media_defaults
+            .clone()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .filter(|d: &MediaDefaults| d.validate().is_ok())
+            .unwrap_or_default();
+        defaults.hints.clear();
+        if defaults.image.is_none() {
+            defaults.image = prefs.image_model_id.clone().map(|model| ImageDefaults {
+                model: Some(model),
+                ..Default::default()
+            });
+        }
+        if defaults.video.is_none() {
+            defaults.video = prefs.video_model_id.clone().map(|model| VideoDefaults {
+                model: Some(model),
+                ..Default::default()
+            });
+        }
+        if defaults.speech.is_none() {
+            defaults.speech = prefs.speech_model_id.clone().map(|model| SpeechDefaults {
+                model: Some(model),
+                ..Default::default()
+            });
+        }
+        defaults
+    }
+
     pub fn remembered_models(&self) -> Result<Value, String> {
         let prefs = self.read_prefs()?.unwrap_or_default();
         Ok(
@@ -941,6 +991,10 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     }
     if let Some(web) = request.web_search {
         record.session.web_search = web;
+    }
+    if let Some(media) = &request.media {
+        media.validate()?;
+        record.session.media = media.clone();
     }
     // Checked against the model by `update_checked`.
     if let Some(level) = &request.thinking_level {
@@ -2632,6 +2686,7 @@ mod tests {
                 title_source: Some(TitleSource::Auto),
                 model_id: "test/model".into(),
                 web_search: false,
+                media: Default::default(),
                 thinking_level: None,
                 created_at: 1,
                 updated_at: 1,

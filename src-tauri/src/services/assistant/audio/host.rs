@@ -280,7 +280,7 @@ impl AssistantHost {
                             Ok((ResultRecord { operation_id: done.operation_id.clone(), run_id: done.run_id.clone(), media: media.clone() }, r.usage.clone(), r.session.updated_at))
                         };
                         if let Some((bytes, info)) = output {
-                            let published = crate::services::assistant::attachments::generated_audio(&store, &sid, &mut media, &bytes, &info, |record, media| {
+                            let published = crate::services::assistant::attachments::generated_audio(&store, &sid, None, &mut media, &bytes, &info, |record, media, _| {
                                 host.admit(generation)?;
                                 host.validate_run(&done)?;
                                 if record.session.deleted_at.is_some() {return Err("assistant_session_deleted".into());}

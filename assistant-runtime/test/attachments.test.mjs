@@ -729,3 +729,47 @@ test("an abort stops a long PDF between pages", async (t) => {
   // Nothing partial was cached by the aborted read.
   assert.equal((await store.read("long.pdf")).pageCount, 100);
 });
+
+test("with generation tools an image reaches a model that cannot view it by id only", async (t) => {
+  const store = await storeWith(t, [["cat.png", onePixelPng, "image/png"]]);
+  const blocked = await prepareAttachments(store, ["cat.png"], {
+    vision: false,
+  });
+  assert.equal(blocked.blocked?.code, "assistant_vision_model_required");
+  const passed = await prepareAttachments(store, ["cat.png"], {
+    vision: false,
+    generation: true,
+  });
+  assert.equal(passed.blocked, null);
+  assert.deepEqual(passed.images, []);
+  assert.match(passed.text, /id=cat\.png/);
+  assert.match(passed.text, /cannot view/);
+  assert.equal(passed.outcomes[0].status, "partial");
+  assert.equal(passed.outcomes[0].details.referenceOnly, true);
+});
+
+test("audio and video are references for generation and never read", async (t) => {
+  const store = await storeWith(t, [
+    ["voice.mp3", Buffer.from("ID3fixture"), "audio/mpeg"],
+    ["clip.mp4", Buffer.from("....ftypisom"), "video/mp4"],
+  ]);
+  const passed = await prepareAttachments(store, ["voice.mp3", "clip.mp4"], {
+    vision: true,
+    generation: true,
+  });
+  assert.equal(passed.blocked, null);
+  assert.deepEqual(
+    passed.outcomes.map((o) => [o.status, o.details.format]),
+    [
+      ["ready", "audio"],
+      ["ready", "video"],
+    ],
+  );
+  assert.match(passed.text, /generate_video/);
+  assert.doesNotMatch(passed.text, /ftypisom|ID3fixture/);
+  const without = await prepareAttachments(store, ["voice.mp3"], {
+    vision: true,
+  });
+  assert.equal(without.blocked?.code, "assistant_attachment_unsupported");
+  await assert.rejects(store.read("clip.mp4"), /not read/);
+});

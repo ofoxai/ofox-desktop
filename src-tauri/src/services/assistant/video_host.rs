@@ -223,14 +223,7 @@ impl AssistantHost {
                 let mut count = 0;
                 for session in sessions {
                     let record = store.load_record(&session.id)?;
-                    let jobs = record
-                        .messages
-                        .iter()
-                        .filter_map(|message| message.media.as_ref())
-                        .filter(|media| {
-                            media.kind == "video" && video::occupies_generation_slot(&media.status)
-                        })
-                        .count();
+                    let jobs = video::occupied_slots(&record);
                     if session.id == sid && jobs > 0 {
                         return Err("assistant_media_video_limit".into());
                     }
@@ -381,6 +374,7 @@ impl AssistantHost {
             prompt,
             &params,
             &frames,
+            &[],
         )
         .await;
         let (receipt, usage) = match &result {
@@ -407,6 +401,7 @@ impl AssistantHost {
                 prompt,
                 &params,
                 &frames,
+                &[],
             )
             .await;
             let (receipt, usage) = match &result {
@@ -473,6 +468,7 @@ impl AssistantHost {
                 generation,
                 run.session_id.clone(),
                 run.message_id.clone(),
+                None,
             );
         }
         Ok(())
@@ -511,6 +507,7 @@ impl AssistantHost {
         let store = self.store(&run.identity.owner)?;
         let sid = run.session_id.clone();
         let mid = run.message_id.clone();
+        let artifact = run.artifact.clone();
         let job = job.map(str::to_owned);
         let status = status.to_owned();
         let error = error.map(str::to_owned);
@@ -521,7 +518,9 @@ impl AssistantHost {
                     .iter_mut()
                     .find(|m| m.id == mid)
                     .ok_or("assistant_message_not_found")?;
-                let media = message.media.as_mut().ok_or(media::INVALID)?;
+                let media = message
+                    .media_for_mut(artifact.as_deref())
+                    .ok_or(media::INVALID)?;
                 if job
                     .as_ref()
                     .is_some_and(|job| media.job_id.as_ref() != Some(job))
@@ -533,6 +532,18 @@ impl AssistantHost {
                 if cost.is_some() {
                     media.cost = cost;
                 }
+                if artifact.is_some() {
+                    // The reply's own status is its chat run's; only the
+                    // generation changes.
+                    media.error_code = error;
+                    if let Some(entries) = &entries {
+                        super::projection::recount_usage(
+                            record,
+                            entries.as_array().ok_or(super::host::PROTOCOL)?,
+                        );
+                    }
+                    return Ok(());
+                }
                 message.status = if matches!(
                     status.as_str(),
                     "failed" | "unknown" | "download_failed" | "query_expired"
@@ -543,7 +554,7 @@ impl AssistantHost {
                 }
                 .into();
                 message.error_code = error;
-                let media = media.clone();
+                let media = message.media.clone().ok_or(media::INVALID)?;
                 let rid = message.run_id.clone();
                 for op in record
                     .operations
@@ -603,16 +614,21 @@ impl AssistantHost {
             for session in sessions {
                 let record = store.load_record(&session.id)?;
                 for message in record.messages {
-                    if message.media.as_ref().is_some_and(|media| {
-                        media.kind == "video"
+                    for media in message.all_media() {
+                        if media.kind == "video"
                             && media.apex.as_deref() == Some(&apex)
                             && media.job_id.is_some()
                             && matches!(
                                 media.status.as_str(),
                                 "queued" | "in_progress" | "downloading" | "paused"
                             )
-                    }) {
-                        jobs.push((session.id.clone(), message.id));
+                        {
+                            jobs.push((
+                                session.id.clone(),
+                                message.id.clone(),
+                                media.tool_call_id.clone(),
+                            ));
+                        }
                     }
                 }
             }
@@ -623,22 +639,20 @@ impl AssistantHost {
             return;
         }
         if let Ok(jobs) = jobs {
-            for (sid, mid) in jobs {
-                self.start_video_poll(identity.clone(), generation, sid, mid);
+            for (sid, mid, artifact) in jobs {
+                self.start_video_poll(identity.clone(), generation, sid, mid, artifact);
             }
         }
     }
-    fn start_video_poll(
+    pub(super) fn start_video_poll(
         self: &Arc<Self>,
         identity: Identity,
         generation: u64,
         sid: String,
         mid: String,
+        artifact: Option<String>,
     ) {
-        let key = format!(
-            "{}:{}:{sid}:{mid}:{generation}",
-            identity.owner, identity.apex
-        );
+        let key = poll_key(&identity, &sid, &mid, artifact.as_deref(), generation);
         let mut set = self
             .video_polling
             .lock()
@@ -654,7 +668,9 @@ impl AssistantHost {
         let host = self.clone();
         self.track(format!("video-poll:{key}"), async move {
             let _registration = registration;
-            let _ = host.poll_video(identity, generation, sid, mid).await;
+            let _ = host
+                .poll_video(identity, generation, sid, mid, artifact)
+                .await;
         });
     }
     async fn poll_video(
@@ -663,6 +679,7 @@ impl AssistantHost {
         generation: u64,
         sid: String,
         mid: String,
+        artifact: Option<String>,
     ) -> Result<(), String> {
         let client = crate::proxy::http_client::assistant_media_client()?;
         let gateway = self.env.gateway_base(&identity.apex)?;
@@ -686,7 +703,9 @@ impl AssistantHost {
                 .iter()
                 .find(|m| m.id == mid)
                 .ok_or("assistant_message_not_found")?;
-            let media = message.media.as_ref().ok_or(media::INVALID)?;
+            let media = message
+                .media_for(artifact.as_deref())
+                .ok_or(media::INVALID)?;
             if !matches!(
                 media.status.as_str(),
                 "queued" | "in_progress" | "downloading" | "paused"
@@ -708,6 +727,7 @@ impl AssistantHost {
             self.remember_key(&key);
             let mut control = RunControl::new(identity.clone(), &request, key.clone());
             control.message_id = mid.clone();
+            control.artifact = artifact.clone();
             let control = Arc::new(control);
             if now().saturating_sub(media.poll_started_at.unwrap_or_else(now))
                 >= 24 * 60 * 60 * 1000
@@ -787,11 +807,13 @@ impl AssistantHost {
                                     let mid = mid.clone();
                                     let host = self.clone();
                                     let job = job.to_owned();
+                                    let artifact = artifact.clone();
                                     move || {
                                         super::attachments::generated_video(
                                             &store,
                                             &sid,
                                             &mid,
+                                            artifact.as_deref(),
                                             file.as_file_mut(),
                                             media,
                                             |record| {
@@ -800,7 +822,7 @@ impl AssistantHost {
                                                     .messages
                                                     .iter()
                                                     .find(|m| m.id == mid)
-                                                    .and_then(|m| m.media.as_ref())
+                                                    .and_then(|m| m.media_for(artifact.as_deref()))
                                                     .ok_or(media::INVALID)?;
                                                 if current.job_id.as_ref() != Some(&job)
                                                     || current.status != "downloading"
@@ -892,8 +914,8 @@ impl AssistantHost {
             .find(|m| m.id == request.message_id)
             .ok_or("assistant_message_not_found")?;
         let media = message
-            .media
-            .clone()
+            .media_for(request.tool_call_id.as_deref())
+            .cloned()
             .filter(|m| m.kind == "video")
             .ok_or(media::INVALID)?;
         if media.apex.as_deref() != Some(&identity.apex) {
@@ -907,6 +929,7 @@ impl AssistantHost {
         let send:SendRequest=serde_json::from_value(json!({"sessionId":request.authority.session_id,"runId":op.run_id,"operationId":op.id,"text":""})).map_err(|_|STATE)?;
         let mut control = RunControl::new(identity.clone(), &send, String::new());
         control.message_id = message.id.clone();
+        control.artifact = request.tool_call_id.clone();
         self.ensure_current(&identity, generation).await?;
         Ok((Arc::new(control), media, generation))
     }
@@ -984,7 +1007,9 @@ impl AssistantHost {
                         .iter_mut()
                         .find(|m| m.id == mid)
                         .ok_or("assistant_message_not_found")?;
-                    let media = message.media.as_mut().ok_or(media::INVALID)?;
+                    let media = message
+                        .media_for_mut(control.artifact.as_deref())
+                        .ok_or(media::INVALID)?;
                     if media.job_id.as_ref() != Some(&job)
                         || !matches!(
                             media.status.as_str(),
@@ -995,9 +1020,13 @@ impl AssistantHost {
                     }
                     media.status = "queued".into();
                     media.poll_started_at = Some(now());
+                    media.error_code = None;
+                    if control.artifact.is_some() {
+                        return Ok(());
+                    }
                     message.status = "queued".into();
                     message.error_code = None;
-                    let media = media.clone();
+                    let media = message.media.clone().ok_or(media::INVALID)?;
                     for op in record
                         .operations
                         .iter_mut()
@@ -1016,11 +1045,9 @@ impl AssistantHost {
         // for that registration to leave before asking for the new GET.
         let host = self.clone();
         let identity = control.identity.clone();
+        let artifact = control.artifact.clone();
         self.track(format!("video-retry:{}", id()), async move {
-            let key = format!(
-                "{}:{}:{sid}:{mid}:{generation}",
-                identity.owner, identity.apex
-            );
+            let key = poll_key(&identity, &sid, &mid, artifact.as_deref(), generation);
             loop {
                 if host.ensure_current(&identity, generation).await.is_err() {
                     return;
@@ -1031,7 +1058,7 @@ impl AssistantHost {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .contains(&key);
                 if !active {
-                    host.start_video_poll(identity, generation, sid, mid);
+                    host.start_video_poll(identity, generation, sid, mid, artifact);
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1048,13 +1075,29 @@ impl AssistantHost {
         .await?;
         self.ensure_current(&control.identity, generation).await?;
         if let Some(message) = detail.messages.iter().find(|m| m.id == control.message_id) {
-            let elapsed = message
-                .media
-                .as_ref()
+            let media = message.media_for(control.artifact.as_deref());
+            let elapsed = media
                 .and_then(|m| m.submitted_at)
                 .map(|start| now().saturating_sub(start));
-            self.emit(control,"media_progress",json!({"owner":control.identity.owner,"generation":generation,"apex":control.identity.apex,"messageId":message.id,"status":message.media.as_ref().map(|m|&m.status),"message":message,"usage":detail.usage,"elapsedMs":elapsed,"updatedAt":detail.session.updated_at}));
+            self.emit(control,"media_progress",json!({"owner":control.identity.owner,"generation":generation,"apex":control.identity.apex,"messageId":message.id,"toolCallId":control.artifact,"status":media.map(|m|&m.status),"message":message,"usage":detail.usage,"elapsedMs":elapsed,"updatedAt":detail.session.updated_at}));
         }
         Ok(())
     }
+}
+
+/// One poller per job: a direct media turn's (`artifact` `None`) or a
+/// generation tool call's.
+fn poll_key(
+    identity: &Identity,
+    sid: &str,
+    mid: &str,
+    artifact: Option<&str>,
+    generation: u64,
+) -> String {
+    format!(
+        "{}:{}:{sid}:{mid}:{}:{generation}",
+        identity.owner,
+        identity.apex,
+        artifact.unwrap_or("")
+    )
 }

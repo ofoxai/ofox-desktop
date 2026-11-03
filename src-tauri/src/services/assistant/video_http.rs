@@ -49,6 +49,7 @@ fn failure(code: &str) -> Failure {
 
 /// One attempt only. A caller may refresh a refused key; it must never
 /// replay a request after an ambiguous result.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn create(
     client: &reqwest::Client,
     gateway: &str,
@@ -57,6 +58,7 @@ pub(super) async fn create(
     prompt: &str,
     params: &VideoRequest,
     frames: &[(&str, String)],
+    references: &[(&str, String)],
 ) -> Result<Response, Failure> {
     let mut body = json!({"model":model,"prompt":prompt,"duration":params.duration,
         "resolution":params.resolution,"generate_audio":params.generate_audio});
@@ -69,6 +71,20 @@ pub(super) async fn create(
             .map(|(kind, data)| json!({
                 "type":"image_url","image_url":{"url":data},"frame_type":kind
             }))
+            .collect::<Vec<_>>());
+    }
+    // `frame_images` and `input_references` exclude each other (POST
+    // /v1/videos); the caller's plan never asks for both.
+    if !references.is_empty() {
+        if !frames.is_empty() {
+            return Err(Failure {
+                unbilled: true,
+                ..failure(media::INVALID)
+            });
+        }
+        body["input_references"] = json!(references
+            .iter()
+            .map(|(kind, data)| json!({"type":kind, *kind:{"url":data}}))
             .collect::<Vec<_>>());
     }
     let response = client
@@ -289,12 +305,54 @@ mod tests {
                 "test/video",
                 "a square",
                 &params(),
-                &[("first_frame", "data:image/png;base64,fixture".into())]
+                &[("first_frame", "data:image/png;base64,fixture".into())],
+                &[]
             )
             .await
             .unwrap(),
             response
         );
+    }
+    #[tokio::test]
+    async fn video_create_sends_references_by_kind_and_never_with_frames() {
+        let server = MockServer::start().await;
+        let job = super::super::types::id();
+        let response = json!({"id":job,"status":"pending"});
+        Mock::given(method("POST")).and(path("/v1/videos"))
+            .and(body_json(json!({"model":"test/video","prompt":"a square","duration":4,"resolution":"480p","aspect_ratio":"16:9","generate_audio":false,
+                "input_references":[{"type":"image_url","image_url":{"url":"data:image/png;base64,a"}},{"type":"audio_url","audio_url":{"url":"data:audio/mpeg;base64,b"}},{"type":"video_url","video_url":{"url":"data:video/mp4;base64,c"}}]})))
+            .respond_with(ResponseTemplate::new(202).set_body_json(&response)).expect(1).mount(&server).await;
+        let references = [
+            ("image_url", "data:image/png;base64,a".to_string()),
+            ("audio_url", "data:audio/mpeg;base64,b".to_string()),
+            ("video_url", "data:video/mp4;base64,c".to_string()),
+        ];
+        let created = create(
+            &client(),
+            &server.uri(),
+            "synthetic-key",
+            "test/video",
+            "a square",
+            &params(),
+            &[],
+            &references,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created, response);
+        let both = create(
+            &client(),
+            &server.uri(),
+            "synthetic-key",
+            "test/video",
+            "a square",
+            &params(),
+            &[("first_frame", "data:image/png;base64,a".into())],
+            &references,
+        )
+        .await
+        .unwrap_err();
+        assert!(both.unbilled && both.code == media::INVALID);
     }
     #[tokio::test]
     async fn video_submit_never_replays_a_refusal_or_ambiguous_response() {
@@ -321,6 +379,7 @@ mod tests {
                 "test/video",
                 "a square",
                 &params(),
+                &[],
                 &[],
             )
             .await

@@ -10,6 +10,12 @@ use serde_json::Value;
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct MediaRecord {
+    /// The model's tool call that asked for it; `None` for a direct media turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// The prompt (or, for speech, the text) that was sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_attempts: Vec<super::provenance::Receipt>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -36,6 +42,10 @@ pub struct MediaRecord {
     pub outputs: Vec<String>,
     #[serde(default)]
     pub cost: Option<String>,
+    /// Why a generation tool's job failed; a direct media turn keeps its
+    /// code on the message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 /// The proxy a run's model requests go through. `url` may carry the proxy's
@@ -100,6 +110,9 @@ pub struct Session {
     /// Web search (S3) stays off until the user turns it on.
     #[serde(default)]
     pub web_search: bool,
+    /// What the generation tools use unless the user says otherwise.
+    #[serde(default)]
+    pub media: super::media_tools::MediaDefaults,
     /// The thinking level chosen for the model; `None` is the default, which
     /// sends no thinking parameter. A level the model no longer offers is
     /// not sent.
@@ -200,6 +213,9 @@ impl Attachment {
 pub struct Message {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<MediaRecord>,
+    /// What the reply's generation tools made, one record per tool call.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub generations: Vec<MediaRecord>,
     pub id: String,
     pub role: String,
     pub content: String,
@@ -257,6 +273,51 @@ pub struct Message {
     /// hidden on every version.
     #[serde(default)]
     pub anchor_entry_id: Option<String>,
+}
+
+impl Message {
+    /// The generation a tool call of this reply made.
+    pub fn generation_mut(&mut self, call: &str) -> Option<&mut MediaRecord> {
+        self.generations
+            .iter_mut()
+            .find(|g| g.tool_call_id.as_deref() == Some(call))
+    }
+
+    /// A direct media turn's record (`artifact` `None`), or the generation of
+    /// the tool call `artifact`.
+    pub fn media_for(&self, artifact: Option<&str>) -> Option<&MediaRecord> {
+        match artifact {
+            None => self.media.as_ref(),
+            Some(call) => self
+                .generations
+                .iter()
+                .find(|g| g.tool_call_id.as_deref() == Some(call)),
+        }
+    }
+
+    pub fn media_for_mut(&mut self, artifact: Option<&str>) -> Option<&mut MediaRecord> {
+        match artifact {
+            None => self.media.as_mut(),
+            Some(call) => self.generation_mut(call),
+        }
+    }
+
+    /// Every media record of the message: its own and its generations'.
+    pub fn all_media(&self) -> impl Iterator<Item = &MediaRecord> {
+        self.media.iter().chain(self.generations.iter())
+    }
+
+    /// Save `media` as its tool call's generation, replacing an older copy.
+    pub fn put_generation(&mut self, media: MediaRecord) {
+        match media
+            .tool_call_id
+            .clone()
+            .and_then(|call| self.generation_mut(&call))
+        {
+            Some(saved) => *saved = media,
+            None => self.generations.push(media),
+        }
+    }
 }
 
 /// A field that is there, `null` included (`Some(None)`); one left out is
@@ -387,6 +448,7 @@ pub struct UpdateRequest {
     pub pinned: Option<bool>,
     pub draft: Option<String>,
     pub draft_attachment_ids: Option<Vec<String>>,
+    pub media: Option<super::media_tools::MediaDefaults>,
 }
 
 /// Destructive requests must name the authority shown by their confirmation.

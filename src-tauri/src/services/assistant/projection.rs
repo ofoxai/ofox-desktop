@@ -440,6 +440,7 @@ pub(super) fn merge_native(
         } else {
             record.messages.push(Message {
                 media: None,
+                generations: vec![],
                 id: id(),
                 role: role.into(),
                 content,
@@ -605,10 +606,59 @@ fn count_reply_usage(record: &mut SessionRecord, entries: &[Value]) {
         let Some(index) = reply_index(&record.messages, run, finals.get(run).copied()) else {
             continue;
         };
-        let usage = record.messages[index]
-            .usage
-            .get_or_insert_with(|| json!({}));
+        let message = &mut record.messages[index];
+        let usage = message.usage.get_or_insert_with(|| json!({}));
         project_usage(usage, of_run.iter().copied(), &prices);
+        add_generation_usage(usage, &message.generations);
+    }
+}
+
+/// A reply's generation lines after its chat usage: each tool call's
+/// image, video or speech with its own cost, `chatCostUsd` for the model's
+/// part and `estimatedCostUsd` for both. Idempotent: the chat part is kept
+/// from the last count of native history.
+fn add_generation_usage(usage: &mut Value, generations: &[MediaRecord]) {
+    ensure_object(usage);
+    let chat = usage
+        .get("chatCostUsd")
+        .cloned()
+        .unwrap_or_else(|| usage["estimatedCostUsd"].clone());
+    if let Some(lines) = usage.get_mut("requests").and_then(Value::as_array_mut) {
+        lines.retain(|line| line.get("toolCallId").is_none());
+    }
+    let counted: Vec<&MediaRecord> = generations
+        .iter()
+        .filter(|m| m.status != "submitting" && m.status != "not_sent")
+        .collect();
+    if counted.is_empty() {
+        if let Some(object) = usage.as_object_mut() {
+            if object.remove("chatCostUsd").is_some() {
+                object.insert("estimatedCostUsd".into(), chat);
+                object.remove("mediaCostUsd");
+            }
+        }
+        return;
+    }
+    let lines = counted.iter().map(|m| {
+        json!({"kind":m.kind,"modelId":m.model,"apex":m.apex,"toolCallId":m.tool_call_id,
+            "status":m.status,"priceSnapshot":m.price_snapshot,"estimatedCostUsd":m.cost,
+            "billedCostUsd":null})
+    });
+    match usage.get_mut("requests").and_then(Value::as_array_mut) {
+        Some(existing) => existing.extend(lines),
+        None => usage["requests"] = json!(lines.collect::<Vec<_>>()),
+    }
+    let media = counted.iter().try_fold(Decimal::ZERO, |sum, m| {
+        sum.checked_add(m.cost.as_deref()?.parse().ok()?)
+    });
+    let total = media
+        .zip(chat.as_str().and_then(|s| s.parse::<Decimal>().ok()))
+        .and_then(|(a, b)| a.checked_add(b));
+    usage["chatCostUsd"] = chat;
+    usage["mediaCostUsd"] = json!(media.map(|n| n.normalize().to_string()));
+    usage["estimatedCostUsd"] = json!(total.map(|n| n.normalize().to_string()));
+    if media.is_none() {
+        usage["usageCoverage"] = json!("incomplete");
     }
 }
 
@@ -617,10 +667,22 @@ fn count_reply_usage(record: &mut SessionRecord, entries: &[Value]) {
 pub(super) fn recount_usage(record: &mut SessionRecord, entries: &[Value]) {
     let prices = search_prices(&record.operations);
     project_usage(&mut record.usage, entries, &prices);
+    for message in &mut record.messages {
+        if !message.generations.is_empty()
+            || message
+                .usage
+                .as_ref()
+                .is_some_and(|u| u.get("chatCostUsd").is_some())
+        {
+            let usage = message.usage.get_or_insert_with(|| json!({}));
+            add_generation_usage(usage, &message.generations);
+        }
+    }
     let media: Vec<_> = record
         .operations
         .iter()
         .filter_map(|op| op.media.as_ref())
+        .chain(record.messages.iter().flat_map(|m| m.generations.iter()))
         .filter(|media| media.status != "submitting" && media.status != "not_sent")
         .collect();
     if media.is_empty() {
@@ -793,6 +855,10 @@ pub(super) fn project_usage<'a>(
     search_prices: &HashMap<&str, &SearchPrice>,
 ) {
     ensure_object(totals);
+    // Recounted from native history: any generation part is added again.
+    if let Some(object) = totals.as_object_mut() {
+        object.remove("chatCostUsd");
+    }
     let mut requests: Vec<_> = entries
         .clone()
         .into_iter()
@@ -958,6 +1024,47 @@ mod tests {
             &request,
             "test-opaque-credential".into(),
         )
+    }
+
+    #[test]
+    fn a_replys_generations_are_counted_apart_from_its_chat_once() {
+        let generation = |call: &str, status: &str, cost: Option<&str>| -> MediaRecord {
+            serde_json::from_value(
+                json!({"toolCallId":call,"kind":"image","model":"test/image",
+                "params":{},"status":status,"cost":cost}),
+            )
+            .unwrap()
+        };
+        let mut usage = json!({"estimatedCostUsd":"0.001","requests":[{"kind":"chat"}]});
+        let made = vec![generation("a", "completed", Some("0.02"))];
+        add_generation_usage(&mut usage, &made);
+        add_generation_usage(&mut usage, &made);
+        assert_eq!(usage["chatCostUsd"], "0.001");
+        assert_eq!(usage["mediaCostUsd"], "0.02");
+        assert_eq!(usage["estimatedCostUsd"], "0.021");
+        assert_eq!(
+            usage["requests"].as_array().unwrap().len(),
+            2,
+            "one line each, once"
+        );
+        let pending = vec![
+            generation("a", "completed", Some("0.02")),
+            generation("b", "queued", None),
+        ];
+        add_generation_usage(&mut usage, &pending);
+        assert!(
+            usage["estimatedCostUsd"].is_null(),
+            "a video still running has no cost yet"
+        );
+        assert_eq!(usage["usageCoverage"], "incomplete");
+        let submitting = vec![generation("c", "submitting", None)];
+        let mut fresh = json!({"estimatedCostUsd":"0.001"});
+        add_generation_usage(&mut fresh, &submitting);
+        assert_eq!(
+            fresh,
+            json!({"estimatedCostUsd":"0.001"}),
+            "not counted before it is sent"
+        );
     }
 
     #[test]

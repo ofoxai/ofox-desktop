@@ -54,6 +54,18 @@ const OFFICE_MIMES = new Map([
   ],
 ]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+// Audio and video are never read: a run with generation tools names them so
+// the model can pass them to generate_video as references.
+const MEDIA_EXTENSIONS = new Map([
+  [".mp3", "audio"],
+  [".wav", "audio"],
+  [".mp4", "video"],
+]);
+const MEDIA_MIMES = new Map([
+  ["audio/mpeg", "audio"],
+  ["audio/wav", "audio"],
+  ["video/mp4", "video"],
+]);
 const OFFICE_FAILURES = {
   invalid_office:
     "The Office document is damaged or is not a valid docx, xlsx or pptx file",
@@ -306,7 +318,7 @@ export class AttachmentStore {
       mimeType === "application/json"
     )
       return "text";
-    return null;
+    return MEDIA_EXTENSIONS.get(extension) ?? MEDIA_MIMES.get(mimeType) ?? null;
   }
 
   supportedFormat(id) {
@@ -424,6 +436,13 @@ export class AttachmentStore {
       return cached;
     }
     const format = this.supportedFormat(id);
+    if (format === "audio" || format === "video")
+      throw new AttachmentError(
+        "unsupported",
+        "assistant_attachment_unsupported",
+        "Audio and video files are not read; their id can be given to generate_video",
+        { format },
+      );
     let result;
     if (format === "image") {
       const { mimeType } = await this.#imageBytes(id);
@@ -743,14 +762,38 @@ export class AttachmentStore {
 async function prepareOne(
   store,
   id,
-  { vision, room, imageLimit, scrub, signal },
+  { vision, generation, room, imageLimit, scrub, signal },
 ) {
   const attachment = store.attachment(id);
   const header = `\n\n[User attachment: ${JSON.stringify(scrub(attachment.name))}; id=${id}`;
   const format = store.supportedFormat(id);
+  if (format === "audio" || format === "video") {
+    if (!generation)
+      throw new AttachmentError(
+        "unsupported",
+        "assistant_attachment_unsupported",
+        "Audio and video files are only used to generate videos; choose a model that takes tools",
+        { format },
+      );
+    return {
+      prompt: `${header}; ${format} file, not read here: give its id to generate_video to use it as a reference]`,
+      attached: [],
+      status: "ready",
+      details: { format, referenceOnly: true },
+    };
+  }
   if (format === "image") {
     const image = await store.image(id, undefined, { signal });
     const details = { format, mimeType: image.mimeType };
+    // A model that cannot view images can still hand one to a generation
+    // tool; it is told it has not seen it.
+    if (!vision && generation)
+      return {
+        prompt: `${header}; an image you cannot view: rely on the user's words for what it shows, and give its id to generate_image or generate_video to use it]`,
+        attached: [],
+        status: "partial",
+        details: { ...details, referenceOnly: true },
+      };
     if (!vision)
       throw visionRequired(
         "This model cannot read images; choose a vision model",
@@ -845,6 +888,7 @@ export async function prepareAttachments(
   ids,
   {
     vision = false,
+    generation = false,
     imageLimit = MAX_MESSAGE_IMAGES,
     scrub = (value) => value,
     signal,
@@ -860,6 +904,7 @@ export async function prepareAttachments(
     try {
       const prepared = await prepareOne(store, id, {
         vision,
+        generation,
         room: imageLimit - images.length,
         imageLimit,
         scrub,

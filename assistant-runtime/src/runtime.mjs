@@ -2,6 +2,7 @@ import { mkdir, stat, lstat, open, rm } from "node:fs/promises";
 import path from "node:path";
 import { LocalTask } from "./local-task.mjs";
 import { localTools } from "./local-tools.mjs";
+import { mediaTools } from "./media-tools.mjs";
 import {
   AttachmentStore,
   MAX_MESSAGE_IMAGES,
@@ -1139,6 +1140,7 @@ export class AssistantRuntime {
         }),
       );
     if (context.params.localConfig) tools.push(...localTools(this, context));
+    if (context.params.media) tools.push(...mediaTools(this, context));
     if (context.params.webSearch === true) {
       context.search = new SearchServer({
         script: this.searchServer,
@@ -1848,6 +1850,9 @@ export class AssistantRuntime {
             turnSelection,
             {
               vision: model.input.includes("image"),
+              // A model that takes tools can pass files on to generation.
+              generation:
+                Boolean(context.params.media) && params.model?.tools !== false,
               imageLimit: MAX_MESSAGE_IMAGES,
               scrub: (value) => scrubSecrets(value, secrets),
               signal: context.abort.signal,

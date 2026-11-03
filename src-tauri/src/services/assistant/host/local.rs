@@ -664,6 +664,63 @@ impl AssistantHost {
         Ok((paths, scope))
     }
 
+    /// Ask before a paid generation, with what it will cost; nothing is
+    /// asked in full auto or after "allow in this conversation". `Ok(false)`:
+    /// the user declined.
+    pub(in crate::services::assistant) async fn confirm_generation(
+        &self,
+        run: &Arc<RunControl>,
+        call_id: &str,
+        name: &str,
+        details: Value,
+    ) -> Result<bool, String> {
+        self.validate_run(run)?;
+        let key = session_key(&run.identity.owner, &run.session_id);
+        let grant = format!("generate:{name}");
+        {
+            let mut states = self.local_states.lock().map_err(|_| STATE)?;
+            let state = states.entry(key.clone()).or_default();
+            if state.mode == PermissionMode::FullAuto || state.grants.contains(&grant) {
+                return Ok(true);
+            }
+        }
+        let binding = self.local_binding(run);
+        let (id, pending) = self.local_approvals.request(binding.clone())?;
+        let mut display = json!({"approvalId":id,"toolCallId":call_id,"name":name,"category":"generation","details":details,"allowSession":true,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
+        scrub_secrets_in(&mut display, &self.known_keys());
+        self.local_approvals.describe(&id, display.clone());
+        self.emit(run, "approval", display);
+        let timeout = run
+            .deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(Duration::from_secs(120));
+        let choice = self
+            .local_approvals
+            .wait(&id, pending, run.cancel.subscribe(), timeout)
+            .await;
+        self.emit(run, "approval_end", json!({"approvalId":id}));
+        self.validate_run(run)?;
+        if self.identity().await? != run.identity || self.generation() != binding.generation {
+            return Err(IDENTITY_CHANGED.into());
+        }
+        match choice {
+            Ok(Choice::Deny) | Err(_) if !run.cancelled() => Ok(false),
+            Err(error) => Err(error),
+            Ok(Choice::Deny) => Ok(false),
+            Ok(Choice::Session) => {
+                self.local_states
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .entry(key)
+                    .or_default()
+                    .grants
+                    .insert(grant);
+                Ok(true)
+            }
+            Ok(Choice::Once) => Ok(true),
+        }
+    }
+
     async fn authorize_local(
         &self,
         run: &Arc<RunControl>,
