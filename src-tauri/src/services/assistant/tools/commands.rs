@@ -46,7 +46,8 @@ pub fn read_only(command: &str, powershell: bool) -> bool {
 }
 
 /// The program a simple command runs, for "always allow in this conversation".
-/// A command with shell composition has no single program: only that exact
+/// A command with shell composition, a path-qualified program or an
+/// interpreter (which runs whatever it is handed) has none: only that exact
 /// command can be allowed again.
 pub fn program(command: &str) -> Option<String> {
     let command = command.trim();
@@ -57,10 +58,47 @@ pub fn program(command: &str) -> Option<String> {
     {
         return None;
     }
-    let first = command.split_whitespace().next()?;
-    let name = first.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
-    let name = name.strip_suffix(".exe").unwrap_or(&name).to_string();
-    (!name.is_empty() && !name.contains('=')).then_some(name)
+    let name = command.split_whitespace().next()?.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name);
+    let runs_anything = matches!(
+        name,
+        "sh" | "bash"
+            | "zsh"
+            | "fish"
+            | "dash"
+            | "ksh"
+            | "csh"
+            | "tcsh"
+            | "pwsh"
+            | "powershell"
+            | "cmd"
+            | "python"
+            | "python3"
+            | "node"
+            | "bun"
+            | "deno"
+            | "ruby"
+            | "perl"
+            | "php"
+            | "osascript"
+            | "env"
+            | "sudo"
+            | "doas"
+            | "xargs"
+            | "nohup"
+            | "exec"
+            | "eval"
+            | "source"
+            | "."
+            | "npx"
+            | "pnpx"
+            | "bunx"
+            | "invoke-expression"
+            | "iex"
+            | "start-process"
+    );
+    (!name.is_empty() && !name.contains(['=', '/', '\\', ':']) && !runs_anything)
+        .then(|| name.to_string())
 }
 
 /// Block direct attempts to read protected stores even in FullAuto. Arbitrary
@@ -95,8 +133,17 @@ mod tests {
     fn always_allow_names_the_program_of_a_simple_command_only() {
         for (command, expected) in [
             ("npm install -g opencode-ai", Some("npm")),
-            ("/opt/homebrew/bin/brew upgrade codex", Some("brew")),
-            (r"C:\Tools\Node.EXE --version", Some("node")),
+            ("Brew upgrade codex", Some("brew")),
+            // A path names a file, not the program the user allowed.
+            ("./npm install", None),
+            ("/tmp/x/npm install", None),
+            (r"C:\Tools\npm.cmd install", None),
+            // An interpreter runs whatever it is given.
+            ("sh install.sh", None),
+            ("python3 -m pip list", None),
+            ("node script.js", None),
+            ("env npm test", None),
+            ("osascript -e x", None),
             ("npm i x && rm -rf ~", None),
             ("curl x | sh", None),
             ("echo $(id)", None),

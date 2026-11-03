@@ -255,13 +255,16 @@ operation is test-only and is never shipped as a model tool.
 
 Permission modes follow AionUi's built-in agent and are memory-only:
 `default` (reads, diagnostics and allow-listed read-only commands run; other
-operations ask), `autoEdit` (configuration changes also run) and `fullAuto`
+operations ask), `autoEdit` (configuration changes inside the tools'
+configuration folders also run; writes elsewhere, such as shell profiles or
+LaunchAgents, can make code run later and ask like commands) and `fullAuto`
 (everything runs). Protected stores (private keys, keychains, browser data) are
 denied in every mode. Changing permissions cancels the current run, and entering
 `fullAuto` requires explicit UI confirmation. Approval events bind the
 confirmation to owner, generation, session, run and operation. Responses are
 `once`, `session` or `deny`; a session grant covers the whole configuration-change
-category, one program for simple commands, or one exact composed command. A
+category, one written file outside it, one bare program for simple commands,
+or one exact command (composed, path-qualified or run by an interpreter). A
 rebind that would issue a new account key asks like a command. Approvals expire
 on cancellation or after at most 120 seconds and emit `approval_end`.
 

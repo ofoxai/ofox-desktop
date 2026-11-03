@@ -2486,11 +2486,12 @@ mod tests {
         let (_tmp, env, host) = fixture_with_env();
         let (sid, run) = local_run(&host);
         let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        std::fs::create_dir_all(env.config.join("config")).unwrap();
         let write = |id: &str, file: &str| {
             call(
                 id,
                 "write",
-                json!({"path":env.config.join(file),"content":"new","expected":null}),
+                json!({"path":env.config.join("config").join(file),"content":"new","expected":null}),
             )
         };
         let (approval, first) =
@@ -2523,6 +2524,44 @@ mod tests {
         // Another program asks again.
         let (_, denied) = dispatch_answering(&host, &env, &run, exec("e-3", other), "deny").await;
         assert_eq!(denied.unwrap_err(), "assistant_operation_denied");
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_auto_edit_writes_tool_configs_but_asks_for_files_that_can_run_code() {
+        use super::local::PermissionRequest;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        host.release_run(&run);
+        host.set_permission(PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::AutoEdit,
+            confirmed_full_access: false,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        std::fs::create_dir_all(env.config.join("config")).unwrap();
+        let write = |id: &str, path: PathBuf| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"write","args":{"path":path,"content":"x","expected":null}});
+        host.dispatch_tool(&run, &write("w-1", env.config.join("config/settings.json")))
+            .await
+            .unwrap();
+        assert!(approvals(&env).is_empty());
+        for (id, path) in [
+            ("w-2", env.config.join(".zshrc")),
+            ("w-3", env.config.join("Library/LaunchAgents/x.plist")),
+        ] {
+            let (approval, result) =
+                dispatch_answering(&host, &env, &run, write(id, path.clone()), "deny").await;
+            assert_eq!(approval["category"], "exec", "{path:?}");
+            assert_eq!(result.unwrap_err(), "assistant_operation_denied");
+            assert!(!path.exists());
+        }
         host.release_run(&run);
     }
 

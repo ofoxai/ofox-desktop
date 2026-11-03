@@ -5509,7 +5509,7 @@
       },
       "modeNotes": {
         "default": "Asks before changes, commands and installs",
-        "autoEdit": "Asks only before commands and installs",
+        "autoEdit": "Changes tool settings without asking; asks before commands, installs and other files",
         "fullAuto": "Never asks, in this conversation only"
       },
       "steps": {

@@ -355,12 +355,23 @@ impl AssistantHost {
             }
             overwrites = rebind_overwrites(&self.env.local_binding_status(selected).await?);
         }
+        // A generic write outside the tools' configuration folders (a shell
+        // profile, a LaunchAgent, any other file) can make code run later: it
+        // asks like a command unless the conversation is in full auto.
+        let generic_write = matches!(tool.name, "write" | "edit");
+        if generic_write && !checked.as_ref().is_some_and(|p| scope.in_root(&p.path)) {
+            tool.category = policy::Category::Exec;
+        }
         let forbidden =
             access == Access::Forbidden || (shell && commands::forbidden(command)) || bundled;
         let grant = match tool.category {
             policy::Category::WriteConfig => "write_config".to_string(),
             policy::Category::Exec if shell => commands::program(command)
                 .map(|program| format!("exec:{program}"))
+                .unwrap_or_else(|| signature.to_string()),
+            policy::Category::Exec if generic_write => checked
+                .as_ref()
+                .map(|p| format!("write:{}", p.path.display()))
                 .unwrap_or_else(|| signature.to_string()),
             policy::Category::Exec => format!("exec:{}", tool.name),
             policy::Category::Read => signature.to_string(),

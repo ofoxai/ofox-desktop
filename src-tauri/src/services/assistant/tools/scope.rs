@@ -29,6 +29,11 @@ impl Scope {
         })
     }
 
+    /// Inside one of the folders, not only one of the exact files (shell profiles).
+    pub fn in_root(&self, path: &Path) -> bool {
+        self.roots.iter().any(|root| path.starts_with(root))
+    }
+
     pub fn add_folder(&mut self, folder: &Path) -> Result<PathBuf, String> {
         let checked = self.check(folder)?;
         if checked.access == Access::Forbidden || !checked.path.is_dir() {
