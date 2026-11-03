@@ -128,31 +128,34 @@ test("a provider failure after a change keeps its own error and is not retried b
   assert.equal(f.requests.length, 3);
   assert.equal(result.localTaskState.changed, true);
 });
-test("waiting for the problem folder ends normally and the next run still has to verify", async (t) => {
-  const first = await fixture(
+test("a repair with no named folder completes after verification in the home folder", async (t) => {
+  const f = await fixture(
     t,
     [
       () => call("write", { path: "/configuration", content: "safe" }),
-      () => call("request_folder", {}),
-      reply,
+      () => call("verify_in_folder", { tool: "opencode" }),
       reply,
     ],
-    (name) =>
-      name === "request_folder" ? { waitingForUser: true } : { changed: true },
+    (name, args) =>
+      name === "write"
+        ? { changed: true }
+        : { folder: args.folder, verified: true },
   );
-  const waiting = await first.run();
-  assert.equal(waiting.status, "completed");
-  assert.equal(first.requests.length, 3);
-  assert.equal(waiting.localTaskState.changed, true);
-  const next = await fixture(t, [reply, reply, reply, reply], () => ({}), {
-    localConfig: {
-      ...first.params.localConfig,
-      taskState: waiting.localTaskState,
-    },
-  });
-  const result = await next.run();
+  const result = await f.run();
+  assert.equal(result.status, "completed");
+  assert.equal(f.requests.length, 3);
+  assert.equal(
+    f.calls.find((c) => c.name === "verify_in_folder").args.folder,
+    f.params.localConfig.cwd,
+  );
+  assert.equal(result.localTaskState, null);
+});
+test("pending verification from an earlier run still has to be done", async (t) => {
+  const f = await fixture(t, [reply, reply, reply, reply], () => ({}), {});
+  f.params.localConfig.taskState = { changed: true, targets: [] };
+  const result = await f.run();
   assert.equal(result.errorCode, "assistant_verification_required");
-  assert.equal(next.requests.length, 3);
+  assert.equal(f.requests.length, 3);
 });
 test("real Pi run stops the fifth repeated operation and emits warning before it", async (t) => {
   const f = await fixture(

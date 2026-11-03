@@ -18,7 +18,6 @@ import {
   Download,
   Ellipsis,
   Globe,
-  Wrench,
   Loader2,
   ListPlus,
   MessageSquare,
@@ -47,8 +46,12 @@ import {
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
 import { useAssistant, type VideoConfirmation } from "./useAssistant";
-import { AssistantLocalPanel } from "./AssistantLocalPanel";
-import { AssistantFolder } from "./AssistantFolder";
+import {
+  LocalApprovalCard,
+  LocalChangesLine,
+  LocalConfigControl,
+  LocalTaskProgress,
+} from "./AssistantLocalConfig";
 import { ImageParams } from "./ImageParams";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
@@ -535,7 +538,13 @@ function AssistantWorkspace() {
     if (!view) return;
     if (follow.current) view.scrollTop = view.scrollHeight;
     else setUnseenBelow(true);
-  }, [assistant.stream, messages.length]);
+  }, [
+    assistant.stream,
+    messages.length,
+    assistant.localApprovals.length,
+    assistant.localPlan,
+    assistant.localIntent,
+  ]);
   useLayoutEffect(() => {
     const input = composer.current;
     if (!input) return;
@@ -853,12 +862,8 @@ function AssistantWorkspace() {
   // and only while this page is the one on screen.
   const { dragging } = useFileDrop({
     ready: interactionActive && writable,
-    onDrop: (token, folder) =>
-      void (
-        folder && assistant.localConfig
-          ? assistant.addLocalFolder(undefined, token)
-          : assistant.dropAttachments(token)
-      ).then(focusComposerIfLost),
+    onDrop: (token) =>
+      void assistant.dropAttachments(token).then(focusComposerIfLost),
     onError: assistant.showError,
   });
   const moveToTrash = () => {
@@ -1209,28 +1214,6 @@ function AssistantWorkspace() {
             {t(`assistant.local.${assistant.localModelNotice}`)}
           </p>
         )}
-        {assistant.localConfig && !session?.deletedAt && (
-          <>
-            <AssistantLocalPanel
-              key={`${assistant.selectedId ?? "new"}:${assistant.bootstrap?.authorityGeneration ?? 0}`}
-              mode={assistant.localMode}
-              locked={settingsLocked || !!assistant.run}
-              approvals={assistant.localApprovals}
-              changes={assistant.localChanges}
-              plan={assistant.localPlan}
-              intent={assistant.localIntent}
-              warning={assistant.localWarning}
-              cost={assistant.localCost}
-              onPermission={assistant.setLocalPermission}
-              onApproval={assistant.respondLocalApproval}
-              onRestore={assistant.restoreLocalChanges}
-            />
-            <AssistantFolder
-              key={session?.id ?? "new"}
-              onChoose={assistant.addLocalFolder}
-            />
-          </>
-        )}
         {/* While a delete dialog is open it shows the failure itself: a
             banner behind it would be announced a second time. */}
         {assistant.error !== null && !deleteDialogOpen && !emptyTrash.open && (
@@ -1465,6 +1448,13 @@ function AssistantWorkspace() {
                               : undefined
                           }
                           message={assistant.stream}
+                          taskProgress={
+                            <LocalTaskProgress
+                              intent={assistant.localIntent}
+                              warning={assistant.localWarning}
+                              plan={assistant.localPlan}
+                            />
+                          }
                           mediaBlock={
                             assistant.stream.media?.kind === "video" ? (
                               videoBlock(assistant.stream, true)
@@ -1492,6 +1482,23 @@ function AssistantWorkspace() {
                           disabled
                           onEdit={noEdit}
                           onRegenerate={noRegenerate}
+                        />
+                      )}
+                    {assistant.localApprovals.map((approval) => (
+                      <LocalApprovalCard
+                        key={approval.approvalId}
+                        approval={approval}
+                        onRespond={assistant.respondLocalApproval}
+                      />
+                    ))}
+                    {assistant.localConfig &&
+                      !assistant.stream &&
+                      messages.length > 0 && (
+                        <LocalChangesLine
+                          key={session?.id ?? "new"}
+                          changes={assistant.localChanges}
+                          disabled={settingsLocked || !!assistant.run}
+                          onRestore={assistant.restoreLocalChanges}
                         />
                       )}
                     {assistant.compacting && (
@@ -1769,24 +1776,14 @@ function AssistantWorkspace() {
                           webSearchToggle
                         ))}
                       {!imageMode && !videoMode && (
-                        <Button
-                          variant="ghost"
-                          aria-pressed={assistant.localConfig}
+                        <LocalConfigControl
+                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
+                          on={assistant.localConfig}
+                          mode={assistant.localMode}
                           disabled={settingsLocked || !!assistant.run}
-                          onClick={() =>
-                            void assistant.setLocalConfig(
-                              !assistant.localConfig,
-                            )
-                          }
-                          className={cn(
-                            "shrink-0 px-2",
-                            assistant.localConfig &&
-                              "bg-brand-soft text-brand-ink",
-                          )}
-                        >
-                          <Wrench aria-hidden className="h-3.5 w-3.5" />
-                          {t("assistant.local.title")}
-                        </Button>
+                          onToggle={(on) => void assistant.setLocalConfig(on)}
+                          onMode={assistant.setLocalPermission}
+                        />
                       )}
                       {!imageMode && !videoMode && showSearchNote && (
                         <span id={searchNoteId} className="sr-only">

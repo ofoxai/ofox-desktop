@@ -214,9 +214,9 @@ export function localTools(runtime, context) {
     tools.push(
       direct(
         name,
-        "Check the tool in the user's problem folder; verification must succeed here after a repair.",
-        { tool: Type.String(), folder: Type.String() },
-        (args) => ({ ...args, folder: path.resolve(cwd, args.folder) }),
+        "Check the tool as it starts in a folder: the user's home folder unless the user named the folder where it fails. After a repair, verification must succeed there.",
+        { tool: Type.String(), folder: Type.Optional(Type.String()) },
+        (args) => ({ ...args, folder: path.resolve(cwd, args.folder ?? ".") }),
       ),
     );
   for (const name of [
@@ -238,13 +238,6 @@ export function localTools(runtime, context) {
       "set_tool_model",
       "Set a supported model from the current region's catalog, preserving credentials and unrelated settings.",
       { tool: Type.String(), model: Type.String() },
-    ),
-  );
-  tools.push(
-    direct(
-      "request_folder",
-      "Ask the user to select or provide the folder where the tool fails. Never invent a folder.",
-      {},
     ),
   );
   tools.push(

@@ -19,9 +19,9 @@ use sha2::{Digest, Sha256};
 #[derive(Default)]
 pub(super) struct LocalState {
     mode: PermissionMode,
-    // Exact tool + arguments, never a wildcard for arbitrary commands/paths.
+    // "Always allow in this conversation": the whole configuration-change
+    // category, one program for commands, or one exact composed command.
     grants: HashSet<String>,
-    folders: Vec<PathBuf>,
     // A repair still waiting for verification, carried into the next run of
     // the conversation. Memory only: a restart does not resume tasks.
     task: Option<Value>,
@@ -47,6 +47,23 @@ fn task_state(value: &Value) -> Option<Value> {
         })
         .unwrap_or_default();
     Some(json!({"changed":true,"targets":targets}))
+}
+
+/// What an approval card shows, and what "always allow" would remember.
+struct Ask<'a> {
+    args: &'a Value,
+    grant: &'a str,
+    overwrites: Option<Vec<String>>,
+}
+
+/// The user-modified fields a rebind resets, shown on its approval card.
+fn rebind_overwrites(status: &Value) -> Option<Vec<String>> {
+    let fields: Vec<String> = status["modifiedFields"]
+        .as_array()?
+        .iter()
+        .filter_map(|f| f.as_str().map(str::to_owned))
+        .collect();
+    (status["status"] == "modified" && !fields.is_empty()).then_some(fields)
 }
 
 pub(super) static MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -184,7 +201,7 @@ impl AssistantHost {
         if identity.owner != request.expected_owner {
             return Err(IDENTITY_CHANGED.into());
         }
-        if request.mode == PermissionMode::FullAccess && !request.confirmed_full_access {
+        if request.mode == PermissionMode::FullAuto && !request.confirmed_full_access {
             return Err("assistant_full_access_confirmation_required".into());
         }
         let record = blocking({
@@ -235,10 +252,7 @@ impl AssistantHost {
         if call.tool_call_id.is_empty() || call.tool_call_id.len() > 200 {
             return Err("assistant_invalid_tool".into());
         }
-        let mut tool = registry::get(&call.name)?;
-        if matches!(tool.name, "bash" | "powershell") {
-            tool.irreversible = commands::irreversible(call.args["command"].as_str().unwrap_or(""));
-        }
+        let tool = registry::get(&call.name)?;
         registry::validate_args(tool, &call.args)?;
         let record = blocking({
             let store = self.store(&run.identity.owner)?;
@@ -301,23 +315,18 @@ impl AssistantHost {
             self.authorize_local(
                 run,
                 tool,
-                args,
-                signature,
                 call_id,
-                tool.operation(true, false, false),
+                tool.operation(false, false),
+                Ask {
+                    args,
+                    grant: signature,
+                    overwrites: None,
+                },
             )
             .await?;
             return Ok(json!({"approved":true}));
         }
-        if tool.name == "request_folder" {
-            self.emit(run, "folder_request", json!({"toolCallId":call_id}));
-            return Ok(
-                json!({"waitingForUser":true,"instruction":"Ask the user to choose the problem folder using the folder card, then continue."}),
-            );
-        }
-        let (paths, scope) = self
-            .local_scope(&run.identity.owner, &run.session_id)
-            .await?;
+        let (paths, scope) = self.local_scope().await?;
         let requested = args["path"]
             .as_str()
             .or_else(|| args["folder"].as_str())
@@ -336,30 +345,36 @@ impl AssistantHost {
                     .is_some_and(|dir| p.path.starts_with(dir))
             });
         let mut tool = tool;
+        let mut overwrites = None;
         if tool.name == "rebind_tool" {
             let selected = registry::supported_tool(args["tool"].as_str().unwrap_or(""))?;
-            tool.irreversible = !self.env.local_key_cached(selected);
+            // Issuing a new account key cannot be undone by a restore: it asks
+            // like a command unless the conversation is in full auto.
+            if !self.env.local_key_cached(selected) {
+                tool.category = policy::Category::Exec;
+            }
+            overwrites = rebind_overwrites(&self.env.local_binding_status(selected).await?);
         }
-        // An allow-listed command reads no file, and metadata reveals no
-        // content: neither needs the path to be in scope.
-        let in_scope = access == Access::Inside || read_only || tool.name == "stat";
         let forbidden =
             access == Access::Forbidden || (shell && commands::forbidden(command)) || bundled;
-        // "Allow for this session" covers one tool on one path; commands and
-        // structured operations stay bound to their exact arguments.
-        let grant = match (tool.name, &checked) {
-            ("read" | "ls" | "find" | "grep" | "write" | "edit", Some(path)) => {
-                format!("{}:{}", tool.name, path.path.display())
-            }
-            _ => signature.to_string(),
+        let grant = match tool.category {
+            policy::Category::WriteConfig => "write_config".to_string(),
+            policy::Category::Exec if shell => commands::program(command)
+                .map(|program| format!("exec:{program}"))
+                .unwrap_or_else(|| signature.to_string()),
+            policy::Category::Exec => format!("exec:{}", tool.name),
+            policy::Category::Read => signature.to_string(),
         };
         self.authorize_local(
             run,
             tool,
-            args,
-            &grant,
             call_id,
-            tool.operation(in_scope, forbidden, read_only),
+            tool.operation(forbidden, read_only),
+            Ask {
+                args,
+                grant: &grant,
+                overwrites,
+            },
         )
         .await?;
         self.validate_run(run)?;
@@ -632,104 +647,32 @@ impl AssistantHost {
         )
     }
 
-    pub(super) async fn local_scope(
-        &self,
-        owner: &str,
-        sid: &str,
-    ) -> Result<(LocalPaths, Scope), String> {
+    pub(super) async fn local_scope(&self) -> Result<(LocalPaths, Scope), String> {
         let paths = self.env.local_paths().await?;
-        let folders = self
-            .local_states
-            .lock()
-            .map_err(|_| STATE)?
-            .get(&session_key(owner, sid))
-            .map(|s| s.folders.clone())
-            .unwrap_or_default();
-        let scope = paths.scope(&folders)?;
+        let scope = paths.scope(&[])?;
         Ok((paths, scope))
-    }
-
-    pub async fn add_dropped_local_folder(
-        &self,
-        authority: DeleteRequest,
-        token: String,
-    ) -> Result<String, String> {
-        let identity = self.identity().await?;
-        self.ensure_current(&identity, authority.expected_generation)
-            .await?;
-        if identity.owner != authority.expected_owner {
-            return Err(IDENTITY_CHANGED.into());
-        }
-        let paths = self.drops.lock().map_err(|_| STATE)?.take(
-            &token,
-            &identity.owner,
-            authority.expected_generation,
-            std::time::Instant::now(),
-        )?;
-        if paths.len() != 1 || !paths[0].is_dir() {
-            return Err("assistant_invalid_folder".into());
-        }
-        self.add_local_folder(authority, paths[0].to_string_lossy().into_owned())
-            .await
-    }
-
-    pub async fn add_local_folder(
-        &self,
-        authority: DeleteRequest,
-        folder: String,
-    ) -> Result<String, String> {
-        let identity = self.identity().await?;
-        self.ensure_current(&identity, authority.expected_generation)
-            .await?;
-        if identity.owner != authority.expected_owner {
-            return Err(IDENTITY_CHANGED.into());
-        }
-        let record = blocking({
-            let store = self.store(&identity.owner)?;
-            let sid = authority.session_id.clone();
-            move || store.load_record(&sid)
-        })
-        .await?;
-        if !capabilities::enabled(&record.session.capabilities) {
-            return Err("assistant_capability_disabled".into());
-        }
-        let (_, mut scope) = self
-            .local_scope(&identity.owner, &authority.session_id)
-            .await?;
-        let folder = scope.add_folder(Path::new(&folder))?;
-        let _runs = self.runs.lock().map_err(|_| STATE)?;
-        if self.generation() != authority.expected_generation {
-            return Err(IDENTITY_CHANGED.into());
-        }
-        let mut states = self.local_states.lock().map_err(|_| STATE)?;
-        let state = states
-            .entry(session_key(&identity.owner, &authority.session_id))
-            .or_default();
-        if !state.folders.contains(&folder) {
-            state.folders.push(folder.clone());
-        }
-        Ok(folder.to_string_lossy().into_owned())
     }
 
     async fn authorize_local(
         &self,
         run: &Arc<RunControl>,
         tool: registry::Tool,
-        args: &Value,
-        signature: &str,
         call_id: &str,
         operation: policy::Operation,
+        ask: Ask<'_>,
     ) -> Result<(), String> {
+        let Ask {
+            args,
+            grant,
+            overwrites,
+        } = ask;
         self.validate_run(run)?;
         let key = session_key(&run.identity.owner, &run.session_id);
         let decision = {
             let mut states = self.local_states.lock().map_err(|_| STATE)?;
             let state = states.entry(key.clone()).or_default();
             let decision = policy::decide(true, state.mode, operation);
-            if decision == Decision::Confirm
-                && !tool.irreversible
-                && state.grants.contains(signature)
-            {
+            if decision == Decision::Confirm && state.grants.contains(grant) {
                 Decision::Allow
             } else {
                 decision
@@ -742,7 +685,7 @@ impl AssistantHost {
                 let binding = self.local_binding(run);
                 let (id, pending) = self.local_approvals.request(binding.clone())?;
                 let safe = crate::redact::scrub(&args.to_string()).into_owned();
-                let mut display = json!({"approvalId":id,"toolCallId":call_id,"name":tool.name,"category":tool.category,"details":safe,"allowSession":!tool.irreversible,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
+                let mut display = json!({"approvalId":id,"toolCallId":call_id,"name":tool.name,"category":tool.category,"details":safe,"overwrites":overwrites,"allowSession":true,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
                 scrub_secrets_in(&mut display, &self.known_keys());
                 self.local_approvals.describe(&id, display.clone());
                 self.emit(run, "approval", display);
@@ -762,17 +705,17 @@ impl AssistantHost {
                 }
                 match choice? {
                     Choice::Deny => Err("assistant_operation_denied".into()),
-                    Choice::Session if !tool.irreversible => {
+                    Choice::Session => {
                         self.local_states
                             .lock()
                             .map_err(|_| STATE)?
                             .entry(key)
                             .or_default()
                             .grants
-                            .insert(signature.into());
+                            .insert(grant.into());
                         Ok(())
                     }
-                    Choice::Session | Choice::Once => Ok(()),
+                    Choice::Once => Ok(()),
                 }
             }
         }

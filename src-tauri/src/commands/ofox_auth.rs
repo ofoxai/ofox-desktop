@@ -363,6 +363,22 @@ pub(crate) async fn bind_existing_tool_to_ofox_internal(
     Ok(())
 }
 
+/// Rewrites the Ofox-managed fields of a binding the user edited, after the
+/// user approved it in the assistant. Native and WorkBuddy bindings keep
+/// their conflict: they have no field-level template to restore from.
+pub(crate) async fn reset_modified_tool_binding_internal(
+    db: &crate::database::Database,
+    ofox_manager: &Arc<RwLock<crate::ofox_auth::OfoxAuthManager>>,
+    app: &str,
+) -> Result<(), String> {
+    let (tool, holder) =
+        crate::services::ofox_bind::tool_for(app).ok_or_else(|| "无效的应用类型".to_string())?;
+    let token = acquire_bind_token(tool.app().into(), ofox_manager).await?;
+    crate::services::ofox_bind::reset_modified_binding(db, tool, holder, &token).await?;
+    crate::ofox_api_keys::mark_key_used(tool.app());
+    Ok(())
+}
+
 /// Bind an AI tool (claude/codex/...) to OfoxAI.
 ///
 /// 取（或签发）该工具的 Ofox API key，把工具配置文件里的接入方式改成 Ofox 网关，

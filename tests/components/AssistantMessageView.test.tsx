@@ -949,3 +949,29 @@ it("offers fork for a saved reply and keeps it unavailable while busy", async ()
     screen.getByRole("button", { name: "Message actions" }),
   ).toBeDisabled();
 });
+
+it("shows a local run's progress only while the reply streams", () => {
+  const reply = (status: AssistantMessage["status"]) => (
+    <TooltipProvider>
+      <AssistantMessageView
+        message={{
+          id: "m",
+          role: "assistant",
+          content: "Looking",
+          createdAt: 1,
+          status,
+        }}
+        taskProgress={<p>Reading the Codex config</p>}
+        disabled
+        onEdit={async () => false}
+        onRegenerate={() => undefined}
+      />
+    </TooltipProvider>
+  );
+  const shown = render(reply("streaming"));
+  expect(
+    within(screen.getByRole("article")).getByText("Reading the Codex config"),
+  ).toBeVisible();
+  shown.rerender(reply("completed"));
+  expect(screen.queryByText("Reading the Codex config")).toBeNull();
+});

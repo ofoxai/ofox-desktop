@@ -31,7 +31,34 @@ pub fn folder_metadata(scope: &Scope, folder: &Path, outside: bool) -> Value {
     Value::Object(metadata)
 }
 
+/// macOS asks before an app's child process may open Documents, Desktop,
+/// Downloads or iCloud Drive; until the user answers, a probe there hangs.
+fn permission_hint(folder: &Path, home: &Path, error: &str) -> Option<&'static str> {
+    let protected = [
+        "Documents",
+        "Desktop",
+        "Downloads",
+        "Library/Mobile Documents",
+    ]
+    .iter()
+    .any(|dir| folder.starts_with(home.join(dir)));
+    (cfg!(target_os = "macos") && protected && error.contains("timed out")).then_some(
+        "macOS may be asking whether Ofox Desktop can access this folder. Ask the user to click Allow in the system dialog, then check again; this is not a fault of the tool.",
+    )
+}
+
 pub async fn probe(tool: BindableTool, folder: &Path, home: &Path) -> Value {
+    let mut result = probe_once(tool, folder, home).await;
+    if let Some(hint) = result["error"]
+        .as_str()
+        .and_then(|error| permission_hint(folder, home, error))
+    {
+        result["hint"] = json!(hint);
+    }
+    result
+}
+
+async fn probe_once(tool: BindableTool, folder: &Path, home: &Path) -> Value {
     let name = tool.as_str();
     match tool_update::probe_executable_in(name, folder).await {
         Ok(install) => {
@@ -62,6 +89,16 @@ pub async fn probe(tool: BindableTool, folder: &Path, home: &Path) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_probe_timeout_in_a_protected_folder_points_at_the_macos_permission_prompt() {
+        let home = Path::new("/Users/me");
+        let timeout = "Active executable failed its version check: Version probe timed out";
+        assert!(permission_hint(&home.join("Documents/奖学金"), home, timeout).is_some());
+        assert!(permission_hint(&home.join("Library/Mobile Documents/x"), home, timeout).is_some());
+        assert!(permission_hint(&home.join("code/app"), home, timeout).is_none());
+        assert!(permission_hint(&home.join("Desktop"), home, "not found").is_none());
+    }
     #[test]
     fn metadata_limits_package_fields_and_scrubs_credentials() {
         let dir = tempfile::tempdir().unwrap();

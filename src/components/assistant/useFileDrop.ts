@@ -30,7 +30,7 @@ export function useFileDrop({
 }: {
   ready: boolean;
   /** Imports the files of this drop; `token` is theirs, never a path. */
-  onDrop: (token: string, folder?: boolean) => void;
+  onDrop: (token: string) => void;
   onError: (reason: unknown) => void;
 }) {
   const [dragging, setDragging] = useState(false);
@@ -50,11 +50,11 @@ export function useFileDrop({
       ),
     );
     void keep(
-      assistantApi.onDrop(({ token, folder }) => {
+      assistantApi.onDrop(({ token }) => {
         // A drop ends the drag, and no leave follows it.
         setDragging(false);
         if (latest.current.ready && !underModalDialog())
-          latest.current.onDrop(token, folder);
+          latest.current.onDrop(token);
       }),
     );
     return () => {

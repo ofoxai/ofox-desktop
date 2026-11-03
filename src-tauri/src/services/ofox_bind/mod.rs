@@ -903,7 +903,7 @@ pub(crate) async fn bind(
     holder: &str,
     api_key: &str,
 ) -> Result<(), String> {
-    bind_inner(db, tool, holder, api_key, false).await
+    bind_inner(db, tool, holder, api_key, None).await
 }
 
 pub(crate) async fn bind_existing(
@@ -912,15 +912,43 @@ pub(crate) async fn bind_existing(
     holder: &str,
     api_key: &str,
 ) -> Result<(), String> {
-    bind_inner(db, tool, holder, api_key, true).await
+    bind_inner(
+        db,
+        tool,
+        holder,
+        api_key,
+        Some(status::BindingStatus::Configured),
+    )
+    .await
 }
 
+/// An explicit, user-approved repair: the Ofox entry is still on disk but its
+/// managed fields (address, key, transport) were edited. They are rewritten
+/// from the region's template; the model the user chose in the tool is kept.
+pub(crate) async fn reset_modified_binding(
+    db: &Database,
+    tool: Tool,
+    holder: &str,
+    api_key: &str,
+) -> Result<(), String> {
+    bind_inner(
+        db,
+        tool,
+        holder,
+        api_key,
+        Some(status::BindingStatus::Modified),
+    )
+    .await
+}
+
+/// `existing`: `None` binds afresh; otherwise the Ofox entry must already be on
+/// disk with exactly this health before anything is rewritten.
 async fn bind_inner(
     db: &Database,
     tool: Tool,
     holder: &str,
     api_key: &str,
-    require_existing: bool,
+    existing: Option<status::BindingStatus>,
 ) -> Result<(), String> {
     crate::agent_env::ready().await;
     let _guard = BIND_LOCK.lock().await;
@@ -935,11 +963,11 @@ async fn bind_inner(
         journal_paths,
     )?;
 
-    if require_existing {
+    if let Some(expected) = existing {
         require_existing_ofox_config(tool)?;
         let health = status::inspect_managed_fields(db, tool, Some(api_key))
             .map_err(|_| "无法确认现有 Ofox 接入配置，已停止启动修复。".to_string())?;
-        if health.status != status::BindingStatus::Configured {
+        if health.status != expected {
             return Err(health
                 .message
                 .unwrap_or_else(|| "Ofox 接入配置已变化，已停止启动修复。".into()));

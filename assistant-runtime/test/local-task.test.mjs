@@ -95,19 +95,25 @@ test("pending verification survives into the next run and clears once verified",
       false,
     );
 });
-test("a folder request pauses the completion gate until the user answers", () => {
-  const task = new LocalTask(limits);
+test("a change with no diagnosed folder is verified in the home folder", () => {
+  const home = "/Users/me";
+  const task = new LocalTask(limits, Date.now, null, home);
   task.observe("write", { path: "/config" }, { changed: true });
-  task.observe("request_folder", {}, { waitingForUser: true });
-  assert.equal(task.waitingForFolder, true);
-  assert.equal(task.continuation(), null);
+  assert.match(task.continuation(), /home folder/);
   task.observe(
-    "diagnose_in_folder",
-    { tool: "codex", folder: "/problem" },
-    { verified: false },
+    "verify_in_folder",
+    { tool: "codex", folder: "/elsewhere" },
+    { folder: "/elsewhere", verified: true },
   );
-  assert.equal(task.waitingForFolder, false);
-  assert.ok(task.continuation());
+  assert.equal(task.needsVerification, true);
+  task.observe(
+    "verify_in_folder",
+    { tool: "codex", folder: home },
+    { folder: home, verified: true },
+  );
+  assert.equal(task.needsVerification, false);
+  task.observe("write", { path: "/config" }, { changed: true });
+  assert.equal(task.needsVerification, true);
 });
 test("plans cap steps, Unicode length, status and one active step", () => {
   assert.equal(

@@ -729,3 +729,17 @@ it("forwards local capability choices without persisting permission grants", asy
     request: { sessionId: "session", capabilities: [] },
   });
 });
+
+it("sets a local permission mode and has no folder command", async () => {
+  const request = {
+    sessionId: "s",
+    mode: "fullAuto" as const,
+    confirmedFullAccess: true,
+    expectedOwner: "owner",
+    expectedGeneration: 2,
+  };
+  invoke.mockResolvedValue("fullAuto");
+  expect(await assistantApi.setPermission(request)).toBe("fullAuto");
+  expect(invoke).toHaveBeenCalledWith("assistant_set_permission", { request });
+  expect("localFolder" in assistantApi).toBe(false);
+});

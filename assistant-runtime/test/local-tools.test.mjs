@@ -187,3 +187,16 @@ test("PowerShell forwarding uses host authority, cwd and timeout on every platfo
     timeout: 12,
   });
 });
+
+test("no folder picking: diagnose and verify default to the home folder", async () => {
+  const { calls, tools } = fixture((name, args) => ({ folder: args.folder }));
+  assert.ok(!tools.some((t) => t.name === "request_folder"));
+  for (const name of ["diagnose_in_folder", "verify_in_folder"]) {
+    await tools.find((t) => t.name === name).execute(name, { tool: "codex" });
+    assert.equal(calls.at(-1).args.folder, HOST_ROOT);
+  }
+  await tools
+    .find((t) => t.name === "diagnose_in_folder")
+    .execute("named", { tool: "codex", folder: "project" });
+  assert.equal(calls.at(-1).args.folder, path.join(HOST_ROOT, "project"));
+});

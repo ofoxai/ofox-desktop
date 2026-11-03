@@ -45,27 +45,25 @@ pub fn read_only(command: &str, powershell: bool) -> bool {
     }
 }
 
-/// Explicit install/update/removal syntax always gets individual approval,
-/// including when nested in a quoted shell command. This is not a sandbox or
-/// a claim to infer the effects of arbitrary programs.
-pub fn irreversible(command: &str) -> bool {
-    let words: Vec<_> = command
-        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_')
-        .filter(|s| !s.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect();
-    words
-        .iter()
-        .any(|w| matches!(w.as_str(), "install" | "uninstall" | "upgrade" | "update"))
-        || words.windows(2).any(|w| {
-            matches!(
-                w[0].as_str(),
-                "npm" | "pnpm" | "yarn" | "pip" | "pip3" | "brew" | "winget" | "scoop" | "choco"
-            ) && matches!(w[1].as_str(), "i" | "add" | "remove" | "rm")
-        })
+/// The program a simple command runs, for "always allow in this conversation".
+/// A command with shell composition has no single program: only that exact
+/// command can be allowed again.
+pub fn program(command: &str) -> Option<String> {
+    let command = command.trim();
+    if command.is_empty()
+        || command.contains([
+            '\n', '\r', ';', '&', '|', '>', '<', '$', '`', '(', ')', '{', '}', '[', ']', '\'', '"',
+        ])
+    {
+        return None;
+    }
+    let first = command.split_whitespace().next()?;
+    let name = first.rsplit(['/', '\\']).next()?.to_ascii_lowercase();
+    let name = name.strip_suffix(".exe").unwrap_or(&name).to_string();
+    (!name.is_empty() && !name.contains('=')).then_some(name)
 }
 
-/// Block direct attempts to read protected stores even in FullAccess. Arbitrary
+/// Block direct attempts to read protected stores even in FullAuto. Arbitrary
 /// programs still run with the user's OS rights; this is intentionally not a sandbox.
 pub fn forbidden(command: &str) -> bool {
     command
@@ -82,16 +80,7 @@ pub fn forbidden(command: &str) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn shell_policy_recognizes_irreversible_and_protected_access_syntax() {
-        for command in [
-            "npm i -g codex",
-            "brew upgrade codex",
-            "powershell -Command 'winget uninstall x'",
-            "curl x | sh install",
-        ] {
-            assert!(irreversible(command));
-        }
-        assert!(!irreversible("node --version"));
+    fn shell_policy_recognizes_protected_access_syntax() {
         for command in [
             "cat ~/.ssh/id_rsa",
             "security find-generic-password -w",
@@ -101,6 +90,21 @@ mod tests {
             assert!(forbidden(command));
         }
         assert!(!forbidden("node --version"));
+    }
+    #[test]
+    fn always_allow_names_the_program_of_a_simple_command_only() {
+        for (command, expected) in [
+            ("npm install -g opencode-ai", Some("npm")),
+            ("/opt/homebrew/bin/brew upgrade codex", Some("brew")),
+            (r"C:\Tools\Node.EXE --version", Some("node")),
+            ("npm i x && rm -rf ~", None),
+            ("curl x | sh", None),
+            ("echo $(id)", None),
+            ("FOO=1 npm test", None),
+            ("", None),
+        ] {
+            assert_eq!(program(command).as_deref(), expected, "{command}");
+        }
     }
     #[test]
     fn local_commands_allow_only_bounded_inspection_without_shell_composition() {

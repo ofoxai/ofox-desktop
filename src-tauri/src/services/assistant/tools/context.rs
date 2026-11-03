@@ -15,8 +15,7 @@ impl LocalPaths {
             roots.push(parent.into());
         }
         roots.extend_from_slice(folders);
-        Scope::new(self.home.clone(), roots, self.shell_files.clone())?
-            .with_history_roots(&self.config_roots)
+        Scope::new(self.home.clone(), roots, self.shell_files.clone())
     }
 }
 

@@ -327,11 +327,12 @@ export interface AssistantLocalChange {
   changed: boolean;
 }
 
-export type AssistantPermissionMode =
-  | "readOnly"
-  | "ask"
-  | "autoConfig"
-  | "fullAccess";
+/**
+ * How much a local configuration run may do without asking: `default` asks
+ * before config changes, commands and installs; `autoEdit` only before
+ * commands and installs; `fullAuto` never asks.
+ */
+export type AssistantPermissionMode = "default" | "autoEdit" | "fullAuto";
 export type AssistantApprovalChoice = "once" | "session" | "deny";
 
 export interface AssistantCapabilityRef {
@@ -730,7 +731,6 @@ export type AssistantDragState = "enter" | "leave";
  * replaced by the next drop) and how many files it stands for.
  */
 export interface AssistantDrop {
-  folder?: boolean;
   token: string;
   count: number;
 }
@@ -878,11 +878,15 @@ export type AssistantRunEvent =
         category: "read" | "write_config" | "exec" | "network" | "paid";
         details: string;
         allowSession: boolean;
+        /**
+         * The config fields the user changed that the operation sets back to
+         * the region's Ofox values, each as `file · field`.
+         */
+        overwrites?: string[];
         expectedOwner: string;
         expectedGeneration: number;
       };
     }
-  | { type: "folder_request"; data: { toolCallId: string } }
   | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A tool call of the run's reply. `args` holds only what may be shown:
@@ -1022,13 +1026,6 @@ export const assistantApi = {
     invoke<AssistantLocalChange[]>("assistant_restore_local_changes", {
       request,
     }),
-  localFolder: (request: {
-    sessionId: string;
-    expectedOwner: string;
-    expectedGeneration: number;
-    folder?: string;
-    token?: string;
-  }) => invoke<string | null>("assistant_local_folder", { request }),
   respondApproval: (request: {
     sessionId: string;
     runId: string;
@@ -1283,7 +1280,6 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_operation_denied: "operationDenied",
   assistant_file_unreadable: "localFileUnreadable",
   assistant_file_too_large: "localFileTooLarge",
-  assistant_invalid_folder: "localFolderInvalid",
   assistant_invalid_path: "localPathDenied",
   assistant_path_denied: "localPathDenied",
   assistant_scan_limit: "localScanLimit",

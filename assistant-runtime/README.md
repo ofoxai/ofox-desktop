@@ -253,13 +253,17 @@ claiming a call ID. A repeated ID returns its saved result; changed arguments
 are refused and a still-pending claim returns `unknown_outcome`. The probe
 operation is test-only and is never shipped as a model tool.
 
-Permission modes and session grants are memory-only. Their default is
-`autoConfig`; changing permissions cancels the current run, and entering
-`fullAccess` requires explicit UI confirmation. Approval events bind the
+Permission modes follow AionUi's built-in agent and are memory-only:
+`default` (reads, diagnostics and allow-listed read-only commands run; other
+operations ask), `autoEdit` (configuration changes also run) and `fullAuto`
+(everything runs). Protected stores (private keys, keychains, browser data) are
+denied in every mode. Changing permissions cancels the current run, and entering
+`fullAuto` requires explicit UI confirmation. Approval events bind the
 confirmation to owner, generation, session, run and operation. Responses are
-`once`, `session` or `deny`; session grants cover the exact operation signature.
-Irreversible operations cannot receive a reusable grant. Approvals expire on
-cancellation or after at most 120 seconds and emit `approval_end`.
+`once`, `session` or `deny`; a session grant covers the whole configuration-change
+category, one program for simple commands, or one exact composed command. A
+rebind that would issue a new account key asks like a command. Approvals expire
+on cancellation or after at most 120 seconds and emit `approval_end`.
 
 ## Attachments
 
@@ -592,7 +596,7 @@ smoke checks verify the SDK, native canvas, PDF and history paths after pruning.
 ### Local configuration reads
 
 A host-issued `localConfig` run parameter registers scoped `read`, `ls`, `find`,
-`grep`, tool diagnostics and folder requests. Pi's read/list/find definitions
+`grep` and tool diagnostics. Pi's read/list/find definitions
 retain their output formatting, with every filesystem operation overridden by
 an engine-neutral host callback. Grep is implemented by Rust and never starts
 `rg` in Node. Host reads are bounded, reject sensitive paths (including resolved
@@ -669,7 +673,9 @@ arbitrary shell commands too: Rust marks commands outside the
 read-only whitelist as possibly changing configuration, even on a nonzero exit.
 It does not claim that those arbitrary side effects are journaled. Completion requires
 `verify_in_folder` succeeding after the last mutation in every folder originally
-diagnosed, for the same tool. Up to two hidden custom-message continuations ask
+diagnosed, for the same tool, or in the home folder when no folder was
+diagnosed. Verification still owed when a run ends is kept in host memory and
+handed to the next run of the conversation. Up to two hidden custom-message continuations ask
 for verification; unresolved verification ends with a stable error. Assistant
 prose never satisfies the gate. Hidden continuations are not user messages.
 
@@ -678,6 +684,6 @@ can render `[[enable_local_config]]` as a user-operated button. The recommended
 model and suitable-model allowlist live in Rust's capability definition. Both
 currently select `openai/gpt-6.1-sol`, the canonical catalog ID of the chosen
 `gpt-6.1-sol` alias. If the model is unavailable, the UI retains the current
-model and explains why. Permission modes, approvals and folder grants
+model and explains why. Permission modes and approvals
 are host memory only. Session details expose the current permission for display
 without writing it into session files, forks or backups.

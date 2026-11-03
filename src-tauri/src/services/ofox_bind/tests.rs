@@ -4595,6 +4595,56 @@ async fn opencode_base_url_changed_is_a_conflict() {
 
 #[tokio::test]
 #[serial]
+async fn an_approved_reset_rewrites_edited_managed_fields_and_keeps_the_rest() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    // Already healthy: nothing to reset.
+    assert!(reset_modified_binding(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .is_err());
+    edit_text(&path, "https://api.ofox.ai/v1", "https://api.ofox.ai/v");
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Modified
+    );
+    // The startup repair still refuses to overwrite the user's edit.
+    assert!(bind_existing(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .is_err());
+    reset_modified_binding(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .expect("approved reset");
+    assert_eq!(
+        status_of(&db, Tool::OpenCode).await,
+        status::BindingStatus::Configured
+    );
+    let config = json_at(&path);
+    assert_eq!(
+        config["provider"]["ofox-opencode"]["options"]["baseURL"],
+        "https://api.ofox.ai/v1"
+    );
+    assert_eq!(config["provider"]["deepseek"]["options"]["apiKey"], "sk-ds");
+    unbind(&db, Tool::OpenCode, "opencode", &[], false)
+        .await
+        .expect("unbind");
+    assert_eq!(fs::read_to_string(&path).unwrap(), OPENCODE_CONFIG);
+}
+
+#[tokio::test]
+#[serial]
+async fn a_reset_never_takes_over_an_entry_pointed_away_from_ofox() {
+    let (_home, db, path) =
+        bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;
+    edit_text(&path, "https://api.ofox.ai/v1", "https://relay.example/v1");
+    let bytes = fs::read(&path).unwrap();
+    assert!(reset_modified_binding(&db, Tool::OpenCode, "opencode", KEY)
+        .await
+        .is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[tokio::test]
+#[serial]
 async fn replacing_the_key_keeps_the_opencode_models_and_selected_model() {
     let (_home, db, path) =
         bind_with_user_config(Tool::OpenCode, "opencode", OPENCODE_CONFIG).await;

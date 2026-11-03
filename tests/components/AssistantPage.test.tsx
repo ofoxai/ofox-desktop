@@ -8319,10 +8319,10 @@ describe('local configuration capability',()=>{
 });
 
 it('local permission display uses host memory after a renderer remount and approvals expire with their run',async()=>{
- current.session.capabilities=[{id:'local_config',version:1}];current.permissionMode='readOnly';current.session.activeRun={runId:'local-run',operationId:'local-op'};
+ current.session.capabilities=[{id:'local_config',version:1}];current.permissionMode='autoEdit';current.session.activeRun={runId:'local-run',operationId:'local-op'};
  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
  act(()=>hook.result.current.select(session.id));await waitFor(()=>expect(hook.result.current.run?.runId).toBe('local-run'));
- expect(hook.result.current.localMode).toBe('readOnly');
+ expect(hook.result.current.localMode).toBe('autoEdit');
  act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval',data:{approvalId:'approval-1',toolCallId:'tool-1',name:'bash',category:'exec',details:'run diagnostic',allowSession:true,expectedOwner:capabilities.owner,expectedGeneration:1}} as AssistantEvent));
  expect(hook.result.current.localApprovals).toHaveLength(1);
  await act(async()=>{await hook.result.current.respondLocalApproval('approval-1','once');});
@@ -8336,4 +8336,234 @@ it('tool-page entry creates a separate enabled conversation with tool context, w
  expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
  expect(mocks.updateSession).toHaveBeenCalledWith(expect.objectContaining({draft:'Diagnose codex in the problem folder'}));
  expect(mocks.send).not.toHaveBeenCalled();
+});
+
+describe("local configuration in the conversation", () => {
+  const localSession = () => {
+    current.session.capabilities = [{ id: "local_config", version: 1 }];
+  };
+  const permission = () => screen.getByRole("combobox", { name: "Permission" });
+  const startRun = async () => {
+    await userEvent.type(composer(), "Fix codex");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    const emit = (type: string, data: Record<string, unknown>) =>
+      act(() =>
+        mocks.listener?.({ ...sent, type, data } as unknown as AssistantEvent),
+      );
+    emit("run_start", { messageId: "reply", webSearch: false });
+    return emit;
+  };
+  const approval = {
+    approvalId: "approval-1",
+    toolCallId: "tool-1",
+    name: "rebind_tool",
+    category: "write_config",
+    details: '{"tool":"opencode"}',
+    allowSession: true,
+    overwrites: ["~/.config/opencode/opencode.json · provider.ofox.baseURL"],
+    expectedOwner: capabilities.owner,
+    expectedGeneration: 1,
+  };
+
+  it("has no panel or folder card above the transcript, only the composer control", async () => {
+    localSession();
+    await openConversation();
+    expect(permission()).toHaveTextContent("Default");
+    expect(permission().closest("footer")).toBe(composer().closest("footer"));
+    expect(
+      screen.queryByRole("region", { name: "Local configuration" }),
+    ).toBeNull();
+    expect(screen.queryByRole("button", { name: /folder/i })).toBeNull();
+    expect(screen.queryByText(/This round/)).toBeNull();
+    expect(
+      screen.getByText(
+        "Local configuration is on: the assistant can check and fix the AI tools on this computer.",
+      ),
+    ).toBeVisible();
+  });
+
+  it("turns on from the composer and starts in the default mode", async () => {
+    await openConversation();
+    expect(screen.queryByRole("combobox", { name: "Permission" })).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Local configuration" }),
+    );
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          capabilities: [{ id: "local_config", version: 1 }],
+        }),
+      ),
+    );
+    expect(
+      await screen.findByRole("combobox", { name: "Permission" }),
+    ).toHaveTextContent("Default");
+  });
+
+  it("switches modes from the composer, confirming full auto first", async () => {
+    localSession();
+    await openConversation();
+    await userEvent.click(permission());
+    await userEvent.click(
+      await screen.findByRole("option", { name: /^Auto edit/ }),
+    );
+    await waitFor(() =>
+      expect(mocks.setPermission).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: session.id, mode: "autoEdit" }),
+      ),
+    );
+    await waitFor(() => expect(permission()).toHaveTextContent("Auto edit"));
+    await userEvent.click(permission());
+    await userEvent.click(
+      await screen.findByRole("option", { name: /^Full auto/ }),
+    );
+    expect(mocks.setPermission).toHaveBeenCalledTimes(1);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Turn on full auto" }),
+    );
+    await waitFor(() =>
+      expect(mocks.setPermission).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          mode: "fullAuto",
+          confirmedFullAccess: true,
+        }),
+      ),
+    );
+    await waitFor(() => expect(permission()).toHaveTextContent("Full auto"));
+  });
+
+  it("turns off from the mode menu", async () => {
+    localSession();
+    await openConversation();
+    await userEvent.click(permission());
+    await userEvent.click(
+      await screen.findByRole("option", {
+        name: "Turn off local configuration",
+      }),
+    );
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenCalledWith(
+        expect.objectContaining({ capabilities: [] }),
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("combobox", { name: "Permission" })).toBeNull(),
+    );
+  });
+
+  it("can't change the mode while a reply runs", async () => {
+    localSession();
+    await openConversation();
+    await startRun();
+    expect(permission()).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Local configuration" }),
+    ).toBeDisabled();
+  });
+
+  it("shows the run's step and plan inside the streaming reply, and an approval card after it", async () => {
+    localSession();
+    await openConversation();
+    const emit = await startRun();
+    emit("tool_start", {
+      messageId: "reply",
+      name: "tool_status",
+      toolCallId: "c1",
+      intent: "Checking the OpenCode binding",
+    });
+    emit("task_plan", {
+      steps: [
+        { step: "Inspect the binding", status: "completed" },
+        { step: "Repair it", status: "in_progress" },
+      ],
+    });
+    emit("approval", approval);
+    const replies = screen.getAllByRole("article", { name: "Assistant" });
+    const reply = replies[replies.length - 1];
+    expect(reply).toHaveTextContent("Checking the OpenCode binding");
+    expect(
+      within(reply).getByRole("list", { name: "Task steps" }),
+    ).toHaveTextContent("Repair it");
+    const card = screen.getByRole("group", { name: "Approve operation" });
+    expect(reply.compareDocumentPosition(card)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING,
+    );
+    expect(card).toHaveTextContent("Repair binding");
+    expect(card).toHaveTextContent("provider.ofox.baseURL");
+    await userEvent.click(
+      within(card).getByRole("button", {
+        name: "Always allow in this conversation",
+      }),
+    );
+    expect(mocks.respondApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalId: "approval-1", choice: "session" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("group", { name: "Approve operation" }),
+      ).toBeNull(),
+    );
+    emit("run_end", { status: "completed" });
+    await waitFor(() =>
+      expect(screen.queryByText("Checking the OpenCode binding")).toBeNull(),
+    );
+    expect(screen.queryByRole("list", { name: "Task steps" })).toBeNull();
+  });
+
+  it("offers to restore unrestored changes under the reply", async () => {
+    localSession();
+    current.messages = [
+      {
+        id: "fixed",
+        role: "assistant",
+        content: "Repaired the binding.",
+        status: "completed",
+        createdAt: 1,
+        runId: "local-run",
+      },
+    ];
+    const pending = {
+      id: "c1",
+      operation: "rebind_tool",
+      paths: ["/home/me/.config/opencode/opencode.json"],
+      restored: false,
+      outcomeKnown: true,
+      changed: true,
+    };
+    mocks.localChanges.mockResolvedValue([pending]);
+    mocks.restoreLocalChanges.mockResolvedValue([
+      { ...pending, restored: true },
+    ]);
+    await openConversation();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Changed 1 file" }),
+    );
+    expect(
+      screen.getByText("/home/me/.config/opencode/opencode.json"),
+    ).toBeVisible();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Restore this conversation’s changes",
+      }),
+    );
+    expect(mocks.restoreLocalChanges).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: session.id }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "Changed 1 file" }),
+      ).toBeNull(),
+    );
+  });
+
+  it("asks the tools page's question without a folder", () => {
+    for (const [lang, data] of Object.entries({ en, zh, ja })) {
+      expect(data.assistant.local.toolPrompt, lang).not.toMatch(
+        /folder|文件夹|フォルダー/,
+      );
+    }
+    expect(zh.assistant.local.toolPrompt).toBe("帮我诊断并修复 {{tool}}。");
+  });
 });

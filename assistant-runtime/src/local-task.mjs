@@ -32,8 +32,11 @@ export function validatePlan(steps) {
 const targetKey = (tool, folder) => JSON.stringify([tool, folder]);
 export class LocalTask {
   // `state` is the host-kept snapshot of an earlier run in this conversation:
-  // a repair whose verification is still missing stays missing.
-  constructor(limits, clock = Date.now, state = null) {
+  // a repair whose verification is still missing stays missing. `home` is
+  // where a change is verified when the user named no problem folder.
+  constructor(limits, clock = Date.now, state = null, home = null) {
+    this.home = home;
+    this.homeVerified = false;
     this.limits = limits;
     this.clock = clock;
     this.started = clock();
@@ -49,7 +52,6 @@ export class LocalTask {
           folder: t.folder,
           verified: t.verified === true,
         });
-    this.waitingForFolder = false;
     this.retries = 0;
     this.stopped = null;
   }
@@ -116,38 +118,40 @@ export class LocalTask {
     if (!result || typeof result !== "object") return;
     const folder = result.folder ?? args.folder;
     const key = targetKey(args.tool, folder);
-    // Asking for the folder hands the turn to the user; pushing the model on
-    // would only repeat the question. The gate resumes once a folder is used.
-    if (name === "request_folder" && result.waitingForUser === true)
-      this.waitingForFolder = true;
-    else if (name === "diagnose_in_folder" || name === "verify_in_folder")
-      this.waitingForFolder = false;
     if (name === "diagnose_in_folder" && !this.targets.has(key))
       this.targets.set(key, { tool: args.tool, folder, verified: false });
     if (result.changed === true || result.requiresVerification === true) {
       this.changed = true;
       for (const target of this.targets.values()) target.verified = false;
+      this.homeVerified = false;
     }
+    if (
+      name === "verify_in_folder" &&
+      this.home &&
+      folder === this.home &&
+      result.verified === true
+    )
+      this.homeVerified = true;
     if (name === "verify_in_folder" && this.targets.has(key))
       this.targets.get(key).verified = result.verified === true;
   }
   get needsVerification() {
     return (
       this.changed &&
-      (!this.targets.size ||
-        [...this.targets.values()].some((t) => !t.verified))
+      (this.targets.size
+        ? [...this.targets.values()].some((t) => !t.verified)
+        : !this.homeVerified)
     );
   }
   continuation() {
     if (
       !this.needsVerification ||
-      this.waitingForFolder ||
       this.stopped ||
       this.finalStep ||
       this.retries >= this.limits.completionRetries
     )
       return null;
     this.retries++;
-    return `Host verification is still missing after configuration changes. Do not claim a successful repair. ${this.targets.size ? `Run verify_in_folder for these original problem folders: ${JSON.stringify([...this.targets.values()].filter((t) => !t.verified))}` : "Ask the user for the original problem folder with request_folder, diagnose there, then verify there."}`;
+    return `Host verification is still missing after configuration changes. Do not claim a successful repair. ${this.targets.size ? `Run verify_in_folder for these original problem folders: ${JSON.stringify([...this.targets.values()].filter((t) => !t.verified))}` : "Run verify_in_folder for the changed tool in the user's home folder (leave folder out), or in the folder the user said fails."}`;
   }
 }

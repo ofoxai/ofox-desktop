@@ -2325,7 +2325,7 @@ mod tests {
             .id;
         host.set_permission(PermissionRequest {
             session_id: sid.clone(),
-            mode: super::super::tools::policy::PermissionMode::FullAccess,
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
             confirmed_full_access: true,
             expected_owner: identity().owner,
             expected_generation: host.generation(),
@@ -2371,22 +2371,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_folder_grant_is_user_bound_and_reads_are_scrubbed() {
+    async fn local_reads_anywhere_run_without_approval_but_stay_scrubbed_and_protected() {
         let (_tmp, env, host) = fixture_with_env();
-        let store = host.store(&identity().owner).unwrap();
-        let sid = store
-            .create_with_capabilities(
-                "test/model",
-                false,
-                "ofox",
-                &[super::super::capabilities::CapabilityRef {
-                    id: "local_config".into(),
-                    version: 1,
-                }],
-            )
-            .unwrap()
-            .session
-            .id;
+        let (sid, run) = local_run(&host);
         let folder = env.config.join("project");
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::write(
@@ -2394,58 +2381,23 @@ mod tests {
             r#"{"api_key":"sk-test-sensitive-value-123456789"}"#,
         )
         .unwrap();
-        let mut run = control(&sid);
-        Arc::get_mut(&mut run).unwrap().local_enabled = true;
-        host.register_run(run.clone(), host.generation(), || Ok(()))
-            .unwrap();
-        let authority = || DeleteRequest {
-            session_id: sid.clone(),
-            expected_owner: identity().owner,
-            expected_generation: host.generation(),
-        };
-        let mut stale = authority();
-        stale.expected_generation += 1;
+        let read = |id: &str, path: PathBuf| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"read","args":{"path":path}});
+        let text = host
+            .dispatch_tool(&run, &read("read-1", folder.join("config.json")))
+            .await
+            .unwrap()
+            .to_string();
+        assert!(!text.contains("sensitive-value"));
+        let key = env.config.join(".ssh/id_ed25519");
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        std::fs::write(&key, "private").unwrap();
         assert_eq!(
-            host.add_local_folder(stale, folder.to_string_lossy().into())
+            host.dispatch_tool(&run, &read("read-2", key))
                 .await
                 .unwrap_err(),
-            IDENTITY_CHANGED
+            "assistant_operation_denied"
         );
-        host.add_local_folder(authority(), folder.to_string_lossy().into())
-            .await
-            .unwrap();
-        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"read-1","name":"read","args":{"path":folder.join("config.json")}});
-        let text = host.dispatch_tool(&run, &params).await.unwrap().to_string();
-        assert!(!text.contains("sensitive-value"));
-        assert!(!env
-            .events
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|e| e.r#type == "approval"));
-        let forbidden = env.config.join(".ssh");
-        std::fs::create_dir_all(&forbidden).unwrap();
-        assert!(host
-            .add_local_folder(authority(), forbidden.to_string_lossy().into())
-            .await
-            .is_err());
-        let (token, _) = host
-            .accept_drop(vec![folder.clone()])
-            .await
-            .unwrap()
-            .unwrap();
-        let granted = host
-            .add_dropped_local_folder(authority(), token.clone())
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::canonicalize(granted).unwrap(),
-            std::fs::canonicalize(folder).unwrap()
-        );
-        assert!(host
-            .add_dropped_local_folder(authority(), token)
-            .await
-            .is_err());
+        assert!(approvals(&env).is_empty());
         host.release_run(&run);
     }
 
@@ -2530,33 +2482,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_session_grant_covers_the_same_tool_on_the_same_path() {
+    async fn local_session_grant_covers_config_changes_and_one_program() {
         let (_tmp, env, host) = fixture_with_env();
         let (sid, run) = local_run(&host);
-        let file = env.config.join("outside.txt");
-        std::fs::write(&file, "outside").unwrap();
-        let call = |id: &str, name: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":{"path":file}});
-        // Pi checks a file before reading it; the check alone asks nothing.
-        let stat = host.dispatch_tool(&run, &call("stat-1", "stat")).await;
-        assert_eq!(stat.unwrap()["exists"], true);
-        assert!(approvals(&env).is_empty());
-        let (_, read) =
-            dispatch_answering(&host, &env, &run, call("read-1", "read"), "session").await;
-        assert_eq!(read.unwrap(), json!("outside"));
-        let again = host.dispatch_tool(&run, &call("read-2", "read")).await;
-        assert_eq!(again.unwrap(), json!("outside"));
+        let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        let write = |id: &str, file: &str| {
+            call(
+                id,
+                "write",
+                json!({"path":env.config.join(file),"content":"new","expected":null}),
+            )
+        };
+        let (approval, first) =
+            dispatch_answering(&host, &env, &run, write("w-1", "a.txt"), "session").await;
+        assert_eq!(approval["allowSession"], true);
+        assert_eq!(first.unwrap()["changed"], true);
+        // The grant is the whole configuration-change category.
+        host.dispatch_tool(&run, &write("w-2", "b.txt"))
+            .await
+            .unwrap();
         assert_eq!(approvals(&env).len(), 1);
+        let (shell, echo, other) = if cfg!(windows) {
+            ("powershell", "Write-Output one", "Get-Date")
+        } else {
+            ("bash", "echo one", "date")
+        };
+        let exec = |id: &str, command: &str| {
+            call(
+                id,
+                shell,
+                json!({"command":command,"folder":env.config,"timeout":30}),
+            )
+        };
+        let (_, ran) = dispatch_answering(&host, &env, &run, exec("e-1", echo), "session").await;
+        assert_eq!(ran.unwrap()["exitCode"], 0);
+        host.dispatch_tool(&run, &exec("e-2", &format!("{echo} two")))
+            .await
+            .unwrap();
+        assert_eq!(approvals(&env).len(), 2);
+        // Another program asks again.
+        let (_, denied) = dispatch_answering(&host, &env, &run, exec("e-3", other), "deny").await;
+        assert_eq!(denied.unwrap_err(), "assistant_operation_denied");
         host.release_run(&run);
     }
 
     #[tokio::test]
-    async fn local_rebind_that_may_issue_a_new_key_always_asks_without_a_session_grant() {
+    async fn local_rebind_that_may_issue_a_new_key_asks_like_a_command_until_full_auto() {
+        use super::local::PermissionRequest;
         let (_tmp, env, host) = fixture_with_env();
         let (sid, run) = local_run(&host);
-        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"rebind-1","name":"rebind_tool","args":{"tool":"codex"}});
-        let (approval, result) = dispatch_answering(&host, &env, &run, params, "deny").await;
-        assert_eq!(approval["allowSession"], false);
+        let rebind = |id: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"rebind_tool","args":{"tool":"codex"}});
+        let (approval, result) = dispatch_answering(&host, &env, &run, rebind("r-1"), "deny").await;
+        assert_eq!(approval["category"], "exec");
         assert_eq!(result.unwrap_err(), "assistant_operation_denied");
+        host.release_run(&run);
+        host.set_permission(PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let run = control(&sid);
+        let mut run = run;
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"r-2","name":"rebind_tool","args":{"tool":"codex"}});
+        // The test environment has no binding writer; no approval was asked.
+        assert_eq!(
+            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            "assistant_local_unavailable"
+        );
+        assert_eq!(approvals(&env).len(), 1);
         host.release_run(&run);
     }
 

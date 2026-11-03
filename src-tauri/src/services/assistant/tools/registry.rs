@@ -7,22 +7,14 @@ use serde_json::Value;
 pub struct Tool {
     pub name: &'static str,
     pub category: Category,
-    pub retry_safe: bool,
-    pub reversible: bool,
-    pub structured: bool,
-    pub irreversible: bool,
 }
 
 impl Tool {
-    pub fn operation(self, in_scope: bool, forbidden: bool, read_only_command: bool) -> Operation {
+    pub fn operation(self, forbidden: bool, read_only_command: bool) -> Operation {
         Operation {
             category: self.category,
-            in_scope,
-            forbidden,
             read_only_command,
-            reversible: self.reversible,
-            structured: self.structured,
-            irreversible: self.irreversible,
+            forbidden,
         }
     }
 }
@@ -37,18 +29,7 @@ pub fn get(name: &str) -> Result<Tool, String> {
         "tool_status",
         "diagnose_in_folder",
         "verify_in_folder",
-        "request_folder",
     ];
-    if let Some(name) = READ.iter().find(|known| **known == name) {
-        return Ok(Tool {
-            name,
-            category: Category::Read,
-            retry_safe: true,
-            reversible: false,
-            structured: true,
-            irreversible: false,
-        });
-    }
     const WRITE: &[&str] = &[
         "write",
         "edit",
@@ -56,16 +37,6 @@ pub fn get(name: &str) -> Result<Tool, String> {
         "rebind_tool",
         "set_tool_model",
     ];
-    if let Some(name) = WRITE.iter().find(|known| **known == name) {
-        return Ok(Tool {
-            name,
-            category: Category::WriteConfig,
-            retry_safe: false,
-            reversible: true,
-            structured: !matches!(*name, "write" | "edit"),
-            irreversible: false,
-        });
-    }
     const EXEC: &[&str] = &[
         "bash",
         "powershell",
@@ -73,25 +44,20 @@ pub fn get(name: &str) -> Result<Tool, String> {
         "update_tool",
         "uninstall_tool",
     ];
-    if let Some(name) = EXEC.iter().find(|known| **known == name) {
-        return Ok(Tool {
-            name,
-            category: Category::Exec,
-            retry_safe: false,
-            reversible: false,
-            structured: !matches!(*name, "bash" | "powershell"),
-            irreversible: !matches!(*name, "bash" | "powershell"),
-        });
+    for (names, category) in [
+        (READ, Category::Read),
+        (WRITE, Category::WriteConfig),
+        (EXEC, Category::Exec),
+    ] {
+        if let Some(name) = names.iter().find(|known| **known == name) {
+            return Ok(Tool { name, category });
+        }
     }
     match name {
         #[cfg(test)]
         "probe_write" => Ok(Tool {
             name: "probe_write",
             category: Category::WriteConfig,
-            retry_safe: false,
-            reversible: false,
-            structured: false,
-            irreversible: false,
         }),
         _ => Err("assistant_unknown_tool".into()),
     }
@@ -170,13 +136,6 @@ pub fn validate_args(tool: Tool, args: &Value) -> Result<(), String> {
                 Err("assistant_invalid_tool".into())
             } else {
                 Ok(())
-            }
-        }
-        "request_folder" => {
-            if args.as_object().is_some_and(|a| a.is_empty()) {
-                Ok(())
-            } else {
-                Err("assistant_invalid_tool".into())
             }
         }
         #[cfg(test)]

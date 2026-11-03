@@ -32,7 +32,7 @@ fn node_version(node: &Path) -> String {
 #[tokio::test]
 #[serial_test::serial]
 #[ignore = "offline manual acceptance: set OFOX_TEST_FNM, OFOX_TEST_NODE_OLD, OFOX_TEST_NODE_NEW, OFOX_TEST_OPENCODE"]
-async fn real_fnm_problem_folder_repair_verify_and_restart_restore_in_four_modes() {
+async fn real_fnm_problem_folder_repair_verify_and_restart_restore_in_each_mode() {
     let fnm = std::path::PathBuf::from(std::env::var_os("OFOX_TEST_FNM").expect("fnm path"));
     let old_node =
         std::path::PathBuf::from(std::env::var_os("OFOX_TEST_NODE_OLD").expect("older Node path"));
@@ -57,10 +57,9 @@ async fn real_fnm_problem_folder_repair_verify_and_restart_restore_in_four_modes
     let _shell = Shell(std::env::var_os("SHELL"));
     std::env::set_var("SHELL", "/bin/zsh");
     for mode in [
-        policy::PermissionMode::ReadOnly,
-        policy::PermissionMode::Ask,
-        policy::PermissionMode::AutoConfig,
-        policy::PermissionMode::FullAccess,
+        policy::PermissionMode::Default,
+        policy::PermissionMode::AutoEdit,
+        policy::PermissionMode::FullAuto,
     ] {
         let sandbox = crate::test_sandbox::sandbox();
         let home = sandbox.home();
@@ -112,22 +111,10 @@ async fn real_fnm_problem_folder_repair_verify_and_restart_restore_in_four_modes
             mode,
             policy::Operation {
                 category: policy::Category::WriteConfig,
-                in_scope: true,
-                reversible: true,
-                structured: true,
                 read_only_command: false,
                 forbidden: false,
-                irreversible: false,
             },
         );
-        if mode == policy::PermissionMode::ReadOnly {
-            assert_eq!(decision, policy::Decision::Deny);
-            assert_eq!(
-                std::fs::read_to_string(home.join(".zshrc")).unwrap(),
-                original
-            );
-            continue;
-        }
         if decision == policy::Decision::Confirm {
             let broker = approval::Broker::default();
             let binding = approval::Binding {

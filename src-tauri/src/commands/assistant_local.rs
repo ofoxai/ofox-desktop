@@ -107,6 +107,18 @@ pub async fn mutate(
         .await?;
         return Ok(json!({"changed":true}));
     }
+    // The approval (or the conversation's permission mode) is the user's consent
+    // to overwrite their edits to the Ofox-managed fields.
+    if name == "rebind_tool"
+        && health.status == BindingStatus::Modified
+        && !native
+        && tool != BindableTool::WorkBuddy
+    {
+        super::ofox_auth::reset_modified_tool_binding_internal(&state.db, &auth.0, tool.as_str())
+            .await?;
+        super::model_selection::notify(app, vec![tool.as_str().into()]);
+        return Ok(json!({"changed":true}));
+    }
     if health.status != BindingStatus::Configured {
         return Err("assistant_restore_conflict".into());
     }

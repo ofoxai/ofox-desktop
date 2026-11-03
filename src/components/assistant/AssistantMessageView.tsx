@@ -201,10 +201,11 @@ function SourceList({
  * `‹2/3›` switcher: it asks `onSwitchVersion` for the question of the version
  * to show, and is off while `disabled`. `activity` says what a streaming
  * reply is doing while one of its tools runs; `thinking` times the reasoning
- * it is streaming. `searchUnavailable` marks a reply whose run went without
- * the web search its conversation asked for. `highlight` marks what a
- * conversation search looks for in the text. `latest` marks the newest
- * reply, whose actions stay in view; the others show theirs while the
+ * it is streaming; `taskProgress`, what its local configuration run is at,
+ * shows under it while it streams. `searchUnavailable` marks a reply whose
+ * run went without the web search its conversation asked for. `highlight`
+ * marks what a conversation search looks for in the text. `latest` marks the
+ * newest reply, whose actions stay in view; the others show theirs while the
  * pointer or keyboard focus is on the message.
  */
 export const AssistantMessageView = memo(function AssistantMessageView({
@@ -229,10 +230,13 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onEnableLocal,
   immutable = false,
   mediaBlock,
+  taskProgress,
 }: {
   message: AssistantMessage;
   immutable?: boolean;
   mediaBlock?: React.ReactNode;
+  /** A local configuration run's step, warning and plan, while it streams. */
+  taskProgress?: React.ReactNode;
   activity?: AssistantActivity | null;
   /** A streaming reply's thinking so far, for its live timer. */
   thinking?: AssistantThinking | null;
@@ -472,6 +476,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {progress && statusLine(progress, "mt-2")}
         </>
       )}
+      {streaming && taskProgress}
       {retryCard ? (
         <RetryCard
           key={message.id}

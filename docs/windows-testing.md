@@ -172,11 +172,11 @@ macOS 上通过的路径策略和回调测试不能证明 Windows 原生进程�
 复审时须核对同一提交的 Windows Probe 结果。文件还原保存只读属性，不保存完整 ACL。
 
 macOS 另有默认忽略的真实 fnm 验收测试
-`real_fnm_problem_folder_repair_verify_and_restart_restore_in_four_modes`。
+`real_fnm_problem_folder_repair_verify_and_restart_restore_in_each_mode`。
 设置 `OFOX_TEST_FNM`、`OFOX_TEST_NODE_OLD`、`OFOX_TEST_NODE_NEW` 和
 `OFOX_TEST_OPENCODE` 为本机现有可执行文件后，用 `cargo test` 的
 `--ignored --nocapture` 运行。测试复制两个 Node 和 OpenCode 到临时 HOME，
-复现问题文件夹切换 Node 后找不到工具，并验证四档权限、修复、原文件夹验证和重启还原；
+复现问题文件夹切换 Node 后找不到工具，并验证三档权限、修复、原文件夹验证和重启还原；
 它不安装工具，不修改原有 fnm 目录。
 
 原生凭据库验收由 Windows 检查脚本单独执行（不包含在默认忽略测试中）：

@@ -226,7 +226,6 @@ export function useAssistant(enabled: boolean) {
   const [localPlan, setLocalPlan] = useState<PlanStep[]>([]);
   const [localIntent, setLocalIntent] = useState<string | null>(null);
   const [localWarning, setLocalWarning] = useState<string | null>(null);
-  const [localCost, setLocalCost] = useState(0);
   const [localModelNotice, setLocalModelNotice] = useState<string | null>(null);
   // Thinking for the conversation the first message creates: it belongs to
   // the model chosen for it, so choosing another model clears it.
@@ -414,11 +413,8 @@ export function useAssistant(enabled: boolean) {
       setTools([]);
       setLocalApprovals([]);
       setLocalIntent(null);
-      if (value) {
-        setLocalPlan([]);
-        setLocalWarning(null);
-        setLocalCost(0);
-      }
+      setLocalPlan([]);
+      setLocalWarning(null);
     }
     runRef.current = value;
     setRunState(value);
@@ -832,7 +828,7 @@ export function useAssistant(enabled: boolean) {
         const alreadyFollowing = Boolean(runRef.current);
         setLocalModes((old) => ({
           ...old,
-          [sessionId]: value.permissionMode ?? "autoConfig",
+          [sessionId]: value.permissionMode ?? "default",
         }));
         setDetail((old) => {
           if (preparing)
@@ -949,7 +945,6 @@ export function useAssistant(enabled: boolean) {
       setLocalChanges([]);
       setLocalPlan([]);
       setLocalWarning(null);
-      setLocalCost(0);
       setLocalModelNotice(null);
       setNewWebSearch(false);
       setNewThinking(null);
@@ -1420,12 +1415,9 @@ export function useAssistant(enabled: boolean) {
           case "task_plan":
             setLocalPlan(event.data.steps);
             return;
+          // The run's cost is shown with its reply, once saved.
           case "task_status":
-            if (event.data.cost !== undefined) setLocalCost(event.data.cost);
             if (event.data.warning) setLocalWarning(event.data.warning);
-            return;
-          case "folder_request":
-            setLocalWarning("folder_required");
             return;
           case "run_start": {
             if (event.data.compactOnly) {
@@ -1673,7 +1665,6 @@ export function useAssistant(enabled: boolean) {
       setLocalChanges([]);
       setLocalPlan([]);
       setLocalWarning(null);
-      setLocalCost(0);
       selectionSequence.current += 1;
       updateSequence.current += 1;
       createdSession.current = null;
@@ -1802,45 +1793,6 @@ export function useAssistant(enabled: boolean) {
     setNewWebSearch,
     showError,
   ]);
-
-  const addLocalFolder = useCallback(
-    async (folder?: string, token?: string) => {
-      const generation = epoch.current;
-      if (
-        !newLocalConfigRef.current &&
-        !detailRef.current?.session.capabilities.some(
-          (c) => c.id === "local_config",
-        )
-      )
-        return false;
-      let sid = selectedRef.current;
-      try {
-        if (!sid) sid = (await ensureSession()).id;
-        const identity = bootstrapRef.current;
-        if (!identity?.owner) return false;
-        const selected = await assistantApi.localFolder({
-          sessionId: sid,
-          expectedOwner: identity.owner,
-          expectedGeneration: identity.authorityGeneration,
-          folder,
-          token,
-        });
-        if (
-          !selected ||
-          generation !== epoch.current ||
-          sid !== selectedRef.current
-        )
-          return false;
-        setDraft([draftRef.current, selected].filter(Boolean).join("\n"));
-        return true;
-      } catch (reason) {
-        if (generation === epoch.current && sid === selectedRef.current)
-          showError(reason);
-        return false;
-      }
-    },
-    [setDraft, showError, ensureSession],
-  );
 
   const prepareAudio = useCallback(async () => {
     if (
@@ -2362,7 +2314,7 @@ export function useAssistant(enabled: boolean) {
           ...(recommended ? { modelId: recommended.id } : {}),
         });
         if (!saved) return false;
-        setLocalModes((old) => ({ ...old, [saved.id]: "autoConfig" }));
+        setLocalModes((old) => ({ ...old, [saved.id]: "default" }));
       }
       setLocalModelNotice(
         on
@@ -3551,19 +3503,15 @@ export function useAssistant(enabled: boolean) {
     setLocalConfig,
     startLocalConfig,
     localModelNotice,
-    localMode: selectedId
-      ? (localModes[selectedId] ?? "autoConfig")
-      : "autoConfig",
+    localMode: selectedId ? (localModes[selectedId] ?? "default") : "default",
     localApprovals: localApprovals.map((e) => e.data),
     localChanges,
     localPlan,
     localIntent,
     localWarning,
-    localCost,
     setLocalPermission,
     respondLocalApproval,
     restoreLocalChanges,
-    addLocalFolder,
     webSearchWaits,
     searchSkipped,
     search,

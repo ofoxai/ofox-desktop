@@ -1029,47 +1029,6 @@ pub async fn assistant_set_permission(
     host.set_permission(request).await
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LocalFolderRequest {
-    session_id: String,
-    expected_owner: String,
-    expected_generation: u64,
-    folder: Option<String>,
-    token: Option<String>,
-}
-#[tauri::command(rename_all = "camelCase")]
-pub async fn assistant_local_folder(
-    app: tauri::AppHandle,
-    host: Host<'_>,
-    request: LocalFolderRequest,
-) -> Result<Option<String>, String> {
-    let authority = DeleteRequest {
-        session_id: request.session_id,
-        expected_owner: request.expected_owner,
-        expected_generation: request.expected_generation,
-    };
-    if request.folder.is_some() && request.token.is_some() {
-        return Err("assistant_invalid_folder".into());
-    }
-    if let Some(token) = request.token {
-        return host
-            .add_dropped_local_folder(authority, token)
-            .await
-            .map(Some);
-    }
-    let folder = match request.folder {
-        Some(folder) => Some(folder),
-        None => super::config::pick_directory(app, None)
-            .await
-            .map_err(|_| "assistant_invalid_folder")?,
-    };
-    match folder {
-        Some(folder) => host.add_local_folder(authority, folder).await.map(Some),
-        None => Ok(None),
-    }
-}
-
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_local_changes(
     host: Host<'_>,
