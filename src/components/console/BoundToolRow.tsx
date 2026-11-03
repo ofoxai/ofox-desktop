@@ -300,7 +300,9 @@ export default function BoundToolRow({
         data-column="actions"
         className="flex items-center justify-end gap-1 pr-3 max-[720px]:col-start-3 max-[720px]:row-start-1"
       >
-        {onAssistant && (
+        {/* Help is offered where something is wrong: a config conflict, a
+        missing binding, an installation or detection problem. */}
+        {onAssistant && stateKey && (
           <Button
             variant="ghost"
             size="sm"

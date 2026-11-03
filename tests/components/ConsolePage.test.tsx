@@ -1248,6 +1248,42 @@ describe("Bound tool lifecycle", () => {
     expect(mocks.install).toHaveBeenCalledWith("codex");
   });
 
+  it("offers the assistant's help only on a row that has a problem", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    const original = mocks.invoke.getMockImplementation()!;
+    let status = "configured";
+    mocks.invoke.mockImplementation(
+      async (command: string, ...args: unknown[]) => {
+        if (command === "get_tool_binding_status")
+          return {
+            status,
+            message: null,
+            missingFiles: [],
+            modifiedFields:
+              status === "modified" ? ["~/.claude/settings.json · model"] : [],
+            envOverrides: [],
+          };
+        return original(command, ...args);
+      },
+    );
+    const view = render(<ConsolePage boundTools={["claude"]} />);
+    const healthy = await screen.findByRole("group", { name: "Claude Code" });
+    await waitFor(() =>
+      expect(within(healthy).getByRole("button", { name: "打开" })).toBeVisible(),
+    );
+    expect(
+      within(healthy).queryByRole("button", { name: "用不了？让助手看看" }),
+    ).toBeNull();
+    view.unmount();
+    status = "modified";
+    render(<ConsolePage boundTools={["claude"]} />);
+    const conflict = await screen.findByRole("group", { name: "Claude Code" });
+    expect(await within(conflict).findByText("配置冲突")).toBeVisible();
+    expect(
+      within(conflict).getByRole("button", { name: "用不了？让助手看看" }),
+    ).toBeVisible();
+  });
+
   it("offers explicit configuration recovery without automatically rebinding", async () => {
     localTools = [localTool("claude", "2.1.293")];
     const original = mocks.invoke.getMockImplementation()!;
