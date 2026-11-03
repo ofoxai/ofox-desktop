@@ -5120,6 +5120,14 @@
     "nextVersion": "次のバージョン",
     "versions": "バージョン",
     "versionPosition": "{{index}}/{{total}}",
+    "usageLines": {
+      "input": "入力トークン",
+      "cacheRead": "キャッシュヒット",
+      "cacheWrite": "キャッシュ書き込み",
+      "output": "出力トークン",
+      "search": "ウェブ検索 ×{{count}}",
+      "total": "今回の費用（推定）"
+    },
     "replyDetails": "返信の詳細",
     "replyDuration": "所要時間 {{duration}}",
     "attach": "ファイルを添付",

@@ -5120,6 +5120,14 @@
     "nextVersion": "下一个版本",
     "versions": "版本",
     "versionPosition": "{{index}}/{{total}}",
+    "usageLines": {
+      "input": "输入 Tokens",
+      "cacheRead": "缓存命中",
+      "cacheWrite": "缓存写入",
+      "output": "输出 Tokens",
+      "search": "联网搜索 ×{{count}}",
+      "total": "本轮费用（估算）"
+    },
     "replyDetails": "回复详情",
     "replyDuration": "耗时 {{duration}}",
     "attach": "添加文件",

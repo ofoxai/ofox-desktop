@@ -5120,6 +5120,14 @@
     "nextVersion": "Next version",
     "versions": "Versions",
     "versionPosition": "{{index}}/{{total}}",
+    "usageLines": {
+      "input": "Input tokens",
+      "cacheRead": "Cache hits",
+      "cacheWrite": "Cache writes",
+      "output": "Output tokens",
+      "search": "Web search ×{{count}}",
+      "total": "This reply (estimate)"
+    },
     "replyDetails": "Reply details",
     "replyDuration": "Took {{duration}}",
     "attach": "Attach files",

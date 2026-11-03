@@ -44,6 +44,73 @@ export function usageSummary(
   return parts.length ? parts.join(" · ") : null;
 }
 
+export type UsageLineKey = "input" | "cacheRead" | "cacheWrite" | "output";
+
+export interface UsageBreakdown {
+  /** Lines with tokens, in ofox-agent's order; `usd` null when unknown. */
+  lines: { key: UsageLineKey; tokens: number; usd: number | null }[];
+  search: { count: number; usd: number | null } | null;
+  /** The reply's estimated total; null when any request's cost is unknown. */
+  total: number | null;
+}
+
+/**
+ * A reply's cost line by line, like ofox-agent: each request's tokens priced
+ * at the price frozen when it was sent. Still an estimate, not the charge.
+ */
+export function usageBreakdown(usage: AssistantUsage): UsageBreakdown {
+  const total =
+    usage.usageCoverage !== "incomplete" &&
+    typeof usage.estimatedCostUsd === "string"
+      ? Number(usage.estimatedCostUsd)
+      : null;
+  const tokens: Record<UsageLineKey, number> = {
+    input: usage.inputTokens ?? 0,
+    cacheRead: usage.cacheReadTokens ?? 0,
+    cacheWrite: usage.cacheWriteTokens ?? 0,
+    output: usage.outputTokens ?? 0,
+  };
+  const priced = (key: UsageLineKey): number | null => {
+    if (total === null) return null;
+    const amounts = (usage.requests ?? [])
+      .map((request) => {
+        const cost = (request.usage as { cost?: Record<string, unknown> })
+          ?.cost;
+        return typeof cost?.[key] === "number" ? cost[key] : null;
+      })
+      .filter((amount): amount is number => amount !== null);
+    return amounts.length
+      ? amounts.reduce((sum, amount) => sum + amount, 0)
+      : null;
+  };
+  const searches = usage.searchCount ?? 0;
+  return {
+    lines: (["input", "cacheRead", "cacheWrite", "output"] as const)
+      .filter((key) => tokens[key] > 0)
+      .map((key) => ({ key, tokens: tokens[key], usd: priced(key) })),
+    search:
+      searches > 0
+        ? {
+            count: searches,
+            usd:
+              total !== null && typeof usage.searchCostUsd === "string"
+                ? Number(usage.searchCostUsd)
+                : null,
+          }
+        : null,
+    total,
+  };
+}
+
+/** Small amounts keep their digits, or a reply of a few mils shows as $0.00. */
+export function fmtUsd(usd: number | null | undefined): string {
+  if (usd == null || !Number.isFinite(usd)) return "—";
+  if (usd === 0) return "$0.00";
+  if (usd < 0.001) return `$${usd.toFixed(6)}`;
+  if (usd < 0.01) return `$${usd.toFixed(4)}`;
+  return `$${usd.toFixed(2)}`;
+}
+
 /**
  * How long a reply took, in ms: from when its run began to when it ended.
  * Null for a reply that has no end saved (older ones, or one still going).

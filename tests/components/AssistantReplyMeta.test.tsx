@@ -179,10 +179,44 @@ describe("a reply's usage", () => {
     const popover = await screen.findByRole("dialog", {
       name: "Reply details",
     });
-    expect(popover).toHaveTextContent(
-      "Input 3 · Output 312 tokens · Estimated cost <$0.001",
-    );
+    expect(popover).toHaveTextContent("This reply (estimate)$0.000400");
     expect(popover).toHaveTextContent("Took 4.2 sec");
+  });
+
+  it("lists each line with its tokens and cost, like ofox-agent", async () => {
+    render(
+      view({
+        modelId: "deepseek/deepseek-v4.1-flash",
+        completedAt: 2_000,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 42,
+          cacheReadTokens: 17_700,
+          searchCount: 1,
+          searchCostUsd: "0.008",
+          estimatedCostUsd: "0.008156",
+          requests: [
+            {
+              kind: "chat",
+              status: "completed",
+              usage: { cost: { output: 0.00005, cacheRead: 0.000106 } },
+            },
+          ],
+        },
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Reply details" }),
+    );
+    const popover = await screen.findByRole("dialog");
+    expect(popover).toHaveTextContent("deepseek/deepseek-v4.1-flash");
+    const row = (name: string) =>
+      within(popover).getByText(name).closest("[data-usage-line]")!;
+    expect(row("Output tokens")).toHaveTextContent("42$0.000050");
+    expect(row("Cache hits")).toHaveTextContent("17.7K$0.000106");
+    expect(row("Web search ×1")).toHaveTextContent("$0.0080");
+    expect(within(popover).queryByText("Input tokens")).toBeNull();
+    expect(popover).toHaveTextContent("This reply (estimate)$0.0082");
   });
 
   it("says the cost is unavailable when a request's cost is unknown", async () => {

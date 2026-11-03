@@ -327,9 +327,10 @@ describe("the line under a reply, on the page", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Reply details" }),
     );
-    expect(await screen.findByRole("dialog")).toHaveTextContent(
-      "Input 3 · Output 312 tokens · Estimated cost <$0.001",
-    );
+    const details = await screen.findByRole("dialog");
+    expect(details).toHaveTextContent("Input tokens3");
+    expect(details).toHaveTextContent("Output tokens312");
+    expect(details).toHaveTextContent("This reply (estimate)");
   });
 });
 
