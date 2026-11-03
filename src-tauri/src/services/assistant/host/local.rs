@@ -273,20 +273,42 @@ impl AssistantHost {
             .map(PathBuf::from);
         let checked = requested.as_ref().map(|p| scope.check(p)).transpose()?;
         let access = checked.as_ref().map_or(Access::Inside, |p| p.access);
+        let shell = matches!(tool.name, "bash" | "powershell");
+        let command = args["command"].as_str().unwrap_or("");
+        let read_only = shell && commands::read_only(command, cfg!(windows));
+        // The bundled skill is trusted instructions: never rewritten by a run.
+        let bundled = matches!(tool.name, "write" | "edit")
+            && checked.as_ref().is_some_and(|p| {
+                paths
+                    .skill
+                    .parent()
+                    .is_some_and(|dir| p.path.starts_with(dir))
+            });
+        let mut tool = tool;
+        if tool.name == "rebind_tool" {
+            let selected = registry::supported_tool(args["tool"].as_str().unwrap_or(""))?;
+            tool.irreversible = !self.env.local_key_cached(selected);
+        }
+        // An allow-listed command reads no file, and metadata reveals no
+        // content: neither needs the path to be in scope.
+        let in_scope = access == Access::Inside || read_only || tool.name == "stat";
+        let forbidden =
+            access == Access::Forbidden || (shell && commands::forbidden(command)) || bundled;
+        // "Allow for this session" covers one tool on one path; commands and
+        // structured operations stay bound to their exact arguments.
+        let grant = match (tool.name, &checked) {
+            ("read" | "ls" | "find" | "grep" | "write" | "edit", Some(path)) => {
+                format!("{}:{}", tool.name, path.path.display())
+            }
+            _ => signature.to_string(),
+        };
         self.authorize_local(
             run,
             tool,
             args,
-            signature,
+            &grant,
             call_id,
-            tool.operation(
-                access == Access::Inside,
-                access == Access::Forbidden
-                    || (matches!(tool.name, "bash" | "powershell")
-                        && commands::forbidden(args["command"].as_str().unwrap_or(""))),
-                matches!(tool.name, "bash" | "powershell")
-                    && commands::read_only(args["command"].as_str().unwrap_or(""), cfg!(windows)),
-            ),
+            tool.operation(in_scope, forbidden, read_only),
         )
         .await?;
         self.validate_run(run)?;

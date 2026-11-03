@@ -101,6 +101,11 @@ pub trait Environment: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Value, String>> {
         Box::pin(async { Ok(json!({"status":"unknown"})) })
     }
+    /// Whether the tool's Ofox key is already stored locally. Rebinding without
+    /// one issues a new account key, which no journal restore can undo.
+    fn local_key_cached(&self, _tool: crate::app_config::BindableTool) -> bool {
+        false
+    }
 
     /// Blocking proxy-aware audio transport; tests inject a direct local client.
     fn audio_client(&self) -> Result<reqwest::Client, String> {
@@ -1694,13 +1699,7 @@ impl AssistantHost {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
                 let result = self.dispatch_tool(control, &value["params"]).await;
-                let reply = frame(&match result {
-                    Ok(result) => json!({"id":value["id"],"result":result}),
-                    Err(code) => {
-                        let code = local::tool_failure(&code, &self.known_keys());
-                        json!({"id":value["id"],"error":{"code":code,"message":code}})
-                    }
-                })?;
+                let reply = tool_reply(&value["id"], result, &self.known_keys())?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {
                 attempt.answered = true;
@@ -2140,6 +2139,32 @@ pub(super) fn frame(value: &Value) -> Result<Vec<u8>, String> {
     Ok(line)
 }
 
+/// The runtime drops input lines over 1 MiB, so a larger tool result would
+/// never settle its pending call; it becomes an error the model can act on.
+const RUNTIME_LINE_LIMIT: usize = 1024 * 1024;
+
+pub(super) fn tool_reply(
+    id: &Value,
+    result: Result<Value, String>,
+    known_keys: &[String],
+) -> Result<Vec<u8>, String> {
+    let error = |code: &str| {
+        let code = local::tool_failure(code, known_keys);
+        frame(&json!({"id":id,"error":{"code":code,"message":code}}))
+    };
+    match result {
+        Ok(result) => {
+            let reply = frame(&json!({"id":id,"result":result}))?;
+            if reply.len() > RUNTIME_LINE_LIMIT {
+                error("assistant_result_too_large")
+            } else {
+                Ok(reply)
+            }
+        }
+        Err(code) => error(&code),
+    }
+}
+
 pub(super) async fn write_line<W: AsyncWrite + Unpin>(
     input: &mut W,
     line: &[u8],
@@ -2421,6 +2446,129 @@ mod tests {
             .await
             .is_err());
         host.release_run(&run);
+    }
+
+    /// A local-config session with one registered run in the default mode.
+    fn local_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create_with_capabilities(
+                "test/model",
+                false,
+                "ofox",
+                &[super::super::capabilities::CapabilityRef {
+                    id: "local_config".into(),
+                    version: 1,
+                }],
+            )
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        (sid, run)
+    }
+
+    fn approvals(env: &FixedEnvironment) -> Vec<Value> {
+        env.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e.r#type == "approval")
+            .map(|e| e.data.clone())
+            .collect()
+    }
+
+    /// Dispatches one call and answers the approval it raises with `choice`.
+    async fn dispatch_answering(
+        host: &Arc<AssistantHost>,
+        env: &Arc<FixedEnvironment>,
+        run: &Arc<RunControl>,
+        params: Value,
+        choice: &str,
+    ) -> (Value, Result<Value, String>) {
+        let seen = approvals(env).len();
+        let task = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            async move { host.dispatch_tool(&run, &params).await }
+        });
+        let approval = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(data) = approvals(env).get(seen) {
+                    break data.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        host.respond_approval(serde_json::from_value(json!({"sessionId":run.session_id,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval["approvalId"],"choice":choice,"expectedOwner":identity().owner,"expectedGeneration":host.generation()})).unwrap())
+            .await
+            .unwrap();
+        (approval, task.await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn local_read_only_commands_from_home_run_without_approval() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let (name, command) = if cfg!(windows) {
+            ("powershell", "Get-Location")
+        } else {
+            ("bash", "pwd")
+        };
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"pwd-1","name":name,"args":{"command":command,"folder":env.config,"timeout":30}});
+        let result = host.dispatch_tool(&run, &params).await.unwrap();
+        assert_eq!(result["exitCode"], 0, "{result}");
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_session_grant_covers_the_same_tool_on_the_same_path() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let file = env.config.join("outside.txt");
+        std::fs::write(&file, "outside").unwrap();
+        let call = |id: &str, name: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":{"path":file}});
+        // Pi checks a file before reading it; the check alone asks nothing.
+        let stat = host.dispatch_tool(&run, &call("stat-1", "stat")).await;
+        assert_eq!(stat.unwrap()["exists"], true);
+        assert!(approvals(&env).is_empty());
+        let (_, read) =
+            dispatch_answering(&host, &env, &run, call("read-1", "read"), "session").await;
+        assert_eq!(read.unwrap(), json!("outside"));
+        let again = host.dispatch_tool(&run, &call("read-2", "read")).await;
+        assert_eq!(again.unwrap(), json!("outside"));
+        assert_eq!(approvals(&env).len(), 1);
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn local_rebind_that_may_issue_a_new_key_always_asks_without_a_session_grant() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"rebind-1","name":"rebind_tool","args":{"tool":"codex"}});
+        let (approval, result) = dispatch_answering(&host, &env, &run, params, "deny").await;
+        assert_eq!(approval["allowSession"], false);
+        assert_eq!(result.unwrap_err(), "assistant_operation_denied");
+        host.release_run(&run);
+    }
+
+    #[test]
+    fn local_tool_replies_over_the_runtime_line_limit_become_an_error() {
+        let id = json!("tool-1");
+        let small = super::tool_reply(&id, Ok(json!("short")), &[]).unwrap();
+        assert!(String::from_utf8(small).unwrap().contains("short"));
+        let large = super::tool_reply(&id, Ok(json!("中".repeat(400_000))), &[]).unwrap();
+        assert!(large.len() < 1024);
+        let text = String::from_utf8(large).unwrap();
+        assert!(text.contains("assistant_result_too_large"), "{text}");
+        assert!(text.contains("tool-1"));
     }
 
     #[tokio::test]

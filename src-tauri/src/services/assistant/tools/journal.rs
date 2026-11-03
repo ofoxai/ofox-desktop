@@ -15,6 +15,9 @@ const FAILED: &str = "assistant_journal_unavailable";
 const CONFLICT: &str = "assistant_restore_conflict";
 const MAX_FILE: u64 = 2 * 1024 * 1024;
 const MAX_JOURNAL: u64 = 32 * 1024 * 1024;
+/// Changes not yet restored; restored history is dropped past `MAX_ENTRIES`.
+const MAX_PENDING: usize = 512;
+const MAX_ENTRIES: usize = 1024;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FileState {
@@ -182,7 +185,7 @@ impl Journal {
                     .map_err(|_| FAILED)?,
             );
             let ledger: Ledger = serde_json::from_slice(&plaintext).map_err(|_| FAILED)?;
-            if ledger.version != 1 || ledger.entries.len() > 512 {
+            if ledger.version != 1 || ledger.entries.len() > MAX_ENTRIES {
                 return Err(FAILED.into());
             }
             ledger
@@ -232,19 +235,15 @@ impl Journal {
         paths: &[PathBuf],
         state: Value,
     ) -> Result<String, String> {
-        if self.ledger.restoring || self.ledger.entries.len() >= 512 || paths.len() > 64 {
+        if self.ledger.restoring || paths.len() > 64 {
             return Err(FAILED.into());
         }
-        if self
-            .ledger
-            .entries
-            .iter()
-            .any(|e| !e.restored && e.after.is_none())
-        {
-            return Err("unknown_outcome".into());
+        self.settle(|_| Err(FAILED.into()));
+        if self.ledger.entries.iter().filter(|e| !e.restored).count() >= MAX_PENDING {
+            return Err(FAILED.into());
         }
         let id = uuid::Uuid::new_v4().to_string();
-        let before = paths
+        let before: Vec<FileState> = paths
             .iter()
             .map(|p| {
                 if fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
@@ -253,6 +252,20 @@ impl Journal {
                 FileState::capture(&super::scope::resolve(p)?)
             })
             .collect::<Result<_, _>>()?;
+        // An earlier change whose outcome is unknown blocks only the files and
+        // state it touched; other repairs in the conversation can continue.
+        let scope = state["scope"].as_str();
+        if self.unresolved().any(|e| {
+            e.before
+                .iter()
+                .any(|f| before.iter().any(|b| b.path == f.path))
+                || (scope.is_some() && e.before_state["scope"].as_str() == scope)
+        }) {
+            return Err("unknown_outcome".into());
+        }
+        if self.ledger.entries.len() >= MAX_ENTRIES {
+            self.ledger.entries.retain(|e| !e.restored);
+        }
         self.ledger.entries.push(Entry {
             id: id.clone(),
             operation: operation.into(),
@@ -264,6 +277,38 @@ impl Journal {
         });
         self.save()?;
         Ok(id)
+    }
+    /// Changes whose commit never happened (a crash or a failed final save).
+    fn unresolved(&self) -> impl Iterator<Item = &Entry> {
+        self.ledger
+            .entries
+            .iter()
+            .filter(|e| !e.restored && e.after.is_none())
+    }
+    /// An unfinished change whose files (and state, when it can be read) still
+    /// match the snapshot taken before it is known to have changed nothing.
+    fn settle(&mut self, read_state: impl Fn(&Value) -> Result<Value, String>) {
+        for entry in self
+            .ledger
+            .entries
+            .iter_mut()
+            .filter(|e| !e.restored && e.after.is_none())
+        {
+            let digests: Option<Vec<String>> = entry
+                .before
+                .iter()
+                .map(|f| {
+                    let now = FileState::capture(&f.path).and_then(|s| s.digest()).ok()?;
+                    (f.digest().ok()? == now).then_some(now)
+                })
+                .collect();
+            let state_unchanged = entry.before_state.is_null()
+                || read_state(&entry.before_state).is_ok_and(|now| now == entry.before_state);
+            if let (Some(digests), true) = (digests, state_unchanged) {
+                entry.after = Some(digests);
+                entry.after_state = Some(entry.before_state.clone());
+            }
+        }
     }
     pub fn finish(&mut self, id: &str, state: Value) -> Result<(), String> {
         let entry = self
@@ -307,10 +352,12 @@ impl Journal {
     /// Validate the complete reverse chain before changing any file. Repeated
     /// writes to a path are collapsed to its first original, so partial restore
     /// can resume safely after restart once the restoring marker was saved.
+    /// Changes with an unknown outcome are never replayed; they stay listed for
+    /// the user, and a later change to the same file surfaces as a conflict.
     fn restore_plan(&self) -> Result<BTreeMap<PathBuf, FileState>, String> {
         let mut first = BTreeMap::new();
         let mut expected = BTreeMap::new();
-        for entry in self.ledger.entries.iter().filter(|e| !e.restored) {
+        for entry in self.restorable() {
             let after = entry.after.as_ref().ok_or("unknown_outcome")?;
             if after.len() != entry.before.len() {
                 return Err(FAILED.into());
@@ -335,13 +382,15 @@ impl Journal {
         }
         Ok(first)
     }
-    pub fn restore_files(&mut self) -> Result<(), String> {
-        if self
-            .ledger
+    fn restorable(&self) -> impl Iterator<Item = &Entry> {
+        self.ledger
             .entries
             .iter()
-            .any(|e| !e.restored && !e.before_state.is_null())
-        {
+            .filter(|e| !e.restored && e.after.is_some())
+    }
+    pub fn restore_files(&mut self) -> Result<(), String> {
+        self.settle(|_| Err(FAILED.into()));
+        if self.restorable().any(|e| !e.before_state.is_null()) {
             return Err(FAILED.into());
         }
         self.restore_with(|_| Ok(Value::Null), |_, _| Ok(()))
@@ -351,15 +400,11 @@ impl Journal {
         read_state: impl Fn(&Value) -> Result<Value, String>,
         restore_state: impl Fn(&Value, &Value) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.settle(&read_state);
         let files = self.restore_plan()?;
         // Extra state is keyed by its scope field (tool-specific DB/settings).
         let mut states: BTreeMap<String, (Value, Value)> = BTreeMap::new();
-        for entry in self
-            .ledger
-            .entries
-            .iter()
-            .filter(|e| !e.restored && !e.before_state.is_null())
-        {
+        for entry in self.restorable().filter(|e| !e.before_state.is_null()) {
             let scope = entry.before_state["scope"]
                 .as_str()
                 .ok_or(FAILED)?
@@ -393,7 +438,7 @@ impl Journal {
                 restore_state(before, after)?;
             }
         }
-        for entry in &mut self.ledger.entries {
+        for entry in self.ledger.entries.iter_mut().filter(|e| e.after.is_some()) {
             entry.restored = true;
         }
         self.ledger.restoring = false;
@@ -597,14 +642,81 @@ mod tests {
         assert!(Journal::open(&directory, &[1; 32], "context").is_err());
     }
     #[test]
-    fn incomplete_journal_entry_is_not_automatically_replayed_or_restored() {
+    fn incomplete_journal_entry_is_not_replayed_and_blocks_only_its_own_files() {
         let root = tempfile::tempdir().unwrap();
-        let file = root.path().join("a");
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        std::fs::write(&a, "original").unwrap();
         let directory = root.path().join("changes");
         let mut journal = Journal::open(&directory, &[1; 32], "context").unwrap();
         journal
-            .prepare("write", &[file], serde_json::Value::Null)
+            .prepare("write", std::slice::from_ref(&a), Value::Null)
             .unwrap();
-        assert_eq!(journal.restore_files().unwrap_err(), "unknown_outcome");
+        // The process stops between the write and its journal commit.
+        std::fs::write(&a, "partial").unwrap();
+        drop(journal);
+        let mut journal = Journal::open(&directory, &[1; 32], "context").unwrap();
+        assert_eq!(
+            journal
+                .prepare("write", std::slice::from_ref(&a), Value::Null)
+                .unwrap_err(),
+            "unknown_outcome"
+        );
+        let id = journal
+            .prepare("write", std::slice::from_ref(&b), Value::Null)
+            .unwrap();
+        std::fs::write(&b, "new").unwrap();
+        journal.finish(&id, Value::Null).unwrap();
+        journal.restore_files().unwrap();
+        assert!(!b.exists());
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "partial");
+        let unknown: Vec<_> = journal
+            .changes()
+            .into_iter()
+            .filter(|c| !c.outcome_known)
+            .collect();
+        assert_eq!(unknown.len(), 1);
+        assert!(!unknown[0].restored);
+    }
+
+    #[test]
+    fn incomplete_journal_entry_whose_files_never_changed_settles_as_no_change() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let directory = root.path().join("changes");
+        let mut journal = Journal::open(&directory, &[1; 32], "context").unwrap();
+        journal
+            .prepare("write", std::slice::from_ref(&a), Value::Null)
+            .unwrap();
+        drop(journal);
+        let mut journal = Journal::open(&directory, &[1; 32], "context").unwrap();
+        let id = journal
+            .prepare("write", std::slice::from_ref(&a), Value::Null)
+            .unwrap();
+        std::fs::write(&a, "written").unwrap();
+        journal.finish(&id, Value::Null).unwrap();
+        journal.restore_files().unwrap();
+        assert!(!a.exists());
+        assert!(journal
+            .changes()
+            .iter()
+            .all(|c| c.restored && c.outcome_known));
+    }
+
+    #[test]
+    fn restored_entries_do_not_count_against_the_pending_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("changes");
+        let mut journal = Journal::open(&directory, &[1; 32], "context").unwrap();
+        for round in 0..(MAX_ENTRIES + 100) {
+            let id = journal.prepare("write", &[], Value::Null).unwrap();
+            journal.finish(&id, Value::Null).unwrap();
+            if round % 256 == 255 {
+                journal.restore_files().unwrap();
+            }
+        }
+        assert!(journal.changes().len() <= MAX_ENTRIES);
+        drop(journal);
+        Journal::open(&directory, &[1; 32], "context").unwrap();
     }
 }

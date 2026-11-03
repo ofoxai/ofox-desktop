@@ -167,18 +167,25 @@ pub fn grep(
         .map_err(|_| "assistant_invalid_tool")?;
     let root = checked(scope, root, outside)?;
     let mut matches = Vec::new();
+    let mut bytes = 0;
     for path in walk(scope, &root, outside)? {
         let Ok(text) = read(scope, &path, outside) else {
             continue;
         };
         for (line, text) in text.lines().enumerate() {
             if pattern.is_match(text) {
-                matches.push(format!(
+                let found = format!(
                     "{}:{}:{}",
                     path.strip_prefix(&root).unwrap_or(&path).display(),
                     line + 1,
                     text.chars().take(1000).collect::<String>()
-                ));
+                );
+                // Keep the reply well inside the runtime's line limit.
+                bytes += found.len();
+                if bytes > GREP_BYTES {
+                    return Ok(matches);
+                }
+                matches.push(found);
                 if matches.len() >= limit.min(500) {
                     return Ok(matches);
                 }
@@ -187,6 +194,7 @@ pub fn grep(
     }
     Ok(matches)
 }
+const GREP_BYTES: usize = 256 * 1024;
 
 #[cfg(test)]
 mod tests {
@@ -226,5 +234,16 @@ mod tests {
                 .iter()
                 .any(|s| s == "link.txt"));
         }
+    }
+    #[test]
+    fn local_grep_stops_at_a_byte_budget_for_long_wide_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let line = format!("needle {}\n", "中".repeat(990));
+        std::fs::write(root.join("notes.md"), line.repeat(120)).unwrap();
+        let scope = Scope::new(root.into(), vec![root.into()], vec![]).unwrap();
+        let matches = grep(&scope, root, "needle", 500, false).unwrap();
+        assert!(!matches.is_empty());
+        assert!(matches.iter().map(String::len).sum::<usize>() <= GREP_BYTES);
     }
 }

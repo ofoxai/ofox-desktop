@@ -47,23 +47,24 @@ pub async fn mutate(
     let auth = app.state::<super::ofox_auth::OfoxAuthState>();
     match name {
         "install_tool" => {
-            return super::install_tool::install_tool(app.clone(), tool.as_str().into(), None, None)
-                .await
-                .map(|code| json!({"started":true,"code":code,"reversible":false}))
-                .map_err(|_| "unknown_outcome".into())
+            let result =
+                super::install_tool::install_tool(app.clone(), tool.as_str().into(), None, None)
+                    .await
+                    .map(|code| json!({"started":true,"code":code}));
+            return lifecycle_result(name, result);
         }
         "update_tool" => {
-            return super::tool_update::update_tool(
+            let result = super::tool_update::update_tool(
                 app.clone(),
                 tool.as_str().into(),
                 operation.into(),
             )
             .await
-            .and_then(|v| serde_json::to_value(v).map_err(|_| "unknown_outcome".into()))
-            .map_err(|_| "unknown_outcome".into())
+            .and_then(|v| serde_json::to_value(v).map_err(|_| "unknown_outcome".into()));
+            return lifecycle_result(name, result);
         }
         "uninstall_tool" => {
-            return super::uninstall_tool::uninstall_tool(
+            let result = super::uninstall_tool::uninstall_tool(
                 app.clone(),
                 state,
                 auth,
@@ -72,8 +73,8 @@ pub async fn mutate(
                 None,
             )
             .await
-            .and_then(|v| serde_json::to_value(v).map_err(|_| "unknown_outcome".into()))
-            .map_err(|_| "unknown_outcome".into())
+            .and_then(|v| serde_json::to_value(v).map_err(|_| "unknown_outcome".into()));
+            return lifecycle_result(name, result);
         }
         _ => {}
     }
@@ -200,4 +201,52 @@ pub async fn mutate(
     }
     super::model_selection::notify(app, vec![tool.as_str().into()]);
     Ok(json!({"changed":true}))
+}
+
+/// Installing or updating changes what runs in the problem folder, so the
+/// task must verify there again; removal is the user's intent, not a repair.
+/// A refusal before any work keeps its code; any other failure may have
+/// changed the tool part-way and is reported as an unknown outcome.
+fn lifecycle_result(name: &str, result: Result<Value, String>) -> Result<Value, String> {
+    match result {
+        Ok(mut value) => {
+            value["reversible"] = json!(false);
+            if name != "uninstall_tool" {
+                value["changed"] = json!(true);
+                value["requiresVerification"] = json!(true);
+            }
+            Ok(value)
+        }
+        Err(error) if error == super::tool_update::TOOL_BUSY => Err("assistant_tool_busy".into()),
+        Err(_) => Err("unknown_outcome".into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_install_and_update_require_verification_and_busy_is_a_definite_refusal() {
+        for name in ["install_tool", "update_tool"] {
+            let value = lifecycle_result(name, Ok(json!({"started":true}))).unwrap();
+            assert_eq!(value["changed"], true, "{name}");
+            assert_eq!(value["requiresVerification"], true, "{name}");
+            assert_eq!(value["reversible"], false, "{name}");
+        }
+        let removed = lifecycle_result("uninstall_tool", Ok(json!({}))).unwrap();
+        assert!(removed.get("requiresVerification").is_none());
+        assert_eq!(
+            lifecycle_result(
+                "update_tool",
+                Err(super::super::tool_update::TOOL_BUSY.into())
+            )
+            .unwrap_err(),
+            "assistant_tool_busy"
+        );
+        assert_eq!(
+            lifecycle_result("update_tool", Err("npm exited with 1".into())).unwrap_err(),
+            "unknown_outcome"
+        );
+    }
 }

@@ -595,6 +595,12 @@ impl Environment for AssistantEnvironment {
             serde_json::to_value(status).map_err(|_| "assistant_local_unavailable".into())
         })
     }
+    fn local_key_cached(&self, tool: crate::app_config::BindableTool) -> bool {
+        // A storage error counts as missing: the rebind then asks first.
+        crate::ofox_secret::default_store()
+            .load(crate::ofox_secret::Slot::ApiKey { tool })
+            .is_ok_and(|key| key.is_some())
+    }
 
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
         Box::pin(async move {

@@ -14,10 +14,31 @@ pub struct CheckedPath {
     pub access: Access,
 }
 
+/// Folder or file names inside a tool's configuration directory that hold the
+/// tool's own conversations, histories or logs rather than its configuration.
+const HISTORY: &[&str] = &[
+    "projects",
+    "sessions",
+    "archived_sessions",
+    "history",
+    "history.jsonl",
+    "todos",
+    "shell-snapshots",
+    "file-history",
+    "transcripts",
+    "conversations",
+    "chats",
+    "tmp",
+    "logs",
+    "log",
+];
+
 #[derive(Clone, Debug)]
 pub struct Scope {
     roots: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    /// Configuration roots whose history folders stay outside the automatic scope.
+    history_roots: Vec<PathBuf>,
 }
 
 impl Scope {
@@ -26,7 +47,25 @@ impl Scope {
         Ok(Self {
             roots: roots.iter().map(|p| resolve(p)).collect::<Result<_, _>>()?,
             files: files.iter().map(|p| resolve(p)).collect::<Result<_, _>>()?,
+            history_roots: Vec::new(),
         })
+    }
+
+    /// Other tools' transcripts and logs need confirmation even though their
+    /// configuration directory is read automatically.
+    pub fn with_history_roots(mut self, roots: &[PathBuf]) -> Result<Self, String> {
+        self.history_roots = roots.iter().map(|p| resolve(p)).collect::<Result<_, _>>()?;
+        Ok(self)
+    }
+
+    fn history(&self, root: &Path, path: &Path) -> bool {
+        self.history_roots.iter().any(|r| r == root)
+            && path.strip_prefix(root).is_ok_and(|relative| {
+                relative.components().any(|c| {
+                    let name = c.as_os_str().to_string_lossy().to_lowercase();
+                    HISTORY.contains(&name.as_str())
+                })
+            })
     }
 
     pub fn add_folder(&mut self, folder: &Path) -> Result<PathBuf, String> {
@@ -50,7 +89,11 @@ impl Scope {
         let path = resolve(path)?;
         let access = if sensitive_path(&path.to_string_lossy()) {
             Access::Forbidden
-        } else if self.roots.iter().any(|root| path.starts_with(root)) || self.files.contains(&path)
+        } else if self
+            .roots
+            .iter()
+            .any(|root| path.starts_with(root) && !self.history(root, &path))
+            || self.files.contains(&path)
         {
             Access::Inside
         } else {
@@ -215,6 +258,38 @@ mod tests {
             );
         }
         assert!(scope.check(std::path::Path::new("relative")).is_err());
+    }
+
+    #[test]
+    fn local_scope_history_inside_tool_config_roots_needs_confirmation() {
+        let tmp = Temp::new();
+        let home = tmp.0.clone();
+        let config = home.join(".claude");
+        let project = home.join("project");
+        for dir in [
+            config.join("projects/-Users-me-app"),
+            config.join("agents/main/sessions"),
+            project.join("sessions"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let mut scope = Scope::new(home.clone(), vec![config.clone()], vec![])
+            .unwrap()
+            .with_history_roots(std::slice::from_ref(&config))
+            .unwrap();
+        scope.add_folder(&project).unwrap();
+        for (path, access) in [
+            (config.join("settings.json"), Access::Inside),
+            (
+                config.join("projects/-Users-me-app/1.jsonl"),
+                Access::Outside,
+            ),
+            (config.join("agents/main/sessions/a.jsonl"), Access::Outside),
+            (config.join("history.jsonl"), Access::Outside),
+            (project.join("sessions/notes.md"), Access::Inside),
+        ] {
+            assert_eq!(scope.check(&path).unwrap().access, access, "{path:?}");
+        }
     }
 
     #[test]

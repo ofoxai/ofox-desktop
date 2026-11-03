@@ -14,15 +14,16 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 const UPDATE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 static BUSY: Lazy<Mutex<HashSet<String>>> = Lazy::new(|| Mutex::new(HashSet::new()));
 
+pub(crate) const TOOL_BUSY: &str =
+    "An installation, update or uninstall is already running for this tool";
+
 /// Shared with the installer so two entry points cannot mutate one tool together.
 pub(crate) struct ToolOperationGuard(String);
 impl ToolOperationGuard {
     pub(crate) fn acquire(tool: &str) -> Result<Self, String> {
         let mut busy = BUSY.lock().map_err(|e| e.to_string())?;
         if !busy.insert(tool.to_string()) {
-            return Err(
-                "An installation, update or uninstall is already running for this tool".into(),
-            );
+            return Err(TOOL_BUSY.into());
         }
         Ok(Self(tool.to_string()))
     }
