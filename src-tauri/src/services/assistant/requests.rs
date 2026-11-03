@@ -588,17 +588,25 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
-        let local_config = if super::capabilities::enabled(&record.session.capabilities) {
-            let paths = self.env.local_paths().await?;
-            Some(
-                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)}),
-            )
+        // Local configuration where this computer offers it: a conversation
+        // still chats when its paths are unavailable.
+        let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
+            match self.env.local_paths().await {
+                Ok(paths) => Some(paths),
+                Err(error) => {
+                    log::warn!("[Assistant] local configuration is unavailable: {error}");
+                    None
+                }
+            }
         } else {
             None
         };
+        let local_config = local_paths.map(|paths| {
+            json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
+        });
         self.remember_key(&key);
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
-        control.local_enabled = super::capabilities::enabled(&record.session.capabilities);
+        control.local_enabled = local_config.is_some();
         if media_params.is_some() {
             control.media = Some(super::media_tools::host::MediaRun::new(
                 record.session.media.clone(),

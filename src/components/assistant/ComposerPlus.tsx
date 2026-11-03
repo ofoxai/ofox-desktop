@@ -1,13 +1,12 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
   AudioLines,
+  ChevronDown,
   Clapperboard,
-  Globe,
   ImageIcon,
   Paperclip,
   Plus,
-  Wrench,
   X,
 } from "lucide-react";
 import type {
@@ -28,7 +27,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
-import { cn } from "@/lib/utils";
 import {
   MediaDefaultsFields,
   generationModel,
@@ -48,7 +46,7 @@ const ICONS: Record<AssistantGenerationKind, typeof ImageIcon> = {
   speech: AudioLines,
 };
 
-/** The chip's short summary of the parameters that are not the default. */
+/** The parameters that are not the default, for the chip's tooltip. */
 function summary(
   kind: AssistantGenerationKind,
   value: MediaFieldsValue | undefined,
@@ -83,9 +81,9 @@ function summary(
 }
 
 /**
- * The composer's "+": add files, ask for a generation (it becomes a chip
- * that holds the model and parameters), turn on web search or local
- * configuration. What is on shows as a chip beside it, removed with ×.
+ * The composer's "+": add files, or ask for a generation, which becomes a
+ * chip beside it. A chip names only what it makes; its model and parameters
+ * are in its tooltip and the panel it opens. × removes it.
  */
 export function ComposerPlus({
   models,
@@ -93,15 +91,6 @@ export function ComposerPlus({
   onMedia,
   canAttach,
   onAttach,
-  webSearch,
-  webSearchDisabled,
-  webSearchLit = webSearch,
-  webSearchNote,
-  onWebSearch,
-  localConfig,
-  localDisabled,
-  onLocalConfig,
-  localControl,
   disabled,
 }: {
   models: ReadonlyArray<AssistantModel>;
@@ -109,18 +98,6 @@ export function ComposerPlus({
   onMedia: (media: AssistantMediaDefaults) => void;
   canAttach: boolean;
   onAttach: () => void;
-  webSearch: boolean;
-  webSearchDisabled: boolean;
-  /** On and offered: a search will happen. */
-  webSearchLit?: boolean;
-  /** What a search may cost, or why it is unavailable. */
-  webSearchNote?: string | null;
-  onWebSearch: (on: boolean) => void;
-  localConfig: boolean;
-  localDisabled: boolean;
-  onLocalConfig: (on: boolean) => void;
-  /** The local configuration chip with its permission menu. */
-  localControl: ReactNode;
   disabled: boolean;
 }) {
   const { t } = useTranslation();
@@ -150,7 +127,7 @@ export function ComposerPlus({
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="start"
-          className="w-56"
+          className="w-52"
           onCloseAutoFocus={(event) => {
             if (focusMoves.current) event.preventDefault();
             focusMoves.current = false;
@@ -183,45 +160,16 @@ export function ComposerPlus({
               </DropdownMenuItem>
             );
           })}
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            disabled={webSearchDisabled}
-            onSelect={() => onWebSearch(!webSearch)}
-            className="flex-wrap"
-          >
-            <Globe aria-hidden className="h-3.5 w-3.5" />
-            {t("assistant.webSearch")}
-            {webSearch && (
-              <span className="ml-auto text-note text-brand-ink">
-                {t("assistant.generation.on")}
-              </span>
-            )}
-            {webSearchNote && (
-              <span className="w-full pl-5 text-note text-ink-muted">
-                {webSearchNote}
-              </span>
-            )}
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            disabled={localDisabled}
-            onSelect={() => onLocalConfig(!localConfig)}
-          >
-            <Wrench aria-hidden className="h-3.5 w-3.5" />
-            {t("assistant.local.title")}
-            {localConfig && (
-              <span className="ml-auto text-note text-brand-ink">
-                {t("assistant.generation.on")}
-              </span>
-            )}
-          </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
       {hints.map((kind) => {
         const Icon = ICONS[kind];
         const value = media[kind];
         const model = generationModel(models, kind, value?.model);
-        const detail = summary(kind, value, t);
         const name = t(`assistant.generation.kinds.${kind}`);
+        const detail = [model?.name, summary(kind, value, t)]
+          .filter(Boolean)
+          .join(" · ");
         return (
           <span
             key={kind}
@@ -236,14 +184,12 @@ export function ComposerPlus({
                   variant="ghost"
                   disabled={disabled}
                   aria-label={t("assistant.generation.chipLabel", { name })}
-                  className="h-7 max-w-[280px] px-2 text-brand-ink hover:bg-transparent hover:text-ink"
+                  title={detail || undefined}
+                  className="h-7 gap-1 px-2 text-brand-ink hover:bg-transparent hover:text-ink"
                 >
                   <Icon aria-hidden className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">
-                    {[name, model?.shortName || model?.name, detail]
-                      .filter(Boolean)
-                      .join(" · ")}
-                  </span>
+                  {name}
+                  <ChevronDown aria-hidden className="h-3 w-3 opacity-60" />
                 </Button>
               </PopoverTrigger>
               <PopoverContent align="start" className="w-[420px] max-w-[90vw]">
@@ -271,33 +217,6 @@ export function ComposerPlus({
           </span>
         );
       })}
-      {webSearch && (
-        <span
-          data-testid="web-search-chip"
-          title={webSearchNote ?? undefined}
-          className={cn(
-            "inline-flex shrink-0 items-center rounded-ctl px-2 text-ctl",
-            webSearchLit
-              ? "bg-brand-soft text-brand-ink"
-              : "bg-pill text-ink-2",
-          )}
-        >
-          <Globe aria-hidden className="mr-1 h-3.5 w-3.5" />
-          {t("assistant.webSearch")}
-          <button
-            type="button"
-            aria-label={t("assistant.generation.remove", {
-              name: t("assistant.webSearch"),
-            })}
-            disabled={disabled}
-            className="ml-1 rounded-ctl p-0.5 hover:text-ink disabled:opacity-50"
-            onClick={() => onWebSearch(false)}
-          >
-            <X aria-hidden className="h-3 w-3" />
-          </button>
-        </span>
-      )}
-      {localConfig && localControl}
     </div>
   );
 }

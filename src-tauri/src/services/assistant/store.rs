@@ -310,7 +310,7 @@ impl AssistantStore {
     ) -> Result<Detail, String> {
         super::capabilities::validate(assistant_id, capabilities)?;
         let at = now();
-        let record = SessionRecord {
+        let mut record = SessionRecord {
             session: Session {
                 assistant_id: assistant_id.into(),
                 capabilities: capabilities.to_vec(),
@@ -339,6 +339,7 @@ impl AssistantStore {
             operations: vec![],
             inherited_usage: vec![],
         };
+        derive_local_config(&mut record.session);
         let directory = private_subdir(&self.ensure_root()?, &record.session.id)?;
         let path = directory.join(SESSION_FILE);
         let lock = file_lock(&path);
@@ -976,6 +977,7 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     super::capabilities::validate(assistant_id, capabilities)?;
     record.session.assistant_id = assistant_id.into();
     record.session.capabilities = capabilities.to_vec();
+    derive_local_config(&mut record.session);
     if let Some(title) = &request.title {
         if title.len() > MAX_TITLE_BYTES {
             return Err("assistant_title_too_long".into());
@@ -1255,7 +1257,24 @@ fn parse_record(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
     }
     let mut record = file.record;
     derive_title_source(&mut record);
+    derive_local_config(&mut record.session);
     Ok(record)
+}
+
+/// Every conversation may look after this computer's AI tools; its
+/// permission mode says how much it does without asking. One saved before
+/// that, or saved without it, reads with local configuration.
+fn derive_local_config(session: &mut Session) {
+    if session.assistant_id == super::capabilities::default_assistant_id()
+        && session.capabilities.is_empty()
+    {
+        session
+            .capabilities
+            .push(super::capabilities::CapabilityRef {
+                id: super::capabilities::LOCAL_CONFIG.into(),
+                version: super::capabilities::LOCAL_CONFIG_VERSION,
+            });
+    }
 }
 
 /// A record saved before titles had a source gets one: its title is the
@@ -1385,9 +1404,14 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn local_capabilities_default_for_legacy_sessions_and_persist_user_updates() {
+    fn every_conversation_reads_with_local_configuration_and_keeps_it() {
         let (config, store) = fixture();
         let sid = store.create("model", false).unwrap().session.id;
+        let local = json!([{"id": "local_config", "version": 1}]);
+        assert_eq!(
+            serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap()["capabilities"],
+            local
+        );
         let path = session_file(config.path(), &store, &sid);
         let mut legacy: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         legacy["session"]
@@ -1401,23 +1425,18 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let loaded = serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap();
         assert_eq!(loaded["assistantId"], "ofox");
-        assert_eq!(loaded["capabilities"], json!([]));
-        let change = serde_json::from_value(json!({"sessionId": sid,
-            "capabilities": [{"id": "local_config", "version": 1}]}))
-        .unwrap();
-        store.update(&change, no_precondition).unwrap();
-        let saved = serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap();
         assert_eq!(
-            saved["capabilities"],
-            json!([{"id": "local_config", "version": 1}])
+            loaded["capabilities"], local,
+            "a legacy record reads with it"
         );
-        assert!(saved.get("permissionMode").is_none());
+        assert!(loaded.get("permissionMode").is_none());
         let disable =
             serde_json::from_value(json!({"sessionId": sid, "capabilities": []})).unwrap();
         store.update(&disable, no_precondition).unwrap();
         assert_eq!(
             serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap()["capabilities"],
-            json!([])
+            local,
+            "it cannot be turned off"
         );
     }
 

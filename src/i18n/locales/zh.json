@@ -5519,7 +5519,7 @@
       "modelSwitched": "已切换到推荐的配置任务模型，你可以手动换回。",
       "modelUnconfigured": "尚未配置推荐的配置任务模型，或该模型暂不可用。继续使用当前模型。",
       "enable": "开启本机配置",
-      "boundary": "已开启本机配置：助手可以检查和修复本机的 AI 工具。",
+      "boundary": "助手可以检查和修复本机的 AI 工具，并读取你附加的文件；开启联网后才会搜索网页。",
       "modes": {
         "default": "默认",
         "autoEdit": "自动编辑",
@@ -5559,7 +5559,8 @@
         "install_tool": "安装工具",
         "update_tool": "更新工具",
         "uninstall_tool": "卸载工具"
-      }
+      },
+      "permissionValue": "权限：{{mode}}"
     },
     "generation": {
       "plus": "添加内容或功能",

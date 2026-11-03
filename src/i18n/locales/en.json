@@ -5519,7 +5519,7 @@
       "modelSwitched": "Switched to the recommended configuration model. You can change it back.",
       "modelUnconfigured": "A recommended configuration model has not been configured or is unavailable. Your current model is unchanged.",
       "enable": "Enable local configuration",
-      "boundary": "Local configuration is on: the assistant can check and fix the AI tools on this computer.",
+      "boundary": "The assistant can check and repair the AI tools on this computer and reads the files you attach; it searches the web only with web search on.",
       "modes": {
         "default": "Default",
         "autoEdit": "Auto edit",
@@ -5559,7 +5559,8 @@
         "install_tool": "Install tool",
         "update_tool": "Update tool",
         "uninstall_tool": "Uninstall tool"
-      }
+      },
+      "permissionValue": "Permission: {{mode}}"
     },
     "generation": {
       "plus": "Add content or a feature",

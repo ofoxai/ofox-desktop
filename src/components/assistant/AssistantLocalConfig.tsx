@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Wrench } from "lucide-react";
 import type {
   AssistantGenerationApproval,
   AssistantApprovalChoice,
@@ -24,24 +23,18 @@ export interface LocalPlanStep {
 }
 
 const MODES = ["default", "autoEdit", "fullAuto"] as const;
-type LocalMenuChoice = AssistantPermissionMode | "off";
 
 /**
- * The composer's local configuration switch. Off, a toggle like Web search;
- * on, `本机配置 · 默认 ▾`: the name turns it off, the menu picks how much the
- * assistant may do without asking (or turns it off). Full auto asks first.
+ * The composer's `权限：默认 ▾`: how much the assistant may do on this
+ * computer without asking. Full auto asks first.
  */
-export function LocalConfigControl({
-  on,
+export function PermissionControl({
   mode,
   disabled,
-  onToggle,
   onMode,
 }: {
-  on: boolean;
   mode: AssistantPermissionMode;
   disabled: boolean;
-  onToggle: (on: boolean) => void;
   onMode: (
     mode: AssistantPermissionMode,
     confirmed?: boolean,
@@ -58,58 +51,31 @@ export function LocalConfigControl({
       setBusy(false);
     }
   };
-  // One wrapper on and off, so the toggle keeps its focus when pressed.
   return (
-    <span
-      className={cn(
-        "inline-flex shrink-0 items-center rounded-ctl",
-        on && "bg-brand-soft text-brand-ink",
-      )}
-    >
-      <Button
-        variant="ghost"
-        aria-pressed={on}
-        disabled={disabled}
-        onClick={() => onToggle(!on)}
-        className={cn(
-          "shrink-0 px-2",
-          on && "pr-1 text-brand-ink hover:bg-transparent hover:text-ink",
+    <>
+      <MenuSelect<AssistantPermissionMode>
+        aria-label={t("assistant.local.permission")}
+        value={mode}
+        disabled={disabled || busy}
+        onChange={(next) => {
+          if (next === "fullAuto") setConfirmFull(true);
+          else void choose(next);
+        }}
+        options={MODES.map((value) => ({
+          value,
+          label: t(`assistant.local.modes.${value}`),
+          note: t(`assistant.local.modeNotes.${value}`),
+        }))}
+        valueLabel={t("assistant.local.permissionValue", {
+          mode: t(`assistant.local.modes.${mode}`),
+        })}
+        width={300}
+        align="start"
+        triggerClassName={cn(
+          "h-[27px] border-transparent bg-transparent px-2 text-ink-2 hover:bg-transparent hover:text-ink",
+          mode === "fullAuto" && "text-warn",
         )}
-      >
-        <Wrench aria-hidden className="h-3.5 w-3.5" />
-        {t("assistant.local.title")}
-      </Button>
-      {on && (
-        <>
-          <span aria-hidden className="opacity-60">
-            ·
-          </span>
-          <MenuSelect<LocalMenuChoice>
-            aria-label={t("assistant.local.permission")}
-            value={mode}
-            disabled={disabled || busy}
-            onChange={(next) => {
-              if (next === "off") onToggle(false);
-              else if (next === "fullAuto") setConfirmFull(true);
-              else void choose(next);
-            }}
-            options={[
-              ...MODES.map((value) => ({
-                value,
-                label: t(`assistant.local.modes.${value}`),
-                note: t(`assistant.local.modeNotes.${value}`),
-                group: "modes",
-                groupLabel: t("assistant.local.permission"),
-              })),
-              { value: "off" as const, label: t("assistant.local.turnOff") },
-            ]}
-            valueLabel={t(`assistant.local.modes.${mode}`)}
-            width={300}
-            align="start"
-            triggerClassName="h-[27px] border-transparent bg-transparent pl-1 pr-2 text-brand-ink hover:bg-transparent hover:text-ink data-[state=open]:bg-transparent data-[state=open]:text-ink"
-          />
-        </>
-      )}
+      />
       <ConfirmDialog
         isOpen={confirmFull}
         title={t("assistant.local.fullTitle")}
@@ -123,7 +89,7 @@ export function LocalConfigControl({
           })
         }
       />
-    </span>
+    </>
   );
 }
 

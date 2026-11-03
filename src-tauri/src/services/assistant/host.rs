@@ -2652,8 +2652,12 @@ mod tests {
         Arc::get_mut(&mut run).unwrap().local_enabled = true;
         let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
             "toolCallId":"probe-1","name":"probe_write","args":{"command":"synthetic"}});
+        // A run without local access (none on this computer) gets no local tool.
+        let plain = control(&sid);
+        let plain_params = json!({"sessionId":sid,"runId":plain.run_id,"operationId":plain.operation_id,
+            "toolCallId":"probe-0","name":"probe_write","args":{"command":"synthetic"}});
         assert_eq!(
-            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            host.dispatch_tool(&plain, &plain_params).await.unwrap_err(),
             "assistant_capability_disabled"
         );
         store

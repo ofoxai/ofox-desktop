@@ -947,7 +947,12 @@ impl AssistantStore {
                         for value in [&mut current, &mut previous] {
                             let session = value["session"].as_object_mut().ok_or(INVALID)?;
                             session.entry("assistantId").or_insert(json!("ofox"));
-                            session.entry("capabilities").or_insert(json!([]));
+                            // Every conversation reads with local configuration.
+                            let capabilities = session.entry("capabilities").or_insert(json!([]));
+                            if capabilities == &json!([]) {
+                                *capabilities = json!([{"id":"local_config","version":1}]);
+                            }
+                            session.entry("media").or_insert(json!({}));
                         }
                         current == previous
                     } else {
@@ -977,7 +982,7 @@ mod tests {
     use std::io::{Read, Write};
 
     #[test]
-    fn local_capabilities_old_backup_matches_default_fields_but_not_user_changes() {
+    fn an_old_backup_without_local_fields_matches_a_conversation_that_has_them() {
         let (_tmp, store, sid) = fixture();
         let out = tempfile::tempdir().unwrap();
         let archive = out.path().join("current.zip");
@@ -998,18 +1003,13 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("capabilities");
+        old["session"].as_object_mut().unwrap().remove("media");
         replace_member(&mut members, &name, serde_json::to_vec(&old).unwrap());
         let older = out.path().join("older.zip");
         write_zip(&older, &members, false);
+        // It reads with local configuration, which every conversation has.
         let report = store.restore(&older, &[], || Ok(())).unwrap();
         assert_eq!((report.skipped, report.conflicts), (1, 0));
-        let update = serde_json::from_value(
-            json!({"sessionId":sid,"capabilities":[{"id":"local_config","version":1}]}),
-        )
-        .unwrap();
-        store.update(&update, || Ok(())).unwrap();
-        let report = store.restore(&older, &[], || Ok(())).unwrap();
-        assert_eq!((report.skipped, report.conflicts), (0, 1));
         let enabled = out.path().join("enabled.zip");
         store.backup(&enabled, &[], || Ok(())).unwrap();
         let target = tempfile::tempdir().unwrap();

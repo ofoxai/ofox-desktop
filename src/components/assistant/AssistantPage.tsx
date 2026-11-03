@@ -17,6 +17,7 @@ import {
   ArrowUp,
   Download,
   Ellipsis,
+  Globe,
   Loader2,
   ListPlus,
   MessageSquare,
@@ -44,7 +45,7 @@ import { useAssistant } from "./useAssistant";
 import {
   LocalApprovalCard,
   LocalChangesLine,
-  LocalConfigControl,
+  PermissionControl,
   LocalTaskProgress,
 } from "./AssistantLocalConfig";
 import { MediaBlock } from "./MediaBlock";
@@ -869,6 +870,24 @@ function AssistantWorkspace() {
     searchHighlight(assistant.search),
   );
 
+  const webSearchToggle = (
+    <Button
+      variant="ghost"
+      aria-pressed={assistant.webSearch}
+      aria-describedby={showSearchNote ? searchNoteId : undefined}
+      disabled={searchLocked}
+      onClick={() => assistant.setWebSearch(!assistant.webSearch)}
+      className={cn(
+        "shrink-0 px-2",
+        searchLit &&
+          "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
+      )}
+    >
+      <Globe aria-hidden className="h-3.5 w-3.5" />
+      {t("assistant.webSearch")}
+    </Button>
+  );
+
   return (
     <div
       ref={workspace}
@@ -1625,26 +1644,6 @@ function AssistantWorkspace() {
                           // it was open: the message takes it back.
                           void assistant.pickAttachments().then(focusComposer)
                         }
-                        webSearch={assistant.webSearch}
-                        webSearchDisabled={searchLocked}
-                        webSearchLit={searchLit}
-                        webSearchNote={showSearchNote ? searchNote : null}
-                        onWebSearch={assistant.setWebSearch}
-                        localConfig={assistant.localConfig}
-                        localDisabled={settingsLocked || !!assistant.run}
-                        onLocalConfig={(on) =>
-                          void assistant.setLocalConfig(on)
-                        }
-                        localControl={
-                          <LocalConfigControl
-                            key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
-                            on={assistant.localConfig}
-                            mode={assistant.localMode}
-                            disabled={settingsLocked || !!assistant.run}
-                            onToggle={(on) => void assistant.setLocalConfig(on)}
-                            onMode={assistant.setLocalPermission}
-                          />
-                        }
                         disabled={!available || trashed}
                       />
                       {bootstrap?.audioModels?.some(
@@ -1665,10 +1664,33 @@ function AssistantWorkspace() {
                           <Mic aria-hidden className="h-3.5 w-3.5" />
                         </Button>
                       )}
-                      {showSearchNote && assistant.webSearch && (
+                      {showSearchNote ? (
+                        <Tooltip>
+                          {/* The wrapper takes the hover while the switch is off. */}
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex shrink-0">
+                              {webSearchToggle}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            {searchNote}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        webSearchToggle
+                      )}
+                      {showSearchNote && (
                         <span id={searchNoteId} className="sr-only">
                           {searchNote}
                         </span>
+                      )}
+                      {composerModel?.tools !== false && (
+                        <PermissionControl
+                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
+                          mode={assistant.localMode}
+                          disabled={settingsLocked || !!assistant.run}
+                          onMode={assistant.setLocalPermission}
+                        />
                       )}
                       {/* A reply under way goes on as it began: the choice is
                       for the next message. */}
