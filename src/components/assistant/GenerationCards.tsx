@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { RefreshCw } from "lucide-react";
+import { Download, Info, Loader2, RefreshCw } from "lucide-react";
 import type {
   AssistantAttachment,
   AssistantGeneration,
@@ -19,9 +19,15 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { MediaBlock, ActivityLink } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
+import { MEDIA_PLACEHOLDER, MediaToolButton, MediaTools } from "./MediaTools";
 import { TopUpAction, needsTopUp } from "./TopUpAction";
 import {
   MediaDefaultsFields,
@@ -131,9 +137,99 @@ function summary(
 }
 
 /**
- * What the reply's generation tools made: each result with the model and
- * parameters it used, the prompt that was sent, and "regenerate with other
- * parameters", which goes straight to the generation without the chat model.
+ * What a generation used, sent and cost, behind a result's ⓘ: the model and
+ * parameters, the cost, and the prompt (or the text read aloud).
+ */
+function GenerationDetails({
+  item,
+  models,
+}: {
+  item: AssistantGeneration;
+  models: ReadonlyArray<AssistantModel>;
+}) {
+  const { t } = useTranslation();
+  const label = t("assistant.generation.details");
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <MediaToolButton label={label}>
+          <Info aria-hidden />
+        </MediaToolButton>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        aria-label={label}
+        className="w-80 max-w-[calc(100vw-32px)] space-y-2 p-3 text-note text-ink-2"
+      >
+        <p className="font-medium text-ink">{summary(item, models, t)}</p>
+        {item.cost != null && (
+          <p className="tabular-nums">
+            {t("assistant.media.cost", { cost: item.cost })}
+          </p>
+        )}
+        {item.prompt && (
+          <div className="space-y-0.5 border-t border-line pt-2">
+            <p className="text-ink-muted">
+              {t(
+                item.kind === "speech"
+                  ? "assistant.generation.text"
+                  : "assistant.generation.prompt",
+              )}
+            </p>
+            <p className="max-h-48 overflow-y-auto whitespace-pre-wrap break-words">
+              {item.prompt}
+            </p>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * A generation that failed, where its result would be: why, and what can be
+ * done (top up, regenerate), in view rather than behind the pointer.
+ */
+function FailedResult({
+  item,
+  details,
+  onRegenerate,
+  disabled,
+}: {
+  item: AssistantGeneration;
+  details: ReactNode;
+  onRegenerate?: () => void;
+  disabled?: boolean;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="w-full max-w-[420px] space-y-2 rounded-list border border-line bg-card-2 px-3 py-2.5">
+      <p role="alert" className="text-note text-danger">
+        {item.errorCode
+          ? t(assistantErrorKey(item.errorCode))
+          : item.kind === "video"
+            ? t(`assistant.video.status.${item.status}`)
+            : t("assistant.errors.generic")}
+      </p>
+      <div className="flex flex-wrap items-center gap-1">
+        {needsTopUp(item.errorCode) && <TopUpAction />}
+        {onRegenerate && (
+          <Button variant="ghost" disabled={disabled} onClick={onRegenerate}>
+            <RefreshCw aria-hidden className="h-3.5 w-3.5" />
+            {t("assistant.generation.regenerate")}
+          </Button>
+        )}
+        {details}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * What the reply's generation tools made: each result alone, as it is. Its
+ * actions (save, regenerate with other parameters, which goes straight to
+ * the generation without the chat model, and its details) show while the
+ * pointer or focus is on it; a failure says why where the result would be.
  */
 export function GenerationCards({
   message,
@@ -166,21 +262,41 @@ export function GenerationCards({
   const items = message.generations ?? [];
   if (items.length === 0) return null;
   return (
-    <div className="mt-2 space-y-2">
+    <div className="mt-3 space-y-3">
       {items.map((item) => {
         const files = (message.attachments ?? []).filter((file) =>
           item.outputs.includes(file.id),
+        );
+        const regenerate = onRegenerate ? () => setEditing(item) : undefined;
+        const details = <GenerationDetails item={item} models={models} />;
+        const tools = (
+          <>
+            {regenerate && (
+              <MediaToolButton
+                label={t("assistant.generation.regenerate")}
+                disabled={disabled || item.status === "submitting"}
+                onClick={regenerate}
+              >
+                <RefreshCw aria-hidden />
+              </MediaToolButton>
+            )}
+            {details}
+          </>
         );
         return (
           <section
             key={item.toolCallId}
             aria-label={t(`assistant.generation.kinds.${item.kind}`)}
-            className="space-y-2 rounded-list border border-line bg-card-2 p-2"
+            className="max-w-full"
           >
-            <p className="text-note text-ink-muted">
-              {summary(item, models, t)}
-            </p>
-            {item.kind === "image" && (
+            {["error", "failed"].includes(item.status) ? (
+              <FailedResult
+                item={item}
+                details={details}
+                onRegenerate={regenerate}
+                disabled={disabled}
+              />
+            ) : item.kind === "image" ? (
               <MediaBlock
                 message={message}
                 media={item}
@@ -189,9 +305,9 @@ export function GenerationCards({
                 generation={authority}
                 disabled={disabled}
                 onSave={onSave}
+                tools={tools}
               />
-            )}
-            {item.kind === "video" && (
+            ) : item.kind === "video" ? (
               <VideoBlock
                 message={message}
                 media={item}
@@ -202,9 +318,9 @@ export function GenerationCards({
                 onSave={onSave}
                 onCancel={() => onCancelVideo(item)}
                 onResume={() => onResumeVideo(item)}
+                tools={tools}
               />
-            )}
-            {item.kind === "speech" && (
+            ) : (
               <SpeechResult
                 item={item}
                 files={files}
@@ -213,38 +329,8 @@ export function GenerationCards({
                 }
                 disabled={disabled}
                 onSave={onSave}
+                tools={tools}
               />
-            )}
-            {["error", "failed"].includes(item.status) && item.errorCode && (
-              <p role="alert" className="text-note text-danger">
-                {t(assistantErrorKey(item.errorCode))}
-              </p>
-            )}
-            {["error", "failed"].includes(item.status) &&
-              needsTopUp(item.errorCode) && <TopUpAction />}
-            {item.prompt && (
-              <details className="text-note text-ink-muted">
-                <summary className="cursor-default select-none">
-                  {t(
-                    item.kind === "speech"
-                      ? "assistant.generation.text"
-                      : "assistant.generation.prompt",
-                  )}
-                </summary>
-                <p className="mt-1 whitespace-pre-wrap break-words text-ink-2">
-                  {item.prompt}
-                </p>
-              </details>
-            )}
-            {onRegenerate && (
-              <Button
-                variant="ghost"
-                disabled={disabled || item.status === "submitting"}
-                onClick={() => setEditing(item)}
-              >
-                <RefreshCw aria-hidden className="h-3.5 w-3.5" />
-                {t("assistant.generation.regenerate")}
-              </Button>
             )}
           </section>
         );
@@ -267,58 +353,69 @@ function SpeechResult({
   url,
   disabled,
   onSave,
+  tools,
 }: {
   item: AssistantGeneration;
   files: AssistantAttachment[];
   url: (file: AssistantAttachment) => string;
   disabled?: boolean;
   onSave: (file: AssistantAttachment) => Promise<unknown>;
+  tools: ReactNode;
 }) {
   const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
   if (item.status === "submitting")
     return (
-      <p role="status" className="text-note text-ink-muted">
+      <div
+        role="status"
+        className={`${MEDIA_PLACEHOLDER} h-9 w-64 flex-row rounded-full`}
+      >
+        <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
         {t("assistant.generation.speaking")}
-      </p>
+      </div>
     );
   if (item.status === "unknown")
     return (
-      <p role="alert" className="text-note text-ink-muted">
+      <p
+        role="alert"
+        className="max-w-[420px] rounded-list border border-line bg-card-2 px-3 py-2.5 text-note text-ink-muted"
+      >
         {t("assistant.errors.mediaOutcomeUnknown")} <ActivityLink />
       </p>
     );
   return (
-    <>
+    <div className="space-y-2">
       {files.map((file) => (
-        <div key={file.id} className="flex flex-wrap items-center gap-2">
+        // A player has no picture to put the actions on: they follow it.
+        <div
+          key={file.id}
+          className="group/media flex max-w-full items-center gap-1.5"
+        >
           <audio
             aria-label={file.name}
             controls
             preload="metadata"
             src={url(file)}
-            className="h-9 max-w-full"
+            className="h-9 min-w-0 max-w-full"
           />
-          <Button
-            variant="ghost"
-            disabled={disabled || saving}
-            onClick={() => {
-              setSaving(true);
-              void onSave(file)
-                .catch((error) => toast.error(t(assistantErrorKey(error))))
-                .finally(() => setSaving(false));
-            }}
-          >
-            {t("assistant.media.save")}
-          </Button>
+          <MediaTools inline>
+            <MediaToolButton
+              label={t("assistant.media.save")}
+              disabled={disabled || saving}
+              onClick={() => {
+                setSaving(true);
+                void onSave(file)
+                  .catch((error) => toast.error(t(assistantErrorKey(error))))
+                  .finally(() => setSaving(false));
+              }}
+            >
+              <Download aria-hidden />
+            </MediaToolButton>
+            {tools}
+          </MediaTools>
         </div>
       ))}
-      {item.cost != null && (
-        <p className="text-note tabular-nums text-ink-muted">
-          {t("assistant.media.cost", { cost: item.cost })}
-        </p>
-      )}
-    </>
+    </div>
   );
 }
 

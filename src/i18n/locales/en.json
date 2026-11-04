@@ -5614,6 +5614,7 @@
       "regenerate": "Regenerate with other parameters",
       "regenerateTitle": "Regenerate with other parameters",
       "regenerateNote": "Generates again with these parameters, without the chat model; the result is added under this reply.",
+      "details": "Details",
       "estimate": "Estimated cost ${{cost}}",
       "estimateUnknown": "The cost cannot be estimated right now",
       "confirmGenerate": "Confirm and generate",

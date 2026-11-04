@@ -7322,12 +7322,16 @@ describe("generation tools", () => {
       attachments: [generatedFile],
     });
     const card = await screen.findByRole("region", { name: "Generate image" });
-    expect(card).toHaveTextContent("Image Test");
-    expect(card).toHaveTextContent("1024x1024");
     expect(within(card).getByRole("img")).toHaveAttribute(
       "alt",
       "generated-1.png",
     );
+    // The model and parameters are in its details, not on the result.
+    expect(card).not.toHaveTextContent("Image Test");
+    await userEvent.click(within(card).getByRole("button", { name: "Details" }));
+    const details = await screen.findByRole("dialog", { name: "Details" });
+    expect(details).toHaveTextContent("Image Test");
+    expect(details).toHaveTextContent("1024x1024");
   });
 
   it("confirms a video's estimate on its card before it is made", async () => {
