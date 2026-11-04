@@ -198,6 +198,23 @@ describe("AppSidebar", () => {
     ).toBeVisible();
   });
 
+  it("collapsed: one divider between the two groups, sub-pages aligned when expanded", async () => {
+    localStorage.setItem("ofox.shell.sidebarCollapsed", "1");
+    const view = frame();
+    expect(
+      screen
+        .getByRole("tablist", { name: "Pages" })
+        .querySelectorAll("span.h-px"),
+    ).toHaveLength(1);
+    view.unmount();
+    localStorage.clear();
+    frame();
+    await userEvent.click(screen.getByRole("tab", { name: "Usage" }));
+    expect(screen.getByRole("tablist", { name: "Usage" }).className).toContain(
+      "ml-[26px]",
+    );
+  });
+
   it("settings opens through openSettings", async () => {
     frame();
     await userEvent.click(screen.getByRole("button", { name: "Settings" }));

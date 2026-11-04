@@ -122,13 +122,15 @@ export function AppSidebar({
         aria-orientation="vertical"
         className="no-drag flex w-full flex-col"
       >
-        {SHELL_GROUPS.map((group) => (
+        {SHELL_GROUPS.map((group, groupIndex) => (
           <div key={group.id} className="flex flex-col gap-0.5">
             {collapsed ? (
-              <span
-                aria-hidden
-                className="mx-auto my-2 block h-px w-6 bg-line first:hidden"
-              />
+              groupIndex > 0 && (
+                <span
+                  aria-hidden
+                  className="mx-auto my-2 block h-px w-6 bg-line"
+                />
+              )
             ) : (
               <span className="px-2.5 pb-1.5 pt-3.5 text-[11px] text-ink-muted">
                 {t(`shell.groups.${group.id}`)}
@@ -234,7 +236,7 @@ export function SubNav({ label, nav }: { label: string; nav: ShellSubnav }) {
       role="tablist"
       aria-label={label}
       aria-orientation="vertical"
-      className="mb-1 ml-[22px] mt-0.5 flex flex-col gap-px"
+      className="mb-1 ml-[26px] mt-0.5 flex flex-col gap-px"
     >
       {nav.items.map((item, index) => {
         const on = item.value === nav.value;
