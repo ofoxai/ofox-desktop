@@ -222,3 +222,47 @@ describe("regenerating with other parameters", () => {
     expect(within(dialog).queryByRole("img")).toBeNull();
   });
 });
+
+describe("a finished video", () => {
+  it("shows the frame it started from, not a black box, before it plays", () => {
+    const movie: AssistantAttachment = {
+      ...file,
+      id: "movie-1",
+      name: "movie.mp4",
+      mimeType: "video/mp4",
+    };
+    const { container } = render(
+      <GenerationCards
+        message={
+          {
+            id: "reply",
+            role: "assistant",
+            content: "",
+            createdAt: 0,
+            attachments: [movie],
+            generations: [
+              image({
+                kind: "video",
+                model: "video/test",
+                params: { duration: 5, resolution: "720p", firstFrameId: "frame-1" },
+                outputs: ["movie-1"],
+              } as never),
+            ],
+          } as unknown as AssistantMessage
+        }
+        sessionId="s1"
+        owner="o"
+        generation={1}
+        models={models}
+        onSave={vi.fn()}
+        onCancelVideo={vi.fn()}
+        onResumeVideo={vi.fn()}
+        sourceFile={(id) => (id === "frame-1" ? frame : undefined)}
+      />,
+    );
+    const video = container.querySelector("video")!;
+    expect(video.getAttribute("poster")).toContain("frame-1");
+    // Without a first frame, the player is asked for the video's own.
+    expect(video.getAttribute("src")).toMatch(/movie-1.*#t=0\.1$/);
+  });
+});

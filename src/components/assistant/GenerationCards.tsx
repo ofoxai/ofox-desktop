@@ -312,6 +312,21 @@ export function GenerationCards({
               />
             ) : item.kind === "video" ? (
               <VideoBlock
+                poster={(() => {
+                  const frame = generationSources(item, sourceFile, t).find(
+                    ({ file }) =>
+                      item.kind === "video" &&
+                      file.id === item.params.firstFrameId,
+                  );
+                  return frame
+                    ? assistantMediaUrl(
+                        sessionId,
+                        frame.file.id,
+                        owner,
+                        authority,
+                      )
+                    : undefined;
+                })()}
                 message={message}
                 media={item}
                 sessionId={sessionId}

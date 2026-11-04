@@ -24,6 +24,7 @@ export function VideoBlock({
   onCancel,
   onResume,
   tools,
+  poster,
 }: {
   message: AssistantMessage;
   /** A generation of the reply; its own media when left out. */
@@ -44,6 +45,8 @@ export function VideoBlock({
   onResume: () => Promise<unknown>;
   /** More of the result's actions; the result's details are among them. */
   tools?: ReactNode;
+  /** What shows before it plays: the image the video started from. */
+  poster?: string;
 }) {
   const { t } = useTranslation();
   const { apex, isLoading } = useOfoxApex();
@@ -146,7 +149,10 @@ export function VideoBlock({
             <div key={file.id} className="group/media relative">
               <video
                 aria-label={file.name}
-                src={assistantMediaUrl(sessionId, file.id, owner, generation)}
+                // `#t=0.1` has the player draw that moment rather than black
+                // while nothing plays; a first frame, when there is one, shows.
+                src={`${assistantMediaUrl(sessionId, file.id, owner, generation)}#t=0.1`}
+                poster={poster}
                 controls
                 playsInline
                 preload="metadata"
