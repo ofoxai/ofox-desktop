@@ -27,6 +27,7 @@ import type { LibraryKind } from "@/lib/api/library";
 import { LibraryResourceIcon } from "./LibraryResourceIcon";
 import {
   LIBRARY_RECOMMENDATIONS,
+  needsApiKey,
   type LibraryRecommendation,
 } from "./libraryRecommendations";
 
@@ -161,6 +162,16 @@ export function LibraryDiscover({
                     <p className="mt-0.5 flex flex-wrap gap-x-2 text-note text-ink-muted">
                       <span>{recipe.publisher}</span>
                       {recipe.runtimeKey && <span>{t(recipe.runtimeKey)}</span>}
+                      {recipe.signIn && (
+                        <span className="rounded-full bg-pill px-2 py-0.5">
+                          {t("library.discover3.signIn")}
+                        </span>
+                      )}
+                      {needsApiKey(recipe) && (
+                        <span className="rounded-full bg-pill px-2 py-0.5">
+                          {t("library.discover3.apiKey")}
+                        </span>
+                      )}
                     </p>
                   </div>
                 </div>

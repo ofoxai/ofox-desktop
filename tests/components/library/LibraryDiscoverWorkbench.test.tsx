@@ -35,10 +35,10 @@ beforeEach(() => {
 });
 
 describe("curated resource workbench", () => {
-  it("contains eight MCP recipes, six selected skill directories and three templates", () => {
+  it("contains 26 verified MCP recipes, six selected skill directories and three templates", () => {
     expect(
       LIBRARY_RECOMMENDATIONS.filter((r) => r.kind === "mcp"),
-    ).toHaveLength(8);
+    ).toHaveLength(26);
     expect(
       LIBRARY_RECOMMENDATIONS.filter((r) => r.kind === "skills"),
     ).toHaveLength(6);
@@ -98,7 +98,7 @@ describe("curated resource workbench", () => {
         target: { value: "" },
       },
     );
-    expect(screen.getAllByRole("article")).toHaveLength(8);
+    expect(screen.getAllByRole("article")).toHaveLength(26);
     expect(choose).not.toHaveBeenCalled();
   });
 
@@ -255,7 +255,7 @@ describe("curated evidence and keyboard boundaries", () => {
     fireEvent.change(search, { target: { value: "no-such-curated-recipe" } });
     await userEvent.click(screen.getByRole("button", { name: "清除筛选" }));
     expect(search).toHaveFocus();
-    expect(screen.getAllByRole("article")).toHaveLength(8);
+    expect(screen.getAllByRole("article")).toHaveLength(26);
   });
 
   it("uses only bundled trusted icons and falls back for unknown IDs", () => {

@@ -4256,7 +4256,8 @@
         "files": "ファイルとウェブ",
         "development": "開発支援",
         "design": "デザイン",
-        "communication": "対話とレビュー"
+        "communication": "対話とレビュー",
+        "search": "検索"
       },
       "details": "設定の詳細",
       "closeDetails": "詳細を閉じる",
@@ -4298,7 +4299,8 @@
         "mitService": "サーバーソース：MIT。ホスト型サービスには別途 GitHub の利用条件が適用されます。",
         "skill": "選択したスキル内のライセンスファイルを保持します。実際のコミットとライセンスは詳細に記録されます。",
         "skillFonts": "スキルと各フォントの個別ライセンスを保持します。フォント使用前に条件を確認してください。",
-        "template": "プロジェクトに合わせて変更できる Ofox のテンプレートです。"
+        "template": "プロジェクトに合わせて変更できる Ofox のテンプレートです。",
+        "sourceTerms": "ソースのライセンスは未確認です。使用するバージョンのライセンスと利用規約を確認してください。"
       },
       "recipes": {
         "microsoft-learn": "Microsoft の公式ドキュメントとコード例を検索します。",
@@ -4446,6 +4448,41 @@
       "resolveTitle": "スキルの取得元を確認",
       "resolveHelp": "{{repo}} の実際のスキルパスと既定ブランチを確認して選択してください。",
       "confirmSource": "この取得元を使用"
+    },
+    "discover3": {
+      "signIn": "ログインが必要",
+      "apiKey": "API キーが必要",
+      "preparation": {
+        "signIn": "ネット接続と、対象ツールでのブラウザーログイン認可が必要です。",
+        "publicHttp": "ネット接続と対象ツールの Streamable HTTP 対応が必要です。",
+        "node": "Node.js と npm が必要です。初回利用時に MCP パッケージを取得します。",
+        "uv": "uv / uvx と互換性のある Python 環境が必要です。",
+        "apiKey": "Node.js、npm、サービス提供元の API キーを用意し、対応する環境変数に入力してください。"
+      },
+      "permissions": {
+        "remote": "リクエストはサービス提供元に送信されます。読み書きできる範囲はツール、アカウント、認可によって決まります。",
+        "local": "ローカルプロセスは実行環境で許可されたデータにアクセスできます。必要最小限の権限だけを付与してください。"
+      },
+      "recipes": {
+        "exa": "エージェント向けのウェブ検索とコード検索で、読みやすいページ内容を取得します。",
+        "memory": "エージェントが会話をまたいで保持する知識グラフです。",
+        "sequential-thinking": "問題を段階的に考え、必要に応じて修正や分岐を行います。",
+        "git": "Git リポジトリを読み取り、検索、変更します。",
+        "time": "各地の現在時刻を取得し、タイムゾーンを変換します。",
+        "sentry": "Sentry の問題、エラー、トレースと Seer による分析を利用します。",
+        "linear": "Linear の Issue、プロジェクト、コメントを検索、作成、更新します。",
+        "notion": "Notion ワークスペース内のページとデータベースを検索、読み書きします。",
+        "atlassian": "Atlassian Cloud の Jira Issue と Confluence ページを利用します。",
+        "supabase": "Supabase のテーブル、SQL、マイグレーション、ログ、Edge Functions を管理します。",
+        "stripe": "顧客、支払い、サブスクリプションと Stripe のドキュメントを利用します。",
+        "vercel": "Vercel のプロジェクト、デプロイ、ログとドキュメントを利用します。",
+        "neon": "Neon のサーバーレス Postgres：プロジェクト、ブランチ、SQL を操作します。",
+        "cloudflare-docs": "Cloudflare のドキュメントを検索します。",
+        "huggingface": "Hugging Face Hub のモデル、データセット、Spaces、論文を検索します。",
+        "brave-search": "Brave 独自のインデックスでウェブ、ニュース、画像、ローカル情報を検索します。",
+        "firecrawl": "ウェブを取得、クロール、検索し、読みやすい Markdown に変換します。",
+        "tavily": "Tavily でウェブ検索とコンテンツ抽出を行います。"
+      }
     }
   },
   "datePicker": {

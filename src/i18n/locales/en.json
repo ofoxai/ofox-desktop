@@ -4256,7 +4256,8 @@
         "files": "Files and web",
         "development": "Development",
         "design": "Design",
-        "communication": "Communication and review"
+        "communication": "Communication and review",
+        "search": "Search"
       },
       "details": "Configuration details",
       "closeDetails": "Hide details",
@@ -4298,7 +4299,8 @@
         "mitService": "Server source: MIT. GitHub terms apply separately to the hosted service.",
         "skill": "License files within the selected skill directory are retained. Details record the actual commit and license.",
         "skillFonts": "Retain the skill license and separate font licenses. Read their terms before using the fonts.",
-        "template": "An editable Ofox template that you can adapt to your project."
+        "template": "An editable Ofox template that you can adapt to your project.",
+        "sourceTerms": "Source license not verified. Consult the source project license and service terms for the version you use."
       },
       "recipes": {
         "microsoft-learn": "Search Microsoft's official documentation and code examples.",
@@ -4446,6 +4448,41 @@
       "resolveTitle": "Confirm skill source",
       "resolveHelp": "Verify the actual skill path and default branch in {{repo}}, then choose a source.",
       "confirmSource": "Use this source"
+    },
+    "discover3": {
+      "signIn": "Sign-in required",
+      "apiKey": "API key required",
+      "preparation": {
+        "signIn": "Network access and browser sign-in authorization in the target tool.",
+        "publicHttp": "Network access and Streamable HTTP support in the target tool.",
+        "node": "Node.js and npm; the MCP package is downloaded on first use.",
+        "uv": "uv / uvx and a compatible Python environment.",
+        "apiKey": "Node.js, npm, and a provider API key entered in the matching environment variable."
+      },
+      "permissions": {
+        "remote": "Requests go to the service provider. Read and write access depends on the tool, account, and authorization.",
+        "local": "The local process can access data permitted by its runtime environment. Grant only the permissions needed for the task."
+      },
+      "recipes": {
+        "exa": "Web search and code search built for agents, with clean page contents.",
+        "memory": "A knowledge graph the agent keeps across conversations.",
+        "sequential-thinking": "Think a problem through step by step, revising and branching as it goes.",
+        "git": "Read, search and change Git repositories.",
+        "time": "The current time anywhere, and conversions between time zones.",
+        "sentry": "Issues, errors and traces from Sentry, and Seer's analysis of them.",
+        "linear": "Find, create and update Linear issues, projects and comments.",
+        "notion": "Search, read and write pages and databases in your Notion workspace.",
+        "atlassian": "Jira issues and Confluence pages from Atlassian Cloud.",
+        "supabase": "Manage Supabase projects: tables, SQL, migrations, logs and edge functions.",
+        "stripe": "Customers, payments, subscriptions and Stripe's documentation.",
+        "vercel": "Projects, deployments and logs on Vercel, and its documentation.",
+        "neon": "Serverless Postgres on Neon: projects, branches and SQL.",
+        "cloudflare-docs": "Search Cloudflare's documentation.",
+        "huggingface": "Search models, datasets, Spaces and papers on the Hugging Face Hub.",
+        "brave-search": "Web, news, image and local search from Brave's independent index.",
+        "firecrawl": "Scrape, crawl and search the web into clean Markdown.",
+        "tavily": "Search and extract from the web with Tavily."
+      }
     }
   },
   "datePicker": {

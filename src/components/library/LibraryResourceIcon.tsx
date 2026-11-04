@@ -15,6 +15,20 @@ import context7Logo from "@/assets/library-logos/context7.png";
 import chromeLogo from "@/assets/library-logos/chrome-devtools.png";
 import playwrightLogo from "@/assets/library-logos/playwright.svg";
 import deepwikiLogo from "@/assets/library-logos/deepwiki.png";
+import exaLogo from "@lobehub/icons-static-svg/icons/exa-color.svg";
+import notionLogo from "@lobehub/icons-static-svg/icons/notion.svg";
+import vercelLogo from "@lobehub/icons-static-svg/icons/vercel.svg";
+import cloudflareLogo from "@lobehub/icons-static-svg/icons/cloudflare-color.svg";
+import huggingfaceLogo from "@lobehub/icons-static-svg/icons/huggingface-color.svg";
+import tavilyLogo from "@lobehub/icons-static-svg/icons/tavily-color.svg";
+import sentryLogo from "@/assets/library-logos/sentry.png";
+import linearLogo from "@/assets/library-logos/linear.png";
+import atlassianLogo from "@/assets/library-logos/atlassian.png";
+import supabaseLogo from "@/assets/library-logos/supabase.png";
+import stripeLogo from "@/assets/library-logos/stripe.png";
+import neonLogo from "@/assets/library-logos/neon.png";
+import bravesearchLogo from "@/assets/library-logos/brave-search.png";
+import firecrawlLogo from "@/assets/library-logos/firecrawl.png";
 import type { LibraryKind } from "@/lib/api/library";
 import { cn } from "@/lib/utils";
 
@@ -22,6 +36,24 @@ import { cn } from "@/lib/utils";
 const RECIPE_LOGOS: Readonly<
   Record<string, { src: string; invert?: boolean }>
 > = {
+  exa: { src: exaLogo },
+  memory: { src: mcpLogo, invert: true },
+  "sequential-thinking": { src: mcpLogo, invert: true },
+  git: { src: mcpLogo, invert: true },
+  time: { src: mcpLogo, invert: true },
+  sentry: { src: sentryLogo },
+  linear: { src: linearLogo },
+  notion: { src: notionLogo, invert: true },
+  atlassian: { src: atlassianLogo },
+  supabase: { src: supabaseLogo },
+  stripe: { src: stripeLogo },
+  vercel: { src: vercelLogo, invert: true },
+  neon: { src: neonLogo },
+  "cloudflare-docs": { src: cloudflareLogo },
+  huggingface: { src: huggingfaceLogo },
+  "brave-search": { src: bravesearchLogo },
+  firecrawl: { src: firecrawlLogo },
+  tavily: { src: tavilyLogo },
   context7: { src: context7Logo },
   "chrome-devtools": { src: chromeLogo },
   deepwiki: { src: deepwikiLogo },
@@ -37,6 +69,10 @@ const RECIPE_LOGOS: Readonly<
   "theme-factory": { src: anthropicLogo, invert: true },
   "canvas-design": { src: anthropicLogo, invert: true },
 };
+
+export function hasRecipeLogo(id: string): boolean {
+  return Object.prototype.hasOwnProperty.call(RECIPE_LOGOS, id);
+}
 
 const TILE_COLORS = [
   "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",

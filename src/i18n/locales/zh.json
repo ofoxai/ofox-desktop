@@ -4256,7 +4256,8 @@
         "files": "文件与网页",
         "development": "开发协作",
         "design": "设计辅助",
-        "communication": "沟通与审查"
+        "communication": "沟通与审查",
+        "search": "搜索"
       },
       "details": "配置详情",
       "closeDetails": "收起详情",
@@ -4298,7 +4299,8 @@
         "mitService": "服务端源码：MIT；托管服务另受 GitHub 条款约束。",
         "skill": "下载时保留技能目录内许可文件；实际提交与许可在详情中记录。",
         "skillFonts": "保留技能许可与字体的独立许可；使用字体前查看对应条款。",
-        "template": "Ofox 可编辑模板，可按项目需求修改。"
+        "template": "Ofox 可编辑模板，可按项目需求修改。",
+        "sourceTerms": "源码许可尚未核验；使用前请查看来源项目所用版本的许可与服务条款。"
       },
       "recipes": {
         "microsoft-learn": "检索微软官方文档与代码示例。",
@@ -4446,6 +4448,41 @@
       "resolveTitle": "确认技能来源",
       "resolveHelp": "正在核对 {{repo}} 的实际技能目录和默认分支。选择要安装的来源。",
       "confirmSource": "使用此来源"
+    },
+    "discover3": {
+      "signIn": "需登录",
+      "apiKey": "需要 API key",
+      "preparation": {
+        "signIn": "保持网络连接，并在目标工具中完成浏览器登录授权。",
+        "publicHttp": "保持网络连接；目标工具须支持 Streamable HTTP。",
+        "node": "准备 Node.js 和 npm；首次使用时下载对应 MCP 包。",
+        "uv": "准备 uv / uvx 与兼容的 Python 环境。",
+        "apiKey": "准备 Node.js、npm 和服务商的 API key，在表单中填写对应环境变量。"
+      },
+      "permissions": {
+        "remote": "请求会发送给服务提供方；实际读取和写入范围由工具、账号与授权决定。",
+        "local": "本地进程可访问其运行环境允许的数据；仅授予完成任务所需的权限。"
+      },
+      "recipes": {
+        "exa": "为 Agent 打造的网页与代码搜索，返回干净的页面内容。",
+        "memory": "Agent 跨对话保留的知识图谱。",
+        "sequential-thinking": "一步步想清问题，边想边修正、分支。",
+        "git": "读取、搜索和修改 Git 仓库。",
+        "time": "任意地点的当前时间，以及时区换算。",
+        "sentry": "Sentry 中的问题、错误和追踪，以及 Seer 的分析。",
+        "linear": "查找、创建和更新 Linear 的 Issue、项目和评论。",
+        "notion": "搜索、读写 Notion 工作区中的页面和数据库。",
+        "atlassian": "Atlassian Cloud 上的 Jira Issue 和 Confluence 页面。",
+        "supabase": "管理 Supabase 项目：数据表、SQL、迁移、日志和 Edge Functions。",
+        "stripe": "客户、支付、订阅，以及 Stripe 文档。",
+        "vercel": "Vercel 上的项目、部署和日志，以及其文档。",
+        "neon": "Neon 上的 Serverless Postgres：项目、分支和 SQL。",
+        "cloudflare-docs": "搜索 Cloudflare 文档。",
+        "huggingface": "搜索 Hugging Face Hub 上的模型、数据集、Spaces 和论文。",
+        "brave-search": "基于 Brave 独立索引的网页、新闻、图片和本地搜索。",
+        "firecrawl": "抓取、爬取和搜索网页，输出干净的 Markdown。",
+        "tavily": "用 Tavily 搜索并提取网页内容。"
+      }
     }
   },
   "datePicker": {
