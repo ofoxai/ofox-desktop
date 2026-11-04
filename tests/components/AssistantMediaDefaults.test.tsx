@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import {
   MediaDefaultsFields,
@@ -141,4 +141,106 @@ it("starts images on gpt-image-2 and videos on Wan 3.0 while nothing is chosen",
   expect(generationModel(catalog, "video", "alibaba/happyhorse-1.0")?.id).toBe(
     "alibaba/happyhorse-1.0",
   );
+});
+
+describe("speech models and voices", () => {
+  const tts = (
+    id: string,
+    family: "gemini-tts" | "elevenlabs-tts",
+    pricing: Record<string, string | null>,
+  ) =>
+    ({
+      id,
+      name: id,
+      shortName: id,
+      kind: "speech",
+      audio: {
+        family,
+        responseFormats: ["wav", "mp3"],
+        defaultFormat: "wav",
+        voiceKind: family === "gemini-tts" ? "name" : "id",
+        suggestedVoices:
+          family === "gemini-tts" ? ["Kore", "Puck"] : ["21m00Tcm4TlvDq8ikWAM"],
+        instructions: false,
+        prompt: false,
+        language: true,
+        wordTimestamps: false,
+        pricing: {
+          unit: family === "gemini-tts" ? "tokens" : "characters",
+          inputAudioPerSecond: null,
+          inputTextPerCharacter: null,
+          inputTextPerMillion: null,
+          inputAudioPerMillion: null,
+          outputTextPerMillion: null,
+          outputAudioPerMillion: null,
+          ...pricing,
+        },
+      },
+      inputPricePerMillion: "0",
+      outputPricePerMillion: "0",
+    }) as unknown as AssistantModel;
+  const gemini = tts("google/tts", "gemini-tts", {
+    inputTextPerMillion: "0.5",
+    outputAudioPerMillion: "10",
+  });
+  const eleven = tts("elevenlabs/eleven_v4", "elevenlabs-tts", {
+    inputTextPerCharacter: "0.00008",
+  });
+
+  it("prices each speech model by how it is billed", async () => {
+    render(
+      <MediaDefaultsFields
+        kind="speech"
+        models={[gemini, eleven]}
+        value={{ model: "google/tts" }}
+        onChange={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("combobox", { name: "Model" }));
+    const [first, second] = screen.getAllByRole("option");
+    expect(first).toHaveTextContent("In $0.5 · audio $10/M");
+    expect(second).toHaveTextContent("$0.08/1K chars");
+    expect(second).not.toHaveTextContent("$0 / $0");
+  });
+
+  it("takes a voice the list does not have, in the form the model accepts", async () => {
+    const onChange = vi.fn();
+    render(
+      <MediaDefaultsFields
+        kind="speech"
+        models={[gemini]}
+        value={{ model: "google/tts" }}
+        onChange={onChange}
+      />,
+    );
+    await userEvent.click(screen.getByRole("combobox", { name: "Voice" }));
+    const search = screen.getByRole("combobox", {
+      name: "Search or type a voice name",
+    });
+    await userEvent.type(search, "Charon");
+    await userEvent.click(screen.getByRole("option", { name: "Use “Charon”" }));
+    expect(onChange).toHaveBeenCalledWith({ model: "google/tts", voice: "Charon" });
+  });
+
+  it("offers no ElevenLabs voice that is not a voice ID", async () => {
+    render(
+      <MediaDefaultsFields
+        kind="speech"
+        models={[eleven]}
+        value={{ model: "elevenlabs/eleven_v4" }}
+        onChange={() => {}}
+      />,
+    );
+    await userEvent.click(screen.getByRole("combobox", { name: "Voice" }));
+    const search = screen.getByRole("combobox", {
+      name: "Search or paste a voice ID",
+    });
+    await userEvent.type(search, "Rachel");
+    expect(screen.queryByRole("option", { name: /Use/ })).toBeNull();
+    await userEvent.clear(search);
+    await userEvent.type(search, "pNInz6obpgDQGcFmaJgB");
+    expect(
+      screen.getByRole("option", { name: "Use “pNInz6obpgDQGcFmaJgB”" }),
+    ).toBeInTheDocument();
+  });
 });

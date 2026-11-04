@@ -62,6 +62,12 @@ export interface MenuSelectProps<T extends string> {
   triggerTitle?: string;
   /** Classes for the menu, such as a larger `max-h-*`. */
   menuClassName?: string;
+  /**
+   * An option for what is typed in the filter, when it is a value the menu
+   * may take that no option holds ("Use …"); null for none. Picking it
+   * picks that value.
+   */
+  createOption?: (query: string) => MenuSelectOption<T> | null;
 }
 
 /**
@@ -188,7 +194,7 @@ export function MenuSelect<T extends string>({
   value,
   highlightValue,
   onChange,
-  options,
+  options: listed,
   placeholder,
   searchable = false,
   searchPlaceholder,
@@ -202,11 +208,22 @@ export function MenuSelect<T extends string>({
   valueLabel,
   triggerTitle,
   menuClassName,
+  createOption,
 }: MenuSelectProps<T>) {
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const menuTab = useMenuTab(() => setOpen(false));
   const [query, setQuery] = React.useState("");
+  // What is typed, as a value of its own, after the listed options.
+  const created =
+    searchable && query.trim() ? createOption?.(query.trim()) : null;
+  const options = React.useMemo(
+    () =>
+      created && !listed.some((option) => option.value === created.value)
+        ? [...listed, created]
+        : listed,
+    [listed, created?.value, created?.label],
+  );
   // The highlighted option's key. Kept here rather than in cmdk: cmdk only
   // records which element is highlighted (for aria-activedescendant) when a
   // key or the pointer moves it, never when it picks the first option itself.
@@ -301,8 +318,9 @@ export function MenuSelect<T extends string>({
     setActive(
       preferred >= 0 ? itemKey(preferred) : firstKey(inMenuOrder(options, "")),
     );
-    // A different kind or refreshed catalog starts its own search/highlight.
-  }, [options, highlightValue]);
+    // A different kind or refreshed catalog starts its own search/highlight
+    // (not the option made of what is typed).
+  }, [listed, highlightValue]);
 
   const choose = (option: MenuSelectOption<T>) => {
     setOpen(false);

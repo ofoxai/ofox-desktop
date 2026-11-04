@@ -243,11 +243,20 @@ export function MediaDefaultsFields({
     if (!caps) return null;
     return (
       <>
-        {pick(
+        {field(
           t("assistant.generation.voice"),
-          speech.voice,
-          caps.suggestedVoices,
-          (voice) => onChange({ ...speech, voice }),
+          <VoicePicker
+            caps={caps}
+            value={speech.voice}
+            onChange={(voice) => onChange({ ...speech, voice })}
+            label={t("assistant.generation.voice")}
+            valueLabel={shown(
+              t("assistant.generation.voice"),
+              speech.voice || t("assistant.media.default"),
+            )}
+            disabled={disabled}
+            triggerClassName={trigger}
+          />,
         )}
         {pick(
           t("assistant.generation.format"),
@@ -284,5 +293,74 @@ export function MediaDefaultsFields({
       )}
       {fields()}
     </div>
+  );
+}
+
+/** The voice a model reads with: Gemini names one, ElevenLabs an id. */
+const VOICE_FORMS: Record<string, RegExp> = {
+  "gemini-tts": /^[A-Za-z]{1,64}$/,
+  "elevenlabs-tts": /^[A-Za-z0-9]{20}$/,
+};
+
+/**
+ * A model's voice: its known voices, or any other typed into the filter in
+ * the form the model takes (a Gemini voice name, an ElevenLabs voice id).
+ */
+function VoicePicker({
+  caps,
+  value,
+  onChange,
+  label,
+  valueLabel,
+  disabled,
+  triggerClassName,
+}: {
+  caps: NonNullable<AssistantModel["audio"]>;
+  value: string | null | undefined;
+  onChange: (voice: string | undefined) => void;
+  label: string;
+  valueLabel: string;
+  disabled?: boolean;
+  triggerClassName?: string;
+}) {
+  const { t } = useTranslation();
+  const form = VOICE_FORMS[caps.family];
+  const byId = caps.voiceKind === "id";
+  // A voice chosen before, though no list has it, stays on the list.
+  const voices = [
+    ...new Set([...caps.suggestedVoices, ...(value ? [value] : [])]),
+  ];
+  return (
+    <MenuSelect
+      aria-label={label}
+      value={value ?? ""}
+      valueLabel={valueLabel}
+      onChange={(next) => onChange(next || undefined)}
+      disabled={disabled}
+      triggerClassName={triggerClassName}
+      searchable
+      searchPlaceholder={t(
+        byId
+          ? "assistant.generation.voiceSearchId"
+          : "assistant.generation.voiceSearchName",
+      )}
+      head={t(
+        byId
+          ? "assistant.generation.voiceIdHint"
+          : "assistant.generation.voiceNameHint",
+      )}
+      createOption={(query) =>
+        form?.test(query)
+          ? {
+              value: query,
+              label: t("assistant.generation.useVoice", { voice: query }),
+            }
+          : null
+      }
+      options={[
+        { value: "", label: t("assistant.media.default") },
+        ...voices.map((voice) => ({ value: voice, label: voice })),
+      ]}
+    />
   );
 }

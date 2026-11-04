@@ -83,6 +83,43 @@ export function useModelOptions(
             groupLabel: label,
           };
         }
+        if (kind === "speech" && model.audio) {
+          // A speech model is billed per character read, or per token of the
+          // text in and the audio out; never by its chat prices (0 / 0).
+          const pricing = model.audio.pricing as
+            | NonNullable<AssistantModel["audio"]>["pricing"]
+            | undefined;
+          const perThousand = (rate: string) =>
+            String(Number((Number(rate) * 1000).toPrecision(6)));
+          const price =
+            pricing?.unit === "characters" && pricing.inputTextPerCharacter
+              ? t("assistant.media.perThousandChars", {
+                  price: perThousand(pricing.inputTextPerCharacter),
+                })
+              : pricing?.unit === "tokens" &&
+                  pricing.inputTextPerMillion &&
+                  pricing.outputAudioPerMillion
+                ? t("assistant.media.audioTokenPrice", {
+                    input: pricing.inputTextPerMillion,
+                    output: pricing.outputAudioPerMillion,
+                  })
+                : "";
+          const long =
+            pricing?.unit === "tokens" && price
+              ? t("assistant.media.audioTokenPriceLong", {
+                  input: pricing.inputTextPerMillion,
+                  output: pricing.outputAudioPerMillion,
+                })
+              : price;
+          return {
+            value: model.id,
+            label: model.shortName || model.name,
+            meta: price || undefined,
+            title: [model.name, long].filter(Boolean).join("\n"),
+            group: vendor,
+            groupLabel: label,
+          };
+        }
         const tokens = model.contextWindow
           ? fmtTokens(model.contextWindow)
           : "";
