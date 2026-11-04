@@ -748,7 +748,7 @@ fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
         let boot = host.bootstrap().await.unwrap();
         assert_eq!(boot["owner"], owner());
         assert_eq!(boot["runtime"]["available"], true);
-        assert_eq!(boot["runtime"]["version"], "1.4.0");
+        assert_eq!(boot["runtime"]["version"], "1.5.0");
         assert_eq!(boot["defaultModelId"], MODEL);
         assert_eq!(boot["models"][0]["id"], MODEL);
         assert_eq!(boot["key"]["status"], "missing", "bootstrap mints no key");

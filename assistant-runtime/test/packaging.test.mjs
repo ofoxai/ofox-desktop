@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import {
   access,
   mkdir,
@@ -10,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { pruneProduction } from "../../scripts/assistant-prune.mjs";
 
 const exists = (file) =>
@@ -17,6 +19,61 @@ const exists = (file) =>
     () => true,
     () => false,
   );
+
+test("development and packaged runtimes resolve Pi 1.5 and patched undici", async () => {
+  for (const tree of ["../", "../resources/runtime/"]) {
+    const runtime = new URL(tree, import.meta.url);
+    for (const name of ["pi-ai", "pi-coding-agent", "pi-mcp", "pi-codemode"]) {
+      const installed = JSON.parse(
+        await readFile(
+          new URL(`node_modules/@earendil-works/${name}/package.json`, runtime),
+          "utf8",
+        ),
+      );
+      assert.equal(installed.version, "1.5.0", `${tree}${name}`);
+    }
+    const lock = JSON.parse(
+      await readFile(new URL("package-lock.json", runtime), "utf8"),
+    );
+    const clients = Object.keys(lock.packages).filter((name) =>
+      name.endsWith("node_modules/undici"),
+    );
+    assert.ok(clients.length > 0);
+    for (const client of clients) {
+      const { version } = JSON.parse(
+        await readFile(new URL(`${client}/package.json`, runtime), "utf8"),
+      );
+      const [major, minor, patch] = version.split(".").map(Number);
+      assert.ok(
+        major > 8 ||
+          (major === 8 && (minor > 12 || (minor === 12 && patch >= 3))),
+        `${tree}${client} ${version} must be at least 8.12.3`,
+      );
+    }
+  }
+});
+
+test("the packaged sidecar and its manifest report the installed Pi 1.5 SDK", async () => {
+  const resources = new URL("../resources/", import.meta.url);
+  const manifest = JSON.parse(
+    await readFile(new URL("manifest.json", resources), "utf8"),
+  );
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL(manifest.entry, resources))],
+    {
+      input: '{"id":1,"method":"health"}\n',
+      encoding: "utf8",
+      env: process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {},
+      timeout: 10000,
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  const health = JSON.parse(result.stdout.trim()).result;
+  assert.equal(manifest.sdkVersion, "1.5.0");
+  assert.deepEqual(health, { protocolVersion: 1, sdkVersion: "1.5.0" });
+});
 
 test("production pruning drops unused PDF.js builds, viewers, decoders and fonts but keeps the legacy runtime", async (t) => {
   const production = await mkdtemp(path.join(tmpdir(), "ofox-prune-"));
@@ -111,7 +168,7 @@ test("the runtime pins PDF.js, the native canvas and the MCP client and the boun
   );
   assert.equal(manifest.dependencies["pdfjs-dist"], "6.4.299");
   assert.equal(manifest.dependencies["@napi-rs/canvas"], "1.0.13");
-  assert.equal(manifest.dependencies["@earendil-works/pi-mcp"], "1.4.0");
+  assert.equal(manifest.dependencies["@earendil-works/pi-mcp"], "1.5.0");
   const lock = JSON.parse(
     await readFile(new URL("package-lock.json", runtime), "utf8"),
   );
@@ -119,7 +176,7 @@ test("the runtime pins PDF.js, the native canvas and the MCP client and the boun
   assert.equal(lock.packages["node_modules/@napi-rs/canvas"].version, "1.0.13");
   assert.equal(
     lock.packages["node_modules/@earendil-works/pi-mcp"].version,
-    "1.4.0",
+    "1.5.0",
   );
   for (const name of Object.keys(lock.packages))
     assert.doesNotMatch(

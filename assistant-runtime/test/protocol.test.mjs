@@ -99,7 +99,7 @@ test("sidecar accepts private JSON-RPC without logging credentials or loading us
   const wire = fixture.spawnSidecar();
   assert.deepEqual(await wire.start("health"), {
     protocolVersion: 1,
-    sdkVersion: "1.4.0",
+    sdkVersion: "1.5.0",
   });
   const malformed = wire.waitFor(
     (message) => message.id === null && message.error,

@@ -35,7 +35,7 @@ async function productionSmoke() {
       name,
       "package.json",
     );
-    assert.equal(JSON.parse(await readFile(manifest, "utf8")).version, "1.4.0");
+    assert.equal(JSON.parse(await readFile(manifest, "utf8")).version, "1.5.0");
   }
   // The native canvas addon loads in the bundled Node and encodes images.
   const require = createRequire(path.join(production, "package.json"));

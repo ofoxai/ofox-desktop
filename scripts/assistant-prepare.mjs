@@ -347,12 +347,21 @@ if (process.argv.includes("--node-only")) {
       2,
     ) + "\n",
   );
+  const { version: sdkVersion } = JSON.parse(
+    await readFile(
+      path.join(
+        production,
+        "node_modules/@earendil-works/pi-coding-agent/package.json",
+      ),
+      "utf8",
+    ),
+  );
   await writeFile(
     path.join(resources, "manifest.json"),
     JSON.stringify(
       {
         protocolVersion: 1,
-        sdkVersion: "1.4.0",
+        sdkVersion,
         nodeVersion: manifest.version,
         platform: target,
         node: `node/${path.basename(node)}`,
@@ -365,6 +374,6 @@ if (process.argv.includes("--node-only")) {
     ) + "\n",
   );
   process.stdout.write(
-    `Prepared assistant runtime (${target}, Node ${manifest.version}, Pi SDK 1.4.0)\n`,
+    `Prepared assistant runtime (${target}, Node ${manifest.version}, Pi SDK ${sdkVersion})\n`,
   );
 }

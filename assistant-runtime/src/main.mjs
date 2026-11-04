@@ -1,8 +1,19 @@
 import { createInterface } from "node:readline";
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AssistantRuntime } from "./runtime.mjs";
 import { LINE_LIMIT, oversizedReplyId } from "./ipc.mjs";
 import { errorMessage, redact, scrubSecrets } from "./security.mjs";
+
+const { version: sdkVersion } = JSON.parse(
+  await readFile(
+    new URL(
+      "../node_modules/@earendil-works/pi-coding-agent/package.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 
 const pending = new Map();
 // Frames carry conversation content: only the exact run credentials go.
@@ -122,7 +133,7 @@ async function handle(line) {
     }
     let result;
     if (request.method === "health")
-      result = { protocolVersion: 1, sdkVersion: "1.4.0" };
+      result = { protocolVersion: 1, sdkVersion };
     else if (request.method === "load")
       result = await runtime.load(request.params ?? {});
     else if (request.method === "run")
