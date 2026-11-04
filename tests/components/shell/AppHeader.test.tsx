@@ -74,15 +74,15 @@ beforeEach(() => {
 });
 
 describe("AppHeader navigation", () => {
-  it("offers tools, sessions, library, usage and assistant in order with tools open first", () => {
+  it("offers tools, sessions, library, assistant and usage in order with tools open first", () => {
     renderHeader();
     const tabs = screen.getAllByRole("tab");
     expect(tabs.map((tab) => tab.textContent)).toEqual([
       "工具",
       "会话",
       "资源库",
-      "用量",
       "助手",
+      "用量",
     ]);
     expect(screen.getByRole("tab", { name: "工具" })).toHaveAttribute(
       "aria-selected",

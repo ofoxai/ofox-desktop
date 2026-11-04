@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 
 /**
- * How the window is laid out: the top bar ("narrow"), or the left rail and
- * roomier pages ("wide"), as on a laptop's full screen or a large window.
+ * How roomy the window is: "wide" (a laptop's full screen or a large
+ * window) gives the assistant larger text and controls; the navigation is
+ * the same sidebar at every width.
  */
 export type ShellLayout = "narrow" | "wide";
 

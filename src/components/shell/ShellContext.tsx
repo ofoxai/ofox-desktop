@@ -18,14 +18,44 @@ export type ShellPage =
   | "usage"
   | "assistant";
 
-/** The header's tabs, in order. */
-export const SHELL_PAGES: readonly ShellPage[] = [
-  "tools",
-  "sessions",
-  "library",
-  "usage",
-  "assistant",
+/** The sidebar's groups and their pages, in order. */
+export const SHELL_GROUPS: ReadonlyArray<{
+  id: "use" | "observe";
+  pages: readonly ShellPage[];
+}> = [
+  { id: "use", pages: ["tools", "sessions", "library", "assistant"] },
+  { id: "observe", pages: ["usage"] },
 ];
+
+/** Every page, in the sidebar's order. */
+export const SHELL_PAGES: readonly ShellPage[] = SHELL_GROUPS.flatMap(
+  (group) => group.pages,
+);
+
+export interface ShellSubnavItem<T extends string = string> {
+  value: T;
+  label: string;
+  count?: number;
+  /** The id of the sub-page's panel, for the tab's `aria-controls`. */
+  controls: string;
+}
+
+/** A page's sub-pages, published to the sidebar; the page keeps the state. */
+export interface ShellSubnav<T extends string = string> {
+  items: ReadonlyArray<ShellSubnavItem<T>>;
+  value: T;
+  onChange: (value: T) => void;
+}
+
+const SIDEBAR_COLLAPSED_KEY = "ofox.shell.sidebarCollapsed";
+
+function readCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
 
 /** The id of a page's panel, for the tab's `aria-controls`. */
 export const shellPanelId = (page: ShellPage) => `shell-panel-${page}`;
@@ -63,6 +93,13 @@ export interface ShellContextValue {
   canRefresh: boolean;
   /** The page on screen is refreshing. */
   refreshing: boolean;
+  /** Sub-pages the mounted pages publish (useShellSubnav). */
+  subnavs: Partial<Record<ShellPage, ShellSubnav>>;
+  /** For useShellSubnav: publish or (null) withdraw a page's sub-pages. */
+  publishSubnav: (page: ShellPage, nav: ShellSubnav | null) => void;
+  /** The sidebar shows icons only; remembered on this machine. */
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: (collapsed: boolean) => void;
   /** Refresh the page on screen; ignored while it already is refreshing. */
   refresh: () => Promise<void>;
 }
@@ -228,6 +265,30 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     }
   }, [active]);
 
+  const [subnavs, setSubnavs] = useState<
+    Partial<Record<ShellPage, ShellSubnav>>
+  >({});
+  const publishSubnav = useCallback(
+    (page: ShellPage, nav: ShellSubnav | null) =>
+      setSubnavs((previous) => {
+        if (!nav && !previous[page]) return previous;
+        const next = { ...previous };
+        if (nav) next[page] = nav;
+        else delete next[page];
+        return next;
+      }),
+    [],
+  );
+  const [sidebarCollapsed, setCollapsedState] = useState(readCollapsed);
+  const setSidebarCollapsed = useCallback((collapsed: boolean) => {
+    setCollapsedState(collapsed);
+    try {
+      localStorage.setItem(SIDEBAR_COLLAPSED_KEY, collapsed ? "1" : "0");
+    } catch {
+      // A blocked storage only loses the memory, not the toggle.
+    }
+  }, []);
+
   const layout = useShellLayout();
   const value = useMemo<ShellContextValue>(
     () => ({
@@ -253,6 +314,10 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       canRefresh: registered.has(active),
       refreshing: runningPages.has(active),
       refresh,
+      subnavs,
+      publishSubnav,
+      sidebarCollapsed,
+      setSidebarCollapsed,
     }),
     [
       active,
@@ -277,6 +342,10 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       runningPages,
       refresh,
       layout,
+      subnavs,
+      publishSubnav,
+      sidebarCollapsed,
+      setSidebarCollapsed,
     ],
   );
 
@@ -310,4 +379,46 @@ export function useShellRefresh(page: ShellPage, fn: RefreshHandler) {
     () => registerRefresh(page, () => latest.current()),
     [page, registerRefresh],
   );
+}
+
+/**
+ * Publish `page`'s sub-pages to the sidebar while the caller is mounted.
+ * The page keeps the state; the sidebar calls the latest `onChange`, so it
+ * need not be memoised. Republished only when the value or the items' text
+ * change.
+ */
+export function useShellSubnav<T extends string>(
+  page: ShellPage,
+  nav: ShellSubnav<T> | null,
+) {
+  const { publishSubnav } = useShell();
+  const latest = useRef(nav);
+  useLayoutEffect(() => {
+    latest.current = nav;
+  });
+  const key = nav
+    ? JSON.stringify([
+        nav.value,
+        nav.items.map((item) => [
+          item.value,
+          item.label,
+          item.count ?? null,
+          item.controls,
+        ]),
+      ])
+    : null;
+  useLayoutEffect(() => {
+    const current = latest.current;
+    publishSubnav(
+      page,
+      current
+        ? {
+            items: current.items,
+            value: current.value,
+            onChange: (value) => latest.current?.onChange(value as T),
+          }
+        : null,
+    );
+  }, [key, page, publishSubnav]);
+  useEffect(() => () => publishSubnav(page, null), [page, publishSubnav]);
 }
