@@ -66,6 +66,7 @@ async function fixture(t, turns, host, extra = {}) {
     events = [],
     calls = [];
   const runtime = new AssistantRuntime({
+    retrySleep: async () => {},
     fetch: async (url, options) => {
       requests.push(JSON.parse(options.body));
       return turns[requests.length - 1]?.() ?? reply();
@@ -357,3 +358,72 @@ for (const [name, usage] of [
     assert.equal(f.requests.length, 1);
     assert.equal(result.entries.filter((e) => e.role === "request").length, 1);
   });
+
+test("unknown retry receipts allow the current request to finish but stop local tools and further model requests", async (t) => {
+  for (const status of [502, 503]) {
+    const refused = () =>
+      Response.json({ error: { message: "upstream unavailable" } }, { status });
+    const f = await fixture(
+      t,
+      [
+        refused,
+        refused,
+        () =>
+          call("write", { path: "/configuration", content: "must not run" }),
+        reply,
+      ],
+      () => ({ changed: true }),
+    );
+    const result = await f.run();
+    assert.equal(
+      f.requests.length,
+      3,
+      "the permitted retries finish, with no further model request",
+    );
+    assert.equal(f.calls.length, 0, "no side effect after an unknown cost");
+    assert.equal(result.status, "error");
+    assert.equal(result.errorCode, "assistant_cost_unavailable");
+    assert.deepEqual(
+      f.events.filter((e) => e.type === "retrying").map((e) => e.data.attempt),
+      [1, 2],
+    );
+    assert.deepEqual(
+      result.entries
+        .filter((e) => e.role === "request")
+        .map((e) => e.request.status),
+      ["unknown", "unknown", "completed"],
+    );
+    const success = result.entries.find((e) => e.role === "assistant");
+    assert.equal(success.usage.input, 10);
+    assert.equal(success.usage.output, 5);
+    assert.ok(success.usage.cost.total > 0);
+    assert.equal(result.usageCoverage, "incomplete");
+  }
+});
+
+test("rejected and reliably unsent retry receipts do not block local tools or their follow-up model request", async (t) => {
+  for (const refused of [
+    () =>
+      Response.json({ error: { message: "rate limited" } }, { status: 429 }),
+    () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connection refused"), {
+          code: "ECONNREFUSED",
+          syscall: "connect",
+        }),
+      });
+    },
+  ]) {
+    const f = await fixture(
+      t,
+      [refused, refused, () => call("tool_status", { tool: "codex" }), reply],
+      () => ({ installed: true }),
+    );
+    const result = await f.run();
+    assert.equal(result.status, "completed");
+    assert.equal(f.requests.length, 4);
+    assert.equal(f.calls.length, 1);
+    assert.equal(result.usageCoverage, "complete");
+    assert.equal(result.errorCode, undefined);
+  }
+});

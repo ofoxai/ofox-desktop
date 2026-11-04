@@ -3119,7 +3119,10 @@ test("system prompt states the local date, English weekday, IANA time zone and a
 
 test("retries only the failed model HTTP request twice and preserves every receipt", async (t) => {
   for (const status of [429, 502, 503]) {
-    const params = await sandbox(t);
+    const params = {
+      ...(await sandbox(t)),
+      model: { ...model, pricingKnown: true, cost: { input: 1, output: 1 } },
+    };
     const events = [],
       delays = [];
     let requests = 0;
@@ -3139,6 +3142,20 @@ test("retries only the failed model HTTP request twice and preserves every recei
     const result = await runtime.run(params);
     assert.equal(result.status, "completed", String(status));
     assert.equal(requests, 3);
+    const coverage = status === 429 ? "complete" : "incomplete";
+    assert.equal(result.usageCoverage, coverage);
+    const loaded = await runtime.load(params);
+    assert.equal(loaded.usageCoverage, coverage);
+    const known = loaded.entries.filter((e) => e.role === "assistant");
+    assert.equal(
+      known.reduce((sum, e) => sum + e.usage.input, 0),
+      10,
+    );
+    assert.equal(
+      known.reduce((sum, e) => sum + e.usage.output, 0),
+      5,
+    );
+    assert.ok(known[0].usage.cost.total > 0);
     assert.deepEqual(delays, [1000, 3000]);
     assert.deepEqual(
       events.filter((e) => e.type === "retrying").map((e) => e.data),

@@ -6062,6 +6062,24 @@ fn retrying_events_and_actual_ui_language_reach_the_real_host_and_model() {
                 .contains(&format!("App language: {language}.")));
         }
         assert_eq!(gateway.requests().len(), 6);
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["usageCoverage"], "incomplete");
+        assert!(detail.usage["estimatedCostUsd"].is_null());
+        assert_eq!(detail.usage["inputTokens"], 30);
+        assert_eq!(detail.usage["outputTokens"], 15);
+        assert_eq!(detail.usage["modelRequests"], 3);
+        let requests = detail.usage["requests"].as_array().unwrap();
+        assert_eq!(
+            requests.iter().filter(|r| r["status"] == "unknown").count(),
+            3
+        );
+        for reply in detail.messages.iter().filter(|m| m.role == "assistant") {
+            let usage = reply.usage.as_ref().unwrap();
+            assert_eq!(usage["usageCoverage"], "incomplete");
+            assert!(usage["estimatedCostUsd"].is_null());
+            assert_eq!(usage["inputTokens"], 10);
+            assert_eq!(usage["outputTokens"], 5);
+        }
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);

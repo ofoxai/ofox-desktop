@@ -24,6 +24,12 @@ media generation, search, titles and compaction keep their existing policies.
 
 Each HTTP attempt keeps a separate sanitized request receipt. A 502/503 remains
 an unknown billing outcome even if a later attempt completes; request IDs are
-correlation evidence, not proof of billing. The public retry event contains only
+correlation evidence, not proof of billing. Such an attempt makes aggregate cost
+coverage incomplete and the total estimate unavailable; known successful usage
+is still retained once. A local configuration task may finish the retries of
+that same HTTP request, then stops before another tool or model request with
+`assistant_cost_unavailable`. Its USD 1 budget remains unchanged.
+
+The public retry event contains only
 `type: "retrying"` and `data: { attempt: 1 | 2 }` within the existing run envelope.
 The host validates the run and attempt and forwards no error-body diagnostics.

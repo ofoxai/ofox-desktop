@@ -919,6 +919,14 @@ pub(super) fn project_usage<'a>(
             "priceSnapshot":price,"estimatedCostUsd":cost,"billedCostUsd":null}),
         );
     }
+    // Receipts carry outcome certainty, while assistant/usage entries below
+    // remain the sole source of token/cost subtotals. Do not count both.
+    if requests
+        .iter()
+        .any(|receipt| receipt["status"] == "unknown")
+    {
+        totals["usageCoverage"] = json!("incomplete");
+    }
     if !requests.is_empty() {
         totals["requests"] = json!(requests);
     } else if let Some(object) = totals.as_object_mut() {
@@ -1342,6 +1350,50 @@ mod tests {
             &mut json!({"delta": "y".repeat(64 * 1024)}),
         );
         assert!(buffer.due());
+    }
+
+    #[test]
+    fn assistant_retry_receipts_preserve_unknown_cost_and_count_success_usage_only_once() {
+        for status in ["unknown", "rejected", "not_sent"] {
+            let receipt = |status: &str, usage: Value| {
+                json!({"role":"request", "runId":"r",
+                "request":{"kind":"chat", "status":status, "usage":usage,
+                    "estimatedCostUsd":if status == "completed" {json!("0.03")} else {Value::Null},
+                    "billedCostUsd":null}})
+            };
+            let success = json!({"input":10, "output":5, "cacheRead":0, "cacheWrite":0, "cost":{"total":0.03}});
+            let entries = vec![
+                receipt(status, Value::Null),
+                receipt(status, Value::Null),
+                json!({"role":"assistant", "runId":"r", "usageCoverage":"complete", "pricingKnown":true, "usage":success}),
+                receipt("completed", success),
+            ];
+            let mut totals = json!({"usageCoverage":"complete"});
+            for _ in 0..2 {
+                project_usage(&mut totals, &entries, &HashMap::new());
+                assert_eq!(totals["inputTokens"], 10);
+                assert_eq!(totals["outputTokens"], 5);
+                assert_eq!(totals["modelRequests"], 1);
+                assert_eq!(totals["requests"].as_array().unwrap().len(), 3);
+                assert_eq!(totals["requests"][2]["estimatedCostUsd"], "0.03");
+                assert_eq!(
+                    totals["usageCoverage"],
+                    if status == "unknown" {
+                        "incomplete"
+                    } else {
+                        "complete"
+                    }
+                );
+                assert_eq!(
+                    totals["estimatedCostUsd"],
+                    if status == "unknown" {
+                        Value::Null
+                    } else {
+                        json!("0.03")
+                    }
+                );
+            }
+        }
     }
 
     #[test]

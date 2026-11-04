@@ -385,6 +385,7 @@ function recordRequest(
       secrets,
     ),
   );
+  return status;
 }
 
 // The only way a model request leaves the runtime: to the model's own Ofox
@@ -654,6 +655,8 @@ function projection(manager, secrets = []) {
             timestamp: Date.parse(entry.timestamp),
             runId: entry.data.runId,
             operationId: entry.data.operationId,
+            usageCoverage:
+              entry.data.status === "unknown" ? "incomplete" : "complete",
             request: entry.data,
           },
           secrets,
@@ -1620,8 +1623,8 @@ export class AssistantRuntime {
                     sleep: this.retrySleep,
                     notify: (attempt) =>
                       this.notify(context, "retrying", { attempt }),
-                    record: (attempt) =>
-                      recordRequest(
+                    record: (attempt) => {
+                      const status = recordRequest(
                         manager,
                         context.nativeParams ?? params,
                         target,
@@ -1629,7 +1632,13 @@ export class AssistantRuntime {
                         null,
                         attempt,
                         secrets,
-                      ),
+                      );
+                      // Keep the permitted retries of this HTTP request, but
+                      // stop subsequent tools/requests when its cost is unknown.
+                      if (status === "unknown" && context.localTask)
+                        context.localTask.stopped ??=
+                          "assistant_cost_unavailable";
+                    },
                   }),
             env: {},
             headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
