@@ -314,7 +314,7 @@ describe("QuickModelPicker", () => {
     const trigger = screen.getByRole("combobox");
     expect(trigger).toHaveAttribute("aria-haspopup", "dialog");
     expect(trigger).toHaveClass(
-      "h-[26px]",
+      "h-[var(--ctl-h,26px)]",
       "rounded-ctl",
       "border-line",
       "bg-card",
@@ -373,7 +373,7 @@ describe("QuickModelPicker", () => {
       />,
     );
     expect(screen.getByRole("combobox", { name: "2 个模型" })).toHaveClass(
-      "h-[26px]",
+      "h-[var(--ctl-h,26px)]",
       "rounded-ctl",
       "border-line",
       "bg-card",

@@ -76,7 +76,7 @@ export interface MenuSelectProps<T extends string> {
  * menu (ModelPicker) so every dropdown trigger looks the same.
  */
 export const menuTriggerClassName =
-  "group inline-flex h-[26px] max-w-[180px] flex-none cursor-default items-center gap-1 rounded-ctl border border-line bg-card pl-[9px] pr-[7px] text-ctl text-ink-ctl transition-colors duration-150 ease-soft hover:bg-pill data-[state=open]:bg-pill disabled:pointer-events-none disabled:opacity-50";
+  "group inline-flex h-[var(--ctl-h,26px)] max-w-[180px] flex-none cursor-default items-center gap-1 rounded-ctl border border-line bg-card pl-[9px] pr-[7px] text-ctl text-ink-ctl transition-colors duration-150 ease-soft hover:bg-pill data-[state=open]:bg-pill disabled:pointer-events-none disabled:opacity-50";
 
 export function MenuChevron({ className }: { className?: string }) {
   return (

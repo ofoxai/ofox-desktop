@@ -72,7 +72,12 @@ describe("Button", () => {
       "font-medium",
     );
     const icon = screen.getByRole("button", { name: "Refresh" });
-    expect(icon).toHaveClass("h-[26px]", "w-[26px]", "rounded-ctl");
+    // 26px unless a page sets --icon-btn (see sizeTokens.test).
+    expect(icon).toHaveClass(
+      "h-[var(--icon-btn,26px)]",
+      "w-[var(--icon-btn,26px)]",
+      "rounded-ctl",
+    );
     expect(icon).not.toHaveClass("h-8");
     expect(screen.getByRole("button", { name: "Copy" })).toHaveClass(
       "h-[22px]",
