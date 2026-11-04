@@ -9,6 +9,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useShellLayout, type ShellLayout } from "./useShellLayout";
 
 export type ShellPage =
   | "tools"
@@ -32,6 +33,8 @@ export const shellPanelId = (page: ShellPage) => `shell-panel-${page}`;
 export type RefreshHandler = () => unknown;
 
 export interface ShellContextValue {
+  /** The top bar, or the left rail and roomier pages of a wide window. */
+  layout: ShellLayout;
   /** The page on screen. */
   active: ShellPage;
   setActive: (page: ShellPage) => void;
@@ -225,8 +228,10 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
     }
   }, [active]);
 
+  const layout = useShellLayout();
   const value = useMemo<ShellContextValue>(
     () => ({
+      layout,
       active,
       setActive,
       registerLeaveGuard,
@@ -271,6 +276,7 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
       registered,
       runningPages,
       refresh,
+      layout,
     ],
   );
 
