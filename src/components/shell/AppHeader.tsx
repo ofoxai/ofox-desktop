@@ -21,8 +21,11 @@ import { UpdatePill } from "./UpdatePill";
  */
 export function AppHeader({
   settingsButtonRef,
+  navRef,
 }: {
   settingsButtonRef?: Ref<HTMLButtonElement>;
+  /** The element holding the page tabs. */
+  navRef?: Ref<HTMLElement>;
 }) {
   const { t } = useTranslation();
   const shell = useShell();
@@ -34,6 +37,7 @@ export function AppHeader({
 
   return (
     <header
+      ref={navRef}
       {...drag}
       className={cn(
         "relative flex h-[46px] shrink-0 items-center gap-2 pr-2.5",

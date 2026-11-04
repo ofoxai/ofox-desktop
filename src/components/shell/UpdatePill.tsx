@@ -14,7 +14,12 @@ import {
  * magpie's `.update`: a quiet brand pill before the header's icons while a
  * newer Ofox Desktop is out. It opens a menu to fetch it or skip it.
  */
-export function UpdatePill() {
+export function UpdatePill({
+  compact,
+}: {
+  /** The rail's form: an icon, its text the button's name and tooltip. */
+  compact?: boolean;
+}) {
   const { t } = useTranslation();
   const { hasUpdate, isDismissed, updateInfo, dismissUpdate } = useUpdate();
   if (!hasUpdate || isDismissed) return null;
@@ -29,18 +34,30 @@ export function UpdatePill() {
     });
   };
 
+  const label = version
+    ? t("shell.update.pill", { version })
+    : t("update.bannerTitle");
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="mr-1.5 inline-flex h-[22px] items-center gap-1 whitespace-nowrap rounded-full bg-brand-soft pl-[7px] pr-[9px] text-[11.5px] font-semibold tracking-[.005em] text-brand-ink shadow-[inset_0_0_0_.5px_rgb(var(--brand)/.35)] transition-[background-color,color,transform] duration-150 ease-soft hover:bg-brand hover:text-brand-on active:scale-[.96] data-[state=open]:bg-brand data-[state=open]:text-brand-on"
-        >
-          <ArrowUpCircle aria-hidden className="h-3 w-3" />
-          {version
-            ? t("shell.update.pill", { version })
-            : t("update.bannerTitle")}
-        </button>
+        {compact ? (
+          <button
+            type="button"
+            aria-label={label}
+            title={label}
+            className="grid h-[30px] w-[30px] place-items-center rounded-full bg-brand-soft text-brand-ink shadow-[inset_0_0_0_.5px_rgb(var(--brand)/.35)] transition-[background-color,color,transform] duration-150 ease-soft hover:bg-brand hover:text-brand-on active:scale-[.96] data-[state=open]:bg-brand data-[state=open]:text-brand-on"
+          >
+            <ArrowUpCircle aria-hidden className="h-4 w-4" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="mr-1.5 inline-flex h-[22px] items-center gap-1 whitespace-nowrap rounded-full bg-brand-soft pl-[7px] pr-[9px] text-[11.5px] font-semibold tracking-[.005em] text-brand-ink shadow-[inset_0_0_0_.5px_rgb(var(--brand)/.35)] transition-[background-color,color,transform] duration-150 ease-soft hover:bg-brand hover:text-brand-on active:scale-[.96] data-[state=open]:bg-brand data-[state=open]:text-brand-on"
+          >
+            <ArrowUpCircle aria-hidden className="h-3 w-3" />
+            {label}
+          </button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-[150px]">
         <DropdownMenuItem disabled={!downloadUrl} onSelect={openDownload}>

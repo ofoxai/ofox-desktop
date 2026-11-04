@@ -17,7 +17,7 @@ import { ToolsPanel } from "./ToolsPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { SessionsPanel } from "@/components/sessions/SessionsPanel";
-import { AppHeader } from "@/components/shell/AppHeader";
+import { ShellFrame } from "@/components/shell/ShellFrame";
 import { LibraryPage } from "@/components/library/LibraryPage";
 import {
   ShellProvider,
@@ -142,79 +142,76 @@ function ConsoleShell({
   });
 
   return (
-    <div className="flex h-screen w-full flex-col bg-canvas">
-      <AppHeader settingsButtonRef={settingsButtonRef} />
-      <div className="px-4">
-        <SettingsHealthBanner />
+    <ShellFrame
+      settingsButtonRef={settingsButtonRef}
+      banner={
+        <div className="px-4">
+          <SettingsHealthBanner />
+        </div>
+      }
+    >
+      <div
+        {...panel("tools")}
+        className="h-full overscroll-contain overflow-y-auto px-[max(16px,calc(50%-600px))] pb-6 pt-1"
+      >
+        {localOnly ? (
+          <LocalToolsPanel
+            signedIn={localSignedIn}
+            onLoginRequested={onLoginRequested}
+          />
+        ) : (
+          <SignedToolsPanel
+            boundTools={boundTools}
+            onBoundToolsChanged={onBoundToolsChanged}
+          />
+        )}
       </div>
 
-      <main className="min-h-0 flex-1">
+      {shell.visited.has("sessions") && (
+        <div {...panel("sessions")} className="h-full px-4 pb-4 pt-1">
+          <SessionsPanel
+            className="h-full min-h-0"
+            onAnalyze={shell.locateUsage}
+            onConfigure={(section) =>
+              section === "tools"
+                ? shell.setActive("tools")
+                : shell.locateLibrary(section)
+            }
+          />
+        </div>
+      )}
+      {shell.visited.has("usage") && (
         <div
-          {...panel("tools")}
-          className="h-full overscroll-contain overflow-y-auto px-[max(16px,calc(50%-600px))] pb-6 pt-1"
+          {...panel("usage")}
+          className="h-full overflow-y-auto px-4 pb-4 pt-1"
         >
           {localOnly ? (
-            <LocalToolsPanel
-              signedIn={localSignedIn}
-              onLoginRequested={onLoginRequested}
-            />
+            <UsagePage account={LOCAL_ACCOUNT} boundTools={[]} />
           ) : (
-            <SignedToolsPanel
-              boundTools={boundTools}
-              onBoundToolsChanged={onBoundToolsChanged}
-            />
+            <SignedUsagePage boundTools={boundTools} />
           )}
         </div>
-
-        {shell.visited.has("sessions") && (
-          <div {...panel("sessions")} className="h-full px-4 pb-4 pt-1">
-            <SessionsPanel
-              className="h-full min-h-0"
-              onAnalyze={shell.locateUsage}
-              onConfigure={(section) =>
-                section === "tools"
-                  ? shell.setActive("tools")
-                  : shell.locateLibrary(section)
-              }
+      )}
+      {shell.visited.has("library") && (
+        <div {...panel("library")} className="h-full overflow-y-auto px-4 pb-4">
+          <InteractionScope active={shell.active === "library"}>
+            <LibraryPage
+              location={shell.libraryLocation}
+              onLocated={shell.consumeLibraryLocation}
             />
-          </div>
-        )}
-        {shell.visited.has("usage") && (
-          <div
-            {...panel("usage")}
-            className="h-full overflow-y-auto px-4 pb-4 pt-1"
-          >
-            {localOnly ? (
-              <UsagePage account={LOCAL_ACCOUNT} boundTools={[]} />
-            ) : (
-              <SignedUsagePage boundTools={boundTools} />
-            )}
-          </div>
-        )}
-        {shell.visited.has("library") && (
-          <div
-            {...panel("library")}
-            className="h-full overflow-y-auto px-4 pb-4"
-          >
-            <InteractionScope active={shell.active === "library"}>
-              <LibraryPage
-                location={shell.libraryLocation}
-                onLocated={shell.consumeLibraryLocation}
-              />
-            </InteractionScope>
-          </div>
-        )}
-        {shell.visited.has("assistant") && (
-          <div {...panel("assistant")} className="h-full px-4 pb-4 pt-1">
-            <InteractionScope active={shell.active === "assistant"}>
-              <AccountAssistantPanel
-                enabled={Boolean(localSignedIn)}
-                onLoginRequested={onLoginRequested}
-              />
-            </InteractionScope>
-          </div>
-        )}
-      </main>
+          </InteractionScope>
+        </div>
+      )}
+      {shell.visited.has("assistant") && (
+        <div {...panel("assistant")} className="h-full px-4 pb-4 pt-1">
+          <InteractionScope active={shell.active === "assistant"}>
+            <AccountAssistantPanel
+              enabled={Boolean(localSignedIn)}
+              onLoginRequested={onLoginRequested}
+            />
+          </InteractionScope>
+        </div>
+      )}
 
       {/* 首次发现新版本的提示对话框。顶栏的 UpdatePill 常驻（hasUpdate &&
           !isDismissed），这里只在本会话首次发现时弹一次，弹过即由
@@ -243,7 +240,7 @@ function ConsoleShell({
           markPrompted();
         }}
       />
-    </div>
+    </ShellFrame>
   );
 }
 

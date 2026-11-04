@@ -149,6 +149,69 @@ export function SegmentedNav<T extends string>({
   );
 }
 
+/**
+ * The page tabs as a column for the left rail of a wide window: an icon over
+ * its label, up and down arrows to move. A label too long for the rail is
+ * cut short, with the whole name as the tab's tooltip.
+ */
+export function RailNav<T extends string>({
+  items,
+  value,
+  onChange,
+  icons,
+  "aria-label": ariaLabel,
+  className,
+}: SegmentedNavProps<T> & { icons: Record<T, React.ReactNode> }) {
+  const bind = useRoving(
+    items.map((item) => item.value),
+    value,
+    onChange,
+    true,
+  );
+  return (
+    <div
+      role="tablist"
+      aria-label={ariaLabel}
+      aria-orientation="vertical"
+      className={cn("flex flex-col items-center gap-1", className)}
+    >
+      {items.map((item, index) => {
+        const on = item.value === value;
+        return (
+          <button
+            key={item.value}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            aria-controls={item.controls}
+            title={typeof item.label === "string" ? item.label : undefined}
+            onClick={() => {
+              if (!on) onChange(item.value);
+            }}
+            {...bind(index)}
+            className={cn(
+              "flex w-[68px] flex-col items-center gap-1 rounded-[10px] px-1 py-1.5 transition-colors duration-150 ease-soft",
+              on
+                ? "bg-pill text-ink"
+                : "text-ink-ctl hover:bg-pill/60 hover:text-ink-2",
+            )}
+          >
+            <span
+              aria-hidden
+              className="grid h-5 w-5 place-items-center [&_svg]:h-[18px] [&_svg]:w-[18px]"
+            >
+              {icons[item.value]}
+            </span>
+            <span className="w-full truncate text-center text-[10.5px] leading-[13px]">
+              {item.label}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export interface SegmentedControlProps<T extends string> {
   options: ReadonlyArray<SegmentedItem<T>>;
   value: T;
