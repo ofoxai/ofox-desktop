@@ -220,10 +220,7 @@ function ConsoleShell({
         </div>
       )}
       {shell.visited.has("usage") && (
-        <div
-          {...panel("usage")}
-          className="h-full overflow-y-auto px-4 pb-4 pt-1"
-        >
+        <div {...panel("usage")} className="h-full overflow-y-auto pb-4">
           {localOnly || !account ? (
             <UsagePage account={LOCAL_ACCOUNT} boundTools={[]} />
           ) : (

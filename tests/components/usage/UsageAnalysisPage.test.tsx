@@ -13,6 +13,7 @@ import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { queryClient } from "@/lib/query/queryClient";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
+import { PageSubnav } from "../../utils/pageSubnav";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { sessionAnalyticsFixture } from "./sessionAnalyticsFixture";
@@ -39,6 +40,7 @@ function Page() {
     <ShellProvider openSettings={() => undefined}>
       <Controls />
       <UsagePage account={account} />
+      <PageSubnav page="usage" />
     </ShellProvider>
   );
 }
@@ -564,12 +566,9 @@ it("keeps ranking-selected filters visible without jumping and removes only the 
   );
   await userEvent.click(screen.getByRole("option", { name: "model-a" }));
   await userEvent.keyboard("{Escape}");
-  await userEvent.click(
-    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
-      "button",
-      { name: "Codex" },
-    ),
-  );
+  await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
+  await userEvent.click(screen.getByRole("option", { name: "Codex" }));
+  await userEvent.keyboard("{Escape}");
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenLastCalledWith(
       "get_session_usage_analytics",
@@ -712,12 +711,9 @@ it("removes one project from a multi-selected ranking without altering other dim
   await userEvent.click(screen.getByRole("option", { name: "project" }));
   await userEvent.click(screen.getByRole("option", { name: "second" }));
   await userEvent.keyboard("{Escape}");
-  await userEvent.click(
-    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
-      "button",
-      { name: "Codex" },
-    ),
-  );
+  await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
+  await userEvent.click(screen.getByRole("option", { name: "Codex" }));
+  await userEvent.keyboard("{Escape}");
   await waitFor(() =>
     expect(
       screen.getByRole("button", { name: "移除 project 筛选" }),

@@ -5676,6 +5676,20 @@
         "title": "技能",
         "description": "技能文件夹，按需链接到各工具"
       }
+    },
+    "usage": {
+      "overview": {
+        "title": "用量概览",
+        "description": "各工具这段时间用了多少 token、花了多少钱"
+      },
+      "requests": {
+        "title": "用量明细",
+        "description": "每一次请求的模型、token 和费用"
+      },
+      "sessions": {
+        "title": "会话分析",
+        "description": "按会话看用量和耗时"
+      }
     }
   }
 }

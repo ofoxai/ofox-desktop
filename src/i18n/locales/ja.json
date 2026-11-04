@@ -5676,6 +5676,20 @@
         "title": "スキル",
         "description": "スキルフォルダを必要なツールにリンク"
       }
+    },
+    "usage": {
+      "overview": {
+        "title": "使用量の概要",
+        "description": "この期間に各ツールが使ったトークンと費用"
+      },
+      "requests": {
+        "title": "使用量の明細",
+        "description": "リクエストごとのモデル・トークン・費用"
+      },
+      "sessions": {
+        "title": "セッション分析",
+        "description": "セッションごとの使用量と所要時間"
+      }
     }
   }
 }

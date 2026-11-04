@@ -13,6 +13,7 @@ import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { queryClient } from "@/lib/query/queryClient";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
+import { PageSubnav } from "../../utils/pageSubnav";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import type { UsageOverview } from "@/lib/api/usageOverview";
@@ -101,6 +102,7 @@ function Page({
     <ShellProvider openSettings={() => undefined}>
       <Refresh />
       <UsagePage account={value} boundTools={bound} />
+      <PageSubnav page="usage" />
     </ShellProvider>
   );
 }
@@ -390,12 +392,9 @@ describe("UsagePage", () => {
     });
     render(<Page />);
     await screen.findByText("unknown-model");
-    await userEvent.click(
-      within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
-        "button",
-        { name: "OpenCode" },
-      ),
-    );
+    await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
+    await userEvent.click(screen.getByRole("option", { name: "OpenCode" }));
+    await userEvent.keyboard("{Escape}");
     await waitFor(() =>
       expect(
         mocks.invoke.mock.calls.some(
@@ -564,17 +563,20 @@ it("shows usage tools independently of bindings and counts ChatGPT under Codex",
   mocks.invoke.mockImplementation((command: string, ...args: unknown[]) =>
     command === "get_usage_overview"
       ? Promise.resolve({ ...overview, unsupportedTools: ["chatgpt"] })
-      : normal(command, ...args),
+      : command === "get_usage_capabilities"
+        ? Promise.resolve({ queryVersion: 1, sources: [] })
+        : normal(command, ...args),
   );
   render(<Page bound={["hermes", "chatgpt", "claude"]} />);
-  const tools = await screen.findByRole("group", { name: "工具筛选" });
+  const menu = await screen.findByRole("combobox", { name: "工具筛选" });
+  await waitFor(() => expect(menu).toBeEnabled());
+  await userEvent.click(menu);
   await waitFor(() =>
     expect(
-      within(tools)
-        .getAllByRole("button")
-        .map((button) => button.getAttribute("aria-label")),
+      screen
+        .getAllByRole("option")
+        .map((option) => option.getAttribute("aria-label")),
     ).toEqual([
-      "全部工具",
       "Claude Code",
       "Codex",
       "OpenCode",
@@ -604,14 +606,15 @@ it("keeps usage tool filters after unbinding when the initial reads fail", async
   });
   render(<Page bound={["hermes", "dsh"]} />);
   fireEvent.click(await screen.findByRole("tab", { name: "明细" }));
-  const tools = await screen.findByRole("group", { name: "工具筛选" });
+  const menu = await screen.findByRole("combobox", { name: "工具筛选" });
+  await waitFor(() => expect(menu).toBeEnabled());
+  await userEvent.click(menu);
   await waitFor(() =>
     expect(
-      within(tools)
-        .getAllByRole("button")
-        .map((button) => button.getAttribute("aria-label")),
+      screen
+        .getAllByRole("option")
+        .map((option) => option.getAttribute("aria-label")),
     ).toEqual([
-      "全部工具",
       "Claude Code",
       "Codex",
       "OpenCode",
@@ -990,11 +993,15 @@ it("keeps a filtered overview unchanged when an automatic refresh fails during a
   const timers = vi.spyOn(window, "setInterval");
   try {
     render(<Page />);
-    const tools = await screen.findByRole("group", { name: "工具筛选" });
-    const claude = within(tools).getByRole("button", { name: "Claude Code" });
-    await waitFor(() => expect(claude).toBeEnabled());
+    const menu = await screen.findByRole("combobox", { name: "工具筛选" });
+    await waitFor(() => expect(menu).toBeEnabled());
+    await userEvent.click(menu);
+    const claude = await screen.findByRole("option", { name: "Claude Code" });
     fireEvent.click(claude);
-    await waitFor(() => expect(claude).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() =>
+      expect(claude).toHaveAttribute("aria-selected", "true"),
+    );
+    await userEvent.keyboard("{Escape}");
     await screen.findByText("unknown-model");
     expect(screen.queryByText(/正在重建 Codex 本机统计/)).toBeNull();
 
@@ -1004,8 +1011,8 @@ it("keeps a filtered overview unchanged when an automatic refresh fails during a
     tick();
     await waitFor(() => expect(failRefresh).toBeTypeOf("function"));
     expect(
-      within(tools).getByRole("button", { name: "Claude Code" }),
-    ).toHaveAttribute("aria-pressed", "true");
+      screen.getByRole("combobox", { name: "工具筛选" }),
+    ).toHaveTextContent("Claude Code");
     expect(screen.queryByText(/正在重建 Codex 本机统计/)).toBeNull();
     await act(async () => failRefresh(new Error("background read failed")));
     expect(screen.queryByText(/部分数据刷新失败/)).toBeNull();
@@ -1040,11 +1047,15 @@ it("publishes a fresh filtered overview only after the background read completes
   const timers = vi.spyOn(window, "setInterval");
   try {
     render(<Page />);
-    const tools = await screen.findByRole("group", { name: "工具筛选" });
-    const claude = within(tools).getByRole("button", { name: "Claude Code" });
-    await waitFor(() => expect(claude).toBeEnabled());
+    const menu = await screen.findByRole("combobox", { name: "工具筛选" });
+    await waitFor(() => expect(menu).toBeEnabled());
+    await userEvent.click(menu);
+    const claude = await screen.findByRole("option", { name: "Claude Code" });
     fireEvent.click(claude);
-    await waitFor(() => expect(claude).toHaveAttribute("aria-pressed", "true"));
+    await waitFor(() =>
+      expect(claude).toHaveAttribute("aria-selected", "true"),
+    );
+    await userEvent.keyboard("{Escape}");
     await waitFor(() =>
       expect(screen.getAllByText("1.2K").length).toBeGreaterThan(0),
     );
@@ -1069,7 +1080,9 @@ it("publishes a fresh filtered overview only after the background read completes
     tick();
     await waitFor(() => expect(release).toBeTypeOf("function"));
     expect(screen.getAllByText("1.2K")[0]).toBeVisible();
-    expect(claude).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("combobox", { name: "工具筛选" }),
+    ).toHaveTextContent("Claude Code");
     expect(screen.queryByText(/正在更新筛选结果/)).toBeNull();
 
     await act(async () =>
@@ -1081,7 +1094,9 @@ it("publishes a fresh filtered overview only after the background read completes
       }),
     );
     await waitFor(() => expect(screen.getAllByText("7.2K")[0]).toBeVisible());
-    expect(claude).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("combobox", { name: "工具筛选" }),
+    ).toHaveTextContent("Claude Code");
     expect(screen.queryByText(/正在更新筛选结果/)).toBeNull();
   } finally {
     timers.mockRestore();
@@ -1246,5 +1261,92 @@ describe("the Ofox assistant's usage", () => {
     await waitFor(() => expect(summaryReads()).toBe(2));
     fireEvent.click(screen.getByText("refresh-page"));
     await waitFor(() => expect(summaryReads()).toBe(3));
+  });
+});
+
+describe("usage sub-pages in the sidebar", () => {
+  const capable = (more: Record<string, unknown>) => {
+    const normal = mocks.invoke.getMockImplementation()!;
+    mocks.invoke.mockImplementation(async (command: string, args: any) =>
+      command === "get_usage_capabilities"
+        ? { queryVersion: 1, sources: [], ...more }
+        : normal(command, args),
+    );
+  };
+  const subPages = () =>
+    within(screen.getByRole("tablist", { name: "usage sub-pages" }))
+      .getAllByRole("tab")
+      .map((tab) => tab.textContent);
+
+  it("publishes 概览 / 明细 / 会话分析 when supported", async () => {
+    capable({ requestSnapshots: true, sessionAnalytics: true });
+    render(<Page />);
+    await waitFor(() =>
+      expect(subPages()).toEqual(["概览", "明细", "会话分析"]),
+    );
+    expect(screen.getByRole("tab", { name: "明细" })).toHaveAttribute(
+      "aria-controls",
+      "usage-requests-panel",
+    );
+  });
+
+  it("omits 明细 when requests are unsupported", async () => {
+    capable({ requestSnapshots: false, sessionAnalytics: true });
+    render(<Page />);
+    await waitFor(() => expect(subPages()).toEqual(["概览", "会话分析"]));
+  });
+
+  it("titles the page by its sub-page, with the refresh interval and refresh in the title row", async () => {
+    capable({ requestSnapshots: true, sessionAnalytics: true });
+    render(<Page />);
+    const header = await waitFor(
+      () => document.querySelector<HTMLElement>("[data-page-header]")!,
+    );
+    expect(
+      within(header).getByRole("heading", {
+        level: 1,
+        name: zh.pages.usage.overview.title,
+      }),
+    ).toBeVisible();
+    expect(
+      within(header).getByRole("combobox", { name: "刷新周期" }),
+    ).toBeVisible();
+    expect(
+      within(header).getByRole("button", { name: "刷新本机数据" }),
+    ).toBeVisible();
+    await waitFor(() => expect(subPages()).toContain("会话分析"));
+    await userEvent.click(screen.getByRole("tab", { name: "会话分析" }));
+    expect(
+      within(header).getByRole("heading", {
+        level: 1,
+        name: zh.pages.usage.sessions.title,
+      }),
+    ).toBeVisible();
+  });
+
+  it("follows a located session into 会话分析 in the sidebar", async () => {
+    capable({ requestSnapshots: true, sessionAnalytics: true });
+    function Locate() {
+      const shell = useShell();
+      return (
+        <button onClick={() => shell.locateUsage("codex:abc")}>locate</button>
+      );
+    }
+    render(
+      <ShellProvider openSettings={() => undefined}>
+        <Refresh />
+        <Locate />
+        <UsagePage account={account} boundTools={["claude"]} />
+        <PageSubnav page="usage" />
+      </ShellProvider>,
+    );
+    await waitFor(() => expect(subPages()).toContain("会话分析"));
+    fireEvent.click(screen.getByText("locate"));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "会话分析" })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
   });
 });

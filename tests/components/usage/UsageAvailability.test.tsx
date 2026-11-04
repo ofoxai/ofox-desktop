@@ -5,6 +5,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
+import { PageSubnav } from "../../utils/pageSubnav";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
 import { UsageSessions } from "@/components/usage-overview/UsageSessions";
 import { queryClient } from "@/lib/query/queryClient";
@@ -95,6 +96,7 @@ function Page() {
     <ShellProvider openSettings={() => undefined}>
       <Activate />
       <UsagePage account={{ user: null } as OfoxAccount} />
+      <PageSubnav page="usage" />
     </ShellProvider>
   );
 }

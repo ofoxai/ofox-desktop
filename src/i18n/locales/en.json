@@ -5676,6 +5676,20 @@
         "title": "Skills",
         "description": "Skill folders, linked into the tools that need them"
       }
+    },
+    "usage": {
+      "overview": {
+        "title": "Usage overview",
+        "description": "What each tool used and spent over this period"
+      },
+      "requests": {
+        "title": "Usage details",
+        "description": "The model, tokens and cost of every request"
+      },
+      "sessions": {
+        "title": "Session analysis",
+        "description": "Usage and time, session by session"
+      }
     }
   }
 }

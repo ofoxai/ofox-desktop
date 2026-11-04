@@ -3,12 +3,18 @@ import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArrowRight, RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
+import {
+  useShell,
+  useShellRefresh,
+  useShellSubnav,
+} from "@/components/shell/ShellContext";
+import { PAGE_BODY_WIDE, PageHeader } from "@/components/shell/PageHeader";
+import { cn } from "@/lib/utils";
 import { useInteractionActive } from "@/components/ui/interaction-scope";
 import { Button } from "@/components/ui/button";
 import { DatePicker } from "@/components/ui/date-picker";
 import { MenuSelect } from "@/components/ui/menu-select";
-import { SegmentedControl, SegmentedNav } from "@/components/ui/segmented";
+import { SegmentedControl } from "@/components/ui/segmented";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { useOfoxApex } from "@/hooks/useOfoxApex";
 import { accountIdentity, useUsageOverview } from "@/hooks/useUsageOverview";
@@ -539,592 +545,614 @@ export function UsagePage({
       : effectiveTab === "overview"
         ? data?.appliedQuery
         : undefined) ?? displayedQuery;
-  return (
-    <div className="flex min-w-0 flex-col gap-3">
-      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-        <SegmentedNav
-          className="shrink-0 [&>button]:px-2 [&>button]:text-ctl"
-          aria-label={t("usageWorkbench.tabs")}
-          value={effectiveTab}
-          onChange={(value) => {
-            if (
-              !sharedProjectSupported &&
-              value !== "sessions" &&
-              analysisProjects.length
-            ) {
-              setAnalysisProjects([]);
-              setProjectsCleared(true);
-            }
-            setTab(value);
-            setSavedHistory(undefined);
-            localStorage.setItem("ofox.usageTab", value);
-          }}
-          items={[
+  const changeTab = (value: Tab) => {
+    if (
+      !sharedProjectSupported &&
+      value !== "sessions" &&
+      analysisProjects.length
+    ) {
+      setAnalysisProjects([]);
+      setProjectsCleared(true);
+    }
+    setTab(value);
+    setSavedHistory(undefined);
+    localStorage.setItem("ofox.usageTab", value);
+  };
+  useShellSubnav("usage", {
+    items: [
+      {
+        value: "overview",
+        label: t("usageWorkbench.overview"),
+        controls: "usage-overview-panel",
+      },
+      ...(requestSupported
+        ? [
             {
-              value: "overview",
-              label: t("usageWorkbench.overview"),
-              controls: "usage-overview-panel",
+              value: "requests" as const,
+              label: t("usageWorkbench.requests"),
+              controls: "usage-requests-panel",
             },
-            ...(requestSupported
-              ? [
-                  {
-                    value: "requests" as const,
-                    label: t("usageWorkbench.requests"),
-                    controls: "usage-requests-panel",
-                  },
-                ]
-              : []),
-            ...(analysisSupported
-              ? [
-                  {
-                    value: "sessions" as const,
-                    label: t("usageSessions.title"),
-                    controls: "usage-sessions-panel",
-                  },
-                ]
-              : []),
-          ]}
-        />
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <SegmentedControl<WorkbenchPeriod>
-            aria-label={t("usagePage.period")}
-            value={range.period}
-            className="[&>button]:px-2"
-            options={(modern
-              ? (["today", "7d", "30d", "90d", "all", "custom"] as const)
-              : (["today", "7d", "30d", "all"] as const)
-            ).map((value) => ({
-              value,
-              label: t(`usagePage.periods.${value}`),
-            }))}
-            onChange={(period) =>
-              period === "custom"
-                ? toggleCustomRange()
-                : chooseRange({ period })
-            }
-            onReselect={(period) => {
-              if (period === "custom") toggleCustomRange();
-            }}
-          />
-          {effectiveTab === "overview" && (
-            <span
-              className="inline-flex items-center gap-1.5"
-              title={t("usagePage.estimate")}
+          ]
+        : []),
+      ...(analysisSupported
+        ? [
+            {
+              value: "sessions" as const,
+              label: t("usageSessions.title"),
+              controls: "usage-sessions-panel",
+            },
+          ]
+        : []),
+    ],
+    value: effectiveTab,
+    onChange: changeTab,
+  });
+  return (
+    <div className="flex min-w-0 flex-col">
+      <PageHeader
+        wide
+        title={t(`pages.usage.${effectiveTab}.title`)}
+        description={t(`pages.usage.${effectiveTab}.description`)}
+        actions={
+          <>
+            <MenuSelect
+              aria-label={t("usageWorkbench.refreshEvery")}
+              value={String(interval)}
+              onChange={(value) => {
+                setIntervalValue(Number(value));
+                localStorage.setItem("ofox.usageRefreshSeconds", value);
+              }}
+              options={[0, 5, 10, 30, 60].map((value) => ({
+                value: String(value),
+                label: value
+                  ? t("usageWorkbench.seconds", { count: value })
+                  : t("usageWorkbench.refreshOff"),
+              }))}
+            />
+            <Button
+              variant="ghost"
+              className="h-[26px] w-[26px] p-0 text-ink-muted"
+              aria-label={t("usageWorkbench.refresh")}
+              aria-busy={refreshing}
+              disabled={refreshing}
+              title={
+                refreshError
+                  ? t("usagePage.refreshFailed")
+                  : t("usageWorkbench.refresh")
+              }
+              onClick={() => void manualRefresh().catch(() => undefined)}
             >
-              <span className="text-sub font-semibold tabular-nums">
-                {usageIsUnavailable(data)
-                  ? "—"
-                  : formatUsageEstimate(
-                      data?.totals.estimate,
-                      data?.totals.costUsd,
-                    )}
-              </span>
+              <RefreshCw
+                aria-hidden
+                className={`h-3.5 w-3.5 ${refreshing ? "animate-spin motion-reduce:animate-none" : ""}`}
+              />
+            </Button>
+          </>
+        }
+      />
+      <div className={cn(PAGE_BODY_WIDE, "flex min-w-0 flex-col gap-3")}>
+        <UsageFilterToolbar
+          leading={
+            <>
+              <SegmentedControl<WorkbenchPeriod>
+                aria-label={t("usagePage.period")}
+                value={range.period}
+                className="[&>button]:px-2"
+                options={(modern
+                  ? (["today", "7d", "30d", "90d", "all", "custom"] as const)
+                  : (["today", "7d", "30d", "all"] as const)
+                ).map((value) => ({
+                  value,
+                  label: t(`usagePage.periods.${value}`),
+                }))}
+                onChange={(period) =>
+                  period === "custom"
+                    ? toggleCustomRange()
+                    : chooseRange({ period })
+                }
+                onReselect={(period) => {
+                  if (period === "custom") toggleCustomRange();
+                }}
+              />
+            </>
+          }
+          trailing={
+            <>
+              {effectiveTab === "overview" && (
+                <span
+                  className="inline-flex items-center gap-1.5"
+                  title={t("usagePage.estimate")}
+                >
+                  <span className="text-sub font-semibold tabular-nums">
+                    {usageIsUnavailable(data)
+                      ? "—"
+                      : formatUsageEstimate(
+                          data?.totals.estimate,
+                          data?.totals.costUsd,
+                        )}
+                  </span>
+                </span>
+              )}
+            </>
+          }
+          tools={toolIds.map((value) => ({
+            value,
+            label: TOOL_META[value]?.label ?? value,
+          }))}
+          selectedTools={filters.toolIds ?? []}
+          onToolsChange={(toolIds) =>
+            setFilters((old) => ({ ...old, toolIds }))
+          }
+          disabled={!modern}
+          chips={filterChips}
+          onReset={() => {
+            setFilters({});
+            setAnalysisProjects([]);
+          }}
+        >
+          <UsageFilterMenu
+            label={t("usageWorkbench.modelsFilter")}
+            allLabel={t("usageFilters.allModels")}
+            pageSize={effectiveTab === "sessions" ? 50 : undefined}
+            options={modelIds.map((value) => ({ value, label: value }))}
+            selected={filters.modelIds ?? []}
+            onChange={(modelIds) => setFilters((old) => ({ ...old, modelIds }))}
+            disabled={!modern}
+          />
+          {sharedProjectSupported ||
+          (effectiveTab === "sessions" && analysisProjectSupported) ? (
+            <UsageFilterMenu
+              label={t(
+                sharedProjectSupported
+                  ? "usageWorkbench.projectsFilter"
+                  : "usageSessions.projectFilter",
+              )}
+              allLabel={t("usageFilters.allProjects")}
+              pageSize={50}
+              options={projectOptions}
+              selected={selectedProjects}
+              onChange={chooseProjects}
+            />
+          ) : (
+            <span
+              className="text-note text-ink-faint"
+              title={t("usageWorkbench.projectUnavailable")}
+            >
+              {t("usageWorkbench.projectUnavailable")}
             </span>
           )}
-        </div>
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          <MenuSelect
-            aria-label={t("usageWorkbench.refreshEvery")}
-            value={String(interval)}
-            onChange={(value) => {
-              setIntervalValue(Number(value));
-              localStorage.setItem("ofox.usageRefreshSeconds", value);
+        </UsageFilterToolbar>
+        {customOpen && (
+          <form
+            aria-label={t("usagePage.periods.custom")}
+            className="flex w-fit max-w-full flex-wrap items-end gap-3 rounded-card border border-line bg-card p-3 shadow-sm"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const next: WorkbenchRange = {
+                period: "custom",
+                startDate: customStart,
+                endDate: customEnd,
+              };
+              try {
+                resolveWorkbenchRange(next);
+                chooseRange(next);
+              } catch {
+                setRangeError(true);
+              }
             }}
-            options={[0, 5, 10, 30, 60].map((value) => ({
-              value: String(value),
-              label: value
-                ? t("usageWorkbench.seconds", { count: value })
-                : t("usageWorkbench.refreshOff"),
-            }))}
-          />
-          <Button
-            variant="ghost"
-            className="h-[26px] w-[26px] p-0 text-ink-muted"
-            aria-label={t("usageWorkbench.refresh")}
-            aria-busy={refreshing}
-            disabled={refreshing}
-            title={
-              refreshError
-                ? t("usagePage.refreshFailed")
-                : t("usageWorkbench.refresh")
-            }
-            onClick={() => void manualRefresh().catch(() => undefined)}
+          >
+            <div className="w-[156px]">
+              <DatePicker
+                label={t("usageWorkbench.startDate")}
+                value={customStart}
+                onChange={(value) => {
+                  setCustomStart(value);
+                  setRangeError(false);
+                }}
+                rangeStart={customStart}
+                rangeEnd={customEnd}
+                invalid={rangeError}
+                describedBy={rangeError ? "usage-custom-date-error" : undefined}
+              />
+            </div>
+            <ArrowRight
+              aria-hidden
+              className="mb-2 h-3.5 w-3.5 text-ink-faint"
+            />
+            <div className="w-[156px]">
+              <DatePicker
+                label={t("usageWorkbench.endDate")}
+                value={customEnd}
+                onChange={(value) => {
+                  setCustomEnd(value);
+                  setRangeError(false);
+                }}
+                rangeStart={customStart}
+                rangeEnd={customEnd}
+                invalid={rangeError}
+                describedBy={rangeError ? "usage-custom-date-error" : undefined}
+              />
+            </div>
+            <div className="flex gap-1.5">
+              <Button type="submit" className="h-8 px-3.5">
+                {t("usageWorkbench.applyRange")}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                className="h-8"
+                onClick={() => setCustomOpen(false)}
+              >
+                {t("common.cancel")}
+              </Button>
+            </div>
+            {rangeError && (
+              <p
+                id="usage-custom-date-error"
+                role="alert"
+                className="w-full text-note text-warn"
+              >
+                {t("usageWorkbench.invalidRange")}
+              </p>
+            )}
+          </form>
+        )}
+        {!sharedProjectSupported &&
+          effectiveTab === "sessions" &&
+          analysisProjectSupported && (
+            <p className="text-note text-ink-muted">
+              {t("usageSessions.projectScope")}
+            </p>
+          )}
+        {projectsCleared && effectiveTab !== "sessions" && (
+          <p role="status" className="text-note text-ink-muted">
+            {t("usageSessions.projectsCleared")}
+          </p>
+        )}
+        {refreshError && (
+          <p role="alert" className="text-note text-warn">
+            {t("usagePage.refreshFailed")}
+          </p>
+        )}
+        {refreshing && effectiveTab !== "requests" && (
+          <p
+            role="status"
+            className="flex items-center gap-2 text-note text-ink-2"
           >
             <RefreshCw
               aria-hidden
-              className={`h-3.5 w-3.5 ${refreshing ? "animate-spin motion-reduce:animate-none" : ""}`}
+              className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
             />
-          </Button>
-        </div>
-      </div>
-      {customOpen && (
-        <form
-          aria-label={t("usagePage.periods.custom")}
-          className="flex w-fit max-w-full flex-wrap items-end gap-3 rounded-card border border-line bg-card p-3 shadow-sm"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const next: WorkbenchRange = {
-              period: "custom",
-              startDate: customStart,
-              endDate: customEnd,
-            };
-            try {
-              resolveWorkbenchRange(next);
-              chooseRange(next);
-            } catch {
-              setRangeError(true);
-            }
-          }}
-        >
-          <div className="w-[156px]">
-            <DatePicker
-              label={t("usageWorkbench.startDate")}
-              value={customStart}
-              onChange={(value) => {
-                setCustomStart(value);
-                setRangeError(false);
-              }}
-              rangeStart={customStart}
-              rangeEnd={customEnd}
-              invalid={rangeError}
-              describedBy={rangeError ? "usage-custom-date-error" : undefined}
-            />
-          </div>
-          <ArrowRight aria-hidden className="mb-2 h-3.5 w-3.5 text-ink-faint" />
-          <div className="w-[156px]">
-            <DatePicker
-              label={t("usageWorkbench.endDate")}
-              value={customEnd}
-              onChange={(value) => {
-                setCustomEnd(value);
-                setRangeError(false);
-              }}
-              rangeStart={customStart}
-              rangeEnd={customEnd}
-              invalid={rangeError}
-              describedBy={rangeError ? "usage-custom-date-error" : undefined}
-            />
-          </div>
-          <div className="flex gap-1.5">
-            <Button type="submit" className="h-8 px-3.5">
-              {t("usageWorkbench.applyRange")}
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              className="h-8"
-              onClick={() => setCustomOpen(false)}
-            >
-              {t("common.cancel")}
-            </Button>
-          </div>
-          {rangeError && (
-            <p
-              id="usage-custom-date-error"
-              role="alert"
-              className="w-full text-note text-warn"
-            >
-              {t("usageWorkbench.invalidRange")}
-            </p>
-          )}
-        </form>
-      )}
-      <UsageFilterToolbar
-        tools={toolIds.map((value) => ({
-          value,
-          label: TOOL_META[value]?.label ?? value,
-        }))}
-        selectedTools={filters.toolIds ?? []}
-        onToolsChange={(toolIds) => setFilters((old) => ({ ...old, toolIds }))}
-        disabled={!modern}
-        chips={filterChips}
-        onReset={() => {
-          setFilters({});
-          setAnalysisProjects([]);
-        }}
-      >
-        <UsageFilterMenu
-          label={t("usageWorkbench.modelsFilter")}
-          allLabel={t("usageFilters.allModels")}
-          pageSize={effectiveTab === "sessions" ? 50 : undefined}
-          options={modelIds.map((value) => ({ value, label: value }))}
-          selected={filters.modelIds ?? []}
-          onChange={(modelIds) => setFilters((old) => ({ ...old, modelIds }))}
-          disabled={!modern}
-        />
-        {sharedProjectSupported ||
-        (effectiveTab === "sessions" && analysisProjectSupported) ? (
-          <UsageFilterMenu
-            label={t(
-              sharedProjectSupported
-                ? "usageWorkbench.projectsFilter"
-                : "usageSessions.projectFilter",
-            )}
-            allLabel={t("usageFilters.allProjects")}
-            pageSize={50}
-            options={projectOptions}
-            selected={selectedProjects}
-            onChange={chooseProjects}
-          />
-        ) : (
-          <span
-            className="text-note text-ink-faint"
-            title={t("usageWorkbench.projectUnavailable")}
-          >
-            {t("usageWorkbench.projectUnavailable")}
-          </span>
-        )}
-      </UsageFilterToolbar>
-      {!sharedProjectSupported &&
-        effectiveTab === "sessions" &&
-        analysisProjectSupported && (
-          <p className="text-note text-ink-muted">
-            {t("usageSessions.projectScope")}
+            {t(`usageWorkbench.refreshPhase.${refreshPhase ?? "query"}`)}
           </p>
         )}
-      {projectsCleared && effectiveTab !== "sessions" && (
-        <p role="status" className="text-note text-ink-muted">
-          {t("usageSessions.projectsCleared")}
+        <p className="text-note text-ink-muted">
+          {t("usageWorkbench.rangeSummary", {
+            start:
+              resultQuery.startMs == null
+                ? t("usageWorkbench.beginning")
+                : new Date(resultQuery.startMs).toLocaleDateString(
+                    i18n.language,
+                  ),
+            end: new Date(resultQuery.endMs - 1).toLocaleString(i18n.language),
+            timezone,
+          })}
         </p>
-      )}
-      {refreshError && (
-        <p role="alert" className="text-note text-warn">
-          {t("usagePage.refreshFailed")}
-        </p>
-      )}
-      {refreshing && effectiveTab !== "requests" && (
-        <p
-          role="status"
-          className="flex items-center gap-2 text-note text-ink-2"
-        >
-          <RefreshCw
-            aria-hidden
-            className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none"
-          />
-          {t(`usageWorkbench.refreshPhase.${refreshPhase ?? "query"}`)}
-        </p>
-      )}
-      <p className="text-note text-ink-muted">
-        {t("usageWorkbench.rangeSummary", {
-          start:
-            resultQuery.startMs == null
-              ? t("usageWorkbench.beginning")
-              : new Date(resultQuery.startMs).toLocaleDateString(i18n.language),
-          end: new Date(resultQuery.endMs - 1).toLocaleString(i18n.language),
-          timezone,
-        })}
-      </p>
-      {capabilities.isFetched && !modern && (
-        <p role="status" className="text-note text-ink-muted">
-          {t("usageWorkbench.oldBackend")}
-        </p>
-      )}
-      <section
-        id="usage-overview-panel"
-        role="tabpanel"
-        aria-label={t("usageWorkbench.overview")}
-        hidden={effectiveTab !== "overview"}
-        className="space-y-3"
-        aria-busy={state.overview.isFetching || !!refreshPhase}
-      >
-        {!state.overview.data && data && (
-          <p
-            role="status"
-            className="rounded-lg border border-brand/25 bg-brand/5 px-3 py-2 text-note text-ink-2"
-          >
-            {t(
-              state.overview.isError
-                ? "usageFilters.previous"
-                : "usageFilters.updating",
-            )}
-            {data.appliedQuery && (
-              <span className="mt-1 block break-words text-ink-faint">
-                {describePrevious(data.appliedQuery)}
-              </span>
-            )}
+        {capabilities.isFetched && !modern && (
+          <p role="status" className="text-note text-ink-muted">
+            {t("usageWorkbench.oldBackend")}
           </p>
         )}
-        <p className="text-note font-medium text-ink-muted">
-          {t("usageWorkbench.currentAccount")}
-        </p>
-        <BalanceTrendCard
-          user={state.user}
-          trend={state.trend.data}
-          spending={state.spending.data}
-          recharge={() => open(ofoxWalletUrl(apex))}
-        />
-        {account.user && (
-          <AssistantUsageCard
-            identity={accountIdentity(account.user, apex)}
-            enabled={visible && effectiveTab === "overview"}
-          />
-        )}
-        <p className="pt-1 text-note font-medium text-ink-muted">
-          {t("usageWorkbench.localHistory")}
-        </p>
-        {state.overview.isPending && !data ? (
-          <p role="status" className="p-6 text-center text-ink-muted">
-            {t("common.loading")}
-          </p>
-        ) : !data ||
-          (!usageIsUnavailable(data) &&
-            ![
-              data.totals.requests,
-              data.totals.inputTokens,
-              data.totals.outputTokens,
-              data.totals.cacheReadTokens,
-              data.totals.cacheWriteTokens,
-              data.totals.costUsd,
-              Number(data.totals.estimate?.knownCostUsd),
-            ].some((value) => value > 0) &&
-            data.coverage?.state !== "partial" &&
-            !data.coverage?.aggregateOnly) ? (
-          <div className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
-            {t(
-              state.overview.isError || data?.coverage?.state === "unsupported"
-                ? "usagePage.unavailable"
-                : "usagePage.empty",
-            )}
-          </div>
-        ) : (
-          <>
-            <UsageKpis
-              totals={data.totals}
-              attribution={data.attribution}
-              unavailable={usageIsUnavailable(data)}
-            />
-            {usageIsUnavailable(data) ? (
-              <p role="status" className="text-note text-ink-muted">
-                {t("usagePage.unavailable")}
-              </p>
-            ) : (
-              <>
-                <UsageBars overview={data} />
-                <div className="grid gap-3 md:grid-cols-2">
-                  <UsageBreakdownList
-                    kind="tools"
-                    compact
-                    initialLimit={6}
-                    pageSize={50}
-                    rows={data.byTool.map((row) => ({
-                      ...row,
-                      id: row.appType,
-                    }))}
-                    total={data.totals.totalTokens}
-                    onFilter={
-                      modern
-                        ? (id) =>
-                            setFilters((old) => ({
-                              ...old,
-                              toolIds: old.toolIds?.includes(id) ? [] : [id],
-                            }))
-                        : undefined
-                    }
-                  />
-                  <UsageBreakdownList
-                    kind="models"
-                    compact
-                    initialLimit={6}
-                    pageSize={50}
-                    rows={data.byModel.map((row) => ({
-                      ...row,
-                      id: row.model,
-                    }))}
-                    total={data.totals.totalTokens}
-                    onFilter={
-                      modern
-                        ? (id) =>
-                            setFilters((old) => ({
-                              ...old,
-                              modelIds: old.modelIds?.includes(id) ? [] : [id],
-                            }))
-                        : undefined
-                    }
-                  />
-                  {data.byProject && (
-                    <section
-                      className="min-w-0 md:col-span-2"
-                      aria-label={t("usageSessions.projectRank")}
-                    >
-                      <UsageBreakdownList
-                        kind="projects"
-                        compact
-                        initialLimit={6}
-                        rows={data.byProject.map((row) => ({
-                          ...row,
-                          label: usageProjectLabel(
-                            row.id,
-                            row.label,
-                            row.path,
-                            projectNames,
-                          ),
-                        }))}
-                        total={data.totals.totalTokens}
-                        pageSize={50}
-                        onFilter={
-                          sharedProjectSupported
-                            ? (id) =>
-                                chooseProjects(
-                                  selectedProjects.length === 1 &&
-                                    selectedProjects[0] === id
-                                    ? []
-                                    : [id],
-                                )
-                            : undefined
-                        }
-                      />
-                    </section>
-                  )}
-                </div>
-              </>
-            )}
-          </>
-        )}
-        <UsageSourceAlert
-          sources={data?.sources}
-          pricing={data?.pricingCoverage}
-          onRetry={retry}
-        />
-        {data?.coverage?.state === "unsupported" && (
-          <p className="text-note text-ink-muted">
-            {t("usageWorkbench.queryUnavailable")}
-          </p>
-        )}
-      </section>
-      {requestSupported && (
-        <div
-          id="usage-requests-panel"
+        <section
+          id="usage-overview-panel"
           role="tabpanel"
-          aria-label={t("usageWorkbench.requests")}
-          hidden={effectiveTab !== "requests"}
+          aria-label={t("usageWorkbench.overview")}
+          hidden={effectiveTab !== "overview"}
+          className="space-y-3"
+          aria-busy={state.overview.isFetching || !!refreshPhase}
         >
-          <UsageRequests
-            query={displayedQuery}
-            recordBasis={historyScope ? "savedHistory" : "effective"}
-            onEffectiveRecords={() => setSavedHistory(undefined)}
-            onSavedHistory={openSavedHistory}
-            onOptions={updateOptions}
-            apex={apex}
-            active={visible && effectiveTab === "requests"}
-            sourceIds={options.sourceIds}
-            updateVersion={state.sourceVersion}
-            canExport={!!capabilities.data?.csv}
-            onLatest={() => setAnchor(Date.now())}
-          />
-        </div>
-      )}
-      {analysisSupported && (
-        <div
-          id="usage-sessions-panel"
-          role="tabpanel"
-          aria-label={t("usageSessions.title")}
-          hidden={effectiveTab !== "sessions"}
-          aria-busy={analysis.isFetching || !!refreshPhase}
-        >
-          {!analysis.data && analysisDisplay && (
+          {!state.overview.data && data && (
             <p
               role="status"
               className="rounded-lg border border-brand/25 bg-brand/5 px-3 py-2 text-note text-ink-2"
             >
               {t(
-                analysis.isError
+                state.overview.isError
                   ? "usageFilters.previous"
                   : "usageFilters.updating",
               )}
-              <span className="mt-1 block break-words text-ink-faint">
-                {describePrevious(analysisDisplay.appliedQuery)}
-              </span>
+              {data.appliedQuery && (
+                <span className="mt-1 block break-words text-ink-faint">
+                  {describePrevious(data.appliedQuery)}
+                </span>
+              )}
             </p>
           )}
-          {analysis.isPending && !analysisDisplay ? (
+          <p className="text-note font-medium text-ink-muted">
+            {t("usageWorkbench.currentAccount")}
+          </p>
+          <BalanceTrendCard
+            user={state.user}
+            trend={state.trend.data}
+            spending={state.spending.data}
+            recharge={() => open(ofoxWalletUrl(apex))}
+          />
+          {account.user && (
+            <AssistantUsageCard
+              identity={accountIdentity(account.user, apex)}
+              enabled={visible && effectiveTab === "overview"}
+            />
+          )}
+          <p className="pt-1 text-note font-medium text-ink-muted">
+            {t("usageWorkbench.localHistory")}
+          </p>
+          {state.overview.isPending && !data ? (
             <p role="status" className="p-6 text-center text-ink-muted">
               {t("common.loading")}
             </p>
-          ) : !analysisDisplay ||
-            analysisDisplay.coverage.state === "unsupported" ? (
-            <p className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
-              {t("usagePage.unavailable")}
-            </p>
-          ) : null}
-          {analysisDisplay && (
-            <UsageSessions
-              key={apex}
-              data={analysisDisplay}
-              showData={analysisDisplay.coverage.state !== "unsupported"}
-              active={visible && effectiveTab === "sessions"}
-              onRetry={retry}
-              onProject={
-                sharedProjectSupported || analysisProjectSupported
-                  ? (id) => {
-                      chooseProjects(
-                        selectedProjects.length === 1 &&
-                          selectedProjects[0] === id
-                          ? []
-                          : [id],
-                      );
-                    }
-                  : undefined
-              }
-              onModel={(id) =>
-                setFilters((old) => ({
-                  ...old,
-                  modelIds: old.modelIds?.includes(id) ? [] : [id],
-                }))
-              }
-              onRemoveProject={
-                sharedProjectSupported || analysisProjectSupported
-                  ? (id) =>
-                      chooseProjects(
-                        selectedProjects.filter((value) => value !== id),
-                      )
-                  : undefined
-              }
-              onRemoveModel={(id) =>
-                setFilters((old) => ({
-                  ...old,
-                  modelIds: old.modelIds?.filter((value) => value !== id),
-                }))
-              }
-              onRemoveTool={(id) =>
-                setFilters((old) => ({
-                  ...old,
-                  toolIds: old.toolIds?.filter((value) => value !== id),
-                }))
-              }
-              onManage={shell.locateSession}
-              onTool={(id) =>
-                setFilters((old) => ({
-                  ...old,
-                  toolIds: old.toolIds?.includes(id) ? [] : [id],
-                }))
-              }
-              location={analysis.data ? sessionTarget : null}
-              onLocated={clearSessionTarget}
-              onExpandScope={() => {
-                setFilters({});
-                setAnalysisProjects([]);
-                chooseRange({ period: "all" });
-              }}
-            />
+          ) : !data ||
+            (!usageIsUnavailable(data) &&
+              ![
+                data.totals.requests,
+                data.totals.inputTokens,
+                data.totals.outputTokens,
+                data.totals.cacheReadTokens,
+                data.totals.cacheWriteTokens,
+                data.totals.costUsd,
+                Number(data.totals.estimate?.knownCostUsd),
+              ].some((value) => value > 0) &&
+              data.coverage?.state !== "partial" &&
+              !data.coverage?.aggregateOnly) ? (
+            <div className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
+              {t(
+                state.overview.isError ||
+                  data?.coverage?.state === "unsupported"
+                  ? "usagePage.unavailable"
+                  : "usagePage.empty",
+              )}
+            </div>
+          ) : (
+            <>
+              <UsageKpis
+                totals={data.totals}
+                attribution={data.attribution}
+                unavailable={usageIsUnavailable(data)}
+              />
+              {usageIsUnavailable(data) ? (
+                <p role="status" className="text-note text-ink-muted">
+                  {t("usagePage.unavailable")}
+                </p>
+              ) : (
+                <>
+                  <UsageBars overview={data} />
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <UsageBreakdownList
+                      kind="tools"
+                      compact
+                      initialLimit={6}
+                      pageSize={50}
+                      rows={data.byTool.map((row) => ({
+                        ...row,
+                        id: row.appType,
+                      }))}
+                      total={data.totals.totalTokens}
+                      onFilter={
+                        modern
+                          ? (id) =>
+                              setFilters((old) => ({
+                                ...old,
+                                toolIds: old.toolIds?.includes(id) ? [] : [id],
+                              }))
+                          : undefined
+                      }
+                    />
+                    <UsageBreakdownList
+                      kind="models"
+                      compact
+                      initialLimit={6}
+                      pageSize={50}
+                      rows={data.byModel.map((row) => ({
+                        ...row,
+                        id: row.model,
+                      }))}
+                      total={data.totals.totalTokens}
+                      onFilter={
+                        modern
+                          ? (id) =>
+                              setFilters((old) => ({
+                                ...old,
+                                modelIds: old.modelIds?.includes(id)
+                                  ? []
+                                  : [id],
+                              }))
+                          : undefined
+                      }
+                    />
+                    {data.byProject && (
+                      <section
+                        className="min-w-0 md:col-span-2"
+                        aria-label={t("usageSessions.projectRank")}
+                      >
+                        <UsageBreakdownList
+                          kind="projects"
+                          compact
+                          initialLimit={6}
+                          rows={data.byProject.map((row) => ({
+                            ...row,
+                            label: usageProjectLabel(
+                              row.id,
+                              row.label,
+                              row.path,
+                              projectNames,
+                            ),
+                          }))}
+                          total={data.totals.totalTokens}
+                          pageSize={50}
+                          onFilter={
+                            sharedProjectSupported
+                              ? (id) =>
+                                  chooseProjects(
+                                    selectedProjects.length === 1 &&
+                                      selectedProjects[0] === id
+                                      ? []
+                                      : [id],
+                                  )
+                              : undefined
+                          }
+                        />
+                      </section>
+                    )}
+                  </div>
+                </>
+              )}
+            </>
           )}
-        </div>
-      )}
-      {!!unsupported.length && (
-        <p className="text-note text-ink-muted">
-          {t("usagePage.unsupported", {
-            tools: unsupported
-              .map((id) => TOOL_META[id]?.label ?? id)
-              .join(", "),
-          })}
-        </p>
-      )}
-      <Button
-        variant="link"
-        className="h-auto self-start px-0 text-note"
-        onClick={() => open(ofoxDashboardUrl(apex))}
-      >
-        {t("shell.usage.webDetails")}
-      </Button>
+          <UsageSourceAlert
+            sources={data?.sources}
+            pricing={data?.pricingCoverage}
+            onRetry={retry}
+          />
+          {data?.coverage?.state === "unsupported" && (
+            <p className="text-note text-ink-muted">
+              {t("usageWorkbench.queryUnavailable")}
+            </p>
+          )}
+        </section>
+        {requestSupported && (
+          <div
+            id="usage-requests-panel"
+            role="tabpanel"
+            aria-label={t("usageWorkbench.requests")}
+            hidden={effectiveTab !== "requests"}
+          >
+            <UsageRequests
+              query={displayedQuery}
+              recordBasis={historyScope ? "savedHistory" : "effective"}
+              onEffectiveRecords={() => setSavedHistory(undefined)}
+              onSavedHistory={openSavedHistory}
+              onOptions={updateOptions}
+              apex={apex}
+              active={visible && effectiveTab === "requests"}
+              sourceIds={options.sourceIds}
+              updateVersion={state.sourceVersion}
+              canExport={!!capabilities.data?.csv}
+              onLatest={() => setAnchor(Date.now())}
+            />
+          </div>
+        )}
+        {analysisSupported && (
+          <div
+            id="usage-sessions-panel"
+            role="tabpanel"
+            aria-label={t("usageSessions.title")}
+            hidden={effectiveTab !== "sessions"}
+            aria-busy={analysis.isFetching || !!refreshPhase}
+          >
+            {!analysis.data && analysisDisplay && (
+              <p
+                role="status"
+                className="rounded-lg border border-brand/25 bg-brand/5 px-3 py-2 text-note text-ink-2"
+              >
+                {t(
+                  analysis.isError
+                    ? "usageFilters.previous"
+                    : "usageFilters.updating",
+                )}
+                <span className="mt-1 block break-words text-ink-faint">
+                  {describePrevious(analysisDisplay.appliedQuery)}
+                </span>
+              </p>
+            )}
+            {analysis.isPending && !analysisDisplay ? (
+              <p role="status" className="p-6 text-center text-ink-muted">
+                {t("common.loading")}
+              </p>
+            ) : !analysisDisplay ||
+              analysisDisplay.coverage.state === "unsupported" ? (
+              <p className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">
+                {t("usagePage.unavailable")}
+              </p>
+            ) : null}
+            {analysisDisplay && (
+              <UsageSessions
+                key={apex}
+                data={analysisDisplay}
+                showData={analysisDisplay.coverage.state !== "unsupported"}
+                active={visible && effectiveTab === "sessions"}
+                onRetry={retry}
+                onProject={
+                  sharedProjectSupported || analysisProjectSupported
+                    ? (id) => {
+                        chooseProjects(
+                          selectedProjects.length === 1 &&
+                            selectedProjects[0] === id
+                            ? []
+                            : [id],
+                        );
+                      }
+                    : undefined
+                }
+                onModel={(id) =>
+                  setFilters((old) => ({
+                    ...old,
+                    modelIds: old.modelIds?.includes(id) ? [] : [id],
+                  }))
+                }
+                onRemoveProject={
+                  sharedProjectSupported || analysisProjectSupported
+                    ? (id) =>
+                        chooseProjects(
+                          selectedProjects.filter((value) => value !== id),
+                        )
+                    : undefined
+                }
+                onRemoveModel={(id) =>
+                  setFilters((old) => ({
+                    ...old,
+                    modelIds: old.modelIds?.filter((value) => value !== id),
+                  }))
+                }
+                onRemoveTool={(id) =>
+                  setFilters((old) => ({
+                    ...old,
+                    toolIds: old.toolIds?.filter((value) => value !== id),
+                  }))
+                }
+                onManage={shell.locateSession}
+                onTool={(id) =>
+                  setFilters((old) => ({
+                    ...old,
+                    toolIds: old.toolIds?.includes(id) ? [] : [id],
+                  }))
+                }
+                location={analysis.data ? sessionTarget : null}
+                onLocated={clearSessionTarget}
+                onExpandScope={() => {
+                  setFilters({});
+                  setAnalysisProjects([]);
+                  chooseRange({ period: "all" });
+                }}
+              />
+            )}
+          </div>
+        )}
+        {!!unsupported.length && (
+          <p className="text-note text-ink-muted">
+            {t("usagePage.unsupported", {
+              tools: unsupported
+                .map((id) => TOOL_META[id]?.label ?? id)
+                .join(", "),
+            })}
+          </p>
+        )}
+        <Button
+          variant="link"
+          className="h-auto self-start px-0 text-note"
+          onClick={() => open(ofoxDashboardUrl(apex))}
+        >
+          {t("shell.usage.webDetails")}
+        </Button>
+      </div>
     </div>
   );
 }
