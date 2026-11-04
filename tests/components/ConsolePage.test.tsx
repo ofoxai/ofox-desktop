@@ -1537,3 +1537,27 @@ it("keeps every page mounted when the console switches between local and signed-
   view.rerender(<ConsolePage boundTools={[]} localOnly localSignedIn />);
   expect(screen.getByRole("tabpanel", { name: "会话" })).toBe(sessions);
 });
+
+it("lets every page panel hide: none carries a display class that beats the hidden attribute", async () => {
+  // Tailwind's .flex / .grid / .block sit after preflight's [hidden] rule
+  // with the same specificity, so on a panel they keep a hidden page on
+  // screen over the one the user opened (jsdom does not apply the CSS).
+  render(<ConsolePage boundTools={[]} localSignedIn />);
+  await screen.findByText("Test User");
+  // 资源库 needs a query client this file does not provide; its panel's
+  // classes are static like the others.
+  for (const name of ["会话", "助手", "用量", "工具"])
+    fireEvent.click(screen.getByRole("tab", { name }));
+  const panels = document.querySelectorAll<HTMLElement>(
+    '[id^="shell-panel-"][role="tabpanel"]',
+  );
+  expect(panels.length).toBe(4);
+  for (const panel of panels)
+    expect(panel.className.split(/\s+/)).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^(flex|inline-flex|grid|inline-grid|block|inline-block|table|contents)$/,
+        ),
+      ]),
+    );
+});

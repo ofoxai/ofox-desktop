@@ -194,22 +194,26 @@ function ConsoleShell({
       </div>
 
       {shell.visited.has("sessions") && (
-        <div {...panel("sessions")} className="flex h-full flex-col">
-          <PageHeader
-            wide
-            title={t("pages.sessions.title")}
-            description={t("pages.sessions.description")}
-            actions={<ShellRefreshButton />}
-          />
-          <SessionsPanel
-            className={cn(PAGE_BODY_WIDE, "min-h-0 flex-1 pb-4 pt-0")}
-            onAnalyze={shell.locateUsage}
-            onConfigure={(section) =>
-              section === "tools"
-                ? shell.setActive("tools")
-                : shell.locateLibrary(section)
-            }
-          />
+        // The panel stays a plain block so its hidden attribute hides it;
+        // a display class here (flex) would win over [hidden].
+        <div {...panel("sessions")} className="h-full">
+          <div className="flex h-full flex-col">
+            <PageHeader
+              wide
+              title={t("pages.sessions.title")}
+              description={t("pages.sessions.description")}
+              actions={<ShellRefreshButton />}
+            />
+            <SessionsPanel
+              className={cn(PAGE_BODY_WIDE, "min-h-0 flex-1 pb-4 pt-0")}
+              onAnalyze={shell.locateUsage}
+              onConfigure={(section) =>
+                section === "tools"
+                  ? shell.setActive("tools")
+                  : shell.locateLibrary(section)
+              }
+            />
+          </div>
         </div>
       )}
       {shell.visited.has("usage") && (
