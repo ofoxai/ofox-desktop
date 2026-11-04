@@ -4962,6 +4962,7 @@
     "totalTokens": "总 Token"
   },
   "assistant": {
+    "retrying": "重试中…（{{attempt}}/2）",
     "audio": {
       "title": "语音输入",
       "import": "导入音频",

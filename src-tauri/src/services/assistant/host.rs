@@ -1734,6 +1734,13 @@ impl AssistantHost {
             return Err(PROTOCOL.into());
         }
         match kind {
+            "retrying" => {
+                let retry = data["attempt"]
+                    .as_u64()
+                    .filter(|value| matches!(value, 1 | 2))
+                    .ok_or(PROTOCOL)?;
+                self.emit(control, kind, json!({"attempt": retry}));
+            }
             "steer_applied" => {
                 attempt.projection.end_thinking();
                 self.flush(control, &mut attempt.projection).await?;
@@ -3896,6 +3903,47 @@ while read line; do :; done"#,
             env.events.lock().unwrap().is_empty(),
             "nothing was published"
         );
+    }
+
+    #[tokio::test]
+    async fn assistant_retry_events_validate_attempt_and_identity_and_publish_only_public_data() {
+        let (_config, env, host) = fixture_with_env();
+        let run = control(&id());
+        let event = |data| {
+            json!({"sessionId":run.session_id, "runId":run.run_id,
+            "operationId":run.operation_id, "type":"retrying", "data":data})
+        };
+        for retry in [1, 2] {
+            let mut attempt = Attempt::default();
+            host.on_event(
+                &run,
+                &event(json!({"attempt":retry,"diagnostic":"secret"})),
+                &mut attempt,
+            )
+            .await
+            .unwrap();
+            assert!(!attempt.progressed);
+        }
+        for retry in [json!(0), json!(3), json!("1"), json!(null)] {
+            assert!(host
+                .on_event(
+                    &run,
+                    &event(json!({"attempt":retry})),
+                    &mut Attempt::default()
+                )
+                .await
+                .is_err());
+        }
+        let mut foreign = event(json!({"attempt":1}));
+        foreign["runId"] = json!(id());
+        assert!(host
+            .on_event(&run, &foreign, &mut Attempt::default())
+            .await
+            .is_err());
+        let events = env.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data, json!({"attempt":1}));
+        assert_eq!(events[1].data, json!({"attempt":2}));
     }
 
     #[tokio::test]

@@ -317,3 +317,13 @@ Linux GTK3/Tauri still resolves `glib` 0.18.5. [GHSA-wrw7-89jp-8q8g](https://git
 ## ZIP import metadata bounds
 
 ZIP imports require single-disk archives with zero archive offset and an unambiguous end record. Archives with another end-record signature in the final 128 KiB, over 32 MiB of central metadata (lower limits apply to smaller imports), or over 1 MiB of ZIP64 extensible metadata are rejected before metadata allocation. This intentionally excludes ambiguous/polyglot or unusually metadata-heavy archives; ordinary stored, deflated, Unicode-name and legacy ZIP64 archives have compatibility fixtures.
+
+
+## Assistant conversation request retries
+
+[Conversation retries](assistant-request-retries.md) preserve unknown billing
+receipts for 502/503 attempts even if a later attempt succeeds. Gateway errors
+are not proof that a model did no work. A partially received stream, timeout
+or ambiguous socket failure still requires a manual retry. This change has
+macOS fixture coverage through the prepared Pi runtime and real Rust event
+bridge; native Windows and live billed-provider acceptance remain unverified.

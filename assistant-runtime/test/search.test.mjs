@@ -189,7 +189,7 @@ test("web tools exist only when the run enables web search, and start nothing un
   assert.match(search, /cite the sources/i);
   assert.match(search, /Search once with one precise query/);
   assert.match(search, /only if the results are insufficient/);
-  assert.match(search, /at most 3 searches/);
+  assert.match(search, /at most 6 searches/);
   assert.match(search, /Prefer the search summary/);
 });
 
@@ -439,7 +439,7 @@ test("a repeated query in one run is answered once, without a second charge", as
   assert.match(JSON.stringify(results[1].content), /already searched/);
 });
 
-test("a run sends at most 3 searches: a sent failure counts, repeats and unsent failures do not", async (t) => {
+test("a run sends at most 6 searches: a sent failure counts, repeats and unsent failures do not", async (t) => {
   const fixture = await sandbox(t);
   const model = scriptedModel(
     () =>
@@ -451,6 +451,9 @@ test("a run sends at most 3 searches: a sent failure counts, repeats and unsent 
         ["web_search", { query: "  tauri   RELEASE " }],
         ["web_search", { query: "Pi SDK" }],
         ["web_search", { query: "Node 22" }],
+        ["web_search", { query: "React" }],
+        ["web_search", { query: "Rust" }],
+        ["web_search", { query: "seventh search" }],
       ),
     () => callTools(["web_search", { query: "Pi SDK" }]),
     () => reply("Tauri 2 is out."),
@@ -466,6 +469,9 @@ test("a run sends at most 3 searches: a sent failure counts, repeats and unsent 
       "protocol error",
       "Tauri release",
       "Pi SDK",
+      "Node 22",
+      "React",
+      "Rust",
     ],
   );
   const ends = toolEvents(events).filter((event) => event.type === "tool_end");
@@ -480,6 +486,9 @@ test("a run sends at most 3 searches: a sent failure counts, repeats and unsent 
       [true, null],
       [true, null],
       [true, null],
+      [true, null],
+      [true, null],
+      [true, null],
       [false, "search_limit_reached"],
       [true, null],
     ],
@@ -489,15 +498,15 @@ test("a run sends at most 3 searches: a sent failure counts, repeats and unsent 
   assert.match(ends[2].message, /no search was made/);
   // The model reads why and what to do instead; nothing was billed.
   assert.match(
-    ends[6].message,
-    /^search_limit_reached: .*3 web searches.*answer with the information you already have/,
+    ends[9].message,
+    /^search_limit_reached: .*6 web searches.*answer with the information you already have/,
   );
-  assert.deepEqual(ends[6].details, { code: "search_limit_reached" });
+  assert.deepEqual(ends[9].details, { code: "search_limit_reached" });
   // A repeat after the limit is still answered from the earlier result.
-  assert.equal(ends[7].details.deduplicated, true);
-  const [limited] = toolResults(model.requests[1]).slice(6);
+  assert.equal(ends[10].details.deduplicated, true);
+  const [limited] = toolResults(model.requests[1]).slice(9);
   assert.match(JSON.stringify(limited.content), /search_limit_reached/);
-  const entry = result.entries.filter((item) => item.role === "tool")[6];
+  const entry = result.entries.filter((item) => item.role === "tool")[9];
   assert.equal(entry.isError, true);
   assert.equal(entry.usageCoverage, "complete");
 });
@@ -533,6 +542,9 @@ test("a query with a URL is refused unsent and does not count toward the search 
         ["web_search", { query: "site:example.com tauri updater" }],
         ["web_search", { query: "Tauri release" }],
         ["web_search", { query: "Pi SDK" }],
+        ["web_search", { query: "Rust" }],
+        ["web_search", { query: "Node" }],
+        ["web_search", { query: "seventh" }],
       ),
     () => reply("Tauri 2 is out."),
   );
@@ -541,13 +553,23 @@ test("a query with a URL is refused unsent and does not count toward the search 
   assert.equal(result.status, "completed");
   assert.deepEqual(
     calls(await fixture.log()).map(([, args]) => args.query),
-    ["example.com", "site:example.com tauri updater", "Tauri release"],
+    [
+      "example.com",
+      "site:example.com tauri updater",
+      "Tauri release",
+      "Pi SDK",
+      "Rust",
+      "Node",
+    ],
   );
   const ends = toolEvents(events).filter((event) => event.type === "tool_end");
   assert.deepEqual(
     ends.map(({ success, details }) => [success, details.code ?? null]),
     [
       ...URL_QUERIES.map(() => [false, "search_rejected"]),
+      [true, null],
+      [true, null],
+      [true, null],
       [true, null],
       [true, null],
       [true, null],

@@ -162,7 +162,7 @@ const usd = new Intl.NumberFormat("en-US", {
 });
 
 /** The most web searches the runtime lets one reply make (its MAX_SEARCHES). */
-const MAX_SEARCHES_PER_REPLY = 3;
+const MAX_SEARCHES_PER_REPLY = 6;
 
 /**
  * What one web search may cost: the gateway bills each search call, and one
@@ -1590,6 +1590,7 @@ function AssistantWorkspace() {
                             ) : undefined
                           }
                           generations={generationCards(assistant.stream, true)}
+                          retryAttempt={assistant.retryAttempt}
                           activity={assistant.activity}
                           thinking={assistant.thinking}
                           searchUnavailable={assistant.searchSkipped.has(

@@ -4962,6 +4962,7 @@
     "totalTokens": "合計 Token"
   },
   "assistant": {
+    "retrying": "再試行中…（{{attempt}}/2）",
     "audio": {
       "title": "音声入力",
       "import": "音声を読み込む",

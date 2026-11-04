@@ -211,6 +211,7 @@ function SourceList({
 export const AssistantMessageView = memo(function AssistantMessageView({
   message,
   activity = null,
+  retryAttempt = null,
   thinking = null,
   searchUnavailable = false,
   latest = false,
@@ -241,6 +242,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   /** A local configuration run's step, warning and plan, while it streams. */
   taskProgress?: React.ReactNode;
   activity?: AssistantActivity | null;
+  retryAttempt?: 1 | 2 | null;
   /** A streaming reply's thinking so far, for its live timer. */
   thinking?: AssistantThinking | null;
   searchUnavailable?: boolean;
@@ -423,7 +425,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         </div>
       ) : streaming && !message.content ? (
         // The thinking caption above already says so, with its timer.
-        thinking?.since != null && !progress ? null : (
+        retryAttempt || (thinking?.since != null && !progress) ? null : (
           statusLine(progress || t("assistant.typing"))
         )
       ) : (
@@ -488,6 +490,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       )}
       {generations}
       {streaming && taskProgress}
+      {streaming && retryAttempt && (
+        <p role="status" className="mt-2 text-ctl text-ink-muted">
+          {t("assistant.retrying", { attempt: retryAttempt })}
+        </p>
+      )}
       {retryCard ? (
         <RetryCard
           key={message.id}

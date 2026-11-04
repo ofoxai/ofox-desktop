@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
+import i18n from "@/i18n";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
 import zh from "@/i18n/locales/zh.json";
@@ -241,8 +242,11 @@ describe("assistant commands", () => {
       attachmentIds: [],
       retryMessageId: "failed",
     };
+    await i18n.changeLanguage("en");
     await assistantApi.send(request);
-    expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
+    expect(invoke).toHaveBeenCalledWith("assistant_send", {
+      request: { ...request, uiLanguage: "en" },
+    });
   });
 
   it("writes an interruption to its existing run with frozen authority", async () => {
@@ -270,8 +274,11 @@ describe("assistant commands", () => {
       expectedOwner: "owner",
       expectedGeneration: 7,
     };
+    await i18n.changeLanguage("en");
     await assistantApi.send(request);
-    expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
+    expect(invoke).toHaveBeenCalledWith("assistant_send", {
+      request: { ...request, uiLanguage: "en" },
+    });
     expect(invoke).toHaveBeenCalledOnce();
   });
 
@@ -742,4 +749,26 @@ it("sets a local permission mode and has no folder command", async () => {
   expect(await assistantApi.setPermission(request)).toBe("fullAuto");
   expect(invoke).toHaveBeenCalledWith("assistant_set_permission", { request });
   expect("localFolder" in assistantApi).toBe(false);
+});
+
+it("sends the actual UI language on first launch and after switching languages", async () => {
+  const previous = i18n.language;
+  try {
+    for (const language of ["en", "ja", "zh"]) {
+      await i18n.changeLanguage(language);
+      const request = {
+        sessionId: "session",
+        runId: "run",
+        operationId: "op",
+        text: "Hello",
+        attachmentIds: [],
+      };
+      await assistantApi.send(request);
+      expect(invoke).toHaveBeenLastCalledWith("assistant_send", {
+        request: { ...request, uiLanguage: language },
+      });
+    }
+  } finally {
+    await i18n.changeLanguage(previous);
+  }
 });

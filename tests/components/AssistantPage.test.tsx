@@ -3642,15 +3642,15 @@ describe("web search", () => {
   it.each([
     [
       "en",
-      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 3 searches per reply; one search can bring back several sources.",
+      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 6 searches per reply; one search can bring back several sources.",
     ],
     [
       "ja",
-      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 3 回で、1 回の検索で複数の出典が見つかることがあります。",
+      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 6 回で、1 回の検索で複数の出典が見つかることがあります。",
     ],
     [
       "zh",
-      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 3 次，一次搜索可能带回多个来源。",
+      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 6 次，一次搜索可能带回多个来源。",
     ],
   ])(
     "always describes what a search may cost, one or two billed calls, and how many a reply makes at most, and says it in a tooltip, in %s",
@@ -8620,4 +8620,45 @@ describe("local configuration in the conversation", () => {
     }
     expect(zh.assistant.local.toolPrompt).toBe("帮我诊断并修复 {{tool}}。");
   });
+});
+
+it("shows request retry progress only for the followed run and clears it when text arrives", async () => {
+  await openConversation();
+  mocks.send.mockReturnValue(new Promise(() => undefined));
+  await userEvent.type(composer(), "Hello{Enter}");
+  await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+  const sent = mocks.send.mock.calls[0][0];
+  const emit = (runId: string, type: string, data: Record<string, unknown>) =>
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        runId,
+        type,
+        data,
+      } as unknown as AssistantEvent),
+    );
+  emit(sent.runId, "run_start", { messageId: "reply", webSearch: false });
+  emit("another-run", "retrying", { attempt: 1 });
+  expect(screen.queryByText("Retrying… (1/2)")).not.toBeInTheDocument();
+  emit(sent.runId, "retrying", { attempt: 1 });
+  expect(await screen.findByText("Retrying… (1/2)")).toBeVisible();
+  emit(sent.runId, "retrying", { attempt: 2 });
+  expect(await screen.findByText("Retrying… (2/2)")).toBeVisible();
+  for (const [language, resource, expected] of [
+    ["zh", zh, "重试中…（2/2）"],
+    ["ja", ja, "再試行中…（2/2）"],
+  ] as const) {
+    i18n.addResourceBundle(language, "translation", resource, true, true);
+    await act(async () => {
+      await i18n.changeLanguage(language);
+    });
+    expect(screen.getByText(expected)).toBeVisible();
+  }
+  await act(async () => {
+    await i18n.changeLanguage("en");
+  });
+  emit(sent.runId, "text_delta", { delta: "Answer", messageId: "reply" });
+  await waitFor(() =>
+    expect(screen.queryByText("Retrying… (2/2)")).not.toBeInTheDocument(),
+  );
 });

@@ -262,6 +262,7 @@ export function useAssistant(enabled: boolean) {
     () => new Set(),
   );
   const [compacting, setCompacting] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState<1 | 2 | null>(null);
   const listenerReady = useRef<ReturnType<typeof subscriptionReadiness> | null>(
     null,
   );
@@ -417,6 +418,7 @@ export function useAssistant(enabled: boolean) {
   const setRun = useCallback((value: AssistantRunRef | null) => {
     // Another run, or none: the tools the last one started are not followed.
     if (value?.runId !== runRef.current?.runId) {
+      setRetryAttempt(null);
       setTools([]);
       setLocalApprovals([]);
       setLocalIntent(null);
@@ -1472,7 +1474,26 @@ export function useAssistant(enabled: boolean) {
           flushDeltas();
         // session and event types this build does not know change nothing
         // on screen: the transcript and session are read again at run_end.
+        // A retry notice belongs only to the followed live request. Model or
+        // tool progress, a replacement turn, failure and completion clear it.
+        if (
+          [
+            "thinking_start",
+            "text_delta",
+            "thinking_delta",
+            "tool_start",
+            "message",
+            "error",
+            "run_end",
+            "steer_applied",
+          ].includes(event.type)
+        )
+          setRetryAttempt(null);
         switch (event.type) {
+          case "retrying":
+            if (event.data.attempt === 1 || event.data.attempt === 2)
+              setRetryAttempt(event.data.attempt);
+            return;
           case "approval":
             setLocalApprovals((old) => [
               ...old.filter((a) => a.data.approvalId !== event.data.approvalId),
@@ -3675,6 +3696,7 @@ export function useAssistant(enabled: boolean) {
     activity,
     run,
     compacting,
+    retryAttempt,
     error,
     errorDetail,
     setError,

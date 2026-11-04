@@ -1516,6 +1516,7 @@ mod tests {
 
     fn send(sid: &str, edit: Option<&str>, regenerate: Option<&str>) -> SendRequest {
         SendRequest {
+            ui_language: None,
             expected_owner: None,
             expected_generation: None,
             media: None,

@@ -1,3 +1,4 @@
+import i18n from "@/i18n";
 import { isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -949,6 +950,8 @@ export type AssistantRunEvent =
         compactOnly?: boolean;
       };
     }
+  /** A model HTTP request is waiting before its first or second retry. */
+  | { type: "retrying"; data: { attempt: 1 | 2 } }
   /**
    * The reply began streaming reasoning, as soon as its first reasoning
    * arrived: the reasoning text itself can follow a little later. It lasts
@@ -1320,7 +1323,16 @@ export const assistantApi = {
       callback(payload),
     ),
   send: (request: AssistantSendRequest) =>
-    invoke<AssistantRunRef>("assistant_send", { request }),
+    invoke<AssistantRunRef>("assistant_send", {
+      request: {
+        ...request,
+        uiLanguage: ["en", "ja"].includes(
+          i18n.resolvedLanguage ?? i18n.language,
+        )
+          ? (i18n.resolvedLanguage ?? i18n.language)
+          : "zh",
+      },
+    }),
   steer: (request: AssistantSteerRequest) =>
     invoke<null>("assistant_steer", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>

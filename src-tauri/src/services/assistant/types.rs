@@ -499,6 +499,10 @@ pub struct ExportMarkdownRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
+    /// The renderer's resolved language, including first-launch OS detection.
+    /// Older callers omit it and use the saved application preference.
+    #[serde(default)]
+    pub ui_language: Option<String>,
     /// Optional together for older callers; new sends freeze the account and
     /// region generation before IPC admission, including ordinary queues.
     #[serde(default)]

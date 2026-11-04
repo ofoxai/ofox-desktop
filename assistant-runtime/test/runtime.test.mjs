@@ -739,10 +739,11 @@ test("navigate refuses anything but a message of a saved history and changes not
   await runtime.close();
 });
 
-test("provider errors never retry paid requests and stay scrubbed in native history", async (t) => {
+test("rate limit retries are bounded and stay scrubbed in native history", async (t) => {
   const params = await sandbox(t);
   let requests = 0;
   const runtime = new AssistantRuntime({
+    retrySleep: async () => {},
     fetch: async () => {
       requests++;
       return Response.json(
@@ -752,7 +753,7 @@ test("provider errors never retry paid requests and stay scrubbed in native hist
     },
   });
   const result = await runtime.run(params);
-  assert.equal(requests, 1);
+  assert.equal(requests, 3);
   assert.equal(result.status, "error");
   assert.equal(
     (await readFile(params.sessionFile, "utf8")).includes(token),
@@ -896,7 +897,10 @@ test("a request refused with a 4xx or never sent reports why and costs a known z
     ],
   ]) {
     const params = await sandbox(t);
-    const runtime = new AssistantRuntime({ fetch: async () => reply() });
+    const runtime = new AssistantRuntime({
+      retrySleep: async () => {},
+      fetch: async () => reply(),
+    });
     const result = await runtime.run(params);
     assert.equal(result.status, "error", name);
     const failed = result.entries.at(-1);
@@ -2455,6 +2459,10 @@ async function thinkingRun(t, name, input, extra = {}) {
     raw: bodies[0]
       .split(dir)
       .join("<dir>")
+      .replace(
+        /Current date: [^\\]+App language: zh\./,
+        "Current date: <date> (<weekday>). Time zone: <zone>. App language: zh.",
+      )
       .replace(/"prompt_cache_key":"[^"]+"/, '"prompt_cache_key":"<session>"'),
     body: JSON.parse(bodies[0]),
     events,
@@ -3075,4 +3083,379 @@ test("a completed reply without usage retains its receipt while its cost stays u
   assert.equal(receipt.estimatedCostUsd, null);
   assert.equal(receipt.billedCostUsd, null);
   assert.equal(result.usageCoverage, "incomplete");
+});
+
+test("system prompt states the local date, English weekday, IANA time zone and app language", async (t) => {
+  const original = process.env.TZ;
+  process.env.TZ = "Asia/Shanghai";
+  t.after(() =>
+    original === undefined
+      ? delete process.env.TZ
+      : (process.env.TZ = original),
+  );
+  for (const uiLanguage of ["zh", "en", "ja"])
+    for (const now of ["2026-11-05T02:00:00Z", "2026-11-04T18:00:00Z"]) {
+      const params = {
+        ...(await sandbox(t)),
+        uiLanguage,
+        now,
+      };
+      let prompt;
+      const runtime = new AssistantRuntime({
+        fetch: async (_url, options) => {
+          prompt = JSON.parse(options.body).messages[0].content;
+          return stream("Answer");
+        },
+      });
+      await runtime.run(params);
+      assert.match(
+        prompt,
+        /Current date: 2026-11-05 \(Thursday\)\. Time zone: Asia\/Shanghai\./,
+      );
+      assert.ok(prompt.includes(`App language: ${uiLanguage}.`));
+      await runtime.close();
+    }
+});
+
+test("retries only the failed model HTTP request twice and preserves every receipt", async (t) => {
+  for (const status of [429, 502, 503]) {
+    const params = await sandbox(t);
+    const events = [],
+      delays = [];
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      emit: (e) => events.push(e),
+      retrySleep: async (ms) => delays.push(ms),
+      fetch: async () => {
+        requests++;
+        return requests < 3
+          ? Response.json(
+              { error: { message: `busy ${token}` } },
+              { status, headers: { "x-request-id": `attempt-${requests}` } },
+            )
+          : stream("One answer");
+      },
+    });
+    const result = await runtime.run(params);
+    assert.equal(result.status, "completed", String(status));
+    assert.equal(requests, 3);
+    assert.deepEqual(delays, [1000, 3000]);
+    assert.deepEqual(
+      events.filter((e) => e.type === "retrying").map((e) => e.data),
+      [{ attempt: 1 }, { attempt: 2 }],
+    );
+    assert.equal(
+      result.entries.filter((e) => e.role === "assistant").length,
+      1,
+    );
+    const raw = await readFile(params.sessionFile, "utf8");
+    assert.ok(!raw.includes(token));
+    const receipts = raw
+      .trim()
+      .split("\n")
+      .map(JSON.parse)
+      .filter((e) => e.customType === "ofox-desktop-request")
+      .map((e) => e.data);
+    assert.deepEqual(
+      receipts.map((e) => e.httpStatus),
+      [status, status, 200],
+    );
+    assert.deepEqual(
+      receipts.map((e) => e.status),
+      [
+        status === 429 ? "rejected" : "unknown",
+        status === 429 ? "rejected" : "unknown",
+        "completed",
+      ],
+    );
+    assert.ok(!JSON.stringify(events).includes(token));
+    await runtime.close();
+  }
+});
+
+test("honours Retry-After up to 10 seconds on 429 and stops after two retries", async (t) => {
+  for (const [header, expected] of [
+    ["2", 2000],
+    ["60", 10000],
+    ["invalid", 1000],
+  ]) {
+    const params = await sandbox(t),
+      delays = [],
+      events = [];
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      retrySleep: async (ms) => delays.push(ms),
+      emit: (e) => events.push(e),
+      fetch: async () => {
+        requests++;
+        return Response.json(
+          { error: { message: "busy" } },
+          { status: 429, headers: { "Retry-After": header } },
+        );
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "error");
+    assert.equal(requests, 3);
+    assert.deepEqual(delays, [
+      expected,
+      header === "invalid" ? 3000 : expected,
+    ]);
+    assert.equal(events.filter((e) => e.type === "retrying").length, 2);
+    await runtime.close();
+  }
+});
+
+test("retries reliable connection failures but never timeouts, aborts, ambiguous networks or other HTTP errors", async (t) => {
+  const cases = [
+    [
+      () => {
+        throw networkError(systemError("ECONNREFUSED", "connect"));
+      },
+      3,
+    ],
+    [
+      () => {
+        throw networkError(systemError("ENOTFOUND", "getaddrinfo"));
+      },
+      3,
+    ],
+    [
+      () => {
+        throw networkError(systemError("UND_ERR_CONNECT_TIMEOUT", "connect"));
+      },
+      1,
+    ],
+    [
+      () => {
+        throw networkError(systemError("ECONNRESET", "read"));
+      },
+      1,
+    ],
+    [
+      () => {
+        throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+      },
+      1,
+    ],
+    [
+      () => {
+        throw Object.assign(new Error("cancelled"), {
+          name: "AbortError",
+          cause: systemError("ECONNREFUSED", "connect"),
+        });
+      },
+      1,
+    ],
+    ...[400, 408, 409, 500, 504].map((status) => [
+      () => Response.json({ error: { message: "failed" } }, { status }),
+      1,
+    ]),
+  ];
+  for (const [reply, count] of cases) {
+    const params = await sandbox(t);
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      retrySleep: async () => {},
+      fetch: async () => {
+        requests++;
+        return reply();
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "error");
+    assert.equal(requests, count);
+    await runtime.close();
+  }
+});
+
+test("partial text, reasoning and tool-call streams are never retried", async (t) => {
+  for (const delta of [
+    { content: "partial answer" },
+    { reasoning_content: "partial thought" },
+    {
+      tool_calls: [
+        {
+          index: 0,
+          id: "call",
+          type: "function",
+          function: { name: "probe", arguments: "{" },
+        },
+      ],
+    },
+  ]) {
+    const params = await sandbox(t);
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      retrySleep: async () => assert.fail("no partial retry"),
+      fetch: async () => {
+        requests++;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`,
+                ),
+              );
+              setTimeout(
+                () =>
+                  controller.error(
+                    networkError(systemError("ECONNREFUSED", "connect")),
+                  ),
+                10,
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "error");
+    assert.equal(requests, 1);
+    await runtime.close();
+  }
+});
+
+test("cancelling during retry wait stops immediately without another HTTP request", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0,
+    retrySeen;
+  const ready = new Promise((resolve) => (retrySeen = resolve));
+  const runtime = new AssistantRuntime({
+    emit: (e) => {
+      if (e.type === "retrying") retrySeen();
+    },
+    fetch: async () => {
+      requests++;
+      return Response.json(
+        { error: { message: "busy" } },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    },
+  });
+  const running = runtime.run(params);
+  await Promise.race([
+    ready,
+    running.then(() => assert.fail("expected retry wait")),
+  ]);
+  const start = Date.now();
+  await runtime.stop(params);
+  const result = await running;
+  assert.equal(result.status, "stopped");
+  assert.ok(Date.now() - start < 1000);
+  assert.equal(requests, 1);
+  await runtime.close();
+});
+
+test("request retries work for all supported protocols on both apexes without changing the request", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"])
+    for (const [name, input] of Object.entries(await thinkingModels())) {
+      const params = { ...(await sandbox(t)), apex, model: input };
+      const bodies = [],
+        events = [];
+      const runtime = new AssistantRuntime({
+        retrySleep: async () => {},
+        emit: (e) => events.push(e),
+        fetch: async (url, init) => {
+          assert.equal(new URL(url).hostname, `api.${apex}`);
+          assert.equal(
+            new Headers(init.headers).get("authorization"),
+            `Bearer ${token}`,
+          );
+          bodies.push(init.body);
+          return bodies.length < 3
+            ? Response.json({ error: { message: "busy" } }, { status: 503 })
+            : thinkingReply(name);
+        },
+      });
+      assert.equal(
+        (await runtime.run(params)).status,
+        "completed",
+        `${name}/${apex}`,
+      );
+      assert.equal(bodies.length, 3);
+      assert.equal(bodies[0], bodies[1]);
+      assert.equal(bodies[1], bodies[2]);
+      assert.equal(events.filter((e) => e.type === "retrying").length, 2);
+      await runtime.close();
+    }
+});
+
+test("retrying a model request after a tool or media operation never replays that side effect", async (t) => {
+  for (const name of [
+    probeToolName,
+    "generate_image",
+    "generate_video",
+    "generate_speech",
+  ]) {
+    const params = {
+      ...(await sandbox(t)),
+      media: {
+        image: { model: "image", models: ["image"], maxImages: 4 },
+        video: {
+          model: "video",
+          models: ["video"],
+          minDuration: 4,
+          maxDuration: 30,
+        },
+        speech: { model: "speech", models: ["speech"], voices: ["voice"] },
+      },
+    };
+    let requests = 0;
+    const calls = [];
+    const Runtime = name === probeToolName ? ProbeRuntime : AssistantRuntime;
+    const args =
+      name === probeToolName
+        ? { command: "one operation" }
+        : name === "generate_speech"
+          ? { text: "Hello" }
+          : { prompt: "One fox" };
+    const runtime = new Runtime({
+      retrySleep: async () => {},
+      hostCall: async (call) => {
+        calls.push(call);
+        return { status: "completed", model: "media", files: [] };
+      },
+      fetch: async () => {
+        requests++;
+        return requests === 1
+          ? toolStream(name, args)
+          : requests < 4
+            ? Response.json({ error: { message: "busy" } }, { status: 503 })
+            : stream("Done once");
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "completed", name);
+    assert.equal(requests, 4, name);
+    assert.equal(calls.length, 1, name);
+    await runtime.close();
+  }
+});
+
+test("the SDK abort signal cancels a retry wait even without a run cancellation", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0,
+    retrySeen;
+  const ready = new Promise((resolve) => (retrySeen = resolve));
+  const runtime = new AssistantRuntime({
+    emit: (e) => {
+      if (e.type === "retrying") retrySeen();
+    },
+    fetch: async () => {
+      requests++;
+      return Response.json(
+        { error: { message: "busy" } },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    },
+  });
+  const running = runtime.run(params);
+  await ready;
+  const context = runtime.runs.get(params.runId);
+  const start = Date.now();
+  await context.session.abort();
+  await running;
+  assert.equal(context.abort.signal.aborted, false);
+  assert.ok(Date.now() - start < 1000);
+  assert.equal(requests, 1);
+  await runtime.close();
 });

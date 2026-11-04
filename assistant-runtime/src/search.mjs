@@ -22,7 +22,7 @@ const MAX_URL_CHARS = 2048;
 // an earlier result, or a failure that never reached it, is not one), and
 // failed page reads. Beyond them the tools refuse without a request, so a
 // model that keeps searching or retrying stops.
-const MAX_SEARCHES = 3;
+const MAX_SEARCHES = 6;
 const MAX_FETCH_FAILURES = 3;
 // What Node itself may need on Windows and macOS; nothing else is inherited.
 const INHERITED_ENV = ["SystemRoot", "TEMP", "TMP", "PATH"];

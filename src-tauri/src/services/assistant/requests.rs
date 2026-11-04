@@ -17,6 +17,19 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+// Only supported UI language codes cross the runtime boundary. The renderer
+// resolves first-launch language; persisted settings keep old callers working.
+fn request_ui_language(requested: Option<&str>, saved: Option<&str>) -> String {
+    requested
+        .into_iter()
+        .chain(saved)
+        .find_map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            matches!(value.as_str(), "zh" | "en" | "ja").then_some(value)
+        })
+        .unwrap_or_else(|| "zh".into())
+}
+
 const MAX_MESSAGE_BYTES: usize = 128_000;
 /// The turn to show is not a user turn of the conversation's native history.
 const VERSION_UNAVAILABLE: &str = "assistant_version_unavailable";
@@ -652,7 +665,12 @@ impl AssistantHost {
         .await?;
 
         let thinking_level = run_thinking_level(&record.session, &model);
+        let ui_language = request_ui_language(
+            request.ui_language.as_deref(),
+            crate::settings::get_settings().language.as_deref(),
+        );
         let mut params = json!({
+            "uiLanguage": ui_language,
             "sessionId": request.session_id,
             "runId": request.run_id,
             "operationId": request.operation_id,
@@ -1515,6 +1533,23 @@ pub(super) fn publish_turn(
 mod tests {
     use super::*;
     use crate::services::assistant::host::Identity;
+
+    #[test]
+    #[serial_test::serial]
+    fn assistant_ui_language_uses_current_ui_then_saved_settings_for_older_callers() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        for language in ["zh", "en", "ja"] {
+            crate::settings::mutate_settings(|settings| {
+                settings.language = Some(language.into());
+            })
+            .unwrap();
+            let saved = crate::settings::get_settings().language;
+            assert_eq!(request_ui_language(None, saved.as_deref()), language);
+            assert_eq!(request_ui_language(Some("bad"), saved.as_deref()), language);
+            assert_eq!(request_ui_language(Some(" JA "), saved.as_deref()), "ja");
+        }
+        assert_eq!(request_ui_language(None, None), "zh");
+    }
 
     fn attachment(name: &str, status: &str) -> Attachment {
         serde_json::from_value(json!({

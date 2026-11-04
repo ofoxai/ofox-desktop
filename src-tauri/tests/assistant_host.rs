@@ -1683,6 +1683,10 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
                 "assistant_model_unavailable",
             ),
         ] {
+            if code == "assistant_rate_limited" {
+                gateway.reply(reply.clone());
+                gateway.reply(reply.clone());
+            }
             gateway.reply(reply);
             let usage = assert_failed(code).await;
             assert_eq!(usage["estimatedCostUsd"], priced["estimatedCostUsd"], "{code}");
@@ -6027,4 +6031,38 @@ fn a_chat_model_reads_text_aloud_into_a_file_on_its_reply() {
         assert_eq!(spoken.outputs, vec![reply.attachments[0].id.clone()]);
         host.shutdown().await;
     });
+}
+
+#[test]
+fn retrying_events_and_actual_ui_language_reach_the_real_host_and_model() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        for language in ["en", "ja", "zh"] {
+            gateway.reply(Reply::Error(
+                503,
+                json!({"error":{"message":format!("busy {KEY}")}}),
+            ));
+            gateway.reply(Reply::Stream("One answer".into()));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Hello", json!({"uiLanguage":language})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            assert_eq!(of_type(&env, &run, "retrying"), vec![json!({"attempt":1})]);
+            assert!(system_preamble(gateway.requests().last().unwrap())
+                .contains(&format!("App language: {language}.")));
+        }
+        assert_eq!(gateway.requests().len(), 6);
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
 }
