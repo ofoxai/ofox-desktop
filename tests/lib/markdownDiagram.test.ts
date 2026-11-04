@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   cleanDiagram,
   diagramImage,
-  quietDiagramSource,
+  diagramSource,
 } from "@/lib/markdownDiagram";
 
 const svg = (inner: string, attributes = "") =>
@@ -55,36 +55,43 @@ describe("a diagram's SVG", () => {
 });
 
 describe("a diagram's text before it is drawn", () => {
-  it("loses markup that loads something and every attribute", () => {
+  it("turns a tag that is not plain formatting into text", () => {
     expect(
-      quietDiagramSource(
-        'flowchart LR\n  X["<img src=x onerror=go()>"] --> A["<b style=\'color:red\'>bold</b>"]',
+      diagramSource(
+        'flowchart LR\n  X["<img src=x onerror=go()>"] --> A["<b>bold</b> <b/onclick=go()>x</b>"]',
       ),
-    ).toBe('flowchart LR\n  X[" "] --> A["<b>bold</b>"]');
+    ).toBe(
+      'flowchart LR\n  X["‹img src=x onerror=go()>"] --> A["<b>bold</b> ‹b/onclick=go()>x</b>"]',
+    );
   });
 
-  it("cannot configure Mermaid or style with a reference", () => {
+  it("cannot configure Mermaid, however the configuration is written", () => {
+    const configured = [
+      "---  \nconfig:\n  themeCSS: 'body{display:none}'\n---  \nflowchart LR\n  A --> B",
+      "%%{init: {'themeCSS': '.n{position:fixed}'}}%%\nflowchart LR\n  A --> B",
+    ];
+    for (const source of configured)
+      expect(diagramSource(source)?.trim()).toBe("flowchart LR\n  A --> B");
+    // An unclosed directive takes the rest with it, as it does in Mermaid.
     expect(
-      quietDiagramSource(
-        [
-          "---",
-          "config:",
-          "  themeCSS: 'body{display:none}'",
-          "---",
-          "%%{init: {'themeCSS': '.n{position:fixed}'}}%%",
-          "flowchart LR",
-          "  A --> B",
-          "  style A fill:#f9f,stroke:#333",
-          "  style B fill:u\\72l(//x.test/p)",
-          "  classDef c background:url(//x.test/q)",
-        ].join("\n"),
-      ),
-    ).toBe("flowchart LR\n  A --> B\n  style A fill:#f9f,stroke:#333");
+      diagramSource("flowchart LR\n  A --> B\n%%{init: {'theme': 'x'}"),
+    ).toBe("flowchart LR\n  A --> B\n");
   });
 
-  it("keeps Mermaid's own arrows, annotations and line breaks", () => {
+  it("is not drawn when it reaches for something", () => {
+    for (const source of [
+      "flowchart LR\n  A --> B; style B fill:url(//x.test/p)",
+      "flowchart LR\n  A --> B\n  style B fill:u\\72l(//x.test/p)",
+      "flowchart LR\n  A --> B\n  classDef c background:image-set('x.png' 1x)",
+      'flowchart LR\n  A@{ img: "https://x.test/a.png", label: "a" }',
+      "flowchart LR\n  A --> B\n  style B font:@import x",
+    ])
+      expect(diagramSource(source)).toBeNull();
+  });
+
+  it("keeps Mermaid's own arrows, annotations, styles and line breaks", () => {
     const source =
-      "classDiagram\n  class Shape{\n    <<interface>>\n  }\n  Shape <|-- Circle\nflowchart LR\n  A <--> B\n  B -->|a<br>b| C";
-    expect(quietDiagramSource(source)).toBe(source);
+      'classDiagram\n  class Shape{\n    <<interface>>\n  }\n  Shape <|-- Circle\nflowchart LR\n  A <--> B\n  B -->|a<br>b| C\n  style C fill:#f9f,stroke:#333\n  D["line\\nnext"]';
+    expect(diagramSource(source)).toBe(source);
   });
 });

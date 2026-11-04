@@ -8,37 +8,35 @@ export interface DiagramImage {
   width: number | null;
 }
 
-/** Markup in a label that could load or open something. */
-const RESOURCE_TAGS =
-  /<\/?\s*(?:img|image|picture|source|video|audio|track|iframe|frame|object|embed|link|meta|base|script|style|svg|math|form|input|button|textarea|select|a)\b[^>]*>/gi;
-/** A tag with attributes: `<b onclick=…>`, `<span style=…>`. */
-const TAG_ATTRIBUTES = /<([a-z][a-z0-9]*)\s[^>]*=[^>]*>/gi;
-/** `%%{init: …}%%`: configuration from inside the diagram. */
-const DIRECTIVES = /%%\{[\s\S]*?\}%%[ \t]*(?:\r?\n)?/g;
-/** Front matter at the top (`---\nconfig: …\n---`): configuration too. */
-const FRONT_MATTER = /^\s*---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/;
-/** A style statement that could reference something: a URL, an escape, an at-rule. */
-const STYLE_REFERENCE =
-  /^\s*(?:style|classDef|linkStyle)\b.*(?:url|image|\\|@|expression)/i;
+/** Front matter at the top (`---\nconfig: …\n---`), as loosely as Mermaid reads it. */
+const FRONT_MATTER = /^\s*-{3}\s*[\n\r][\s\S]*?[\n\r]-{3}\s*(?:[\n\r]+|$)/;
+/** `%%{init: …}%%`, closed or not, as Mermaid reads it. */
+const DIRECTIVES = /%%\{(?:(?!\}%%)[\s\S])*(?:\}%%)?/g;
+/**
+ * What only a diagram that reaches for something has: a URL, an image, an
+ * at-rule, a CSS expression, an image shape (`img:`), and a backslash, which
+ * CSS reads as an escape (`u\72l(`); `\n` alone can spell none of these.
+ */
+const REFERENCE =
+  /url\s*\(|image-set\s*\(|@import|expression\s*\(|\bimg\s*:|\\(?!n)/i;
+/** Something an HTML parser would take for a tag, and `<<annotations>>`. */
+const TAG_LIKE = /<<[^<>]*>>|<[a-z!?/][^>]*>?/gi;
+/** Formatting a label may keep: a bare tag, no attribute. */
+const FORMAT_TAG = /^<\/?(?:br|b|i|em|strong|u|s|sub|sup|small)\s*\/?>$/i;
+const ANNOTATION = /^<<[\w\s-]+>>$/;
 
 /**
- * The diagram's text as Mermaid gets it. Mermaid puts a label's HTML in the
- * page while it measures it, before any sanitizing, so tags that load or
- * open something go first, and every attribute (`<br>`, `<b>`, `<i>` still
- * format). The diagram cannot configure Mermaid (theme, CSS, fonts), and a
- * style that refers to anything is left out.
+ * The diagram's text as Mermaid gets it, or null when it is not drawn but
+ * shown as its code. It cannot configure Mermaid (no front matter, no
+ * directive), cannot reach for anything, and a tag that is not plain
+ * formatting turns into text: `‹` takes the place of its `<`.
  */
-export function quietDiagramSource(source: string): string {
-  return (
-    source
-      .replace(FRONT_MATTER, "")
-      .replace(DIRECTIVES, "")
-      .split("\n")
-      .filter((line) => !STYLE_REFERENCE.test(line))
-      .join("\n")
-      // A space, not nothing: Mermaid refuses an empty label.
-      .replace(RESOURCE_TAGS, " ")
-      .replace(TAG_ATTRIBUTES, "<$1>")
+export function diagramSource(source: string): string | null {
+  const text = source.replace(FRONT_MATTER, "").replace(DIRECTIVES, "");
+  if (/%%\{/.test(text) || /^\s*-{3}/.test(text) || REFERENCE.test(text))
+    return null;
+  return text.replace(TAG_LIKE, (tag) =>
+    FORMAT_TAG.test(tag) || ANNOTATION.test(tag) ? tag : `‹${tag.slice(1)}`,
   );
 }
 
@@ -134,7 +132,11 @@ async function draw(
     // Labels are measured and drawn in the font the reply is written in (a
     // system font, which an SVG image can use too).
     fontFamily: getComputedStyle(document.body).fontFamily || undefined,
-    // None of these can be changed from inside a diagram.
+    // Labels are SVG text: a label's HTML is never parsed, not even while
+    // Mermaid measures it in the page.
+    htmlLabels: false,
+    // None of these can be changed from inside a diagram, at any depth
+    // (Mermaid removes them from nested settings too, e.g. flowchart's).
     secure: [
       "secure",
       "securityLevel",
@@ -142,15 +144,18 @@ async function draw(
       "maxTextSize",
       "suppressErrorRendering",
       "maxEdges",
+      "dompurifyConfig",
       "theme",
       "themeCSS",
       "themeVariables",
       "fontFamily",
+      "altFontFamily",
       "htmlLabels",
       "darkMode",
     ],
   });
-  const text = quietDiagramSource(source);
+  const text = diagramSource(source);
+  if (text === null) return null;
   if (!(await mermaid.parse(text, { suppressErrors: true }))) return null;
   count += 1;
   const { svg } = await mermaid.render(`assistant-diagram-${count}`, text);
