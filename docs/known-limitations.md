@@ -327,3 +327,9 @@ are not proof that a model did no work. A partially received stream, timeout
 or ambiguous socket failure still requires a manual retry. This change has
 macOS fixture coverage through the prepared Pi runtime and real Rust event
 bridge; native Windows and live billed-provider acceptance remain unverified.
+
+## Assistant skill target
+
+The library target, modes and host proof helpers precede runtime skill loading, slash selection and approval-backed creation. Those later integrations must consume a fresh host snapshot; selecting the library target alone does not yet add a model tool. The optional creation-origin sidecar has a strict reader; its transactional writer belongs to the creation integration. Missing origin evidence does not reconstruct ownership from names.
+
+Official popular metadata does not contain a unique repository directory. Origin classification verifies its full publisher repository and the actual fixed artifact's frontmatter name; it does not assert a unique skills.sh URL-to-directory mapping or a safety audit. Ambiguous/mismatching metadata remains unreviewed. Native Windows execution and live-agent acceptance remain unverified. Configuration locks coordinate application writes, not arbitrary external processes; skill scripts are not placed in an OS sandbox.

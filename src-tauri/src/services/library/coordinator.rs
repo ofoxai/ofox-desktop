@@ -618,6 +618,7 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         return Ok(op);
     }
     verify_routing(&op)?;
+    super::assistant_target::validate_operation(&op)?;
     let first_confirmation = op.status == "previewed";
     let mut prepared = snapshot.clone();
     let mut blocked_updates = BTreeSet::new();
@@ -700,7 +701,17 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         let result = (|| {
             source_valid?;
             if op.kind == super::ResourceKind::Skills {
-                return super::skill_resource::write(target);
+                let assistant_key =
+                    format!("skills:{}:{}", op.resource_id, super::assistant_target::ID);
+                let enabling = target
+                    .receipt
+                    .as_ref()
+                    .is_some_and(|r| r.owners.iter().any(|o| o == super::assistant_target::ID))
+                    && op
+                        .previous_assignments
+                        .get(&assistant_key)
+                        .is_none_or(|value| value.is_none());
+                return super::assistant_target::write_target(target, enabling);
             }
             if physical(&path)?.to_string_lossy() != target.physical_target {
                 return Err(error("targetChanged"));

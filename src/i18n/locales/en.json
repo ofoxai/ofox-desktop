@@ -4507,7 +4507,27 @@
         "firecrawl": "Scrape, crawl and search the web into clean Markdown.",
         "tavily": "Search and extract from the web with Tavily."
       }
-    }
+    },
+    "assistantTarget": {
+      "label": "Ofox Assistant",
+      "mode": "Assistant skill use",
+      "auto": "Automatic",
+      "manual": "Manual only",
+      "broken": "Cannot read: {{reason}}",
+      "reviewed": "Reviewed",
+      "unreviewed": "Unreviewed",
+      "assistantCreated": "Assistant created",
+      "originHint": "Catalog origin does not guarantee content safety."
+    },
+    "assistantSkillStateInvalid": "Assistant skill settings cannot be read. Check them and retry.",
+    "assistantSkillUnreadable": "The skill file cannot be read.",
+    "assistantSkillTooLarge": "SKILL.md exceeds 1 MB.",
+    "assistantSkillBinary": "SKILL.md is not a valid text file.",
+    "assistantSkillFrontmatter": "SKILL.md has missing or invalid frontmatter.",
+    "assistantSkillDescriptionMissing": "The skill has no description.",
+    "assistantSkillNameInvalid": "The skill name is invalid.",
+    "assistantSkillDuplicate": "The skill name is duplicated. Use a unique name.",
+    "assistantSkillUnavailable": "The skill changed or is not enabled for the assistant. Refresh and retry."
   },
   "datePicker": {
     "open": "Choose {{label}}",

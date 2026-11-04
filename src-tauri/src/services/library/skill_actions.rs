@@ -1165,6 +1165,42 @@ mod tests {
     }
     #[tokio::test]
     #[serial_test::serial]
+    async fn updating_a_modified_assistant_skill_asks_first_and_preserves_bytes() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let mut settings = crate::settings::get_settings();
+        settings.skill_sync_method = crate::services::skill::SyncMethod::Copy;
+        crate::settings::update_settings(settings).unwrap();
+        let db = fixture(true);
+        let op = skill_resource::preview(&db, "sample", &[library::assistant_target::ID.into()])
+            .unwrap();
+        assert_eq!(
+            library::apply_operation(&db, &op.id).unwrap().status,
+            "applied"
+        );
+        let native = library::assistant_target::skills_dir().join("sample/SKILL.md");
+        fs::write(&native, "User's modified skill").unwrap();
+        let checked = check_with(&db, "sample", 1, 0, |_, _| async {
+            Ok(download("Remote candidate", true, "nested/sample"))
+        })
+        .await
+        .unwrap();
+        assert!(!checked["targetConflicts"].as_array().unwrap().is_empty());
+        let ticket = checked["candidate"]["ticketId"].as_str().unwrap();
+        assert!(confirm(&db, ticket, 1, 0, "update", None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("skillTargetModified"));
+        assert_eq!(
+            fs::read_to_string(&native).unwrap(),
+            "User's modified skill"
+        );
+        assert_eq!(
+            db.library_snapshot().unwrap().definitions.skills["sample"].revision,
+            1
+        );
+    }
+    #[tokio::test]
+    #[serial_test::serial]
     async fn comparison_reports_an_unknown_baseline_when_the_old_artifact_changes_after_check() {
         let _sandbox = crate::test_sandbox::sandbox();
         let db = fixture(true);

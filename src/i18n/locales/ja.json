@@ -4507,7 +4507,27 @@
         "firecrawl": "ウェブを取得、クロール、検索し、読みやすい Markdown に変換します。",
         "tavily": "Tavily でウェブ検索とコンテンツ抽出を行います。"
       }
-    }
+    },
+    "assistantTarget": {
+      "label": "Ofox アシスタント",
+      "mode": "アシスタントでの使用方法",
+      "auto": "自動で使用",
+      "manual": "手動のみ",
+      "broken": "読み取れません：{{reason}}",
+      "reviewed": "確認済み",
+      "unreviewed": "未確認",
+      "assistantCreated": "アシスタントが作成",
+      "originHint": "カタログの出典表示は内容の安全性を保証するものではありません。"
+    },
+    "assistantSkillStateInvalid": "アシスタントのスキル設定を読み取れません。確認して再試行してください。",
+    "assistantSkillUnreadable": "スキルファイルを読み取れません。",
+    "assistantSkillTooLarge": "SKILL.md が 1 MB を超えています。",
+    "assistantSkillBinary": "SKILL.md は有効なテキストファイルではありません。",
+    "assistantSkillFrontmatter": "SKILL.md の先頭メタデータが存在しないか無効です。",
+    "assistantSkillDescriptionMissing": "スキルの説明がありません。",
+    "assistantSkillNameInvalid": "スキル名が無効です。",
+    "assistantSkillDuplicate": "スキル名が重複しています。一意の名前を使用してください。",
+    "assistantSkillUnavailable": "スキルが変更されたか、アシスタントで有効になっていません。更新して再試行してください。"
   },
   "datePicker": {
     "open": "{{label}}を選択",

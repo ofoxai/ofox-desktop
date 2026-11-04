@@ -19,6 +19,7 @@ import pi from "@/icons/extracted/pi.svg?url";
 import copilot from "@/icons/extracted/githubcopilot.svg?url";
 import cursor from "@lobehub/icons-static-svg/icons/cursor.svg?url";
 import claudeDesktop from "@lobehub/icons-static-svg/icons/claude-color.svg?url";
+import ofox from "@/assets/icons/ofox-logo.png";
 
 interface ToolLogo {
   src: string;
@@ -28,6 +29,7 @@ interface ToolLogo {
 
 /** Bundled product marks; provenance is recorded in docs/brand-assets.md. */
 export const TOOL_LOGOS: Record<string, ToolLogo> = {
+  "ofox-assistant": { src: ofox, label: "Ofox" },
   claude: { src: claude, label: "Claude Code" },
   codex: { src: codex, label: "Codex" },
   chatgpt: { src: chatgpt, label: "ChatGPT", darkTreatment: "white" },

@@ -1,4 +1,5 @@
 import type { LibraryKind } from "@/lib/api/library";
+import recommendedSkills from "./recommendedSkills.json";
 
 export interface LibraryMcpPair {
   id: string;
@@ -699,25 +700,18 @@ export const LIBRARY_RECOMMENDATIONS: readonly LibraryRecommendation[] = [
     dependencyKeys: ["library.discover3.preparation.apiKey"],
     permissionKeys: ["library.discover3.permissions.local"],
   },
-  ...[
-    "frontend-design",
-    "webapp-testing",
-    "mcp-builder",
-    "skill-creator",
-    "theme-factory",
-    "canvas-design",
-  ].map((name) => ({
+  ...recommendedSkills.map(({ id: name, owner, repo, directory }) => ({
     ...base(
       name,
       name,
-      `https://github.com/anthropics/skills/tree/main/skills/${name}`,
+      `https://github.com/${owner}/${repo}/tree/main/${directory}`,
     ),
     kind: "skills" as const,
     repository: {
-      owner: "anthropics",
-      name: "skills",
+      owner,
+      name: repo,
       branch: "main",
-      directory: `skills/${name}`,
+      directory,
     },
     descriptionKey: ["theme-factory", "canvas-design"].includes(name)
       ? `library.discover2.recipes.${name}`

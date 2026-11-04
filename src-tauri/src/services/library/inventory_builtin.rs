@@ -143,6 +143,14 @@ fn verified_fixed_skill(db: &Database, row: &InstalledSkill) -> bool {
         .is_some_and(|sha| sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
         && super::super::skill_resource::artifact_for(db, &row.id).is_ok()
 }
+/// The same strict curated identity used by library discovery and origin labels.
+pub(crate) fn fixed_skill_matches(
+    db: &Database,
+    recipe: &BuiltinRecipe,
+    row: &InstalledSkill,
+) -> bool {
+    same_origin_directory(recipe, row) && verified_fixed_skill(db, row)
+}
 fn native_candidates(
     db: &Database,
     kind: &ResourceKind,

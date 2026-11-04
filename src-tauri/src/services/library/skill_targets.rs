@@ -30,10 +30,20 @@ const LEGACY_TARGETS: &[SkillTarget] = &[
     },
 ];
 
-pub fn all() -> impl Iterator<Item = &'static SkillTarget> {
+pub const BUILTIN_TARGET: SkillTarget = SkillTarget {
+    id: super::assistant_target::ID,
+    label: "Ofox Assistant",
+    reads_shared: false,
+};
+
+pub fn visible() -> impl Iterator<Item = &'static SkillTarget> {
     super::extension_targets::TARGETS
         .iter()
-        .chain(LEGACY_TARGETS)
+        .chain(std::iter::once(&BUILTIN_TARGET))
+}
+
+pub fn all() -> impl Iterator<Item = &'static SkillTarget> {
+    visible().chain(LEGACY_TARGETS)
 }
 pub fn find(id: &str) -> Option<&'static SkillTarget> {
     all().find(|target| target.id == id)
@@ -116,6 +126,7 @@ pub const DESKTOP_MANIFEST: &str = "manifest.json";
 pub fn home(id: &str) -> Result<PathBuf, AppError> {
     let home = crate::config::get_home_dir();
     Ok(match id {
+        super::assistant_target::ID => super::assistant_target::assistant_dir(),
         "claude" => crate::config::get_claude_config_dir(),
         "codex" => crate::codex_config::get_codex_config_dir(),
         "gemini" => crate::gemini_config::get_gemini_dir(),
@@ -167,6 +178,9 @@ fn app_installed(names: &[&str]) -> bool {
 
 /// The agent's folder is here (a file in its place does not count), or its app is.
 pub fn detected_locally(id: &str) -> bool {
+    if id == super::assistant_target::ID {
+        return true;
+    }
     if id == "claude-desktop" {
         return !desktop_accounts().is_empty();
     }
@@ -254,6 +268,21 @@ pub fn desktop_manifest_set(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn assistant_target_is_listed_and_points_at_the_assistant_skills_dir() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let target = find("ofox-assistant").expect("builtin assistant skill target");
+        assert!(!target.reads_shared);
+        assert!(detected_locally(target.id));
+        assert_eq!(
+            root(target.id).unwrap(),
+            crate::config::get_app_config_dir().join("assistant/skills")
+        );
+        assert_eq!(all().count(), 13);
+        assert!(!super::super::extension_targets::TOOLS.contains(&target.id));
+    }
 
     #[test]
     #[serial_test::serial]

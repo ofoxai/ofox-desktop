@@ -17,6 +17,7 @@ use std::{
 mod builtin;
 #[path = "inventory_details.rs"]
 mod details;
+pub(crate) use builtin::fixed_skill_matches;
 pub use builtin::{match_builtin_recipes, BuiltinRecipe};
 #[path = "inventory_readers.rs"]
 mod readers;

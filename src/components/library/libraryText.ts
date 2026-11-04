@@ -44,6 +44,7 @@ export function libraryError(error: unknown, t: TFunction) {
     : t("library.failed");
 }
 export function toolLabel(tool: string, t: TFunction) {
+  if (tool === "ofox-assistant") return t("library.assistantTarget.label");
   return tool === "shared"
     ? t("library.sharedDirectory")
     : ({

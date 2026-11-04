@@ -4507,7 +4507,27 @@
         "firecrawl": "抓取、爬取和搜索网页，输出干净的 Markdown。",
         "tavily": "用 Tavily 搜索并提取网页内容。"
       }
-    }
+    },
+    "assistantTarget": {
+      "label": "Ofox 助手",
+      "mode": "助手使用方式",
+      "auto": "自动用",
+      "manual": "只能手动用",
+      "broken": "无法读取：{{reason}}",
+      "reviewed": "已审核",
+      "unreviewed": "未审核",
+      "assistantCreated": "助手创建",
+      "originHint": "目录来源标记不代表内容安全保证。"
+    },
+    "assistantSkillStateInvalid": "助手技能设置无法读取，请检查后重试。",
+    "assistantSkillUnreadable": "技能文件无法读取。",
+    "assistantSkillTooLarge": "SKILL.md 超过 1 MB。",
+    "assistantSkillBinary": "SKILL.md 不是有效的文本文件。",
+    "assistantSkillFrontmatter": "SKILL.md 缺少或包含无效的开头元数据。",
+    "assistantSkillDescriptionMissing": "技能缺少描述。",
+    "assistantSkillNameInvalid": "技能名称无效。",
+    "assistantSkillDuplicate": "技能名称重复，请使用唯一名称。",
+    "assistantSkillUnavailable": "技能已变更或未给助手启用，请刷新后重试。"
   },
   "datePicker": {
     "open": "为{{label}}选择日期",

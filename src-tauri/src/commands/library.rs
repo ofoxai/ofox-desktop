@@ -9,7 +9,9 @@ async fn list_discovery() -> std::collections::BTreeMap<String, crate::commands:
     let mut found: std::collections::BTreeMap<_, _> = library::skill_targets::all()
         .map(|target| {
             let mut detected = library::skill_targets::detected_locally(target.id);
-            detected |= crate::commands::misc::locate_cli(target.id);
+            if target.id != library::assistant_target::ID {
+                detected |= crate::commands::misc::locate_cli(target.id);
+            }
             if ["codex", "workbuddy"].contains(&target.id) {
                 let names = if target.id == "codex" {
                     vec!["Codex.app", "ChatGPT.app"]
@@ -652,6 +654,11 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
     crate::agent_env::ready().await;
     let discovery = skill_discovery().await?;
     let _io = crate::config_io::lock();
+    let assistant_skills = library::assistant_target::list_assistant_skills(
+        &state.db,
+        &library::assistant_target::reviewed_names(),
+    )
+    .map_err(|e| e.to_string())?;
     library::skill_resource::ensure_metadata(&state.db).map_err(|e| e.to_string())?;
     let mut skills = Vec::new();
     for row in state
@@ -662,6 +669,17 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
     {
         let mut view =
             library::skill_view::definition_view(&state.db, row).map_err(|e| e.to_string())?;
+        view["origin"] = json!(
+            library::assistant_target::origin_for_resource(&state.db, row)
+                .map_err(|e| e.to_string())?
+        );
+        let assistant_path = library::assistant_target::skills_dir().join(&row.directory);
+        if let Some(skill) = assistant_skills
+            .iter()
+            .find(|skill| skill.dir == assistant_path)
+        {
+            view["assistantSkill"] = json!(skill);
+        }
         if let Some(targets) = view["targets"].as_array_mut() {
             for target in targets {
                 let tool = target["toolId"].as_str().unwrap_or_default().to_owned();
@@ -694,7 +712,7 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         .collect();
     operations.sort_by_key(|op| std::cmp::Reverse(op.created_at));
     let resolved = library::skill_resource::native_paths().unwrap_or_default();
-    let skill_targets: Vec<Value> = library::extension_targets::TARGETS.iter()
+    let skill_targets: Vec<Value> = library::skill_targets::visible()
         .map(|target| {
             json!({"id":target.id,"label":target.label,"readsShared":target.reads_shared,
                 "detected":discovery.get(target.id).is_some_and(|entry| entry.status == "installed"),
@@ -702,8 +720,39 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         })
         .collect();
     Ok(
-        json!({"epoch":snapshot.machine.epoch,"skills":skills,"skillTargets":skill_targets,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
+        json!({"epoch":snapshot.machine.epoch,"skills":skills,"skillTargets":skill_targets,"assistantSkills":assistant_skills,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
     )
+}
+
+#[tauri::command]
+pub fn library_assistant_skill_modes(
+) -> Result<std::collections::BTreeMap<String, library::assistant_target::SkillMode>, String> {
+    library::assistant_target::skill_modes().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn library_set_assistant_skill_mode(
+    state: State<'_, AppState>,
+    name: String,
+    mode: library::assistant_target::SkillMode,
+) -> Result<(), String> {
+    let _io = crate::config_io::lock();
+    let snapshot = library::assistant_target::assistant_skill_snapshot(
+        &state.db,
+        &library::assistant_target::reviewed_names(),
+    )
+    .map_err(|e| e.to_string())?;
+    let proof = snapshot
+        .proof(&name)
+        .ok_or("library.assistantSkillUnavailable")?;
+    library::assistant_target::with_revalidated_skill(
+        &state.db,
+        proof,
+        library::assistant_target::SkillAccess::UserSelected,
+        |_| Ok(()),
+    )
+    .map_err(|e| e.to_string())?;
+    library::assistant_target::set_skill_mode(&name, mode).map_err(|e| e.to_string())
 }
 #[tauri::command]
 pub async fn preview_library_skill_distribution(
