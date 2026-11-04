@@ -2,7 +2,7 @@ import { act, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
-import { FoxLoader } from "@/components/ui/fox-loader";
+import { FoxLoader, useLoadingFox } from "@/components/ui/fox-loader";
 
 // The fox that greets a page's first load.
 
@@ -53,5 +53,40 @@ describe("FoxLoader", () => {
     expect(container.querySelector('[data-part="ear-l"]')).not.toBeNull();
     expect(container.querySelector('[data-part="ear-r"]')).not.toBeNull();
     expect(container.querySelectorAll('[data-part="eye"]')).toHaveLength(2);
+  });
+});
+
+describe("useLoadingFox", () => {
+  it("holds the page on the fox for at least 600ms once it shows", () => {
+    function Page({ pending }: { pending: boolean }) {
+      const fox = useLoadingFox(pending, { label: "Reading usage…" });
+      return fox.loading ? <>{fox.fox}</> : <p>content</p>;
+    }
+    const { rerender } = render(<Page pending />);
+    wait(200);
+    expect(
+      screen.getByRole("status", { name: "Reading usage…" }),
+    ).toBeVisible();
+    wait(50);
+    rerender(<Page pending={false} />);
+    expect(
+      screen.getByRole("status", { name: "Reading usage…" }),
+    ).toBeVisible();
+    expect(screen.queryByText("content")).toBeNull();
+    wait(560);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText("content")).toBeVisible();
+  });
+
+  it("shows nothing and no content gap for a load under 200ms", () => {
+    function Page({ pending }: { pending: boolean }) {
+      const fox = useLoadingFox(pending);
+      return fox.loading ? <>{fox.fox}</> : <p>content</p>;
+    }
+    const { rerender } = render(<Page pending />);
+    wait(150);
+    expect(screen.queryByRole("status")).toBeNull();
+    rerender(<Page pending={false} />);
+    expect(screen.getByText("content")).toBeVisible();
   });
 });

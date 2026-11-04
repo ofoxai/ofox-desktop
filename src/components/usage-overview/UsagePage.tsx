@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { FoxLoader } from "@/components/ui/fox-loader";
+import { useLoadingFox } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArrowRight, RefreshCw } from "lucide-react";
@@ -546,6 +546,12 @@ export function UsagePage({
       : effectiveTab === "overview"
         ? data?.appliedQuery
         : undefined) ?? displayedQuery;
+  const overviewFox = useLoadingFox(state.overview.isPending && !data, {
+    label: t("pages.usage.loading"),
+  });
+  const analysisFox = useLoadingFox(analysis.isPending && !analysisDisplay, {
+    label: t("pages.usage.loading"),
+  });
   const changeTab = (value: Tab) => {
     if (
       !sharedProjectSupported &&
@@ -887,8 +893,8 @@ export function UsagePage({
           <p className="pt-1 text-note font-medium text-ink-muted">
             {t("usageWorkbench.localHistory")}
           </p>
-          {state.overview.isPending && !data ? (
-            <FoxLoader label={t("pages.usage.loading")} />
+          {overviewFox.loading ? (
+            overviewFox.fox
           ) : !data ||
             (!usageIsUnavailable(data) &&
               ![
@@ -1062,8 +1068,8 @@ export function UsagePage({
                 </span>
               </p>
             )}
-            {analysis.isPending && !analysisDisplay ? (
-              <FoxLoader label={t("pages.usage.loading")} />
+            {analysisFox.loading ? (
+              analysisFox.fox
             ) : !analysisDisplay ||
               analysisDisplay.coverage.state === "unsupported" ? (
               <p className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">

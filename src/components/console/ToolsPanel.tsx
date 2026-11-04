@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { FoxLoader } from "@/components/ui/fox-loader";
+import { useLoadingFox } from "@/components/ui/fox-loader";
 import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -240,6 +240,10 @@ export function ToolsPanel({
     );
   };
 
+  const firstScan = useLoadingFox(loading && tools.length === 0, {
+    size: "block",
+    label: t("pages.tools.loading"),
+  });
   return (
     <>
       <PageHeader
@@ -275,11 +279,9 @@ export function ToolsPanel({
           )}
         </div>
 
-        {loading && tools.length === 0 ? (
+        {firstScan.loading ? (
           // 首次加载——列表本身还没渲染过，给个占位条避免空白
-          <ListCard>
-            <FoxLoader size="block" label={t("pages.tools.loading")} />
-          </ListCard>
+          <ListCard>{firstScan.fox}</ListCard>
         ) : tools.length === 0 ? (
           <ListCard>
             <p className="py-8 text-center text-ui text-ink-muted">

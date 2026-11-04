@@ -95,8 +95,16 @@ export interface ShellContextValue {
   refreshing: boolean;
   /** Sub-pages the mounted pages publish (useShellSubnav). */
   subnavs: Partial<Record<ShellPage, ShellSubnav>>;
-  /** For useShellSubnav: publish or (null) withdraw a page's sub-pages. */
-  publishSubnav: (page: ShellPage, nav: ShellSubnav | null) => void;
+  /**
+   * For useShellSubnav: publish or (null) withdraw a page's sub-pages. A
+   * withdrawal only removes what the same `owner` published, so a page
+   * that remounts is not erased by its old instance's late cleanup.
+   */
+  publishSubnav: (
+    page: ShellPage,
+    nav: ShellSubnav | null,
+    owner: object,
+  ) => void;
   /** The sidebar shows icons only; remembered on this machine. */
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (collapsed: boolean) => void;
@@ -268,15 +276,20 @@ export function ShellProvider({ openSettings, children }: ShellProviderProps) {
   const [subnavs, setSubnavs] = useState<
     Partial<Record<ShellPage, ShellSubnav>>
   >({});
+  const subnavOwners = useRef(new Map<ShellPage, object>());
   const publishSubnav = useCallback(
-    (page: ShellPage, nav: ShellSubnav | null) =>
+    (page: ShellPage, nav: ShellSubnav | null, owner: object) => {
+      if (nav) subnavOwners.current.set(page, owner);
+      else if (subnavOwners.current.get(page) !== owner) return;
+      else subnavOwners.current.delete(page);
       setSubnavs((previous) => {
         if (!nav && !previous[page]) return previous;
         const next = { ...previous };
         if (nav) next[page] = nav;
         else delete next[page];
         return next;
-      }),
+      });
+    },
     [],
   );
   const [sidebarCollapsed, setCollapsedState] = useState(readCollapsed);
@@ -392,6 +405,7 @@ export function useShellSubnav<T extends string>(
   nav: ShellSubnav<T> | null,
 ) {
   const { publishSubnav } = useShell();
+  const owner = useRef({}).current;
   const latest = useRef(nav);
   useLayoutEffect(() => {
     latest.current = nav;
@@ -418,7 +432,11 @@ export function useShellSubnav<T extends string>(
             onChange: (value) => latest.current?.onChange(value as T),
           }
         : null,
+      owner,
     );
-  }, [key, page, publishSubnav]);
-  useEffect(() => () => publishSubnav(page, null), [page, publishSubnav]);
+  }, [key, page, publishSubnav, owner]);
+  useEffect(
+    () => () => publishSubnav(page, null, owner),
+    [page, publishSubnav, owner],
+  );
 }

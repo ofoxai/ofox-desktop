@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useDelayedVisible } from "@/hooks/useDelayedVisible";
 import { cn } from "@/lib/utils";
@@ -6,23 +7,41 @@ import { cn } from "@/lib/utils";
  * The loading fox: Ofox's geometric fox with a face, hopping, tilting its
  * head and flicking its ears (keyframes in index.css, still under reduced
  * motion). For a page's or a block's first load only; buttons keep their
- * spinner. It shows after 200ms and stays at least 600ms, so a quick load
- * shows nothing and a slow one never blinks.
+ * spinner. It shows after 200ms, so a quick load shows nothing; where the
+ * content replaces it, useLoadingFox also keeps it at least 600ms.
  */
-export function FoxLoader({
-  size = "page",
-  label,
-  className,
-}: {
+export function FoxLoader(props: FoxLoaderProps) {
+  const visible = useDelayedVisible(true);
+  return visible ? <FoxView {...props} /> : null;
+}
+
+interface FoxLoaderProps {
   /** "page": 60px with a progress line; "block": 36px for a card. */
   size?: "page" | "block";
   /** What is loading, e.g. 「正在读取用量…」; generic by default. */
   label?: string;
   className?: string;
-}) {
+}
+
+/**
+ * For a first load whose content replaces the fox: `loading` stays true
+ * while `pending` is, and, once the fox has shown, for at least 600ms, so
+ * the page shows the fox or its content and never a flash of either.
+ * Render `fox` while `loading`, the content after.
+ */
+export function useLoadingFox(
+  pending: boolean,
+  props: FoxLoaderProps = {},
+): { loading: boolean; fox: ReactNode } {
+  const visible = useDelayedVisible(pending);
+  return {
+    loading: pending || visible,
+    fox: visible ? <FoxView {...props} /> : null,
+  };
+}
+
+function FoxView({ size = "page", label, className }: FoxLoaderProps) {
   const { t } = useTranslation();
-  const visible = useDelayedVisible(true);
-  if (!visible) return null;
   const page = size === "page";
   const name = label ?? t("common.loadingFox");
   return (

@@ -1528,3 +1528,12 @@ it("greets the first scan of the bound tools with the fox", async () => {
     }),
   ).toBeVisible();
 });
+
+it("keeps every page mounted when the console switches between local and signed-in mode", async () => {
+  const view = render(<ConsolePage boundTools={[]} localSignedIn />);
+  await screen.findByText("Test User");
+  fireEvent.click(screen.getByRole("tab", { name: "会话" }));
+  const sessions = screen.getByRole("tabpanel", { name: "会话" });
+  view.rerender(<ConsolePage boundTools={[]} localOnly localSignedIn />);
+  expect(screen.getByRole("tabpanel", { name: "会话" })).toBe(sessions);
+});

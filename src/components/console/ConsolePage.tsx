@@ -112,11 +112,7 @@ export default function ConsolePage(props: ConsolePageProps) {
   return (
     <InteractionScope active={active}>
       <ShellProvider openSettings={openSettings}>
-        {props.localOnly ? (
-          <ConsoleShell {...props} settingsButtonRef={settingsButton} />
-        ) : (
-          <SignedConsoleShell {...props} settingsButtonRef={settingsButton} />
-        )}
+        <ConsoleShell {...props} settingsButtonRef={settingsButton} />
         <OfoxSettingsDialog
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
@@ -131,12 +127,6 @@ type ShellProps = ConsolePageProps & {
   settingsButtonRef: Ref<HTMLButtonElement>;
 };
 
-/** A bound account: one account state for the sidebar and the pages. */
-function SignedConsoleShell(props: ShellProps) {
-  const account = useOfoxAccount();
-  return <ConsoleShell {...props} account={account} />;
-}
-
 function ConsoleShell({
   boundTools,
   onBoundToolsChanged,
@@ -144,17 +134,20 @@ function ConsoleShell({
   localSignedIn,
   onLoginRequested,
   settingsButtonRef,
-  account,
-}: ShellProps & { account?: OfoxAccount }) {
+}: ShellProps) {
   const { t } = useTranslation();
-  const sidebarAccount: SidebarAccountState =
-    account && !localOnly
-      ? { kind: "signed", account }
-      : {
-          kind: "local",
-          signedIn: Boolean(localSignedIn),
-          onAction: () => onLoginRequested?.(),
-        };
+  // One shell in both modes, so switching local ↔ signed-in keeps every
+  // page mounted. The account query never fetches by itself, so local mode
+  // loads nothing; only the signed-in pages are handed the account.
+  const signedAccount = useOfoxAccount();
+  const account = localOnly ? undefined : signedAccount;
+  const sidebarAccount: SidebarAccountState = account
+    ? { kind: "signed", account }
+    : {
+        kind: "local",
+        signedIn: Boolean(localSignedIn),
+        onAction: () => onLoginRequested?.(),
+      };
   const shell = useShell();
   // 应用自更新的首次发现弹窗；常驻的提示在侧栏底部（UpdatePill）。数据源 =
   // UpdateContext（自动检查走 R2 latest.json）。

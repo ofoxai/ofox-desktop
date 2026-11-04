@@ -232,6 +232,14 @@ describe("AppSidebar", () => {
     expect(top).toHaveAttribute("data-tauri-drag-region");
   });
 
+  it("collapsed on mac keeps the toggle below the traffic lights", () => {
+    localStorage.setItem("ofox.shell.sidebarCollapsed", "1");
+    frame();
+    // The lights sit at (14,17) and reach about y 31; the toggle row is
+    // 64px tall with the 28px toggle at its bottom.
+    expect(screen.getByTestId("sidebar-top")).toHaveClass("h-16", "items-end");
+  });
+
   it("does not drag on other platforms", () => {
     mocks.mac = false;
     frame();

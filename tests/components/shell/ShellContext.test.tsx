@@ -78,6 +78,22 @@ describe("ShellContext", () => {
     expect(screen.getByTestId("value")).toHaveTextContent("none");
   });
 
+  it("a page that remounts keeps its sub-pages in the shell", () => {
+    const { rerender } = render(
+      <ShellProvider openSettings={() => undefined}>
+        <Publisher key="before" onChange={() => undefined} />
+        <Probe />
+      </ShellProvider>,
+    );
+    rerender(
+      <ShellProvider openSettings={() => undefined}>
+        <Publisher key="after" onChange={() => undefined} />
+        <Probe />
+      </ShellProvider>,
+    );
+    expect(screen.getByTestId("items")).toHaveTextContent("A,B3");
+  });
+
   it("subnav onChange calls the page's latest callback", () => {
     const first = vi.fn();
     const second = vi.fn();

@@ -10,7 +10,7 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from "react";
-import { FoxLoader } from "@/components/ui/fox-loader";
+import { useLoadingFox } from "@/components/ui/fox-loader";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -1034,6 +1034,10 @@ function AssistantWorkspace() {
     </div>
   );
 
+  const opening = useLoadingFox(assistant.loading, {
+    size: "block",
+    label: t("assistant.loading"),
+  });
   return (
     <div
       ref={workspace}
@@ -1414,8 +1418,8 @@ function AssistantWorkspace() {
               )}
               aria-busy={assistant.loading}
             >
-              {assistant.loading ? (
-                <FoxLoader size="block" label={t("assistant.loading")} />
+              {opening.loading ? (
+                opening.fox
               ) : (
                 <>
                   {emptyTranscript && (

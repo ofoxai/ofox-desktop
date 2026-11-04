@@ -104,7 +104,9 @@ export function AppSidebar({
         {...drag}
         className={cn(
           "flex w-full shrink-0 items-center",
-          mac ? "h-[52px]" : "h-11",
+          // Collapsed on macOS the toggle sits under the traffic lights
+          // (14,17, about 14px tall), at the bottom of a taller row.
+          mac ? (collapsed ? "h-16" : "h-[52px]") : "h-11",
           collapsed ? "justify-center" : "justify-end",
           mac && collapsed && "items-end pb-1",
         )}

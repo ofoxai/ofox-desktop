@@ -3,11 +3,11 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
+import { PageHeader, ShellRefreshButton } from "@/components/shell/PageHeader";
 import {
-  PageHeader,
-  ShellRefreshButton,
-} from "@/components/shell/PageHeader";
-import { ShellProvider, useShellRefresh } from "@/components/shell/ShellContext";
+  ShellProvider,
+  useShellRefresh,
+} from "@/components/shell/ShellContext";
 
 // A page's title row: name, one line on what it is for, its actions; on
 // macOS it drags the window, since there is no title bar above it.
@@ -42,9 +42,9 @@ describe("PageHeader", () => {
 
   it("drags on mac, not elsewhere", () => {
     const { container, unmount } = render(<PageHeader title="Tools" />);
-    expect(
-      container.querySelector("[data-page-header]"),
-    ).toHaveAttribute("data-tauri-drag-region");
+    expect(container.querySelector("[data-page-header]")).toHaveAttribute(
+      "data-tauri-drag-region",
+    );
     unmount();
     mocks.mac = false;
     const other = render(<PageHeader title="Tools" />);
