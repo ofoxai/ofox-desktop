@@ -203,7 +203,13 @@ function ConsoleShell({
         </div>
       )}
       {shell.visited.has("assistant") && (
-        <div {...panel("assistant")} className="h-full px-4 pb-4 pt-1">
+        <div
+          {...panel("assistant")}
+          // A wide window's assistant fills the space beside the rail.
+          className={
+            shell.layout === "wide" ? "h-full" : "h-full px-4 pb-4 pt-1"
+          }
+        >
           <InteractionScope active={shell.active === "assistant"}>
             <AccountAssistantPanel
               enabled={Boolean(localSignedIn)}

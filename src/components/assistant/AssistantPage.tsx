@@ -223,6 +223,9 @@ function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
   const shell = useOptionalShell();
+  // A wide window (see ShellLayout): no frame, roomier sizes, a wider
+  // column, and the title only where the list does not show it.
+  const wide = shell?.layout === "wide";
   const localEntryPending = useRef<number | null>(null);
   const entry = shell?.assistantLocation;
   useEffect(() => {
@@ -930,16 +933,76 @@ function AssistantWorkspace() {
     </Button>
   );
 
+  const column = wide
+    ? "w-[clamp(840px,72%,1040px)] max-w-full"
+    : "w-full max-w-[760px]";
+  // A new conversation of a wide window starts with its composer in the
+  // middle of the page, the starters under it.
+  const centred = wide && emptyTranscript && !assistant.loading && !trashed;
+  const titleShown = !wide || sidebarCollapsed;
+  const modelPicker = Boolean(session || bootstrap?.models.length) && (
+    <AssistantModelPicker
+      models={(bootstrap?.models ?? []).filter(
+        (model) => (model.kind ?? "chat") === "chat",
+      )}
+      rememberedModels={bootstrap?.rememberedModels}
+      value={session?.modelId ?? assistant.newModelId}
+      onChange={(modelId) =>
+        session
+          ? void assistant.update({ modelId })
+          : assistant.chooseNewModel(modelId)
+      }
+      partial={Boolean(bootstrap?.partial?.length)}
+      disabled={!writable}
+      placeholder={session?.modelId || t("assistant.model")}
+    />
+  );
+  const starterButtons = writable && !assistant.draft.trim() && (
+    <div
+      className={cn(
+        "flex flex-wrap justify-center gap-2",
+        centred ? "mt-4" : "mt-5",
+      )}
+    >
+      {starters.map(({ id, kind }) => (
+        <Button
+          key={id}
+          variant="pill"
+          className="h-8 px-3.5 text-ctl"
+          onClick={() => {
+            focusStarter.current = true;
+            const hints = assistant.media.hints ?? [];
+            if (kind && !hints.includes(kind))
+              assistant.setMedia({
+                ...assistant.media,
+                hints: [...hints, kind],
+              });
+            assistant.setDraft(t(`assistant.starters.${id}.prompt`));
+          }}
+        >
+          {t(`assistant.starters.${id}.label`)}
+        </Button>
+      ))}
+    </div>
+  );
+
   return (
     <div
       ref={workspace}
       tabIndex={-1}
-      className="flex h-full min-h-0 overflow-hidden rounded-list border border-line bg-card outline-none"
+      data-layout={wide ? "wide" : "narrow"}
+      className={cn(
+        "flex h-full min-h-0 overflow-hidden bg-card outline-none",
+        wide
+          ? "[--ctl-h:30px] [--fs-ctl:13.5px] [--fs-micro:11.5px] [--fs-nav:14px] [--fs-note:12px] [--fs-sub:12.5px] [--fs-title:17px] [--fs-ui:15px] [--icon-btn:30px]"
+          : "rounded-list border border-line",
+      )}
       onKeyDown={handleShortcuts}
     >
       <AssistantSidebar
         ref={sidebarHandle}
         id={sidebarId}
+        wide={wide}
         collapsed={sidebarCollapsed}
         assistant={assistant}
         canCreate={available && !busy}
@@ -969,7 +1032,14 @@ function AssistantWorkspace() {
         className="flex min-h-0 min-w-0 flex-1 flex-col"
         aria-label={t("assistant.chat")}
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
+        <header
+          // The top of a wide window, the top bar gone, drags it.
+          {...(wide && isMac() ? { "data-tauri-drag-region": true } : {})}
+          className={cn(
+            "flex shrink-0 items-center gap-3 px-4 py-2.5",
+            !wide && "border-b border-line",
+          )}
+        >
           <div className="flex min-w-0 flex-1 items-center gap-1">
             <Button
               ref={sidebarToggle}
@@ -1001,7 +1071,11 @@ function AssistantWorkspace() {
               />
             ) : (
               <h1
-                className="min-w-0 truncate text-ui font-semibold"
+                // Kept for a screen reader where the list already shows it.
+                className={cn(
+                  "min-w-0 truncate text-ui font-semibold",
+                  !titleShown && "sr-only",
+                )}
                 // A conversation in the trash is read-only until restored.
                 onDoubleClick={
                   session && !sessionTrashed
@@ -1012,24 +1086,9 @@ function AssistantWorkspace() {
                 {session?.title || t("assistant.title")}
               </h1>
             )}
+            {wide && modelPicker}
           </div>
-          {Boolean(session || bootstrap?.models.length) && (
-            <AssistantModelPicker
-              models={(bootstrap?.models ?? []).filter(
-                (model) => (model.kind ?? "chat") === "chat",
-              )}
-              rememberedModels={bootstrap?.rememberedModels}
-              value={session?.modelId ?? assistant.newModelId}
-              onChange={(modelId) =>
-                session
-                  ? void assistant.update({ modelId })
-                  : assistant.chooseNewModel(modelId)
-              }
-              partial={Boolean(bootstrap?.partial?.length)}
-              disabled={!writable}
-              placeholder={session?.modelId || t("assistant.model")}
-            />
-          )}
+          {!wide && modelPicker}
           {session && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
@@ -1274,8 +1333,19 @@ function AssistantWorkspace() {
         )}
         {/* The drop overlay covers what the files would be added to: the
             transcript and the composer. */}
-        <div className="relative flex min-h-0 flex-1 flex-col">
-          <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          data-centred={centred ? "true" : "false"}
+          className={cn(
+            "relative flex min-h-0 flex-1 flex-col",
+            centred && "justify-center pb-[12vh]",
+          )}
+        >
+          <div
+            className={cn(
+              "relative flex min-h-0 flex-col",
+              centred ? "flex-none" : "flex-1",
+            )}
+          >
             <div
               ref={scroll}
               onScroll={trackScroll}
@@ -1283,7 +1353,10 @@ function AssistantWorkspace() {
               onTouchMove={endJump}
               onPointerDown={endJump}
               onKeyDown={endJump}
-              className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
+              className={cn(
+                "min-h-0 overflow-y-auto overscroll-contain px-4",
+                centred ? "flex-none" : "flex-1",
+              )}
               aria-busy={assistant.loading}
             >
               {assistant.loading ? (
@@ -1297,7 +1370,12 @@ function AssistantWorkspace() {
               ) : (
                 <>
                   {emptyTranscript && (
-                    <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
+                    <div
+                      className={cn(
+                        "mx-auto flex max-w-lg flex-col items-center justify-center text-center",
+                        centred ? "pb-2" : "min-h-full py-8",
+                      )}
+                    >
                       <h2 className="text-title font-semibold">
                         {t(trashed ? "assistant.trash" : "assistant.welcome")}
                       </h2>
@@ -1308,31 +1386,7 @@ function AssistantWorkspace() {
                           {t("assistant.trashSelect")}
                         </p>
                       )}
-                      {writable && !assistant.draft.trim() && (
-                        <div className="mt-5 flex flex-wrap justify-center gap-2">
-                          {starters.map(({ id, kind }) => (
-                            <Button
-                              key={id}
-                              variant="pill"
-                              className="h-8 px-3.5 text-ctl"
-                              onClick={() => {
-                                focusStarter.current = true;
-                                const hints = assistant.media.hints ?? [];
-                                if (kind && !hints.includes(kind))
-                                  assistant.setMedia({
-                                    ...assistant.media,
-                                    hints: [...hints, kind],
-                                  });
-                                assistant.setDraft(
-                                  t(`assistant.starters.${id}.prompt`),
-                                );
-                              }}
-                            >
-                              {t(`assistant.starters.${id}.label`)}
-                            </Button>
-                          ))}
-                        </div>
-                      )}
+                      {!centred && starterButtons}
                       {!trashed && (
                         <p className="mt-4 text-balance text-note text-ink-muted">
                           {t(
@@ -1349,7 +1403,12 @@ function AssistantWorkspace() {
                       )}
                     </div>
                   )}
-                  <div className="mx-auto max-w-[760px] py-2">
+                  <div
+                    className={cn(
+                      "mx-auto py-2",
+                      wide ? column : "max-w-[760px]",
+                    )}
+                  >
                     {messages.map((message) => {
                       const turn = versions.get(message.id);
                       return (
@@ -1535,7 +1594,10 @@ function AssistantWorkspace() {
               // Read-only until restored: no composer, and the way back.
               <div
                 role="status"
-                className="mx-auto flex w-full max-w-[760px] flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4"
+                className={cn(
+                  "mx-auto flex flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4",
+                  column,
+                )}
               >
                 <p className="text-center text-ctl text-ink-2">
                   {t("assistant.trashHint")}
@@ -1550,7 +1612,7 @@ function AssistantWorkspace() {
                 </Button>
               </div>
             ) : (
-              <div className="mx-auto flex min-h-0 w-full max-w-[760px] flex-col">
+              <div className={cn("mx-auto flex min-h-0 flex-col", column)}>
                 <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
                   {queueCount > 0 && assistant.queue && (
                     <AssistantQueue
@@ -1872,6 +1934,7 @@ function AssistantWorkspace() {
                     {t("assistant.webSearchNextMessage")}
                   </p>
                 )}
+                {centred && starterButtons}
               </div>
             )}
           </footer>
