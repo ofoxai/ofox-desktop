@@ -1,5 +1,14 @@
 import {
   Code2,
+  FlaskConical,
+  Bug,
+  GitCommitHorizontal,
+  LayoutTemplate,
+  BookOpen,
+  ShieldCheck,
+  Shuffle,
+  ListChecks,
+  Zap,
   FileText,
   Languages,
   Plug,
@@ -107,6 +116,15 @@ export const TEMPLATE_ICONS: Record<
   coding: { icon: Code2, className: TILE_COLORS[0] },
   chinese: { icon: Languages, className: TILE_COLORS[5] },
   review: { icon: ScanSearch, className: TILE_COLORS[4] },
+  tdd: { icon: FlaskConical, className: TILE_COLORS[2] },
+  debugging: { icon: Bug, className: TILE_COLORS[1] },
+  "git-commits": { icon: GitCommitHorizontal, className: TILE_COLORS[0] },
+  frontend: { icon: LayoutTemplate, className: TILE_COLORS[4] },
+  "docs-writing": { icon: BookOpen, className: TILE_COLORS[6] },
+  security: { icon: ShieldCheck, className: TILE_COLORS[5] },
+  refactor: { icon: Shuffle, className: TILE_COLORS[7] },
+  "plan-first": { icon: ListChecks, className: TILE_COLORS[1] },
+  concise: { icon: Zap, className: TILE_COLORS[6] },
 };
 
 export function LibraryResourceIcon({

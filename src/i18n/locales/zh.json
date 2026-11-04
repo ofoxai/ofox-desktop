@@ -3440,7 +3440,16 @@
       "templates": {
         "coding": "通用编程",
         "chinese": "中文沟通",
-        "review": "代码审查"
+        "review": "代码审查",
+        "tdd": "测试先行",
+        "debugging": "先找根因",
+        "git-commits": "提交与 PR 规范",
+        "frontend": "前端界面",
+        "docs-writing": "文档写作",
+        "security": "安全检查",
+        "refactor": "小步重构",
+        "plan-first": "先规划再动手",
+        "concise": "简洁回答"
       },
       "recipes": {
         "context7": "为编程问题补充库和框架文档。",
@@ -3453,7 +3462,16 @@
         "skill-creator": "帮助编写、改进和验证技能。",
         "coding": "约定代码修改、测试与结果说明方式。",
         "chinese": "使用中文清晰沟通，保留代码和专有名称。",
-        "review": "聚焦可验证的问题、影响和代码位置。"
+        "review": "聚焦可验证的问题、影响和代码位置。",
+        "tdd": "先写失败测试，用最少代码通过，再整理实现。",
+        "debugging": "先复现并查明原因；同一问题失败三次就停下来换思路。",
+        "git-commits": "小步提交，遵循 Conventional Commits，说明改动原因和验证。",
+        "frontend": "沿用已有组件和样式，兼顾可访问性、暗色模式、窄屏和 i18n。",
+        "docs-writing": "先写结论，用短句和可直接运行的示例解释操作。",
+        "security": "保护密钥，校验输入，检查注入、越权和依赖版本。",
+        "refactor": "保持行为不变，一次只改一件事，每一步都能运行测试。",
+        "plan-first": "复杂任务先列步骤和验收标准，确认后再写代码。",
+        "concise": "先给答案，少铺垫，不重复用户的话。"
       },
       "requirements": {
         "context7": "保持网络可用；建议在 Context7 创建 API Key，再填入 Authorization 请求头。",

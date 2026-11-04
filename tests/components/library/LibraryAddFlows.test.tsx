@@ -96,11 +96,11 @@ describe("library recommendations", () => {
     expect(JSON.stringify(context.initialDraft)).not.toContain("YOUR_API_KEY");
   });
 
-  it("offers three editable instruction templates with localized content", async () => {
+  it("offers twelve editable instruction templates with localized content", async () => {
     const choose = vi.fn();
     render(<LibraryDiscover kind="instructions" onChoose={choose} />);
     const buttons = screen.getAllByRole("button", { name: /^选择 / });
-    expect(buttons).toHaveLength(3);
+    expect(buttons).toHaveLength(12);
     await userEvent.click(buttons[0]);
     const recipe = choose.mock.calls[0][0];
     expect(recipe.kind).toBe("instructions");

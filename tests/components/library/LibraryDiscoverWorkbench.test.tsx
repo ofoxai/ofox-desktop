@@ -35,7 +35,7 @@ beforeEach(() => {
 });
 
 describe("curated resource workbench", () => {
-  it("contains 26 verified MCP recipes, six selected skill directories and three templates", () => {
+  it("contains 26 verified MCP recipes, six selected skill directories and twelve templates", () => {
     expect(
       LIBRARY_RECOMMENDATIONS.filter((r) => r.kind === "mcp"),
     ).toHaveLength(26);
@@ -44,7 +44,7 @@ describe("curated resource workbench", () => {
     ).toHaveLength(6);
     expect(
       LIBRARY_RECOMMENDATIONS.filter((r) => r.kind === "instructions"),
-    ).toHaveLength(3);
+    ).toHaveLength(12);
     for (const id of ["theme-factory", "canvas-design"]) {
       expect(LIBRARY_RECOMMENDATIONS.find((r) => r.id === id)).toMatchObject({
         kind: "skills",

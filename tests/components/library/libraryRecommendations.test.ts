@@ -1,8 +1,22 @@
 import { describe, expect, it } from "vitest";
+import {
+  FlaskConical,
+  Bug,
+  GitCommitHorizontal,
+  LayoutTemplate,
+  BookOpen,
+  ShieldCheck,
+  Shuffle,
+  ListChecks,
+  Zap,
+} from "lucide-react";
 import zh from "@/i18n/locales/zh.json";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
-import { hasRecipeLogo } from "@/components/library/LibraryResourceIcon";
+import {
+  TEMPLATE_ICONS,
+  hasRecipeLogo,
+} from "@/components/library/LibraryResourceIcon";
 import {
   LIBRARY_RECOMMENDATIONS,
   cloneRecommendationDraft,
@@ -147,6 +161,87 @@ describe("verified MCP recommendations", () => {
         "opencode",
         "hermes",
       ]);
+    }
+  });
+});
+
+const templates = LIBRARY_RECOMMENDATIONS.filter(
+  (r) => r.kind === "instructions",
+);
+const templateIds = [
+  "coding",
+  "chinese",
+  "review",
+  "tdd",
+  "debugging",
+  "git-commits",
+  "frontend",
+  "docs-writing",
+  "security",
+  "refactor",
+  "plan-first",
+  "concise",
+];
+
+describe("instruction templates", () => {
+  it("ships 12 instruction templates", () => {
+    expect(templates).toHaveLength(12);
+    expect(templates.map((t) => t.id)).toEqual(templateIds);
+    expect(
+      LIBRARY_RECOMMENDATIONS.filter((r) => r.kind === "skills"),
+    ).toHaveLength(6);
+  });
+  it("writes every template in three languages, 10 to 25 lines each", () => {
+    for (const t of templates)
+      for (const lng of ["zh", "en", "ja"] as const) {
+        const lines = t.contentByLanguage[lng].trim().split("\n").length;
+        expect(lines, `${t.id}: ${lng}`).toBeGreaterThanOrEqual(10);
+        expect(lines, `${t.id}: ${lng}`).toBeLessThanOrEqual(25);
+      }
+  });
+  it("gives every template its own icon", () => {
+    expect(Object.keys(TEMPLATE_ICONS)).toHaveLength(12);
+    for (const [id, icon] of Object.entries({
+      tdd: FlaskConical,
+      debugging: Bug,
+      "git-commits": GitCommitHorizontal,
+      frontend: LayoutTemplate,
+      "docs-writing": BookOpen,
+      security: ShieldCheck,
+      refactor: Shuffle,
+      "plan-first": ListChecks,
+      concise: Zap,
+    })) {
+      expect(TEMPLATE_ICONS[id]?.icon, id).toBe(icon);
+    }
+    for (const id of templateIds) {
+      const color = TEMPLATE_ICONS[id]?.className;
+      expect(color, id).toMatch(
+        /^bg-(red|orange|green|rose|violet|emerald|amber|cyan)-100 text-\1-800 dark:bg-\1-900 dark:text-\1-200$/,
+      );
+    }
+
+    for (const id of templateIds) expect(TEMPLATE_ICONS[id], id).toBeDefined();
+    expect(
+      new Set(templateIds.map((id) => TEMPLATE_ICONS[id]?.icon)).size,
+    ).toBe(12);
+  });
+  it("translates display metadata and uses instruction runtime for every template", () => {
+    for (const t of templates) {
+      expect(t.runtimeKey, t.id).toBe("library.discover2.runtime.instructions");
+      expect(t.publisher).toBe("Ofox");
+      expect(t.licenseKey).toBe("template");
+      for (const locale of [zh, en, ja]) {
+        for (const key of [
+          t.titleKey,
+          t.descriptionKey,
+          t.preparationKey,
+          `library.discover2.categories.${t.category}`,
+        ]) {
+          expect(key, t.id).toBeTruthy();
+          expect(get(locale, key!), `${t.id}: ${key}`).toBeTruthy();
+        }
+      }
     }
   });
 });

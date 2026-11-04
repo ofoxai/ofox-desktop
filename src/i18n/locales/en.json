@@ -3440,7 +3440,16 @@
       "templates": {
         "coding": "General coding",
         "chinese": "Chinese communication",
-        "review": "Code review"
+        "review": "Code review",
+        "tdd": "Test first",
+        "debugging": "Find the root cause",
+        "git-commits": "Commits and PRs",
+        "frontend": "Frontend interfaces",
+        "docs-writing": "Documentation writing",
+        "security": "Security checks",
+        "refactor": "Small-step refactoring",
+        "plan-first": "Plan before coding",
+        "concise": "Concise answers"
       },
       "recipes": {
         "context7": "Look up library and framework documentation while coding.",
@@ -3453,7 +3462,16 @@
         "skill-creator": "Write, improve, and validate skills.",
         "coding": "Set expectations for code changes, tests, and reports.",
         "chinese": "Communicate clearly in Chinese while preserving code and proper names.",
-        "review": "Focus on verifiable findings, impact, and code locations."
+        "review": "Focus on verifiable findings, impact, and code locations.",
+        "tdd": "Write a failing test, pass it with minimal code, then refactor.",
+        "debugging": "Reproduce and diagnose first; stop and change approach after three failed attempts.",
+        "git-commits": "Use small Conventional Commits and explain the reason, behavior, and validation.",
+        "frontend": "Reuse existing components and styles with accessible, dark, narrow-screen, localized UI.",
+        "docs-writing": "Lead with the conclusion, use short sentences, and provide runnable examples.",
+        "security": "Protect secrets, validate input, check injection and authorization, and pin dependencies.",
+        "refactor": "Preserve behavior, change one thing at a time, and test every step.",
+        "plan-first": "For complex tasks, define steps and acceptance criteria, then confirm before coding.",
+        "concise": "Give the answer first, minimize introductions, and avoid repeating the user."
       },
       "requirements": {
         "context7": "Internet access is required. Create a Context7 API key if needed, then add it in the Authorization header.",
