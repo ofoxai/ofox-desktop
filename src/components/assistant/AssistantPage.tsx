@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -18,7 +19,6 @@ import {
   Download,
   Ellipsis,
   Globe,
-  Loader2,
   ListPlus,
   MessageSquare,
   PanelLeftClose,
@@ -1415,13 +1415,7 @@ function AssistantWorkspace() {
               aria-busy={assistant.loading}
             >
               {assistant.loading ? (
-                <div
-                  role="status"
-                  className="flex justify-center gap-2 py-12 text-ctl text-ink-muted"
-                >
-                  <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
-                  {t("assistant.loading")}
-                </div>
+                <FoxLoader size="block" label={t("assistant.loading")} />
               ) : (
                 <>
                   {emptyTranscript && (

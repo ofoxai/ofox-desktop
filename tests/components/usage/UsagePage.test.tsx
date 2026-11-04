@@ -1350,3 +1350,24 @@ describe("usage sub-pages in the sidebar", () => {
     );
   });
 });
+
+it("greets the first load of the overview with the fox, and not a refresh with data", async () => {
+  const normal = mocks.invoke.getMockImplementation()!;
+  let release!: (value: unknown) => void;
+  mocks.invoke.mockImplementation((command: string, args: any) =>
+    command === "get_usage_overview" && !release
+      ? new Promise((resolve) => {
+          release = resolve;
+        })
+      : normal(command, args),
+  );
+  render(<Page />);
+  expect(
+    await screen.findByRole("status", { name: zh.pages.usage.loading }),
+  ).toBeVisible();
+  await act(async () => release(await normal("get_usage_overview", {})));
+  await screen.findAllByText("1.2K");
+  expect(
+    screen.queryByRole("status", { name: zh.pages.usage.loading }),
+  ).toBeNull();
+});

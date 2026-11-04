@@ -5657,11 +5657,14 @@
   "pages": {
     "tools": {
       "title": "工具",
-      "description": "用一个 Ofox 账户管理你的 AI 编程工具"
+      "description": "用一个 Ofox 账户管理你的 AI 编程工具",
+      "loading": "正在读取你的工具…"
     },
     "sessions": {
       "title": "会话",
-      "description": "各工具的历史会话，搜索、续聊、查看用量"
+      "description": "各工具的历史会话，搜索、续聊、查看用量",
+      "loading": "正在找你的会话…",
+      "loadingTranscript": "正在打开会话…"
     },
     "library": {
       "instructions": {
@@ -5675,7 +5678,8 @@
       "skills": {
         "title": "技能",
         "description": "技能文件夹，按需链接到各工具"
-      }
+      },
+      "loading": "正在读取资源库…"
     },
     "usage": {
       "overview": {
@@ -5689,7 +5693,8 @@
       "sessions": {
         "title": "会话分析",
         "description": "按会话看用量和耗时"
-      }
+      },
+      "loading": "正在读取用量…"
     }
   }
 }

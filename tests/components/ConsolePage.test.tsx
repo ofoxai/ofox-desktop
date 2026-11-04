@@ -1512,3 +1512,19 @@ describe("Bound tool lifecycle", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+it("greets the first scan of the bound tools with the fox", async () => {
+  const tauri = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args) =>
+    command === "get_tool_versions"
+      ? new Promise(() => undefined)
+      : tauri(command, args),
+  );
+  render(<ConsolePage boundTools={["claude"]} />);
+  const tools = screen.getByRole("tabpanel", { name: "工具" });
+  expect(
+    await within(tools).findByRole("status", {
+      name: zh.pages.tools.loading,
+    }),
+  ).toBeVisible();
+});

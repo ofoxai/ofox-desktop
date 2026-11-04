@@ -372,3 +372,16 @@ it.each([1512, 1000])("never frames a signed-out assistant (%ipx)", (width) => {
     screen.getByRole("heading", { level: 1 }).closest("section"),
   ).not.toHaveClass("rounded-list");
 });
+
+it("greets a conversation that is still opening with the fox", async () => {
+  page(1512);
+  mocks.getSession.mockImplementation(() => new Promise(() => undefined));
+  await userEvent.click(
+    await screen.findByTitle(
+      new RegExp(`^(Rewrites|${en.assistant.untitled})\\s.*\\d{4}`),
+    ),
+  );
+  expect(
+    await screen.findByRole("status", { name: en.assistant.loading }),
+  ).toBeVisible();
+});

@@ -1089,3 +1089,20 @@ describe("subagent threads", () => {
     expect(screen.queryByRole("button", { name: /个子代理/ })).toBeNull();
   });
 });
+
+it("greets the first load of the session list with the fox", async () => {
+  vi.spyOn(sessionsApi, "list").mockReturnValue(new Promise(() => undefined));
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <ShellProvider openSettings={() => undefined}>
+        <SessionsPage className="h-full" />
+      </ShellProvider>
+    </QueryClientProvider>,
+  );
+  expect(
+    await screen.findByRole("status", { name: zh.pages.sessions.loading }),
+  ).toBeVisible();
+});

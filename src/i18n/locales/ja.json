@@ -5657,11 +5657,14 @@
   "pages": {
     "tools": {
       "title": "ツール",
-      "description": "1 つの Ofox アカウントで AI コーディングツールを管理"
+      "description": "1 つの Ofox アカウントで AI コーディングツールを管理",
+      "loading": "ツールを読み込み中…"
     },
     "sessions": {
       "title": "セッション",
-      "description": "各ツールの過去のセッションを検索・再開し、使用量を確認"
+      "description": "各ツールの過去のセッションを検索・再開し、使用量を確認",
+      "loading": "セッションを探しています…",
+      "loadingTranscript": "セッションを開いています…"
     },
     "library": {
       "instructions": {
@@ -5675,7 +5678,8 @@
       "skills": {
         "title": "スキル",
         "description": "スキルフォルダを必要なツールにリンク"
-      }
+      },
+      "loading": "リソースライブラリを読み込み中…"
     },
     "usage": {
       "overview": {
@@ -5689,7 +5693,8 @@
       "sessions": {
         "title": "セッション分析",
         "description": "セッションごとの使用量と所要時間"
-      }
+      },
+      "loading": "使用量を読み込み中…"
     }
   }
 }

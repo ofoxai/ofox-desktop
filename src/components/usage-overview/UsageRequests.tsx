@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -559,9 +560,7 @@ export function UsageRequests({
         </p>
       )}
       {result.isPending ? (
-        <p role="status" className="p-6 text-center text-sub text-ink-muted">
-          {t("common.loading")}
-        </p>
+        <FoxLoader label={t("pages.usage.loading")} />
       ) : result.isError ? (
         <div
           role="alert"

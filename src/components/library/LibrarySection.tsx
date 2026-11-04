@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import {
@@ -1321,11 +1322,7 @@ export function LibrarySection({
           {t("library.legacyReadOnly")}
         </p>
       )}
-      {query.isPending && (
-        <p role="status" className="text-ctl text-ink-muted">
-          {t("library.loading")}
-        </p>
-      )}
+      {query.isPending && <FoxLoader label={t("pages.library.loading")} />}
       {query.isError && (
         <div role="alert" className="space-y-2 text-ctl text-danger">
           <p>{t("library.loadFailed")}</p>

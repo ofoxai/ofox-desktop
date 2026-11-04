@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { Loader2, Plus } from "lucide-react";
 import { toast } from "sonner";
 import { useTranslation } from "react-i18next";
@@ -277,12 +278,7 @@ export function ToolsPanel({
         {loading && tools.length === 0 ? (
           // 首次加载——列表本身还没渲染过，给个占位条避免空白
           <ListCard>
-            <p
-              role="status"
-              className="py-8 text-center text-ui text-ink-muted"
-            >
-              {t("console.tools.loading")}
-            </p>
+            <FoxLoader size="block" label={t("pages.tools.loading")} />
           </ListCard>
         ) : tools.length === 0 ? (
           <ListCard>

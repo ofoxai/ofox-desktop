@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ArrowRight, RefreshCw } from "lucide-react";
@@ -887,9 +888,7 @@ export function UsagePage({
             {t("usageWorkbench.localHistory")}
           </p>
           {state.overview.isPending && !data ? (
-            <p role="status" className="p-6 text-center text-ink-muted">
-              {t("common.loading")}
-            </p>
+            <FoxLoader label={t("pages.usage.loading")} />
           ) : !data ||
             (!usageIsUnavailable(data) &&
               ![
@@ -1064,9 +1063,7 @@ export function UsagePage({
               </p>
             )}
             {analysis.isPending && !analysisDisplay ? (
-              <p role="status" className="p-6 text-center text-ink-muted">
-                {t("common.loading")}
-              </p>
+              <FoxLoader label={t("pages.usage.loading")} />
             ) : !analysisDisplay ||
               analysisDisplay.coverage.state === "unsupported" ? (
               <p className="rounded-list border border-line bg-card p-8 text-center text-sub text-ink-muted">

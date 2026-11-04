@@ -1569,3 +1569,11 @@ describe("library sub-pages in the sidebar", () => {
     );
   });
 });
+
+it("greets the first load of a library page with the fox", async () => {
+  vi.spyOn(libraryApi, "list").mockReturnValue(new Promise(() => undefined));
+  mount();
+  expect(
+    await screen.findByRole("status", { name: zh.pages.library.loading }),
+  ).toBeVisible();
+});
