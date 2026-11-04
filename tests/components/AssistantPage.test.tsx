@@ -808,7 +808,7 @@ describe("the empty state", () => {
     );
   });
 
-  it("is a title and one line over the centred composer, the starters under it, with no brand icon", async () => {
+  it("is a title, one row of starters and one line, with no brand icon", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
     const title = await screen.findByRole("heading", {
@@ -820,14 +820,7 @@ describe("the empty state", () => {
     expect(empty.querySelector("svg")).toBeNull();
     expect(
       [...empty.children].map((child) => child.tagName.toLowerCase()),
-    ).toEqual(["h2", "p"]);
-    const starter = screen.getAllByRole("button", {
-      name: "Summarize content",
-    })[0];
-    expect(
-      composer().compareDocumentPosition(starter) &
-        Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    ).toEqual(["h2", "div", "p"]);
   });
 
   it("says in one line what the assistant reads, and nothing else about starting", async () => {

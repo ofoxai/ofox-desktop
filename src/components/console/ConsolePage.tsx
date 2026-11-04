@@ -149,6 +149,9 @@ function ConsoleShell({
         onAction: () => onLoginRequested?.(),
       };
   const shell = useShell();
+  // A narrow window keeps the top bar and the pages as they were; a wide
+  // one has the sidebar and titled pages.
+  const wide = shell.layout === "wide";
   // 应用自更新的首次发现弹窗；常驻的提示在侧栏底部（UpdatePill）。数据源 =
   // UpdateContext（自动检查走 R2 latest.json）。
   const {
@@ -177,7 +180,10 @@ function ConsoleShell({
     >
       <div
         {...panel("tools")}
-        className="h-full overscroll-contain overflow-y-auto pb-6"
+        className={cn(
+          "h-full overscroll-contain overflow-y-auto pb-6",
+          !wide && "pt-1",
+        )}
       >
         {localOnly || !account ? (
           <LocalToolsPanel
@@ -196,16 +202,25 @@ function ConsoleShell({
       {shell.visited.has("sessions") && (
         // The panel stays a plain block so its hidden attribute hides it;
         // a display class here (flex) would win over [hidden].
-        <div {...panel("sessions")} className="h-full">
+        <div
+          {...panel("sessions")}
+          className={cn("h-full", !wide && "px-4 pb-4 pt-1")}
+        >
           <div className="flex h-full flex-col">
-            <PageHeader
-              wide
-              title={t("pages.sessions.title")}
-              description={t("pages.sessions.description")}
-              actions={<ShellRefreshButton />}
-            />
+            {wide && (
+              <PageHeader
+                wide
+                title={t("pages.sessions.title")}
+                description={t("pages.sessions.description")}
+                actions={<ShellRefreshButton />}
+              />
+            )}
             <SessionsPanel
-              className={cn(PAGE_BODY_WIDE, "min-h-0 flex-1 pb-4 pt-0")}
+              className={
+                wide
+                  ? cn(PAGE_BODY_WIDE, "min-h-0 flex-1 pb-4 pt-0")
+                  : "h-full min-h-0"
+              }
               onAnalyze={shell.locateUsage}
               onConfigure={(section) =>
                 section === "tools"
@@ -217,7 +232,10 @@ function ConsoleShell({
         </div>
       )}
       {shell.visited.has("usage") && (
-        <div {...panel("usage")} className="h-full overflow-y-auto pb-4">
+        <div
+          {...panel("usage")}
+          className={cn("h-full overflow-y-auto pb-4", !wide && "pt-1")}
+        >
           {localOnly || !account ? (
             <UsagePage account={LOCAL_ACCOUNT} boundTools={[]} />
           ) : (
@@ -238,8 +256,8 @@ function ConsoleShell({
       {shell.visited.has("assistant") && (
         <div
           {...panel("assistant")}
-          // The assistant fills the space beside the sidebar.
-          className="h-full"
+          // Beside the sidebar of a wide window the assistant fills the space.
+          className={wide ? "h-full" : "h-full px-4 pb-4 pt-1"}
         >
           <InteractionScope active={shell.active === "assistant"}>
             <AccountAssistantPanel
@@ -301,7 +319,31 @@ function LocalToolsPanel({
 }) {
   const { t } = useTranslation();
   const catalog = useRef<InstallCatalogHandle>(null);
+  const wide = useShell().layout === "wide";
   useShellRefresh("tools", () => catalog.current?.refresh());
+  // The page's one way on, so the brand button: sign in, then bind.
+  const next = (
+    <Button variant="primary" onClick={onLoginRequested}>
+      {t(signedIn ? "toolCatalog.bindOptional" : "toolCatalog.login")}
+    </Button>
+  );
+  if (!wide)
+    return (
+      <div className={PAGE_BODY}>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h1 className="text-ui font-semibold">
+              {t("toolCatalog.localTitle")}
+            </h1>
+            <p className="text-note text-ink-muted">
+              {t("toolCatalog.localDescription")}
+            </p>
+          </div>
+          {next}
+        </div>
+        <OptionalToolsCatalog ref={catalog} boundTools={[]} />
+      </div>
+    );
   return (
     <>
       <PageHeader
@@ -309,10 +351,7 @@ function LocalToolsPanel({
         description={t("toolCatalog.localDescription")}
         actions={
           <>
-            {/* The page's one way on, so the brand button: sign in, then bind. */}
-            <Button variant="primary" onClick={onLoginRequested}>
-              {t(signedIn ? "toolCatalog.bindOptional" : "toolCatalog.login")}
-            </Button>
+            {next}
             <ShellRefreshButton />
           </>
         }

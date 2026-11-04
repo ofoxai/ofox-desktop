@@ -17,9 +17,10 @@ import {
 export function UpdatePill({
   variant = "row",
 }: {
-  /** "row": the expanded sidebar's full-width row; "icon": the collapsed
-   *  sidebar's, its text the button's name and tooltip. */
-  variant?: "row" | "icon";
+  /** "pill": the narrow window's top bar; "row": the expanded sidebar's
+   *  full-width row; "icon": the collapsed sidebar's, its text the
+   *  button's name and tooltip. */
+  variant?: "pill" | "row" | "icon";
 }) {
   const { t } = useTranslation();
   const { hasUpdate, isDismissed, updateInfo, dismissUpdate } = useUpdate();
@@ -50,6 +51,14 @@ export function UpdatePill({
           >
             <ArrowUpCircle aria-hidden className="h-4 w-4" />
           </button>
+        ) : variant === "pill" ? (
+          <button
+            type="button"
+            className="mr-1.5 inline-flex h-[22px] items-center gap-1 whitespace-nowrap rounded-full bg-brand-soft pl-[7px] pr-[9px] text-[11.5px] font-semibold tracking-[.005em] text-brand-ink shadow-[inset_0_0_0_.5px_rgb(var(--brand)/.35)] transition-[background-color,color,transform] duration-150 ease-soft hover:bg-brand hover:text-brand-on active:scale-[.96] data-[state=open]:bg-brand data-[state=open]:text-brand-on"
+          >
+            <ArrowUpCircle aria-hidden className="h-3 w-3" />
+            {label}
+          </button>
         ) : (
           <button
             type="button"
@@ -61,8 +70,10 @@ export function UpdatePill({
         )}
       </DropdownMenuTrigger>
       <DropdownMenuContent
-        align="start"
-        side={variant === "icon" ? "right" : "top"}
+        align={variant === "pill" ? "end" : "start"}
+        side={
+          variant === "icon" ? "right" : variant === "row" ? "top" : "bottom"
+        }
         className="min-w-[150px]"
       >
         <DropdownMenuItem disabled={!downloadUrl} onSelect={openDownload}>

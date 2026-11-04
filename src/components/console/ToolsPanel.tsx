@@ -44,6 +44,7 @@ import { ofoxAnalyticsUrl } from "@/lib/ofoxUrls";
 // itself is still imported by ProxyToggle / ProxyPanel to hide the on/off
 // toggle row for those tools.
 import AddToolsDialog from "./AddToolsDialog";
+import { BalanceCard } from "./BalanceCard";
 import BoundToolRow, {
   TOOL_LIST_GRID,
   type ToolRowAction,
@@ -99,6 +100,9 @@ export function ToolsPanel({
   // 顶栏的刷新在工具页 = 重新检测工具并检查更新。
   const catalog = useRef<InstallCatalogHandle>(null);
   const shell = useOptionalShell();
+  // A narrow window keeps the old page: balance card, actions in the list
+  // heading; a wide one has the title row and the sidebar's balance.
+  const wide = shell?.layout === "wide";
   useShellRefresh("tools", async () => {
     await Promise.all([refreshList(), catalog.current?.refresh()]);
   });
@@ -244,27 +248,36 @@ export function ToolsPanel({
     size: "block",
     label: t("pages.tools.loading"),
   });
+  const toolActions = (
+    <>
+      <ProfilesMenu boundTools={boundTools} />
+      <Button
+        ref={addToolTrigger}
+        variant="secondary"
+        onClick={() => setAddDialogOpen(true)}
+      >
+        <Plus aria-hidden className="h-3.5 w-3.5" />
+        {t("console.tools.add")}
+      </Button>
+    </>
+  );
   return (
     <>
-      <PageHeader
-        title={t("pages.tools.title")}
-        description={t("pages.tools.description")}
-        actions={
-          <>
-            <ProfilesMenu boundTools={boundTools} />
-            <Button
-              ref={addToolTrigger}
-              variant="secondary"
-              onClick={() => setAddDialogOpen(true)}
-            >
-              <Plus aria-hidden className="h-3.5 w-3.5" />
-              {t("console.tools.add")}
-            </Button>
-            <ShellRefreshButton />
-          </>
-        }
-      />
+      {wide && (
+        <PageHeader
+          title={t("pages.tools.title")}
+          description={t("pages.tools.description")}
+          actions={
+            <>
+              {toolActions}
+              <ShellRefreshButton />
+            </>
+          }
+        />
+      )}
       <div className={PAGE_BODY}>
+        {/* A narrow window has no sidebar: the balance heads the page. */}
+        {!wide && <BalanceCard account={account} className="mb-3" />}
         <div className="mb-2.5 flex min-h-[27px] items-center gap-2 px-0.5">
           <h2 className="text-ui font-semibold text-ink">
             {t("console.tools.title")}
@@ -276,6 +289,12 @@ export function ToolsPanel({
             <span className="whitespace-nowrap rounded-full bg-warn-soft px-2 py-px text-note font-medium text-warn">
               {t("toolLifecycle.needsAttention", { count: attentionCount })}
             </span>
+          )}
+          {!wide && (
+            <>
+              <span className="flex-1" />
+              {toolActions}
+            </>
           )}
         </div>
 

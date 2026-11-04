@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { queryClient } from "@/lib/query/queryClient";
@@ -94,15 +94,18 @@ function Refresh() {
 function Page({
   value = account,
   bound = ["claude", "pi"],
+  sidebar = false,
 }: {
   value?: OfoxAccount;
   bound?: string[];
+  /** Render the wide window's sidebar sub-page tabs too. */
+  sidebar?: boolean;
 }) {
   return (
     <ShellProvider openSettings={() => undefined}>
       <Refresh />
       <UsagePage account={value} boundTools={bound} />
-      <PageSubnav page="usage" />
+      {sidebar && <PageSubnav page="usage" />}
     </ShellProvider>
   );
 }
@@ -1264,7 +1267,13 @@ describe("the Ofox assistant's usage", () => {
   });
 });
 
-describe("usage sub-pages in the sidebar", () => {
+describe("usage sub-pages in the sidebar of a wide window", () => {
+  beforeEach(() => {
+    window.innerWidth = 1512;
+  });
+  afterEach(() => {
+    window.innerWidth = 1024;
+  });
   const capable = (more: Record<string, unknown>) => {
     const normal = mocks.invoke.getMockImplementation()!;
     mocks.invoke.mockImplementation(async (command: string, args: any) =>
@@ -1280,7 +1289,7 @@ describe("usage sub-pages in the sidebar", () => {
 
   it("publishes 概览 / 明细 / 会话分析 when supported", async () => {
     capable({ requestSnapshots: true, sessionAnalytics: true });
-    render(<Page />);
+    render(<Page sidebar />);
     await waitFor(() =>
       expect(subPages()).toEqual(["概览", "明细", "会话分析"]),
     );
@@ -1292,13 +1301,13 @@ describe("usage sub-pages in the sidebar", () => {
 
   it("omits 明细 when requests are unsupported", async () => {
     capable({ requestSnapshots: false, sessionAnalytics: true });
-    render(<Page />);
+    render(<Page sidebar />);
     await waitFor(() => expect(subPages()).toEqual(["概览", "会话分析"]));
   });
 
   it("titles the page by its sub-page, with the refresh interval and refresh in the title row", async () => {
     capable({ requestSnapshots: true, sessionAnalytics: true });
-    render(<Page />);
+    render(<Page sidebar />);
     const header = await waitFor(
       () => document.querySelector<HTMLElement>("[data-page-header]")!,
     );

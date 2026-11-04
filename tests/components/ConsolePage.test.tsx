@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import en from "@/i18n/locales/en.json";
@@ -347,8 +347,13 @@ beforeEach(async () => {
   await cacheUpdates([]);
 });
 
-describe("Console title bar", () => {
+afterEach(() => {
+  window.innerWidth = 1024;
+});
+
+describe("Console title bar of a wide window", () => {
   it("drags the window from the sidebar's top and the page title under the macOS overlay title bar", async () => {
+    window.innerWidth = 1512;
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.getByTestId("sidebar-top")).toHaveAttribute(
@@ -361,6 +366,7 @@ describe("Console title bar", () => {
   });
 
   it("leaves the dragging to the native title bar elsewhere", async () => {
+    window.innerWidth = 1512;
     mocks.mac = false;
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
@@ -409,6 +415,7 @@ describe("Console navigation", () => {
   });
 
   it("titles the sessions page 会话, with its refresh in the title row", async () => {
+    window.innerWidth = 1512;
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     fireEvent.click(screen.getByRole("tab", { name: "会话" }));
@@ -534,6 +541,7 @@ describe("Console model profiles", () => {
 
 describe("Console tools page", () => {
   it("heads the list 已绑定的工具 with its count, with 方案, 添加 and refresh in the page title row", async () => {
+    window.innerWidth = 1512;
     localTools = [localTool("claude", "2.1.293")];
     render(<ConsolePage boundTools={["claude"]} />);
     await screen.findByRole("group", { name: "Claude Code" });
@@ -673,8 +681,9 @@ describe("Console usage page", () => {
   });
 });
 
-describe("Console sidebar balance", () => {
+describe("Console sidebar balance of a wide window", () => {
   it("shows a spent balance in red", async () => {
+    window.innerWidth = 1512;
     mocks.getUserInfo.mockResolvedValue({
       name: "Test User",
       balance: { balance: 0 },
@@ -685,6 +694,7 @@ describe("Console sidebar balance", () => {
   });
 
   it("does not highlight a positive or unknown balance", async () => {
+    window.innerWidth = 1512;
     mocks.getUserInfo.mockResolvedValue({
       name: "Test User",
       balance: { balance: 12.5 },
@@ -1560,4 +1570,81 @@ it("lets every page panel hide: none carries a display class that beats the hidd
         ),
       ]),
     );
+});
+
+// A narrow window keeps the top bar and the old pages.
+describe("Console title bar of a narrow window", () => {
+  it("draws its own brand under the macOS overlay title bar", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("Ofox Desktop")).toBeVisible();
+  });
+
+  it("leaves the title to the native title bar elsewhere", async () => {
+    mocks.mac = false;
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
+
+  it("draws on the canvas, without the orange gradient", async () => {
+    const { container } = render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(container.firstChild).toHaveClass("bg-canvas");
+    expect(container.firstChild).not.toHaveClass("bg-gradient-to-br");
+  });
+});
+
+describe("Console balance card of a narrow window", () => {
+  it("highlights the card when the balance is zero", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 0 },
+    });
+    render(<ConsolePage boundTools={[]} />);
+
+    expect(await screen.findByText("$0.00")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).toHaveAttribute(
+      "data-empty",
+      "true",
+    );
+  });
+
+  it("does not highlight a positive or unknown balance", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 12.5 },
+    });
+    const { unmount } = render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("$12.50")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+    unmount();
+
+    mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("—")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+  });
+});
+
+describe("Console tools page of a narrow window", () => {
+  it("heads the list 已绑定的工具 with its count, the 方案 menu and 添加", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    const heading = within(tools).getByRole("heading", {
+      name: "已绑定的工具",
+    });
+    const toolbar = heading.parentElement!;
+    expect(within(toolbar).getByText("1")).toBeVisible();
+    expect(
+      within(toolbar)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["方案", "添加"]);
+  });
 });

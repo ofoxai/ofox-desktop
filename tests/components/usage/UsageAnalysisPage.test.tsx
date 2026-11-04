@@ -13,7 +13,6 @@ import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { queryClient } from "@/lib/query/queryClient";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
-import { PageSubnav } from "../../utils/pageSubnav";
 import { UsagePage } from "@/components/usage-overview/UsagePage";
 import type { OfoxAccount } from "@/hooks/useOfoxAccount";
 import { sessionAnalyticsFixture } from "./sessionAnalyticsFixture";
@@ -40,7 +39,6 @@ function Page() {
     <ShellProvider openSettings={() => undefined}>
       <Controls />
       <UsagePage account={account} />
-      <PageSubnav page="usage" />
     </ShellProvider>
   );
 }

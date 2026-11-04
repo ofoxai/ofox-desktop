@@ -598,6 +598,8 @@ export function UsagePage({
     <div className="flex min-w-0 flex-col">
       <PageHeader
         wide
+        page="usage"
+        navLabel={t("usageWorkbench.tabs")}
         title={t(`pages.usage.${effectiveTab}.title`)}
         description={t(`pages.usage.${effectiveTab}.description`)}
         actions={

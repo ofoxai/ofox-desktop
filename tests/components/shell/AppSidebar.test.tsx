@@ -1,7 +1,7 @@
 import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
 import { ShellFrame } from "@/components/shell/ShellFrame";
@@ -39,6 +39,9 @@ vi.mock("@/lib/api", () => ({
 }));
 vi.mock("sonner", () => ({ toast: { error: vi.fn(), success: vi.fn() } }));
 
+afterEach(() => {
+  window.innerWidth = 1024;
+});
 beforeEach(async () => {
   localStorage.clear();
   mocks.mac = true;
@@ -86,6 +89,8 @@ function Pages() {
 }
 
 function frame() {
+  // The sidebar is the navigation of a wide window.
+  window.innerWidth = 1512;
   return render(
     <ShellProvider openSettings={mocks.openSettings}>
       <ShellFrame account={local} banner={null}>

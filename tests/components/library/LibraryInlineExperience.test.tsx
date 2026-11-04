@@ -4,7 +4,6 @@ import { InteractionScope } from "@/components/ui/interaction-scope";
 import { useEffect } from "react";
 import { LibraryPage } from "@/components/library/LibraryPage";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
-import { PageSubnav } from "../../utils/pageSubnav";
 import {
   act,
   fireEvent,
@@ -476,7 +475,6 @@ function mountPage() {
           <LibraryPage />
         </div>
         <ShellNavigation />
-        <PageSubnav page="library" />
       </ShellProvider>
     </QueryClientProvider>,
   );

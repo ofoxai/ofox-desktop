@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useEffect, useState } from "react";
 import { InteractionScope } from "@/components/ui/interaction-scope";
 import i18n from "i18next";
@@ -76,7 +76,10 @@ function Fixture({
   section,
   location,
   onLocated,
+  sidebar = false,
 }: {
+  /** Render the wide window's sidebar sub-page tabs too. */
+  sidebar?: boolean;
   active?: boolean;
   section?: "mcp" | "skills";
   location?: { kind: "mcp" | "skills"; request: number };
@@ -103,7 +106,7 @@ function Fixture({
           )}
         </InteractionScope>
         <Refresh />
-        <PageSubnav page="library" />
+        {sidebar && <PageSubnav page="library" />}
       </ShellProvider>
     </QueryClientProvider>
   );
@@ -1518,9 +1521,15 @@ it("starts an explicit Skills location at the source instead of restoring a deep
   expect(scroller.scrollTop).toBe(0);
 });
 
-describe("library sub-pages in the sidebar", () => {
+describe("library sub-pages in the sidebar of a wide window", () => {
+  beforeEach(() => {
+    window.innerWidth = 1512;
+  });
+  afterEach(() => {
+    window.innerWidth = 1024;
+  });
   it("publishes 指令 / MCP / 技能 with their counts", async () => {
-    mount();
+    render(<Fixture sidebar />);
     const tabs = await screen.findByRole("tablist", {
       name: "library sub-pages",
     });
@@ -1542,7 +1551,7 @@ describe("library sub-pages in the sidebar", () => {
   });
 
   it("titles the page by its sub-page", async () => {
-    mount();
+    render(<Fixture sidebar />);
     expect(
       await screen.findByRole("heading", {
         level: 1,
@@ -1560,7 +1569,11 @@ describe("library sub-pages in the sidebar", () => {
 
   it("an explicit location to 技能 selects 技能 in the sidebar", async () => {
     render(
-      <Fixture location={{ kind: "skills", request: 7 }} onLocated={vi.fn()} />,
+      <Fixture
+        sidebar
+        location={{ kind: "skills", request: 7 }}
+        onLocated={vi.fn()}
+      />,
     );
     await waitFor(() =>
       expect(

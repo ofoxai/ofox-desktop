@@ -180,6 +180,9 @@ export function LibraryPage({
     <div ref={root} className="min-w-0">
       <PageHeader
         headerRef={header}
+        page="library"
+        navLabel={t("library.nav")}
+        compactClassName="mb-3 border-b border-line-2 py-1"
         title={t(`pages.library.${tab}.title`)}
         description={t(`pages.library.${tab}.description`)}
         actions={
