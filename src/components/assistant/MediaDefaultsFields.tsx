@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   AssistantGenerationKind,
@@ -63,12 +64,15 @@ export function MediaDefaultsFields({
   value,
   onChange,
   disabled,
+  labeled,
 }: {
   kind: AssistantGenerationKind;
   models: ReadonlyArray<AssistantModel>;
   value: MediaFieldsValue;
   onChange: (value: MediaFieldsValue) => void;
   disabled?: boolean;
+  /** Each control under its name, two to a row: a form, not a toolbar. */
+  labeled?: boolean;
 }) {
   const { t } = useTranslation();
   const usable = generationModels(models, kind);
@@ -80,6 +84,19 @@ export function MediaDefaultsFields({
         {t("assistant.generation.noModel")}
       </p>
     );
+  // A toolbar names a control on it ("Duration: 5 s"); a form above it.
+  const field = (label: string, control: ReactNode) =>
+    labeled ? (
+      <div key={label} className="flex min-w-0 flex-col gap-1">
+        <span className="text-note text-ink-muted">{label}</span>
+        {control}
+      </div>
+    ) : (
+      control
+    );
+  const shown = (label: string, current: string) =>
+    labeled ? current : `${label}: ${current}`;
+  const trigger = labeled ? "h-8 w-full max-w-none" : undefined;
   const pick = (
     label: string,
     current: string | null | undefined,
@@ -87,20 +104,23 @@ export function MediaDefaultsFields({
     set: (next: string | undefined) => void,
     withDefault = true,
   ) =>
-    values.length > 0 && (
+    values.length > 0 &&
+    field(
+      label,
       <MenuSelect
         aria-label={label}
         value={current ?? ""}
-        valueLabel={`${label}: ${current || t("assistant.media.default")}`}
+        valueLabel={shown(label, current || t("assistant.media.default"))}
         onChange={(next) => set(next || undefined)}
         disabled={disabled}
+        triggerClassName={trigger}
         options={[
           ...(withDefault
             ? [{ value: "", label: t("assistant.media.default") }]
             : []),
           ...values.map((item) => ({ value: item, label: item })),
         ]}
-      />
+      />,
     );
   const fields = () => {
     if (kind === "image") {
@@ -118,19 +138,25 @@ export function MediaDefaultsFields({
             caps.qualities,
             (quality) => onChange({ ...image, quality }),
           )}
-          {caps.n && (
-            <MenuSelect
-              aria-label={t("assistant.media.count")}
-              value={String(image.n ?? 1)}
-              valueLabel={`${t("assistant.media.count")}: ${image.n ?? 1}`}
-              onChange={(next) => onChange({ ...image, n: Number(next) })}
-              disabled={disabled}
-              options={[1, 2, 3, 4].map((n) => ({
-                value: String(n),
-                label: String(n),
-              }))}
-            />
-          )}
+          {caps.n &&
+            field(
+              t("assistant.media.count"),
+              <MenuSelect
+                aria-label={t("assistant.media.count")}
+                value={String(image.n ?? 1)}
+                valueLabel={shown(
+                  t("assistant.media.count"),
+                  String(image.n ?? 1),
+                )}
+                onChange={(next) => onChange({ ...image, n: Number(next) })}
+                disabled={disabled}
+                triggerClassName={trigger}
+                options={[1, 2, 3, 4].map((n) => ({
+                  value: String(n),
+                  label: String(n),
+                }))}
+              />,
+            )}
         </>
       );
     }
@@ -141,31 +167,41 @@ export function MediaDefaultsFields({
       const { minDuration: min, maxDuration: max } = caps;
       return (
         <>
-          {min !== null && max !== null && max >= min && (
-            <MenuSelect
-              aria-label={t("assistant.video.duration")}
-              value={String(video.duration ?? "")}
-              valueLabel={
-                video.duration
-                  ? t("assistant.video.seconds", { count: video.duration })
-                  : `${t("assistant.video.duration")}: ${t("assistant.media.default")}`
-              }
-              disabled={disabled}
-              onChange={(next) =>
-                onChange({ ...video, duration: next ? Number(next) : null })
-              }
-              options={[
-                { value: "", label: t("assistant.media.default") },
-                ...Array.from(
-                  { length: Math.min(max - min + 1, 120) },
-                  (_, index) => ({
-                    value: String(min + index),
-                    label: t("assistant.video.seconds", { count: min + index }),
-                  }),
-                ),
-              ]}
-            />
-          )}
+          {min !== null &&
+            max !== null &&
+            max >= min &&
+            field(
+              t("assistant.video.duration"),
+              <MenuSelect
+                aria-label={t("assistant.video.duration")}
+                value={String(video.duration ?? "")}
+                valueLabel={
+                  video.duration
+                    ? t("assistant.video.seconds", { count: video.duration })
+                    : shown(
+                        t("assistant.video.duration"),
+                        t("assistant.media.default"),
+                      )
+                }
+                disabled={disabled}
+                triggerClassName={trigger}
+                onChange={(next) =>
+                  onChange({ ...video, duration: next ? Number(next) : null })
+                }
+                options={[
+                  { value: "", label: t("assistant.media.default") },
+                  ...Array.from(
+                    { length: Math.min(max - min + 1, 120) },
+                    (_, index) => ({
+                      value: String(min + index),
+                      label: t("assistant.video.seconds", {
+                        count: min + index,
+                      }),
+                    }),
+                  ),
+                ]}
+              />,
+            )}
           {pick(
             t("assistant.video.resolution"),
             video.resolution,
@@ -178,19 +214,27 @@ export function MediaDefaultsFields({
             caps.aspectRatios,
             (aspectRatio) => onChange({ ...video, aspectRatio }),
           )}
-          {caps.supportsAudio && (
-            <label className="flex items-center gap-2 text-note text-ink-muted">
-              <Switch
-                aria-label={t("assistant.generation.sound")}
-                checked={video.generateAudio ?? true}
-                onCheckedChange={(generateAudio) =>
-                  onChange({ ...video, generateAudio })
-                }
-                disabled={disabled}
-              />
-              {t("assistant.generation.sound")}
-            </label>
-          )}
+          {caps.supportsAudio &&
+            field(
+              t("assistant.generation.sound"),
+              <label className="flex h-[26px] items-center gap-2 text-note text-ink-muted">
+                <Switch
+                  aria-label={t("assistant.generation.sound")}
+                  checked={video.generateAudio ?? true}
+                  onCheckedChange={(generateAudio) =>
+                    onChange({ ...video, generateAudio })
+                  }
+                  disabled={disabled}
+                />
+                {labeled
+                  ? t(
+                      (video.generateAudio ?? true)
+                        ? "assistant.generation.withSound"
+                        : "assistant.generation.silent",
+                    )
+                  : t("assistant.generation.sound")}
+              </label>,
+            )}
         </>
       );
     }
@@ -215,21 +259,29 @@ export function MediaDefaultsFields({
     );
   };
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <MenuSelect
-        aria-label={t("assistant.generation.model")}
-        value={model.id}
-        valueLabel={model.shortName || model.name}
-        onChange={(next) =>
-          // Parameters belong to a model: another model starts from its own.
-          onChange({ model: next })
-        }
-        disabled={disabled}
-        searchable={usable.length > 8}
-        searchPlaceholder={t("assistant.searchModels")}
-        width={360}
-        options={options}
-      />
+    <div
+      className={
+        labeled ? "grid grid-cols-2 gap-3" : "flex flex-wrap items-center gap-2"
+      }
+    >
+      {field(
+        t("assistant.generation.model"),
+        <MenuSelect
+          aria-label={t("assistant.generation.model")}
+          value={model.id}
+          valueLabel={model.shortName || model.name}
+          onChange={(next) =>
+            // Parameters belong to a model: another model starts from its own.
+            onChange({ model: next })
+          }
+          disabled={disabled}
+          searchable={usable.length > 8}
+          searchPlaceholder={t("assistant.searchModels")}
+          width={360}
+          triggerClassName={trigger}
+          options={options}
+        />,
+      )}
       {fields()}
     </div>
   );

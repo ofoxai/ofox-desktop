@@ -653,6 +653,11 @@ function AssistantWorkspace() {
             ? undefined
             : (item, input) => assistant.regenerateMedia(message, item, input)
         }
+        sourceFile={(id) =>
+          messages
+            .flatMap((item) => item.attachments ?? [])
+            .find((file) => file.id === id)
+        }
       />
     ) : undefined;
   const stop = () =>

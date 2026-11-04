@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import { Download, Info, Loader2, RefreshCw } from "lucide-react";
@@ -242,6 +242,7 @@ export function GenerationCards({
   onCancelVideo,
   onResumeVideo,
   onRegenerate,
+  sourceFile,
 }: {
   message: AssistantMessage;
   sessionId: string;
@@ -256,6 +257,8 @@ export function GenerationCards({
     item: AssistantGeneration,
     input: RegenerateInput,
   ) => Promise<AssistantRegenerateResult | null>;
+  /** A file of the conversation, such as an image a generation started from. */
+  sourceFile?: (id: string) => AssistantAttachment | undefined;
 }) {
   const { t } = useTranslation();
   const [editing, setEditing] = useState<AssistantGeneration | null>(null);
@@ -339,6 +342,10 @@ export function GenerationCards({
         <RegenerateDialog
           item={editing}
           models={models}
+          sources={generationSources(editing, sourceFile, t)}
+          url={(file) =>
+            assistantMediaUrl(sessionId, file.id, owner, authority)
+          }
           onClose={() => setEditing(null)}
           onSubmit={(input) => onRegenerate(editing, input)}
         />
@@ -420,17 +427,56 @@ function SpeechResult({
 }
 
 /**
+ * The images a generation started from, each named by its part (the image
+ * edited, a video's first or last frame, a reference). Only images a
+ * thumbnail can show; a file that is gone is left out.
+ */
+function generationSources(
+  item: AssistantGeneration,
+  sourceFile: ((id: string) => AssistantAttachment | undefined) | undefined,
+  t: (key: string) => string,
+): { file: AssistantAttachment; label: string }[] {
+  const parts: [string | null | undefined, string][] =
+    item.kind === "image"
+      ? item.inputIds.map((id) => [id, t("assistant.generation.sourceImage")])
+      : item.kind === "video"
+        ? [
+            [item.params.firstFrameId, t("assistant.video.firstFrameId")],
+            [item.params.lastFrameId, t("assistant.video.lastFrameId")],
+            ...(item.params.references ?? [])
+              .filter((reference) => reference.kind === "image")
+              .map((reference): [string, string] => [
+                reference.id,
+                t("assistant.generation.reference"),
+              ]),
+          ]
+        : [];
+  return parts.flatMap(([id, label]) => {
+    const file = id ? sourceFile?.(id) : undefined;
+    return file &&
+      file.status !== "missing" &&
+      file.mimeType.startsWith("image/")
+      ? [{ file, label }]
+      : [];
+  });
+}
+
+/**
  * Change a generation's prompt, model or parameters and make it again. A
  * video shows its estimate and is made only once the user confirms it.
  */
 function RegenerateDialog({
   item,
   models,
+  sources,
+  url,
   onClose,
   onSubmit,
 }: {
   item: AssistantGeneration;
   models: ReadonlyArray<AssistantModel>;
+  sources: { file: AssistantAttachment; label: string }[];
+  url: (file: AssistantAttachment) => string;
   onClose: () => void;
   onSubmit: (
     input: RegenerateInput,
@@ -473,56 +519,124 @@ function RegenerateDialog({
       setBusy(false);
     }
   };
+  const promptLabel = t(
+    item.kind === "speech"
+      ? "assistant.generation.text"
+      : "assistant.generation.prompt",
+  );
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent className="max-w-[560px]">
+      <DialogContent className="max-w-[620px]">
         <DialogHeader>
           <DialogTitle>{t("assistant.generation.regenerateTitle")}</DialogTitle>
           <DialogDescription>
             {t("assistant.generation.regenerateNote")}
           </DialogDescription>
         </DialogHeader>
-        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-[18px] py-4">
-          <Textarea
-            rows={4}
-            aria-label={t(
-              item.kind === "speech"
-                ? "assistant.generation.text"
-                : "assistant.generation.prompt",
+        <div className="flex min-h-0 flex-col gap-4 overflow-y-auto px-[18px] py-4">
+          <div className="flex items-start gap-3">
+            {sources.length > 0 && (
+              <div className="flex flex-none flex-col gap-2 pt-5">
+                {sources.map(({ file, label }) => (
+                  <figure
+                    key={`${label}-${file.id}`}
+                    className="relative h-16 w-16 overflow-hidden rounded-ctl border border-line bg-card-2"
+                  >
+                    <img
+                      src={url(file)}
+                      alt={label}
+                      title={file.name}
+                      className="h-full w-full object-cover"
+                    />
+                    <figcaption
+                      aria-hidden
+                      className="absolute bottom-0.5 left-0.5 rounded-[4px] bg-black/55 px-1 text-[10px] leading-4 text-white"
+                    >
+                      {label}
+                    </figcaption>
+                  </figure>
+                ))}
+              </div>
             )}
-            value={prompt}
-            onChange={(event) => setPrompt(event.target.value)}
-            className="resize-none text-ui"
-          />
+            <div className="flex min-w-0 flex-1 flex-col gap-1">
+              <span aria-hidden className="text-note text-ink-muted">
+                {promptLabel}
+              </span>
+              <div className="relative">
+                <PromptField
+                  label={promptLabel}
+                  value={prompt}
+                  onChange={setPrompt}
+                />
+                <span className="pointer-events-none absolute bottom-1.5 right-3 text-micro tabular-nums text-ink-faint">
+                  {t("assistant.generation.characters", {
+                    count: [...prompt].length,
+                  })}
+                </span>
+              </div>
+            </div>
+          </div>
           <MediaDefaultsFields
             kind={item.kind}
             models={models}
             value={fields}
             onChange={setFields}
             disabled={busy}
+            labeled
           />
-          {confirmed && (
-            <p role="status" className="text-note text-ink-2">
-              {confirmed.cost
-                ? t("assistant.generation.estimate", { cost: confirmed.cost })
-                : t("assistant.generation.estimateUnknown")}
-            </p>
-          )}
         </div>
-        <DialogFooter>
-          <Button variant="ghost" disabled={busy} onClick={onClose}>
-            {t("common.cancel")}
-          </Button>
-          <Button
-            disabled={busy || !prompt.trim()}
-            onClick={() => void submit()}
-          >
-            {confirmed
-              ? t("assistant.generation.confirmGenerate")
-              : t("assistant.generation.generateAgain")}
-          </Button>
+        <DialogFooter className="sm:justify-between">
+          {/* What it will cost, once the host has estimated it. */}
+          <p role="status" className="min-w-0 text-note text-ink-2">
+            {confirmed &&
+              (confirmed.cost
+                ? t("assistant.generation.estimate", { cost: confirmed.cost })
+                : t("assistant.generation.estimateUnknown"))}
+          </p>
+          <div className="flex gap-2">
+            <Button variant="ghost" disabled={busy} onClick={onClose}>
+              {t("common.cancel")}
+            </Button>
+            <Button
+              disabled={busy || !prompt.trim()}
+              onClick={() => void submit()}
+            >
+              {confirmed
+                ? t("assistant.generation.confirmGenerate")
+                : t("assistant.generation.generateAgain")}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+/** A prompt as tall as its text, up to about ten lines, then scrolled. */
+function PromptField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  const field = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const input = field.current;
+    if (!input) return;
+    // Cleared first, so deleting text can shrink it.
+    input.style.height = "auto";
+    input.style.height = `${Math.max(96, Math.min(280, input.scrollHeight))}px`;
+  }, [value]);
+  return (
+    <Textarea
+      ref={field}
+      aria-label={label}
+      value={value}
+      onChange={(event) => onChange(event.target.value)}
+      className="resize-none pb-6 text-ui leading-relaxed"
+    />
   );
 }
