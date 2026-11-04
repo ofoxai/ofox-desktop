@@ -616,7 +616,10 @@ fn count_reply_usage(record: &mut SessionRecord, entries: &[Value]) {
 /// A reply's generation lines after its chat usage: each tool call's
 /// image, video or speech with its own cost, `chatCostUsd` for the model's
 /// part and `estimatedCostUsd` for both. Idempotent: the chat part is kept
-/// from the last count of native history.
+/// from the last count of native history. A generation without a cost (still
+/// running, or billed by tokens) leaves only the total unknown, never marks
+/// the usage incomplete: that mark is for good, and would take the chat's
+/// cost with it at the next count.
 fn add_generation_usage(usage: &mut Value, generations: &[MediaRecord]) {
     ensure_object(usage);
     let chat = usage
@@ -657,9 +660,6 @@ fn add_generation_usage(usage: &mut Value, generations: &[MediaRecord]) {
     usage["chatCostUsd"] = chat;
     usage["mediaCostUsd"] = json!(media.map(|n| n.normalize().to_string()));
     usage["estimatedCostUsd"] = json!(total.map(|n| n.normalize().to_string()));
-    if media.is_none() {
-        usage["usageCoverage"] = json!("incomplete");
-    }
 }
 
 /// Recount the conversation's usage from the whole of its native history,
@@ -704,10 +704,9 @@ pub(super) fn recount_usage(record: &mut SessionRecord, entries: &[Value]) {
         .zip(chat_cost)
         .and_then(|(a, b)| a.checked_add(b))
         .map(|n| n.normalize().to_string()));
+    // An unknown generation cost leaves the estimate null, not the usage
+    // incomplete (see `add_generation_usage`).
     record.usage["modelRequests"] = json!(chat_requests + media.len() as u64);
-    if sum.is_none() {
-        record.usage["usageCoverage"] = json!("incomplete");
-    }
 }
 
 /// The search price each run was given, by run id.
@@ -1056,7 +1055,6 @@ mod tests {
             usage["estimatedCostUsd"].is_null(),
             "a video still running has no cost yet"
         );
-        assert_eq!(usage["usageCoverage"], "incomplete");
         let submitting = vec![generation("c", "submitting", None)];
         let mut fresh = json!({"estimatedCostUsd":"0.001"});
         add_generation_usage(&mut fresh, &submitting);
@@ -1065,6 +1063,37 @@ mod tests {
             json!({"estimatedCostUsd":"0.001"}),
             "not counted before it is sent"
         );
+    }
+
+    #[test]
+    fn an_unpriced_generation_leaves_the_chat_cost_known_through_every_recount() {
+        let generation = |kind: &str, status: &str, cost: Option<&str>| -> MediaRecord {
+            serde_json::from_value(json!({"toolCallId":"a","kind":kind,"model":"test/media",
+                "params":{},"status":status,"cost":cost}))
+            .unwrap()
+        };
+        let entries = [json!({"role":"assistant","runId":"r","pricingKnown":true,
+            "usage":{"input":100,"output":10,"cacheRead":0,"cacheWrite":0,"cost":{"total":0.001}}})];
+        let count = |usage: &mut Value, made: &[MediaRecord]| {
+            project_usage(usage, entries.iter(), &HashMap::new());
+            add_generation_usage(usage, made);
+        };
+        // Speech billed by tokens has no estimate; the chat still has its own.
+        let mut usage = json!({});
+        let speech = [generation("speech", "completed", None)];
+        count(&mut usage, &speech);
+        count(&mut usage, &speech);
+        assert_eq!(usage["chatCostUsd"], "0.001");
+        assert!(usage["estimatedCostUsd"].is_null());
+        assert_ne!(usage["usageCoverage"], "incomplete");
+        // A video is priced once it is done, however often it was counted
+        // while it ran.
+        let mut usage = json!({});
+        count(&mut usage, &[generation("video", "queued", None)]);
+        count(&mut usage, &[generation("video", "queued", None)]);
+        count(&mut usage, &[generation("video", "completed", Some("0.5"))]);
+        assert_eq!(usage["estimatedCostUsd"], "0.501");
+        assert_ne!(usage["usageCoverage"], "incomplete");
     }
 
     #[test]

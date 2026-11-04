@@ -693,7 +693,12 @@ mod tests {
                 .cleanup_orphan_attachments(&request.session_id)
                 .unwrap();
             assert!(path.is_file());
-            assert_eq!(record.usage["usageCoverage"], "incomplete");
+            // Billed by tokens: the cost is unknown, here and in the summary.
+            assert!(record.usage["estimatedCostUsd"].is_null());
+            assert_eq!(
+                store.usage_summary().unwrap()["usageCoverage"],
+                "incomplete"
+            );
             assert_eq!(
                 store.remembered_models().unwrap()["speech"],
                 request.model_id
