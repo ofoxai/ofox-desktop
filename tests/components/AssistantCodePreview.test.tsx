@@ -25,7 +25,10 @@ const html =
 
 describe("a Mermaid block in a reply", () => {
   it("is drawn as its diagram, and its source is a click away", async () => {
-    diagram.draw.mockResolvedValue('<svg data-testid="drawn"></svg>');
+    diagram.draw.mockResolvedValue({
+      src: "data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C%2Fsvg%3E",
+      width: 300,
+    });
     render(<SessionMarkdown content={mermaid} previews />);
     expect(
       await screen.findByRole("img", { name: "Mermaid diagram" }),

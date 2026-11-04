@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { Code2, Eye, Workflow } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
-import { drawDiagram } from "@/lib/markdownDiagram";
+import { drawDiagram, type DiagramImage } from "@/lib/markdownDiagram";
 import { htmlHasScripts, htmlPreviewDocument } from "@/lib/htmlPreview";
 
 /** What a code block of `language` can be shown as besides its code. */
@@ -36,15 +36,15 @@ function useDarkTheme(): boolean {
  * A reply still being written changes it often: it is drawn once it has
  * been still for a moment.
  */
-function useDiagram(source: string, enabled: boolean): string | null {
+function useDiagram(source: string, enabled: boolean): DiagramImage | null {
   const dark = useDarkTheme();
-  const [svg, setSvg] = useState<string | null>(null);
+  const [image, setImage] = useState<DiagramImage | null>(null);
   useEffect(() => {
     if (!enabled) return;
     let live = true;
     const timer = window.setTimeout(() => {
       void drawDiagram(source, dark).then((next) => {
-        if (live) setSvg(next);
+        if (live) setImage(next);
       });
     }, 250);
     return () => {
@@ -52,7 +52,7 @@ function useDiagram(source: string, enabled: boolean): string | null {
       window.clearTimeout(timer);
     };
   }, [source, dark, enabled]);
-  return enabled ? svg : null;
+  return enabled ? image : null;
 }
 
 /**
@@ -71,13 +71,13 @@ export function CodeBlock({
   children: ReactNode;
 }) {
   const { t } = useTranslation();
-  const svg = useDiagram(text, preview === "diagram");
+  const diagram = useDiagram(text, preview === "diagram");
   // A diagram starts drawn; an HTML page starts as its code.
   const [showCode, setShowCode] = useState(preview === "html");
-  const diagramShown = preview === "diagram" && svg !== null && !showCode;
+  const diagramShown = preview === "diagram" && diagram !== null && !showCode;
   const htmlShown = preview === "html" && !showCode;
   const toggle =
-    preview === "diagram" && svg !== null ? (
+    preview === "diagram" && diagram !== null ? (
       <Button
         variant="ghost"
         className="h-6 gap-1 px-2 text-note"
@@ -120,14 +120,17 @@ export function CodeBlock({
         {toggle}
         <CopyButton text={text} aria-label={t("sessionExperience.copyCode")} />
       </div>
-      {diagramShown ? (
-        <div
-          role="img"
-          aria-label={t("sessionExperience.diagram")}
-          className="flex max-w-full justify-center overflow-x-auto p-3 [&_svg]:h-auto [&_svg]:max-w-full"
-          // Mermaid's "strict" output, sanitized once more by drawDiagram.
-          dangerouslySetInnerHTML={{ __html: svg }}
-        />
+      {diagramShown && diagram ? (
+        <div className="flex max-w-full justify-center p-3">
+          {/* An image: the diagram can load nothing and style nothing outside it. */}
+          <img
+            src={diagram.src}
+            alt={t("sessionExperience.diagram")}
+            draggable={false}
+            className="h-auto w-full"
+            style={diagram.width ? { maxWidth: diagram.width } : undefined}
+          />
+        </div>
       ) : htmlShown ? (
         <div className="space-y-1 p-2">
           <div className="h-80 min-h-40 resize-y overflow-hidden rounded-ctl border border-line-2">
