@@ -185,7 +185,17 @@ export function LibraryMcpTable({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<DialogState | null>(null);
-  const dialogTrigger = useRef<HTMLButtonElement | null>(null);
+  const dialogTrigger = useRef<HTMLElement | null>(null);
+  const currentDialog = useRef(dialog);
+  currentDialog.current = dialog;
+  const restoreDialogFocus = (event: Event) => {
+    event.preventDefault();
+    // A recipe can replace discovery with an editor in the same commit.
+    if (!active || currentDialog.current) return;
+    const trigger = dialogTrigger.current;
+    if (trigger?.isConnected && !trigger.matches(":disabled")) trigger.focus();
+    else searchRef.current?.focus();
+  };
   const [checking, setChecking] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -204,7 +214,11 @@ export function LibraryMcpTable({
     [registerRefresh, query.refetch, native.rescan],
   );
   useEffect(
-    () => registerDiscover("mcp", () => setDialog({ type: "discover" })),
+    () =>
+      registerDiscover("mcp", (trigger) => {
+        dialogTrigger.current = trigger;
+        setDialog({ type: "discover" });
+      }),
     [registerDiscover],
   );
   async function run(key: string, action: () => Promise<string | void>) {
@@ -663,13 +677,7 @@ export function LibraryMcpTable({
         <DialogContent
           className="sm:max-w-2xl"
           aria-describedby={undefined}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            if (!active) return;
-            const trigger = dialogTrigger.current;
-            if (trigger?.isConnected && !trigger.disabled) trigger.focus();
-            else searchRef.current?.focus();
-          }}
+          onCloseAutoFocus={restoreDialogFocus}
         >
           <DialogHeader className="flex-row items-center justify-between gap-3">
             <DialogTitle className="min-w-0 flex-1">
@@ -892,7 +900,10 @@ export function LibraryMcpTable({
           if (!open) setDialog(null);
         }}
       >
-        <DialogContent className="sm:max-w-3xl">
+        <DialogContent
+          className="sm:max-w-3xl"
+          onCloseAutoFocus={restoreDialogFocus}
+        >
           <DialogHeader>
             <DialogTitle>{t("library.mcpTable.discover")}</DialogTitle>
           </DialogHeader>

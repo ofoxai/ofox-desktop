@@ -133,14 +133,21 @@ function renderTable(onRefresh?: (refresh: () => Promise<unknown>) => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  let openDiscover: ((trigger: HTMLElement) => void) | undefined;
   render(
     <QueryClientProvider client={client}>
+      <button onClick={(event) => openDiscover?.(event.currentTarget)}>
+        发现 MCP 推荐
+      </button>
       <LibraryMcpTable
         registerRefresh={(_kind, refresh) => {
           onRefresh?.(refresh);
           return () => undefined;
         }}
-        registerDiscover={() => () => undefined}
+        registerDiscover={(_kind, open) => {
+          openDiscover = open;
+          return () => undefined;
+        }}
         onChanged={vi.fn()}
       />
     </QueryClientProvider>,
@@ -564,4 +571,38 @@ it("keeps the complete pasted server when the dialog updates its identifier", as
       4,
     ),
   );
+});
+
+it("returns focus to the page discovery button after Escape", async () => {
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  const opener = screen.getByRole("button", { name: "发现 MCP 推荐" });
+  await userEvent.click(opener);
+  expect(await screen.findByRole("dialog", { name: "精选 MCP" })).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await waitFor(() => expect(opener).toHaveFocus());
+});
+
+it("hands discovery focus to the recipe editor and restores its page opener on cancel", async () => {
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  const opener = screen.getByRole("button", { name: "发现 MCP 推荐" });
+  await userEvent.click(opener);
+  const discovery = await screen.findByRole("dialog", { name: "精选 MCP" });
+  await userEvent.click(
+    within(discovery).getByRole("button", { name: "选择 Context7" }),
+  );
+  const editor = await screen.findByRole("dialog", { name: "添加 MCP" });
+  await waitFor(() =>
+    expect(editor).toContainElement(document.activeElement as HTMLElement),
+  );
+  expect(opener).not.toHaveFocus();
+  await userEvent.click(within(editor).getByRole("button", { name: "取消" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await waitFor(() => expect(opener).toHaveFocus());
 });
