@@ -261,7 +261,8 @@
     "enabled": "Enabled",
     "notSet": "Not Set",
     "noMatches": "No matches",
-    "retry": "Retry"
+    "retry": "Retry",
+    "loadingFox": "Loading…"
   },
   "update": {
     "promptTitle": "Update available",

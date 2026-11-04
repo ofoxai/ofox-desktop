@@ -261,7 +261,8 @@
     "enabled": "已开启",
     "notSet": "未设置",
     "noMatches": "无匹配项",
-    "retry": "重试"
+    "retry": "重试",
+    "loadingFox": "加载中…"
   },
   "update": {
     "promptTitle": "发现新版本",

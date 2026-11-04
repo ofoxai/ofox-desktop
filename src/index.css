@@ -379,6 +379,151 @@ html.dark {
   }
 }
 
+/*
+ * The loading fox (FoxLoader): one 2.8s cycle — a little hop that squashes
+ * on landing, a curious head tilt, a flick of the left ear, then the right,
+ * and a blink. Only declared when motion is welcome, so a reduced-motion
+ * system shows a still fox.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .fox-body {
+    transform-origin: 50% 90%;
+    transform-box: fill-box;
+    animation: fox-hop 2.8s cubic-bezier(0.4, 0, 0.3, 1) infinite;
+  }
+  .fox-shadow {
+    animation: fox-shadow 2.8s cubic-bezier(0.4, 0, 0.3, 1) infinite;
+  }
+  .fox-tilt {
+    transform-origin: 256px 300px;
+    transform-box: view-box;
+    animation: fox-tilt 2.8s ease-in-out infinite;
+  }
+  .fox-ear-l {
+    transform-origin: 175px 225px;
+    transform-box: view-box;
+    animation: fox-ear-l 2.8s ease-in-out infinite;
+  }
+  .fox-ear-r {
+    transform-origin: 337px 225px;
+    transform-box: view-box;
+    animation: fox-ear-r 2.8s ease-in-out infinite;
+  }
+  .fox-eye {
+    transform-origin: center;
+    transform-box: fill-box;
+    animation: fox-blink 2.8s infinite;
+  }
+  .fox-bar {
+    animation: fox-bar 1.3s ease-in-out infinite;
+  }
+}
+@keyframes fox-hop {
+  0%,
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+  6% {
+    transform: translateY(0) scale(1.08, 0.9);
+  }
+  16% {
+    transform: translateY(-14px) scale(0.95, 1.06);
+  }
+  26% {
+    transform: translateY(0) scale(1.07, 0.92);
+  }
+  32% {
+    transform: translateY(0) scale(1, 1);
+  }
+}
+@keyframes fox-shadow {
+  0%,
+  6%,
+  26%,
+  100% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+  16% {
+    transform: scaleX(0.6);
+    opacity: 0.5;
+  }
+}
+@keyframes fox-tilt {
+  0%,
+  36% {
+    transform: rotate(0);
+  }
+  44%,
+  62% {
+    transform: rotate(-12deg);
+  }
+  70% {
+    transform: rotate(3deg);
+  }
+  76%,
+  100% {
+    transform: rotate(0);
+  }
+}
+@keyframes fox-ear-l {
+  0%,
+  46% {
+    transform: rotate(0);
+  }
+  50% {
+    transform: rotate(-18deg);
+  }
+  54% {
+    transform: rotate(6deg);
+  }
+  58% {
+    transform: rotate(-10deg);
+  }
+  62%,
+  100% {
+    transform: rotate(0);
+  }
+}
+@keyframes fox-ear-r {
+  0%,
+  80% {
+    transform: rotate(0);
+  }
+  84% {
+    transform: rotate(18deg);
+  }
+  88% {
+    transform: rotate(-6deg);
+  }
+  92% {
+    transform: rotate(8deg);
+  }
+  96%,
+  100% {
+    transform: rotate(0);
+  }
+}
+@keyframes fox-blink {
+  0%,
+  70%,
+  76%,
+  100% {
+    transform: scaleY(1);
+  }
+  73% {
+    transform: scaleY(0.1);
+  }
+}
+@keyframes fox-bar {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(260%);
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-pop-in,
   .animate-fade,
