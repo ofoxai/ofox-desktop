@@ -176,8 +176,15 @@ fn allowed(name: &str, values: &[String]) -> String {
     }
 }
 
+/// The model each kind starts with while the user has chosen none, when the
+/// catalog offers it (the renderer's `PREFERRED_GENERATION_MODELS`).
+pub const PREFERRED_MEDIA_MODEL_IDS: &[(Kind, &str)] = &[
+    (Kind::Image, "openai/gpt-image-2"),
+    (Kind::Video, "alibaba/wan-3.0"),
+];
+
 /// The model of `kind` to use: the one the user named, else the
-/// conversation's default, else the catalog's first.
+/// conversation's default, else the preferred one, else the catalog's first.
 pub fn pick_model<'a>(
     models: &'a [Model],
     kind: Kind,
@@ -200,8 +207,15 @@ pub fn pick_model<'a>(
             )
         });
     }
+    let preferred = || {
+        PREFERRED_MEDIA_MODEL_IDS
+            .iter()
+            .filter(|(of, _)| *of == kind)
+            .find_map(|(_, id)| of_kind(id).filter(|m| usable(m)))
+    };
     default
         .and_then(of_kind)
+        .or_else(preferred)
         .or_else(|| models.iter().find(|m| m.kind == kind && usable(m)))
         .ok_or_else(|| refuse(NO_MODEL, "no model of this kind is available"))
 }
@@ -612,6 +626,31 @@ mod tests {
             "{named}"
         );
         assert!(pick_model(&models, Kind::Speech, None, None).is_err());
+    }
+
+    #[test]
+    fn without_a_choice_images_go_to_gpt_image_2_and_videos_to_wan_3() {
+        let models = vec![
+            image_model("google/gemini-2.5-flash-image"),
+            image_model("openai/gpt-image-2"),
+            video_model("alibaba/happyhorse-1.0"),
+            video_model("alibaba/wan-3.0"),
+        ];
+        let first = |kind, default| pick_model(&models, kind, None, default).unwrap().id.clone();
+        assert_eq!(first(Kind::Image, None), "openai/gpt-image-2");
+        assert_eq!(first(Kind::Video, None), "alibaba/wan-3.0");
+        assert_eq!(first(Kind::Image, Some("gone")), "openai/gpt-image-2");
+        // The user's own choice still wins, and a catalog without them falls
+        // back to its first model.
+        assert_eq!(
+            first(Kind::Video, Some("alibaba/happyhorse-1.0")),
+            "alibaba/happyhorse-1.0"
+        );
+        let others = vec![image_model("x/one"), image_model("x/two")];
+        assert_eq!(
+            pick_model(&others, Kind::Image, None, None).unwrap().id,
+            "x/one"
+        );
     }
 
     #[test]

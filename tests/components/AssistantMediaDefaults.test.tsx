@@ -126,3 +126,19 @@ it("falls back to the first usable model when the chosen one is gone", () => {
   expect(generationModel(models, "speech")?.id).toBe("speech/test");
   expect(generationModel([], "video")).toBeUndefined();
 });
+
+it("starts images on gpt-image-2 and videos on Wan 3.0 while nothing is chosen", () => {
+  const as = (id: string, of: AssistantModel) => ({ ...of, id }) as AssistantModel;
+  const catalog = [
+    as("google/gemini-2.5-flash-image", image),
+    as("openai/gpt-image-2", image),
+    as("alibaba/happyhorse-1.0", video),
+    as("alibaba/wan-3.0", video),
+  ];
+  expect(generationModel(catalog, "image")?.id).toBe("openai/gpt-image-2");
+  expect(generationModel(catalog, "video")?.id).toBe("alibaba/wan-3.0");
+  // A choice still wins.
+  expect(generationModel(catalog, "video", "alibaba/happyhorse-1.0")?.id).toBe(
+    "alibaba/happyhorse-1.0",
+  );
+});

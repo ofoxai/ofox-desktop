@@ -28,14 +28,29 @@ export function generationModels(
   });
 }
 
-/** The model a generation uses: the chosen one while it exists, else the first. */
+/**
+ * The model each kind starts with while the user has chosen none, when the
+ * catalog offers it (the host's `PREFERRED_MEDIA_MODEL_IDS`).
+ */
+const PREFERRED_GENERATION_MODELS: Partial<
+  Record<AssistantGenerationKind, string>
+> = {
+  image: "openai/gpt-image-2",
+  video: "alibaba/wan-3.0",
+};
+
+/**
+ * The model a generation uses: the chosen one while it exists, else the
+ * preferred one, else the first.
+ */
 export function generationModel(
   models: ReadonlyArray<AssistantModel>,
   kind: AssistantGenerationKind,
   chosen?: string | null,
 ): AssistantModel | undefined {
   const usable = generationModels(models, kind);
-  return usable.find((model) => model.id === chosen) ?? usable[0];
+  const find = (id?: string | null) => usable.find((model) => model.id === id);
+  return find(chosen) ?? find(PREFERRED_GENERATION_MODELS[kind]) ?? usable[0];
 }
 
 /**
