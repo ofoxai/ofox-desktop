@@ -190,7 +190,7 @@ export function RailNav<T extends string>({
             }}
             {...bind(index)}
             className={cn(
-              "flex w-[68px] flex-col items-center gap-1 rounded-[10px] px-1 py-1.5 transition-colors duration-150 ease-soft",
+              "flex w-[76px] flex-col items-center gap-1 rounded-[10px] px-0.5 py-1.5 transition-colors duration-150 ease-soft",
               on
                 ? "bg-pill text-ink"
                 : "text-ink-ctl hover:bg-pill/60 hover:text-ink-2",

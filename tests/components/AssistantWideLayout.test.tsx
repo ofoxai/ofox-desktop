@@ -3,7 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import en from "@/i18n/locales/en.json";
-import { AssistantPage } from "@/components/assistant/AssistantPage";
+import {
+  AssistantLoginRequired,
+  AssistantPage,
+} from "@/components/assistant/AssistantPage";
 import { ShellProvider } from "@/components/shell/ShellContext";
 import type {
   AssistantBootstrap,
@@ -34,6 +37,11 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api/assistant", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/assistant")>()),
   assistantApi: mocks,
+}));
+const platform = vi.hoisted(() => ({ mac: false }));
+vi.mock("@/lib/platform", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/platform")>()),
+  isMac: () => platform.mac,
 }));
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
@@ -143,7 +151,13 @@ beforeEach(async () => {
 });
 afterEach(() => {
   window.innerWidth = jsdomWidth;
+  platform.mac = false;
 });
+const resizeTo = (width: number) =>
+  act(() => {
+    window.innerWidth = width;
+    window.dispatchEvent(new Event("resize"));
+  });
 
 function page(width: number) {
   window.innerWidth = width;
@@ -273,4 +287,69 @@ it("switches back to the narrow page when the window shrinks", async () => {
   });
   expect(chat().parentElement).toHaveAttribute("data-layout", "narrow");
   expect(screen.getByText("Done.")).toBeVisible();
+});
+
+describe("switching between the narrow and the wide page", () => {
+  it("drags the window from the empty top of a wide chat on macOS", async () => {
+    platform.mac = true;
+    await open();
+    const empty = [
+      ...topRow().querySelectorAll<HTMLElement>("[data-tauri-drag-region]"),
+    ].filter((element) => element !== topRow());
+    expect(empty.some((element) => element.classList.contains("flex-1"))).toBe(
+      true,
+    );
+  });
+
+  it("keeps the model picker as it was", async () => {
+    await open();
+    const picker = within(topRow()).getByRole("combobox", { name: /model/i });
+    picker.focus();
+    resizeTo(1000);
+    resizeTo(1512);
+    const after = within(topRow()).getByRole("combobox", { name: /model/i });
+    expect(after).toBe(picker);
+    expect(after).toHaveFocus();
+  });
+
+  it("keeps a transcript that followed its end at the end", async () => {
+    await open();
+    const transcript = chat().querySelector<HTMLElement>("[aria-busy]")!;
+    Object.defineProperty(transcript, "scrollHeight", {
+      configurable: true,
+      value: 2400,
+    });
+    transcript.scrollTop = 0;
+    resizeTo(1000);
+    expect(transcript.scrollTop).toBe(2400);
+  });
+
+  it("starts a wide composer taller", async () => {
+    await open();
+    const composer = screen.getByRole("textbox", { name: "Message" });
+    expect(composer.style.height).toBe("96px");
+    resizeTo(1000);
+    expect(composer.style.height).toBe("76px");
+  });
+});
+
+it("frames a signed-out assistant only in a narrow window", () => {
+  window.innerWidth = 1512;
+  const { unmount } = render(
+    <ShellProvider openSettings={() => undefined}>
+      <AssistantLoginRequired onLoginRequested={() => undefined} />
+    </ShellProvider>,
+  );
+  const wide = screen.getByRole("heading", { level: 1 }).closest("section")!;
+  expect(wide).not.toHaveClass("rounded-list");
+  unmount();
+  window.innerWidth = 1000;
+  render(
+    <ShellProvider openSettings={() => undefined}>
+      <AssistantLoginRequired onLoginRequested={() => undefined} />
+    </ShellProvider>,
+  );
+  expect(
+    screen.getByRole("heading", { level: 1 }).closest("section"),
+  ).toHaveClass("rounded-list", "border");
 });

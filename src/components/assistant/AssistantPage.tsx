@@ -187,8 +187,15 @@ export function AssistantLoginRequired({
   onLoginRequested,
 }: Pick<AssistantPageProps, "onLoginRequested">) {
   const { t } = useTranslation();
+  // Beside the rail of a wide window the page has no frame (see AssistantPage).
+  const wide = useOptionalShell()?.layout === "wide";
   return (
-    <section className="grid h-full min-h-0 place-items-center rounded-list border border-line bg-card px-6 py-10 text-center">
+    <section
+      className={cn(
+        "grid h-full min-h-0 place-items-center bg-card px-6 py-10 text-center",
+        !wide && "rounded-list border border-line",
+      )}
+    >
       <div className="flex max-w-sm flex-col items-center">
         <div className="mb-5 grid h-11 w-11 place-items-center rounded-card bg-brand-soft text-brand-ink">
           <MessageSquare aria-hidden className="h-5 w-5" />
@@ -561,15 +568,55 @@ function AssistantWorkspace() {
   useLayoutEffect(() => {
     const input = composer.current;
     if (!input) return;
+    const [min, max] = wide ? [96, 200] : [76, 160];
     const resize = () => {
       // Clear the previous height so deleting text can shrink the field.
       input.style.height = "auto";
-      input.style.height = `${Math.max(76, Math.min(160, input.scrollHeight))}px`;
+      input.style.height = `${Math.max(min, Math.min(max, input.scrollHeight))}px`;
     };
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [assistant.draft, assistant.selectedId, sidebarCollapsed, trashed]);
+  }, [assistant.draft, assistant.selectedId, sidebarCollapsed, trashed, wide]);
+  // Switching between the narrow and the wide page reflows the transcript
+  // (other sizes, another width). One that followed its end stays there;
+  // otherwise the message at its top stays where it was. Read while
+  // rendering the switch, before the new sizes apply.
+  const reflow = useRef({ wide, id: null as string | null, offset: 0 });
+  if (reflow.current.wide !== wide) {
+    const view = scroll.current;
+    const top = view?.getBoundingClientRect().top ?? 0;
+    const first = follow.current
+      ? undefined
+      : [
+          ...(view?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []),
+        ].find((message) => message.getBoundingClientRect().bottom > top);
+    reflow.current = {
+      wide,
+      id: first?.dataset.messageId ?? null,
+      offset: first ? first.getBoundingClientRect().top - top : 0,
+    };
+  }
+  const reflowed = useRef(wide);
+  useLayoutEffect(() => {
+    if (reflowed.current === wide) return;
+    reflowed.current = wide;
+    const view = scroll.current;
+    if (!view) return;
+    if (follow.current) {
+      view.scrollTop = view.scrollHeight;
+      return;
+    }
+    const { id, offset } = reflow.current;
+    const message = id
+      ? view.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
+      : null;
+    if (message)
+      view.scrollTop +=
+        message.getBoundingClientRect().top -
+        view.getBoundingClientRect().top -
+        offset;
+  }, [wide]);
   useLayoutEffect(() => {
     if (!focusStarter.current) return;
     focusStarter.current = false;
@@ -939,6 +986,7 @@ function AssistantWorkspace() {
   // A new conversation of a wide window starts with its composer in the
   // middle of the page, the starters under it.
   const centred = wide && emptyTranscript && !assistant.loading && !trashed;
+  const drag = wide && isMac() ? { "data-tauri-drag-region": true } : {};
   const titleShown = !wide || sidebarCollapsed;
   const modelPicker = Boolean(session || bootstrap?.models.length) && (
     <AssistantModelPicker
@@ -1034,13 +1082,18 @@ function AssistantWorkspace() {
       >
         <header
           // The top of a wide window, the top bar gone, drags it.
-          {...(wide && isMac() ? { "data-tauri-drag-region": true } : {})}
+          {...drag}
           className={cn(
             "flex shrink-0 items-center gap-3 px-4 py-2.5",
             !wide && "border-b border-line",
           )}
         >
-          <div className="flex min-w-0 flex-1 items-center gap-1">
+          <div
+            className={cn(
+              "flex min-w-0 items-center gap-1",
+              wide ? "shrink" : "flex-1",
+            )}
+          >
             <Button
               ref={sidebarToggle}
               variant="icon"
@@ -1086,9 +1139,13 @@ function AssistantWorkspace() {
                 {session?.title || t("assistant.title")}
               </h1>
             )}
-            {wide && modelPicker}
           </div>
-          {!wide && modelPicker}
+          {modelPicker}
+          {/* The empty rest of a wide top row: it drags the window, since
+              Tauri drags only from the element pressed. */}
+          {wide && (
+            <div aria-hidden className="flex-1 self-stretch" {...drag} />
+          )}
           {session && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
@@ -1698,7 +1755,12 @@ function AssistantWorkspace() {
                   <Textarea
                     ref={composer}
                     rows={3}
-                    className="max-h-40 min-h-[76px] shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0"
+                    className={cn(
+                      "shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0",
+                      wide
+                        ? "max-h-[200px] min-h-[96px]"
+                        : "max-h-40 min-h-[76px]",
+                    )}
                     aria-label={t("assistant.message")}
                     placeholder={t("assistant.composerPlaceholder")}
                     value={assistant.draft}
