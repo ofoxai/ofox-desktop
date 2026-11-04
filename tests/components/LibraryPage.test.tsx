@@ -16,6 +16,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { LibraryPage } from "@/components/library/LibraryPage";
 import { LibrarySection } from "@/components/library/LibrarySection";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
+import { PageSubnav } from "../utils/pageSubnav";
 import {
   libraryApi,
   type LibraryData,
@@ -102,6 +103,7 @@ function Fixture({
           )}
         </InteractionScope>
         <Refresh />
+        <PageSubnav page="library" />
       </ShellProvider>
     </QueryClientProvider>
   );
@@ -1514,4 +1516,56 @@ it("starts an explicit Skills location at the source instead of restoring a deep
     expect(screen.getByRole("textbox", { name: "技能来源" })).toHaveFocus(),
   );
   expect(scroller.scrollTop).toBe(0);
+});
+
+describe("library sub-pages in the sidebar", () => {
+  it("publishes 指令 / MCP / 技能 with their counts", async () => {
+    mount();
+    const tabs = await screen.findByRole("tablist", {
+      name: "library sub-pages",
+    });
+    await waitFor(() =>
+      expect(
+        within(tabs)
+          .getAllByRole("tab")
+          .map((tab) => tab.textContent),
+      ).toEqual([
+        `${zh.library.tabs.instructions}1`,
+        `${zh.library.tabs.mcp}1`,
+        `${zh.library.tabs.skills}1`,
+      ]),
+    );
+    expect(within(tabs).getByRole("tab", { name: /^MCP/ })).toHaveAttribute(
+      "aria-controls",
+      "library-panel-mcp",
+    );
+  });
+
+  it("titles the page by its sub-page", async () => {
+    mount();
+    expect(
+      await screen.findByRole("heading", {
+        level: 1,
+        name: zh.pages.library.instructions.title,
+      }),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("tab", { name: /^MCP/ }));
+    expect(
+      screen.getByRole("heading", {
+        level: 1,
+        name: zh.pages.library.mcp.title,
+      }),
+    ).toBeVisible();
+  });
+
+  it("an explicit location to 技能 selects 技能 in the sidebar", async () => {
+    render(
+      <Fixture location={{ kind: "skills", request: 7 }} onLocated={vi.fn()} />,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("tab", { name: new RegExp(zh.library.tabs.skills) }),
+      ).toHaveAttribute("aria-selected", "true"),
+    );
+  });
 });

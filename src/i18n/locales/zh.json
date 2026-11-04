@@ -5662,6 +5662,20 @@
     "sessions": {
       "title": "会话",
       "description": "各工具的历史会话，搜索、续聊、查看用量"
+    },
+    "library": {
+      "instructions": {
+        "title": "指令",
+        "description": "给各工具共用的提示和规则"
+      },
+      "mcp": {
+        "title": "MCP 服务器",
+        "description": "一处配置，分发到各工具"
+      },
+      "skills": {
+        "title": "技能",
+        "description": "技能文件夹，按需链接到各工具"
+      }
     }
   }
 }

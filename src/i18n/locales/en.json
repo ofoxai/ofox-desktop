@@ -5662,6 +5662,20 @@
     "sessions": {
       "title": "Sessions",
       "description": "Every tool's past sessions: search, resume, see what they used"
+    },
+    "library": {
+      "instructions": {
+        "title": "Instructions",
+        "description": "Prompts and rules your tools share"
+      },
+      "mcp": {
+        "title": "MCP servers",
+        "description": "Set up once, hand out to every tool"
+      },
+      "skills": {
+        "title": "Skills",
+        "description": "Skill folders, linked into the tools that need them"
+      }
     }
   }
 }

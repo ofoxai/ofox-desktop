@@ -5662,6 +5662,20 @@
     "sessions": {
       "title": "セッション",
       "description": "各ツールの過去のセッションを検索・再開し、使用量を確認"
+    },
+    "library": {
+      "instructions": {
+        "title": "指示",
+        "description": "各ツールで共有するプロンプトとルール"
+      },
+      "mcp": {
+        "title": "MCP サーバー",
+        "description": "一か所で設定し、各ツールに配布"
+      },
+      "skills": {
+        "title": "スキル",
+        "description": "スキルフォルダを必要なツールにリンク"
+      }
     }
   }
 }

@@ -226,7 +226,7 @@ export function AppSidebar({
 }
 
 /** The open page's sub-pages, indented under it. */
-function SubNav({ label, nav }: { label: string; nav: ShellSubnav }) {
+export function SubNav({ label, nav }: { label: string; nav: ShellSubnav }) {
   const refs = useRef<(HTMLButtonElement | null)[]>([]);
   const current = nav.items.findIndex((item) => item.value === nav.value);
   return (

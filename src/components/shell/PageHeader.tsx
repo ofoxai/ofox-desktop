@@ -1,5 +1,5 @@
 import { RefreshCw } from "lucide-react";
-import type { ReactNode } from "react";
+import type { ReactNode, Ref } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { isMac } from "@/lib/platform";
@@ -23,6 +23,7 @@ export function PageHeader({
   actions,
   wide,
   className,
+  headerRef,
 }: {
   title: string;
   description?: string;
@@ -30,10 +31,13 @@ export function PageHeader({
   /** Use the wide content column (PAGE_BODY_WIDE). */
   wide?: boolean;
   className?: string;
+  /** The header element, for a page that measures it. */
+  headerRef?: Ref<HTMLElement>;
 }) {
   const drag = isMac() ? { "data-tauri-drag-region": true } : {};
   return (
     <header
+      ref={headerRef}
       data-page-header=""
       {...drag}
       className={cn("sticky top-0 z-20 shrink-0 bg-canvas", className)}
