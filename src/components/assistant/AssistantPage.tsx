@@ -28,6 +28,7 @@ import {
   Mic,
   Pin,
   PinOff,
+  RefreshCw,
   Square,
   Trash2,
   RotateCcw,
@@ -187,15 +188,9 @@ export function AssistantLoginRequired({
   onLoginRequested,
 }: Pick<AssistantPageProps, "onLoginRequested">) {
   const { t } = useTranslation();
-  // Beside the rail of a wide window the page has no frame (see AssistantPage).
-  const wide = useOptionalShell()?.layout === "wide";
+  // Beside the sidebar the page has no frame (see AssistantPage).
   return (
-    <section
-      className={cn(
-        "grid h-full min-h-0 place-items-center bg-card px-6 py-10 text-center",
-        !wide && "rounded-list border border-line",
-      )}
-    >
+    <section className="grid h-full min-h-0 place-items-center bg-card px-6 py-10 text-center">
       <div className="flex max-w-sm flex-col items-center">
         <div className="mb-5 grid h-11 w-11 place-items-center rounded-card bg-brand-soft text-brand-ink">
           <MessageSquare aria-hidden className="h-5 w-5" />
@@ -230,8 +225,8 @@ function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
   const shell = useOptionalShell();
-  // A wide window (see ShellLayout): no frame, roomier sizes, a wider
-  // column, and the title only where the list does not show it.
+  // The page has no frame at any width; a wide window (see ShellLayout)
+  // only makes it roomier: larger sizes and a wider column.
   const wide = shell?.layout === "wide";
   const localEntryPending = useRef<number | null>(null);
   const entry = shell?.assistantLocation;
@@ -538,12 +533,15 @@ function AssistantWorkspace() {
   }
   useEffect(settleFocus);
 
-  useShellRefresh("assistant", async () => {
+  // Reload the models, the list and the open conversation: the ⋯ menu's
+  // 刷新, and the shell's refresh while this page is open.
+  const reloadAll = async () => {
     await assistant.loadBootstrap(true);
     await assistant.refreshSessions();
     if (assistant.selectedId)
       await assistant.refreshDetail(assistant.selectedId);
-  });
+  };
+  useShellRefresh("assistant", reloadAll);
 
   useEffect(() => {
     setRenaming(false);
@@ -985,9 +983,11 @@ function AssistantWorkspace() {
     : "w-full max-w-[760px]";
   // A new conversation of a wide window starts with its composer in the
   // middle of the page, the starters under it.
-  const centred = wide && emptyTranscript && !assistant.loading && !trashed;
-  const drag = wide && isMac() ? { "data-tauri-drag-region": true } : {};
-  const titleShown = !wide || sidebarCollapsed;
+  const centred = emptyTranscript && !assistant.loading && !trashed;
+  const drag = isMac() ? { "data-tauri-drag-region": true } : {};
+  // The list shows which conversation is open; the top row only once it
+  // is collapsed.
+  const titleShown = sidebarCollapsed;
   const modelPicker = Boolean(session || bootstrap?.models.length) && (
     <AssistantModelPicker
       models={(bootstrap?.models ?? []).filter(
@@ -1041,16 +1041,14 @@ function AssistantWorkspace() {
       data-layout={wide ? "wide" : "narrow"}
       className={cn(
         "flex h-full min-h-0 overflow-hidden bg-card outline-none",
-        wide
-          ? "[--ctl-h:30px] [--fs-ctl:13.5px] [--fs-micro:11.5px] [--fs-nav:14px] [--fs-note:12px] [--fs-sub:12.5px] [--fs-title:17px] [--fs-ui:15px] [--icon-btn:30px]"
-          : "rounded-list border border-line",
+        wide &&
+          "[--ctl-h:30px] [--fs-ctl:13.5px] [--fs-micro:11.5px] [--fs-nav:14px] [--fs-note:12px] [--fs-sub:12.5px] [--fs-title:17px] [--fs-ui:15px] [--icon-btn:30px]",
       )}
       onKeyDown={handleShortcuts}
     >
       <AssistantSidebar
         ref={sidebarHandle}
         id={sidebarId}
-        wide={wide}
         collapsed={sidebarCollapsed}
         assistant={assistant}
         canCreate={available && !busy}
@@ -1081,19 +1079,11 @@ function AssistantWorkspace() {
         aria-label={t("assistant.chat")}
       >
         <header
-          // The top of a wide window, the top bar gone, drags it.
+          // With no title bar above it, the top row drags the window.
           {...drag}
-          className={cn(
-            "flex shrink-0 items-center gap-3 px-4 py-2.5",
-            !wide && "border-b border-line",
-          )}
+          className="flex shrink-0 items-center gap-3 px-4 py-2.5"
         >
-          <div
-            className={cn(
-              "flex min-w-0 items-center gap-1",
-              wide ? "shrink" : "flex-1",
-            )}
-          >
+          <div className="flex min-w-0 shrink items-center gap-1">
             <Button
               ref={sidebarToggle}
               variant="icon"
@@ -1141,11 +1131,9 @@ function AssistantWorkspace() {
             )}
           </div>
           {modelPicker}
-          {/* The empty rest of a wide top row: it drags the window, since
+          {/* The empty rest of the top row: it drags the window, since
               Tauri drags only from the element pressed. */}
-          {wide && (
-            <div aria-hidden className="flex-1 self-stretch" {...drag} />
-          )}
+          <div aria-hidden className="flex-1 self-stretch" {...drag} />
           {session && (
             <DropdownMenu modal={false}>
               <DropdownMenuTrigger asChild>
@@ -1175,6 +1163,16 @@ function AssistantWorkspace() {
                   action();
                 }}
               >
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void reloadAll().catch((e) =>
+                      console.error("[Assistant] refresh failed", e),
+                    )
+                  }
+                >
+                  <RefreshCw aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  {t("shell.refresh")}
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={sessionTrashed}
                   onSelect={() => {
@@ -1460,12 +1458,7 @@ function AssistantWorkspace() {
                       )}
                     </div>
                   )}
-                  <div
-                    className={cn(
-                      "mx-auto py-2",
-                      wide ? column : "max-w-[760px]",
-                    )}
-                  >
+                  <div className={cn("mx-auto py-2", column)}>
                     {messages.map((message) => {
                       const turn = versions.get(message.id);
                       return (

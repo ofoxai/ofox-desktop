@@ -490,7 +490,7 @@ beforeEach(async () => {
   mocks.bootstrap.mockResolvedValue(capabilities);
   mocks.localChanges.mockResolvedValue([]);
   mocks.restoreLocalChanges.mockResolvedValue([]);
-  mocks.setPermission.mockImplementation(async r=>r.mode);
+  mocks.setPermission.mockImplementation(async (r) => r.mode);
   mocks.respondApproval.mockResolvedValue(undefined);
   mocks.getPreferences.mockResolvedValue({
     instructions: "",
@@ -808,7 +808,7 @@ describe("the empty state", () => {
     );
   });
 
-  it("is a title, one row of starters and one line, with no brand icon", async () => {
+  it("is a title and one line over the centred composer, the starters under it, with no brand icon", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
     const title = await screen.findByRole("heading", {
@@ -820,7 +820,14 @@ describe("the empty state", () => {
     expect(empty.querySelector("svg")).toBeNull();
     expect(
       [...empty.children].map((child) => child.tagName.toLowerCase()),
-    ).toEqual(["h2", "div", "p"]);
+    ).toEqual(["h2", "p"]);
+    const starter = screen.getAllByRole("button", {
+      name: "Summarize content",
+    })[0];
+    expect(
+      composer().compareDocumentPosition(starter) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("says in one line what the assistant reads, and nothing else about starting", async () => {
@@ -7253,7 +7260,10 @@ describe("generation tools", () => {
     });
     // The chip names what it makes; the model is in its tooltip.
     expect(chip).toHaveTextContent(/^Generate image$/);
-    expect(chip).toHaveAttribute("title", expect.stringContaining("Image Test"));
+    expect(chip).toHaveAttribute(
+      "title",
+      expect.stringContaining("Image Test"),
+    );
   });
 
   it("saves the chip's model and parameters as the conversation's defaults, and × removes only the chip", async () => {
@@ -7267,7 +7277,9 @@ describe("generation tools", () => {
         name: "Generate image: model and parameters",
       }),
     );
-    await userEvent.click(await screen.findByRole("combobox", { name: "Size" }));
+    await userEvent.click(
+      await screen.findByRole("combobox", { name: "Size" }),
+    );
     await userEvent.click(
       await screen.findByRole("option", { name: "1536x1024" }),
     );
@@ -7328,7 +7340,9 @@ describe("generation tools", () => {
     );
     // The model and parameters are in its details, not on the result.
     expect(card).not.toHaveTextContent("Image Test");
-    await userEvent.click(within(card).getByRole("button", { name: "Details" }));
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Details" }),
+    );
     const details = await screen.findByRole("dialog", { name: "Details" });
     expect(details).toHaveTextContent("Image Test");
     expect(details).toHaveTextContent("1024x1024");
@@ -7360,7 +7374,9 @@ describe("generation tools", () => {
     });
     expect(card).toHaveTextContent("Estimated cost $0.1");
     expect(card).toHaveTextContent("First frame");
-    await userEvent.click(within(card).getByRole("button", { name: "Generate" }));
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Generate" }),
+    );
     expect(mocks.respondApproval).toHaveBeenCalledWith(
       expect.objectContaining({ approvalId: "approval-v", choice: "once" }),
     );
@@ -7372,7 +7388,13 @@ describe("generation tools", () => {
       toolCallId: "regen-1",
     });
     current.messages = [
-      { id: "q", role: "user", content: "Draw a fox", createdAt: 1, runId: "r" },
+      {
+        id: "q",
+        role: "user",
+        content: "Draw a fox",
+        createdAt: 1,
+        runId: "r",
+      },
       {
         id: "reply",
         role: "assistant",
@@ -7455,7 +7477,9 @@ describe("generation tools", () => {
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Generate again" }),
     );
-    expect(await within(dialog).findByText("Estimated cost $0.12")).toBeVisible();
+    expect(
+      await within(dialog).findByText("Estimated cost $0.12"),
+    ).toBeVisible();
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Confirm and generate" }),
     );
@@ -8292,42 +8316,112 @@ it("does not offer audio history when there is no saved audio operation", async 
   expect(screen.queryByRole("menuitem", { name: "Audio history" })).toBeNull();
 });
 
-describe('local configuration capability',()=>{
- it('starts disabled and only an explicit user toggle persists it in a new conversation',async()=>{
-  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
-  expect(hook.result.current.localConfig).toBe(false);
-  await act(async()=>{await hook.result.current.setLocalConfig(true);});
-  expect(hook.result.current.localConfig).toBe(true);
-  act(()=>hook.result.current.setDraft('Diagnose codex'));
-  await act(async()=>{await hook.result.current.send();});
-  expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
- });
- it('switches an unsuitable model only when the configured recommendation exists in the catalog',async()=>{
-  mocks.bootstrap.mockResolvedValue({...capabilities,localConfigDefinition:{id:'local_config',version:1,recommendedModel:capabilities.models[1].id,suitableModels:[]}});
-  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
-  await act(async()=>{await hook.result.current.setLocalConfig(true);});
-  expect(hook.result.current.newModelId).toBe(capabilities.models[1].id);
- });
+describe("local configuration capability", () => {
+  it("starts disabled and only an explicit user toggle persists it in a new conversation", async () => {
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    expect(hook.result.current.localConfig).toBe(false);
+    await act(async () => {
+      await hook.result.current.setLocalConfig(true);
+    });
+    expect(hook.result.current.localConfig).toBe(true);
+    act(() => hook.result.current.setDraft("Diagnose codex"));
+    await act(async () => {
+      await hook.result.current.send();
+    });
+    expect(mocks.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilities: [{ id: "local_config", version: 1 }],
+      }),
+    );
+  });
+  it("switches an unsuitable model only when the configured recommendation exists in the catalog", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      localConfigDefinition: {
+        id: "local_config",
+        version: 1,
+        recommendedModel: capabilities.models[1].id,
+        suitableModels: [],
+      },
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    await act(async () => {
+      await hook.result.current.setLocalConfig(true);
+    });
+    expect(hook.result.current.newModelId).toBe(capabilities.models[1].id);
+  });
 });
 
-it('local permission display uses host memory after a renderer remount and approvals expire with their run',async()=>{
- current.session.capabilities=[{id:'local_config',version:1}];current.permissionMode='autoEdit';current.session.activeRun={runId:'local-run',operationId:'local-op'};
- const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
- act(()=>hook.result.current.select(session.id));await waitFor(()=>expect(hook.result.current.run?.runId).toBe('local-run'));
- expect(hook.result.current.localMode).toBe('autoEdit');
- act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval',data:{approvalId:'approval-1',toolCallId:'tool-1',name:'bash',category:'exec',details:'run diagnostic',allowSession:true,expectedOwner:capabilities.owner,expectedGeneration:1}} as AssistantEvent));
- expect(hook.result.current.localApprovals).toHaveLength(1);
- await act(async()=>{await hook.result.current.respondLocalApproval('approval-1','once');});
- expect(mocks.respondApproval).toHaveBeenCalledWith(expect.objectContaining({sessionId:session.id,runId:'local-run',operationId:'local-op',expectedGeneration:1,choice:'once'}));
- act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval_end',data:{approvalId:'approval-1'}} as AssistantEvent));
- expect(hook.result.current.localApprovals).toHaveLength(0);
+it("local permission display uses host memory after a renderer remount and approvals expire with their run", async () => {
+  current.session.capabilities = [{ id: "local_config", version: 1 }];
+  current.permissionMode = "autoEdit";
+  current.session.activeRun = { runId: "local-run", operationId: "local-op" };
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.run?.runId).toBe("local-run"));
+  expect(hook.result.current.localMode).toBe("autoEdit");
+  act(() =>
+    mocks.listener?.({
+      sessionId: session.id,
+      runId: "local-run",
+      operationId: "local-op",
+      type: "approval",
+      data: {
+        approvalId: "approval-1",
+        toolCallId: "tool-1",
+        name: "bash",
+        category: "exec",
+        details: "run diagnostic",
+        allowSession: true,
+        expectedOwner: capabilities.owner,
+        expectedGeneration: 1,
+      },
+    } as AssistantEvent),
+  );
+  expect(hook.result.current.localApprovals).toHaveLength(1);
+  await act(async () => {
+    await hook.result.current.respondLocalApproval("approval-1", "once");
+  });
+  expect(mocks.respondApproval).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sessionId: session.id,
+      runId: "local-run",
+      operationId: "local-op",
+      expectedGeneration: 1,
+      choice: "once",
+    }),
+  );
+  act(() =>
+    mocks.listener?.({
+      sessionId: session.id,
+      runId: "local-run",
+      operationId: "local-op",
+      type: "approval_end",
+      data: { approvalId: "approval-1" },
+    } as AssistantEvent),
+  );
+  expect(hook.result.current.localApprovals).toHaveLength(0);
 });
-it('tool-page entry creates a separate enabled conversation with tool context, without sending a model request',async()=>{
- const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
- await act(async()=>{await hook.result.current.startLocalConfig('Diagnose codex in the problem folder');});
- expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
- expect(mocks.updateSession).toHaveBeenCalledWith(expect.objectContaining({draft:'Diagnose codex in the problem folder'}));
- expect(mocks.send).not.toHaveBeenCalled();
+it("tool-page entry creates a separate enabled conversation with tool context, without sending a model request", async () => {
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  await act(async () => {
+    await hook.result.current.startLocalConfig(
+      "Diagnose codex in the problem folder",
+    );
+  });
+  expect(mocks.createSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      capabilities: [{ id: "local_config", version: 1 }],
+    }),
+  );
+  expect(mocks.updateSession).toHaveBeenCalledWith(
+    expect.objectContaining({ draft: "Diagnose codex in the problem folder" }),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
 });
 
 describe("local configuration in the conversation", () => {

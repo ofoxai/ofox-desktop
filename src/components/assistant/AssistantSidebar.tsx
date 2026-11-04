@@ -109,8 +109,6 @@ function useTransferToast(result: AssistantTransferResult | null) {
 interface AssistantSidebarProps {
   id: string;
   collapsed: boolean;
-  /** Beside the rail of a wide window: wider, on the rail's background. */
-  wide?: boolean;
   assistant: ReturnType<typeof useAssistant>;
   /** A new conversation can be started now. */
   canCreate: boolean;
@@ -161,7 +159,6 @@ export const AssistantSidebar = forwardRef<
   {
     id,
     collapsed,
-    wide = false,
     assistant,
     canCreate,
     onCreate,
@@ -380,10 +377,8 @@ export const AssistantSidebar = forwardRef<
       hidden={collapsed}
       // `flex` would win over the hidden attribute's display: none.
       className={cn(
-        "shrink-0 flex-col gap-2 p-3",
-        wide
-          ? "w-[260px] bg-canvas"
-          : "w-[200px] border-r border-line bg-card-2 xl:w-[240px]",
+        // Beside the app's sidebar, on its background.
+        "w-[260px] shrink-0 flex-col gap-2 bg-canvas p-3",
         collapsed ? "hidden" : "flex",
       )}
       aria-label={t("assistant.conversations")}

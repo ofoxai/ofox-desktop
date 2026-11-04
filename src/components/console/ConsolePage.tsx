@@ -241,10 +241,8 @@ function ConsoleShell({
       {shell.visited.has("assistant") && (
         <div
           {...panel("assistant")}
-          // A wide window's assistant fills the space beside the rail.
-          className={
-            shell.layout === "wide" ? "h-full" : "h-full px-4 pb-4 pt-1"
-          }
+          // The assistant fills the space beside the sidebar.
+          className="h-full"
         >
           <InteractionScope active={shell.active === "assistant"}>
             <AccountAssistantPanel

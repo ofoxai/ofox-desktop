@@ -268,14 +268,39 @@ describe("the assistant page of a wide window", () => {
     ).toBeTruthy();
   });
 
-  it("is unchanged in a narrow window", async () => {
+  it("at 1000px has no frame either, the list beside the chat, with today's sizes", async () => {
     await open(1000);
     const root = chat().parentElement!;
     expect(root).toHaveAttribute("data-layout", "narrow");
-    expect(root).toHaveClass("rounded-list", "border", "border-line");
+    expect(root).not.toHaveClass("rounded-list");
+    expect(root.className).not.toContain("[--fs-ui:15px]");
     expect(
-      within(topRow()).getByRole("heading", { level: 1, name: "Rewrites" }),
-    ).not.toHaveClass("sr-only");
+      screen.getByRole("complementary", { name: en.assistant.conversations }),
+    ).toBeVisible();
+    expect(screen.getByRole("heading", { level: 1 })).toHaveClass("sr-only");
+  });
+
+  it("starts a new conversation in the middle at 1000px too", async () => {
+    page(1000);
+    await screen.findByRole("textbox", { name: "Message" });
+    expect(chat().querySelector("[data-centred]")).toHaveAttribute(
+      "data-centred",
+      "true",
+    );
+  });
+
+  it("reloads the conversations from ⋯ → Refresh", async () => {
+    await open();
+    const before = mocks.listSessions.mock.calls.length;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Conversation actions" }),
+    );
+    await userEvent.click(
+      screen.getByRole("menuitem", { name: en.shell.refresh }),
+    );
+    await waitFor(() =>
+      expect(mocks.listSessions.mock.calls.length).toBeGreaterThan(before),
+    );
   });
 });
 
@@ -290,16 +315,19 @@ it("switches back to the narrow page when the window shrinks", async () => {
 });
 
 describe("switching between the narrow and the wide page", () => {
-  it("drags the window from the empty top of a wide chat on macOS", async () => {
-    platform.mac = true;
-    await open();
-    const empty = [
-      ...topRow().querySelectorAll<HTMLElement>("[data-tauri-drag-region]"),
-    ].filter((element) => element !== topRow());
-    expect(empty.some((element) => element.classList.contains("flex-1"))).toBe(
-      true,
-    );
-  });
+  it.each([1512, 1000])(
+    "drags the window from the empty top of the chat on macOS (%ipx)",
+    async (width) => {
+      platform.mac = true;
+      await open(width);
+      const empty = [
+        ...topRow().querySelectorAll<HTMLElement>("[data-tauri-drag-region]"),
+      ].filter((element) => element !== topRow());
+      expect(
+        empty.some((element) => element.classList.contains("flex-1")),
+      ).toBe(true);
+    },
+  );
 
   it("keeps the model picker as it was", async () => {
     await open();
@@ -333,17 +361,8 @@ describe("switching between the narrow and the wide page", () => {
   });
 });
 
-it("frames a signed-out assistant only in a narrow window", () => {
-  window.innerWidth = 1512;
-  const { unmount } = render(
-    <ShellProvider openSettings={() => undefined}>
-      <AssistantLoginRequired onLoginRequested={() => undefined} />
-    </ShellProvider>,
-  );
-  const wide = screen.getByRole("heading", { level: 1 }).closest("section")!;
-  expect(wide).not.toHaveClass("rounded-list");
-  unmount();
-  window.innerWidth = 1000;
+it.each([1512, 1000])("never frames a signed-out assistant (%ipx)", (width) => {
+  window.innerWidth = width;
   render(
     <ShellProvider openSettings={() => undefined}>
       <AssistantLoginRequired onLoginRequested={() => undefined} />
@@ -351,5 +370,5 @@ it("frames a signed-out assistant only in a narrow window", () => {
   );
   expect(
     screen.getByRole("heading", { level: 1 }).closest("section"),
-  ).toHaveClass("rounded-list", "border");
+  ).not.toHaveClass("rounded-list");
 });
