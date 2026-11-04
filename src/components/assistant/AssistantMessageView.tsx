@@ -456,6 +456,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   // Only replies draw math; a question shows as it was typed
                   // (`find . \( -name a \)` is a command, not a formula).
                   math={!isUser}
+                  previews={!isUser}
                 />
               </AssistantQuote>
             </div>

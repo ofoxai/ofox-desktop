@@ -4688,6 +4688,13 @@
     "reader": "Session reader",
     "copyMessage": "Copy message",
     "copyCode": "Copy code",
+    "showDiagram": "Diagram",
+    "showSource": "Source",
+    "previewHtml": "Preview",
+    "showCode": "Code",
+    "diagram": "Mermaid diagram",
+    "previewFrame": "HTML preview",
+    "previewNoScripts": "The preview runs none of the page's scripts and loads nothing from the network.",
     "imageBlocked": "Image not loaded",
     "imageHint": "Images are not loaded automatically to protect your privacy.",
     "questions": "Questions",
@@ -4990,7 +4997,7 @@
       "mediaInvalidParams": "This model does not support the selected media parameters.",
       "mediaOutcomeUnknown": "The media request may have been charged, but its result could not be confirmed. Check your activity before submitting again.",
       "mediaSafetyRejected": "The image request was rejected by the provider’s safety checks. Change the prompt or input image and try again.",
-      "mediaInsufficientCredits": "There are not enough credits to generate this image.",
+      "mediaInsufficientCredits": "There are not enough credits for this generation.",
       "visionModelRequired": "This model can't read images. Choose a model that can read images, then send the message again.",
       "modelRequired": "Choose a model first.",
       "modelUnavailable": "This model isn't available right now. Choose another model.",
@@ -5242,6 +5249,22 @@
       "assistant": "Assistant"
     },
     "starters": {
+      "image": {
+        "label": "Make an image",
+        "prompt": "Draw an image: a seaside town at dawn, watercolor style, warm colors."
+      },
+      "video": {
+        "label": "Make a short video",
+        "prompt": "Make a short video: an orange cat stretching on a windowsill as sunlight comes in, the camera slowly pushing in."
+      },
+      "speech": {
+        "label": "Record a voice-over",
+        "prompt": "Read this as a voice-over in a calm, warm voice:\n\nWelcome to Ofox: one account for the leading AI models."
+      },
+      "localCheck": {
+        "label": "Check Claude Code setup",
+        "prompt": "Check the Claude Code configuration on my computer for problems, and tell me how to fix any you find."
+      },
       "summary": {
         "label": "Summarize content",
         "prompt": "Please summarize the following content, highlight the key points, and list any action items:\n\n"

@@ -788,6 +788,26 @@ describe("the empty state", () => {
     for (const button of buttons) expect(button).toHaveClass("rounded-full");
   });
 
+  it("offers the Claude Code check where the assistant can read this computer's configuration", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      localConfigDefinition: {
+        id: "local_config",
+        version: 1,
+        recommendedModel: capabilities.models[1].id,
+        suitableModels: [],
+      },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Check Claude Code setup" }),
+    );
+    expect(composer()).toHaveValue(
+      "Check the Claude Code configuration on my computer for problems, and tell me how to fix any you find.",
+    );
+  });
+
   it("is a title, one row of starters and one line, with no brand icon", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
@@ -7169,6 +7189,55 @@ describe("generation tools", () => {
     );
     expect(screen.queryByRole("option", { name: /Image Test/ })).toBeNull();
     expect(screen.queryByRole("radio", { name: /Image/ })).toBeNull();
+  });
+
+  it("starts a generation from the empty state with its chip on and an example to edit", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make an image" }),
+    );
+    expect(composer()).toHaveValue(
+      "Draw an image: a seaside town at dawn, watercolor style, warm colors.",
+    );
+    expect(composer()).toHaveFocus();
+    expect(
+      screen.getByRole("button", {
+        name: "Generate image: model and parameters",
+      }),
+    ).toBeInTheDocument();
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("offers a starter only for a kind the account has a model for", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(
+      await screen.findByRole("button", { name: "Make a short video" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Record a voice-over" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Summarize content" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Polish writing" })).toBeNull();
+  });
+
+  it("keeps the writing starters for a chat model without tools", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [
+        { ...model("balanced", "Balanced model"), tools: false },
+        imageModel,
+      ],
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(
+      await screen.findByRole("button", { name: "Polish writing" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Make an image" })).toBeNull();
   });
 
   it("adds a generation chip from + and saves it with the conversation", async () => {

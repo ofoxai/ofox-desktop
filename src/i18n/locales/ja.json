@@ -4688,6 +4688,13 @@
     "reader": "セッション閲覧",
     "copyMessage": "メッセージをコピー",
     "copyCode": "コードをコピー",
+    "showDiagram": "図を表示",
+    "showSource": "ソースを表示",
+    "previewHtml": "プレビュー",
+    "showCode": "コードを表示",
+    "diagram": "Mermaid 図",
+    "previewFrame": "HTML プレビュー",
+    "previewNoScripts": "プレビューではページのスクリプトを実行せず、ネットワーク上のリソースも読み込みません。",
     "imageBlocked": "画像は未読み込み",
     "imageHint": "プライバシー保護のため、画像は自動的に読み込まれません。",
     "questions": "質問一覧",
@@ -4990,7 +4997,7 @@
       "mediaInvalidParams": "このモデルは選択したメディア設定に対応していません。",
       "mediaOutcomeUnknown": "メディアのリクエストは課金された可能性がありますが、結果を確認できませんでした。再送信前に利用履歴を確認してください。",
       "mediaSafetyRejected": "画像リクエストはプロバイダーの安全性チェックで拒否されました。プロンプトまたは入力画像を変更して再試行してください。",
-      "mediaInsufficientCredits": "画像を生成するための残高が不足しています。",
+      "mediaInsufficientCredits": "生成に必要な残高が不足しています。",
       "visionModelRequired": "このモデルは画像を読み取れません。画像を読み取れるモデルを選んでから、メッセージをもう一度送信してください。",
       "modelRequired": "先にモデルを選んでください。",
       "modelUnavailable": "このモデルは現在利用できません。別のモデルを選んでください。",
@@ -5242,6 +5249,22 @@
       "assistant": "アシスタント"
     },
     "starters": {
+      "image": {
+        "label": "画像を作る",
+        "prompt": "画像を描いて：夜明けの海辺の町、水彩画風、暖かい色合い。"
+      },
+      "video": {
+        "label": "短い動画を作る",
+        "prompt": "短い動画を作って：窓辺で伸びをする茶トラ猫、差し込む朝日、カメラはゆっくり寄っていく。"
+      },
+      "speech": {
+        "label": "ナレーションを付ける",
+        "prompt": "落ち着いた温かい声で、次の文をナレーションとして読んで：\n\nOfox へようこそ。ひとつのアカウントで主要な AI モデルを使えます。"
+      },
+      "localCheck": {
+        "label": "Claude Code の設定を確認",
+        "prompt": "このパソコンの Claude Code の設定に問題がないか確認して、問題があれば直し方を教えて。"
+      },
       "summary": {
         "label": "内容を要約",
         "prompt": "以下の内容を要約し、要点を示して、対応が必要な事項を挙げてください：\n\n"

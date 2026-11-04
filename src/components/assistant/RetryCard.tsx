@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { MenuSelect } from "@/components/ui/menu-select";
 import { cn } from "@/lib/utils";
 import { useModelOptions } from "./useModelOptions";
+import { TopUpAction, needsTopUp } from "./TopUpAction";
 
 /** A search whose result couldn't be confirmed: it may be billed twice. */
 const SEARCH_OUTCOME_UNKNOWN = "assistant_search_outcome_unknown";
@@ -82,6 +83,7 @@ export function RetryCard({
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
+        {needsTopUp(errorCode) && <TopUpAction />}
         <Button
           variant="secondary"
           aria-disabled={blocked || undefined}

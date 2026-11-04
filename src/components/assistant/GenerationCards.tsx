@@ -21,6 +21,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { MediaBlock, ActivityLink } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
+import { TopUpAction, needsTopUp } from "./TopUpAction";
 import {
   MediaDefaultsFields,
   type MediaFieldsValue,
@@ -218,6 +219,8 @@ export function GenerationCards({
                 {t(assistantErrorKey(item.errorCode))}
               </p>
             )}
+            {["error", "failed"].includes(item.status) &&
+              needsTopUp(item.errorCode) && <TopUpAction />}
             {item.prompt && (
               <details className="text-note text-ink-muted">
                 <summary className="cursor-default select-none">

@@ -39,6 +39,7 @@ import {
   assistantErrorKey,
   type AssistantMessage,
   type AssistantAttachment,
+  type AssistantGenerationKind,
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
 import { useAssistant } from "./useAssistant";
@@ -51,6 +52,7 @@ import {
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
 import { ComposerPlus } from "./ComposerPlus";
+import { generationModels } from "./MediaDefaultsFields";
 import { GenerationCards } from "./GenerationCards";
 import { useReadAloud } from "./useReadAloud";
 import { AssistantMessageView } from "./AssistantMessageView";
@@ -104,7 +106,28 @@ import {
 } from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
-const STARTERS = ["summary", "writing", "explain"] as const;
+interface Starter {
+  id: string;
+  /** The generation chip it turns on. */
+  kind?: AssistantGenerationKind;
+}
+
+/**
+ * What the assistant can do beyond chat, for a model that takes tools: each
+ * shown only while the account has a model for it, then a summary.
+ */
+const SCENARIO_STARTERS: Starter[] = [
+  { id: "image", kind: "image" },
+  { id: "video", kind: "video" },
+  { id: "speech", kind: "speech" },
+  { id: "localCheck" },
+];
+/** For a model without tools, or an account with none of the above. */
+const TEXT_STARTERS: Starter[] = [
+  { id: "summary" },
+  { id: "writing" },
+  { id: "explain" },
+];
 
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
@@ -422,6 +445,20 @@ function AssistantWorkspace() {
     () => [...(bootstrap?.models ?? []), ...(bootstrap?.audioModels ?? [])],
     [bootstrap?.models, bootstrap?.audioModels],
   );
+  const localDefinition = Boolean(bootstrap?.localConfigDefinition);
+  const starters = useMemo(() => {
+    const scenario =
+      composerModel?.tools === false
+        ? []
+        : SCENARIO_STARTERS.filter((starter) =>
+            starter.kind
+              ? generationModels(generationCatalog, starter.kind).length > 0
+              : localDefinition,
+          );
+    return scenario.length > 0
+      ? [...scenario, { id: "summary" }]
+      : TEXT_STARTERS;
+  }, [composerModel?.tools, generationCatalog, localDefinition]);
   const queueCount = assistant.queue?.messages.length ?? 0;
   const queueMode = !session?.audioOnly && Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
@@ -1268,13 +1305,19 @@ function AssistantWorkspace() {
                       )}
                       {writable && !assistant.draft.trim() && (
                         <div className="mt-5 flex flex-wrap justify-center gap-2">
-                          {STARTERS.map((id) => (
+                          {starters.map(({ id, kind }) => (
                             <Button
                               key={id}
                               variant="pill"
                               className="h-8 px-3.5 text-ctl"
                               onClick={() => {
                                 focusStarter.current = true;
+                                const hints = assistant.media.hints ?? [];
+                                if (kind && !hints.includes(kind))
+                                  assistant.setMedia({
+                                    ...assistant.media,
+                                    hints: [...hints, kind],
+                                  });
                                 assistant.setDraft(
                                   t(`assistant.starters.${id}.prompt`),
                                 );
