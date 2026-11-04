@@ -18,6 +18,14 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { useUpdate } from "@/contexts/UpdateContext";
 import { SessionsPanel } from "@/components/sessions/SessionsPanel";
 import { ShellFrame } from "@/components/shell/ShellFrame";
+import {
+  PAGE_BODY,
+  PAGE_BODY_WIDE,
+  PageHeader,
+  ShellRefreshButton,
+} from "@/components/shell/PageHeader";
+import { cn } from "@/lib/utils";
+import type { SidebarAccountState } from "@/components/shell/SidebarAccount";
 import { LibraryPage } from "@/components/library/LibraryPage";
 import {
   ShellProvider,
@@ -104,7 +112,11 @@ export default function ConsolePage(props: ConsolePageProps) {
   return (
     <InteractionScope active={active}>
       <ShellProvider openSettings={openSettings}>
-        <ConsoleShell {...props} settingsButtonRef={settingsButton} />
+        {props.localOnly ? (
+          <ConsoleShell {...props} settingsButtonRef={settingsButton} />
+        ) : (
+          <SignedConsoleShell {...props} settingsButtonRef={settingsButton} />
+        )}
         <OfoxSettingsDialog
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
@@ -115,6 +127,16 @@ export default function ConsolePage(props: ConsolePageProps) {
   );
 }
 
+type ShellProps = ConsolePageProps & {
+  settingsButtonRef: Ref<HTMLButtonElement>;
+};
+
+/** A bound account: one account state for the sidebar and the pages. */
+function SignedConsoleShell(props: ShellProps) {
+  const account = useOfoxAccount();
+  return <ConsoleShell {...props} account={account} />;
+}
+
 function ConsoleShell({
   boundTools,
   onBoundToolsChanged,
@@ -122,10 +144,19 @@ function ConsoleShell({
   localSignedIn,
   onLoginRequested,
   settingsButtonRef,
-}: ConsolePageProps & { settingsButtonRef: Ref<HTMLButtonElement> }) {
+  account,
+}: ShellProps & { account?: OfoxAccount }) {
   const { t } = useTranslation();
+  const sidebarAccount: SidebarAccountState =
+    account && !localOnly
+      ? { kind: "signed", account }
+      : {
+          kind: "local",
+          signedIn: Boolean(localSignedIn),
+          onAction: () => onLoginRequested?.(),
+        };
   const shell = useShell();
-  // 应用自更新的首次发现弹窗；常驻的提示在顶栏（UpdatePill）。数据源 =
+  // 应用自更新的首次发现弹窗；常驻的提示在侧栏底部（UpdatePill）。数据源 =
   // UpdateContext（自动检查走 R2 latest.json）。
   const {
     updateInfo,
@@ -143,6 +174,7 @@ function ConsoleShell({
 
   return (
     <ShellFrame
+      account={sidebarAccount}
       settingsButtonRef={settingsButtonRef}
       banner={
         <div className="px-4">
@@ -152,25 +184,32 @@ function ConsoleShell({
     >
       <div
         {...panel("tools")}
-        className="h-full overscroll-contain overflow-y-auto px-[max(16px,calc(50%-600px))] pb-6 pt-1"
+        className="h-full overscroll-contain overflow-y-auto pb-6"
       >
-        {localOnly ? (
+        {localOnly || !account ? (
           <LocalToolsPanel
             signedIn={localSignedIn}
             onLoginRequested={onLoginRequested}
           />
         ) : (
-          <SignedToolsPanel
+          <ToolsPanel
             boundTools={boundTools}
             onBoundToolsChanged={onBoundToolsChanged}
+            account={account}
           />
         )}
       </div>
 
       {shell.visited.has("sessions") && (
-        <div {...panel("sessions")} className="h-full px-4 pb-4 pt-1">
+        <div {...panel("sessions")} className="flex h-full flex-col">
+          <PageHeader
+            wide
+            title={t("pages.sessions.title")}
+            description={t("pages.sessions.description")}
+            actions={<ShellRefreshButton />}
+          />
           <SessionsPanel
-            className="h-full min-h-0"
+            className={cn(PAGE_BODY_WIDE, "min-h-0 flex-1 pb-4 pt-0")}
             onAnalyze={shell.locateUsage}
             onConfigure={(section) =>
               section === "tools"
@@ -185,10 +224,10 @@ function ConsoleShell({
           {...panel("usage")}
           className="h-full overflow-y-auto px-4 pb-4 pt-1"
         >
-          {localOnly ? (
+          {localOnly || !account ? (
             <UsagePage account={LOCAL_ACCOUNT} boundTools={[]} />
           ) : (
-            <SignedUsagePage boundTools={boundTools} />
+            <UsagePage boundTools={boundTools} account={account} />
           )}
         </div>
       )}
@@ -219,7 +258,7 @@ function ConsoleShell({
         </div>
       )}
 
-      {/* 首次发现新版本的提示对话框。顶栏的 UpdatePill 常驻（hasUpdate &&
+      {/* 首次发现新版本的提示对话框。侧栏的 UpdatePill 常驻（hasUpdate &&
           !isDismissed），这里只在本会话首次发现时弹一次，弹过即由
           markPrompted 关闭，避免每次定时复查都打扰。 */}
       <ConfirmDialog
@@ -242,7 +281,7 @@ function ConsoleShell({
           }
         }}
         onCancel={() => {
-          // "稍后"：仅关闭弹窗，顶栏的 UpdatePill 保留。
+          // "稍后"：仅关闭弹窗，侧栏的 UpdatePill 保留。
           markPrompted();
         }}
       />
@@ -261,18 +300,6 @@ const LOCAL_ACCOUNT: OfoxAccount = {
   refreshBalance: async () => undefined,
 };
 
-function SignedToolsPanel(
-  props: Pick<ConsolePageProps, "boundTools" | "onBoundToolsChanged">,
-) {
-  const account = useOfoxAccount();
-  return <ToolsPanel {...props} account={account} />;
-}
-
-function SignedUsagePage({ boundTools }: { boundTools: string[] }) {
-  const account = useOfoxAccount();
-  return <UsagePage boundTools={boundTools} account={account} />;
-}
-
 function LocalToolsPanel({
   signedIn,
   onLoginRequested,
@@ -285,21 +312,22 @@ function LocalToolsPanel({
   useShellRefresh("tools", () => catalog.current?.refresh());
   return (
     <>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-ui font-semibold">
-            {t("toolCatalog.localTitle")}
-          </h1>
-          <p className="text-note text-ink-muted">
-            {t("toolCatalog.localDescription")}
-          </p>
-        </div>
-        {/* The page's one way on, so the brand button: sign in, then bind. */}
-        <Button variant="primary" onClick={onLoginRequested}>
-          {t(signedIn ? "toolCatalog.bindOptional" : "toolCatalog.login")}
-        </Button>
+      <PageHeader
+        title={t("toolCatalog.localTitle")}
+        description={t("toolCatalog.localDescription")}
+        actions={
+          <>
+            {/* The page's one way on, so the brand button: sign in, then bind. */}
+            <Button variant="primary" onClick={onLoginRequested}>
+              {t(signedIn ? "toolCatalog.bindOptional" : "toolCatalog.login")}
+            </Button>
+            <ShellRefreshButton />
+          </>
+        }
+      />
+      <div className={PAGE_BODY}>
+        <OptionalToolsCatalog ref={catalog} boundTools={[]} />
       </div>
-      <OptionalToolsCatalog ref={catalog} boundTools={[]} />
     </>
   );
 }

@@ -292,7 +292,20 @@
     "usage": {
       "webDetails": "在网页查看详细用量 ↗"
     },
-    "website": "Ofox 网站 ↗"
+    "website": "Ofox 网站 ↗",
+    "groups": {
+      "use": "使用",
+      "observe": "观测"
+    },
+    "sidebar": {
+      "collapse": "收起侧栏",
+      "expand": "展开侧栏"
+    },
+    "account": {
+      "balance": "余额 {{amount}}",
+      "refresh": "刷新余额",
+      "settings": "账户设置"
+    }
   },
   "firstRunNotice": {
     "title": "欢迎使用 Ofox Desktop",
@@ -5639,6 +5652,16 @@
       "overLimit": "生成视频最多使用 9 张参考图、3 段音频（每段不超过 15 秒）和 1 个视频，请删掉多余的附件。",
       "needsTools": "当前模型不能调用工具，无法生成图片、视频或语音。请换一个模型。",
       "readAloudFailed": "朗读失败，请稍后再试。"
+    }
+  },
+  "pages": {
+    "tools": {
+      "title": "工具",
+      "description": "用一个 Ofox 账户管理你的 AI 编程工具"
+    },
+    "sessions": {
+      "title": "会话",
+      "description": "各工具的历史会话，搜索、续聊、查看用量"
     }
   }
 }

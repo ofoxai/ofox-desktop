@@ -11,14 +11,15 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 /**
- * magpie's `.update`: a quiet brand pill before the header's icons while a
- * newer Ofox Desktop is out. It opens a menu to fetch it or skip it.
+ * A quiet brand row at the sidebar's foot while a newer Ofox Desktop is
+ * out. It opens a menu to fetch it or skip it.
  */
 export function UpdatePill({
-  compact,
+  variant = "row",
 }: {
-  /** The rail's form: an icon, its text the button's name and tooltip. */
-  compact?: boolean;
+  /** "row": the expanded sidebar's full-width row; "icon": the collapsed
+   *  sidebar's, its text the button's name and tooltip. */
+  variant?: "row" | "icon";
 }) {
   const { t } = useTranslation();
   const { hasUpdate, isDismissed, updateInfo, dismissUpdate } = useUpdate();
@@ -40,7 +41,7 @@ export function UpdatePill({
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        {compact ? (
+        {variant === "icon" ? (
           <button
             type="button"
             aria-label={label}
@@ -52,14 +53,18 @@ export function UpdatePill({
         ) : (
           <button
             type="button"
-            className="mr-1.5 inline-flex h-[22px] items-center gap-1 whitespace-nowrap rounded-full bg-brand-soft pl-[7px] pr-[9px] text-[11.5px] font-semibold tracking-[.005em] text-brand-ink shadow-[inset_0_0_0_.5px_rgb(var(--brand)/.35)] transition-[background-color,color,transform] duration-150 ease-soft hover:bg-brand hover:text-brand-on active:scale-[.96] data-[state=open]:bg-brand data-[state=open]:text-brand-on"
+            className="mb-1 flex h-[30px] w-full items-center gap-2 whitespace-nowrap rounded-[8px] bg-brand-soft px-2.5 text-[12px] font-semibold text-brand-ink transition-[background-color,color] duration-150 ease-soft hover:bg-brand hover:text-brand-on data-[state=open]:bg-brand data-[state=open]:text-brand-on"
           >
-            <ArrowUpCircle aria-hidden className="h-3 w-3" />
+            <ArrowUpCircle aria-hidden className="h-3.5 w-3.5" />
             {label}
           </button>
         )}
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-[150px]">
+      <DropdownMenuContent
+        align="start"
+        side={variant === "icon" ? "right" : "top"}
+        className="min-w-[150px]"
+      >
         <DropdownMenuItem disabled={!downloadUrl} onSelect={openDownload}>
           {t("shell.update.now")}
         </DropdownMenuItem>

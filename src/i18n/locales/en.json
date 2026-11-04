@@ -292,7 +292,20 @@
     "usage": {
       "webDetails": "View detailed usage on the web ↗"
     },
-    "website": "Ofox website ↗"
+    "website": "Ofox website ↗",
+    "groups": {
+      "use": "Use",
+      "observe": "Observe"
+    },
+    "sidebar": {
+      "collapse": "Collapse sidebar",
+      "expand": "Expand sidebar"
+    },
+    "account": {
+      "balance": "Balance {{amount}}",
+      "refresh": "Refresh balance",
+      "settings": "Account settings"
+    }
   },
   "firstRunNotice": {
     "title": "Welcome to Ofox Desktop",
@@ -5639,6 +5652,16 @@
       "overLimit": "A video can use at most 9 reference images, 3 audio clips (15 seconds each at most) and 1 video. Remove the extra files.",
       "needsTools": "This model cannot use tools, so it cannot generate images, videos or speech. Choose another model.",
       "readAloudFailed": "Reading aloud failed. Try again later."
+    }
+  },
+  "pages": {
+    "tools": {
+      "title": "Tools",
+      "description": "Run your AI coding tools on one Ofox account"
+    },
+    "sessions": {
+      "title": "Sessions",
+      "description": "Every tool's past sessions: search, resume, see what they used"
     }
   }
 }

@@ -292,7 +292,20 @@
     "usage": {
       "webDetails": "ウェブで詳しい使用量を見る ↗"
     },
-    "website": "Ofox ウェブサイト ↗"
+    "website": "Ofox ウェブサイト ↗",
+    "groups": {
+      "use": "使う",
+      "observe": "観測"
+    },
+    "sidebar": {
+      "collapse": "サイドバーを閉じる",
+      "expand": "サイドバーを開く"
+    },
+    "account": {
+      "balance": "残高 {{amount}}",
+      "refresh": "残高を更新",
+      "settings": "アカウント設定"
+    }
   },
   "firstRunNotice": {
     "title": "Ofox Desktop へようこそ",
@@ -5639,6 +5652,16 @@
       "overLimit": "動画に使えるのは参照画像 9 枚、音声 3 本（各 15 秒以内）、動画 1 本までです。余分なファイルを外してください。",
       "needsTools": "このモデルはツールを使えないため、画像・動画・音声を生成できません。別のモデルを選んでください。",
       "readAloudFailed": "読み上げに失敗しました。しばらくしてからもう一度お試しください。"
+    }
+  },
+  "pages": {
+    "tools": {
+      "title": "ツール",
+      "description": "1 つの Ofox アカウントで AI コーディングツールを管理"
+    },
+    "sessions": {
+      "title": "セッション",
+      "description": "各ツールの過去のセッションを検索・再開し、使用量を確認"
     }
   }
 }
