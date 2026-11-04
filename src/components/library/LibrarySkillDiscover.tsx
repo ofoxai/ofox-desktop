@@ -28,6 +28,9 @@ import type { LibraryRecommendation } from "./libraryRecommendations";
 
 const PAGE_SIZE = 40;
 const REPOS_KEY = ["skillDiscoveryRepos"];
+const CONFIRMED_PATHS_KEY = ["skillDiscoveryConfirmedPaths"];
+const upstreamIdentity = (skill: DiscoverableSkill) =>
+  `${skill.repoOwner.toLowerCase()}/${skill.repoName.toLowerCase()}:${skill.directory}`;
 const repoId = (repo: SkillRepo) => `${repo.owner}/${repo.name}`;
 type Source = "repos" | "skillssh" | "featured";
 type SkillCard = DiscoverableSkill & { installs?: number; official?: boolean };
@@ -51,6 +54,16 @@ export function LibrarySkillDiscover({
 }) {
   const { t } = useTranslation();
   const client = useQueryClient();
+  // A skills.sh slug is not a repository path. Only an explicit source choice
+  // links that upstream identity to an exact path, for this app lifetime.
+  const confirmedPaths = useQuery<Record<string, string>>({
+    queryKey: CONFIRMED_PATHS_KEY,
+    queryFn: () => ({}),
+    initialData: {},
+    enabled: false,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
   const [source, setSource] = useState<Source>("skillssh");
   const [search, setSearch] = useState("");
   const [submitted, setSubmitted] = useState("");
@@ -172,6 +185,17 @@ export function LibrarySkillDiscover({
       ? [...unique.values()]
       : [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [source, showingPopular, catalogs, online.data]);
+  const collectionKey = (skill: DiscoverableSkill) =>
+    source === "repos"
+      ? skill.key
+      : confirmedPaths.data[upstreamIdentity(skill)];
+  const isCollected = (skill: DiscoverableSkill) => {
+    const key = collectionKey(skill);
+    return (
+      key !== undefined &&
+      rows.some((row) => collectedRepositorySkill(row, key))
+    );
+  };
   const needle = search.trim().toLocaleLowerCase();
   const filtered = discovered.filter((skill) => {
     if (
@@ -180,7 +204,7 @@ export function LibrarySkillDiscover({
       `${skill.repoOwner}/${skill.repoName}` !== repository
     )
       return false;
-    if (onlyNew && rows.some((row) => collectedRepositorySkill(row, skill.key)))
+    if (onlyNew && (collectionKey(skill) === undefined || isCollected(skill)))
       return false;
     return (
       source !== "repos" ||
@@ -347,7 +371,11 @@ export function LibrarySkillDiscover({
                   setPage(0);
                 }}
               />
-              {t("library.skillDiscover.onlyNew")}
+              {t(
+                source === "skillssh"
+                  ? "library.skillDiscover.onlyConfirmedNew"
+                  : "library.skillDiscover.onlyNew",
+              )}
             </label>
             <span
               role="status"
@@ -371,6 +399,11 @@ export function LibrarySkillDiscover({
                   })}
             </span>
           </div>
+          {source === "skillssh" && onlyNew && (
+            <p className="text-note text-ink-muted">
+              {t("library.skillDiscover.confirmedFilterHelp")}
+            </p>
+          )}
           {((repos.isError && source === "repos") ||
             (online.isError &&
               source === "skillssh" &&
@@ -427,9 +460,8 @@ export function LibrarySkillDiscover({
             }
           >
             {visible.map((skill) => {
-              const collected = rows.some((row) =>
-                collectedRepositorySkill(row, skill.key),
-              );
+              const collected = isCollected(skill);
+              const unresolved = collectionKey(skill) === undefined;
               return (
                 <article
                   key={skill.key}
@@ -475,6 +507,11 @@ export function LibrarySkillDiscover({
                           {skill.repoOwner}/{skill.repoName}
                         </button>
                       </div>
+                      {unresolved && (
+                        <p className="mt-1 text-note text-ink-faint">
+                          {t("library.skillDiscover.collectionUnresolved")}
+                        </p>
+                      )}
                       {skill.description && (
                         <p className="mt-1 line-clamp-2 text-note text-ink-muted">
                           {skill.description}
@@ -617,6 +654,15 @@ export function LibrarySkillDiscover({
                   variant="secondary"
                   disabled={busy}
                   onClick={() => {
+                    if (resolving) {
+                      client.setQueryData<Record<string, string>>(
+                        CONFIRMED_PATHS_KEY,
+                        (current) => ({
+                          ...current,
+                          [upstreamIdentity(resolving)]: skill.key,
+                        }),
+                      );
+                    }
                     resolvedSelection.current = true;
                     onChoose(skill);
                     setResolving(null);

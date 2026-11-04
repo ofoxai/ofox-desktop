@@ -21,13 +21,9 @@ const item = (name: string, owner = "example"): DiscoverableSkill => ({
   repoBranch: "main",
 });
 const choose = vi.fn();
-function page(rows: SkillDefinition[] = []) {
-  return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
+function discovery(rows: SkillDefinition[], client: QueryClient) {
+  return (
+    <QueryClientProvider client={client}>
       <LibrarySkillDiscover
         rows={rows}
         busy={false}
@@ -35,9 +31,27 @@ function page(rows: SkillDefinition[] = []) {
         onChooseRecipe={vi.fn()}
         onOpenSource={vi.fn()}
       />
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
 }
+function page(
+  rows: SkillDefinition[] = [],
+  client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  }),
+) {
+  return render(discovery(rows, client));
+}
+const collectedRow = (skill: DiscoverableSkill): SkillDefinition =>
+  ({
+    id: skill.key,
+    name: skill.name,
+    directory: skill.directory,
+    sourceKind: "repository",
+    repository: `${skill.repoOwner}/${skill.repoName}`,
+    sourceState: "ready",
+    targets: [],
+  }) as SkillDefinition;
 beforeEach(async () => {
   vi.restoreAllMocks();
   choose.mockReset();
@@ -302,4 +316,194 @@ it("returns focus to a popular Add button after cancelling source resolution", a
   await screen.findByRole("dialog", { name: "确认技能来源" });
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(trigger).toHaveFocus());
+});
+
+it("keeps a confirmed nested identity collected after rows update and discovery remount, and filters it out", async () => {
+  const popular = POPULAR_SKILLS[0];
+  const [owner, name] = popular.source.split("/");
+  const actual = {
+    ...item(popular.name, owner),
+    repoName: name,
+    key: `${popular.source}:nested/${popular.skillId}`,
+    directory: `nested/${popular.skillId}`,
+    repoBranch: "HEAD",
+  };
+  vi.mocked(skillsApi.discoverRepository).mockResolvedValue([actual]);
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const view = page([], client);
+  await userEvent.click(
+    within(screen.getByRole("article", { name: popular.name })).getByRole(
+      "button",
+      { name: "添加" },
+    ),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "确认技能来源" });
+  await userEvent.click(
+    await within(dialog).findByRole("button", { name: "使用此来源" }),
+  );
+  expect(choose).toHaveBeenCalledWith(actual);
+  view.rerender(discovery([collectedRow(actual)], client));
+  expect(
+    within(screen.getByRole("article", { name: popular.name })).getByRole(
+      "button",
+      { name: "已收录" },
+    ),
+  ).toBeDisabled();
+  view.unmount();
+  const reopened = page([collectedRow(actual)], client);
+  expect(
+    within(screen.getByRole("article", { name: popular.name })).getByRole(
+      "button",
+      { name: "已收录" },
+    ),
+  ).toBeDisabled();
+  await userEvent.click(
+    screen.getByRole("checkbox", { name: "只看已确认未收录" }),
+  );
+  expect(screen.queryByRole("article", { name: popular.name })).toBeNull();
+  reopened.unmount();
+  page([collectedRow(actual)]);
+  const restarted = screen.getByRole("article", { name: popular.name });
+  expect(within(restarted).getByText("收录状态待确认")).toBeVisible();
+  expect(
+    within(restarted).queryByRole("button", { name: "已收录" }),
+  ).toBeNull();
+});
+
+it("keeps initial or restarted popular identities unresolved even when a row has the same name or slug", async () => {
+  const popular = POPULAR_SKILLS[0];
+  const [owner, name] = popular.source.split("/");
+  const actual = {
+    ...item(popular.name, owner),
+    repoName: name,
+    key: `${popular.source}:${popular.skillId}`,
+    directory: popular.skillId,
+  };
+  page([collectedRow(actual)]);
+  const card = screen.getByRole("article", { name: popular.name });
+  expect(within(card).getByText("收录状态待确认")).toBeVisible();
+  expect(within(card).queryByRole("button", { name: "已收录" })).toBeNull();
+  await userEvent.click(
+    screen.getByRole("checkbox", { name: "只看已确认未收录" }),
+  );
+  expect(screen.queryByRole("article", { name: popular.name })).toBeNull();
+  expect(
+    screen.getByText(
+      "仅显示本次打开应用后已确认来源、且尚未收录的技能。其他技能的收录状态待确认。",
+    ),
+  ).toBeVisible();
+});
+
+it("does not merge same-name or same-basename candidates until each upstream identity is explicitly confirmed", async () => {
+  const first = {
+    source: "example/catalog",
+    skillId: "foo",
+    name: "same display",
+    installs: 20,
+    official: false,
+    description: "first upstream",
+  };
+  const second = { ...first, skillId: "bar", description: "second upstream" };
+  const actualA = {
+    ...item(first.name),
+    key: "example/catalog:a/foo",
+    directory: "a/foo",
+    repoBranch: "HEAD",
+  };
+  const actualB = {
+    ...actualA,
+    key: "example/catalog:b/foo",
+    directory: "b/foo",
+  };
+  POPULAR_SKILLS.unshift(first, second);
+  try {
+    vi.mocked(skillsApi.discoverRepository).mockResolvedValue([
+      actualA,
+      actualB,
+    ]);
+    page([collectedRow(actualA)]);
+    let cards = screen.getAllByRole("article", { name: first.name });
+    await userEvent.click(
+      within(cards[0]).getByRole("button", { name: "添加" }),
+    );
+    let dialog = await screen.findByRole("dialog", { name: "确认技能来源" });
+    await within(dialog).findByText("a/foo");
+    expect(
+      within(dialog).getAllByRole("button", { name: "使用此来源" }),
+    ).toHaveLength(2);
+    expect(choose).not.toHaveBeenCalled();
+    expect(within(cards[0]).getByText("收录状态待确认")).toBeVisible();
+    await userEvent.click(
+      within(
+        within(dialog).getByText("a/foo").parentElement!.parentElement!,
+      ).getByRole("button", { name: "使用此来源" }),
+    );
+    cards = screen.getAllByRole("article", { name: first.name });
+    expect(
+      within(cards[0]).getByRole("button", { name: "已收录" }),
+    ).toBeDisabled();
+    expect(within(cards[1]).getByText("收录状态待确认")).toBeVisible();
+    expect(
+      within(cards[1]).getByRole("button", { name: "添加" }),
+    ).toBeEnabled();
+    await userEvent.click(
+      within(cards[1]).getByRole("button", { name: "添加" }),
+    );
+    dialog = await screen.findByRole("dialog", { name: "确认技能来源" });
+    await userEvent.click(
+      within(
+        within(dialog).getByText("b/foo").parentElement!.parentElement!,
+      ).getByRole("button", { name: "使用此来源" }),
+    );
+    expect(choose).toHaveBeenLastCalledWith(actualB);
+    await userEvent.click(
+      screen.getByRole("checkbox", { name: "只看已确认未收录" }),
+    );
+    cards = screen.getAllByRole("article", { name: first.name });
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveTextContent("second upstream");
+    expect(
+      within(cards[0]).getByRole("button", { name: "添加" }),
+    ).toBeEnabled();
+  } finally {
+    POPULAR_SKILLS.splice(0, 2);
+  }
+});
+
+it("uses the same confirmed exact identity for a matching live skills.sh result", async () => {
+  const popular = POPULAR_SKILLS[0];
+  const [owner, name] = popular.source.split("/");
+  const actual = {
+    ...item(popular.name, owner),
+    repoName: name,
+    key: `${popular.source}:nested/${popular.skillId}`,
+    directory: `nested/${popular.skillId}`,
+    repoBranch: "HEAD",
+  };
+  vi.mocked(skillsApi.discoverRepository).mockResolvedValue([actual]);
+  vi.spyOn(skillsApi, "searchSkillsSh").mockResolvedValue({
+    query: "live",
+    totalCount: 1,
+    skills: [{ ...actual, directory: popular.skillId, installs: 10 }],
+  });
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const view = page([], client);
+  await userEvent.click(
+    within(screen.getByRole("article", { name: popular.name })).getByRole(
+      "button",
+      { name: "添加" },
+    ),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "确认技能来源" });
+  await userEvent.click(
+    await within(dialog).findByRole("button", { name: "使用此来源" }),
+  );
+  view.rerender(discovery([collectedRow(actual)], client));
+  await userEvent.type(screen.getByRole("searchbox"), "live");
+  const result = await screen.findByRole("article", { name: popular.name });
+  expect(within(result).getByRole("button", { name: "已收录" })).toBeDisabled();
 });
