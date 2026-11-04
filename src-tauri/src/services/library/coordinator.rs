@@ -692,6 +692,7 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
             snapshot = persist(db, &snapshot, &op, None)?;
         }
         let source_valid = verify_sources(&op.targets[index], &op.targets);
+        let enabling = super::assistant_target::is_newly_enabled(&op, &op.targets[index]);
         let target = &mut op.targets[index];
         if target.status == "applied" || target.status == "conflict" || target.after_hash.is_empty()
         {
@@ -701,16 +702,6 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         let result = (|| {
             source_valid?;
             if op.kind == super::ResourceKind::Skills {
-                let assistant_key =
-                    format!("skills:{}:{}", op.resource_id, super::assistant_target::ID);
-                let enabling = target
-                    .receipt
-                    .as_ref()
-                    .is_some_and(|r| r.owners.iter().any(|o| o == super::assistant_target::ID))
-                    && op
-                        .previous_assignments
-                        .get(&assistant_key)
-                        .is_none_or(|value| value.is_none());
                 return super::assistant_target::write_target(target, enabling);
             }
             if physical(&path)?.to_string_lossy() != target.physical_target {

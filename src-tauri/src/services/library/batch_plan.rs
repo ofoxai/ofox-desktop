@@ -581,7 +581,10 @@ pub(super) fn write_group(journal: &Journal, index: usize) -> Result<(), AppErro
     let group = &journal.groups[index];
     if journal.kind == ResourceKind::Skills {
         let member = &group.members[0];
-        return skill_resource::write(&journal.plans[member.child].targets[member.target]);
+        let operation = &journal.plans[member.child];
+        let target = &operation.targets[member.target];
+        let enabling = super::super::assistant_target::is_newly_enabled(operation, target);
+        return super::super::assistant_target::write_target(target, enabling);
     }
     if io::physical_id(Path::new(&group.path))? != group.physical_target
         || io::fingerprint(

@@ -545,6 +545,19 @@ pub(super) fn validate_operation(op: &super::Operation) -> Result<(), AppError> 
     }
     Ok(())
 }
+/// Derive new assistant ownership from the frozen plan for both write entry points.
+pub(super) fn is_newly_enabled(op: &super::Operation, target: &super::TargetWrite) -> bool {
+    op.kind == ResourceKind::Skills
+        && target
+            .receipt
+            .as_ref()
+            .is_some_and(|r| r.owners.iter().any(|owner| owner == ID))
+        && op
+            .previous_assignments
+            .get(&format!("skills:{}:{ID}", op.resource_id))
+            .is_none_or(|value| value.is_none())
+}
+
 /// A newly enabled entry starts Auto. State write failure prevents target mutation.
 pub(super) fn write_target(target: &super::TargetWrite, enabling: bool) -> Result<(), AppError> {
     if !enabling {
