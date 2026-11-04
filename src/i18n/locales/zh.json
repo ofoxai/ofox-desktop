@@ -5143,7 +5143,8 @@
       "output": "输出 Tokens",
       "search": "联网搜索 ×{{count}}",
       "total": "本轮费用（估算）",
-      "chat": "对话模型"
+      "chat": "对话模型",
+      "generationUnpriced": "这项生成没有可预估的价格（例如按 Token 计费的语音，或仍在生成的视频），总费用以账单为准。"
     },
     "replyDetails": "回复详情",
     "replyDuration": "耗时 {{duration}}",

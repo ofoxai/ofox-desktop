@@ -222,6 +222,48 @@ describe("a reply's usage", () => {
     expect(popover).toHaveTextContent("This reply (estimate)$0.02");
   });
 
+  it("keeps the chat model's cost when a generation has no price, and says why the total is unknown", async () => {
+    render(
+      view({
+        modelId: "openai/gpt-5-mini",
+        completedAt: 2_000,
+        usage: {
+          outputTokens: 40,
+          chatCostUsd: "0.0004",
+          mediaCostUsd: null,
+          estimatedCostUsd: null,
+          requests: [
+            {
+              kind: "chat",
+              status: "completed",
+              usage: { cost: { output: 0.0004 } },
+            },
+            {
+              kind: "speech",
+              modelId: "google/tts",
+              toolCallId: "call-1",
+              status: "completed",
+              estimatedCostUsd: null,
+            },
+          ],
+        },
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Reply details" }),
+    );
+    const popover = await screen.findByRole("dialog");
+    const row = (name: string | RegExp) =>
+      within(popover).getByText(name).closest("[data-usage-line]")!;
+    expect(row("Chat model")).toHaveTextContent("$0.000400");
+    expect(row("Output tokens")).toHaveTextContent("$0.000400");
+    expect(row(/^Generate speech/)).toHaveTextContent("—");
+    expect(popover).toHaveTextContent(
+      en.assistant.usageLines.generationUnpriced,
+    );
+    expect(popover).toHaveTextContent("This reply (estimate)Cost unavailable");
+  });
+
   it("lists each line with its tokens and cost, like ofox-agent", async () => {
     render(
       view({

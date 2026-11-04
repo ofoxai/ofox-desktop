@@ -16,6 +16,7 @@ import {
   DialogContent,
   DialogDescription,
   DialogFooter,
+  DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
@@ -377,36 +378,40 @@ function RegenerateDialog({
   };
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
-      <DialogContent className="max-w-[560px] gap-3">
-        <DialogTitle>{t("assistant.generation.regenerateTitle")}</DialogTitle>
-        <DialogDescription>
-          {t("assistant.generation.regenerateNote")}
-        </DialogDescription>
-        <Textarea
-          rows={4}
-          aria-label={t(
-            item.kind === "speech"
-              ? "assistant.generation.text"
-              : "assistant.generation.prompt",
+      <DialogContent className="max-w-[560px]">
+        <DialogHeader>
+          <DialogTitle>{t("assistant.generation.regenerateTitle")}</DialogTitle>
+          <DialogDescription>
+            {t("assistant.generation.regenerateNote")}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex min-h-0 flex-col gap-3 overflow-y-auto px-[18px] py-4">
+          <Textarea
+            rows={4}
+            aria-label={t(
+              item.kind === "speech"
+                ? "assistant.generation.text"
+                : "assistant.generation.prompt",
+            )}
+            value={prompt}
+            onChange={(event) => setPrompt(event.target.value)}
+            className="resize-none text-ui"
+          />
+          <MediaDefaultsFields
+            kind={item.kind}
+            models={models}
+            value={fields}
+            onChange={setFields}
+            disabled={busy}
+          />
+          {confirmed && (
+            <p role="status" className="text-note text-ink-2">
+              {confirmed.cost
+                ? t("assistant.generation.estimate", { cost: confirmed.cost })
+                : t("assistant.generation.estimateUnknown")}
+            </p>
           )}
-          value={prompt}
-          onChange={(event) => setPrompt(event.target.value)}
-          className="resize-none text-ui"
-        />
-        <MediaDefaultsFields
-          kind={item.kind}
-          models={models}
-          value={fields}
-          onChange={setFields}
-          disabled={busy}
-        />
-        {confirmed && (
-          <p role="status" className="text-note text-ink-2">
-            {confirmed.cost
-              ? t("assistant.generation.estimate", { cost: confirmed.cost })
-              : t("assistant.generation.estimateUnknown")}
-          </p>
-        )}
+        </div>
         <DialogFooter>
           <Button variant="ghost" disabled={busy} onClick={onClose}>
             {t("common.cancel")}

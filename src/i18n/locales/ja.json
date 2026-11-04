@@ -5143,7 +5143,8 @@
       "output": "出力トークン",
       "search": "ウェブ検索 ×{{count}}",
       "total": "今回の費用（推定）",
-      "chat": "チャットモデル"
+      "chat": "チャットモデル",
+      "generationUnpriced": "この生成には見積もれる価格がありません（トークン課金の音声や生成中の動画など）。合計は請求でご確認ください。"
     },
     "replyDetails": "返信の詳細",
     "replyDuration": "所要時間 {{duration}}",

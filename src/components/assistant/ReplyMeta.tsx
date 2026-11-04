@@ -180,6 +180,13 @@ export function ReplyMeta({
                         </span>
                       </div>
                     ))}
+                    {breakdown.generations.some(
+                      (line) => line.usd === null,
+                    ) && (
+                      <p className="pt-0.5 leading-snug text-ink-muted">
+                        {t("assistant.usageLines.generationUnpriced")}
+                      </p>
+                    )}
                   </div>
                 )}
                 <div className="flex items-baseline justify-between gap-3 border-t border-line bg-surface-tertiary px-3 py-2 text-ink">

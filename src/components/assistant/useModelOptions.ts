@@ -55,12 +55,15 @@ export function useModelOptions(
         }
         if (kind === "video") {
           const caps = model.video;
-          const notes = [
+          const price =
             caps?.fromPricePerSecond != null
               ? t("assistant.video.fromPrice", {
                   price: caps.fromPricePerSecond,
                 })
-              : "",
+              : "";
+          // The price beside the name, the rest on a line of its own: all of
+          // it on one line leaves the name a few letters.
+          const specs = [
             caps?.minDuration != null && caps.maxDuration != null
               ? t("assistant.video.durationRange", {
                   min: caps.minDuration,
@@ -73,8 +76,9 @@ export function useModelOptions(
           return {
             value: model.id,
             label: model.shortName || model.name,
-            meta: notes.join(" · ") || undefined,
-            title: [model.name, ...notes].join(" · "),
+            meta: price || undefined,
+            note: specs.join(" · ") || undefined,
+            title: [model.name, price, ...specs].filter(Boolean).join(" · "),
             group: vendor,
             groupLabel: label,
           };

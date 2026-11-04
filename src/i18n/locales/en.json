@@ -5143,7 +5143,8 @@
       "output": "Output tokens",
       "search": "Web search ×{{count}}",
       "total": "This reply (estimate)",
-      "chat": "Chat model"
+      "chat": "Chat model",
+      "generationUnpriced": "This generation has no price to estimate from (speech billed by tokens, or a video still being made); the bill has the total."
     },
     "replyDetails": "Reply details",
     "replyDuration": "Took {{duration}}",
