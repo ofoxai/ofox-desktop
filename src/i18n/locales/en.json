@@ -4436,6 +4436,9 @@
       "showMine": "View My resources"
     },
     "skillDiscover": {
+      "popular": "Popular skills",
+      "add": "Add",
+      "official": "Official",
       "source": "Discovery source",
       "repos": "Repositories · {{count}}",
       "featured": "Featured",

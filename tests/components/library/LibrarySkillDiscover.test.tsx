@@ -6,6 +6,10 @@ import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import { LibrarySkillDiscover } from "@/components/library/LibrarySkillDiscover";
 import { skillsApi, type DiscoverableSkill } from "@/lib/api/skills";
+import {
+  POPULAR_SKILLS,
+  formatInstalls,
+} from "@/components/library/popularSkills";
 import type { SkillDefinition } from "@/lib/api/library";
 const item = (name: string, owner = "example"): DiscoverableSkill => ({
   key: `${owner}/catalog:skills/${name}`,
@@ -59,6 +63,7 @@ it("filters by description and exact provenance, and never installs while browsi
       targets: [],
     } as SkillDefinition,
   ]);
+  await userEvent.click(screen.getByRole("radio", { name: /仓库/ }));
   const alpha = await screen.findByRole("article", { name: "alpha" });
   expect(within(alpha).getByRole("button", { name: "已收录" })).toBeDisabled();
   await userEvent.click(screen.getByRole("checkbox", { name: "只看未收录" }));
@@ -76,6 +81,7 @@ it("renders a bounded page and filters across the entire repository catalog", as
     ),
   );
   page();
+  await userEvent.click(screen.getByRole("radio", { name: /仓库/ }));
   await screen.findByRole("article", { name: "skill-000" });
   expect(screen.getAllByRole("article")).toHaveLength(40);
   await userEvent.type(screen.getByRole("searchbox"), "skill-500");
@@ -96,6 +102,7 @@ it("keeps successful repository results and retries a failed repository explicit
     return [item("alpha")];
   });
   page();
+  await userEvent.click(screen.getByRole("radio", { name: /仓库/ }));
   await screen.findByRole("article", { name: "alpha" });
   expect(await screen.findByRole("alert")).toHaveTextContent("other/catalog");
   vi.mocked(skillsApi.discoverRepository).mockImplementation(async (repo) => [
@@ -184,4 +191,115 @@ it("returns keyboard focus to repository management after Escape", async () => {
   await screen.findByRole("dialog", { name: "管理仓库" });
   await userEvent.keyboard("{Escape}");
   await waitFor(() => expect(manage).toHaveFocus());
+});
+
+it("shows popular skills before any search without querying skills.sh", () => {
+  const search = vi.spyOn(skillsApi, "searchSkillsSh");
+  page();
+  const first = POPULAR_SKILLS[0];
+  const card = screen.getByRole("article", { name: first.name });
+  expect(
+    within(card).getByText(`↓ ${formatInstalls(first.installs)}`),
+  ).toBeVisible();
+  expect(within(card).getByRole("button", { name: "添加" })).toBeEnabled();
+  expect(card.parentElement).toHaveClass(
+    "grid-cols-2",
+    "lg:grid-cols-3",
+    "xl:grid-cols-4",
+  );
+  expect(screen.getByRole("radio", { name: "skills.sh" })).toBeChecked();
+  expect(search).not.toHaveBeenCalled();
+});
+
+it("shows no undefined text for a skill without a description, and displays zero installs and official metadata", () => {
+  const missing = {
+    source: "unknown-author/catalog",
+    skillId: "missing-description",
+    name: "missing-description",
+    installs: 0,
+    official: true,
+  };
+  POPULAR_SKILLS.unshift(missing);
+  try {
+    page();
+    const card = screen.getByRole("article", { name: missing.name });
+    expect(card).not.toHaveTextContent("undefined");
+    expect(within(card).getByText("↓ 0")).toBeVisible();
+    expect(within(card).getByLabelText("官方")).toBeVisible();
+    expect(within(card).getByText("U")).toBeVisible();
+    expect(card.querySelector("img")).toBeNull();
+  } finally {
+    POPULAR_SKILLS.shift();
+  }
+});
+
+it("adds a popular skill through the existing skills.sh install path", async () => {
+  const first = POPULAR_SKILLS[0];
+  const [owner, repo] = first.source.split("/");
+  const actual = {
+    ...item(first.name, owner),
+    repoName: repo,
+    key: `${first.source}:nested/${first.skillId}`,
+    directory: `nested/${first.skillId}`,
+    repoBranch: "HEAD",
+  };
+  vi.mocked(skillsApi.discoverRepository).mockResolvedValue([actual]);
+  page();
+  await userEvent.click(
+    within(screen.getByRole("article", { name: first.name })).getByRole(
+      "button",
+      { name: "添加" },
+    ),
+  );
+  const dialog = await screen.findByRole("dialog", { name: "确认技能来源" });
+  expect(await within(dialog).findByText(actual.directory)).toBeVisible();
+  expect(skillsApi.discoverRepository).toHaveBeenCalledWith({
+    owner,
+    name: repo,
+    branch: "HEAD",
+    enabled: true,
+  });
+  expect(choose).not.toHaveBeenCalled();
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "使用此来源" }),
+  );
+  expect(choose).toHaveBeenCalledWith(actual);
+});
+
+it("switches from popular to live search and returns immediately when cleared", async () => {
+  vi.spyOn(skillsApi, "searchSkillsSh").mockResolvedValue({
+    query: "live",
+    totalCount: 1,
+    skills: [{ ...item("live-result", "unknown-author"), installs: 0 }],
+  });
+  page();
+  const input = screen.getByRole("searchbox");
+  await userEvent.type(input, "l");
+  expect(
+    screen.queryByRole("article", { name: POPULAR_SKILLS[0].name }),
+  ).toBeNull();
+  expect(screen.getByText(/输入至少 2/)).toBeVisible();
+  await userEvent.type(input, "ive");
+  const result = await screen.findByRole("article", { name: "live-result" });
+  expect(within(result).getByText("↓ 0")).toBeVisible();
+  expect(within(result).getByText("U")).toBeVisible();
+  const requests = vi.mocked(skillsApi.searchSkillsSh).mock.calls.length;
+  await userEvent.clear(input);
+  await userEvent.click(screen.getByRole("button", { name: "刷新发现列表" }));
+  expect(skillsApi.searchSkillsSh).toHaveBeenCalledTimes(requests);
+  expect(
+    screen.getByRole("article", { name: POPULAR_SKILLS[0].name }),
+  ).toBeVisible();
+  expect(screen.queryByRole("article", { name: "live-result" })).toBeNull();
+});
+
+it("returns focus to a popular Add button after cancelling source resolution", async () => {
+  page();
+  const trigger = within(
+    screen.getByRole("article", { name: POPULAR_SKILLS[0].name }),
+  ).getByRole("button", { name: "添加" });
+  await userEvent.click(trigger);
+  await screen.findByRole("dialog", { name: "确认技能来源" });
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() => expect(trigger).toHaveFocus());
 });

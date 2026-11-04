@@ -4436,6 +4436,9 @@
       "showMine": "マイリソースを見る"
     },
     "skillDiscover": {
+      "popular": "人気のスキル",
+      "add": "追加",
+      "official": "公式",
       "source": "検索元",
       "repos": "リポジトリ · {{count}}",
       "featured": "おすすめ",

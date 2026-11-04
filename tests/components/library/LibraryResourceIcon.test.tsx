@@ -146,3 +146,28 @@ describe("library resource icons", () => {
     },
   );
 });
+
+it("uses only a bundled owner avatar and keeps unknown authors on letter tiles", () => {
+  const { container, rerender } = render(
+    <LibraryResourceIcon
+      kind="skills"
+      owner="vercel-labs"
+      name="vercel-labs"
+    />,
+  );
+  expect(container.querySelector("img")?.getAttribute("src")).toContain(
+    "owners/vercel-labs.png",
+  );
+  expect(container.querySelector("img")?.getAttribute("src")).not.toMatch(
+    /^https?:/,
+  );
+  rerender(
+    <LibraryResourceIcon
+      kind="skills"
+      owner="unknown-author"
+      name="unknown-author"
+    />,
+  );
+  expect(container.querySelector("img")).toBeNull();
+  expect(screen.getByText("U")).toBeVisible();
+});

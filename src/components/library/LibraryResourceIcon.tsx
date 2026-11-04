@@ -40,6 +40,7 @@ import bravesearchLogo from "@/assets/library-logos/brave-search.png";
 import firecrawlLogo from "@/assets/library-logos/firecrawl.png";
 import type { LibraryKind } from "@/lib/api/library";
 import { cn } from "@/lib/utils";
+import { ownerAvatar } from "./popularSkills";
 
 /** Only pass a maintained recipe ID or a backend-confirmed recipe match. */
 const RECIPE_LOGOS: Readonly<
@@ -129,15 +130,18 @@ export const TEMPLATE_ICONS: Record<
 
 export function LibraryResourceIcon({
   recipeId,
+  owner,
   kind,
   name,
   className,
 }: {
   recipeId?: string;
+  owner?: string;
   kind: LibraryKind;
   name?: string;
   className?: string;
 }) {
+  const avatar = owner ? ownerAvatar(owner) : undefined;
   const logo =
     recipeId && Object.prototype.hasOwnProperty.call(RECIPE_LOGOS, recipeId)
       ? RECIPE_LOGOS[recipeId]
@@ -156,7 +160,7 @@ export function LibraryResourceIcon({
       aria-hidden="true"
       className={cn(
         "flex h-10 w-10 shrink-0 items-center justify-center rounded-ctl",
-        logo
+        avatar || logo
           ? "bg-pill text-ink-2"
           : template?.className ||
               (tile
@@ -165,7 +169,13 @@ export function LibraryResourceIcon({
         className,
       )}
     >
-      {logo ? (
+      {avatar ? (
+        <img
+          src={avatar}
+          alt=""
+          className="h-10 w-10 rounded-ctl object-cover"
+        />
+      ) : logo ? (
         <img
           src={logo.src}
           alt=""

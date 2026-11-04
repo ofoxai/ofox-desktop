@@ -45,3 +45,32 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Popular skills snapshot
+
+Metadata adapted from [magpie](https://github.com/yetone/magpie), `internal/library/market_skills.json` (MIT, © 2026 yetone; full license above). Snapshot generated 2026-11-04T19:44:07.036Z. Only catalogue metadata is bundled; no third-party skill bodies or scripts are copied. The official field records upstream publisher metadata and does not represent a security audit. English descriptions were retrieved once from the corresponding skills.sh metadata pages; unavailable descriptions are omitted.
+
+GitHub owner avatars, used to identify their respective publishers (rights remain with their owners):
+
+- `owners/101-skills.png` — https://github.com/101-skills.png?size=96
+- `owners/anthropics.png` — https://github.com/anthropics.png?size=96
+- `owners/designed-by-ai.png` — https://github.com/designed-by-ai.png?size=96
+- `owners/flowkit-labs.png` — https://github.com/flowkit-labs.png?size=96
+- `owners/genmedia-labs.png` — https://github.com/genmedia-labs.png?size=96
+- `owners/google.png` — https://github.com/google.png?size=96
+- `owners/heygen-com.png` — https://github.com/heygen-com.png?size=96
+- `owners/juliusbrussee.png` — https://github.com/juliusbrussee.png?size=96
+- `owners/larksuite.png` — https://github.com/larksuite.png?size=96
+- `owners/leonxlnx.png` — https://github.com/leonxlnx.png?size=96
+- `owners/lllllllama.png` — https://github.com/lllllllama.png?size=96
+- `owners/mattpocock.png` — https://github.com/mattpocock.png?size=96
+- `owners/microsoft.png` — https://github.com/microsoft.png?size=96
+- `owners/nextlevelbuilder.png` — https://github.com/nextlevelbuilder.png?size=96
+- `owners/obra.png` — https://github.com/obra.png?size=96
+- `owners/prime-skills.png` — https://github.com/prime-skills.png?size=96
+- `owners/prisma.png` — https://github.com/prisma.png?size=96
+- `owners/remotion-dev.png` — https://github.com/remotion-dev.png?size=96
+- `owners/supabase.png` — https://github.com/supabase.png?size=96
+- `owners/vercel-labs.png` — https://github.com/vercel-labs.png?size=96
+
+Avatars retrieved at generation time and bundled locally. No runtime image or description requests are made.

@@ -4436,6 +4436,9 @@
       "showMine": "查看我的资源"
     },
     "skillDiscover": {
+      "popular": "热门技能",
+      "add": "添加",
+      "official": "官方",
       "source": "发现来源",
       "repos": "仓库 · {{count}}",
       "featured": "精选",

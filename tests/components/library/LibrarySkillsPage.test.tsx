@@ -1165,6 +1165,7 @@ it("searches repository skills with provenance and chooses through the existing 
   const search = await screen.findByRole("searchbox", {
     name: "搜索 Skill、描述或仓库",
   });
+  await userEvent.click(screen.getByRole("radio", { name: /^仓库/ }));
   await userEvent.type(search, "evidence");
   const row = await screen.findByRole("article", { name: "Research helper" });
   expect(within(row).getByText("example/catalog")).toBeVisible();
@@ -1201,6 +1202,7 @@ it("opens discovery on demand and returns to the saved Skills list without losin
   expect(search).toHaveFocus();
   expect(row).not.toBeVisible();
   expect(screen.queryByRole("region", { name: "Agent 中已有" })).toBeNull();
+  await userEvent.click(screen.getByRole("radio", { name: /^仓库/ }));
   await userEvent.type(search, "evidence");
   await waitFor(() => expect(catalog).toHaveBeenCalledTimes(1));
   scroller.scrollTop = 300;
