@@ -47,6 +47,7 @@ function guidelines(media) {
   if (media.image)
     lines.push(
       `generate_image draws with ${media.image.model} by default; pass image_ids with one image to change that image instead. At most ${media.image.maxImages} images per reply.`,
+      "A flowchart, sequence diagram, org chart, mind map, timeline or other diagram of steps or structure is a mermaid block in your reply, not generate_image: its text stays exact and it costs nothing. Use generate_image for one only when the user asks for a picture or illustration of it, or turned on image generation.",
     );
   if (media.video)
     lines.push(

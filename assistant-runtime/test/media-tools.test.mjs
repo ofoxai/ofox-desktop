@@ -131,6 +131,24 @@ test("a model without a style option offers no style argument", () => {
   assert.ok(tool(styled.tools, "generate_speech").parameters.properties.style);
 });
 
+test("a diagram of steps or structure is Mermaid, not the image model", () => {
+  const prompt = (media) =>
+    fixture(media)
+      .tools.flatMap((t) => t.promptGuidelines ?? [])
+      .join(" ");
+  const withImages = prompt(MEDIA);
+  assert.match(
+    withImages,
+    /flowchart[^.]*mermaid block[^.]*not generate_image/i,
+  );
+  assert.match(
+    withImages,
+    /only when the user asks for a picture[^.]*turned on image generation/i,
+  );
+  // Without an image model there is nothing to tell apart.
+  assert.doesNotMatch(prompt({ video: MEDIA.video, hints: [] }), /mermaid/i);
+});
+
 test("a chip tells the model what the user is about to ask for", () => {
   const { tools } = fixture({ ...MEDIA, hints: ["video"] });
   const guidelines = tools.flatMap((t) => t.promptGuidelines ?? []).join(" ");
