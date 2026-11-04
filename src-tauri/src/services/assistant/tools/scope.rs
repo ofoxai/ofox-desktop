@@ -18,17 +18,41 @@ pub struct CheckedPath {
 pub struct Scope {
     roots: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    protected: Vec<PathBuf>,
+    readable: Vec<(PathBuf, PathBuf)>,
 }
 
 impl Scope {
     pub fn new(home: PathBuf, roots: Vec<PathBuf>, files: Vec<PathBuf>) -> Result<Self, String> {
         resolve(&home)?;
         Ok(Self {
+            protected: vec![],
+            readable: vec![],
             roots: roots.iter().map(|p| resolve(p)).collect::<Result<_, _>>()?,
             files: files.iter().map(|p| resolve(p)).collect::<Result<_, _>>()?,
         })
     }
 
+    pub fn protect(
+        &mut self,
+        private: &Path,
+        denied: &[PathBuf],
+        readable: Vec<(PathBuf, PathBuf)>,
+    ) -> Result<(), String> {
+        self.protected = vec![private.into(), resolve(private)?];
+        self.protected.extend_from_slice(denied);
+        self.readable = readable;
+        Ok(())
+    }
+    pub fn write_forbidden(&self, requested: &Path) -> bool {
+        let real = resolve(requested).ok();
+        self.protected
+            .iter()
+            .any(|p| requested.starts_with(p) || real.as_ref().is_some_and(|r| r.starts_with(p)))
+    }
+    pub fn protected_roots(&self) -> &[PathBuf] {
+        &self.protected
+    }
     /// Inside one of the folders, not only one of the exact files (shell profiles).
     pub fn in_root(&self, path: &Path) -> bool {
         self.roots.iter().any(|root| path.starts_with(root))
@@ -52,8 +76,16 @@ impl Scope {
                 access: Access::Forbidden,
             });
         }
+        let requested = path;
         let path = resolve(path)?;
-        let access = if sensitive_path(&path.to_string_lossy()) {
+        let private = self.write_forbidden(requested);
+        let permitted = self.readable.iter().any(|(target, real)| {
+            path.starts_with(real)
+                && (requested.starts_with(target)
+                    || requested.starts_with(real)
+                    || !self.protected.iter().any(|p| requested.starts_with(p)))
+        });
+        let access = if sensitive_path(&path.to_string_lossy()) || (private && !permitted) {
             Access::Forbidden
         } else if self.roots.iter().any(|root| path.starts_with(root)) || self.files.contains(&path)
         {
@@ -278,5 +310,163 @@ mod tests {
             assert!(sensitive_path(path), "{path}");
         }
         assert!(!sensitive_path(r"C:\Users\A\.codex\config.toml"));
+    }
+}
+
+#[cfg(test)]
+mod private_tests {
+    use super::*;
+    use crate::services::assistant::tools::{
+        commands, files,
+        policy::{self, Category, Decision, Operation, PermissionMode},
+    };
+    #[test]
+    fn private_overlay_prunes_outside_traversal_and_never_grants_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join("private");
+        let skill = private.join("assistant/skills/one");
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "needle").unwrap();
+        std::fs::write(private.join("secret.txt"), "needle").unwrap();
+        std::fs::write(tmp.path().join("public.txt"), "needle").unwrap();
+        let mut scope = Scope::new(tmp.path().into(), vec![], vec![]).unwrap();
+        scope
+            .protect(
+                &private,
+                &[],
+                vec![(skill.clone(), resolve(&skill).unwrap())],
+            )
+            .unwrap();
+        assert_eq!(
+            files::read(&scope, &skill.join("SKILL.md"), true).unwrap(),
+            "needle"
+        );
+        assert!(files::read(&scope, &private.join("secret.txt"), true).is_err());
+        let found = files::find(&scope, tmp.path(), "*.txt", 100, true).unwrap();
+        assert_eq!(found.len(), 1);
+        let matches = files::grep(&scope, tmp.path(), "needle", 100, true).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(files::list(&scope, tmp.path(), 100, true).unwrap().len(), 1);
+        for mode in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ] {
+            for path in [
+                skill.join("SKILL.md"),
+                skill.join("new"),
+                private.join("state.json"),
+            ] {
+                assert_eq!(
+                    policy::decide(
+                        true,
+                        mode,
+                        Operation {
+                            category: Category::WriteConfig,
+                            read_only_command: false,
+                            forbidden: scope.write_forbidden(&path)
+                        }
+                    ),
+                    Decision::Deny
+                );
+            }
+        }
+        for command in [
+            "echo x > SKILL.md",
+            "cp /tmp/x SKILL.md",
+            "mv SKILL.md x",
+            "rm SKILL.md",
+            "Set-Content SKILL.md x",
+            "Copy-Item /tmp/x SKILL.md",
+            "Rename-Item SKILL.md x",
+            "Remove-Item SKILL.md",
+        ] {
+            assert!(
+                commands::protected_operation(command, &skill, tmp.path(), &scope),
+                "{command}"
+            );
+        }
+        assert!(commands::protected_operation(
+            "rm -rf .",
+            tmp.path(),
+            tmp.path(),
+            &scope
+        ));
+        assert!(!commands::protected_operation(
+            "cat SKILL.md",
+            &skill,
+            tmp.path(),
+            &scope
+        ));
+        assert!(!commands::protected_operation(
+            "python3 script.py",
+            &skill,
+            tmp.path(),
+            &scope
+        ));
+        assert!(commands::protected_operation(
+            &format!("cat '{}'", private.join("secret.txt").display()),
+            tmp.path(),
+            tmp.path(),
+            &scope
+        ));
+    }
+    #[cfg(unix)]
+    #[test]
+    fn precise_artifact_exception_does_not_follow_replaced_or_escaping_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join("private");
+        let target = private.join("assistant/skills/one");
+        let tree = private.join("library/artifacts/hash/tree");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("file"), "ok").unwrap();
+        std::os::unix::fs::symlink(&tree, &target).unwrap();
+        let mut scope = Scope::new(tmp.path().into(), vec![], vec![]).unwrap();
+        scope
+            .protect(
+                &private,
+                &[],
+                vec![(target.clone(), resolve(&tree).unwrap())],
+            )
+            .unwrap();
+        assert_eq!(
+            files::read(&scope, &target.join("file"), true).unwrap(),
+            "ok"
+        );
+        assert!(scope.write_forbidden(&target.join("new")));
+        assert!(scope.write_forbidden(&tree.join("file")));
+        assert_eq!(
+            scope.check(tree.parent().unwrap()).unwrap().access,
+            Access::Forbidden
+        );
+        std::os::unix::fs::symlink(tmp.path(), tree.join("escape")).unwrap();
+        assert_eq!(
+            scope.check(&target.join("escape")).unwrap().access,
+            Access::Forbidden
+        );
+        std::fs::remove_file(&target).unwrap();
+        std::os::unix::fs::symlink(tmp.path(), &target).unwrap();
+        assert_eq!(
+            scope.check(&target.join("public")).unwrap().access,
+            Access::Forbidden
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_skill_paths {
+    use super::*;
+    #[test]
+    fn trusted_canonical_identity_keeps_public_paths_ordinary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lexical = tmp.path().join("技能 with spaces");
+        std::fs::create_dir(&lexical).unwrap();
+        let canonical = std::fs::canonicalize(&lexical).unwrap();
+        assert!(canonical.to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(resolve(&canonical).unwrap(), resolve(&lexical).unwrap());
+        let scope = Scope::new(tmp.path().into(), vec![], vec![]).unwrap();
+        assert_eq!(scope.check(&canonical).unwrap().access, Access::Forbidden);
+        assert_ne!(scope.check(&lexical).unwrap().access, Access::Forbidden);
     }
 }

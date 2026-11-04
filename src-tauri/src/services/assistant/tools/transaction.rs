@@ -85,7 +85,9 @@ pub fn begin<'a>(
         return Err("assistant_cancelled".into());
     }
     for path in &paths {
-        if context.scope.check(path)?.access == Access::Forbidden {
+        if context.scope.write_forbidden(path)
+            || context.scope.check(path)?.access == Access::Forbidden
+        {
             return Err("assistant_path_denied".into());
         }
     }

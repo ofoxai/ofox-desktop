@@ -261,8 +261,8 @@ impl AssistantHost {
         })
         .await?;
         capabilities::validate(&record.session.assistant_id, &record.session.capabilities)?;
-        if !run.local_enabled
-            || !capabilities::enabled(&record.session.capabilities)
+        if (tool.name != "use_skill"
+            && (!run.local_enabled || !capabilities::enabled(&record.session.capabilities)))
             || record.session.deleted_at.is_some()
             || run.compact_only
         {
@@ -292,9 +292,17 @@ impl AssistantHost {
             }
             calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
         }
-        let result = self
-            .execute_local(run, tool, &call.args, &fingerprint, &call.tool_call_id)
-            .await;
+        let result = if tool.name == "use_skill" {
+            self.load_run_skill(
+                run,
+                call.args["name"].as_str().ok_or("assistant_invalid_tool")?,
+                false,
+            )
+            .await
+        } else {
+            self.execute_local(run, tool, &call.args, &fingerprint, &call.tool_call_id)
+                .await
+        };
         run.local_calls
             .0
             .lock()
@@ -327,6 +335,7 @@ impl AssistantHost {
             return Ok(json!({"approved":true}));
         }
         let (paths, scope) = self.local_scope().await?;
+        let scope = self.skill_scope(run, scope).await?;
         let requested = args["path"]
             .as_str()
             .or_else(|| args["folder"].as_str())
@@ -362,8 +371,17 @@ impl AssistantHost {
         if generic_write && !checked.as_ref().is_some_and(|p| scope.in_root(&p.path)) {
             tool.category = policy::Category::Exec;
         }
-        let forbidden =
-            access == Access::Forbidden || (shell && commands::forbidden(command)) || bundled;
+        let forbidden = access == Access::Forbidden
+            || (shell
+                && (commands::forbidden(command)
+                    || commands::protected_operation(
+                        command,
+                        requested.as_deref().unwrap_or(&paths.home),
+                        &paths.home,
+                        &scope,
+                    )))
+            || bundled
+            || (generic_write && requested.as_ref().is_some_and(|p| scope.write_forbidden(p)));
         let grant = match tool.category {
             policy::Category::WriteConfig => "write_config".to_string(),
             policy::Category::Exec if shell => commands::program(command)
@@ -471,6 +489,12 @@ impl AssistantHost {
                         .await
                 }
                 "bash" | "powershell" => {
+                    let scope = self.skill_scope(run, scope.clone()).await?;
+                    if scope.check(&path)?.access == Access::Forbidden
+                        || commands::protected_operation(command, &path, &paths.home, &scope)
+                    {
+                        return Err("assistant_operation_denied".into());
+                    }
                     let a: registry::ExecArgs = registry::decode(args)?;
                     execute::run(&a.command, &path, &paths.home, a.timeout).await
                 }
@@ -493,7 +517,7 @@ impl AssistantHost {
                         return Err(IDENTITY_CHANGED.into());
                     }
                     let _io = crate::config_io::lock();
-                    if scope.check(&path)?.path != path {
+                    if scope.write_forbidden(&path) || scope.check(&path)?.path != path {
                         return Err("assistant_restore_conflict".into());
                     }
                     let original = if path.exists() {
@@ -531,28 +555,38 @@ impl AssistantHost {
                 }
                 "read" | "stat" | "ls" | "find" | "grep" => {
                     let args = args.clone();
-                    blocking(move || match tool.name {
-                        "read" => Ok(json!(files::read(&scope, &path, outside)?)),
-                        "stat" => files::stat(&scope, &path, outside),
-                        "ls" => Ok(json!(files::list(
-                            &scope,
-                            &path,
-                            registry::decode::<registry::ListArgs>(&args)?.limit,
-                            outside
-                        )?)),
-                        "find" => {
-                            let a: registry::SearchArgs = registry::decode(&args)?;
-                            Ok(json!(files::find(
-                                &scope, &path, &a.pattern, a.limit, outside
-                            )?))
-                        }
-                        "grep" => {
-                            let a: registry::SearchArgs = registry::decode(&args)?;
-                            Ok(json!(files::grep(
-                                &scope, &path, &a.pattern, a.limit, outside
-                            )?))
-                        }
-                        _ => Err("assistant_unknown_tool".into()),
+                    let env = self.env.clone();
+                    let grants = run.skills.lock().map_err(|_| STATE)?.grants();
+                    let target = path.clone();
+                    blocking(move || {
+                        super::super::skills::read_in_skill(
+                            env.as_ref(),
+                            grants,
+                            &target,
+                            Box::new(move || match tool.name {
+                                "read" => Ok(json!(files::read(&scope, &path, outside)?)),
+                                "stat" => files::stat(&scope, &path, outside),
+                                "ls" => Ok(json!(files::list(
+                                    &scope,
+                                    &path,
+                                    registry::decode::<registry::ListArgs>(&args)?.limit,
+                                    outside
+                                )?)),
+                                "find" => {
+                                    let a: registry::SearchArgs = registry::decode(&args)?;
+                                    Ok(json!(files::find(
+                                        &scope, &path, &a.pattern, a.limit, outside
+                                    )?))
+                                }
+                                "grep" => {
+                                    let a: registry::SearchArgs = registry::decode(&args)?;
+                                    Ok(json!(files::grep(
+                                        &scope, &path, &a.pattern, a.limit, outside
+                                    )?))
+                                }
+                                _ => Err("assistant_unknown_tool".into()),
+                            }),
+                        )
                     })
                     .await
                 }

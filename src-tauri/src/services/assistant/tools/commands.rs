@@ -114,6 +114,137 @@ pub fn forbidden(command: &str) -> bool {
         })
 }
 
+/// A conservative direct-path guard, never an OS sandbox. Computed paths and
+/// effects inside approved programs remain governed by the user's OS rights.
+pub fn protected_operation(
+    command: &str,
+    cwd: &std::path::Path,
+    home: &std::path::Path,
+    scope: &super::scope::Scope,
+) -> bool {
+    use super::scope::Access;
+    // Tokenize only literal shell words. Composition is refused whenever the
+    // command directly names protected data; we do not attempt shell evaluation.
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut composed = false;
+    for ch in command.chars() {
+        if let Some(q) = quote {
+            if ch == q {
+                quote = None;
+            } else {
+                word.push(ch);
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+        } else if ch.is_whitespace() || [';', '|', '&', '>', '<'].contains(&ch) {
+            composed |= [';', '|', '&', '>', '<'].contains(&ch);
+            if !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+        } else {
+            word.push(ch);
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    let program = words
+        .first()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let mutation = matches!(
+        program.as_str(),
+        "rm" | "rmdir"
+            | "mv"
+            | "cp"
+            | "install"
+            | "chmod"
+            | "chown"
+            | "remove-item"
+            | "move-item"
+            | "rename-item"
+            | "copy-item"
+            | "set-content"
+            | "add-content"
+            | "out-file"
+    );
+    let mut touches = scope.write_forbidden(cwd);
+    let mut denied = false;
+    for word in &words {
+        let raw = word
+            .strip_prefix("--")
+            .and_then(|w| w.split_once('=').map(|(_, v)| v))
+            .unwrap_or(word);
+        let path = if let Some(rest) = raw.strip_prefix("~/") {
+            home.join(rest)
+        } else {
+            let p = std::path::PathBuf::from(raw);
+            if p.is_absolute() {
+                p
+            } else {
+                cwd.join(p)
+            }
+        };
+        // Normalize literal dot components without permitting unresolved '..'
+        // to become an exception to protected-root checks.
+        let mut normalized = std::path::PathBuf::new();
+        for c in path.components() {
+            match c {
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                std::path::Component::CurDir => {}
+                _ => normalized.push(c.as_os_str()),
+            }
+        }
+        if mutation
+            && scope
+                .protected_roots()
+                .iter()
+                .any(|root| root.starts_with(&normalized))
+        {
+            return true;
+        }
+        if scope.write_forbidden(&normalized) {
+            touches = true;
+            denied |= scope
+                .check(&normalized)
+                .map_or(true, |p| p.access == Access::Forbidden);
+        }
+    }
+    if denied {
+        return true;
+    }
+    if !touches {
+        return false;
+    }
+    // Exact read forms and script launchers only. An interpreter's code is
+    // not inspected or advertised as isolated; -c/-e/-Command are not literals.
+    let read = matches!(
+        program.as_str(),
+        "cat" | "head" | "tail" | "ls" | "pwd" | "get-content" | "get-childitem" | "get-location"
+    );
+    let script = matches!(
+        program.as_str(),
+        "python" | "python3" | "node" | "bash" | "sh" | "pwsh" | "powershell"
+    ) && words
+        .get(1)
+        .is_some_and(|w| !w.starts_with('-') && !w.contains(['$', '`']));
+    let direct_script = words.first().is_some_and(|w| {
+        let p = std::path::PathBuf::from(w);
+        let p = if p.is_absolute() { p } else { cwd.join(p) };
+        scope.write_forbidden(&p)
+            && scope.check(&p).is_ok_and(|c| c.access != Access::Forbidden)
+            && p.is_file()
+    });
+    composed
+        || quote.is_some()
+        || command.contains(['$', '`', '\n', '\r'])
+        || !(read || script || direct_script)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -419,6 +419,7 @@ fn split_in_three(text: &str) -> Vec<String> {
 // ── environment ──────────────────────────────────────────────────────────
 
 struct TestEnv {
+    skill_db: Mutex<Option<Arc<cc_switch_lib::Database>>>,
     config: PathBuf,
     runtime: PathBuf,
     state: Mutex<EnvState>,
@@ -453,6 +454,7 @@ fn owner() -> String {
 impl TestEnv {
     fn new(config: &Path, runtime: &Path, gateways: &[(&str, &Gateway)]) -> Arc<Self> {
         Arc::new(Self {
+            skill_db: Mutex::new(None),
             config: config.to_path_buf(),
             runtime: runtime.to_path_buf(),
             state: Mutex::new(EnvState {
@@ -512,6 +514,24 @@ impl TestEnv {
 }
 
 impl Environment for TestEnv {
+    fn skill_snapshot(
+        &self,
+    ) -> Result<cc_switch_lib::assistant_target::AssistantSkillSnapshot, String> {
+        match self.skill_db.lock().unwrap().as_ref() {
+            Some(db) => cc_switch_lib::assistant::skills::snapshot(db),
+            None => Ok(Default::default()),
+        }
+    }
+    fn skill_read(
+        &self,
+        proof: &cc_switch_lib::assistant_target::AssistantSkillProof,
+        access: cc_switch_lib::assistant_target::SkillAccess,
+        read: cc_switch_lib::assistant::skills::SkillRead,
+    ) -> Result<Value, String> {
+        let db = self.skill_db.lock().unwrap().clone().ok_or("no skill db")?;
+        cc_switch_lib::assistant::skills::read_verified(&db, proof, access, read)
+    }
+
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
         Box::pin(async move { self.state.lock().unwrap().identity.clone() })
     }
@@ -3199,11 +3219,11 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         gateway.reply(Reply::Stream("No search here".into()));
         let (run, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
-        assert!(tool_names(&gateway.requests()[0]).is_empty());
+        assert_eq!(tool_names(&gateway.requests()[0]), ["use_skill"]);
         // The run says it could not search, although the switch is on.
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
-        // Priced: offered, and a conversation with search off still gets no tools.
+        // Priced: offered, and a conversation with search off still gets no web tools.
         env.catalog.lock().unwrap().push(search_model());
         let boot = AssistantHost::new(env.clone()).bootstrap().await.unwrap();
         assert_eq!(
@@ -3217,7 +3237,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         assert!(!off.web_search);
         gateway.reply(Reply::Stream("Still no search".into()));
         let (run, _) = turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
-        assert!(tool_names(&gateway.requests()[1]).is_empty());
+        assert_eq!(tool_names(&gateway.requests()[1]), ["use_skill"]);
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // The conversation with search on now gets both tools.
@@ -3225,7 +3245,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[2]),
-            ["web_search", "web_fetch"]
+            ["use_skill", "web_search", "web_fetch"]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], true);
         let detail = host.get_session(&sid).await.unwrap();
@@ -6083,4 +6103,43 @@ fn retrying_events_and_actual_ui_language_reach_the_real_host_and_model() {
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
     assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+#[serial_test::serial]
+fn requests_pass_assistant_skills_without_broken_ones() {
+    let Some(bundle) = runtime_dir() else { return };
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir();
+    for (name, body) in [
+        (
+            "drawing",
+            "---\nname: drawing\ndescription: Draw safely\n---\nskill-body-marker",
+        ),
+        ("broken", "no frontmatter"),
+    ] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        std::fs::write(root.join(name).join("SKILL.md"), body).unwrap();
+    }
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "use_skill",
+            json!({"name":"drawing"}),
+        )]));
+        gateway.reply(Reply::Stream("Loaded".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Use drawing", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        let prompt = system_preamble(&requests[0]);
+        assert!(prompt.contains("drawing: Draw safely"), "{prompt}");
+        assert!(!prompt.contains("broken"));
+        assert!(requests[1].text().contains("skill-body-marker"));
+        assert!(requests[1].text().contains("scriptsUnavailable"));
+    });
 }

@@ -404,3 +404,41 @@ fn replacing_a_local_directory_with_identical_bytes_revokes_its_proof() {
     )
     .is_err());
 }
+
+#[test]
+#[serial_test::serial]
+fn run_proof_same_identity_ignores_only_epoch() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    local("same", body("same").as_bytes());
+    let snap = assistant_skill_snapshot(&db, &reviewed_names()).unwrap();
+    let proof = snap.proof("same").unwrap();
+    let mut epoch = proof.clone();
+    epoch.epoch += 1;
+    assert!(proof.same_identity(&epoch));
+    let mut variants = vec![];
+    macro_rules! changed {
+        ($field:ident,$value:expr) => {{
+            let mut p = proof.clone();
+            p.$field = $value;
+            variants.push(p);
+        }};
+    }
+    changed!(name, "other".into());
+    changed!(lexical_root, PathBuf::from("/other"));
+    changed!(canonical_root, PathBuf::from("/other"));
+    changed!(root_identity, "other".into());
+    changed!(lexical_target, PathBuf::from("/other"));
+    changed!(canonical_dir, PathBuf::from("/other"));
+    changed!(directory_identity, "other".into());
+    changed!(mode, SkillMode::Manual);
+    changed!(
+        identity,
+        Identity::Local {
+            tree_hash: "other".into()
+        }
+    );
+    for changed in variants {
+        assert!(!proof.same_identity(&changed));
+    }
+}

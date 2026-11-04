@@ -33,4 +33,5 @@ mod web;
 
 pub use host::AssistantHost;
 
+pub mod skills;
 pub mod speech;

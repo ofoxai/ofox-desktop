@@ -427,3 +427,37 @@ test("rejected and reliably unsent retry receipts do not block local tools or th
     assert.equal(result.errorCode, undefined);
   }
 });
+
+test("unknown OFox retry cost stops use_skill through the Pi hook as well", async (t) => {
+  const skills = [
+    {
+      name: "sample",
+      description: "Sample",
+      dir: "/skills/sample",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+  ];
+  const f = await fixture(
+    t,
+    [
+      () =>
+        Response.json({ error: { message: "unavailable" } }, { status: 503 }),
+      () => call("use_skill", { name: "sample" }),
+      reply,
+    ],
+    () => ({
+      name: "sample",
+      body: "must not load",
+      dir: "/skills/sample",
+      files: [],
+      truncated: false,
+    }),
+    { skills },
+  );
+  const result = await f.run();
+  assert.equal(f.requests.length, 2);
+  assert.equal(f.calls.length, 0);
+  assert.equal(result.errorCode, "assistant_cost_unavailable");
+});

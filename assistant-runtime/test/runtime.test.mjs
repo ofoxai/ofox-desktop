@@ -3476,3 +3476,105 @@ test("the SDK abort signal cancels a retry wait even without a run cancellation"
   assert.equal(requests, 1);
   await runtime.close();
 });
+
+test("assistant skills appear in the actual provider prompt without local tools", async (t) => {
+  const params = await sandbox(t);
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw\nclear diagrams",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+    {
+      name: "private-manual",
+      description: "Hidden",
+      dir: "/skills/manual",
+      mode: "manual",
+      hasScripts: true,
+      reviewed: false,
+    },
+  ];
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return stream("done");
+    },
+  });
+  await runtime.run(params);
+  assert.match(JSON.stringify(requests[0].messages), /Available skills/);
+  assert.match(
+    JSON.stringify(requests[0].messages),
+    /drawing: Draw clear diagrams/,
+  );
+  assert.doesNotMatch(JSON.stringify(requests[0].messages), /private-manual/);
+  assert.ok(
+    requests[0].tools.some((tool) => tool.function.name === "use_skill"),
+  );
+});
+
+test("assistant use_skill reaches the host without local tools", async (t) => {
+  const params = await sandbox(t);
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+  ];
+  let count = 0;
+  const calls = [];
+  const runtime = new AssistantRuntime({
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        name: "drawing",
+        dir: "/skills/drawing",
+        body: "skill-body-marker",
+        files: ["SKILL.md"],
+        truncated: false,
+      };
+    },
+    fetch: async () =>
+      count++ === 0
+        ? toolStream("use_skill", { name: "drawing" })
+        : stream("done"),
+  });
+  await runtime.run(params);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "use_skill");
+});
+
+test("models without tools receive neither use_skill nor an instruction to call it", async (t) => {
+  const params = await sandbox(t);
+  params.model = { ...params.model, tools: false };
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: true,
+      reviewed: false,
+    },
+  ];
+  let request;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      request = JSON.parse(init.body);
+      return stream("done");
+    },
+  });
+  await runtime.run(params);
+  assert.equal(request.tools, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(request.messages),
+    /use_skill|Available skills/,
+  );
+});

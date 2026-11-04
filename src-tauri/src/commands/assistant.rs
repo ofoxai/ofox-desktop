@@ -515,6 +515,20 @@ fn runtime_dir_for(
 }
 
 impl Environment for AssistantEnvironment {
+    fn skill_snapshot(&self) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+        let state = self.app.state::<crate::store::AppState>();
+        crate::services::assistant::skills::snapshot(&state.db)
+    }
+    fn skill_read(
+        &self,
+        proof: &crate::assistant_target::AssistantSkillProof,
+        access: crate::assistant_target::SkillAccess,
+        read: crate::services::assistant::skills::SkillRead,
+    ) -> Result<Value, String> {
+        let state = self.app.state::<crate::store::AppState>();
+        crate::services::assistant::skills::read_verified(&state.db, proof, access, read)
+    }
+
     fn local_mutate<'a>(
         &'a self,
         name: &'a str,

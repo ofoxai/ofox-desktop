@@ -5,6 +5,7 @@ import { validateToolArguments } from "@earendil-works/pi-ai";
 import { AssistantRuntime } from "../src/runtime.mjs";
 
 const samples = {
+  use_skill: { name: "sample" },
   read_attachment: { id: "attachment", offset: 0, length: 10 },
   read: { path: "config.json", offset: 1, limit: 10 },
   ls: { path: "." },
@@ -38,6 +39,7 @@ for (const platform of ["macos", "windows"])
       const context = {
         attachments: new Map([["attachment", {}]]),
         params: {
+          skills: [],
           apex: "ofox.io",
           apiKey: "synthetic-schema-only-credential",
           localConfig: { cwd: tmpdir(), platform },
@@ -78,6 +80,15 @@ for (const platform of ["macos", "windows"])
           args,
           tool.name,
         );
+        if (tool.name === "use_skill")
+          assert.throws(
+            () =>
+              validateToolArguments(tool, {
+                name: tool.name,
+                arguments: { ...args, dir: "/untrusted" },
+              }),
+            /Validation failed for tool/,
+          );
         assert.throws(
           () =>
             validateToolArguments(tool, { name: tool.name, arguments: null }),

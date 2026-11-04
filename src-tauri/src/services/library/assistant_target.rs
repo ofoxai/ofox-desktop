@@ -83,6 +83,12 @@ pub struct AssistantSkillProof {
     identity: Identity,
 }
 impl AssistantSkillProof {
+    /// Refresh an already selected run grant across unrelated epoch changes only.
+    pub fn same_identity(&self, other: &Self) -> bool {
+        let mut current = self.clone();
+        current.epoch = other.epoch;
+        current == *other
+    }
     pub fn lexical_target(&self) -> &Path {
         &self.lexical_target
     }
@@ -90,6 +96,7 @@ impl AssistantSkillProof {
         &self.canonical_dir
     }
 }
+#[derive(Default)]
 pub struct AssistantSkillSnapshot {
     pub skills: Vec<AssistantSkill>,
     proofs: BTreeMap<String, AssistantSkillProof>,

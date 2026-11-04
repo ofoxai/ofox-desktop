@@ -76,6 +76,21 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    fn local_private_root(&self) -> PathBuf {
+        self.config_dir()
+    }
+    fn skill_snapshot(&self) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+        Ok(Default::default())
+    }
+    fn skill_read(
+        &self,
+        _proof: &crate::assistant_target::AssistantSkillProof,
+        _access: crate::assistant_target::SkillAccess,
+        _read: super::skills::SkillRead,
+    ) -> Result<Value, String> {
+        Err("not_available: skill service unavailable".into())
+    }
+
     fn local_mutate<'a>(
         &'a self,
         _name: &'a str,
@@ -169,6 +184,7 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    pub(super) skills: Mutex<super::skills::SkillRunState>,
     local_calls: local::Calls,
     /// The generation tools of a chat run; `None` for a model without tools.
     pub(super) media: Option<super::media_tools::host::MediaRun>,
@@ -197,6 +213,7 @@ impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
             local_calls: local::Calls::default(),
+            skills: Mutex::new(Default::default()),
             media: None,
             artifact: None,
             local_enabled: false,
@@ -2422,6 +2439,187 @@ mod tests {
         host.release_run(&run);
     }
 
+    #[tokio::test]
+    async fn assistant_private_config_is_not_a_generic_read_grant() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let file = env
+            .local_private_root()
+            .join("assistant/private-state.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "private-state-marker").unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"private-read","name":"read","args":{"path":file}});
+        assert_eq!(
+            host.dispatch_tool(&run, &call).await.unwrap_err(),
+            "assistant_operation_denied"
+        );
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn private_skill_writes_and_direct_commands_are_denied_in_every_mode() {
+        use super::super::tools::policy::PermissionMode;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, original_run) = local_run(&host);
+        host.release_run(&original_run);
+        let skill = env.local_private_root().join("assistant/skills/sample");
+        std::fs::create_dir_all(&skill).unwrap();
+        let file = skill.join("SKILL.md");
+        std::fs::write(&file, "original").unwrap();
+        for (i, mode) in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.set_permission(super::local::PermissionRequest {
+                session_id: sid.clone(),
+                mode,
+                confirmed_full_access: true,
+                expected_owner: identity().owner,
+                expected_generation: host.generation(),
+            })
+            .await
+            .unwrap();
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().local_enabled = true;
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap();
+            let shell = if cfg!(windows) { "powershell" } else { "bash" };
+            for (j,(name,args)) in [
+                ("write",json!({"path":file,"content":"changed","expected":null})),
+                ("edit",json!({"path":file,"content":"changed","expected":"original"})),
+                ("write",json!({"path":skill.join("new"),"content":"new","expected":null})),
+                (shell,json!({"folder":env.config,"command":format!("echo changed > '{}'",file.display()),"timeout":1})),
+            ].into_iter().enumerate() {
+                let call=json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":format!("denied-{i}-{j}"),"name":name,"args":args});
+                assert_eq!(host.dispatch_tool(&run,&call).await.unwrap_err(),"assistant_operation_denied");
+            }
+            host.release_run(&run);
+        }
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
+        assert!(!skill.join("new").exists());
+        assert!(approvals(&env).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn local_config_may_read_and_run_in_the_skills_dir_but_not_write() {
+        use crate::assistant_target::{self, SkillMode};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        *env.skill_db.lock().unwrap() = Some(Arc::new(crate::Database::memory().unwrap()));
+        let dir = assistant_target::skills_dir().join("sample");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sample\ndescription: Fixture\n---\nBody",
+        )
+        .unwrap();
+        let (sid, run) = local_run(&host);
+        host.refresh_run_skills(&run).await.unwrap();
+        let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("read-auto", "read", json!({"path":dir.join("SKILL.md")}))
+            )
+            .await
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("Body"));
+        let (shell, command) = if cfg!(windows) {
+            ("powershell", "Get-Content SKILL.md")
+        } else {
+            ("bash", "cat SKILL.md")
+        };
+        let (_, result) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call(
+                "run-auto",
+                shell,
+                json!({"folder":dir,"command":command,"timeout":5}),
+            ),
+            "once",
+        )
+        .await;
+        assert_eq!(result.unwrap()["exitCode"], 0);
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call(
+                    "write-auto",
+                    "write",
+                    json!({"path":dir.join("new"),"content":"bad","expected":null})
+                )
+            )
+            .await
+            .unwrap_err(),
+            "assistant_operation_denied"
+        );
+        assistant_target::set_skill_mode("sample", SkillMode::Manual).unwrap();
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("stale-auto", "use_skill", json!({"name":"sample"}))
+            )
+            .await
+            .unwrap_err()
+            .contains("not_available"));
+        host.refresh_run_skills(&run).await.unwrap();
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call("manual-read", "read", json!({"path":dir.join("SKILL.md")}))
+            )
+            .await
+            .unwrap_err(),
+            "assistant_operation_denied"
+        );
+        let selected = host.select_run_skill(&run, "sample").await.unwrap();
+        assert_eq!(selected["dir"], json!(dir));
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call(
+                    "selected-read",
+                    "read",
+                    json!({"path":dir.join("SKILL.md")})
+                )
+            )
+            .await
+            .is_ok());
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("manual-tool", "use_skill", json!({"name":"sample"}))
+            )
+            .await
+            .unwrap_err()
+            .contains("not_available"));
+        std::fs::rename(&dir, dir.with_file_name("old")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sample\ndescription: Fixture\n---\nBody",
+        )
+        .unwrap();
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("replaced", "read", json!({"path":dir.join("SKILL.md")}))
+            )
+            .await
+            .is_err());
+        host.release_run(&run);
+    }
+
     /// A local-config session with one registered run in the default mode.
     fn local_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
         let sid = host
@@ -2832,6 +3030,7 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        skill_db: Mutex<Option<Arc<crate::Database>>>,
         apex: Mutex<String>,
         catalog_apexes: Mutex<Vec<String>>,
         config: PathBuf,
@@ -2852,6 +3051,30 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn local_private_root(&self) -> PathBuf {
+            if self.skill_db.lock().unwrap().is_some() {
+                crate::config::get_app_config_dir()
+            } else {
+                self.config.join("private-app")
+            }
+        }
+        fn skill_snapshot(
+            &self,
+        ) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+            match self.skill_db.lock().unwrap().as_ref() {
+                Some(db) => super::super::skills::snapshot(db),
+                None => Ok(Default::default()),
+            }
+        }
+        fn skill_read(
+            &self,
+            proof: &crate::assistant_target::AssistantSkillProof,
+            access: crate::assistant_target::SkillAccess,
+            read: super::super::skills::SkillRead,
+        ) -> Result<Value, String> {
+            let db = self.skill_db.lock().unwrap().clone().ok_or("no skill db")?;
+            super::super::skills::read_verified(&db, proof, access, read)
+        }
         fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
             Box::pin(async { Ok(zeroize::Zeroizing::new([7; 32])) })
         }
@@ -2953,6 +3176,7 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            skill_db: Mutex::new(None),
             apex: Mutex::new("ofox.ai".into()),
             catalog_apexes: Mutex::default(),
             config: config.path().to_path_buf(),

@@ -634,6 +634,7 @@ impl AssistantHost {
                 );
         }
         let control = Arc::new(control);
+        let skills = self.refresh_run_skills(&control).await?;
         let text = super::host::scrub_secrets(&request.text, std::slice::from_ref(&key));
         blocking({
             let host = self.clone();
@@ -688,6 +689,7 @@ impl AssistantHost {
             "regenerateEntryId": branch.regenerate_entry,
         });
         if let Some(params) = params.as_object_mut() {
+            params.insert("skills".into(), skills["skills"].clone());
             if let Some(local_config) = local_config {
                 params.insert("localConfig".into(), local_config);
             }
