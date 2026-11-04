@@ -2620,6 +2620,66 @@ mod tests {
         host.release_run(&run);
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_auto_rejects_qualified_and_chained_ancestor_mutations_before_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, initial) = local_run(&host);
+        host.release_run(&initial);
+        host.set_permission(super::local::PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let private = env.local_private_root();
+        std::fs::create_dir_all(&private).unwrap();
+        let bytes = private.join("SKILL.md");
+        std::fs::write(&bytes, "unchanged").unwrap();
+        let bin = env.config.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let executable = bin.join("rm");
+        let marker = env.config.join("spawned");
+        // Harmless stand-in: even a broken guard cannot delete anything. A
+        // real /bin/rm is never executed by this regression.
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf spawned > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let mut outcomes = vec![];
+        for (i, command) in [
+            format!("'{}' -rf .", executable.display()),
+            format!("echo ok && '{}' -rf .", executable.display()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":format!("qualified-{i}"),"name":"bash","args":{"folder":env.config,"command":command,"timeout":2}});
+            outcomes.push(host.dispatch_tool(&run, &call).await);
+        }
+        assert!(
+            outcomes.iter().all(|r| r
+                .as_ref()
+                .err()
+                .is_some_and(|e| e == "assistant_operation_denied")),
+            "{outcomes:?}"
+        );
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read_to_string(bytes).unwrap(), "unchanged");
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
     /// A local-config session with one registered run in the default mode.
     fn local_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
         let sid = host
