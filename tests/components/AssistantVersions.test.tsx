@@ -32,6 +32,8 @@ const mocks = vi.hoisted(() => ({
   updateSession: vi.fn(),
   switchVersion: vi.fn(),
   send: vi.fn(),
+  stop: vi.fn(),
+  respondApproval: vi.fn(),
   usageSummary: vi.fn(),
   getPreferences: vi.fn(),
   setPreferences: vi.fn(),
@@ -314,6 +316,122 @@ describe("the versions of a turn", () => {
     await open();
     expect(screen.getByText("Second wording")).toBeVisible();
     expect(screen.queryByRole("group", { name: "Versions" })).toBeNull();
+  });
+});
+
+describe("a regenerate the user cancels", () => {
+  it("shows the version it would have replaced again once its generation is declined", async () => {
+    clock = 0;
+    const first = [
+      turn("q1", "user", "Make the video", "run-1"),
+      turn("a1", "assistant", "Here is your video", "run-1"),
+    ];
+    detail = { ...detail, messages: first };
+    let emitTo: ((event: unknown) => void) | undefined;
+    mocks.subscribe.mockImplementation(async (listener) => {
+      emitTo = listener;
+      return () => undefined;
+    });
+    mocks.send.mockImplementation(async (request) => ({
+      runId: request.runId,
+      operationId: request.operationId,
+    }));
+    mocks.respondApproval.mockResolvedValue(undefined);
+    mocks.stop.mockResolvedValue(undefined);
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+    await waitFor(() =>
+      expect(mocks.send).toHaveBeenCalledWith(
+        expect.objectContaining({ regenerateMessageId: "a1" }),
+      ),
+    );
+    const sent = mocks.send.mock.calls[0][0];
+    const emit = (type: string, data: Record<string, unknown>) =>
+      act(() =>
+        emitTo?.({
+          sessionId: "session-a",
+          runId: sent.runId,
+          operationId: sent.operationId,
+          type,
+          data,
+        }),
+      );
+    emit("run_start", { messageId: "a2", webSearch: false });
+    emit("approval", {
+      approvalId: "approval-1",
+      toolCallId: "call-1",
+      name: "generate_video",
+      category: "generation",
+      details: { model: "video/test", prompt: "again", duration: 5 },
+      allowSession: true,
+      expectedOwner: owner,
+      expectedGeneration: 1,
+    });
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Don't generate" }),
+    );
+    expect(mocks.respondApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalId: "approval-1", choice: "deny" }),
+    );
+    // Nothing more is asked of the model for a regenerate called off.
+    await waitFor(() => expect(mocks.stop).toHaveBeenCalled());
+    // The backend now holds the new version, shown, beside the first.
+    detail = {
+      ...detail,
+      messages: [
+        ...first.map((message) => ({ ...message, superseded: true })),
+        turn("q2", "user", "Make the video", sent.runId),
+        turn("a2", "assistant", "", sent.runId, { status: "stopped" }),
+      ],
+    };
+    emit("run_end", { status: "stopped", stopped: true });
+    await waitFor(() =>
+      expect(mocks.switchVersion).toHaveBeenCalledWith(
+        expect.objectContaining({ messageId: "q1" }),
+      ),
+    );
+    expect(await screen.findByText("Here is your video")).toBeVisible();
+  });
+
+  it("keeps the new version when the regenerate goes through", async () => {
+    clock = 0;
+    const first = [
+      turn("q1", "user", "Make the video", "run-1"),
+      turn("a1", "assistant", "Here is your video", "run-1"),
+    ];
+    detail = { ...detail, messages: first };
+    let emitTo: ((event: unknown) => void) | undefined;
+    mocks.subscribe.mockImplementation(async (listener) => {
+      emitTo = listener;
+      return () => undefined;
+    });
+    mocks.send.mockImplementation(async (request) => ({
+      runId: request.runId,
+      operationId: request.operationId,
+    }));
+    await open();
+    await userEvent.click(screen.getByRole("button", { name: "Regenerate" }));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    const sent = mocks.send.mock.calls[0][0];
+    detail = {
+      ...detail,
+      messages: [
+        ...first.map((message) => ({ ...message, superseded: true })),
+        turn("q2", "user", "Make the video", sent.runId),
+        turn("a2", "assistant", "Another video", sent.runId),
+      ],
+    };
+    act(() =>
+      emitTo?.({
+        sessionId: "session-a",
+        runId: sent.runId,
+        operationId: sent.operationId,
+        type: "run_end",
+        data: { status: "completed" },
+      }),
+    );
+    expect(await screen.findByText("Another video")).toBeVisible();
+    expect(mocks.switchVersion).not.toHaveBeenCalled();
   });
 });
 
