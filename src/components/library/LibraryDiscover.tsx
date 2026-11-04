@@ -152,6 +152,7 @@ export function LibraryDiscover({
                   <LibraryResourceIcon
                     kind={recipe.kind}
                     recipeId={recipe.id}
+                    name={name}
                   />
                   <div className="min-w-0 flex-1">
                     <h3 className="break-words text-ui font-medium text-ink">
