@@ -932,3 +932,174 @@ test("unsafe credential-bearing schema is rejected before tool registration and 
   );
   assert.ok(!JSON.stringify(f.requests).includes("418731"));
 });
+
+test("real Pi rejects credential-bearing unknown schema subtrees without trusted-mode reentry", async (t) => {
+  for (const variant of [
+    "extension_bool",
+    "extension_null",
+    "disguised_schema",
+    "disguised_annotation",
+    "disguised_root",
+    "root_bool",
+  ])
+    await t.test(variant, async (t) => {
+      const f = await fixture(
+        t,
+        [() => call("tool_search", { query: "fixture" }), reply],
+        () => ({ approved: true }),
+        { localConfig: undefined },
+      );
+      f.params.mcp = {
+        servers: {
+          fixture: {
+            command: process.execPath,
+            args: [
+              fileURLToPath(
+                new URL("./fixtures/mcp-fixture.mjs", import.meta.url),
+              ),
+            ],
+            env: {
+              MCP_SCENARIO: "schema_classification",
+              SCHEMA_CASE: variant,
+              FLAG_TOKEN: "false",
+              EMPTY_TOKEN: "null",
+            },
+          },
+        },
+      };
+      assert.equal((await f.run()).status, "completed");
+      const tools = f.requests[1].tools ?? [];
+      const registered = tools.find(
+        (tool) => tool.function.name === "mcp__fixture__read_fixture",
+      );
+      t.diagnostic(
+        JSON.stringify({
+          variant,
+          registered: Boolean(registered),
+          schema: registered?.function.parameters,
+        }),
+      );
+      assert.equal(
+        registered,
+        undefined,
+        "unsafe metadata must be rejected before Pi registration/model parameters",
+      );
+      assert.equal(
+        f.calls.length,
+        1,
+        "only discovery is admitted; unsafe tools cannot be authorized",
+      );
+      assert.equal(f.calls[0].args.toolName, "tool_search");
+      assert.ok(
+        f.events.some(
+          (event) =>
+            event.type === "mcp_status" && event.data.reason === "unavailable",
+        ),
+      );
+      const log = await readFile(
+        path.join(f.root, "runtime-settings/mcp.log"),
+        "utf8",
+      );
+      const native = await readFile(f.params.sessionFile, "utf8");
+      for (const text of [
+        log,
+        native,
+        JSON.stringify(f.requests),
+        JSON.stringify(f.events),
+      ]) {
+        assert.ok(!text.includes("x-credential"));
+        assert.ok(!text.includes("x-private"));
+      }
+    });
+});
+
+test("real Pi retains legitimate boolean subschemas, permission hints and harmless unknown metadata", async (t) => {
+  for (const variant of ["legitimate", "safe_metadata"])
+    await t.test(variant, async (t) => {
+      const f = await fixture(
+        t,
+        [
+          () => call("tool_search", { query: "fixture" }),
+          () => call("mcp__fixture__read_fixture", { index: 1 }),
+          reply,
+        ],
+        () => ({ approved: true }),
+        { localConfig: undefined },
+      );
+      f.params.mcp = {
+        servers: {
+          fixture: {
+            command: process.execPath,
+            args: [
+              fileURLToPath(
+                new URL("./fixtures/mcp-fixture.mjs", import.meta.url),
+              ),
+            ],
+            env: {
+              MCP_SCENARIO: "schema_classification",
+              SCHEMA_CASE: variant,
+              FLAG_TOKEN: "false",
+              EMPTY_TOKEN: "null",
+            },
+          },
+        },
+      };
+      assert.equal((await f.run()).status, "completed");
+      const registered = f.requests[1].tools.find(
+        (tool) => tool.function.name === "mcp__fixture__read_fixture",
+      );
+      assert.ok(registered);
+      const schema = registered.function.parameters;
+      assert.equal(schema.additionalProperties, false);
+      if (variant === "legitimate") {
+        assert.equal(schema.properties.safe, false);
+        assert.equal(schema.properties.list.items, false);
+        assert.deepEqual(schema.properties.list.prefixItems, [true, false]);
+        assert.deepEqual(schema.properties.choice.allOf, [
+          true,
+          { anyOf: [false, true] },
+        ]);
+        assert.deepEqual(schema.properties.legacy.items, [true, false]);
+        assert.equal(schema.$defs.never, false);
+      } else
+        assert.deepEqual(schema["x-private"], {
+          type: "display",
+          properties: { label: "Readable metadata" },
+          annotations: { readOnlyHint: "display only" },
+        });
+      const authorized = f.calls.find(
+        (call) => call.args.toolName === "mcp__fixture__read_fixture",
+      );
+      assert.equal(authorized.args.readOnly, true);
+      const resultMessage = f.requests[2].messages.findLast(
+        (message) => message.role === "tool",
+      );
+      assert.match(JSON.stringify(resultMessage), /Fixture worked/);
+    });
+});
+
+test("MCP schema root requires an object and only legal subschema positions grant boolean syntax", async () => {
+  const { sanitizeMcpMessage, mcpScrubber } = await import("../src/mcp.mjs");
+  const cleaner = mcpScrubber(["false", "null", "object"]);
+  for (const inputSchema of [
+    false,
+    null,
+    [false],
+    { "x-private": { type: "object" } },
+    { "x-private": { properties: { flag: false } } },
+    { "x-private": { annotations: { readOnlyHint: false } } },
+  ])
+    assert.throws(() =>
+      sanitizeMcpMessage(
+        { result: { tools: [{ name: "fixture", inputSchema }] } },
+        cleaner,
+      ),
+    );
+  assert.deepEqual(
+    sanitizeMcpMessage(
+      { result: { tools: [{ name: "fixture", inputSchema: {} }] } },
+      cleaner,
+    ),
+    { result: { tools: [{ name: "fixture", inputSchema: {} }] } },
+  );
+});

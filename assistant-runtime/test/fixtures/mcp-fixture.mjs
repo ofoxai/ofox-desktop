@@ -144,5 +144,64 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     result.tools[0].inputSchema.properties.index.default = Number(
       process.env.PIN,
     );
+  if (
+    q.method === "tools/list" &&
+    process.env.MCP_SCENARIO === "schema_classification"
+  ) {
+    const schema = result.tools[0].inputSchema;
+    const cases = {
+      extension_bool: { "x-credential": false },
+      extension_null: { "x-private": { value: null } },
+      disguised_schema: {
+        "x-private": { type: "object", properties: { flag: false } },
+      },
+      disguised_annotation: {
+        "x-private": { annotations: { readOnlyHint: false } },
+      },
+      disguised_root: {
+        "x-private": { inputSchema: { properties: { flag: false } } },
+      },
+      safe_metadata: {
+        "x-private": {
+          type: "display",
+          properties: { label: "Readable metadata" },
+          annotations: { readOnlyHint: "display only" },
+        },
+      },
+    };
+    if (process.env.SCHEMA_CASE === "legitimate") {
+      schema.properties.safe = false;
+      schema.properties.list = {
+        type: "array",
+        items: false,
+        prefixItems: [true, false],
+        contains: true,
+        unevaluatedItems: false,
+      };
+      schema.properties.choice = {
+        allOf: [true, { anyOf: [false, true] }],
+        oneOf: [false, true],
+        not: false,
+        if: true,
+        then: true,
+        else: false,
+      };
+      schema.additionalProperties = false;
+      schema.unevaluatedProperties = false;
+      schema.propertyNames = true;
+      schema.$defs = { never: false };
+      schema.properties.legacy = {
+        type: "array",
+        items: [true, false],
+        additionalItems: false,
+      };
+      result.tools[0].annotations = {
+        readOnlyHint: true,
+        destructiveHint: false,
+      };
+    } else if (process.env.SCHEMA_CASE === "root_bool")
+      result.tools[0].inputSchema = false;
+    else Object.assign(schema, cases[process.env.SCHEMA_CASE]);
+  }
   send({ id: q.id, result });
 }

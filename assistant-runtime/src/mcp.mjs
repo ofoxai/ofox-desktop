@@ -56,22 +56,141 @@ export function sanitizeMcpMessage(message, cleaner) {
     "idempotentHint",
     "openWorldHint",
   ]);
+  const isObject = (value) =>
+    value !== null && typeof value === "object" && !Array.isArray(value);
+  const schemaMaps = new Set([
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+  ]);
+  const schemaSingles = new Set([
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "additionalItems",
+    "unevaluatedItems",
+    "contains",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+  ]);
+  const schemaLists = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+  const schemaFlags = new Set([
+    "uniqueItems",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
+    "$recursiveAnchor",
+  ]);
+  const invalidSchema = () => {
+    throw new Error(
+      "MCP schema must use an object or a legal boolean subschema",
+    );
+  };
   const visit = (value, mode = "protocol", key = "") => {
+    // Schema authority comes from a known grammar position, never from a key
+    // encountered later inside arbitrary metadata. MCP tool roots are objects;
+    // only explicit subschema positions may contain boolean schemas (not null).
+    if (mode === "schemaRoot") {
+      if (!isObject(value)) invalidSchema();
+      return visit(value, "schema");
+    }
+    if (mode === "schema") {
+      if (typeof value === "boolean") return value;
+      if (!isObject(value)) invalidSchema();
+      return Object.fromEntries(
+        Object.entries(value).map(([field, item]) => {
+          control(field);
+          if (schemaMaps.has(field)) {
+            if (!isObject(item)) invalidSchema();
+            return [
+              field,
+              Object.fromEntries(
+                Object.entries(item).map(([name, child]) => {
+                  control(name);
+                  return [name, visit(child, "schema")];
+                }),
+              ),
+            ];
+          }
+          if (schemaSingles.has(field)) return [field, visit(item, "schema")];
+          if (schemaLists.has(field)) {
+            if (!Array.isArray(item)) invalidSchema();
+            return [field, item.map((child) => visit(child, "schema"))];
+          }
+          // Legacy tuple items/dependencies have explicit schema positions too.
+          if (field === "items")
+            return [
+              field,
+              Array.isArray(item)
+                ? item.map((child) => visit(child, "schema"))
+                : visit(item, "schema"),
+            ];
+          if (field === "dependencies") {
+            if (!isObject(item)) invalidSchema();
+            return [
+              field,
+              Object.fromEntries(
+                Object.entries(item).map(([name, child]) => {
+                  control(name);
+                  return [
+                    name,
+                    Array.isArray(child)
+                      ? visit(child, "constraint")
+                      : visit(child, "schema"),
+                  ];
+                }),
+              ),
+            ];
+          }
+          if (field === "$vocabulary") {
+            if (!isObject(item)) invalidSchema();
+            return [
+              field,
+              Object.fromEntries(
+                Object.entries(item).map(([name, required]) => {
+                  control(name);
+                  if (typeof required !== "boolean") invalidSchema();
+                  return [name, required];
+                }),
+              ),
+            ];
+          }
+          if (schemaFlags.has(field) && typeof item === "boolean")
+            return [field, item];
+          if (
+            field === "type" &&
+            (schemaTypes.has(item) ||
+              (Array.isArray(item) &&
+                item.every((type) => schemaTypes.has(type))))
+          )
+            return [field, item];
+          if (
+            ["description", "title", "$comment"].includes(field) &&
+            typeof item === "string"
+          )
+            return [field, cleaner.text(item)];
+          // Includes const/default/enum and every unknown extension. This mode
+          // validates the complete tree and cannot re-enter schema or annotations.
+          return [field, visit(item, "constraint", field)];
+        }),
+      );
+    }
     if (Array.isArray(value))
       return value.map((item) => visit(item, mode, key));
     if (!value || typeof value !== "object") {
       if (mode === "data") return cleaner.scalar(value);
       // These are fixed syntax, not credential-derived payload: never change
       // a schema's structural boolean or an annotation that grants permission.
-      if (mode === "schema" && (typeof value === "boolean" || value === null))
-        return value;
       if (
         mode === "annotation" &&
         booleanHints.has(key) &&
         typeof value === "boolean"
       )
-        return value;
-      if (mode === "schema" && key === "type" && schemaTypes.has(value))
         return value;
       if (
         mode === "protocol" &&
@@ -133,30 +252,8 @@ export function sanitizeMcpMessage(message, cleaner) {
           control(field);
           return [field, visit(item, "constraint", field)];
         }
-        if (mode === "names") {
-          control(field);
-          return [field, visit(item, "schema", field)];
-        }
-        if (mode === "schema") {
-          if (["const", "default", "enum", "examples"].includes(field))
-            return [field, visit(item, "constraint", field)];
-          if (
-            [
-              "properties",
-              "patternProperties",
-              "$defs",
-              "definitions",
-              "dependentSchemas",
-            ].includes(field)
-          )
-            return [field, visit(item, "names", field)];
-          if (["description", "title", "$comment"].includes(field))
-            return [field, visit(item, "data", field)];
-          control(field);
-          return [field, visit(item, "schema", field)];
-        }
         if (field === "inputSchema" || field === "outputSchema")
-          return [field, visit(item, "schema", field)];
+          return [field, visit(item, "schemaRoot", field)];
         if (field === "annotations")
           return [field, visit(item, "annotation", field)];
         if (
