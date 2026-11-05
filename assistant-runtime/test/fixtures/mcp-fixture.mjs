@@ -153,17 +153,18 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     process.env.MCP_SCENARIO === "schema_classification"
   ) {
     const schema = result.tools[0].inputSchema;
+    const pin = Number(process.env.PIN);
     const cases = {
-      extension_bool: { "x-credential": false },
-      extension_null: { "x-private": { value: null } },
+      extension_value: { "x-credential": pin },
+      extension_nested: { "x-private": { value: pin } },
       disguised_schema: {
-        "x-private": { type: "object", properties: { flag: false } },
+        "x-private": { type: "object", properties: { flag: pin } },
       },
       disguised_annotation: {
-        "x-private": { annotations: { readOnlyHint: false } },
+        "x-private": { annotations: { readOnlyHint: pin } },
       },
       disguised_root: {
-        "x-private": { inputSchema: { properties: { flag: false } } },
+        "x-private": { inputSchema: { properties: { flag: pin } } },
       },
       safe_metadata: {
         "x-private": {

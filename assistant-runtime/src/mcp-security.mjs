@@ -1,19 +1,46 @@
+const credentialStem =
+  /key|token|secret|passw|credential|cookie|auth|signature|private/i;
+const credentialWord = /(^|[^a-z0-9])(pin|pwd|pass|pat)([^a-z0-9]|$)/i;
+// Flags and small counts (AUTH_ENABLED=true, TOKEN_TTL=60) are settings.
+const setting = (value) =>
+  ["", "true", "false", "null", "yes", "no", "on", "off"].includes(
+    value.toLowerCase(),
+  ) || /^\d{1,3}$/.test(value);
+
+const tokenShaped = (value) =>
+  [...value].length >= 20 &&
+  !/[\s/\\]/.test(value) &&
+  /[a-z]/i.test(value) &&
+  /\d/.test(value);
+
+// Only a value named like a credential, or shaped like a generated token, is
+// private. Plain settings (DEBUG=1, LOG_LEVEL=info) would otherwise rewrite
+// every matching word and collide with request ids. Mirrors credential_value
+// in src-tauri/src/services/assistant/mcp.rs.
+export function credentialValue(name, value) {
+  const named = credentialStem.test(name) || credentialWord.test(name);
+  return (named && !setting(value)) || tokenShaped(value);
+}
+
 export function mcpSecrets(params) {
   return Object.values(params?.servers ?? {})
     .flatMap((server) =>
       [server.env, server.headers].flatMap((values) =>
-        Object.values(values ?? {}),
+        Object.entries(values ?? {}),
       ),
     )
-    .filter((value) => typeof value === "string" && value.length > 0)
-    .flatMap((value) => {
+    .filter(
+      ([name, value]) =>
+        typeof value === "string" && credentialValue(name, value),
+    )
+    .flatMap(([, value]) => {
       // Servers often echo only the credential, without its HTTP auth scheme.
       const credential = /^(?:Bearer|Basic|Token)\s+(.+)$/i.exec(value)?.[1];
       return credential ? [value, credential] : [value];
     });
 }
 
-// All explicit values are private, even short passwords. Replace in one pass:
+// Every selected value is private, even a short password. Replace in one pass:
 // a later short match must not corrupt a replacement made for a longer secret.
 export function mcpScrubber(values) {
   const secrets = [...new Set(values)]

@@ -181,10 +181,10 @@ pub fn secrets(snapshot: &Value) -> Vec<String> {
         .flat_map(|v| v.values())
         .flat_map(|s| [&s["env"], &s["headers"]])
         .filter_map(Value::as_object)
-        .flat_map(|v| v.values())
-        .filter_map(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .flat_map(|value| {
+        .flat_map(|v| v.iter())
+        .filter_map(|(name, value)| Some((name, value.as_str()?)))
+        .filter(|(name, value)| credential_value(name, value))
+        .flat_map(|(_, value)| {
             let mut values = vec![value.to_owned()];
             if let Some((scheme, credential)) = value.split_once(' ') {
                 if ["bearer", "basic", "token"].contains(&scheme.to_ascii_lowercase().as_str())
@@ -196,6 +196,43 @@ pub fn secrets(snapshot: &Value) -> Vec<String> {
             values
         })
         .collect()
+}
+
+/// Only a value named like a credential, or shaped like a generated token, is
+/// private. Plain settings (DEBUG=1, LOG_LEVEL=info) would otherwise rewrite
+/// every matching word in replies and history and collide with request ids.
+/// Mirrors `credentialValue` in assistant-runtime/src/mcp-security.mjs.
+fn credential_value(name: &str, value: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let named = [
+        "key",
+        "token",
+        "secret",
+        "passw",
+        "credential",
+        "cookie",
+        "auth",
+        "signature",
+        "private",
+    ]
+    .iter()
+    .any(|stem| name.contains(stem))
+        || name
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|word| matches!(word, "pin" | "pwd" | "pass" | "pat"));
+    // Flags and small counts (AUTH_ENABLED=true, TOKEN_TTL=60) are settings.
+    let setting = matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "true" | "false" | "null" | "yes" | "no" | "on" | "off"
+    ) || (value.len() < 4 && value.bytes().all(|b| b.is_ascii_digit()));
+    (named && !setting) || token_shaped(value)
+}
+
+fn token_shaped(value: &str) -> bool {
+    value.chars().count() >= 20
+        && !value.contains(|c: char| c.is_whitespace() || c == '/' || c == '\\')
+        && value.chars().any(|c| c.is_ascii_alphabetic())
+        && value.chars().any(|c| c.is_ascii_digit())
 }
 
 // Only credential-bearing data is rewritten. Routing IDs, permission/status
@@ -305,7 +342,7 @@ mod tests {
     use super::*;
     #[test]
     fn final_mcp_preview_scrubs_before_scalar_truncation_and_fails_on_key_collision() {
-        let snapshot = json!({"servers":{"fixture":{"env":{"SHORT":"xy7","PIN":"418731","BOOL":"false","EMPTY":"null"},"headers":{"Authorization":"Bearer credential"}}}});
+        let snapshot = json!({"servers":{"fixture":{"env":{"SHORT_SECRET":"xy7","PIN":"418731","BOOL":"false","EMPTY":"null"},"headers":{"Authorization":"Bearer credential"}}}});
         let args = json!({"target":"draft","body":"Readable body","nested":{"text":"xy7 credential","pin":418731,"flag":false,"empty":null,"418731":"Readable key"}});
         let original = args.clone();
         let (preview, truncated) = arguments_preview(&args, &snapshot).unwrap();
@@ -314,9 +351,11 @@ mod tests {
             args, original,
             "preview must never mutate permission/execution args"
         );
-        for value in ["xy7", "418731", "false", "null", "credential"] {
+        for value in ["xy7", "418731", "credential"] {
             assert!(!preview.contains(value));
         }
+        // BOOL/EMPTY are plain settings: the preview keeps the real values.
+        assert!(preview.contains("\"flag\": false") && preview.contains("\"empty\": null"));
         assert!(preview.contains("Readable body") && preview.contains("Readable key"));
         assert_eq!(
             arguments_preview(&json!({}), &snapshot).unwrap(),
@@ -332,6 +371,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn only_credential_named_or_token_shaped_values_are_secrets() {
+        let mut found = secrets(&json!({"servers":{"s":{
+            "env":{"DEBUG":"1","LOG_LEVEL":"info","NODE_ENV":"production","AUTH_ENABLED":"true",
+                   "BRAVE_API_KEY":"brv-live-123","PIN":"4187",
+                   "UNNAMED":"ghp0123456789abcdefghijKLMN","DATA_DIR":"/Users/me/projects/data2026"},
+            "headers":{"Content-Type":"application/json","Authorization":"Bearer tok-123456"}}}}));
+        found.sort();
+        let mut want = vec![
+            "4187",
+            "Bearer tok-123456",
+            "brv-live-123",
+            "ghp0123456789abcdefghijKLMN",
+            "tok-123456",
+        ];
+        want.sort();
+        assert_eq!(found, want);
+    }
     #[test]
     fn assistant_mcp_startup_rejects_sign_in_corruption_and_namespace_collisions() {
         assert_eq!(

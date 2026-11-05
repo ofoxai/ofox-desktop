@@ -241,6 +241,47 @@ test("MCP configuration filters missing runners, replaces stale files, and prese
     {},
   );
 });
+test("only credential-named or token-shaped MCP values are secrets", async () => {
+  const { mcpSecrets, mcpScrubber, sanitizeMcpMessage } = await import(
+    "../src/mcp.mjs"
+  );
+  const config = {
+    servers: {
+      s: {
+        env: {
+          DEBUG: "1",
+          LOG_LEVEL: "info",
+          NODE_ENV: "production",
+          AUTH_ENABLED: "true",
+          BRAVE_API_KEY: "brv-live-123",
+          PIN: "4187",
+          UNNAMED: "ghp0123456789abcdefghijKLMN",
+          DATA_DIR: "/Users/me/projects/data2026",
+        },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer tok-123456",
+        },
+      },
+    },
+  };
+  assert.deepEqual(
+    mcpSecrets(config).sort(),
+    [
+      "4187",
+      "Bearer tok-123456",
+      "brv-live-123",
+      "ghp0123456789abcdefghijKLMN",
+      "tok-123456",
+    ].sort(),
+  );
+  const cleaner = mcpScrubber(mcpSecrets(config));
+  assert.doesNotThrow(() =>
+    sanitizeMcpMessage({ jsonrpc: "2.0", id: 1, result: {} }, cleaner),
+  );
+  assert.equal(cleaner.text("info: 1 file"), "info: 1 file");
+});
+
 test("source boundary scrubs short/long secrets and decoded text blobs, rejects identifiers and opaque binary", async () => {
   const { mcpScrubber, sanitizeMcpMessage } = await import("../src/mcp.mjs");
   const scrub = mcpScrubber(["abc-secret", "abc", "短密"]);
@@ -778,8 +819,9 @@ test("numeric structuredContent is scrubbed before Pi serialization and SDK larg
   ])
     assert.match(text, /Readable fixture result/);
   assert.match(large, /"pin": "\*\*\*"/);
-  assert.equal(JSON.parse(large).flag, "***");
-  assert.equal(JSON.parse(large).none, "***");
+  // BOOLEAN/NULL_VALUE are plain settings, not credentials: values stay.
+  assert.equal(JSON.parse(large).flag, false);
+  assert.equal(JSON.parse(large).none, null);
 });
 
 test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax keeps its meaning", async () => {
@@ -946,8 +988,8 @@ test("unsafe credential-bearing schema is rejected before tool registration and 
 
 test("real Pi rejects credential-bearing unknown schema subtrees without trusted-mode reentry", async (t) => {
   for (const variant of [
-    "extension_bool",
-    "extension_null",
+    "extension_value",
+    "extension_nested",
     "disguised_schema",
     "disguised_annotation",
     "disguised_root",
@@ -972,8 +1014,7 @@ test("real Pi rejects credential-bearing unknown schema subtrees without trusted
             env: {
               MCP_SCENARIO: "schema_classification",
               SCHEMA_CASE: variant,
-              FLAG_TOKEN: "false",
-              EMPTY_TOKEN: "null",
+              PIN: "418731",
             },
           },
         },
@@ -1177,12 +1218,13 @@ test("final resource metadata stays data before real Pi model content and SDK fi
       const nativeItem = (nativePayload.resources ??
         nativePayload.resourceTemplates ??
         nativePayload.contents)[0];
-      assert.equal(nativeItem.annotations.readOnlyHint, "***");
+      // Flags and nulls are data, not credentials: they keep their values.
+      assert.equal(nativeItem.annotations.readOnlyHint, false);
       assert.deepEqual(nativeItem.annotations.audience, ["assistant"]);
       assert.equal(nativeItem.vendor.inputSchema.type, "***");
-      assert.equal(nativeItem.vendor.inputSchema.additionalProperties, "***");
+      assert.equal(nativeItem.vendor.inputSchema.additionalProperties, false);
       assert.equal(nativeItem.vendor.data.pin, "***");
-      assert.equal(nativeItem.vendor.data.empty, "***");
+      assert.equal(nativeItem.vendor.data.empty, null);
       assert.equal(nativeItem.vendor.data["***"], "Readable key");
       assert.match(nativeItem.vendor.readable, /Readable resource metadata/);
       const transcript = await readFile(f.params.sessionFile, "utf8");
@@ -1210,24 +1252,20 @@ test("final resource metadata stays data before real Pi model content and SDK fi
       if (tool !== "read_mcp_resource") {
         const resource = JSON.parse(large);
         const entry = (resource.resources ?? resource.resourceTemplates)[0];
-        assert.equal(
-          entry.annotations.readOnlyHint,
-          "***",
-          "resource annotations are data, not permission hints",
-        );
+        assert.equal(entry.annotations.readOnlyHint, false);
         assert.deepEqual(entry.annotations.audience, ["assistant"]);
         assert.equal(entry.annotations.priority, 0.5);
         assert.equal(entry.vendor.inputSchema.type, "***");
-        assert.equal(entry.vendor.inputSchema.additionalProperties, "***");
-        assert.equal(entry.vendor.outputSchema.properties.safe, "***");
-        assert.equal(entry.vendor.nested.isError, "***");
+        assert.equal(entry.vendor.inputSchema.additionalProperties, false);
+        assert.equal(entry.vendor.outputSchema.properties.safe, false);
+        assert.equal(entry.vendor.nested.isError, false);
         assert.equal(
           entry.vendor.nested.tools[0].annotations.readOnlyHint,
-          "***",
+          false,
         );
         assert.equal(entry.vendor.nested.resources[0].inputSchema.type, "***");
         assert.equal(entry.vendor.data.pin, "***");
-        assert.equal(entry.vendor.data.empty, "***");
+        assert.equal(entry.vendor.data.empty, null);
         assert.equal(entry.vendor.data["***"], "Readable key");
         const modelText = f.requests
           .at(-1)
@@ -1235,11 +1273,10 @@ test("final resource metadata stays data before real Pi model content and SDK fi
           .map((m) => JSON.stringify(m.content))
           .join("\n");
         assert.match(modelText, /Readable resource metadata/);
-        assert.ok(!modelText.includes('readOnlyHint\\":false'));
       } else {
         assert.match(large, /"pin":\*\*\*/);
-        assert.match(large, /"flag":\*\*\*/);
-        assert.match(large, /"empty":\*\*\*/);
+        assert.match(large, /"flag":false/);
+        assert.match(large, /"empty":null/);
       }
       const parameters = f.requests[1].tools.find(
         (t) => t.function.name === "mcp__fixture__read_fixture",

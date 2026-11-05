@@ -4402,8 +4402,9 @@ mod tests {
         let events = env.events.lock().unwrap();
         let shown = &events.last().unwrap().data;
         assert_eq!(shown["details"]["pin"], "***");
-        assert_eq!(shown["details"]["flag"], "***");
-        assert_eq!(shown["details"]["empty"], "***");
+        // BOOL/NULL are plain settings, not credentials: values stay intact.
+        assert_eq!(shown["details"]["flag"], false);
+        assert_eq!(shown["details"]["empty"], Value::Null);
         assert_eq!(shown["details"]["safe"], "Readable Host payload");
         assert_eq!(shown["success"], false);
         assert_eq!(shown["toolCallId"], "safe-id");
