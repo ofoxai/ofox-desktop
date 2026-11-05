@@ -1,3 +1,4 @@
+import { SkillResultCards } from "./SkillResultCards";
 import { SkillChip, SkillPicker } from "./SkillPicker";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -367,6 +368,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       data-message-id={message.id}
     >
       <h2 className="sr-only">{role}</h2>
+      {!isUser && !!message.skillResults?.length && (
+        <SkillResultCards groups={message.skillResults} />
+      )}
       <ReasoningBlock
         reasoning={message.reasoning}
         reasoningMs={message.reasoningMs}

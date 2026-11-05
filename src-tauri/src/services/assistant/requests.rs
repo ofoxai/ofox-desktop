@@ -1561,6 +1561,7 @@ pub(super) fn publish_turn(
     let at = now();
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
+        skill_results: vec![],
         skill: branch.skill.clone(),
         media: None,
         generations: vec![],
@@ -1585,6 +1586,7 @@ pub(super) fn publish_turn(
         anchor_entry_id: anchor.clone(),
     });
     record.messages.push(Message {
+        skill_results: vec![],
         skill: None,
         media: None,
         generations: vec![],

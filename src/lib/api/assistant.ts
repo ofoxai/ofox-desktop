@@ -491,7 +491,32 @@ export interface AssistantAttachment {
  * only by the renderer's own placeholders (a question being sent, a reply
  * being streamed).
  */
+export interface AssistantSkillResult {
+  resultId: string;
+  name: string;
+  source: string;
+  description: string;
+  installs?: number | null;
+  reviewed: boolean;
+  /** Host-confirmed commit fact; never an installation control. */
+  installed?: boolean;
+}
+export interface AssistantSkillResultGroup {
+  toolCallId: string;
+  results: AssistantSkillResult[];
+}
+export interface AssistantSkillApproval {
+  name: string;
+  description?: string;
+  body?: string;
+  source?: string;
+  directory?: string;
+  commitSha?: string;
+  installs?: number | null;
+  reviewed?: boolean;
+}
 export interface AssistantMessage {
+  skillResults?: AssistantSkillResultGroup[];
   skill?: string;
   media?: AssistantMedia;
   /** What the reply's generation tools made, one per tool call. */
@@ -1000,9 +1025,11 @@ export type AssistantRunEvent =
           | "exec"
           | "network"
           | "paid"
-          | "generation";
+          | "generation"
+          | "skillInstall"
+          | "skillSave";
         /** Text for a local operation; what will be made for a generation. */
-        details: string | AssistantGenerationApproval;
+        details: string | AssistantGenerationApproval | AssistantSkillApproval;
         allowSession: boolean;
         /**
          * The config fields the user changed that the operation sets back to
@@ -1012,6 +1039,10 @@ export type AssistantRunEvent =
         expectedOwner: string;
         expectedGeneration: number;
       };
+    }
+  | {
+      type: "skill_results";
+      data: { messageId: string; group: AssistantSkillResultGroup };
     }
   | { type: "approval_end"; data: { approvalId: string } }
   /**
@@ -1424,6 +1455,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_operation_already_submitted: "runChanged",
   assistant_approval_expired: "approvalExpired",
   assistant_approval_timeout: "approvalTimeout",
+  assistant_approval_once_required: "approvalOnceRequired",
   assistant_capability_disabled: "capabilityDisabled",
   assistant_full_access_confirmation_required: "fullAccessConfirmation",
   assistant_invalid_assistant: "capabilityInvalid",

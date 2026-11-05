@@ -1,4 +1,5 @@
 //! Local resource ownership. Definitions and machine execution state are distinct.
+pub(crate) mod assistant_skill_transaction;
 pub mod assistant_target;
 pub(crate) mod batch;
 pub(crate) mod catalog;

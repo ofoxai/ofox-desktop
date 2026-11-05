@@ -107,5 +107,62 @@ export function skillTools(runtime, context) {
         };
       },
     ),
+    ...[
+      [
+        "find_skills",
+        "Find skills from the catalog and skills.sh. Results are read-only; only their current resultId can be requested for installation.",
+        Type.Object(
+          { query: Type.String({ minLength: 2, maxLength: 512 }) },
+          { additionalProperties: false },
+        ),
+      ],
+      [
+        "install_skill",
+        "Ask the user to install a result from the latest search. Every installation requires clicking Install, including full auto. Never choose a different source for an ambiguous result.",
+        Type.Object(
+          { resultId: Type.String({ minLength: 1, maxLength: 200 }) },
+          { additionalProperties: false },
+        ),
+      ],
+      [
+        "save_skill",
+        "Ask the user to save a reusable skill. Always requires clicking Save. Existing skills can only be replaced when they were created by this assistant and remain unchanged.",
+        Type.Object(
+          {
+            name: Type.String({
+              pattern: "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+              maxLength: 64,
+            }),
+            description: Type.String({ minLength: 1, maxLength: 500 }),
+            body: Type.String({ maxLength: 60000 }),
+          },
+          { additionalProperties: false },
+        ),
+      ],
+    ].map(([name, description, schema]) =>
+      runtime.wrapTool(
+        context,
+        name,
+        description,
+        schema,
+        async (args, signal, id) => {
+          const result = await runtime.hostTool(
+            context,
+            name,
+            args,
+            signal,
+            id,
+          );
+          if (result.refresh) {
+            const changed = replaceSkillIndex(context, result.refresh);
+            result.usable = Boolean(
+              changed && context.skillIndex.get(result.name)?.mode === "auto",
+            );
+          }
+          const { refresh, ...visible } = result;
+          return visible;
+        },
+      ),
+    ),
   ];
 }

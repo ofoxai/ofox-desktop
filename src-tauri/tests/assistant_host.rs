@@ -528,6 +528,13 @@ impl Environment for TestEnv {
         })
     }
 
+    fn skill_database(&self) -> Result<Arc<cc_switch_lib::Database>, String> {
+        self.skill_db
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("skill_service_unavailable".into())
+    }
     fn skill_snapshot(
         &self,
     ) -> Result<cc_switch_lib::assistant_target::AssistantSkillSnapshot, String> {
@@ -3233,7 +3240,10 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         gateway.reply(Reply::Stream("No search here".into()));
         let (run, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
-        assert_eq!(tool_names(&gateway.requests()[0]), ["use_skill"]);
+        assert_eq!(
+            tool_names(&gateway.requests()[0]),
+            ["use_skill", "find_skills", "install_skill", "save_skill"]
+        );
         // The run says it could not search, although the switch is on.
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
@@ -3251,7 +3261,10 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         assert!(!off.web_search);
         gateway.reply(Reply::Stream("Still no search".into()));
         let (run, _) = turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
-        assert_eq!(tool_names(&gateway.requests()[1]), ["use_skill"]);
+        assert_eq!(
+            tool_names(&gateway.requests()[1]),
+            ["use_skill", "find_skills", "install_skill", "save_skill"]
+        );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // The conversation with search on now gets both tools.
@@ -3259,7 +3272,14 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[2]),
-            ["use_skill", "web_search", "web_fetch"]
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "web_search",
+                "web_fetch"
+            ]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], true);
         let detail = host.get_session(&sid).await.unwrap();
@@ -6467,6 +6487,39 @@ fn picked_skill_manual_reference_grant_and_tools_false_guidance() {
                         || calls[0].body["tools"].as_array().unwrap().is_empty()
                 );
             }
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn skill_tools_real_bridge_save_click_refresh_then_same_turn_use_on_both_apexes() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    let bundle =
+        runtime_dir().expect("prepare Node/Pi bundle is required for skill tool bridge tests");
+    for apex in ["ofox.ai", "ofox.io"] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        let db = Arc::new(cc_switch_lib::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async{
+            let sid=create(&host).await;
+            let prefix="same-turn-bridge-body-marker\n";let body=format!("{prefix}{}","😀".repeat(60000-prefix.chars().count()));let description="😀".repeat(500);
+            gateway.reply(Reply::ToolCalls(vec![("save_skill",json!({"name":"bridge-fixture","description":description,"body":body}))]));
+            gateway.reply(Reply::ToolCalls(vec![("use_skill",json!({"name":"bridge-fixture"}))]));gateway.reply(Reply::Stream("Saved and used in this turn".into()));
+            let run=host.send(request(&sid,"Save the reusable fixture then use it",json!({}))).await.unwrap();let approval=wait_for(&env,&run.run_id,"approval").await;
+            assert_eq!(approval.data["name"],"save_skill");assert_eq!(approval.data["allowSession"],false);assert_eq!(approval.data["details"]["description"].as_str().unwrap().chars().count(),500);assert_eq!(approval.data["details"]["body"].as_str().unwrap().chars().count(),60000);
+            assert!(db.get_all_installed_skills().unwrap().is_empty());assert!(!cc_switch_lib::assistant_target::skills_dir().join("bridge-fixture").exists());
+            let respond:ApprovalRequest=serde_json::from_value(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"once","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap();host.respond_approval(respond).await.unwrap();
+            let end=wait_for(&env,&run.run_id,"run_end").await;assert_eq!(end.data["status"],"completed","{end:?}");let calls=gateway.requests();assert_eq!(calls.len(),3);
+            let tool=calls[1].body["messages"].as_array().unwrap().iter().find(|m|m["role"]=="tool").expect("save result reaches the next model turn");
+            let result:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();assert_eq!(result["saved"],true);assert_eq!(result["usable"],true);assert!(result.get("refresh").is_none(),"host-only refresh must not be model content");
+            assert!(calls[2].text().contains(prefix.trim()),"same-turn use must return the saved body");assert!(calls[2].text().contains("scriptsUnavailable"));
+            assert_eq!(db.get_all_installed_skills().unwrap().len(),1);assert_eq!(cc_switch_lib::assistant_target::list_assistant_skills(&db,&Default::default()).unwrap()[0].origin,Some(cc_switch_lib::assistant_target::SkillOrigin::AssistantCreated));
+            let detail=host.get_session(&sid).await.unwrap();assert_eq!(detail.messages.last().unwrap().content,"Saved and used in this turn");
         });
     }
 }

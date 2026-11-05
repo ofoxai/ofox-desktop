@@ -211,6 +211,9 @@ impl Attachment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    /// Host-authored, read-only historical search cards; never an installation capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_results: Vec<Value>,
     /// User-selected skill name only; never a persisted permission or body.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skill: Option<String>,

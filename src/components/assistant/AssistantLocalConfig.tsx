@@ -1,7 +1,9 @@
+import { SkillApprovalCard } from "./SkillResultCards";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   AssistantGenerationApproval,
+  AssistantSkillApproval,
   AssistantApprovalChoice,
   AssistantLocalChange,
   AssistantPermissionMode,
@@ -164,12 +166,25 @@ export function LocalApprovalCard({
     void onRespond(approval.approvalId, choice).finally(() => setBusy(false));
   };
   if (
+    (approval.category === "skillInstall" ||
+      approval.category === "skillSave") &&
+    typeof approval.details === "object"
+  )
+    return (
+      <SkillApprovalCard
+        details={approval.details as AssistantSkillApproval}
+        install={approval.category === "skillInstall"}
+        busy={busy}
+        onRespond={respond}
+      />
+    );
+  if (
     approval.category === "generation" &&
     typeof approval.details === "object"
   )
     return (
       <GenerationApproval
-        details={approval.details}
+        details={approval.details as AssistantGenerationApproval}
         busy={busy}
         allowSession={approval.allowSession}
         onRespond={respond}

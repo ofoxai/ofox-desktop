@@ -9,7 +9,7 @@ use std::{
 };
 
 #[path = "assistant_target_state.rs"]
-mod state;
+pub(crate) mod state;
 pub use state::{
     agent_created, read_agent_skill_origins, set_skill_mode, skill_modes, AgentSkillOrigin,
 };
@@ -182,7 +182,10 @@ pub(super) fn metadata(dir: &Path) -> Result<(String, String), AppError> {
     let dir = fs::canonicalize(dir).map_err(|_| error("assistantSkillUnreadable"))?;
     let bytes = state::read_regular(&dir.join("SKILL.md"), 1024 * 1024)?
         .ok_or_else(|| error("assistantSkillUnreadable"))?;
-    let text = std::str::from_utf8(&bytes).map_err(|_| error("assistantSkillBinary"))?;
+    metadata_bytes(&bytes)
+}
+pub(crate) fn metadata_bytes(bytes: &[u8]) -> Result<(String, String), AppError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| error("assistantSkillBinary"))?;
     if text
         .chars()
         .any(|c| c.is_control() && !['\n', '\r', '\t'].contains(&c))
@@ -283,7 +286,7 @@ fn origin_with_candidates(
     let Ok((name, _)) = metadata(&path) else {
         return Ok(fallback);
     };
-    if names.contains(&name) && state::verified_created_origin(db, row, origins.get(&row.id))? {
+    if names.contains(&name) && state::verified_creation_source(db, row, origins.get(&row.id))? {
         return Ok(SkillOrigin::AssistantCreated);
     }
     if source["commitSha"].as_str().is_none() || source["sourceKind"] != "repository" {
@@ -332,6 +335,7 @@ pub fn assistant_skill_snapshot(
     names: &BTreeSet<String>,
 ) -> Result<AssistantSkillSnapshot, AppError> {
     let _io = crate::config_io::lock();
+    super::assistant_skill_transaction::recover(db)?;
     let modes = skill_modes()?;
     agent_created()?;
     read_agent_skill_origins()?;

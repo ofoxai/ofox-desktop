@@ -975,3 +975,31 @@ it("shows a local run's progress only while the reply streams", () => {
   shown.rerender(reply("completed"));
   expect(screen.queryByText("Reading the Codex config")).toBeNull();
 });
+
+it("reopened assistant replies display persisted read-only skill results", () => {
+  render(
+    view({
+      status: "completed",
+      content: "Found a skill",
+      skillResults: [
+        {
+          toolCallId: "historic-search",
+          results: [
+            {
+              resultId: "expired",
+              name: "historical-fixture",
+              source: "fixture/repo",
+              description: "Invented fixture",
+              reviewed: false,
+            },
+          ],
+        },
+      ],
+    }),
+  );
+  expect(screen.getByText("historical-fixture")).toBeInTheDocument();
+  expect(screen.getByText("fixture/repo")).toBeInTheDocument();
+  expect(
+    screen.queryByRole("button", { name: /install|save skill/i }),
+  ).toBeNull();
+});

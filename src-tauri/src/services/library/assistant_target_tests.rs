@@ -442,3 +442,81 @@ fn run_proof_same_identity_ignores_only_epoch() {
         assert!(!proof.same_identity(&changed));
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn skill_tools_pending_intent_never_becomes_local_auto() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    local("pending-copy", body("pending-copy").as_bytes());
+    fs::write(
+        assistant_dir().join("skill-transaction-v1.json"),
+        b"{broken intent",
+    )
+    .unwrap();
+    assert!(
+        assistant_skill_snapshot(&db, &reviewed_names()).is_err(),
+        "unresolved intent cannot authorize a copied target as Local/Auto"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn skill_tools_created_origin_survives_off_without_grant() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let row = managed(
+        &db,
+        "anthropics",
+        "frontend-design",
+        "skills/frontend-design",
+    );
+    let before = db.library_snapshot().unwrap();
+    let receipt = before
+        .machine
+        .receipts
+        .values()
+        .find(|r| r.resource_id == row.id)
+        .unwrap()
+        .clone();
+    let marker = AgentSkillOrigin {
+        version: 1,
+        creation_id: uuid::Uuid::new_v4().to_string(),
+        revision: before.definitions.skills[&row.id].clone(),
+        artifact_hash: row.content_hash.clone().unwrap(),
+        receipt,
+    };
+    fs::write(
+        assistant_dir().join("agent-skills.json"),
+        r#"["frontend-design"]"#,
+    )
+    .unwrap();
+    fs::write(
+        assistant_dir().join("agent-skill-origins.json"),
+        serde_json::to_vec(&BTreeMap::from([(row.id.clone(), marker)])).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        list_assistant_skills(&db, &reviewed_names()).unwrap()[0].origin,
+        Some(SkillOrigin::AssistantCreated)
+    );
+    assert!(!list_assistant_skills(&db, &reviewed_names()).unwrap()[0].reviewed);
+    let mut next = before.clone();
+    next.machine.epoch += 1;
+    db.library_commit(&before, &next).unwrap();
+    assert_eq!(
+        origin_for_resource(&db, &row).unwrap(),
+        SkillOrigin::AssistantCreated
+    );
+    let off = skill_resource::preview(&db, &row.id, &[]).unwrap();
+    assert_eq!(
+        crate::services::library::apply_operation(&db, &off.id)
+            .unwrap()
+            .status,
+        "applied"
+    );
+    assert_eq!(
+        origin_for_resource(&db, &row).unwrap(),
+        SkillOrigin::AssistantCreated
+    );
+}

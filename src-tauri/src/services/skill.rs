@@ -1044,6 +1044,18 @@ impl SkillService {
         Ok(skills)
     }
 
+    pub(crate) async fn discover_assistant_repository(
+        &self,
+        repo: &SkillRepo,
+    ) -> Result<Vec<DiscoverableSkill>> {
+        timeout(
+            std::time::Duration::from_secs(30),
+            selected_download::assistant_catalog(repo),
+        )
+        .await
+        .map_err(|_| anyhow!("library.skillDownloadTimeout"))?
+    }
+
     /// Strict lookup for an explicit source. Never turn offline/timeout into an empty list.
     pub async fn discover_repository(&self, repo: &SkillRepo) -> Result<Vec<DiscoverableSkill>> {
         timeout(

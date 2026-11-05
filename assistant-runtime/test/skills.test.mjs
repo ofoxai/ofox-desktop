@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { LocalTask } from "../src/local-task.mjs";
 import { AssistantRuntime } from "../src/runtime.mjs";
 import { skillPrompt, skillTools, replaceSkillIndex } from "../src/skills.mjs";
 const skill = (name = "one", mode = "auto") => ({
@@ -112,4 +113,101 @@ test("only exact auto names can load; host refresh replaces rather than accumula
   await assert.rejects(tool.execute("old", { name: "one" }), /not_available/);
   await tool.execute("new", { name: "new" });
   assert.equal(calls, 1);
+});
+
+test("find install save use host callbacks, count calls and refresh before same-turn use", async () => {
+  const calls = [];
+  const ctx = context([]);
+  const rt = new AssistantRuntime({
+    hostCall: async (payload) => {
+      calls.push(payload.name);
+      if (payload.name === "find_skills")
+        return { results: [{ resultId: "r", name: "new" }] };
+      if (payload.name === "install_skill" || payload.name === "save_skill")
+        return {
+          [payload.name === "install_skill" ? "installed" : "saved"]: true,
+          name: "new",
+          usable: true,
+          refresh: { revision: calls.length, skills: [skill("new")] },
+        };
+      return { body: "Self-authored fixture", files: [] };
+    },
+  });
+  const tools = new Map(skillTools(rt, ctx).map((t) => [t.name, t]));
+  for (const name of ["find_skills", "install_skill", "save_skill"])
+    assert.ok(tools.has(name), `${name} is offered`);
+  await tools.get("find_skills").execute("search", { query: "fixture" });
+  await tools.get("install_skill").execute("install", { resultId: "r" });
+  await tools.get("use_skill").execute("use", { name: "new" });
+  await tools
+    .get("save_skill")
+    .execute("save", { name: "new", description: "Fixture", body: "Body" });
+  assert.deepEqual(calls, [
+    "find_skills",
+    "install_skill",
+    "use_skill",
+    "save_skill",
+  ]);
+  assert.equal(ctx.callCount, 4);
+  ctx.callCount = 20;
+  await assert.rejects(
+    tools.get("find_skills").execute("over", { query: "fixture" }),
+    /Maximum tool-call/,
+  );
+});
+
+test("new skill tools retain unknown-cost, repeat and run limits", async () => {
+  for (const name of ["find_skills", "install_skill", "save_skill"]) {
+    for (const reason of [
+      "assistant_cost_unavailable",
+      "assistant_cost_limit",
+      "assistant_duration_limit",
+    ]) {
+      let calls = 0;
+      const rt = new AssistantRuntime({
+        hostCall: async () => {
+          calls++;
+          return {};
+        },
+      });
+      const ctx = context([]);
+      ctx.localTask = new LocalTask({
+        maxToolCalls: 20,
+        maxDurationSeconds: 900,
+        maxCostUsd: 1,
+        repeatWarning: 2,
+        repeatStop: 3,
+      });
+      ctx.localTask.stopped = reason;
+      const tool = skillTools(rt, ctx).find((t) => t.name === name);
+      const result = await tool.execute("stopped", {});
+      assert.equal(result.details.code, reason);
+      assert.equal(calls, 0);
+    }
+  }
+  const rt = new AssistantRuntime({ hostCall: async () => ({ results: [] }) });
+  const ctx = context([]);
+  ctx.localTask = new LocalTask({
+    maxToolCalls: 20,
+    maxDurationSeconds: 900,
+    maxCostUsd: 1,
+    repeatWarning: 2,
+    repeatStop: 3,
+  });
+  const find = skillTools(rt, ctx).find((t) => t.name === "find_skills");
+  await find.execute("1", { query: "fixture" });
+  await find.execute("2", { query: "fixture" });
+  const result = await find.execute("3", { query: "fixture" });
+  assert.equal(result.details.code, "assistant_repeat_limit");
+  assert.deepEqual(
+    rt.tools(
+      {
+        ...context([]),
+        attachments: new Map(),
+        params: { skills: [], model: { tools: false } },
+      },
+      {},
+    ),
+    [],
+  );
 });

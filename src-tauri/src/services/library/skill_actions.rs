@@ -91,7 +91,7 @@ fn verify(db: &Database, frozen: &Frozen) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn decode(raw: &str) -> Result<String, AppError> {
+pub(super) fn decode(raw: &str) -> Result<String, AppError> {
     let mut result = vec![];
     let mut bytes = raw.bytes();
     while let Some(b) = bytes.next() {

@@ -520,6 +520,10 @@ fn runtime_dir_for(
 }
 
 impl Environment for AssistantEnvironment {
+    fn skill_database(&self) -> Result<std::sync::Arc<crate::Database>, String> {
+        Ok(self.app.state::<crate::store::AppState>().db.clone())
+    }
+
     fn skill_snapshot(&self) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
         let state = self.app.state::<crate::store::AppState>();
         crate::services::assistant::skills::snapshot(&state.db)

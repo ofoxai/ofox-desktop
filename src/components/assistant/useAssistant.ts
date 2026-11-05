@@ -1513,6 +1513,42 @@ export function useAssistant(enabled: boolean) {
             if (event.data.attempt === 1 || event.data.attempt === 2)
               setRetryAttempt(event.data.attempt);
             return;
+          case "skill_results": {
+            const { messageId, group } = event.data;
+            if (
+              !Array.isArray(group?.results) ||
+              group.results.length > 8 ||
+              typeof group.toolCallId !== "string"
+            )
+              return;
+            const apply = (message: AssistantMessage): AssistantMessage => ({
+              ...message,
+              skillResults: [
+                ...(message.skillResults ?? []).filter(
+                  (g) => g.toolCallId !== group.toolCallId,
+                ),
+                group,
+              ],
+            });
+            setStream((previous) =>
+              apply(
+                previous?.id === messageId
+                  ? previous
+                  : { ...blankReply(event.runId), id: messageId },
+              ),
+            );
+            setDetail((previous) =>
+              previous
+                ? {
+                    ...previous,
+                    messages: previous.messages.map((m) =>
+                      m.id === messageId ? apply(m) : m,
+                    ),
+                  }
+                : previous,
+            );
+            return;
+          }
           case "approval":
             setLocalApprovals((old) => [
               ...old.filter((a) => a.data.approvalId !== event.data.approvalId),

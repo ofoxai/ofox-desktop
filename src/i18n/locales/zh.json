@@ -5156,7 +5156,8 @@
       "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。",
       "localPartialChange": "修复失败前已产生部分改动。请检查改动记录后再试。",
       "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。",
-      "skillUnavailable": "技能不可用或已更改，请用 / 重新选择或移除。"
+      "skillUnavailable": "技能不可用或已更改，请用 / 重新选择或移除。",
+      "approvalOnceRequired": "请点击安装或保存，确认本次操作。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5743,6 +5744,17 @@
       "empty": "没有可用的技能",
       "unavailable": "技能加载失败，请重新输入 /。",
       "queueOnly": "带技能的消息会排队，等本次回答结束后发送。"
+    },
+    "skillTools": {
+      "results": "技能搜索结果",
+      "installTitle": "安装技能",
+      "saveTitle": "保存技能",
+      "install": "安装",
+      "save": "保存",
+      "preview": "技能预览",
+      "installs": "{{count}} 次安装",
+      "originHint": "目录来源标记不代表安全保证。安装始终需要你确认。",
+      "installed": "已安装"
     }
   },
   "pages": {

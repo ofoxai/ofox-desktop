@@ -20,6 +20,7 @@ pub mod process;
 mod projection;
 mod provenance;
 mod requests;
+pub mod skill_tools;
 pub mod store;
 pub mod thinking;
 mod title;

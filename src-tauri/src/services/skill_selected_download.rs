@@ -458,9 +458,23 @@ pub(super) async fn catalog(repo: &SkillRepo) -> Result<Vec<super::DiscoverableS
     );
     catalog_with(repo, &transport).await
 }
+pub(super) async fn assistant_catalog(repo: &SkillRepo) -> Result<Vec<super::DiscoverableSkill>> {
+    let transport = HttpTransport(
+        crate::proxy::http_client::mcp_check_client()
+            .map_err(|_| failure("skillDownloadFailed"))?,
+    );
+    catalog_mode(repo, &transport, true).await
+}
 async fn catalog_with<T: Transport>(
     repo: &SkillRepo,
     transport: &T,
+) -> Result<Vec<super::DiscoverableSkill>> {
+    catalog_mode(repo, transport, false).await
+}
+async fn catalog_mode<T: Transport>(
+    repo: &SkillRepo,
+    transport: &T,
+    strict: bool,
 ) -> Result<Vec<super::DiscoverableSkill>> {
     use futures::{stream, StreamExt, TryStreamExt};
     let reference = validate_repo(repo)?;
@@ -541,7 +555,13 @@ async fn catalog_with<T: Transport>(
             return Err(failure("skillRepositoryInvalid"));
         }
         let content = std::str::from_utf8(&bytes).map_err(|_| failure("skillRepositoryInvalid"))?;
-        let meta = super::SkillService::parse_skill_metadata_content(content);
+        let mut meta = super::SkillService::parse_skill_metadata_content(content);
+        if strict {
+            let (name, description) = crate::assistant_target::metadata_bytes(&bytes)
+                .map_err(|_| failure("skillSourceAmbiguous"))?;
+            meta.name = Some(name);
+            meta.description = Some(description);
+        }
         let path = entry.path.strip_suffix("/SKILL.md").unwrap_or_default();
         let directory = if path.is_empty() {
             repo.name.as_str()

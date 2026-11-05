@@ -19,7 +19,7 @@ fn linked(meta: &fs::Metadata) -> bool {
     }
 }
 /// Resolve the configured app-root alias, then refuse links within private state.
-fn private_path(path: &Path) -> Result<PathBuf, AppError> {
+pub(crate) fn private_path(path: &Path) -> Result<PathBuf, AppError> {
     let base = crate::config::get_app_config_dir();
     let relative = path
         .strip_prefix(&base)
@@ -48,7 +48,7 @@ pub(super) fn check_directory(path: &Path) -> Result<(), AppError> {
         Err(_) => Err(error("assistantSkillStateInvalid")),
     }
 }
-pub(super) fn read_regular(path: &Path, max: u64) -> Result<Option<Vec<u8>>, AppError> {
+pub(crate) fn read_regular(path: &Path, max: u64) -> Result<Option<Vec<u8>>, AppError> {
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -193,7 +193,24 @@ pub fn read_agent_skill_origins() -> Result<BTreeMap<String, AgentSkillOrigin>, 
     }
     Ok(origins)
 }
-pub(super) fn verified_created_origin(
+/// Durable provenance does not depend on whether the assistant target is enabled.
+pub(crate) fn verified_creation_source(
+    db: &Database,
+    row: &InstalledSkill,
+    origin: Option<&AgentSkillOrigin>,
+) -> Result<bool, AppError> {
+    let Some(origin) = origin else {
+        return Ok(false);
+    };
+    let snapshot = db.library_snapshot()?;
+    Ok(
+        snapshot.definitions.skills.get(&row.id) == Some(&origin.revision)
+            && row.content_hash.as_ref() == Some(&origin.artifact_hash)
+            && origin.receipt.resource_id == row.id
+            && skill_resource::artifact_for(db, &row.id).is_ok(),
+    )
+}
+pub(crate) fn verified_created_origin(
     db: &Database,
     row: &InstalledSkill,
     origin: Option<&AgentSkillOrigin>,
@@ -204,21 +221,17 @@ pub(super) fn verified_created_origin(
     let snapshot = db.library_snapshot()?;
     let target = skills_dir().join(&row.directory);
     let physical = skill_resource::entry_id(&target)?;
-    Ok(
-        snapshot.definitions.skills.get(&row.id) == Some(&origin.revision)
-            && row.content_hash.as_ref() == Some(&origin.artifact_hash)
-            && snapshot
-                .machine
-                .assignments
-                .get(&format!("skills:{}:{ID}", row.id))
-                == Some(&row.id)
-            && origin.receipt.path == target.to_string_lossy()
-            && origin.receipt.physical_target == physical
-            && snapshot.machine.receipts.get(&format!("skills:{physical}"))
-                == Some(&origin.receipt)
-            && skill_resource::artifact_for(db, &row.id).is_ok()
-            && skill_resource::receipt_intact(&origin.receipt),
-    )
+    Ok(verified_creation_source(db, row, Some(origin))?
+        && snapshot
+            .machine
+            .assignments
+            .get(&format!("skills:{}:{ID}", row.id))
+            == Some(&row.id)
+        && origin.receipt.path == target.to_string_lossy()
+        && origin.receipt.physical_target == physical
+        && snapshot.machine.receipts.get(&format!("skills:{physical}")) == Some(&origin.receipt)
+        && skill_resource::artifact_for(db, &row.id).is_ok()
+        && skill_resource::receipt_intact(&origin.receipt))
 }
 pub(super) fn write_modes(modes: &BTreeMap<String, SkillMode>) -> Result<(), AppError> {
     let path = private_path(&assistant_dir().join("skill-modes.json"))?;

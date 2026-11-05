@@ -76,6 +76,26 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    fn skill_database(&self) -> Result<Arc<crate::Database>, String> {
+        Err("skill_service_unavailable".into())
+    }
+    fn skill_search<'a>(
+        &'a self,
+        query: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<super::skill_tools::Candidate>, String>> {
+        Box::pin(super::skill_tools::search(query))
+    }
+    fn skill_prepare(
+        &self,
+        db: Arc<crate::Database>,
+        candidate: super::skill_tools::Candidate,
+    ) -> BoxFuture<
+        '_,
+        Result<crate::services::library::assistant_skill_transaction::Prepared, String>,
+    > {
+        Box::pin(super::skill_tools::prepare_install(db, candidate))
+    }
+
     fn local_private_root(&self) -> PathBuf {
         self.config_dir()
     }
@@ -184,6 +204,7 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    pub(super) skill_tools: Mutex<super::skill_tools::State>,
     pub(super) skills: Mutex<super::skills::SkillRunState>,
     local_calls: local::Calls,
     /// The generation tools of a chat run; `None` for a model without tools.
@@ -214,6 +235,7 @@ impl RunControl {
         Self {
             local_calls: local::Calls::default(),
             skills: Mutex::new(Default::default()),
+            skill_tools: Mutex::new(Default::default()),
             media: None,
             artifact: None,
             local_enabled: false,
@@ -311,7 +333,7 @@ pub struct AssistantHost {
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
     local_states: Mutex<HashMap<String, local::LocalState>>,
-    local_approvals: super::tools::approval::Broker,
+    pub(super) local_approvals: super::tools::approval::Broker,
     /// Background work at it (see [`Self::track`]), such as a title.
     background: Arc<AtomicU64>,
     /// When shutdown aborts what is still at work, once it began.
@@ -1329,6 +1351,15 @@ impl AssistantHost {
             .get(&control.session_id)
             .is_some_and(|run| run.run_id == control.run_id)
         {
+            let mut state = control
+                .skill_tools
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.closed = true;
+            state.results.clear();
+            state.installed.clear();
+            state.saved.clear();
+            state.epoch += 1;
             runs.remove(&control.session_id);
         }
     }
@@ -2115,6 +2146,15 @@ impl AssistantHost {
                 .get(&control.session_id)
                 .is_some_and(|r| r.run_id == control.run_id)
             {
+                let mut state = control
+                    .skill_tools
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                state.closed = true;
+                state.results.clear();
+                state.installed.clear();
+                state.saved.clear();
+                state.epoch += 1;
                 runs.remove(&control.session_id);
             }
         }
@@ -2436,6 +2476,447 @@ mod tests {
             "assistant_operation_denied"
         );
         assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn skill_tools_forged_install_is_rejected_without_approval() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"forged-skill","name":"install_skill","args":{"resultId":"forged"}});
+        assert_eq!(
+            host.dispatch_tool(&run, &call).await.unwrap_err(),
+            "not_in_results"
+        );
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_save_requires_click_all_modes_and_no_local_reads_same_turn() {
+        use super::super::tools::policy::PermissionMode;
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, first) = local_run(&host);
+        host.release_run(&first);
+        for (i, mode) in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.set_permission(super::local::PermissionRequest {
+                session_id: sid.clone(),
+                mode,
+                confirmed_full_access: true,
+                expected_owner: identity().owner,
+                expected_generation: host.generation(),
+            })
+            .await
+            .unwrap();
+            let run = control(&sid);
+            assert!(!run.local_enabled);
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap();
+            let name = format!("fixture-{i}");
+            let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+            let args = json!({"name":name,"description":"Invented fixture","body":"# Invented instructions"});
+            let (card, denied) = dispatch_answering(
+                &host,
+                &env,
+                &run,
+                call("deny", "save_skill", args.clone()),
+                "deny",
+            )
+            .await;
+            assert_eq!(card["allowSession"], false);
+            assert_eq!(card["category"], "skillSave");
+            assert_eq!(denied.unwrap()["saved"], false);
+            assert!(db.get_all_installed_skills().unwrap().is_empty() || i > 0);
+            let (_, saved) = dispatch_answering(
+                &host,
+                &env,
+                &run,
+                call("save", "save_skill", args.clone()),
+                "once",
+            )
+            .await;
+            let saved = saved.unwrap();
+            assert_eq!(saved["saved"], true, "{saved}");
+            assert_eq!(saved["usable"], true, "{saved}");
+            assert!(saved["refresh"]["revision"].as_u64().unwrap() > 0);
+            let body = host
+                .dispatch_tool(&run, &call("use", "use_skill", json!({"name":name})))
+                .await
+                .unwrap();
+            assert!(body["body"]
+                .as_str()
+                .unwrap()
+                .contains("Invented instructions"));
+            assert!(host
+                .dispatch_tool(
+                    &run,
+                    &call(
+                        "terminal",
+                        "bash",
+                        json!({"command":"echo no","folder":env.config,"timeout":1})
+                    )
+                )
+                .await
+                .is_err());
+            crate::assistant_target::set_skill_mode(
+                &name,
+                crate::assistant_target::SkillMode::Manual,
+            )
+            .unwrap();
+            let seen = approvals(&env).len();
+            let (_, again) =
+                dispatch_answering(&host, &env, &run, call("same", "save_skill", args), "deny")
+                    .await;
+            assert_eq!(again.unwrap()["saved"], false);
+            assert_eq!(approvals(&env).len(), seen + 1);
+            assert_eq!(
+                crate::assistant_target::skill_modes().unwrap()[&name],
+                crate::assistant_target::SkillMode::Manual
+            );
+            host.release_run(&run);
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_latest_results_precede_success_cache_and_existing_source_reuses() {
+        use crate::services::library::{assistant_target, skill_resource};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("SKILL.md"),
+            "---\nname: fixture\ndescription: Invented fixture\n---\nOriginal body",
+        )
+        .unwrap();
+        let row = crate::app_config::InstalledSkill {
+            id: "fixture/repo:nested/fixture".into(),
+            name: "User title".into(),
+            description: Some("User description".into()),
+            directory: "fixture".into(),
+            repo_owner: Some("fixture".into()),
+            repo_name: Some("repo".into()),
+            repo_branch: Some("main".into()),
+            readme_url: Some(format!(
+                "https://github.com/fixture/repo/blob/{}/nested/fixture/SKILL.md",
+                "a".repeat(40)
+            )),
+            apps: Default::default(),
+            installed_at: 0,
+            updated_at: 0,
+            content_hash: None,
+        };
+        let row = skill_resource::save_draft(&db, row, source.path(), None).unwrap();
+        let (sid, run) = local_run(&host);
+        host.store(&identity().owner).unwrap().mutate(&sid,|record|{record.messages.push(serde_json::from_value(json!({"id":run.reply_id(),"role":"assistant","content":"","createdAt":0,"status":"streaming","runId":run.run_id})).unwrap());Ok(())}).unwrap();
+        let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        let found = host
+            .dispatch_tool(
+                &run,
+                &call("search", "find_skills", json!({"query":"first"})),
+            )
+            .await
+            .unwrap();
+        let id = found["results"][0]["resultId"].clone();
+        let (_, declined) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call("decline-install", "install_skill", json!({"resultId":id})),
+            "deny",
+        )
+        .await;
+        assert_eq!(declined.unwrap()["installed"], false);
+        let persisted = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert_ne!(
+            persisted.messages[0].skill_results[0]["results"][0]["installed"],
+            true
+        );
+        let (card, installed) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call("install", "install_skill", json!({"resultId":id})),
+            "once",
+        )
+        .await;
+        assert_eq!(card["details"]["directory"], "nested/fixture");
+        assert_eq!(card["details"]["commitSha"], "a".repeat(40));
+        let installed = installed.unwrap();
+        assert_eq!(installed["installed"], true, "{installed}");
+        assert_eq!(installed["usable"], true, "{installed}");
+        let persisted = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert_eq!(
+            persisted.messages[0].skill_results[0]["results"][0]["installed"],
+            true
+        );
+        assert_eq!(db.get_all_installed_skills().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::to_value(db.get_installed_skill(&row.id).unwrap()).unwrap(),
+            serde_json::to_value(Some(row.clone())).unwrap()
+        );
+        assistant_target::set_skill_mode("fixture", assistant_target::SkillMode::Manual).unwrap();
+        let seen = approvals(&env).len();
+        let cached = host
+            .dispatch_tool(
+                &run,
+                &call("again", "install_skill", json!({"resultId":id})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached["already"], true);
+        assert_eq!(cached["usable"], false);
+        assert_eq!(approvals(&env).len(), seen);
+        host.dispatch_tool(
+            &run,
+            &call("search2", "find_skills", json!({"query":"second"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            host.dispatch_tool(&run, &call("old", "install_skill", json!({"resultId":id})))
+                .await
+                .unwrap_err(),
+            "not_in_results"
+        );
+        assert_eq!(approvals(&env).len(), seen);
+        env.skill_refresh_fail.store(true, Ordering::SeqCst);
+        let (_, reinstall) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call("install2", "install_skill", json!({"resultId":"second-id"})),
+            "once",
+        )
+        .await;
+        let reinstall = reinstall.unwrap();
+        assert_eq!(reinstall["installed"], true);
+        assert_eq!(reinstall["usable"], false);
+        let persisted = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert_eq!(
+            persisted.messages[0].skill_results[1]["results"][0]["installed"],
+            true
+        );
+        assert_eq!(persisted.messages[0].skill_results.len(), 2);
+        env.skill_refresh_fail.store(false, Ordering::SeqCst);
+        let off = skill_resource::preview(&db, &row.id, &[]).unwrap();
+        crate::services::library::apply_operation(&db, &off.id).unwrap();
+        let seen = approvals(&env).len();
+        let off_retry = host
+            .dispatch_tool(
+                &run,
+                &call(
+                    "off-retry",
+                    "install_skill",
+                    json!({"resultId":"second-id"}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(off_retry["installed"], true);
+        assert_eq!(off_retry["usable"], false);
+        assert_eq!(approvals(&env).len(), seen);
+        assert!(!assistant_target::skills_dir().join("fixture").exists());
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("failed-search", "find_skills", json!({"query":"failure"}))
+            )
+            .await
+            .is_err());
+        let seen = approvals(&env).len();
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call(
+                    "failed-old",
+                    "install_skill",
+                    json!({"resultId":"second-id"})
+                )
+            )
+            .await
+            .unwrap_err(),
+            "not_in_results"
+        );
+        assert_eq!(approvals(&env).len(), seen);
+        host.release_run(&run);
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call("ended", "install_skill", json!({"resultId":"second-id"}))
+            )
+            .await
+            .unwrap_err(),
+            "not_in_results"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_committed_refresh_failure_retries_without_reinstall_or_reenable() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, run) = local_run(&host);
+        let call = |id: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+        env.skill_refresh_fail.store(true, Ordering::SeqCst);
+        let (_, result) = dispatch_answering(&host, &env, &run, call("first"), "once").await;
+        let result = result.unwrap();
+        assert_eq!(result["saved"], true);
+        assert_eq!(result["usable"], false);
+        assert_eq!(result["code"], "skill_refresh_failed");
+        let before = db.library_snapshot().unwrap();
+        let seen = approvals(&env).len();
+        crate::assistant_target::set_skill_mode(
+            "fixture",
+            crate::assistant_target::SkillMode::Manual,
+        )
+        .unwrap();
+        env.skill_refresh_fail.store(false, Ordering::SeqCst);
+        let again = host.dispatch_tool(&run, &call("retry")).await.unwrap();
+        assert_eq!(again["saved"], true);
+        assert_eq!(again["usable"], false);
+        assert_eq!(db.library_snapshot().unwrap(), before);
+        assert_eq!(approvals(&env).len(), seen);
+        host.release_run(&run);
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_session_approval_rejected_and_epoch_change_fails_closed() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, run) = local_run(&host);
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"save","name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+        let task = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            async move { host.dispatch_tool(&run, &params).await }
+        });
+        let card = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(c) = approvals(&env).first() {
+                    break c.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let request = |choice: &str| {
+            serde_json::from_value(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":card["approvalId"],"choice":choice,"expectedOwner":identity().owner,"expectedGeneration":host.generation()})).unwrap()
+        };
+        assert_eq!(
+            host.respond_approval(request("session")).await.unwrap_err(),
+            "assistant_approval_once_required"
+        );
+        assert!(!crate::assistant_target::skills_dir()
+            .join("fixture")
+            .exists());
+        let before = db.library_snapshot().unwrap();
+        let mut changed = before.clone();
+        changed.machine.epoch += 1;
+        db.library_commit(&before, &changed).unwrap();
+        let changed = db.library_snapshot().unwrap();
+        host.respond_approval(request("once")).await.unwrap();
+        assert!(task
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("epochOrRevisionChanged"));
+        assert_eq!(db.library_snapshot().unwrap(), changed);
+        assert!(!crate::assistant_target::skills_dir()
+            .join("fixture")
+            .exists());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_cancel_timeout_and_foreign_name_never_grant() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, first) = local_run(&host);
+        host.release_run(&first);
+        for cancel in [true, false] {
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().deadline =
+                tokio::time::Instant::now() + Duration::from_millis(250);
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap();
+            let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"save","name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+            let seen = approvals(&env).len();
+            let task = tokio::spawn({
+                let host = host.clone();
+                let run = run.clone();
+                async move { host.dispatch_tool(&run, &params).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while approvals(&env).len() == seen {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if cancel {
+                run.cancel.send_replace(true);
+            }
+            let result = task.await.unwrap().unwrap();
+            assert_eq!(result["saved"], false);
+            assert!(db.get_all_installed_skills().unwrap().is_empty());
+            assert!(
+                crate::assistant_target::assistant_skill_snapshot(&db, &Default::default())
+                    .unwrap()
+                    .skills
+                    .is_empty()
+            );
+            host.release_run(&run);
+        }
+        let run = control(&sid);
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        std::fs::create_dir_all(crate::assistant_target::skills_dir().join("fixture")).unwrap();
+        std::fs::write(
+            crate::assistant_target::skills_dir().join("fixture/SKILL.md"),
+            "---\nname: fixture\ndescription: Foreign\n---\nBody",
+        )
+        .unwrap();
+        let seen = approvals(&env).len();
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"foreign","name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+        assert!(host
+            .dispatch_tool(&run, &params)
+            .await
+            .unwrap_err()
+            .contains("not_agent_created"));
+        assert_eq!(approvals(&env).len(), seen);
         host.release_run(&run);
     }
 
@@ -3090,6 +3571,7 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        skill_refresh_fail: AtomicBool,
         skill_db: Mutex<Option<Arc<crate::Database>>>,
         apex: Mutex<String>,
         catalog_apexes: Mutex<Vec<String>>,
@@ -3111,6 +3593,57 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn skill_database(&self) -> Result<Arc<crate::Database>, String> {
+            self.skill_db
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or("skill_service_unavailable".into())
+        }
+        fn skill_search<'a>(
+            &'a self,
+            query: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<super::super::skill_tools::Candidate>, String>> {
+            Box::pin(async move {
+                if query == "failure" {
+                    return Err("fixture_search_failed".into());
+                }
+                Ok(vec![super::super::skill_tools::Candidate {
+                    result: super::super::skill_tools::SkillResult {
+                        result_id: format!("{query}-id"),
+                        name: "fixture".into(),
+                        source: "fixture/repo".into(),
+                        description: "Invented fixture".into(),
+                        installs: Some(1),
+                        reviewed: false,
+                        installed: None,
+                    },
+                    skill_id: "fixture".into(),
+                    directory: Some("nested/fixture".into()),
+                }])
+            })
+        }
+        fn skill_prepare(
+            &self,
+            db: Arc<crate::Database>,
+            candidate: super::super::skill_tools::Candidate,
+        ) -> BoxFuture<
+            '_,
+            Result<crate::services::library::assistant_skill_transaction::Prepared, String>,
+        > {
+            Box::pin(async move {
+                crate::services::library::assistant_skill_transaction::prepare_existing(
+                    &db,
+                    &candidate.result.source,
+                    &candidate.skill_id,
+                    candidate.directory.as_deref(),
+                    serde_json::to_value(&candidate.result).unwrap(),
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or("fixture_source_missing".into())
+            })
+        }
+
         fn local_private_root(&self) -> PathBuf {
             if self.skill_db.lock().unwrap().is_some() {
                 crate::config::get_app_config_dir()
@@ -3121,6 +3654,9 @@ mod tests {
         fn skill_snapshot(
             &self,
         ) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+            if self.skill_refresh_fail.load(Ordering::SeqCst) {
+                return Err("fixture_refresh_failed".into());
+            }
             match self.skill_db.lock().unwrap().as_ref() {
                 Some(db) => super::super::skills::snapshot(db),
                 None => Ok(Default::default()),
@@ -3236,6 +3772,7 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            skill_refresh_fail: AtomicBool::new(false),
             skill_db: Mutex::new(None),
             apex: Mutex::new("ofox.ai".into()),
             catalog_apexes: Mutex::default(),

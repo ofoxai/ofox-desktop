@@ -5,6 +5,9 @@ import { validateToolArguments } from "@earendil-works/pi-ai";
 import { AssistantRuntime } from "../src/runtime.mjs";
 
 const samples = {
+  find_skills: { query: "fixture" },
+  install_skill: { resultId: "result" },
+  save_skill: { name: "fixture", description: "Fixture", body: "Body" },
   use_skill: { name: "sample" },
   read_attachment: { id: "attachment", offset: 0, length: 10 },
   read: { path: "config.json", offset: 1, limit: 10 },
@@ -80,7 +83,11 @@ for (const platform of ["macos", "windows"])
           args,
           tool.name,
         );
-        if (tool.name === "use_skill")
+        if (
+          ["use_skill", "find_skills", "install_skill", "save_skill"].includes(
+            tool.name,
+          )
+        )
           assert.throws(
             () =>
               validateToolArguments(tool, {
@@ -97,3 +104,40 @@ for (const platform of ["macos", "windows"])
         );
       }
     });
+
+test("Pi save schema accepts Unicode scalar limits through the actual wrapper", async () => {
+  let calls = 0;
+  const runtime = new AssistantRuntime({
+    hostCall: async (payload) => {
+      calls++;
+      assert.equal([...payload.args.description].length, 500);
+      assert.equal([...payload.args.body].length, 60000);
+      return { saved: true };
+    },
+  });
+  const context = {
+    attachments: new Map(),
+    params: { skills: [] },
+    calls: new Map(),
+    callCount: 0,
+  };
+  const tool = runtime.tools(context, {}).find((t) => t.name === "save_skill");
+  const args = {
+    name: "fixture",
+    description: "😀".repeat(500),
+    body: "😀".repeat(60000),
+  };
+  const checked = validateToolArguments(tool, {
+    name: tool.name,
+    arguments: args,
+  });
+  await tool.execute("unicode", checked);
+  assert.equal(calls, 1);
+  for (const key of ["description", "body"]) {
+    const over = { ...args, [key]: args[key] + "😀" };
+    assert.throws(
+      () => validateToolArguments(tool, { name: tool.name, arguments: over }),
+      /Validation failed/,
+    );
+  }
+});

@@ -156,7 +156,7 @@ impl AssistantHost {
             .remove(&session_key(owner, sid));
     }
 
-    fn local_binding(&self, run: &RunControl) -> Binding {
+    pub(in crate::services::assistant) fn local_binding(&self, run: &RunControl) -> Binding {
         Binding {
             owner: run.identity.owner.clone(),
             session_id: run.session_id.clone(),
@@ -253,7 +253,47 @@ impl AssistantHost {
             return Err("assistant_invalid_tool".into());
         }
         let tool = registry::get(&call.name)?;
+        if super::super::skill_tools::is_tool(tool.name) {
+            if self
+                .runs
+                .lock()
+                .map_err(|_| STATE)?
+                .get(&run.session_id)
+                .is_none_or(|active| active.run_id != run.run_id)
+            {
+                return Err("not_in_results".into());
+            }
+            let reply = run.reply_id();
+            let mut state = run.skill_tools.lock().map_err(|_| STATE)?;
+            if state.closed {
+                return Err("not_in_results".into());
+            }
+            if state.reply_id != reply {
+                let epoch = state.epoch + 1;
+                *state = super::super::skill_tools::State {
+                    reply_id: reply,
+                    epoch,
+                    ..Default::default()
+                };
+            }
+        }
+        if call.name == "find_skills"
+            && !run
+                .local_calls
+                .0
+                .lock()
+                .map_err(|_| STATE)?
+                .contains_key(&call.tool_call_id)
+        {
+            let mut skills = run.skill_tools.lock().map_err(|_| STATE)?;
+            skills.epoch += 1;
+            skills.results.clear();
+            skills.installed.clear();
+        }
         registry::validate_args(tool, &call.args)?;
+        if call.name == "install_skill" {
+            self.check_skill_result(run, &call.args)?;
+        }
         let record = blocking({
             let store = self.store(&run.identity.owner)?;
             let sid = run.session_id.clone();
@@ -262,6 +302,7 @@ impl AssistantHost {
         .await?;
         capabilities::validate(&record.session.assistant_id, &record.session.capabilities)?;
         if (tool.name != "use_skill"
+            && !super::super::skill_tools::is_tool(tool.name)
             && (!run.local_enabled || !capabilities::enabled(&record.session.capabilities)))
             || record.session.deleted_at.is_some()
             || run.compact_only
@@ -292,7 +333,9 @@ impl AssistantHost {
             }
             calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
         }
-        let result = if tool.name == "use_skill" {
+        let result = if super::super::skill_tools::is_tool(tool.name) {
+            self.dispatch_skill_tool(run, &call).await
+        } else if tool.name == "use_skill" {
             self.load_run_skill(
                 run,
                 call.args["name"].as_str().ok_or("assistant_invalid_tool")?,
