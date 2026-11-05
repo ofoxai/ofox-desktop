@@ -625,6 +625,17 @@ impl AssistantHost {
         control.local_enabled = local_config.is_some();
         control.mcp = super::mcp::snapshot(&self.env.config_dir())
             .unwrap_or_else(|_| json!({"servers":{},"unavailable":true}));
+        if control.mcp["servers"]
+            .as_object()
+            .is_some_and(|servers| !servers.is_empty())
+        {
+            let mut limits = super::capabilities::local_config().limits;
+            if !control.local_enabled {
+                limits.max_tool_calls = 20;
+            }
+            control.mcp["limits"] =
+                serde_json::to_value(limits).map_err(|_| "assistant_state_unavailable")?;
+        }
         control.mcp_generation = generation;
         control.mcp["searchPrice"] =
             serde_json::to_value(&search_price).map_err(|_| "assistant_state_unavailable")?;

@@ -47,7 +47,7 @@ export async function writeSessionMcpConfig(agentDir, mcp) {
     temporary,
     JSON.stringify({
       autoEnableCodemode: false,
-      mcpServers: cleaner.scrub(servers),
+      mcpServers: cleaner.scrub(servers, false),
     }),
     { mode: 0o600, flag: "wx" },
   );

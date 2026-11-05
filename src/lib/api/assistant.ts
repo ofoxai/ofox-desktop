@@ -1529,6 +1529,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",
   assistant_mcp_config_unavailable: "mcpUnavailable",
+  assistant_mcp_data_unavailable: "mcpUnavailable",
   assistant_mcp_environment_missing: "mcpUnavailable",
   assistant_mcp_snapshot_changed: "mcpUnavailable",
   assistant_mcp_unknown_server: "mcpUnavailable",

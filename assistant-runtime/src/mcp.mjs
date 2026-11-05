@@ -28,33 +28,76 @@ const unsupported =
 // results. Routing identifiers are validated, never rewritten into another tool.
 export function sanitizeMcpMessage(message, cleaner) {
   const control = (value) => {
-    if (typeof value === "string" && cleaner.text(value) !== value)
-      throw new Error("MCP identifier contains a configured secret");
+    if (cleaner.scalar(value) !== value)
+      throw new Error(
+        "MCP control value or identifier contains a configured secret",
+      );
+    return value;
   };
-  const visit = (value, key = "") => {
-    if (Array.isArray(value)) return value.map((item) => visit(item, key));
+  const schemaTypes = new Set([
+    "null",
+    "boolean",
+    "object",
+    "array",
+    "number",
+    "string",
+    "integer",
+  ]);
+  const contentTypes = new Set([
+    "text",
+    "image",
+    "audio",
+    "resource",
+    "resource_link",
+  ]);
+  const booleanHints = new Set([
+    "readOnlyHint",
+    "destructiveHint",
+    "idempotentHint",
+    "openWorldHint",
+  ]);
+  const visit = (value, mode = "protocol", key = "") => {
+    if (Array.isArray(value))
+      return value.map((item) => visit(item, mode, key));
     if (!value || typeof value !== "object") {
-      if (
-        [
-          "id",
-          "method",
-          "jsonrpc",
-          "name",
-          "uri",
-          "uriTemplate",
-          "mimeType",
-          "protocolVersion",
-          "type",
-        ].includes(key)
-      ) {
-        control(value);
+      if (mode === "data") return cleaner.scalar(value);
+      // These are fixed syntax, not credential-derived payload: never change
+      // a schema's structural boolean or an annotation that grants permission.
+      if (mode === "schema" && (typeof value === "boolean" || value === null))
         return value;
-      }
-      return typeof value === "string" ? cleaner.text(value) : value;
+      if (
+        mode === "annotation" &&
+        booleanHints.has(key) &&
+        typeof value === "boolean"
+      )
+        return value;
+      if (mode === "schema" && key === "type" && schemaTypes.has(value))
+        return value;
+      if (
+        mode === "protocol" &&
+        ((key === "jsonrpc" && value === "2.0") ||
+          (key === "type" && contentTypes.has(value)))
+      )
+        return value;
+      if (
+        mode === "protocol" &&
+        ["isError", "listChanged", "subscribe"].includes(key) &&
+        typeof value === "boolean"
+      )
+        return value;
+      return control(value);
     }
-    if (value.type === "image" || value.type === "audio")
+    if (
+      (mode === "protocol" || mode === "data") &&
+      (value.type === "image" || value.type === "audio")
+    )
       return { type: "text", text: unsupported };
-    if (typeof value.blob === "string") {
+    if (
+      (mode === "protocol" || mode === "data") &&
+      typeof value.blob === "string"
+    ) {
+      if (Object.hasOwn(value, "text"))
+        throw new Error("MCP blob and text content conflict");
       let decoded;
       try {
         decoded = new TextDecoder("utf-8", { fatal: true }).decode(
@@ -64,18 +107,71 @@ export function sanitizeMcpMessage(message, cleaner) {
         /* opaque */
       }
       const { blob, ...rest } = value;
-      return visit({
-        ...rest,
-        text:
-          decoded !== undefined && !/[\x00-\x08\x0e-\x1f]/.test(decoded)
-            ? decoded
-            : unsupported,
-      });
+      return visit(
+        {
+          ...rest,
+          text:
+            decoded !== undefined && !/[\x00-\x08\x0e-\x1f]/.test(decoded)
+              ? decoded
+              : unsupported,
+        },
+        mode,
+      );
+    }
+    if (mode === "data") {
+      const entries = Object.entries(value).map(([field, item]) => [
+        cleaner.text(field),
+        visit(item, "data", field),
+      ]);
+      if (new Set(entries.map(([field]) => field)).size !== entries.length)
+        throw new Error("MCP data keys collide after redaction");
+      return Object.fromEntries(entries);
     }
     return Object.fromEntries(
       Object.entries(value).map(([field, item]) => {
+        if (mode === "constraint") {
+          control(field);
+          return [field, visit(item, "constraint", field)];
+        }
+        if (mode === "names") {
+          control(field);
+          return [field, visit(item, "schema", field)];
+        }
+        if (mode === "schema") {
+          if (["const", "default", "enum", "examples"].includes(field))
+            return [field, visit(item, "constraint", field)];
+          if (
+            [
+              "properties",
+              "patternProperties",
+              "$defs",
+              "definitions",
+              "dependentSchemas",
+            ].includes(field)
+          )
+            return [field, visit(item, "names", field)];
+          if (["description", "title", "$comment"].includes(field))
+            return [field, visit(item, "data", field)];
+          control(field);
+          return [field, visit(item, "schema", field)];
+        }
+        if (field === "inputSchema" || field === "outputSchema")
+          return [field, visit(item, "schema", field)];
+        if (field === "annotations")
+          return [field, visit(item, "annotation", field)];
+        if (
+          [
+            "structuredContent",
+            "data",
+            "text",
+            "description",
+            "title",
+            "message",
+          ].includes(field)
+        )
+          return [field, visit(item, "data", field)];
         control(field);
-        return [field, visit(item, field)];
+        return [field, visit(item, mode, field)];
       }),
     );
   };
@@ -95,7 +191,7 @@ export async function mcpExtensions(runtime, context, agentDir) {
   const raw = config.servers;
   const entries = Object.entries(raw).map(([name, config]) => ({
     name,
-    config: cleaner.scrub(config),
+    config: cleaner.scrub(config, false),
     source,
     scope: "extension",
   }));

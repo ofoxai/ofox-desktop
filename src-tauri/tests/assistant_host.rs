@@ -6742,3 +6742,48 @@ fn assistant_mcp_missing_environment_isolated_to_one_server_in_real_bridge() {
         }
     });
 }
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_no_local_twenty_tool_budget_includes_existing_skill_tools() {
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for MCP budget regression");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    for local_capability in [false, true] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let skill = cc_switch_lib::assistant_target::skills_dir().join("budget-fixture");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"),"---\nname: budget-fixture\ndescription: Budget fixture\n---\nReadable skill instructions").unwrap();
+        cc_switch_lib::assistant_target::set_skill_mode(
+            "budget-fixture",
+            cc_switch_lib::assistant_target::SkillMode::Auto,
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let physical = config.path().canonicalize().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+        *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+        let host = AssistantHost::new(env.clone());
+        let calls = physical.join("calls");
+        fs::create_dir_all(physical.join("assistant")).unwrap();
+        fs::write(physical.join("assistant/mcp.json"),json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":calls}}}}).to_string()).unwrap();
+        runtime().block_on(async {
+            let sid=host.create_session(serde_json::from_value(if local_capability {json!({"capabilities":[{"id":"local_config","version":1}]})}else{json!({})}).unwrap()).await.unwrap().id;
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+            for index in 2..=21 { gateway.reply(Reply::ToolCalls(vec![if index%5==0 {("use_skill",json!({"name":"budget-fixture"}))}else{("mcp__fixture__read_fixture",json!({"index":index}))}])); }
+            gateway.reply(Reply::Stream("Budget complete".into()));
+            let (run,_)=turn(&host,&env,request(&sid,"Use mixed tools",json!({}))).await;
+            let events=env.events(&run);let starts:Vec<_>=events.iter().filter(|event|event.r#type=="tool_start").collect();
+            assert_eq!(starts.len(),20,"actual Host no-local params must retain twenty tools, capability={local_capability}");
+            assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(),15,"call21 never executes");
+            assert_eq!(starts.iter().filter(|event|event.data["name"]=="use_skill").count(),4,"existing tool20 executes");
+            assert_eq!(gateway.requests()[20].body["tool_choice"],"none");
+            assert!(!gateway.requests()[0].body["tools"].as_array().unwrap().iter().any(|tool|tool["function"]["name"]=="read"));
+        });
+    }
+}

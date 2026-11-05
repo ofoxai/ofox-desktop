@@ -26,14 +26,35 @@ export function mcpScrubber(values) {
       )
     : null;
   const text = (value) => (pattern ? value.replace(pattern, "***") : value);
-  const scrub = (value) => {
+  const scalar = (value) => {
     if (typeof value === "string") return text(value);
-    if (Array.isArray(value)) return value.map(scrub);
-    if (value && typeof value === "object")
-      return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [text(key), scrub(item)]),
-      );
+    if (
+      value === null ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    ) {
+      const encoded = JSON.stringify(value);
+      if (text(encoded) !== encoded) return "***";
+    }
     return value;
   };
-  return { text, scrub, secrets };
+  const scrub = (value, redactScalars = true) => {
+    if (Array.isArray(value))
+      return value.map((item) => scrub(item, redactScalars));
+    if (value && typeof value === "object") {
+      const entries = Object.entries(value).map(([key, item]) => [
+        text(key),
+        scrub(item, redactScalars),
+      ]);
+      if (new Set(entries.map(([key]) => key)).size !== entries.length)
+        throw new Error("MCP data keys collide after redaction");
+      return Object.fromEntries(entries);
+    }
+    return redactScalars
+      ? scalar(value)
+      : typeof value === "string"
+        ? text(value)
+        : value;
+  };
+  return { text, scalar, scrub, secrets };
 }

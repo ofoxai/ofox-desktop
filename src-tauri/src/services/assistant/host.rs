@@ -1443,6 +1443,10 @@ impl AssistantHost {
     }
 
     pub(super) fn emit(&self, run: &RunControl, kind: &str, mut data: Value) {
+        if super::mcp::scrub_event_data(&mut data, &run.mcp).is_err() {
+            log::warn!("[Assistant] refused unsafe MCP event payload");
+            return;
+        }
         scrub_secrets_in(&mut data, &run.secrets());
         self.env.emit(Event {
             session_id: run.session_id.clone(),
@@ -1787,6 +1791,7 @@ impl AssistantHost {
         if !data.is_object() {
             return Err(PROTOCOL.into());
         }
+        super::mcp::scrub_event_data(&mut data, &control.mcp)?;
         match kind {
             "retrying" => {
                 let retry = data["attempt"]
@@ -1909,6 +1914,13 @@ impl AssistantHost {
         may_retry: bool,
         attempt: &mut Attempt,
     ) -> Result<Finish, Failure> {
+        let mut value = value.clone();
+        if let Some(error) = value.get_mut("error") {
+            super::mcp::scrub_event_data(error, &control.mcp)?;
+        }
+        if let Some(result) = value.get_mut("result") {
+            super::mcp::scrub_event_data(result, &control.mcp)?;
+        }
         let secrets = control.secrets();
         if let Some(error) = value.get("error") {
             return Err(Failure {
@@ -2103,11 +2115,9 @@ impl AssistantHost {
         entries: &Value,
     ) -> Result<(), String> {
         let store = self.store(&control.identity.owner)?;
-        let (sid, entries, secrets) = (
-            control.session_id.clone(),
-            entries.clone(),
-            control.secrets(),
-        );
+        let mut entries = entries.clone();
+        super::mcp::scrub_native_data(&mut entries, &control.mcp)?;
+        let (sid, secrets) = (control.session_id.clone(), control.secrets());
         blocking(move || store.mutate(&sid, |record| merge_native(record, &entries, &secrets)))
             .await
     }
@@ -4350,6 +4360,40 @@ mod tests {
             .request_stop(&store, &other, &sid, &run.run_id, &run.operation_id)
             .is_err());
         assert!(!run.cancelled());
+    }
+
+    #[test]
+    fn assistant_mcp_host_event_payload_scrubs_numeric_short_secrets_without_rewriting_controls() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp =
+            json!({"servers":{"fixture":{"env":{"PIN":"418731","BOOL":"false","NULL":"null"}}}});
+        host.emit(&run,"tool_end",json!({"name":"mcp__fixture__read_fixture","toolCallId":"safe-id","success":false,"details":{"pin":418731,"flag":false,"empty":null,"safe":"Readable Host payload"}}));
+        let events = env.events.lock().unwrap();
+        let shown = &events.last().unwrap().data;
+        assert_eq!(shown["details"]["pin"], "***");
+        assert_eq!(shown["details"]["flag"], "***");
+        assert_eq!(shown["details"]["empty"], "***");
+        assert_eq!(shown["details"]["safe"], "Readable Host payload");
+        assert_eq!(shown["success"], false);
+        assert_eq!(shown["toolCallId"], "safe-id");
+        let mut entries = json!([{"type":"message","id":"native-id","message":{"role":"toolResult","toolCallId":"safe-id","isError":false,"content":[{"type":"text","text":"Readable 418731 payload"}],"details":{"pin":418731}}},{"type":"custom","data":{"version":1}}]);
+        super::super::mcp::scrub_native_data(&mut entries, &run.mcp).unwrap();
+        assert_eq!(entries[0]["message"]["details"]["pin"], "***");
+        assert_eq!(
+            entries[0]["message"]["content"][0]["text"],
+            "Readable *** payload"
+        );
+        assert_eq!(entries[0]["message"]["isError"], false);
+        assert_eq!(entries[0]["id"], "native-id");
+        assert!(entries[1].get("message").is_none());
+        let mut collision = json!({"details":{"418731":1,"***":2}});
+        assert_eq!(
+            super::super::mcp::scrub_event_data(&mut collision, &run.mcp).unwrap_err(),
+            "assistant_mcp_data_unavailable"
+        );
     }
 
     #[test]

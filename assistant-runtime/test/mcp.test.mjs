@@ -508,7 +508,7 @@ test("MCP repeats and configured tool limits stop before extra host admission", 
     },
   };
   const result = await f.run();
-  assert.equal(f.calls.length, 3);
+  assert.equal(f.calls.length, 4);
   assert.match(JSON.stringify(result), /assistant_tool_limit/);
 });
 
@@ -640,4 +640,295 @@ test("close waits pending setup, is idempotent, and prevents later MCP spawn", a
   assert.equal(f.requests.length, 0);
   await assert.rejects(readFile(marker), { code: "ENOENT" });
   await assert.rejects(f.run(), /runtime is closed/);
+});
+
+test("no-local production MCP limits keep exactly twenty mixed wrapped calls", async (t) => {
+  for (const maxToolCalls of [60, 20]) {
+    const turns = [() => call("tool_search", { query: "fixture" })];
+    for (let index = 2; index <= 21; index++)
+      turns.push(() =>
+        index % 5 === 0
+          ? call("use_skill", { name: "fixture-skill" })
+          : call("mcp__fixture__read_fixture", { index }),
+      );
+    turns.push(reply);
+    const f = await fixture(
+      t,
+      turns,
+      () => ({ approved: true, body: "Readable skill", files: [] }),
+      {
+        localConfig: undefined,
+        skills: [
+          {
+            name: "fixture-skill",
+            description: "Fixture",
+            dir: "/fixture",
+            mode: "auto",
+          },
+        ],
+      },
+    );
+    f.params.mcp = {
+      servers: {
+        fixture: {
+          command: process.execPath,
+          args: [
+            fileURLToPath(
+              new URL("./fixtures/mcp-fixture.mjs", import.meta.url),
+            ),
+          ],
+        },
+      },
+      limits: { ...limits, maxToolCalls },
+      snapshot: "host-snapshot",
+      npxPath: null,
+      uvxPath: null,
+      uvAvailable: false,
+      searchPath: process.env.PATH,
+      searchPrice: null,
+    };
+    await f.run();
+    const started = f.events.filter((event) => event.type === "tool_start");
+    assert.equal(
+      started.length,
+      20,
+      `no-local maxToolCalls ${maxToolCalls} cannot expand or reserve away the twentieth tool`,
+    );
+    assert.equal(
+      started.at(-1).data.name,
+      "use_skill",
+      "twentieth call executes",
+    );
+    assert.equal(f.calls.length, 20);
+    assert.equal(
+      f.requests[20].tool_choice,
+      "none",
+      "final answer follows twenty executed tools",
+    );
+    assert.ok(!started.some((event) => event.data.args?.index === 21));
+  }
+});
+
+test("numeric structuredContent is scrubbed before Pi serialization and SDK large-result files", async (t) => {
+  const f = await fixture(
+    t,
+    [
+      () => call("tool_search", { query: "fixture" }),
+      () => call("mcp__fixture__read_fixture", {}),
+      reply,
+    ],
+    () => ({ approved: true }),
+    { localConfig: undefined },
+  );
+  f.params.mcp = {
+    servers: {
+      fixture: {
+        command: process.execPath,
+        args: [
+          fileURLToPath(new URL("./fixtures/mcp-fixture.mjs", import.meta.url)),
+        ],
+        env: {
+          MCP_SCENARIO: "numeric",
+          PIN: "418731",
+          BOOLEAN: "false",
+          NULL_VALUE: "null",
+          TRUE_VALUE: "true",
+          SCHEMA_TYPE: "object",
+          JSONRPC: "2.0",
+        },
+      },
+    },
+  };
+  const result = await f.run();
+  assert.equal(result.status, "completed");
+  const transcript = await readFile(f.params.sessionFile, "utf8");
+  const paths = [
+    ...transcript.matchAll(/Full output: ([^ ]+pi-mcp-[^ ]+\.txt)/g),
+  ].map((match) => match[1]);
+  assert.ok(
+    paths.length > 0,
+    "structuredContent genuinely takes SDK large-output path",
+  );
+  t.after(() =>
+    Promise.all([...new Set(paths)].map((file) => rm(file, { force: true }))),
+  );
+  const large = await readFile(paths[0], "utf8");
+  for (const text of [
+    large,
+    transcript,
+    JSON.stringify(f.requests),
+    JSON.stringify(f.events),
+    JSON.stringify(result),
+  ]) {
+    assert.ok(
+      !text.includes("418731"),
+      "numeric secret must not reach any persisted/model surface",
+    );
+  }
+  for (const text of [
+    large,
+    transcript,
+    JSON.stringify(f.requests),
+    JSON.stringify(result),
+  ])
+    assert.match(text, /Readable fixture result/);
+  assert.match(large, /"pin": "\*\*\*"/);
+  assert.equal(JSON.parse(large).flag, "***");
+  assert.equal(JSON.parse(large).none, "***");
+});
+
+test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax keeps its meaning", async () => {
+  const { sanitizeMcpMessage, mcpScrubber } = await import("../src/mcp.mjs");
+  const cleaner = mcpScrubber([
+    "418731",
+    "false",
+    "null",
+    "object",
+    "2.0",
+    "true",
+  ]);
+  const message = {
+    jsonrpc: "2.0",
+    id: 7,
+    result: {
+      tools: [
+        {
+          name: "safe_tool",
+          inputSchema: {
+            type: "object",
+            properties: { index: { type: "integer" } },
+            additionalProperties: false,
+          },
+          annotations: { readOnlyHint: true, destructiveHint: false },
+        },
+      ],
+    },
+  };
+  assert.deepEqual(
+    sanitizeMcpMessage(message, cleaner),
+    message,
+    "fixed schema and permission hints are unchanged",
+  );
+  const payload = sanitizeMcpMessage(
+    {
+      jsonrpc: "2.0",
+      id: 7,
+      result: {
+        content: [],
+        structuredContent: {
+          pin: 418731,
+          flag: false,
+          none: null,
+          safe: "Readable payload",
+        },
+      },
+    },
+    cleaner,
+  );
+  assert.equal(
+    sanitizeMcpMessage(
+      {
+        result: {
+          structuredContent: {
+            nested: { blob: Buffer.from("Readable 418731").toString("base64") },
+          },
+        },
+      },
+      cleaner,
+    ).result.structuredContent.nested.text,
+    "Readable ***",
+  );
+  assert.deepEqual(payload.result.structuredContent, {
+    pin: "***",
+    flag: "***",
+    none: "***",
+    safe: "Readable payload",
+  });
+  for (const constraint of [
+    { const: 418731 },
+    { default: false },
+    { enum: [null] },
+    { properties: { 418731: { type: "string" } } },
+  ])
+    assert.throws(
+      () =>
+        sanitizeMcpMessage(
+          {
+            result: { tools: [{ name: "safe_tool", inputSchema: constraint }] },
+          },
+          cleaner,
+        ),
+      /control value/,
+    );
+  assert.throws(
+    () =>
+      sanitizeMcpMessage({ jsonrpc: "2.0", id: 418731, result: {} }, cleaner),
+    /control value/,
+  );
+  assert.throws(
+    () =>
+      sanitizeMcpMessage(
+        {
+          result: {
+            tools: [{ name: "418731", inputSchema: { type: "object" } }],
+          },
+        },
+        cleaner,
+      ),
+    /control value/,
+  );
+  assert.throws(
+    () =>
+      sanitizeMcpMessage(
+        {
+          result: {
+            structuredContent: { 418731: "secret key", "***": "existing key" },
+          },
+        },
+        cleaner,
+      ),
+    /keys collide/,
+  );
+  assert.deepEqual(
+    sanitizeMcpMessage(
+      { result: { structuredContent: { 418731: "Readable key value" } } },
+      cleaner,
+    ).result.structuredContent,
+    { "***": "Readable key value" },
+  );
+});
+
+test("unsafe credential-bearing schema is rejected before tool registration and authorization", async (t) => {
+  const f = await fixture(
+    t,
+    [() => call("tool_search", { query: "fixture" }), reply],
+    () => ({ approved: true }),
+    { localConfig: undefined },
+  );
+  f.params.mcp = {
+    servers: {
+      fixture: {
+        command: process.execPath,
+        args: [
+          fileURLToPath(new URL("./fixtures/mcp-fixture.mjs", import.meta.url)),
+        ],
+        env: { MCP_SCENARIO: "unsafe_schema", PIN: "418731" },
+      },
+    },
+  };
+  assert.equal((await f.run()).status, "completed");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].args.toolName, "tool_search");
+  assert.ok(
+    !f.requests[1].tools?.some((tool) =>
+      tool.function.name.startsWith("mcp__fixture__"),
+    ),
+  );
+  assert.ok(
+    f.events.some(
+      (event) =>
+        event.type === "mcp_status" && event.data.reason === "unavailable",
+    ),
+  );
+  assert.ok(!JSON.stringify(f.requests).includes("418731"));
 });

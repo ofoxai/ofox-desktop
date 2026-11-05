@@ -1354,7 +1354,6 @@ export class AssistantRuntime {
           if (
             ++context.callCount >
             (context.params.localConfig?.definition?.limits?.maxToolCalls ??
-              context.params.mcp?.limits?.maxToolCalls ??
               MAX_TOOL_CALLS)
           )
             throw new Error("Maximum tool-call count reached");
@@ -1511,10 +1510,17 @@ export class AssistantRuntime {
       localTask:
         params.localConfig || params.mcp?.limits
           ? new LocalTask(
-              params.localConfig?.definition.limits ?? params.mcp.limits,
+              params.localConfig?.definition.limits ?? {
+                ...params.mcp.limits,
+                maxToolCalls: Math.min(
+                  MAX_TOOL_CALLS,
+                  params.mcp.limits.maxToolCalls ?? MAX_TOOL_CALLS,
+                ),
+              },
               Date.now,
               params.localConfig?.taskState ?? null,
               params.localConfig?.cwd ?? null,
+              Boolean(params.localConfig),
             )
           : null,
     };

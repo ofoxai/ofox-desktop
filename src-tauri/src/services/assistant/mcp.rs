@@ -169,9 +169,8 @@ pub fn snapshot(root: &Path) -> Result<Value, String> {
     );
     let (npx, search) = crate::commands::resolve_cli_path("npx");
     let (uvx, _) = crate::commands::resolve_cli_path("uvx");
-    let limits = (!servers.is_empty()).then(|| super::capabilities::local_config().limits);
     Ok(
-        json!({"servers":servers,"snapshot":hash,"npxPath":npx,"uvxPath":uvx,"uvAvailable":uvx.is_some(),"searchPath":search,"limits":limits}),
+        json!({"servers":servers,"snapshot":hash,"npxPath":npx,"uvxPath":uvx,"uvAvailable":uvx.is_some(),"searchPath":search}),
     )
 }
 
@@ -197,6 +196,98 @@ pub fn secrets(snapshot: &Value) -> Vec<String> {
             values
         })
         .collect()
+}
+
+// Only credential-bearing data is rewritten. Routing IDs, permission/status
+// booleans and usage accounting retain their validated engine-neutral types.
+fn scrub_payload(value: &Value, pattern: &regex::Regex) -> Result<Value, String> {
+    let text = |text: &str| pattern.replace_all(text, "***").into_owned();
+    Ok(match value {
+        Value::String(value) => json!(text(value)),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| scrub_payload(value, pattern))
+                .collect::<Result<_, _>>()?,
+        ),
+        Value::Object(values) => {
+            let mut result = serde_json::Map::new();
+            for (key, value) in values {
+                if result
+                    .insert(text(key), scrub_payload(value, pattern)?)
+                    .is_some()
+                {
+                    return Err("assistant_mcp_data_unavailable".into());
+                }
+            }
+            Value::Object(result)
+        }
+        scalar if pattern.is_match(&scalar.to_string()) => json!("***"),
+        scalar => scalar.clone(),
+    })
+}
+fn payload_pattern(snapshot: &Value) -> Result<Option<regex::Regex>, String> {
+    let mut values = secrets(snapshot);
+    values.sort_by_key(|value| std::cmp::Reverse(value.len()));
+    values.dedup();
+    if values.is_empty() {
+        return Ok(None);
+    }
+    regex::Regex::new(
+        &values
+            .iter()
+            .map(|value| regex::escape(value))
+            .collect::<Vec<_>>()
+            .join("|"),
+    )
+    .map(Some)
+    .map_err(|_| "assistant_mcp_data_unavailable".into())
+}
+pub(super) fn scrub_event_data(data: &mut Value, snapshot: &Value) -> Result<(), String> {
+    let Some(pattern) = payload_pattern(snapshot)? else {
+        return Ok(());
+    };
+    for field in ["args", "details", "delta"] {
+        if let Some(value) = data.get_mut(field) {
+            *value = scrub_payload(value, &pattern)?;
+        }
+    }
+    for field in ["message", "errorMessage"] {
+        if let Some(value) = data.get_mut(field).filter(|value| value.is_string()) {
+            *value = scrub_payload(value, &pattern)?;
+        }
+    }
+    Ok(())
+}
+pub(super) fn scrub_native_data(entries: &mut Value, snapshot: &Value) -> Result<(), String> {
+    let Some(pattern) = payload_pattern(snapshot)? else {
+        return Ok(());
+    };
+    for entry in entries.as_array_mut().into_iter().flatten() {
+        if let Some(value) = entry.get_mut("summary").filter(|value| value.is_string()) {
+            *value = scrub_payload(value, &pattern)?;
+        }
+        let Some(message) = entry.get_mut("message") else {
+            continue;
+        };
+        if let Some(value) = message.get_mut("details") {
+            *value = scrub_payload(value, &pattern)?;
+        }
+        if let Some(content) = message.get_mut("content") {
+            if content.is_string() {
+                *content = scrub_payload(content, &pattern)?;
+            } else {
+                for block in content.as_array_mut().into_iter().flatten() {
+                    for field in ["text", "thinking", "arguments"] {
+                        if let Some(value) = block.get_mut(field) {
+                            *value = scrub_payload(value, &pattern)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

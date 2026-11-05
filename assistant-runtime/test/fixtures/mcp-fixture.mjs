@@ -60,7 +60,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
           description: "Read fixture",
           inputSchema: {
             type: "object",
-            properties: {},
+            properties: { index: { type: "integer" } },
             additionalProperties: false,
           },
           annotations: { readOnlyHint: true },
@@ -83,6 +83,17 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         JSON.stringify({ name: q.params.name, pid: process.pid }) + "\n",
       );
     result = { content: [{ type: "text", text: "Fixture worked" }] };
+    if (process.env.MCP_SCENARIO === "numeric")
+      result = {
+        content: [],
+        structuredContent: {
+          pin: Number(process.env.PIN),
+          flag: false,
+          none: null,
+          safe: "Readable fixture result",
+          padding: "N".repeat(25000),
+        },
+      };
     if (process.env.MCP_SCENARIO === "secrets")
       result = {
         content: [
@@ -129,5 +140,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     send({ id: q.id, error: { code: -32601, message: "Unknown method" } });
     continue;
   }
+  if (q.method === "tools/list" && process.env.MCP_SCENARIO === "unsafe_schema")
+    result.tools[0].inputSchema.properties.index.default = Number(
+      process.env.PIN,
+    );
   send({ id: q.id, result });
 }
