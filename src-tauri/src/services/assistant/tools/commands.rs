@@ -142,6 +142,19 @@ fn literal_mutation(name: &str) -> bool {
         | "si" | "ni" | "cli" | "tee"
     )
 }
+/// `~`, `$HOME` and the Windows profile variables all name home.
+fn home_relative(word: &str) -> Option<&str> {
+    ["~", "$HOME", "$env:USERPROFILE", "%USERPROFILE%"]
+        .iter()
+        .find_map(|prefix| {
+            let rest = word.strip_prefix(prefix)?;
+            if rest.is_empty() {
+                Some(rest)
+            } else {
+                rest.strip_prefix(['/', '\\'])
+            }
+        })
+}
 fn segment_mutates(words: &[String]) -> bool {
     let words = &words[words
         .iter()
@@ -160,6 +173,7 @@ fn segment_mutates(words: &[String]) -> bool {
     };
     let name = literal_program(first);
     literal_mutation(&name)
+        || (name == "find" && words.iter().any(|word| word == "-delete"))
         || (matches!(
             name.as_str(),
             "command"
@@ -178,6 +192,8 @@ fn segment_mutates(words: &[String]) -> bool {
                 | "until"
                 | "!"
                 | "time"
+                | "find"
+                | "xargs"
         ) && words
             .iter()
             .skip(1)
@@ -193,6 +209,8 @@ pub fn protected_operation(
     scope: &super::scope::Scope,
 ) -> bool {
     use super::scope::Access;
+    // Braces separate words below; `${HOME}` must stay one home-relative word.
+    let command = &command.replace("${HOME}", "$HOME");
     // Keep literal command segments, including pipelines and PowerShell's
     // call operator. A mutation in any segment makes ancestor operands in
     // the complete command protected too (for example cd parent && rm .).
@@ -244,7 +262,7 @@ pub fn protected_operation(
             .strip_prefix("--")
             .and_then(|w| w.split_once('=').map(|(_, v)| v))
             .unwrap_or(word);
-        let path = if let Some(rest) = raw.strip_prefix("~/") {
+        let path = if let Some(rest) = home_relative(raw) {
             home.join(rest)
         } else {
             let p = std::path::PathBuf::from(raw);

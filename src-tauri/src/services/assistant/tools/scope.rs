@@ -392,6 +392,27 @@ mod private_tests {
             tmp.path(),
             &scope
         ));
+        let elsewhere = tmp.path().join("work");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        for command in [
+            "rm -rf $HOME/private",
+            "rm -rf ${HOME}/private/assistant/skills/one",
+            "rm -rf \"$HOME/private/assistant\"",
+            "find ~ -name SKILL.md -delete",
+            "find ~ -name SKILL.md -exec rm {} +",
+            "cd ~ && rm -rf private/assistant",
+        ] {
+            assert!(
+                commands::protected_operation(command, &elsewhere, tmp.path(), &scope),
+                "{command}"
+            );
+        }
+        for command in ["ls ~", "cat $HOME/public.txt", "find ~ -name '*.md'"] {
+            assert!(
+                !commands::protected_operation(command, &elsewhere, tmp.path(), &scope),
+                "{command}"
+            );
+        }
         assert!(!commands::protected_operation(
             "cat SKILL.md",
             &skill,
