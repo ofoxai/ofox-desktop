@@ -142,12 +142,16 @@ fn literal_mutation(name: &str) -> bool {
         | "si" | "ni" | "cli" | "tee"
     )
 }
-/// `~`, `$HOME` and the Windows profile variables all name home.
+/// `~`, `$HOME` and the Windows profile variables all name home (any case).
 fn home_relative(word: &str) -> Option<&str> {
-    ["~", "$HOME", "$env:USERPROFILE", "%USERPROFILE%"]
+    ["~", "$home", "$env:userprofile", "%userprofile%"]
         .iter()
         .find_map(|prefix| {
-            let rest = word.strip_prefix(prefix)?;
+            let head = word.get(..prefix.len())?;
+            if !head.eq_ignore_ascii_case(prefix) {
+                return None;
+            }
+            let rest = &word[prefix.len()..];
             if rest.is_empty() {
                 Some(rest)
             } else {
@@ -173,7 +177,15 @@ fn segment_mutates(words: &[String]) -> bool {
     };
     let name = literal_program(first);
     literal_mutation(&name)
-        || (name == "find" && words.iter().any(|word| word == "-delete"))
+        // find's actions and xargs run arbitrary programs: count them as writes.
+        || (name == "find"
+            && words.iter().any(|word| {
+                matches!(
+                    word.as_str(),
+                    "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir" | "-fls"
+                ) || word.starts_with("-fprint")
+            }))
+        || name == "xargs"
         || (matches!(
             name.as_str(),
             "command"
@@ -192,8 +204,6 @@ fn segment_mutates(words: &[String]) -> bool {
                 | "until"
                 | "!"
                 | "time"
-                | "find"
-                | "xargs"
         ) && words
             .iter()
             .skip(1)
@@ -210,7 +220,9 @@ pub fn protected_operation(
 ) -> bool {
     use super::scope::Access;
     // Braces separate words below; `${HOME}` must stay one home-relative word.
-    let command = &command.replace("${HOME}", "$HOME");
+    let command = &regex::Regex::new(r"(?i)\$\{(home|env:userprofile)\}")
+        .map(|braced| braced.replace_all(command, "$$$1").into_owned())
+        .unwrap_or_else(|_| command.to_owned());
     // Keep literal command segments, including pipelines and PowerShell's
     // call operator. A mutation in any segment makes ancestor operands in
     // the complete command protected too (for example cd parent && rm .).

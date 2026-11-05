@@ -401,6 +401,11 @@ mod private_tests {
             "find ~ -name SKILL.md -delete",
             "find ~ -name SKILL.md -exec rm {} +",
             "cd ~ && rm -rf private/assistant",
+            "Remove-Item -Recurse $ENV:UserProfile/private",
+            "Remove-Item -Recurse ${env:USERPROFILE}/private",
+            "find ~ -name SKILL.md -execdir shred {} +",
+            "find ~ -name SKILL.md -fprint private/out",
+            "find ~ -name SKILL.md | xargs truncate -s0",
         ] {
             assert!(
                 commands::protected_operation(command, &elsewhere, tmp.path(), &scope),
