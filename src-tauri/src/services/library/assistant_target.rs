@@ -15,6 +15,16 @@ pub use state::{
 };
 
 pub const ID: &str = "ofox-assistant";
+pub const SIGN_IN_HOSTS: &[&str] = &[
+    "mcp.sentry.dev",
+    "mcp.linear.app",
+    "mcp.notion.com",
+    "mcp.atlassian.com",
+    "mcp.supabase.com",
+    "mcp.stripe.com",
+    "mcp.vercel.com",
+    "mcp.neon.tech",
+];
 pub fn assistant_dir() -> PathBuf {
     crate::config::get_app_config_dir().join("assistant")
 }
@@ -543,7 +553,8 @@ pub fn with_revalidated_skill<T>(
 }
 
 /// Validate all sidecar input before a library operation changes assignments/files.
-pub(super) fn validate_operation(op: &super::Operation) -> Result<(), AppError> {
+pub(super) fn validate_operation(op: &super::Operation, db: &Database) -> Result<(), AppError> {
+    super::mcp_targets::validate_operation(db, op)?;
     if op.kind == ResourceKind::Skills
         && op
             .desired_updates

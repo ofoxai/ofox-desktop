@@ -211,6 +211,8 @@ impl Attachment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_steps: Vec<Value>,
     /// Host-authored, read-only historical search cards; never an installation capability.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_results: Vec<Value>,

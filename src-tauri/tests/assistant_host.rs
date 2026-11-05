@@ -6523,3 +6523,222 @@ fn skill_tools_real_bridge_save_click_refresh_then_same_turn_use_on_both_apexes(
         });
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_real_bridge_discovery_read_write_approval_and_persisted_steps() {
+    use cc_switch_lib::assistant::host::local::{ApprovalRequest, PermissionRequest};
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi is required for MCP bridge tests");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    for apex in ["ofox.ai", "ofox.io"] {
+        for (mode, choice) in [
+            ("default", "once"),
+            ("autoEdit", "session"),
+            ("default", "deny"),
+            ("fullAuto", "once"),
+        ] {
+            let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+            let config = tempfile::tempdir().unwrap();
+            let gateway = Gateway::start();
+            let physical_config = config.path().canonicalize().unwrap();
+            let env = TestEnv::new(&physical_config, &bundle, &[(apex, &gateway)]);
+            let host = AssistantHost::new(env.clone());
+            let record = config.path().join("mcp-calls.jsonl");
+            fs::create_dir_all(config.path().join("assistant")).unwrap();
+            fs::write(config.path().join("assistant/mcp.json"),json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":record,"MCP_CHILD_FILE":config.path().join("child-pid")}}}}).to_string()).unwrap();
+            runtime().block_on(async {
+            let sid = create(&host).await;
+            host.set_permission(serde_json::from_value::<PermissionRequest>(json!({"sessionId":sid,"mode":mode,"confirmedFullAccess":true,"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture resources"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("list_mcp_resources",json!({}))]));
+            gateway.reply(Reply::ToolCalls(vec![("read_mcp_resource",json!({"server":"fixture","uri":"fixture://read"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__read_fixture",json!({}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+            if choice=="session" { gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))])); }
+            gateway.reply(Reply::Stream("MCP turn finished".into()));
+            let run = host.send(request(&sid,"Use the fixture",json!({}))).await.unwrap();
+            if mode != "fullAuto" {
+                let approval = wait_for(&env,&run.run_id,"approval").await;
+                assert_eq!(approval.data["name"],"mcp__fixture__write_fixture");
+                assert_eq!(approval.data["allowSession"],true);
+                assert_eq!(fs::read_to_string(&record).unwrap().lines().count(),1,"read-only ran without a prompt");
+                host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":choice,"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            }
+            let end = wait_for(&env,&run.run_id,"run_end").await;
+            assert_eq!(end.data["status"],"completed","{end:?}");
+            let rows=fs::read_to_string(&record).unwrap();
+            assert_eq!(rows.lines().count(),if choice=="deny" {1} else if choice=="session" {3} else {2});
+            let detail=host.get_session(&sid).await.unwrap();
+            let message=detail.messages.last().unwrap();
+            assert_eq!(message.content,"MCP turn finished");
+            assert_eq!(message.mcp_steps.len(),if choice=="session" {6} else {5});
+            assert!(message.mcp_steps.iter().any(|s|s["tool"]=="mcp__fixture__read_fixture" && s["status"]=="completed"));
+            assert!(!serde_json::to_string(&message.mcp_steps).unwrap().contains(record.to_str().unwrap()));
+            assert_mcp_child_gone(&node, &config.path().join("child-pid"));
+            assert_eq!(gateway.requests().len(),if choice=="session" {7} else {6});
+            if choice=="session" {
+                gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+                gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+                gateway.reply(Reply::Stream("Next reply reused conversation grant".into()));
+                let (next_id,next_end)=turn(&host,&env,request(&sid,"Write again in this conversation",json!({}))).await;
+                assert_eq!(next_end.data["status"],"completed");
+                assert!(!env.events(&next_id).iter().any(|event|event.r#type=="approval"),"conversation grant must survive a new run");
+                assert_eq!(fs::read_to_string(&record).unwrap().lines().count(),4);
+                assert_mcp_child_gone(&node,&config.path().join("child-pid"));
+                for boundary in ["other_session","changed_config"] {
+                    let target=if boundary=="other_session" {create(&host).await} else {
+                        let file=config.path().join("assistant/mcp.json");
+                        let mut changed:Value=serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                        changed["mcpServers"]["fixture"]["env"]["MCP_REAUTH"]=json!("configuration-changed");
+                        fs::write(&file,serde_json::to_vec(&changed).unwrap()).unwrap();
+                        sid.clone()
+                    };
+                    gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+                    gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+                    gateway.reply(Reply::Stream("Boundary required a new approval".into()));
+                    let again=host.send(request(&target,boundary,json!({}))).await.unwrap();
+                    let card=wait_for(&env,&again.run_id,"approval").await;
+                    host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":target,"runId":again.run_id,"operationId":again.operation_id,"approvalId":card.data["approvalId"],"choice":"deny","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+                    assert_eq!(wait_for(&env,&again.run_id,"run_end").await.data["status"],"completed");
+                    assert_eq!(fs::read_to_string(&record).unwrap().lines().count(),4,"a different conversation/config must not inherit permission");
+                    assert_mcp_child_gone(&node,&config.path().join("child-pid"));
+                }
+            }
+        });
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_real_bridge_revalidates_approval_after_config_change_and_cancel() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for MCP stale/cancel bridge");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    for action in ["stale", "cancel", "unknown_cost", "leader_failure"] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let config = tempfile::tempdir().unwrap();
+        let physical = config.path().canonicalize().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+        if action == "unknown_cost" {
+            let mut model = serde_json::to_value(test_model()).unwrap();
+            model["pricingKnown"] = json!(false);
+            model["cost"] = json!({"input":null,"output":null,"cacheRead":null,"cacheWrite":null});
+            *env.catalog.lock().unwrap() = vec![serde_json::from_value(model).unwrap()];
+        }
+        let host = AssistantHost::new(env.clone());
+        let calls = physical.join("calls.jsonl");
+        fs::create_dir_all(physical.join("assistant")).unwrap();
+        let source = physical.join("assistant/mcp.json");
+        fs::write(&source,json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":calls,"MCP_CHILD_FILE":physical.join("child-pid"),"MCP_SCENARIO":if action=="leader_failure" {"fail"} else {"normal"}}}}}).to_string()).unwrap();
+        runtime().block_on(async {
+            let sid=create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+            gateway.reply(Reply::Stream("No external write completed".into()));
+            let run=host.send(request(&sid,"Use fixture",json!({}))).await.unwrap();
+            if action!="unknown_cost" && action!="leader_failure" {
+                let approval=wait_for(&env,&run.run_id,"approval").await;
+                if action=="cancel" { host.stop(&sid,&run.run_id,&run.operation_id).await.unwrap(); }
+                else { fs::write(&source,"{\"mcpServers\":{}}").unwrap();host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"once","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap(); }
+            }
+            let end=wait_for(&env,&run.run_id,"run_end").await;
+            if action=="cancel" {assert_eq!(end.data["status"],"stopped");}
+            assert!(!calls.exists(),"{action} must prevent actual external execution");
+            if action!="unknown_cost" { assert_mcp_child_gone(&node,&physical.join("child-pid")); }
+            if action=="unknown_cost" { assert!(!env.events.lock().unwrap().iter().any(|e|e.run_id==run.run_id && e.r#type=="approval")); }
+        });
+    }
+}
+
+fn assert_mcp_child_gone(node: &Path, record: &Path) {
+    let pid = std::fs::read_to_string(record).expect("fixture must really spawn a descendant");
+    let pid: u32 = pid.parse().unwrap();
+    assert!(pid > 1);
+    let status=std::process::Command::new(node).args(["-e","try {process.kill(Number(process.argv[1]),0); process.exit(1)} catch(e) {process.exit(e.code==='ESRCH'?0:2)}",&pid.to_string()]).status().expect("prepared Node process probe");
+    assert!(
+        status.success(),
+        "MCP descendant {pid} survived run teardown"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_missing_environment_isolated_to_one_server_in_real_bridge() {
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for missing-environment bridge");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let config = tempfile::tempdir().unwrap();
+    let physical = config.path().canonicalize().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    let record = physical.join("calls.jsonl");
+    let blocked = physical.join("must-not-start");
+    assert!(std::env::var_os("OFOX_TASK7_MISSING_ENV_7A").is_none());
+    fs::create_dir_all(physical.join("assistant")).unwrap();
+    fs::write(physical.join("assistant/mcp.json"),json!({"mcpServers":{
+        "fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":record}},
+        "missing":{"command":node,"args":[fixture],"env":{"TOKEN":"${OFOX_TASK7_MISSING_ENV_7A}","MCP_PID_FILE":blocked}}
+    }}).to_string()).unwrap();
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "tool_search",
+            json!({"query":"fixture"}),
+        )]));
+        gateway.reply(Reply::ToolCalls(vec![(
+            "mcp__fixture__read_fixture",
+            json!({}),
+        )]));
+        gateway.reply(Reply::Stream("Healthy service completed".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Read healthy service", json!({})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(
+            record.exists(),
+            "one missing environment must not stop the healthy real MCP server"
+        );
+        assert_eq!(fs::read_to_string(&record).unwrap().lines().count(), 1);
+        assert!(
+            !blocked.exists(),
+            "unresolved credentials must never reach a launched service"
+        );
+        assert!(!env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.r#type == "approval"));
+        let detail = host.get_session(&sid).await.unwrap();
+        let steps = &detail.messages.last().unwrap().mcp_steps;
+        assert!(steps
+            .iter()
+            .any(|s| s["server"] == "missing" && s["status"] == "unavailable"));
+        assert!(steps.iter().all(|s| s.get("identity").is_none()));
+        for call in gateway.requests() {
+            assert!(!call.text().contains("OFOX_TASK7_MISSING_ENV_7A"));
+            assert!(!call.text().contains("captured-config"));
+        }
+    });
+}

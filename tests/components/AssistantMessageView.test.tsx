@@ -1003,3 +1003,37 @@ it("reopened assistant replies display persisted read-only skill results", () =>
     screen.queryByRole("button", { name: /install|save skill/i }),
   ).toBeNull();
 });
+
+it("renders saved MCP steps with local icons, unavailable reasons and third-party cost note", () => {
+  render(
+    view({
+      content: "Completed",
+      mcpSteps: [
+        {
+          id: "read",
+          server: "context7",
+          tool: "query_docs",
+          status: "completed",
+          recipeId: "context7",
+        },
+        {
+          id: "missing",
+          server: "custom",
+          tool: "",
+          status: "unavailable",
+          reason: "needs_node",
+        },
+      ],
+    }),
+  );
+  const steps = screen.getByRole("list", { name: "MCP tool steps" });
+  expect(steps).toHaveTextContent("context7 · query_docs");
+  expect(steps).toHaveTextContent("Install Node.js with npx");
+  expect(
+    screen.getByText(
+      "Third-party MCP charges are not included in this estimate.",
+    ),
+  ).toBeVisible();
+  for (const image of steps.querySelectorAll("img"))
+    expect(image.getAttribute("src")).not.toMatch(/^https?:/);
+});

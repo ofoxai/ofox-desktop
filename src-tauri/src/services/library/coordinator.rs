@@ -621,7 +621,7 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         return Ok(op);
     }
     verify_routing(&op)?;
-    super::assistant_target::validate_operation(&op)?;
+    super::assistant_target::validate_operation(&op, db)?;
     let first_confirmation = op.status == "previewed";
     let mut prepared = snapshot.clone();
     let mut blocked_updates = BTreeSet::new();
@@ -715,6 +715,9 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
             if hash != target.before_hash {
                 return Err(error("targetChanged"));
             }
+            if path == super::assistant_target::mcp_config_path() {
+                return super::mcp_targets::write_assistant(&target.after_text);
+            }
             let mode = target
                 .private_values
                 .then(|| crate::config::file_mode(&path).map_or(0o600, |mode| mode & 0o700));
@@ -787,6 +790,7 @@ pub fn recover_operation(db: &Database, id: &str) -> Result<Operation, AppError>
         .get(id)
         .cloned()
         .ok_or_else(|| error("operationMissing"))?;
+    super::mcp_targets::validate_operation(db, &op)?;
     if op.status == "previewed" || op.status == "applied" || op.status == "cancelled" {
         return Ok(op);
     }

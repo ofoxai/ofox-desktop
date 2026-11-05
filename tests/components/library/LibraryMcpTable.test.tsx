@@ -269,7 +269,11 @@ it("lays MCP servers out as rows with one checkbox per agent and per-agent count
   expect(
     screen.queryByRole("columnheader", { name: "ChatGPT" }),
   ).not.toBeInTheDocument();
-  expect(within(row).getAllByRole("checkbox")).toHaveLength(9);
+  expect(within(row).getAllByRole("checkbox")).toHaveLength(10);
+  expect(cell("filesystem", "Ofox 助手")).toHaveAttribute(
+    "data-state",
+    "unchecked",
+  );
   expect(cell("filesystem", "Codex / ChatGPT")).toHaveAttribute(
     "data-state",
     "checked",
@@ -605,4 +609,30 @@ it("hands discovery focus to the recipe editor and restores its page opener on c
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
   );
   await waitFor(() => expect(opener).toHaveFocus());
+});
+
+it("shows the assistant MCP target and refuses sign-in services with the reason", async () => {
+  tools.push("ofox-assistant");
+  try {
+    servers = [
+      server(
+        "sentry",
+        {},
+        {
+          "ofox-assistant": {
+            available: true,
+            disabledReason: "library.assistantMcpSignInUnsupported",
+          },
+        },
+      ),
+    ];
+    renderTable();
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /sentry · Ofox 助手/,
+    });
+    expect(checkbox).toBeDisabled();
+    expect(checkbox.getAttribute("aria-label")).toContain("登录");
+  } finally {
+    tools.pop();
+  }
 });

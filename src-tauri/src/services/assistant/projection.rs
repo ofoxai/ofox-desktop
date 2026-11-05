@@ -440,6 +440,7 @@ pub(super) fn merge_native(
         } else {
             record.messages.push(Message {
                 skill_results: vec![],
+                mcp_steps: vec![],
                 skill: None,
                 media: None,
                 generations: vec![],

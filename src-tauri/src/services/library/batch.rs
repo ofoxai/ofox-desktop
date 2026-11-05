@@ -430,7 +430,7 @@ fn run_inner(
     // Every execution/resumption validates before either metadata-only or
     // physical-group assignment commits. Corrupt state must leave the plan intact.
     for operation in &journal.plans {
-        super::assistant_target::validate_operation(operation)?;
+        super::assistant_target::validate_operation(operation, db)?;
     }
     if !journal.metadata_applied && !cancelled.load(Ordering::SeqCst) {
         let mut next = current.clone();

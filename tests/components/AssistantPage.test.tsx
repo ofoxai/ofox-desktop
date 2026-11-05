@@ -8517,6 +8517,59 @@ describe("local configuration in the conversation", () => {
     expect(permission()).toBeDisabled();
   });
 
+  it("projects MCP host steps through the hook into the streaming reply", async () => {
+    localSession();
+    await openConversation();
+    const emit = await startRun();
+    emit("mcp_step", {
+      messageId: "reply",
+      step: {
+        id: "mcp-1",
+        server: "context7",
+        tool: "query_docs",
+        status: "running",
+        recipeId: "context7",
+      },
+    });
+    expect(
+      screen.getByRole("list", { name: "MCP tool steps" }),
+    ).toHaveTextContent("Running");
+    emit("mcp_step", {
+      messageId: "reply",
+      step: {
+        id: "mcp-1",
+        server: "context7",
+        tool: "query_docs",
+        status: "completed",
+        recipeId: "context7",
+      },
+    });
+    expect(
+      screen.getByRole("list", { name: "MCP tool steps" }),
+    ).toHaveTextContent("Completed");
+    expect(
+      screen
+        .getByRole("list", { name: "MCP tool steps" })
+        .querySelectorAll("li"),
+    ).toHaveLength(1);
+    emit("mcp_step", {
+      messageId: "reply",
+      step: {
+        id: "missing",
+        server: "custom",
+        tool: "",
+        status: "unavailable",
+        reason: "needs_uv",
+      },
+    });
+    expect(screen.getByText("Install uv")).toBeVisible();
+    expect(
+      screen.getByText(
+        "Third-party MCP charges are not included in this estimate.",
+      ),
+    ).toBeVisible();
+  });
+
   it("shows the run's step and plan inside the streaming reply, and an approval card after it", async () => {
     localSession();
     await openConversation();

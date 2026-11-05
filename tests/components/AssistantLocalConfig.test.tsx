@@ -227,3 +227,31 @@ describe("a local run's progress", () => {
     expect(container).toBeEmptyDOMElement();
   });
 });
+
+it("shows the actual MCP approval details and all three ordinary choices", async () => {
+  const respond = vi.fn().mockResolvedValue(true);
+  const base: LocalApproval = {
+    approvalId: "mcp",
+    toolCallId: "tool",
+    name: "mcp__custom__write",
+    category: "mcp",
+    details: { server: "custom", tool: "mcp__custom__write" },
+    allowSession: true,
+    expectedOwner: "owner",
+    expectedGeneration: 1,
+  };
+  const result = render(
+    <LocalApprovalCard approval={base} onRespond={respond} />,
+  );
+  expect(screen.getByText("Allow this MCP operation?")).toBeVisible();
+  expect(screen.getByText("custom · mcp__custom__write")).toBeVisible();
+  const buttons = screen.getAllByRole("button");
+  expect(buttons).toHaveLength(3);
+  for (const [index, choice] of ["once", "session", "deny"].entries()) {
+    await userEvent.click(buttons[index]);
+    await waitFor(() =>
+      expect(respond).toHaveBeenLastCalledWith("mcp", choice),
+    );
+    result.rerender(<LocalApprovalCard approval={base} onRespond={respond} />);
+  }
+});

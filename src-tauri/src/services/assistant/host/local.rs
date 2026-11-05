@@ -232,6 +232,114 @@ impl AssistantHost {
         Ok(request.mode)
     }
 
+    /// Internal sidecar admission: annotations come from Pi's registered tool,
+    /// never from model arguments. Bind grants to config + registered tool schema.
+    pub(in crate::services::assistant) async fn authorize_mcp(
+        &self,
+        run: &Arc<RunControl>,
+        params: &Value,
+    ) -> Result<Value, String> {
+        self.validate_run(run)?;
+        self.ensure_current(&run.identity, run.mcp_generation)
+            .await?;
+        let call: registry::Call = serde_json::from_value(params.clone()).map_err(|_| PROTOCOL)?;
+        if call.session_id != run.session_id
+            || call.run_id != run.run_id
+            || call.operation_id != run.operation_id
+            || call.tool_call_id.is_empty()
+            || call.tool_call_id.len() > 200
+            || run.compact_only
+        {
+            return Err("assistant_runtime_identity_mismatch".into());
+        }
+        if run.mcp["snapshot"].is_null() || call.args["snapshot"] != run.mcp["snapshot"] {
+            return Err("assistant_mcp_snapshot_changed".into());
+        }
+        let current = super::super::mcp::snapshot(&self.env.config_dir())?;
+        if current["snapshot"] != run.mcp["snapshot"] {
+            return Err("assistant_mcp_snapshot_changed".into());
+        }
+        let name = call.args["toolName"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 128)
+            .ok_or(PROTOCOL)?;
+        let schema = call.args["identity"]
+            .as_str()
+            .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or(PROTOCOL)?;
+        let read_only = call.args["readOnly"].as_bool().ok_or(PROTOCOL)?;
+        let server = call.args["server"].as_str();
+        if server.is_some_and(|s| {
+            run.mcp["servers"]
+                .get(s)
+                .is_none_or(|config| config["unavailable"] == true)
+        }) || (server.is_none()
+            && !matches!(
+                name,
+                "tool_search"
+                    | "list_mcp_resources"
+                    | "list_mcp_resource_templates"
+                    | "read_mcp_resource"
+            ))
+        {
+            return Err("assistant_mcp_unknown_tool".into());
+        }
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&call.args).map_err(|_| PROTOCOL)?)
+        );
+        {
+            let mut calls = run.local_calls.0.lock().map_err(|_| STATE)?;
+            if let Some((previous, result)) = calls.get(&call.tool_call_id) {
+                if previous != &fingerprint {
+                    return Err("assistant_tool_call_conflict".into());
+                }
+                return result
+                    .clone()
+                    .unwrap_or_else(|| Err("assistant_tool_pending".into()));
+            }
+            if calls.len() >= capabilities::local_config().limits.max_tool_calls * 4 {
+                return Err("assistant_tool_limit".into());
+            }
+            calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
+        }
+        let result = async {
+            let key = session_key(&run.identity.owner,&run.session_id);
+            let grant = format!("mcp:{}:{schema}:{name}",run.mcp["snapshot"].as_str().ok_or(PROTOCOL)?);
+            let free = {
+                let mut states=self.local_states.lock().map_err(|_|STATE)?;
+                let state=states.entry(key.clone()).or_default();
+                read_only || state.mode == PermissionMode::FullAuto || state.grants.contains(&grant)
+            };
+            if !free {
+                let binding=self.local_binding(run);
+                let (id,pending)=self.local_approvals.request(binding.clone())?;
+                let display=json!({"approvalId":id,"toolCallId":call.tool_call_id,"name":name,"category":"mcp","details":{"server":server,"tool":name},"allowSession":true,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
+                self.local_approvals.describe(&id,display.clone());
+                self.emit(run,"approval",display);
+                let timeout=run.deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(120));
+                let choice=self.local_approvals.wait(&id,pending,run.cancel.subscribe(),timeout).await;
+                self.emit(run,"approval_end",json!({"approvalId":id}));
+                self.validate_run(run)?;
+                self.ensure_current(&run.identity,run.mcp_generation).await?;
+                if super::super::mcp::snapshot(&self.env.config_dir())?["snapshot"] != run.mcp["snapshot"] { return Err("assistant_mcp_snapshot_changed".into()); }
+                match choice? {
+                    Choice::Deny => return Ok(json!({"approved":false})),
+                    Choice::Session => { self.local_states.lock().map_err(|_|STATE)?.entry(key).or_default().grants.insert(grant); }
+                    Choice::Once => {}
+                }
+            }
+            self.validate_run(run)?;
+            Ok(json!({"approved":true}))
+        }.await;
+        run.local_calls
+            .0
+            .lock()
+            .map_err(|_| STATE)?
+            .insert(call.tool_call_id, (fingerprint, Some(result.clone())));
+        result
+    }
+
     pub(super) async fn dispatch_tool(
         &self,
         run: &Arc<RunControl>,

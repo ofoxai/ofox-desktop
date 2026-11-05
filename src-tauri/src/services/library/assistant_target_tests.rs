@@ -520,3 +520,144 @@ fn skill_tools_created_origin_survives_off_without_grant() {
         SkillOrigin::AssistantCreated
     );
 }
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_target_writes_private_json_without_skill_sidecars() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let server = crate::app_config::McpServer {
+        id: "fixture".into(),
+        name: "Fixture".into(),
+        server: serde_json::json!({"command":"fixture","args":[]}),
+        apps: Default::default(),
+        description: None,
+        homepage: None,
+        docs: None,
+        tags: vec![],
+    };
+    super::super::mcp_resource::save_draft(&db, server, None).unwrap();
+    let op = super::super::mcp_resource::preview(&db, "fixture", &[ID.into()]).unwrap();
+    assert_eq!(
+        super::super::apply_operation(&db, &op.id).unwrap().status,
+        "applied"
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(mcp_config_path()).unwrap()).unwrap();
+    assert_eq!(value["mcpServers"]["fixture"]["command"], "fixture");
+    assert!(!assistant_dir().join("skill-modes.json").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(mcp_config_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_sign_in_validation_covers_preview_batch_and_frozen_metadata() {
+    use crate::services::library::{batch, mcp_resource, mcp_targets, ResourceKind};
+    let _sandbox = crate::test_sandbox::sandbox();
+    for (index, host) in SIGN_IN_HOSTS.iter().enumerate() {
+        let db = Database::memory().unwrap();
+        let id = format!("blocked-{index}");
+        let server = crate::app_config::McpServer {
+            id: id.clone(),
+            name: id.clone(),
+            server: serde_json::json!({"url":format!("https://{}.:443/mcp",host.to_uppercase())}),
+            apps: Default::default(),
+            description: None,
+            homepage: None,
+            docs: None,
+            tags: vec![],
+        };
+        let revision = mcp_resource::save_draft(&db, server, None).unwrap();
+        assert!(mcp_resource::preview(&db, &id, &[ID.into()])
+            .unwrap_err()
+            .to_string()
+            .contains("assistantMcpSignInUnsupported"));
+        let epoch = db.library_snapshot().unwrap().machine.epoch;
+        let resource = batch::BatchResource {
+            resource_id: id.clone(),
+            expected_revision: revision.revision,
+            add_tools: vec![ID.into()],
+            withdraw_tools: vec![],
+        };
+        assert!(batch::preview_batch(
+            &db,
+            ResourceKind::Mcp,
+            vec![resource],
+            vec![ID.into()],
+            batch::BatchAction::Apply,
+            epoch
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("assistantMcpSignInUnsupported"));
+        let mut metadata = mcp_resource::preview(&db, &id, &[]).unwrap();
+        metadata
+            .desired_updates
+            .insert(format!("mcp:{id}:{ID}"), Some(id.clone()));
+        metadata.targets.clear();
+        assert!(mcp_targets::validate_operation(&db, &metadata)
+            .unwrap_err()
+            .to_string()
+            .contains("assistantMcpSignInUnsupported"));
+        // Exercise the persisted public execution and recovery entrances too.
+        let mut stored = db.library_snapshot().unwrap();
+        stored
+            .machine
+            .operations
+            .insert(metadata.id.clone(), metadata.clone());
+        db.set_setting(
+            super::super::MACHINE_KEY,
+            &serde_json::to_string(&stored.machine).unwrap(),
+        )
+        .unwrap();
+        assert!(super::super::apply_operation(&db, &metadata.id)
+            .unwrap_err()
+            .to_string()
+            .contains("assistantMcpSignInUnsupported"));
+        assert!(
+            super::super::coordinator::recover_operation(&db, &metadata.id)
+                .unwrap_err()
+                .to_string()
+                .contains("assistantMcpSignInUnsupported")
+        );
+        assert!(!mcp_config_path().exists());
+        assert!(db
+            .library_snapshot()
+            .unwrap()
+            .machine
+            .assignments
+            .is_empty());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_public_and_unknown_remote_servers_are_allowed() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    for host in [
+        "mcp.context7.com",
+        "mcp.deepwiki.com",
+        "learn.microsoft.com",
+        "private.example.test",
+    ] {
+        assert!(
+            super::super::mcp_codec::native_spec(
+                ID,
+                &serde_json::json!({"url":format!("https://{host}/mcp")})
+            )
+            .is_ok(),
+            "{host}"
+        );
+    }
+}

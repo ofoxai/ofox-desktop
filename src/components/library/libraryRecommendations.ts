@@ -903,3 +903,18 @@ export function cloneRecommendationDraft(
     })),
   };
 }
+
+/** The assistant blocks only the maintained sign-in recipes, never unknown remotes. */
+export function assistantMcpRequiresSignIn(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+    return LIBRARY_RECOMMENDATIONS.some(
+      (recipe) =>
+        recipe.kind === "mcp" &&
+        recipe.signIn &&
+        new URL(recipe.initialDraft.url).hostname.toLowerCase() === host,
+    );
+  } catch {
+    return false;
+  }
+}

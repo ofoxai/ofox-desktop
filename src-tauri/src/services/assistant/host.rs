@@ -204,6 +204,8 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    pub(super) mcp: Value,
+    pub(super) mcp_generation: u64,
     pub(super) skill_tools: Mutex<super::skill_tools::State>,
     pub(super) skills: Mutex<super::skills::SkillRunState>,
     local_calls: local::Calls,
@@ -233,6 +235,8 @@ pub struct RunControl {
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
+            mcp: Value::Null,
+            mcp_generation: 0,
             local_calls: local::Calls::default(),
             skills: Mutex::new(Default::default()),
             skill_tools: Mutex::new(Default::default()),
@@ -1752,7 +1756,9 @@ impl AssistantHost {
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
-                let result = if value["params"]["name"]
+                let result = if value["params"]["name"] == "authorize_mcp" {
+                    self.authorize_mcp(control, &value["params"]).await
+                } else if value["params"]["name"]
                     .as_str()
                     .is_some_and(super::media_tools::is_media_tool)
                 {
@@ -1832,6 +1838,9 @@ impl AssistantHost {
                 let shown = super::tools::events::task_event(kind, &data)?;
                 self.emit(control, kind, shown);
             }
+            "mcp_status" => {
+                self.save_mcp_step(control, &data, "unavailable").await?;
+            }
             "tool_start" => {
                 // The model's tool call has been answered with tokens, and the
                 // tool may cost something: never repeat this attempt.
@@ -1839,6 +1848,9 @@ impl AssistantHost {
                 attempt.projection.end_thinking();
                 // As for text: the query is the model's, the keys are not.
                 scrub_secrets_in(&mut data, &control.secrets());
+                if data.get("mcp").is_some() {
+                    self.save_mcp_step(control, &data, "running").await?;
+                }
                 let mut shown = super::tools::events::tool_start_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 self.emit(control, kind, shown);
@@ -1846,6 +1858,18 @@ impl AssistantHost {
             "tool_end" => {
                 attempt.progressed = true;
                 scrub_secrets_in(&mut data, &control.secrets());
+                if data.get("mcp").is_some() {
+                    self.save_mcp_step(
+                        control,
+                        &data,
+                        if data["success"] == true {
+                            "completed"
+                        } else {
+                            "failed"
+                        },
+                    )
+                    .await?;
+                }
                 let mut shown = super::tools::events::tool_end_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 if data["name"] == "web_search" && data["success"] == true {

@@ -1,3 +1,4 @@
+import { McpSteps } from "./McpSteps";
 import { SkillResultCards } from "./SkillResultCards";
 import { SkillChip, SkillPicker } from "./SkillPicker";
 import { memo, useEffect, useId, useRef, useState } from "react";
@@ -368,6 +369,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       data-message-id={message.id}
     >
       <h2 className="sr-only">{role}</h2>
+      {!isUser && !!message.mcpSteps?.length && (
+        <McpSteps steps={message.mcpSteps} />
+      )}
       {!isUser && !!message.skillResults?.length && (
         <SkillResultCards groups={message.skillResults} />
       )}

@@ -11,6 +11,7 @@ pub mod drops;
 pub mod host;
 mod live;
 pub mod materials;
+mod mcp;
 mod media;
 mod media_host;
 mod media_http;

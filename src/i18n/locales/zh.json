@@ -4527,7 +4527,8 @@
     "assistantSkillDescriptionMissing": "技能缺少描述。",
     "assistantSkillNameInvalid": "技能名称无效。",
     "assistantSkillDuplicate": "技能名称重复，请使用唯一名称。",
-    "assistantSkillUnavailable": "技能已变更或未给助手启用，请刷新后重试。"
+    "assistantSkillUnavailable": "技能已变更或未给助手启用，请刷新后重试。",
+    "assistantMcpSignInUnsupported": "该服务需要登录，Ofox 助手暂不支持"
   },
   "datePicker": {
     "open": "为{{label}}选择日期",
@@ -5156,6 +5157,7 @@
       "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。",
       "localPartialChange": "修复失败前已产生部分改动。请检查改动记录后再试。",
       "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。",
+      "mcpUnavailable": "MCP 服务不可用或配置已变更。请在资源库检查后重试。",
       "skillUnavailable": "技能不可用或已更改，请用 / 重新选择或移除。",
       "approvalOnceRequired": "请点击安装或保存，确认本次操作。"
     },
@@ -5755,6 +5757,18 @@
       "installs": "{{count}} 次安装",
       "originHint": "目录来源标记不代表安全保证。安装始终需要你确认。",
       "installed": "已安装"
+    },
+    "mcp": {
+      "steps": "MCP 工具步骤",
+      "running": "调用中",
+      "completed": "已完成",
+      "failed": "调用失败",
+      "unavailable": "服务暂不可用",
+      "needs_node": "请安装 Node.js（含 npx）",
+      "needs_uv": "请安装 uv",
+      "externalCost": "第三方 MCP 费用未纳入此估算。",
+      "approval": "此 MCP 工具可能修改数据。允许本次、本对话，或拒绝。",
+      "approvalTitle": "允许此 MCP 操作？"
     }
   },
   "pages": {

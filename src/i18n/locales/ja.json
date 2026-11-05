@@ -4527,7 +4527,8 @@
     "assistantSkillDescriptionMissing": "スキルの説明がありません。",
     "assistantSkillNameInvalid": "スキル名が無効です。",
     "assistantSkillDuplicate": "スキル名が重複しています。一意の名前を使用してください。",
-    "assistantSkillUnavailable": "スキルが変更されたか、アシスタントで有効になっていません。更新して再試行してください。"
+    "assistantSkillUnavailable": "スキルが変更されたか、アシスタントで有効になっていません。更新して再試行してください。",
+    "assistantMcpSignInUnsupported": "このサービスはログインが必要なため、Ofox アシスタントではまだ利用できません"
   },
   "datePicker": {
     "open": "{{label}}を選択",
@@ -5156,6 +5157,7 @@
       "localCostUnavailable": "このモデルまたは検索の価格情報がなく、費用上限を確認できません。価格情報のあるモデルを選択してください。",
       "localPartialChange": "修復が失敗する前に一部の変更が行われました。変更を確認してから再試行してください。",
       "localMutationUnknown": "変更結果を確認できません。再試行する前にファイルを確認してください。",
+      "mcpUnavailable": "MCP サービスが利用できないか、設定が変更されました。リソースで確認して再試行してください。",
       "skillUnavailable": "スキルが利用できないか変更されています。/ から選び直すか削除してください。",
       "approvalOnceRequired": "今回の操作を承認するには「インストール」または「保存」を選んでください。"
     },
@@ -5755,6 +5757,18 @@
       "installs": "{{count}} 回のインストール",
       "originHint": "カタログの出典表示は安全性を保証しません。インストールには毎回確認が必要です。",
       "installed": "インストール済み"
+    },
+    "mcp": {
+      "steps": "MCP ツールの処理",
+      "running": "実行中",
+      "completed": "完了",
+      "failed": "失敗",
+      "unavailable": "サービスを利用できません",
+      "needs_node": "npx を含む Node.js をインストールしてください",
+      "needs_uv": "uv をインストールしてください",
+      "externalCost": "外部 MCP の料金はこの見積もりに含まれません。",
+      "approval": "この MCP ツールはデータを変更する可能性があります。今回のみ、会話中の許可、または拒否を選択してください。",
+      "approvalTitle": "この MCP 操作を許可しますか？"
     }
   },
   "pages": {

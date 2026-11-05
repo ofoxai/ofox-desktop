@@ -48,6 +48,104 @@ fn id(value: &Value) -> &str {
     value["operationId"].as_str().unwrap()
 }
 
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_batch_writes_private_json_without_touching_corrupt_skill_state() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let resources = vec![mcp(&db, "alpha"), mcp(&db, "beta")];
+    std::fs::create_dir_all(assistant::assistant_dir()).unwrap();
+    let modes = assistant::assistant_dir().join("skill-modes.json");
+    std::fs::write(&modes, b"unreadable skill state must stay intact").unwrap();
+    let plan = preview_batch(
+        &db,
+        ResourceKind::Mcp,
+        resources,
+        vec![assistant::ID.into()],
+        BatchAction::Apply,
+        0,
+    )
+    .unwrap();
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+    let native: Value =
+        serde_json::from_slice(&std::fs::read(assistant::mcp_config_path()).unwrap()).unwrap();
+    assert_eq!(native["mcpServers"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        std::fs::read(&modes).unwrap(),
+        b"unreadable skill state must stay intact"
+    );
+    assert!(!assistant::assistant_dir()
+        .join("skill-origins.json")
+        .exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(assistant::mcp_config_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_batch_revalidates_frozen_and_metadata_only_resume_before_any_assignment() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    for metadata_only in [false, true] {
+        let db = Database::memory().unwrap();
+        let resource = mcp(&db, "remote");
+        let plan = preview_batch(
+            &db,
+            ResourceKind::Mcp,
+            vec![resource],
+            vec![assistant::ID.into()],
+            BatchAction::Apply,
+            0,
+        )
+        .unwrap();
+        let mut server = db
+            .get_all_mcp_servers()
+            .unwrap()
+            .shift_remove("remote")
+            .unwrap();
+        server.server = json!({"url":"https://mcp.notion.com/mcp"});
+        mcp_resource::save_draft(&db, server, Some(1)).unwrap();
+        if metadata_only {
+            let mut store: BatchStore =
+                serde_json::from_str(&db.get_setting(SETTING_KEY).unwrap().unwrap()).unwrap();
+            let journal = store.operations.get_mut(id(&plan)).unwrap();
+            journal.plans[0].targets.clear();
+            journal.groups.clear();
+            journal.status = "partial".into();
+            let mut snapshot = db.library_snapshot().unwrap();
+            project_children(journal, &mut snapshot).unwrap();
+            db.set_setting(
+                library::MACHINE_KEY,
+                &serde_json::to_string(&snapshot.machine).unwrap(),
+            )
+            .unwrap();
+            db.set_setting(SETTING_KEY, &serde_json::to_string(&store).unwrap())
+                .unwrap();
+        }
+        let before = db.library_snapshot().unwrap();
+        assert!(run_batch(&db, id(&plan))
+            .unwrap_err()
+            .to_string()
+            .contains("assistantMcpSignInUnsupported"));
+        assert_eq!(
+            db.library_snapshot().unwrap().machine.assignments,
+            before.machine.assignments
+        );
+        assert!(!assistant::mcp_config_path().exists());
+    }
+}
+
 fn assistant_skill(db: &Database, name: &str) -> BatchResource {
     let source = tempfile::tempdir().unwrap();
     std::fs::write(

@@ -22,6 +22,7 @@ import type {
   ResourceTarget,
 } from "@/lib/api/library";
 import {
+  assistantMcpRequiresSignIn,
   type LibraryMcpDraft,
   type LibraryMcpPair,
 } from "./libraryRecommendations";
@@ -274,6 +275,15 @@ export function LibraryMcpForm({
   onController,
 }: LibraryMcpFormProps) {
   const { t } = useTranslation();
+  const assistantSignIn =
+    value.transport !== "stdio" && assistantMcpRequiresSignIn(value.url);
+  useEffect(() => {
+    if (assistantSignIn && selectedTools.includes("ofox-assistant"))
+      onToolsChange?.(
+        selectedTools.filter((tool) => tool !== "ofox-assistant"),
+      );
+  }, [assistantSignIn, selectedTools, onToolsChange]);
+
   const [error, setError] = useState("");
   const [working, setWorking] = useState(false);
   const [mode, setMode] = useState<"form" | "paste">("form");
@@ -1380,8 +1390,12 @@ export function LibraryMcpForm({
                     index,
                 )
                 .map((target) => {
-                  const reason = target.disabledReason
-                    ? t(target.disabledReason, {
+                  const disabledReason =
+                    target.toolId === "ofox-assistant" && assistantSignIn
+                      ? "library.assistantMcpSignInUnsupported"
+                      : target.disabledReason;
+                  const reason = disabledReason
+                    ? t(disabledReason, {
                         defaultValue: t(
                           "library.mcpComposer.targetUnavailable",
                         ),
@@ -1401,9 +1415,7 @@ export function LibraryMcpForm({
                               : toolLabel(target.toolId, t)
                           }
                           aria-disabled={
-                            disabled ||
-                            !target.available ||
-                            !!target.disabledReason
+                            disabled || !target.available || !!disabledReason
                           }
                           aria-describedby={
                             reason
@@ -1416,7 +1428,7 @@ export function LibraryMcpForm({
                             if (
                               !disabled &&
                               target.available &&
-                              !target.disabledReason
+                              !disabledReason
                             )
                               onToolsChange(
                                 selectedTools.includes(target.toolId)

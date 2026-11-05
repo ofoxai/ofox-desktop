@@ -77,18 +77,42 @@ const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {
   void handle(line);
 });
-input.on("close", () => {
-  void runtime.close().finally(() => {
+let terminating;
+function terminate() {
+  return (terminating ??= (async () => {
+    const closing = runtime.close().catch(() => false);
     for (const request of pending.values())
       request.reject(new Error("Host disconnected"));
     pending.clear();
-  });
+    const confirmed = await closing;
+    if (confirmed) {
+      process.exit(0);
+    } else {
+      // Do not run the SDK's process-exit hook with live cached process-group
+      // IDs. Only this live process is targeted; launcher EOF / the Host's
+      // owned JobObject performs descendant teardown.
+      process.stderr.write(
+        "MCP cleanup incomplete; terminating runtime safely\n",
+      );
+      try {
+        process.kill(process.pid, "SIGKILL");
+      } catch {
+        // If the OS refuses even self-termination, remain alive for the Host's
+        // owned process/job teardown rather than run unsafe exit hooks.
+        process.stderr.write("Runtime awaiting owned Host termination\n");
+        setInterval(() => {}, 1000);
+      }
+    }
+  })());
+}
+input.on("close", () => {
+  void terminate();
 });
 process.on("SIGTERM", () => {
-  void runtime.close().finally(() => process.exit(0));
+  void terminate();
 });
 process.on("SIGINT", () => {
-  void runtime.close().finally(() => process.exit(0));
+  void terminate();
 });
 
 async function handle(line) {

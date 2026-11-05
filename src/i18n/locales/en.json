@@ -4527,7 +4527,8 @@
     "assistantSkillDescriptionMissing": "The skill has no description.",
     "assistantSkillNameInvalid": "The skill name is invalid.",
     "assistantSkillDuplicate": "The skill name is duplicated. Use a unique name.",
-    "assistantSkillUnavailable": "The skill changed or is not enabled for the assistant. Refresh and retry."
+    "assistantSkillUnavailable": "The skill changed or is not enabled for the assistant. Refresh and retry.",
+    "assistantMcpSignInUnsupported": "This service requires sign-in, which Ofox Assistant does not support yet"
   },
   "datePicker": {
     "open": "Choose {{label}}",
@@ -5156,6 +5157,7 @@
       "localCostUnavailable": "This model or search has no reliable price. Choose a priced model to use local configuration within the task budget.",
       "localPartialChange": "Some changes were made before the repair failed. Review the changes before trying again.",
       "localMutationUnknown": "The change outcome could not be confirmed. Check the files before retrying.",
+      "mcpUnavailable": "An MCP service is unavailable or its configuration changed. Check it in Resources and try again.",
       "skillUnavailable": "This skill is unavailable or has changed. Choose it again from / or remove it.",
       "approvalOnceRequired": "Choose Install or Save to approve this request."
     },
@@ -5755,6 +5757,18 @@
       "installs": "{{count}} installs",
       "originHint": "Catalog origin labels do not guarantee safety. Installation always requires your confirmation.",
       "installed": "Installed"
+    },
+    "mcp": {
+      "steps": "MCP tool steps",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "unavailable": "Service unavailable",
+      "needs_node": "Install Node.js with npx",
+      "needs_uv": "Install uv",
+      "externalCost": "Third-party MCP charges are not included in this estimate.",
+      "approval": "This MCP tool may change data. Allow once, for this conversation, or deny.",
+      "approvalTitle": "Allow this MCP operation?"
     }
   },
   "pages": {

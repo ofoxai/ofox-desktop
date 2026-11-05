@@ -515,7 +515,16 @@ export interface AssistantSkillApproval {
   installs?: number | null;
   reviewed?: boolean;
 }
+export interface AssistantMcpStep {
+  id: string;
+  server: string | null;
+  tool: string;
+  status: "running" | "completed" | "failed" | "unavailable";
+  reason?: "needs_node" | "needs_uv" | "unavailable";
+  recipeId?: string | null;
+}
 export interface AssistantMessage {
+  mcpSteps?: AssistantMcpStep[];
   skillResults?: AssistantSkillResultGroup[];
   skill?: string;
   media?: AssistantMedia;
@@ -1020,6 +1029,7 @@ export type AssistantRunEvent =
         toolCallId: string;
         name: string;
         category:
+          | "mcp"
           | "read"
           | "write_config"
           | "exec"
@@ -1029,7 +1039,11 @@ export type AssistantRunEvent =
           | "skillInstall"
           | "skillSave";
         /** Text for a local operation; what will be made for a generation. */
-        details: string | AssistantGenerationApproval | AssistantSkillApproval;
+        details:
+          | string
+          | AssistantGenerationApproval
+          | AssistantSkillApproval
+          | { server: string | null; tool: string };
         allowSession: boolean;
         /**
          * The config fields the user changed that the operation sets back to
@@ -1044,6 +1058,7 @@ export type AssistantRunEvent =
       type: "skill_results";
       data: { messageId: string; group: AssistantSkillResultGroup };
     }
+  | { type: "mcp_step"; data: { messageId: string; step: AssistantMcpStep } }
   | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A generation tool's result on reply `messageId` changed: made, failed or
@@ -1513,6 +1528,12 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_version_unavailable: "versionUnavailable",
   assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",
+  assistant_mcp_config_unavailable: "mcpUnavailable",
+  assistant_mcp_environment_missing: "mcpUnavailable",
+  assistant_mcp_snapshot_changed: "mcpUnavailable",
+  assistant_mcp_unknown_server: "mcpUnavailable",
+  assistant_mcp_unknown_tool: "mcpUnavailable",
+  assistant_tool_pending: "mcpUnavailable",
   assistant_skill_unavailable: "skillUnavailable",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",

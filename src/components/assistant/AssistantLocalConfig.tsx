@@ -191,6 +191,12 @@ export function LocalApprovalCard({
       />
     );
   const overwrites = approval.overwrites ?? [];
+  const mcpDetails =
+    approval.category === "mcp" &&
+    typeof approval.details === "object" &&
+    "tool" in approval.details
+      ? approval.details
+      : null;
   return (
     <div
       role="group"
@@ -198,10 +204,22 @@ export function LocalApprovalCard({
       className="mt-2 space-y-2 rounded-list border border-line bg-card-2 px-3 py-2 text-ctl"
     >
       <p className="font-medium text-ink">
-        {t(`assistant.local.operations.${approval.name}`, {
-          defaultValue: approval.name,
-        })}
+        {approval.category === "mcp"
+          ? t("assistant.mcp.approvalTitle")
+          : t(`assistant.local.operations.${approval.name}`, {
+              defaultValue: approval.name,
+            })}
       </p>
+      {mcpDetails && (
+        <p className="break-words text-note text-ink-2">
+          {mcpDetails.server ?? "MCP"} · {mcpDetails.tool}
+        </p>
+      )}
+      {approval.category === "mcp" && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.mcp.approval")}
+        </p>
+      )}
       {overwrites.length > 0 && (
         <div className="text-note text-ink-2">
           <p>{t("assistant.local.overwrites")}</p>

@@ -1672,6 +1672,30 @@ export function useAssistant(enabled: boolean) {
             );
             return;
           }
+          case "mcp_step": {
+            const { step, messageId } = event.data;
+            const update = (items: AssistantMessage["mcpSteps"]) => [
+              ...(items ?? []).filter((item) => item.id !== step.id),
+              step,
+            ];
+            setStream((previous) => ({
+              ...(previous ?? blankReply(event.runId)),
+              mcpSteps: update(previous?.mcpSteps),
+            }));
+            setDetail((old) =>
+              old
+                ? {
+                    ...old,
+                    messages: old.messages.map((message) =>
+                      message.id === messageId
+                        ? { ...message, mcpSteps: update(message.mcpSteps) }
+                        : message,
+                    ),
+                  }
+                : old,
+            );
+            return;
+          }
           case "tool_start": {
             const { name, toolCallId } = event.data;
             setLocalIntent(event.data.intent ?? null);

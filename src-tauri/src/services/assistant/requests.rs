@@ -623,6 +623,14 @@ impl AssistantHost {
         self.remember_key(&key);
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
         control.local_enabled = local_config.is_some();
+        control.mcp = super::mcp::snapshot(&self.env.config_dir())
+            .unwrap_or_else(|_| json!({"servers":{},"unavailable":true}));
+        control.mcp_generation = generation;
+        control.mcp["searchPrice"] =
+            serde_json::to_value(&search_price).map_err(|_| "assistant_state_unavailable")?;
+        for secret in super::mcp::secrets(&control.mcp) {
+            control.add_secret(&secret);
+        }
         if media_params.is_some() {
             control.media = Some(super::media_tools::host::MediaRun::new(
                 record.session.media.clone(),
@@ -714,6 +722,18 @@ impl AssistantHost {
         });
         if let Some(params) = params.as_object_mut() {
             params.insert("skills".into(), skills["skills"].clone());
+            params.insert(
+                "mcp".into(),
+                if control.mcp["servers"]
+                    .as_object()
+                    .is_some_and(|s| !s.is_empty())
+                    || control.mcp["unavailable"] == true
+                {
+                    control.mcp.clone()
+                } else {
+                    Value::Null
+                },
+            );
             if let Some(local_config) = local_config {
                 params.insert("localConfig".into(), local_config);
             }
@@ -1562,6 +1582,7 @@ pub(super) fn publish_turn(
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
         skill_results: vec![],
+        mcp_steps: vec![],
         skill: branch.skill.clone(),
         media: None,
         generations: vec![],
@@ -1587,6 +1608,7 @@ pub(super) fn publish_turn(
     });
     record.messages.push(Message {
         skill_results: vec![],
+        mcp_steps: vec![],
         skill: None,
         media: None,
         generations: vec![],

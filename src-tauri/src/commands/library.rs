@@ -468,7 +468,7 @@ fn library_mcp_from_discovery(
         })
         .collect();
     let global_targets: Vec<_> = paths.iter().map(|(tool, path)| {
-        let discovery_status = discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown");
+        let discovery_status = if tool == library::assistant_target::ID { "installed" } else { discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown") };
         let available = library::coordinator::target_available(discovery_status, path);
         json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical[tool],
             "available":available,"discoveryStatus":discovery_status,
@@ -492,8 +492,8 @@ fn library_mcp_from_discovery(
             let current=receipt.is_some_and(|receipt|snapshot.definitions.mcp.get(&server.id).is_some_and(|m|m.revision==receipt.resource_revision&&m.hash==receipt.definition_hash));
             let status=match(desired,owns,intact,current){(_,true,false,_)=>"conflict",(true,true,true,true)=>"applied",(true,_,_,_)=>"pending",(false,true,_,_)=>"needsReview",(false,false,true,_)=>"shared",_=>"unassigned"};
             let reason=native_errors.get(tool).cloned().or_else(||library::mcp_codec::native_server(tool,&server.id,&server.server).err().map(|e|e.to_string())).or_else(||discovery.get(tool).and_then(|entry|entry.error.clone()).filter(|reason|reason.starts_with("library.")));
-            json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical[tool],"available":library::coordinator::target_available(discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown"),path),
-            "discoveryStatus":discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown"),
+            json!({"toolId":tool,"path":path.to_string_lossy(),"targetGroupId":physical[tool],"available":library::coordinator::target_available(if tool == library::assistant_target::ID { "installed" } else { discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown") },path),
+            "discoveryStatus":if tool == library::assistant_target::ID { "installed" } else { discovery.get(tool).map(|entry|entry.status.as_str()).unwrap_or("unknown") },
             "pathState":if path.exists(){"exists"}else if path.parent().is_some_and(|parent|parent.is_dir()){"missing"}else{"missingParent"},"desired":desired,"applied":owns&&intact&&current,"status":status,"readers":physical.iter().filter(|(_,id)|*id==&physical[tool]).map(|(tool,_)|tool.clone()).chain(opencode_readers.contains(&physical[tool]).then_some("opencode".to_string())).collect::<std::collections::BTreeSet<_>>(),"disabledReason":reason})
         }).collect();
         let mut view=library::mcp_resource::definition_view(server,&snapshot);view["targets"]=json!(targets);view["serviceHost"]=json!(library::inventory::mcp_service_host(&server.server));view
@@ -1654,9 +1654,12 @@ mod mcp_target_tests {
         let targets = view["targets"]
             .as_array()
             .expect("first MCP needs backend-proven targets before a resource exists");
-        assert_eq!(targets.len(), library::mcp_targets::TOOLS.len());
+        assert_eq!(targets.len(), library::mcp_targets::TOOLS.len() + 1);
         for target in targets {
-            assert_eq!(target["available"], target["toolId"] == "claude");
+            assert_eq!(
+                target["available"],
+                target["toolId"] == "claude" || target["toolId"] == library::assistant_target::ID
+            );
             assert!(target["path"]
                 .as_str()
                 .is_some_and(|path| std::path::Path::new(path).is_absolute()));

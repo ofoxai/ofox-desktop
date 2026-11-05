@@ -4,7 +4,7 @@ pub mod assistant_target;
 pub(crate) mod batch;
 pub(crate) mod catalog;
 pub(crate) mod coordinator;
-mod display;
+pub(crate) mod display;
 pub(crate) mod extension_targets;
 mod instructions;
 pub(crate) mod inventory;
