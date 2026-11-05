@@ -386,6 +386,8 @@ impl AssistantHost {
                 };
             }
         }
+        registry::validate_args(tool, &call.args)?;
+        // A new search replaces the earlier results; an invalid one does not.
         if call.name == "find_skills"
             && !run
                 .local_calls
@@ -399,7 +401,6 @@ impl AssistantHost {
             skills.results.clear();
             skills.installed.clear();
         }
-        registry::validate_args(tool, &call.args)?;
         if call.name == "install_skill" {
             self.check_skill_result(run, &call.args)?;
         }

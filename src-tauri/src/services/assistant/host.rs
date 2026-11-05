@@ -2514,6 +2514,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skill_tools_invalid_search_keeps_the_earlier_results() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        host.store(&identity().owner).unwrap().mutate(&sid,|record|{record.messages.push(serde_json::from_value(json!({"id":run.reply_id(),"role":"assistant","content":"","createdAt":0,"status":"streaming","runId":run.run_id})).unwrap());Ok(())}).unwrap();
+        let call = |id: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"find_skills","args":args});
+        host.dispatch_tool(&run, &call("search", json!({"query":"first"})))
+            .await
+            .unwrap();
+        assert_eq!(
+            host.dispatch_tool(&run, &call("bad", json!({"query":"x"})))
+                .await
+                .unwrap_err(),
+            "invalid_skill_query"
+        );
+        assert!(run
+            .skill_tools
+            .lock()
+            .unwrap()
+            .results
+            .contains_key("first-id"));
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
     async fn skill_tools_forged_install_is_rejected_without_approval() {
         let (_tmp, env, host) = fixture_with_env();
         let (sid, run) = local_run(&host);
