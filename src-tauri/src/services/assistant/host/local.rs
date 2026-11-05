@@ -255,7 +255,7 @@ impl AssistantHost {
         if run.mcp["snapshot"].is_null() || call.args["snapshot"] != run.mcp["snapshot"] {
             return Err("assistant_mcp_snapshot_changed".into());
         }
-        let current = super::super::mcp::snapshot(&self.env.config_dir())?;
+        let current = super::super::mcp::current(self.env.config_dir()).await?;
         if current["snapshot"] != run.mcp["snapshot"] {
             return Err("assistant_mcp_snapshot_changed".into());
         }
@@ -323,7 +323,7 @@ impl AssistantHost {
                 self.emit(run,"approval_end",json!({"approvalId":id}));
                 self.validate_run(run)?;
                 self.ensure_current(&run.identity,run.mcp_generation).await?;
-                if super::super::mcp::snapshot(&self.env.config_dir())?["snapshot"] != run.mcp["snapshot"] { return Err("assistant_mcp_snapshot_changed".into()); }
+                if super::super::mcp::current(self.env.config_dir()).await?["snapshot"] != run.mcp["snapshot"] { return Err("assistant_mcp_snapshot_changed".into()); }
                 match choice? {
                     Choice::Deny => return Ok(json!({"approved":false})),
                     Choice::Session => { self.local_states.lock().map_err(|_|STATE)?.entry(key).or_default().grants.insert(grant); }

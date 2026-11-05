@@ -623,7 +623,8 @@ impl AssistantHost {
         self.remember_key(&key);
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
         control.local_enabled = local_config.is_some();
-        control.mcp = super::mcp::snapshot(&self.env.config_dir())
+        control.mcp = super::mcp::current(self.env.config_dir())
+            .await
             .unwrap_or_else(|_| json!({"servers":{},"unavailable":true}));
         if control.mcp["servers"]
             .as_object()

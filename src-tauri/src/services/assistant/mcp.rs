@@ -96,6 +96,11 @@ impl AssistantHost {
     }
 }
 
+/// The snapshot reads files and probes CLI folders: keep it off async workers.
+pub(super) async fn current(root: std::path::PathBuf) -> Result<Value, String> {
+    super::host::blocking(move || snapshot(&root)).await
+}
+
 pub fn snapshot(root: &Path) -> Result<Value, String> {
     let root = crate::services::library::coordinator::physical(root)
         .map_err(|_| "assistant_mcp_config_unavailable")?;
