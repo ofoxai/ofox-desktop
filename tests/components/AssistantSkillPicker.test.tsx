@@ -164,6 +164,21 @@ it("chooses by keyboard and sends the name through Page hook and real API IPC", 
     }),
   );
 });
+it("Enter sends a slash message when no skill matches", async () => {
+  const input = await open();
+  await userEvent.type(input, "/etc/hosts");
+  await screen.findByText("No available skills");
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() =>
+    expect(ipc.invoke).toHaveBeenCalledWith("assistant_send", {
+      request: expect.objectContaining({ text: "/etc/hosts" }),
+    }),
+  );
+  const sent = ipc.invoke.mock.calls.find(
+    ([name]) => name === "assistant_send",
+  );
+  expect(sent?.[1].request.skill).toBeUndefined();
+});
 it("Backspace removes a chosen chip, while a middle slash never opens", async () => {
   const input = await open();
   await userEvent.type(input, "hello /man");

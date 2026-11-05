@@ -159,6 +159,12 @@ export const SkillPicker = forwardRef<HTMLTextAreaElement, Props>(
         onKeyDown?.(event);
         return;
       }
+      // With nothing to choose, Enter sends the text as typed ("/etc/hosts").
+      if (open && event.key === "Enter" && !event.shiftKey && !matches[index]) {
+        close();
+        onKeyDown?.(event);
+        return;
+      }
       if (
         open &&
         ["ArrowDown", "ArrowUp", "Enter", "Escape"].includes(event.key) &&
