@@ -345,6 +345,22 @@ it("a broken assistant skill shows why", async () => {
   expect(screen.getByText(/缺少描述/)).toBeVisible();
 });
 
+it("damaged assistant skill settings leave the other skills listed", async () => {
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 4,
+    skills: [skill("pdf")],
+    skillTargets: [],
+    operations: [],
+    assistantSkills: [],
+    assistantSkillsError: "配置错误: library.assistantSkillStateInvalid",
+  });
+  renderPage();
+  expect(
+    await screen.findByText(zh.library.assistantSkillStateInvalid),
+  ).toBeVisible();
+  expect(screen.getByText("pdf")).toBeVisible();
+});
+
 it("groups library skills by source with one chip per detected agent", async () => {
   renderPage();
   const row = await screen.findByTestId("skill-row-pdf");

@@ -1551,6 +1551,11 @@ export function LibrarySkillsPage({
           )}
         </div>
 
+        {data?.assistantSkillsError && (
+          <p role="status" className="text-ctl text-warn">
+            {libraryError(data.assistantSkillsError, t)}
+          </p>
+        )}
         {(data?.assistantSkills ?? [])
           .filter(
             (skill) =>

@@ -129,6 +129,8 @@ export interface LibraryData {
   skills?: SkillDefinition[];
   skillTargets?: SkillTarget[];
   assistantSkills?: AssistantSkill[];
+  /** The assistant's skill settings could not be read; other skills still list. */
+  assistantSkillsError?: string | null;
   targets?: ResourceTarget[];
   detachedTargets?: { path: string; resourceId: string; tools: string[] }[];
   operations: LibraryOperation[];

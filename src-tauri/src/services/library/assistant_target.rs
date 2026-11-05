@@ -340,6 +340,15 @@ pub fn list_assistant_skills(
 ) -> Result<Vec<AssistantSkill>, AppError> {
     Ok(assistant_skill_snapshot(db, names)?.skills)
 }
+
+/// The Library page lists every tool's skills: a damaged assistant state is
+/// reported beside them instead of failing the whole page.
+pub fn library_assistant_skills(db: &Database) -> (Vec<AssistantSkill>, Option<String>) {
+    match list_assistant_skills(db, &reviewed_names()) {
+        Ok(skills) => (skills, None),
+        Err(error) => (Vec::new(), Some(error.to_string())),
+    }
+}
 pub fn assistant_skill_snapshot(
     db: &Database,
     names: &BTreeSet<String>,

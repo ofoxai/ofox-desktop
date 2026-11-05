@@ -654,11 +654,8 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
     crate::agent_env::ready().await;
     let discovery = skill_discovery().await?;
     let _io = crate::config_io::lock();
-    let assistant_skills = library::assistant_target::list_assistant_skills(
-        &state.db,
-        &library::assistant_target::reviewed_names(),
-    )
-    .map_err(|e| e.to_string())?;
+    let (assistant_skills, assistant_skills_error) =
+        library::assistant_target::library_assistant_skills(&state.db);
     library::skill_resource::ensure_metadata(&state.db).map_err(|e| e.to_string())?;
     let mut skills = Vec::new();
     for row in state
@@ -720,7 +717,7 @@ pub async fn get_library_skills(state: State<'_, AppState>) -> Result<Value, Str
         })
         .collect();
     Ok(
-        json!({"epoch":snapshot.machine.epoch,"skills":skills,"skillTargets":skill_targets,"assistantSkills":assistant_skills,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
+        json!({"epoch":snapshot.machine.epoch,"skills":skills,"skillTargets":skill_targets,"assistantSkills":assistant_skills,"assistantSkillsError":assistant_skills_error,"operations":operations.into_iter().take(20).map(library::operation_view).collect::<Vec<_>>()}),
     )
 }
 

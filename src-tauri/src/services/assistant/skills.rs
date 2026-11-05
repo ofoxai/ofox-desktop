@@ -122,12 +122,27 @@ impl AssistantHost {
     }
 
     pub async fn refresh_run_skills(&self, run: &Arc<RunControl>) -> Result<Value, String> {
+        self.refresh_skills(run, false).await
+    }
+    /// Chat admission: damaged skill state must not stop ordinary chat. The run
+    /// gets no skills, and a picked skill then reports itself unavailable.
+    pub async fn admit_run_skills(&self, run: &Arc<RunControl>) -> Result<Value, String> {
+        self.refresh_skills(run, true).await
+    }
+    async fn refresh_skills(&self, run: &Arc<RunControl>, degrade: bool) -> Result<Value, String> {
         self.validate_run(run)?;
         if self.identity().await? != run.identity {
             return Err("assistant_identity_changed".into());
         }
         let env = self.env.clone();
-        let snapshot = blocking(move || env.skill_snapshot()).await?;
+        let snapshot = match blocking(move || env.skill_snapshot()).await {
+            Ok(snapshot) => snapshot,
+            Err(error) if degrade => {
+                log::warn!("[Assistant] skills are unavailable for this run: {error}");
+                Default::default()
+            }
+            Err(error) => return Err(error),
+        };
         self.validate_run(run)?;
         if self.identity().await? != run.identity {
             return Err("assistant_identity_changed".into());

@@ -6180,6 +6180,41 @@ fn requests_pass_assistant_skills_without_broken_ones() {
 
 #[test]
 #[serial_test::serial]
+fn damaged_skill_state_still_sends_chat_and_refuses_a_picked_skill() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir();
+    std::fs::create_dir_all(root.join("drawing")).unwrap();
+    std::fs::write(
+        root.join("drawing/SKILL.md"),
+        "---\nname: drawing\ndescription: Draw safely\n---\nbody",
+    )
+    .unwrap();
+    std::fs::write(root.parent().unwrap().join("skill-modes.json"), "{").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        assert_eq!(
+            host.send(request(&sid, "Picked", json!({"skill":"drawing"})))
+                .await
+                .unwrap_err(),
+            "assistant_skill_unavailable"
+        );
+        gateway.reply(Reply::Stream("Plain".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Plain chat", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(!system_preamble(&requests[0]).contains("Draw safely"));
+    });
+}
+
+#[test]
+#[serial_test::serial]
 fn picked_skill_is_user_input_and_unknown_selection_is_refused() {
     let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
     let _sandbox = cc_switch_lib::test_sandbox::sandbox();

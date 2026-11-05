@@ -44,6 +44,24 @@ fn managed(db: &Database, owner: &str, name: &str, source_dir: &str) -> Installe
 
 #[test]
 #[serial_test::serial]
+fn damaged_assistant_state_is_reported_beside_the_library_list() {
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    local("sample", body("sample").as_bytes());
+    fs::write(assistant_dir().join("skill-modes.json"), "{").unwrap();
+    let (skills, error) = library_assistant_skills(&db);
+    assert!(skills.is_empty());
+    assert!(error
+        .unwrap()
+        .contains("library.assistantSkillStateInvalid"));
+    fs::remove_file(assistant_dir().join("skill-modes.json")).unwrap();
+    let (skills, error) = library_assistant_skills(&db);
+    assert_eq!(skills.len(), 1);
+    assert!(error.is_none());
+}
+
+#[test]
+#[serial_test::serial]
 fn skill_modes_default_to_auto_and_round_trip() {
     let _sandbox = crate::test_sandbox::sandbox();
     let db = Database::memory().unwrap();

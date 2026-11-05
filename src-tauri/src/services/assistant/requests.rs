@@ -656,7 +656,7 @@ impl AssistantHost {
                 );
         }
         let control = Arc::new(control);
-        let skills = self.refresh_run_skills(&control).await?;
+        let skills = self.admit_run_skills(&control).await?;
         let text = super::host::scrub_secrets(&request.text, std::slice::from_ref(&key));
         let loaded_skill = if let Some(name) = &branch.skill {
             Some(
