@@ -5155,7 +5155,8 @@
       "localInvalidPlan": "任务步骤格式无效。",
       "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。",
       "localPartialChange": "修复失败前已产生部分改动。请检查改动记录后再试。",
-      "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。"
+      "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。",
+      "skillUnavailable": "技能不可用或已更改，请用 / 重新选择或移除。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5734,6 +5735,14 @@
       "overLimit": "生成视频最多使用 9 张参考图、3 段音频（每段不超过 15 秒）和 1 个视频，请删掉多余的附件。",
       "needsTools": "当前模型不能调用工具，无法生成图片、视频或语音。请换一个模型。",
       "readAloudFailed": "朗读失败，请稍后再试。"
+    },
+    "skills": {
+      "choose": "选择技能",
+      "chip": "技能：{{name}}",
+      "remove": "移除技能 {{name}}",
+      "empty": "没有可用的技能",
+      "unavailable": "技能加载失败，请重新输入 /。",
+      "queueOnly": "带技能的消息会排队，等本次回答结束后发送。"
     }
   },
   "pages": {

@@ -115,6 +115,12 @@ fn load(access: &VerifiedSkillAccess<'_>) -> Result<Value, AppError> {
     )
 }
 impl AssistantHost {
+    pub async fn list_skills(&self) -> Result<Value, String> {
+        let env = self.env.clone();
+        let snapshot = blocking(move || env.skill_snapshot()).await?;
+        Ok(json!(snapshot.skills.iter().filter(|s| s.broken.is_none() && snapshot.proof(&s.name).is_some()).map(|s| json!({"name":s.name,"description":crate::redact::scrub(&s.description),"mode":s.mode,"reviewed":s.reviewed,"origin":s.origin})).collect::<Vec<_>>()))
+    }
+
     pub async fn refresh_run_skills(&self, run: &Arc<RunControl>) -> Result<Value, String> {
         self.validate_run(run)?;
         if self.identity().await? != run.identity {

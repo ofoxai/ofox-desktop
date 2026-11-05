@@ -1,3 +1,4 @@
+import type { SkillMode, SkillOrigin } from "@/lib/api/library";
 import i18n from "@/i18n";
 import { isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
@@ -491,6 +492,7 @@ export interface AssistantAttachment {
  * being streamed).
  */
 export interface AssistantMessage {
+  skill?: string;
   media?: AssistantMedia;
   /** What the reply's generation tools made, one per tool call. */
   generations?: AssistantGeneration[];
@@ -669,6 +671,8 @@ export interface AssistantUpdateRequest {
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
+  skill?: string;
+  replaceSkill?: boolean;
   /** Frozen before admission; the host rejects work left by an old account or region. */
   expectedOwner?: string;
   expectedGeneration?: number;
@@ -1106,7 +1110,16 @@ export const ASSISTANT_DRAG_EVENT = "assistant:drag";
 export const ASSISTANT_DROP_EVENT = "assistant:drop";
 
 /** The backend derives account, organization and region; callers never supply owner IDs. */
+export interface AssistantSkillChoice {
+  name: string;
+  description: string;
+  mode: SkillMode;
+  reviewed: boolean;
+  origin?: SkillOrigin | null;
+}
+
 export const assistantApi = {
+  listSkills: () => invoke<AssistantSkillChoice[]>("assistant_list_skills"),
   bootstrap: (refreshCatalog = false) =>
     refreshCatalog
       ? invoke<AssistantBootstrap>("assistant_bootstrap", {
@@ -1468,6 +1481,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_version_unavailable: "versionUnavailable",
   assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",
+  assistant_skill_unavailable: "skillUnavailable",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",
   assistant_instructions_too_long: "instructionsTooLong",

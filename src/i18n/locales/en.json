@@ -5155,7 +5155,8 @@
       "localInvalidPlan": "The task plan is invalid.",
       "localCostUnavailable": "This model or search has no reliable price. Choose a priced model to use local configuration within the task budget.",
       "localPartialChange": "Some changes were made before the repair failed. Review the changes before trying again.",
-      "localMutationUnknown": "The change outcome could not be confirmed. Check the files before retrying."
+      "localMutationUnknown": "The change outcome could not be confirmed. Check the files before retrying.",
+      "skillUnavailable": "This skill is unavailable or has changed. Choose it again from / or remove it."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5734,6 +5735,14 @@
       "overLimit": "A video can use at most 9 reference images, 3 audio clips (15 seconds each at most) and 1 video. Remove the extra files.",
       "needsTools": "This model cannot use tools, so it cannot generate images, videos or speech. Choose another model.",
       "readAloudFailed": "Reading aloud failed. Try again later."
+    },
+    "skills": {
+      "choose": "Choose a skill",
+      "chip": "Skill: {{name}}",
+      "remove": "Remove skill {{name}}",
+      "empty": "No available skills",
+      "unavailable": "Skills could not be loaded. Try typing / again.",
+      "queueOnly": "Messages with a skill are queued for the next reply."
     }
   },
   "pages": {

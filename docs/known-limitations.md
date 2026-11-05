@@ -318,7 +318,6 @@ Linux GTK3/Tauri still resolves `glib` 0.18.5. [GHSA-wrw7-89jp-8q8g](https://git
 
 ZIP imports require single-disk archives with zero archive offset and an unambiguous end record. Archives with another end-record signature in the final 128 KiB, over 32 MiB of central metadata (lower limits apply to smaller imports), or over 1 MiB of ZIP64 extensible metadata are rejected before metadata allocation. This intentionally excludes ambiguous/polyglot or unusually metadata-heavy archives; ordinary stored, deflated, Unicode-name and legacy ZIP64 archives have compatibility fixtures.
 
-
 ## Assistant conversation request retries
 
 [Conversation retries](assistant-request-retries.md) preserve unknown billing
@@ -330,7 +329,7 @@ bridge; native Windows and live billed-provider acceptance remain unverified.
 
 ## Assistant skill target
 
-The library target and modes now feed a fresh host snapshot into runtime skill loading. Automatic skills are listed within a bounded prompt and loaded through `use_skill`; broken and manual skills cannot be loaded by that tool. Runs without local command tools can still read skill instructions. Slash selection and approval-backed creation remain later integrations. The optional creation-origin sidecar has a strict reader; its transactional writer belongs to the creation integration. Missing origin evidence does not reconstruct ownership from names.
+The library target and modes now feed a fresh host snapshot into runtime skill loading. Automatic skills are listed within a bounded prompt and loaded through `use_skill`; broken and manual skills cannot be loaded by that tool. Runs without local command tools can still read skill instructions. A leading / in the composer selects Auto or Manual for one message. Its current body is injected as XML-escaped ordinary user input; history displays only the original words and skill chip. Retry/regenerate revalidate the current installed body, so a changed skill can change replay input; unavailable skills fail clearly. Edit can replace or clear the chip. Unsent chips are session-scoped memory only, and queued chips are checked again at dispatch. A message with a skill can queue during a reply but cannot steer that existing run. Approval-backed creation remains a later integration. The optional creation-origin sidecar has a strict reader; its transactional writer belongs to the creation integration. Missing origin evidence does not reconstruct ownership from names.
 
 Official popular metadata does not contain a unique repository directory. Origin classification verifies its full publisher repository and the actual fixed artifact's frontmatter name; it does not assert a unique skills.sh URL-to-directory mapping or a safety audit. Ambiguous/mismatching metadata remains unreviewed. Native Windows execution and live-agent acceptance remain unverified. Configuration locks coordinate application writes, not arbitrary external processes; skill scripts are not placed in an OS sandbox.
 

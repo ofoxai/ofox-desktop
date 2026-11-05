@@ -211,6 +211,9 @@ impl Attachment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    /// User-selected skill name only; never a persisted permission or body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<MediaRecord>,
     /// What the reply's generation tools made, one record per tool call.
@@ -499,6 +502,11 @@ pub struct ExportMarkdownRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
+    #[serde(default)]
+    pub skill: Option<String>,
+    /// An edit explicitly replaces or clears its original selection.
+    #[serde(default)]
+    pub replace_skill: bool,
     /// The renderer's resolved language, including first-launch OS detection.
     /// Older callers omit it and use the saved application preference.
     #[serde(default)]

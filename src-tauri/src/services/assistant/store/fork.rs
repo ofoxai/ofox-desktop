@@ -372,7 +372,8 @@ mod tests {
 
     #[test]
     fn fork_stage_copies_context_files_ledger_and_deduplicates_inherited_cost() {
-        let (_temp, store, record, entries) = fixture();
+        let (_temp, store, mut record, entries) = fixture();
+        record.messages[0].skill = Some("historical-skill".into());
         let original = fs::read(store.root.join(&record.session.id).join(SESSION_FILE)).unwrap();
         let stage = store.stage_fork(&record.session.id).unwrap();
         write_bytes(&stage.native_path(), b"native copy\n").unwrap();
@@ -383,6 +384,7 @@ mod tests {
         assert_eq!(fork.session.assistant_id, "ofox");
         assert_eq!(fork.session.capabilities, record.session.capabilities);
         assert_eq!(fork.messages.len(), 2);
+        assert_eq!(fork.messages[0].skill.as_deref(), Some("historical-skill"));
         assert!(fork.session.draft.is_empty());
         assert!(fork.session.context_usage.is_none());
         assert_eq!(fork.operations, record.operations);

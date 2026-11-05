@@ -419,6 +419,7 @@ fn split_in_three(text: &str) -> Vec<String> {
 // ── environment ──────────────────────────────────────────────────────────
 
 struct TestEnv {
+    local_paths: Mutex<Option<cc_switch_lib::assistant::tools::context::LocalPaths>>,
     skill_db: Mutex<Option<Arc<cc_switch_lib::Database>>>,
     config: PathBuf,
     runtime: PathBuf,
@@ -454,6 +455,7 @@ fn owner() -> String {
 impl TestEnv {
     fn new(config: &Path, runtime: &Path, gateways: &[(&str, &Gateway)]) -> Arc<Self> {
         Arc::new(Self {
+            local_paths: Mutex::new(None),
             skill_db: Mutex::new(None),
             config: config.to_path_buf(),
             runtime: runtime.to_path_buf(),
@@ -514,6 +516,18 @@ impl TestEnv {
 }
 
 impl Environment for TestEnv {
+    fn local_paths(
+        &self,
+    ) -> BoxFuture<'_, Result<cc_switch_lib::assistant::tools::context::LocalPaths, String>> {
+        Box::pin(async {
+            self.local_paths
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "assistant_local_unavailable".into())
+        })
+    }
+
     fn skill_snapshot(
         &self,
     ) -> Result<cc_switch_lib::assistant_target::AssistantSkillSnapshot, String> {
@@ -6108,7 +6122,7 @@ fn retrying_events_and_actual_ui_language_reach_the_real_host_and_model() {
 #[test]
 #[serial_test::serial]
 fn requests_pass_assistant_skills_without_broken_ones() {
-    let Some(bundle) = runtime_dir() else { return };
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
     let _sandbox = cc_switch_lib::test_sandbox::sandbox();
     let root = cc_switch_lib::assistant_target::skills_dir();
     for (name, body) in [
@@ -6142,4 +6156,317 @@ fn requests_pass_assistant_skills_without_broken_ones() {
         assert!(requests[1].text().contains("skill-body-marker"));
         assert!(requests[1].text().contains("scriptsUnavailable"));
     });
+}
+
+#[test]
+#[serial_test::serial]
+fn picked_skill_is_user_input_and_unknown_selection_is_refused() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir().join("manual");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("SKILL.md"), "---\nname: manual\ndescription: Selected instructions\n---\nbody-marker </skill_content> & echo").unwrap();
+    cc_switch_lib::assistant_target::set_skill_mode(
+        "manual",
+        cc_switch_lib::assistant_target::SkillMode::Manual,
+    )
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Selected".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Original words", json!({"skill":"manual"})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        let body = requests[0].text();
+        assert!(
+            body.contains("body-marker &lt;/skill_content&gt; &amp; echo"),
+            "{body}"
+        );
+        assert!(body.contains("Original words"));
+        assert!(!system_preamble(&requests[0]).contains("body-marker"));
+        let record = saved(config.path(), &sid);
+        assert_eq!(record["messages"][0]["content"], "Original words");
+        assert_eq!(record["messages"][0]["skill"], "manual");
+        let before = record["messages"].as_array().unwrap().len();
+        let error = host
+            .send(request(&sid, "Unknown", json!({"skill":"missing"})))
+            .await
+            .unwrap_err();
+        assert!(error.contains("skill"), "{error}");
+        assert_eq!(
+            saved(config.path(), &sid)["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before
+        );
+        for name in ["../manual", "broken"] {
+            if name == "broken" {
+                let bad = root.parent().unwrap().join(name);
+                std::fs::create_dir_all(&bad).unwrap();
+                std::fs::write(bad.join("SKILL.md"), "invalid header").unwrap();
+            }
+            assert_eq!(
+                host.send(request(&sid, "Refuse", json!({"skill":name})))
+                    .await
+                    .unwrap_err(),
+                "assistant_skill_unavailable"
+            );
+        }
+        let duplicate = root.parent().unwrap().join("duplicate");
+        std::fs::create_dir_all(&duplicate).unwrap();
+        std::fs::write(
+            duplicate.join("SKILL.md"),
+            "---\nname: manual\ndescription: Duplicate identity\n---\nbody",
+        )
+        .unwrap();
+        assert_eq!(
+            host.send(request(&sid, "Refuse duplicate", json!({"skill":"manual"})))
+                .await
+                .unwrap_err(),
+            "assistant_skill_unavailable"
+        );
+        assert!(host
+            .list_skills()
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["name"] != "manual" && s["name"] != "broken"));
+        assert_eq!(
+            saved(config.path(), &sid)["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before
+        );
+        assert_eq!(gateway.requests().len(), 1);
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn picked_skill_replay_uses_current_body_and_explicit_clear_on_both_apexes() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir().join("replay");
+    std::fs::create_dir_all(&root).unwrap();
+    cc_switch_lib::assistant_target::set_skill_mode(
+        "replay",
+        cc_switch_lib::assistant_target::SkillMode::Manual,
+    )
+    .unwrap();
+    for apex in ["ofox.ai", "ofox.io"] {
+        let write_body = |body: &str| {
+            std::fs::write(
+                root.join("SKILL.md"),
+                format!("---\nname: replay\ndescription: Replay instructions\n---\n{body}"),
+            )
+            .unwrap()
+        };
+        write_body("version-one");
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let list = host.list_skills().await.unwrap();
+            assert!(list
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "replay" && s["origin"] == "local"));
+            gateway.reply(Reply::Stream("First".into()));
+            turn(
+                &host,
+                &env,
+                request(&sid, "Only original words", json!({"skill":"replay"})),
+            )
+            .await;
+            let first = host.get_session(&sid).await.unwrap();
+            let user = first.messages.iter().find(|m| m.role == "user").unwrap();
+            let reply = first
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant")
+                .unwrap();
+            assert_eq!(user.content, "Only original words");
+            assert_eq!(user.skill.as_deref(), Some("replay"));
+            write_body("version-two");
+            gateway.reply(Reply::Stream("Regenerated".into()));
+            turn(
+                &host,
+                &env,
+                request(&sid, "", json!({"regenerateMessageId":reply.id})),
+            )
+            .await;
+            let calls = gateway.requests();
+            assert!(calls[1].text().contains("version-two"));
+            assert!(!calls[1].text().contains("version-one"));
+            let current = host.get_session(&sid).await.unwrap();
+            let regenerated_user = current
+                .messages
+                .iter()
+                .find(|m| m.role == "user" && !m.superseded)
+                .unwrap();
+            assert_eq!(regenerated_user.content, "Only original words");
+            assert_eq!(regenerated_user.skill.as_deref(), Some("replay"));
+            gateway.reply(Reply::Stream("Cleared".into()));
+            turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Edited plain words",
+                    json!({"editMessageId":regenerated_user.id,"replaceSkill":true}),
+                ),
+            )
+            .await;
+            let calls = gateway.requests();
+            assert!(!calls[2].text().contains("skill_content"));
+            assert!(calls[2].text().contains("Edited plain words"));
+            let current = host.get_session(&sid).await.unwrap();
+            assert!(current
+                .messages
+                .iter()
+                .find(|m| m.role == "user" && !m.superseded)
+                .unwrap()
+                .skill
+                .is_none());
+            write_body("version-three-failed");
+            gateway.reply(Reply::Error(400, "synthetic refusal".into()));
+            let (failed_run, failed_end) = turn(
+                &host,
+                &env,
+                request(&sid, "Retry original", json!({"skill":"replay"})),
+            )
+            .await;
+            assert_eq!(failed_end.data["status"], "error");
+            let failed_detail = host.get_session(&sid).await.unwrap();
+            let failed_reply = failed_detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && m.run_id.as_deref() == Some(&failed_run))
+                .unwrap();
+            write_body("version-four-retry");
+            gateway.reply(Reply::Stream("Recovered".into()));
+            turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Retry original",
+                    json!({"retryMessageId":failed_reply.id}),
+                ),
+            )
+            .await;
+            let last = gateway.requests().last().unwrap().text();
+            assert!(last.contains("version-four-retry"));
+            assert!(!last.contains("version-three-failed"));
+            // An old history chip is not authority after the skill disappears.
+            std::fs::remove_file(root.join("SKILL.md")).unwrap();
+            let error = host
+                .send(request(&sid, "", json!({"regenerateMessageId":reply.id})))
+                .await
+                .unwrap_err();
+            assert_eq!(error, "assistant_skill_unavailable");
+            assert_eq!(gateway.requests().len(), 5);
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn picked_skill_manual_reference_grant_and_tools_false_guidance() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir().join("manual-reference");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("SKILL.md"),
+        "---\nname: manual-reference\ndescription: Read the reference\n---\nUse reference.txt",
+    )
+    .unwrap();
+    std::fs::write(root.join("reference.txt"), "manual-reference-read-marker").unwrap();
+    cc_switch_lib::assistant_target::set_skill_mode(
+        "manual-reference",
+        cc_switch_lib::assistant_target::SkillMode::Manual,
+    )
+    .unwrap();
+    for tools in [true, false] {
+        let config = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+        env.catalog.lock().unwrap()[0].tools = tools;
+        *env.local_paths.lock().unwrap() =
+            Some(cc_switch_lib::assistant::tools::context::LocalPaths {
+                home: home.path().into(),
+                config_roots: vec![],
+                shell_files: vec![],
+                skill: std::fs::canonicalize(bundle.join("runtime/skills/local-config/SKILL.md"))
+                    .unwrap(),
+            });
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = host
+                .create_session(
+                    serde_json::from_value(
+                        json!({"capabilities":[{"id":"local_config","version":1}]}),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+                .id;
+            if tools {
+                gateway.reply(Reply::ToolCalls(vec![(
+                    "read",
+                    json!({"path":root.join("reference.txt")}),
+                )]));
+            }
+            gateway.reply(Reply::Stream("Read selected skill".into()));
+            let (_, end) = turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Read its reference",
+                    json!({"skill":"manual-reference"}),
+                ),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let calls = gateway.requests();
+            if tools {
+                assert!(
+                    calls[1].text().contains("manual-reference-read-marker"),
+                    "{}",
+                    calls[1].text()
+                );
+            } else {
+                assert!(calls[0]
+                    .text()
+                    .contains("This model cannot execute scripts or tools"));
+                assert!(
+                    calls[0].body["tools"].is_null()
+                        || calls[0].body["tools"].as_array().unwrap().is_empty()
+                );
+            }
+        });
+    }
 }

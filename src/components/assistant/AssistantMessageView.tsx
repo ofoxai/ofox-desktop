@@ -1,3 +1,4 @@
+import { SkillChip, SkillPicker } from "./SkillPicker";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -23,7 +24,6 @@ import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { isSendable } from "@/utils/assistantAttachments";
 import type { TurnVersions } from "@/utils/assistantVersions";
@@ -254,6 +254,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     messageId: string,
     text: string,
     attachments: AssistantAttachment[],
+    skill?: string,
   ) => Promise<boolean>;
   /** Tells the page whether this message is being edited. */
   onEditingChange?: (editing: boolean) => void;
@@ -277,6 +278,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   const { t } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(message.content);
+  const [editSkill, setEditSkill] = useState(message.skill);
   const [editFiles, setEditFiles] = useState<AssistantAttachment[]>([]);
   // The reply's usage popover is open: its row stays in view meanwhile.
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -374,12 +376,15 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         mediaBlock
       ) : editing ? (
         <div className="w-full space-y-2">
-          <Textarea
+          <SkillPicker
+            scope={message.id}
+            skill={editSkill}
+            onSkill={setEditSkill}
             ref={editor}
             autoFocus
             aria-label={t("assistant.editMessage")}
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            onTextChange={setText}
           />
           {files.length > 0 && (
             <>
@@ -411,7 +416,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
             <Button
               disabled={disabled || (!text.trim() && !editFiles.length)}
               onClick={() => {
-                void onEdit(message.id, text, editFiles).then((sent) => {
+                void (
+                  editSkill
+                    ? onEdit(message.id, text, editFiles, editSkill)
+                    : onEdit(message.id, text, editFiles)
+                ).then((sent) => {
                   if (sent) setEditing(false);
                 });
               }}
@@ -430,6 +439,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         )
       ) : (
         <>
+          {isUser && message.skill && (
+            <div className="mb-1 max-w-full">
+              <SkillChip name={message.skill} />
+            </div>
+          )}
           {/* A question sent with files alone has no words to show. */}
           {(message.content || !files.length) && (
             <div
@@ -565,6 +579,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   disabled={disabled}
                   onClick={() => {
                     setText(message.content);
+                    setEditSkill(message.skill);
                     setEditFiles(resendable);
                     setEditing(true);
                   }}

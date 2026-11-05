@@ -240,6 +240,18 @@ export function useAssistant(enabled: boolean) {
   const detailRef = useRef(detail);
   detailRef.current = detail;
   const [draft, setDraftState] = useState("");
+  const [skill, setSkillState] = useState<string | undefined>();
+  const skillRef = useRef<string | undefined>();
+  const skillDrafts = useRef(new Map<string, string | undefined>());
+  const skillVersion = useRef(0);
+  const skillVersions = useRef(new Map<string, number>());
+  const setSkill = useCallback((value: string | undefined) => {
+    skillVersion.current += 1;
+    skillRef.current = value;
+    skillDrafts.current.set(selectedRef.current ?? "", value);
+    skillVersions.current.set(selectedRef.current ?? "", skillVersion.current);
+    setSkillState(value);
+  }, []);
   const [attachments, setAttachmentsState] = useState<AssistantAttachment[]>(
     [],
   );
@@ -569,8 +581,12 @@ export function useAssistant(enabled: boolean) {
             previous &&
             (previous.owner !== value.owner ||
               previous.authorityGeneration !== value.authorityGeneration)
-          )
+          ) {
             messageQueue.clear();
+            skillDrafts.current.clear();
+            skillVersions.current.clear();
+            setSkill(undefined);
+          }
           if (
             previous?.owner === value.owner &&
             previous.authorityGeneration === value.authorityGeneration &&
@@ -919,6 +935,9 @@ export function useAssistant(enabled: boolean) {
       detailSequence.current += 1;
       selectedRef.current = null;
       drafts.current.clear();
+      skillDrafts.current.clear();
+      skillVersions.current.clear();
+      setSkill(undefined);
       attachmentDrafts.current.clear();
       savedDrafts.current.clear();
       draftScopes.current.clear();
@@ -1794,6 +1813,9 @@ export function useAssistant(enabled: boolean) {
       );
       draftRef.current = id ? (drafts.current.get(id) ?? "") : "";
       setDraftState(draftRef.current);
+      skillRef.current = skillDrafts.current.get(id ?? "");
+      setSkillState(skillRef.current);
+      skillVersion.current += 1;
       attachmentsRef.current = id
         ? (attachmentDrafts.current.get(id) ?? [])
         : [];
@@ -1897,6 +1919,9 @@ export function useAssistant(enabled: boolean) {
     createdSession.current = value.id;
     setNewWebSearch(lastWebSearch.current);
     drafts.current.set(value.id, draftRef.current);
+    skillDrafts.current.set(value.id, skillRef.current);
+    skillVersions.current.set(value.id, skillVersion.current);
+    skillDrafts.current.delete("");
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
@@ -2693,6 +2718,8 @@ export function useAssistant(enabled: boolean) {
       /** A failed or stopped reply to ask again for, with `text` and `attachments`. */
       retryMessageId?: string;
       text?: string;
+      skill?: string;
+      replaceSkill?: boolean;
       attachments?: AssistantAttachment[];
       media?: AssistantImageRequest;
       video?: AssistantVideoRequest;
@@ -2704,6 +2731,9 @@ export function useAssistant(enabled: boolean) {
         options ?? {};
       const text = options?.text ?? draftRef.current;
       const fromComposer = options?.text === undefined;
+      const chosenSkill = fromComposer ? skillRef.current : options?.skill;
+      const originalSkill = skillRef.current;
+      let clearedSkillVersion: number | undefined;
       const revision = Boolean(editMessageId || regenerateMessageId);
       // A regenerate reads its turn's own files again. An edit or a question
       // sent again carries the files its caller chose, leaving out those that
@@ -2843,6 +2873,8 @@ export function useAssistant(enabled: boolean) {
         });
         if (fromComposer) {
           setDraft("");
+          setSkill(undefined);
+          clearedSkillVersion = skillVersion.current;
           setAttachments([]);
         }
         if (!regenerateMessageId)
@@ -2856,6 +2888,7 @@ export function useAssistant(enabled: boolean) {
                       id: `pending-${reference.operationId}`,
                       role: "user",
                       content: text,
+                      skill: chosenSkill,
                       createdAt: Date.now(),
                       revisionOf: editMessageId,
                       attachments: files,
@@ -2880,6 +2913,8 @@ export function useAssistant(enabled: boolean) {
           ...reference,
           ...authority,
           text,
+          ...(chosenSkill ? { skill: chosenSkill } : {}),
+          ...(options?.replaceSkill ? { replaceSkill: true } : {}),
           attachmentIds: files.map((file) => file.id),
           ...(options?.media ? { media: options.media } : {}),
           ...(options?.video
@@ -2933,6 +2968,11 @@ export function useAssistant(enabled: boolean) {
         if (fromComposer && sessionId && generation === epoch.current) {
           if (!drafts.current.get(sessionId))
             drafts.current.set(sessionId, originalDraft);
+          if (
+            clearedSkillVersion !== undefined &&
+            skillVersions.current.get(sessionId) === clearedSkillVersion
+          )
+            skillDrafts.current.set(sessionId, originalSkill);
           if (!attachmentDrafts.current.get(sessionId)?.length)
             attachmentDrafts.current.set(sessionId, originalFiles);
         }
@@ -2956,6 +2996,13 @@ export function useAssistant(enabled: boolean) {
               : old,
           );
           if (fromComposer && !draftRef.current) setDraft(originalDraft);
+          if (
+            fromComposer &&
+            sessionId &&
+            clearedSkillVersion !== undefined &&
+            skillVersions.current.get(sessionId) === clearedSkillVersion
+          )
+            setSkill(originalSkill);
           if (fromComposer && !attachmentsRef.current.length)
             setAttachments(originalFiles);
           if (!preparation?.cancelled) showError(reason);
@@ -3025,8 +3072,10 @@ export function useAssistant(enabled: boolean) {
       (!runRef.current && !messageQueue.get(sid)?.messages.length)
     )
       return false;
-    if (!messageQueue.enqueue(sid, draftRef.current)) return false;
+    if (!messageQueue.enqueue(sid, draftRef.current, skillRef.current))
+      return false;
     setDraft("");
+    setSkill(undefined);
     return true;
   }, [queueAvailable, messageQueue, setDraft]);
 
@@ -3042,6 +3091,7 @@ export function useAssistant(enabled: boolean) {
       !queueAvailable ||
       steerSending.current ||
       attachmentsRef.current.length ||
+      skillRef.current ||
       !text.trim() ||
       new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES
     )
@@ -3126,6 +3176,7 @@ export function useAssistant(enabled: boolean) {
     if (!ticket) return;
     void send({
       text: ticket.message.text,
+      skill: ticket.message.skill,
       attachments: [],
       queueTicket: ticket,
     }).then((sent) => messageQueue.settle(ticket, sent));
@@ -3669,6 +3720,8 @@ export function useAssistant(enabled: boolean) {
     detail,
     draft,
     setDraft,
+    skill,
+    setSkill,
     queue,
     queueAvailable,
     enqueue,

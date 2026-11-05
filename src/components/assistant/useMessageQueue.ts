@@ -5,6 +5,7 @@ export const MAX_MESSAGE_BYTES = 128_000;
 export const MAX_QUEUED_MESSAGES = 10;
 
 export interface QueuedMessage {
+  skill?: string;
   id: string;
   text: string;
 }
@@ -86,7 +87,7 @@ export function useMessageQueue() {
         if (current.current.get(sid)?.messages.length) pause(sid);
         else clear(sid);
       },
-      enqueue: (sid: string, text: string) => {
+      enqueue: (sid: string, text: string, skill?: string) => {
         const queue = current.current.get(sid) ?? emptyQueue();
         if (
           !validQueuedText(text) ||
@@ -95,7 +96,10 @@ export function useMessageQueue() {
           return false;
         put(sid, {
           ...queue,
-          messages: [...queue.messages, { id: crypto.randomUUID(), text }],
+          messages: [
+            ...queue.messages,
+            { id: crypto.randomUUID(), text, ...(skill ? { skill } : {}) },
+          ],
         });
         return true;
       },

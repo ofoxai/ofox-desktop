@@ -1426,6 +1426,12 @@ mod tests {
     fn backup_roundtrip_keeps_native_history_drafts_files_usage_and_operation_prices() {
         let (_source, store, sid, attachment) = seeded();
         let output = tempfile::tempdir().unwrap();
+        store
+            .mutate(&sid, |record| {
+                record.messages[0].skill = Some("historical-skill".into());
+                Ok(())
+            })
+            .unwrap();
         let archive = output.path().join("完整备份.zip");
         let report = store.backup(&archive, &[], || Ok(())).unwrap();
         assert_eq!((report.sessions, report.skipped), (1, 0));
@@ -1447,6 +1453,12 @@ mod tests {
         let report = restored.restore(&archive, &[], || Ok(())).unwrap();
         assert_eq!(report.imported, 1);
         assert!(report.warning.is_none());
+        assert_eq!(
+            restored.load_record(&sid).unwrap().messages[0]
+                .skill
+                .as_deref(),
+            Some("historical-skill")
+        );
         assert_eq!(
             restored.load_record(&sid).unwrap().usage,
             store.load_record(&sid).unwrap().usage

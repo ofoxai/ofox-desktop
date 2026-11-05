@@ -52,6 +52,7 @@ import {
 } from "./AssistantLocalConfig";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
+import { SkillPicker } from "./SkillPicker";
 import { ComposerPlus } from "./ComposerPlus";
 import { generationModels } from "./MediaDefaultsFields";
 import { GenerationCards } from "./GenerationCards";
@@ -83,7 +84,6 @@ import { AssistantRequestDetails } from "./AssistantRequestDetails";
 import { usageSummary } from "@/utils/assistantUsage";
 import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -824,8 +824,19 @@ function AssistantWorkspace() {
     modelId: session?.modelId,
   };
   const editMessage = useCallback(
-    (editMessageId: string, text: string, attachments: AssistantAttachment[]) =>
-      actions.current.send({ text, attachments, editMessageId }),
+    (
+      editMessageId: string,
+      text: string,
+      attachments: AssistantAttachment[],
+      skill?: string,
+    ) =>
+      actions.current.send({
+        text,
+        attachments,
+        editMessageId,
+        skill,
+        replaceSkill: true,
+      }),
     [],
   );
   const regenerateMessage = useCallback(
@@ -1765,7 +1776,10 @@ function AssistantWorkspace() {
                       </p>
                     )}
                   </div>
-                  <Textarea
+                  <SkillPicker
+                    scope={`${bootstrap?.owner}:${bootstrap?.authorityGeneration}:${assistant.selectedId}`}
+                    skill={assistant.skill}
+                    onSkill={assistant.setSkill}
                     ref={composer}
                     rows={3}
                     className={cn(
@@ -1779,7 +1793,7 @@ function AssistantWorkspace() {
                     value={assistant.draft}
                     disabled={!available}
                     readOnly={busy || trashed}
-                    onChange={(event) => assistant.setDraft(event.target.value)}
+                    onTextChange={assistant.setDraft}
                     onPaste={(event) => {
                       const pasted = pastedFiles(event.clipboardData);
                       if (!pasted) return;
@@ -1915,6 +1929,7 @@ function AssistantWorkspace() {
                             !assistant.queueAvailable ||
                             !assistant.draft.trim() ||
                             files.length > 0 ||
+                            Boolean(assistant.skill) ||
                             overLength
                           }
                           onClick={() =>
@@ -1925,6 +1940,11 @@ function AssistantWorkspace() {
                         >
                           {t("assistant.queue.interrupt")}
                         </Button>
+                      )}
+                      {run && assistant.skill && (
+                        <p className="max-w-48 text-note text-ink-muted">
+                          {t("assistant.skills.queueOnly")}
+                        </p>
                       )}
                       {run && (
                         <Tooltip>

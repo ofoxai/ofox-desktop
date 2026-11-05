@@ -36,6 +36,11 @@ pub const ASSISTANT_DROP_EVENT: &str = "assistant:drop";
 type Host<'a> = State<'a, Arc<AssistantHost>>;
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_list_skills(host: Host<'_>) -> Result<Value, String> {
+    host.list_skills().await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_bootstrap(
     host: Host<'_>,
     refresh_catalog: Option<bool>,
