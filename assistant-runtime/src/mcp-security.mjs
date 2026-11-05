@@ -1,25 +1,31 @@
 const credentialStem =
   /key|token|secret|passw|credential|cookie|auth|signature|private/i;
 const credentialWord = /(^|[^a-z0-9])(pin|pwd|pass|pat)([^a-z0-9]|$)/i;
+const plainNames = new Set([
+  "debug",
+  "log_level",
+  "node_env",
+  "lang",
+  "tz",
+  "content-type",
+  "accept",
+  "user-agent",
+]);
 // Flags and small counts (AUTH_ENABLED=true, TOKEN_TTL=60) are settings.
 const setting = (value) =>
   ["", "true", "false", "null", "yes", "no", "on", "off"].includes(
     value.toLowerCase(),
   ) || /^\d{1,3}$/.test(value);
 
-const tokenShaped = (value) =>
-  [...value].length >= 20 &&
-  !/[\s/\\]/.test(value) &&
-  /[a-z]/i.test(value) &&
-  /\d/.test(value);
-
-// Only a value named like a credential, or shaped like a generated token, is
-// private. Plain settings (DEBUG=1, LOG_LEVEL=info) would otherwise rewrite
-// every matching word and collide with request ids. Mirrors credential_value
-// in src-tauri/src/services/assistant/mcp.rs.
+// Configured values are private by default (a webhook URL or a database URL
+// can carry a credential under any name). Only plain settings are exempt, so
+// DEBUG=1 or LOG_LEVEL=info do not rewrite every matching word or collide
+// with request ids. Mirrors credential_value in
+// src-tauri/src/services/assistant/mcp.rs.
 export function credentialValue(name, value) {
-  const named = credentialStem.test(name) || credentialWord.test(name);
-  return (named && !setting(value)) || tokenShaped(value);
+  if (setting(value)) return false;
+  if (credentialStem.test(name) || credentialWord.test(name)) return true;
+  return !plainNames.has(name.toLowerCase()) && [...value].length >= 8;
 }
 
 export function mcpSecrets(params) {

@@ -198,11 +198,20 @@ pub fn secrets(snapshot: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Only a value named like a credential, or shaped like a generated token, is
-/// private. Plain settings (DEBUG=1, LOG_LEVEL=info) would otherwise rewrite
-/// every matching word in replies and history and collide with request ids.
-/// Mirrors `credentialValue` in assistant-runtime/src/mcp-security.mjs.
+/// Configured values are private by default (a webhook URL or a database URL
+/// can carry a credential under any name). Only plain settings are exempt, so
+/// DEBUG=1 or LOG_LEVEL=info do not rewrite every matching word in replies and
+/// history or collide with request ids. Mirrors `credentialValue` in
+/// assistant-runtime/src/mcp-security.mjs.
 fn credential_value(name: &str, value: &str) -> bool {
+    // Flags and small counts (AUTH_ENABLED=true, TOKEN_TTL=60) are settings.
+    let setting = matches!(
+        value.to_ascii_lowercase().as_str(),
+        "" | "true" | "false" | "null" | "yes" | "no" | "on" | "off"
+    ) || (value.len() < 4 && value.bytes().all(|b| b.is_ascii_digit()));
+    if setting {
+        return false;
+    }
     let name = name.to_ascii_lowercase();
     let named = [
         "key",
@@ -220,19 +229,21 @@ fn credential_value(name: &str, value: &str) -> bool {
         || name
             .split(|c: char| !c.is_ascii_alphanumeric())
             .any(|word| matches!(word, "pin" | "pwd" | "pass" | "pat"));
-    // Flags and small counts (AUTH_ENABLED=true, TOKEN_TTL=60) are settings.
-    let setting = matches!(
-        value.to_ascii_lowercase().as_str(),
-        "" | "true" | "false" | "null" | "yes" | "no" | "on" | "off"
-    ) || (value.len() < 4 && value.bytes().all(|b| b.is_ascii_digit()));
-    (named && !setting) || token_shaped(value)
-}
-
-fn token_shaped(value: &str) -> bool {
-    value.chars().count() >= 20
-        && !value.contains(|c: char| c.is_whitespace() || c == '/' || c == '\\')
-        && value.chars().any(|c| c.is_ascii_alphabetic())
-        && value.chars().any(|c| c.is_ascii_digit())
+    if named {
+        return true;
+    }
+    let plain = matches!(
+        name.as_str(),
+        "debug"
+            | "log_level"
+            | "node_env"
+            | "lang"
+            | "tz"
+            | "content-type"
+            | "accept"
+            | "user-agent"
+    );
+    !plain && value.chars().count() >= 8
 }
 
 // Only credential-bearing data is rewritten. Routing IDs, permission/status
@@ -372,19 +383,20 @@ mod tests {
     }
 
     #[test]
-    fn only_credential_named_or_token_shaped_values_are_secrets() {
+    fn configured_values_are_secrets_unless_plain_settings() {
         let mut found = secrets(&json!({"servers":{"s":{
             "env":{"DEBUG":"1","LOG_LEVEL":"info","NODE_ENV":"production","AUTH_ENABLED":"true",
-                   "BRAVE_API_KEY":"brv-live-123","PIN":"4187",
-                   "UNNAMED":"ghp0123456789abcdefghijKLMN","DATA_DIR":"/Users/me/projects/data2026"},
+                   "MODE":"read","BRAVE_API_KEY":"brv-live-123","PIN":"4187","SHORT_PASS":"xy7",
+                   "WEBHOOK_URL":"https://hooks.example.com/services/T0/B0/x9"},
             "headers":{"Content-Type":"application/json","Authorization":"Bearer tok-123456"}}}}));
         found.sort();
         let mut want = vec![
             "4187",
             "Bearer tok-123456",
             "brv-live-123",
-            "ghp0123456789abcdefghijKLMN",
+            "https://hooks.example.com/services/T0/B0/x9",
             "tok-123456",
+            "xy7",
         ];
         want.sort();
         assert_eq!(found, want);

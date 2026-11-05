@@ -241,7 +241,7 @@ test("MCP configuration filters missing runners, replaces stale files, and prese
     {},
   );
 });
-test("only credential-named or token-shaped MCP values are secrets", async () => {
+test("configured MCP values are secrets unless plain settings", async () => {
   const { mcpSecrets, mcpScrubber, sanitizeMcpMessage } = await import(
     "../src/mcp.mjs"
   );
@@ -253,10 +253,11 @@ test("only credential-named or token-shaped MCP values are secrets", async () =>
           LOG_LEVEL: "info",
           NODE_ENV: "production",
           AUTH_ENABLED: "true",
+          MODE: "read",
           BRAVE_API_KEY: "brv-live-123",
           PIN: "4187",
-          UNNAMED: "ghp0123456789abcdefghijKLMN",
-          DATA_DIR: "/Users/me/projects/data2026",
+          SHORT_PASS: "xy7",
+          WEBHOOK_URL: "https://hooks.example.com/services/T0/B0/x9",
         },
         headers: {
           "Content-Type": "application/json",
@@ -271,15 +272,16 @@ test("only credential-named or token-shaped MCP values are secrets", async () =>
       "4187",
       "Bearer tok-123456",
       "brv-live-123",
-      "ghp0123456789abcdefghijKLMN",
+      "https://hooks.example.com/services/T0/B0/x9",
       "tok-123456",
+      "xy7",
     ].sort(),
   );
   const cleaner = mcpScrubber(mcpSecrets(config));
   assert.doesNotThrow(() =>
     sanitizeMcpMessage({ jsonrpc: "2.0", id: 1, result: {} }, cleaner),
   );
-  assert.equal(cleaner.text("info: 1 file"), "info: 1 file");
+  assert.equal(cleaner.text("info: read 1 file"), "info: read 1 file");
 });
 
 test("source boundary scrubs short/long secrets and decoded text blobs, rejects identifiers and opaque binary", async () => {
