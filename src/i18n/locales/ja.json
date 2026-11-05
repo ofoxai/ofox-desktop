@@ -5768,7 +5768,9 @@
       "needs_uv": "uv をインストールしてください",
       "externalCost": "外部 MCP の料金はこの見積もりに含まれません。",
       "approval": "この MCP ツールはデータを変更する可能性があります。今回のみ、会話中の許可、または拒否を選択してください。",
-      "approvalTitle": "この MCP 操作を許可しますか？"
+      "approvalTitle": "この MCP 操作を許可しますか？",
+      "argumentsPreview": "引数のプレビュー",
+      "argumentsTruncated": "プレビューは省略されています。承認すると、ここに表示されていない引数も含む呼び出し全体が実行されます。"
     }
   },
   "pages": {

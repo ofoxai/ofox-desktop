@@ -5768,7 +5768,9 @@
       "needs_uv": "Install uv",
       "externalCost": "Third-party MCP charges are not included in this estimate.",
       "approval": "This MCP tool may change data. Allow once, for this conversation, or deny.",
-      "approvalTitle": "Allow this MCP operation?"
+      "approvalTitle": "Allow this MCP operation?",
+      "argumentsPreview": "Arguments preview",
+      "argumentsTruncated": "The preview is truncated. Approval runs the complete call, including parameters not shown here."
     }
   },
   "pages": {

@@ -5768,7 +5768,9 @@
       "needs_uv": "请安装 uv",
       "externalCost": "第三方 MCP 费用未纳入此估算。",
       "approval": "此 MCP 工具可能修改数据。允许本次、本对话，或拒绝。",
-      "approvalTitle": "允许此 MCP 操作？"
+      "approvalTitle": "允许此 MCP 操作？",
+      "argumentsPreview": "参数预览",
+      "argumentsTruncated": "预览已截断。批准后会执行完整调用，包括此处未显示的参数。"
     }
   },
   "pages": {

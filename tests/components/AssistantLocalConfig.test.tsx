@@ -255,3 +255,41 @@ it("shows the actual MCP approval details and all three ordinary choices", async
     result.rerender(<LocalApprovalCard approval={base} onRespond={respond} />);
   }
 });
+
+it("renders MCP argument previews as text with an explicit complete-call truncation warning", async () => {
+  const details = {
+    server: "custom",
+    tool: "mcp__custom__write",
+    argumentsPreview: JSON.stringify(
+      { target: "draft-inbox", body: "<img src=x onerror=alert(1)>" },
+      null,
+      2,
+    ),
+    argumentsTruncated: true,
+  };
+  const approval: LocalApproval = {
+    approvalId: "preview",
+    toolCallId: "preview-call",
+    name: details.tool,
+    category: "mcp",
+    details,
+    argumentsPreview: details.argumentsPreview,
+    argumentsTruncated: details.argumentsTruncated,
+    allowSession: true,
+    expectedOwner: "owner",
+    expectedGeneration: 1,
+  };
+  const rendered = render(
+    <LocalApprovalCard
+      approval={approval}
+      onRespond={vi.fn().mockResolvedValue(true)}
+    />,
+  );
+  await userEvent.click(screen.getByText("Arguments preview"));
+  expect(screen.getByText(/draft-inbox/)).toBeVisible();
+  expect(screen.getByText(/Approval runs the complete call/)).toBeVisible();
+  expect(rendered.container.querySelector("img")).toBeNull();
+  expect(rendered.container.querySelector("pre")?.textContent).toContain(
+    "<img src=x onerror=alert(1)>",
+  );
+});

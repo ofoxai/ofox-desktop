@@ -4362,6 +4362,34 @@ mod tests {
         assert!(!run.cancelled());
     }
 
+    #[tokio::test]
+    async fn final_mcp_preview_collision_fails_before_any_broker_approval() {
+        let (_tmp, env, host) = fixture_with_env();
+        let source = env.config.join("assistant/mcp.json");
+        crate::config::create_private_dir_all(source.parent().unwrap()).unwrap();
+        crate::config::atomic_write(
+            &source,
+            br#"{"mcpServers":{"fixture":{"command":"node","env":{"PIN":"418731"}}}}"#,
+        )
+        .unwrap();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp = super::super::mcp::snapshot(&env.config).unwrap();
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"preview-collision","name":"authorize_mcp","args":{"server":"fixture","toolName":"mcp__fixture__write","identity":"a".repeat(64),"readOnly":false,"snapshot":run.mcp["snapshot"],"args":{"418731":1,"***":2}}});
+        let outcome = host.authorize_mcp(&run, &call).await;
+        assert_eq!(outcome.unwrap_err(), "assistant_mcp_data_unavailable");
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
     #[test]
     fn assistant_mcp_host_event_payload_scrubs_numeric_short_secrets_without_rewriting_controls() {
         let (_config, env, host) = fixture_with_env();

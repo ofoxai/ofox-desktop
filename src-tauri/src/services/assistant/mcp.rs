@@ -243,6 +243,16 @@ fn payload_pattern(snapshot: &Value) -> Result<Option<regex::Regex>, String> {
     .map(Some)
     .map_err(|_| "assistant_mcp_data_unavailable".into())
 }
+pub(super) fn arguments_preview(args: &Value, snapshot: &Value) -> Result<(String, bool), String> {
+    let safe = match payload_pattern(snapshot)? {
+        Some(pattern) => scrub_payload(args, &pattern)?,
+        None => args.clone(),
+    };
+    let text = serde_json::to_string_pretty(&safe).map_err(|_| "assistant_mcp_data_unavailable")?;
+    let truncated = text.chars().count() > 8000;
+    Ok((text.chars().take(8000).collect(), truncated))
+}
+
 pub(super) fn scrub_event_data(data: &mut Value, snapshot: &Value) -> Result<(), String> {
     let Some(pattern) = payload_pattern(snapshot)? else {
         return Ok(());
@@ -293,6 +303,35 @@ pub(super) fn scrub_native_data(entries: &mut Value, snapshot: &Value) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn final_mcp_preview_scrubs_before_scalar_truncation_and_fails_on_key_collision() {
+        let snapshot = json!({"servers":{"fixture":{"env":{"SHORT":"xy7","PIN":"418731","BOOL":"false","EMPTY":"null"},"headers":{"Authorization":"Bearer credential"}}}});
+        let args = json!({"target":"draft","body":"Readable body","nested":{"text":"xy7 credential","pin":418731,"flag":false,"empty":null,"418731":"Readable key"}});
+        let original = args.clone();
+        let (preview, truncated) = arguments_preview(&args, &snapshot).unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            args, original,
+            "preview must never mutate permission/execution args"
+        );
+        for value in ["xy7", "418731", "false", "null", "credential"] {
+            assert!(!preview.contains(value));
+        }
+        assert!(preview.contains("Readable body") && preview.contains("Readable key"));
+        assert_eq!(
+            arguments_preview(&json!({}), &snapshot).unwrap(),
+            ("{}".into(), false)
+        );
+        let full = json!({"body":"😀".repeat(9000)});
+        let (preview, truncated) = arguments_preview(&full, &snapshot).unwrap();
+        assert!(truncated);
+        assert_eq!(preview.chars().count(), 8000);
+        assert_eq!(
+            arguments_preview(&json!({"418731":1,"***":2}), &snapshot).unwrap_err(),
+            "assistant_mcp_data_unavailable"
+        );
+    }
+
     #[test]
     fn assistant_mcp_startup_rejects_sign_in_corruption_and_namespace_collisions() {
         assert_eq!(

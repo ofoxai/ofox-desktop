@@ -70,7 +70,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
           description: "Write fixture",
           inputSchema: {
             type: "object",
-            properties: {},
+            properties: {
+              target: { type: "string" },
+              body: { type: "string" },
+              nested: { type: "object" },
+            },
             additionalProperties: false,
           },
         },
@@ -202,6 +206,61 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     } else if (process.env.SCHEMA_CASE === "root_bool")
       result.tools[0].inputSchema = false;
     else Object.assign(schema, cases[process.env.SCHEMA_CASE]);
+  }
+  if (process.env.MCP_SCENARIO === "metadata_boundary") {
+    const metadata = {
+      annotations: {
+        readOnlyHint: false,
+        audience: ["assistant"],
+        priority: 0.5,
+      },
+      vendor: {
+        inputSchema: { type: "object", additionalProperties: false },
+        outputSchema: { type: "object", properties: { safe: false } },
+        annotations: { readOnlyHint: false },
+        nested: {
+          isError: false,
+          type: "text",
+          tools: [{ annotations: { readOnlyHint: false } }],
+          resources: [{ inputSchema: { type: "object" } }],
+        },
+        data: { pin: 418731, empty: null, 418731: "Readable key" },
+        readable: "Readable resource metadata",
+      },
+      description: "Readable resource metadata",
+      padding: "R".repeat(25000),
+    };
+    if (q.method === "resources/list")
+      Object.assign(result.resources[0], metadata);
+    if (q.method === "resources/templates/list")
+      result.resourceTemplates = [
+        {
+          uriTemplate: "fixture://read/{index}",
+          name: "Readable template",
+          ...metadata,
+        },
+      ];
+    if (q.method === "resources/read") {
+      Object.assign(result.contents[0], metadata);
+      result.contents[0].text = JSON.stringify({
+        readable: "Readable resource body",
+        pin: 418731,
+        flag: false,
+        empty: null,
+        padding: "R".repeat(25000),
+      });
+    }
+    if (q.method === "tools/list") {
+      result.tools[0].outputSchema = {
+        type: "object",
+        properties: { safe: false },
+        additionalProperties: false,
+      };
+      result.tools[0].annotations = {
+        readOnlyHint: true,
+        destructiveHint: false,
+      };
+    }
   }
   send({ id: q.id, result });
 }

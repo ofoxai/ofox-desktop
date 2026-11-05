@@ -26,7 +26,7 @@ const unsupported =
 
 // This runs at the client boundary, before Pi logs notifications or writes large
 // results. Routing identifiers are validated, never rewritten into another tool.
-export function sanitizeMcpMessage(message, cleaner) {
+export function sanitizeMcpMessage(message, cleaner, requestMethod) {
   const control = (value) => {
     if (cleaner.scalar(value) !== value)
       throw new Error(
@@ -42,13 +42,6 @@ export function sanitizeMcpMessage(message, cleaner) {
     "number",
     "string",
     "integer",
-  ]);
-  const contentTypes = new Set([
-    "text",
-    "image",
-    "audio",
-    "resource",
-    "resource_link",
   ]);
   const booleanHints = new Set([
     "readOnlyHint",
@@ -180,99 +173,176 @@ export function sanitizeMcpMessage(message, cleaner) {
         }),
       );
     }
-    if (Array.isArray(value))
-      return value.map((item) => visit(item, mode, key));
-    if (!value || typeof value !== "object") {
-      if (mode === "data") return cleaner.scalar(value);
-      // These are fixed syntax, not credential-derived payload: never change
-      // a schema's structural boolean or an annotation that grants permission.
-      if (
-        mode === "annotation" &&
-        booleanHints.has(key) &&
-        typeof value === "boolean"
-      )
-        return value;
-      if (
-        mode === "protocol" &&
-        ((key === "jsonrpc" && value === "2.0") ||
-          (key === "type" && contentTypes.has(value)))
-      )
-        return value;
-      if (
-        mode === "protocol" &&
-        ["isError", "listChanged", "subscribe"].includes(key) &&
-        typeof value === "boolean"
-      )
-        return value;
-      return control(value);
-    }
-    if (
-      (mode === "protocol" || mode === "data") &&
-      (value.type === "image" || value.type === "audio")
-    )
-      return { type: "text", text: unsupported };
-    if (
-      (mode === "protocol" || mode === "data") &&
-      typeof value.blob === "string"
-    ) {
-      if (Object.hasOwn(value, "text"))
-        throw new Error("MCP blob and text content conflict");
-      let decoded;
-      try {
-        decoded = new TextDecoder("utf-8", { fatal: true }).decode(
-          Buffer.from(value.blob, "base64"),
-        );
-      } catch {
-        /* opaque */
-      }
-      const { blob, ...rest } = value;
-      return visit(
-        {
-          ...rest,
-          text:
-            decoded !== undefined && !/[\x00-\x08\x0e-\x1f]/.test(decoded)
-              ? decoded
-              : unsupported,
-        },
-        mode,
+    // Data and constraints are sticky. No nested key can re-enter a protocol,
+    // schema or permission mode from either of these untrusted subtrees.
+    if (mode === "constraint") {
+      if (Array.isArray(value)) return value.map((item) => visit(item, mode));
+      if (!isObject(value)) return control(value);
+      return Object.fromEntries(
+        Object.entries(value).map(([field, item]) => {
+          control(field);
+          return [field, visit(item, mode)];
+        }),
       );
     }
     if (mode === "data") {
-      const entries = Object.entries(value).map(([field, item]) => [
+      if (Array.isArray(value)) return value.map((item) => visit(item, mode));
+      if (!isObject(value)) return cleaner.scalar(value);
+      if (value.type === "image" || value.type === "audio")
+        return { type: "text", text: unsupported };
+      if (typeof value.blob === "string") return decodeBlob(value, "data");
+      return entries(value, (field, item) => [
         cleaner.text(field),
-        visit(item, "data", field),
+        visit(item, "data"),
       ]);
-      if (new Set(entries.map(([field]) => field)).size !== entries.length)
-        throw new Error("MCP data keys collide after redaction");
-      return Object.fromEntries(entries);
     }
-    return Object.fromEntries(
-      Object.entries(value).map(([field, item]) => {
-        if (mode === "constraint") {
-          control(field);
-          return [field, visit(item, "constraint", field)];
-        }
-        if (field === "inputSchema" || field === "outputSchema")
-          return [field, visit(item, "schemaRoot", field)];
-        if (field === "annotations")
-          return [field, visit(item, "annotation", field)];
-        if (
-          [
-            "structuredContent",
-            "data",
-            "text",
-            "description",
-            "title",
-            "message",
-          ].includes(field)
-        )
-          return [field, visit(item, "data", field)];
-        control(field);
-        return [field, visit(item, mode, field)];
-      }),
+    if (mode === "tool")
+      return fields(value, {
+        name: control,
+        inputSchema: (v) => visit(v, "schemaRoot"),
+        outputSchema: (v) => visit(v, "schemaRoot"),
+        annotations: (v) => visit(v, "toolAnnotations"),
+      });
+    if (mode === "toolAnnotations")
+      return fields(
+        value,
+        Object.fromEntries([...booleanHints].map((hint) => [hint, boolean])),
+      );
+    if (mode === "resource")
+      return fields(value, {
+        uri: control,
+        uriTemplate: control,
+        name: control,
+        mimeType: control,
+      });
+    if (mode === "resourceContent") {
+      if (typeof value?.blob === "string") return decodeBlob(value, mode);
+      return fields(value, { uri: control, mimeType: control });
+    }
+    if (mode === "content") {
+      if (!isObject(value)) throw new Error("Invalid MCP content");
+      if (value.type === "image" || value.type === "audio")
+        return { type: "text", text: unsupported };
+      if (value.type === "text") return fields(value, { type: fixed("text") });
+      if (value.type === "resource")
+        return fields(value, {
+          type: fixed("resource"),
+          resource: (v) => visit(v, "resourceContent"),
+        });
+      if (value.type === "resource_link")
+        return fields(value, {
+          type: fixed("resource_link"),
+          uri: control,
+          name: control,
+          mimeType: control,
+        });
+      return visit(value, "constraint");
+    }
+    // Unknown response/request kinds are checked conservatively, never inferred
+    // from a `tools`, `resources`, `inputSchema`, or `isError` property.
+    return visit(value, "constraint");
+  };
+  const entries = (value, fn) => {
+    if (!isObject(value)) throw new Error("Invalid MCP object");
+    const pairs = Object.entries(value).map(([field, item]) => fn(field, item));
+    if (new Set(pairs.map(([field]) => field)).size !== pairs.length)
+      throw new Error("MCP data keys collide after redaction");
+    return Object.fromEntries(pairs);
+  };
+  const fields = (value, rules) =>
+    entries(value, (field, item) =>
+      Object.hasOwn(rules, field)
+        ? [field, rules[field](item)]
+        : [cleaner.text(field), visit(item, "data")],
+    );
+  const list = (value, mode) => {
+    if (!Array.isArray(value)) throw new Error("Invalid MCP list");
+    return value.map((item) => visit(item, mode));
+  };
+  const boolean = (value) => {
+    if (typeof value !== "boolean")
+      throw new Error("Invalid MCP boolean control");
+    return value;
+  };
+  const fixed = (expected) => (value) => {
+    if (value !== expected) throw new Error("Invalid MCP fixed protocol value");
+    return value;
+  };
+  const decodeBlob = (value, mode) => {
+    if (Object.hasOwn(value, "text"))
+      throw new Error("MCP blob and text content conflict");
+    let decoded;
+    try {
+      decoded = new TextDecoder("utf-8", { fatal: true }).decode(
+        Buffer.from(value.blob, "base64"),
+      );
+    } catch {
+      /* opaque */
+    }
+    const { blob, ...rest } = value;
+    return visit(
+      {
+        ...rest,
+        text:
+          decoded !== undefined && !/[\x00-\x08\x0e-\x1f]/.test(decoded)
+            ? decoded
+            : unsupported,
+      },
+      mode,
     );
   };
-  return visit(message);
+  const result = (value) => {
+    if (message.method !== undefined) return visit(value, "constraint");
+    switch (requestMethod) {
+      case "initialize":
+        return fields(value, {
+          protocolVersion: control,
+          serverInfo: (v) => fields(v, { name: control, version: control }),
+          capabilities: (v) =>
+            fields(v, {
+              tools: (v) => fields(v, { listChanged: boolean }),
+              prompts: (v) => fields(v, { listChanged: boolean }),
+              resources: (v) =>
+                fields(v, { listChanged: boolean, subscribe: boolean }),
+            }),
+        });
+      case "tools/list":
+        return fields(value, {
+          tools: (v) => list(v, "tool"),
+          nextCursor: control,
+        });
+      case "tools/call":
+        return fields(value, {
+          content: (v) => list(v, "content"),
+          isError: boolean,
+        });
+      case "resources/list":
+        return fields(value, {
+          resources: (v) => list(v, "resource"),
+          nextCursor: control,
+        });
+      case "resources/templates/list":
+        return fields(value, {
+          resourceTemplates: (v) => list(v, "resource"),
+          nextCursor: control,
+        });
+      case "resources/read":
+        return fields(value, { contents: (v) => list(v, "resourceContent") });
+      default:
+        return visit(value, "constraint");
+    }
+  };
+  return fields(message, {
+    jsonrpc: fixed("2.0"),
+    id: control,
+    method: control,
+    result,
+    error: (v) => fields(v, { code: control }),
+    params: (v) =>
+      message.method === "notifications/message"
+        ? visit(v, "data")
+        : visit(v, "constraint"),
+  });
 }
 
 export async function mcpExtensions(runtime, context, agentDir) {
@@ -390,7 +460,10 @@ export async function mcpExtensions(runtime, context, agentDir) {
         reason: "unavailable",
       });
     };
+    // Only outstanding client requests confer response grammar authority.
+    const pending = new Map();
     inner.onClose(() => {
+      pending.clear();
       closed = true;
       resolveClosed();
       if (!closingTransport && !closing) unavailable();
@@ -405,6 +478,7 @@ export async function mcpExtensions(runtime, context, agentDir) {
     const lifetime = {
       close: () =>
         (closingTransport ??= (async () => {
+          pending.clear();
           try {
             if (!config.url && !closed && inner.pid) {
               await bounded(
@@ -430,7 +504,6 @@ export async function mcpExtensions(runtime, context, agentDir) {
         })()),
     };
     transports.add(lifetime);
-    const pending = new Map();
     const observe = (phase, method, started) =>
       runtime.observeMcp?.({
         phase,
@@ -480,13 +553,25 @@ export async function mcpExtensions(runtime, context, agentDir) {
         }
       },
       send: (message, sendOptions) => {
-        if (message.id !== undefined)
+        const request =
+          message.id !== undefined && typeof message.method === "string";
+        if (request) {
+          if (pending.has(message.id) || pending.size >= 256)
+            return Promise.reject(
+              new Error("MCP request context limit or duplicate ID"),
+            );
           pending.set(message.id, {
             method: message.method,
             started: performance.now(),
           });
+        }
+        if (message.method === "notifications/cancelled")
+          pending.delete(message.params?.requestId);
         observe("send", message.method);
-        return guard(() => inner.send(message, sendOptions));
+        return guard(() => inner.send(message, sendOptions)).catch((error) => {
+          if (request) pending.delete(message.id);
+          throw error;
+        });
       },
       setProtocolVersion: (version) => inner.setProtocolVersion?.(version),
       close: lifetime.close,
@@ -502,12 +587,17 @@ export async function mcpExtensions(runtime, context, agentDir) {
       onMessage: (listener) =>
         inner.onMessage((message) => {
           try {
-            const request = pending.get(message.id);
+            const isResponse =
+              message.method === undefined &&
+              message.id !== undefined &&
+              (Object.hasOwn(message, "result") ||
+                Object.hasOwn(message, "error"));
+            const request = isResponse ? pending.get(message.id) : undefined;
             if (request) {
               pending.delete(message.id);
               observe("result", request.method, request.started);
             }
-            const safe = sanitizeMcpMessage(message, cleaner);
+            const safe = sanitizeMcpMessage(message, cleaner, request?.method);
             if (safe.method === "notifications/message") {
               diagnostic(entry.name, JSON.stringify(safe.params));
               return;

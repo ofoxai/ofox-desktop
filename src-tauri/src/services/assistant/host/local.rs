@@ -312,9 +312,10 @@ impl AssistantHost {
                 read_only || state.mode == PermissionMode::FullAuto || state.grants.contains(&grant)
             };
             if !free {
+                let (preview,truncated)=super::super::mcp::arguments_preview(&call.args["args"],&run.mcp)?;
                 let binding=self.local_binding(run);
                 let (id,pending)=self.local_approvals.request(binding.clone())?;
-                let display=json!({"approvalId":id,"toolCallId":call.tool_call_id,"name":name,"category":"mcp","details":{"server":server,"tool":name},"allowSession":true,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
+                let display=json!({"approvalId":id,"toolCallId":call.tool_call_id,"name":name,"category":"mcp","details":{"server":server,"tool":name},"argumentsPreview":preview,"argumentsTruncated":truncated,"allowSession":true,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
                 self.local_approvals.describe(&id,display.clone());
                 self.emit(run,"approval",display);
                 let timeout=run.deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(120));

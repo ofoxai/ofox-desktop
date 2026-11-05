@@ -1044,6 +1044,9 @@ export type AssistantRunEvent =
           | AssistantGenerationApproval
           | AssistantSkillApproval
           | { server: string | null; tool: string };
+        /** Ephemeral, source-redacted MCP arguments; never execution input. */
+        argumentsPreview?: string;
+        argumentsTruncated?: boolean;
         allowSession: boolean;
         /**
          * The config fields the user changed that the operation sets back to

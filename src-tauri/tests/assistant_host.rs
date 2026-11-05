@@ -6787,3 +6787,50 @@ fn assistant_mcp_no_local_twenty_tool_budget_includes_existing_skill_tools() {
         });
     }
 }
+
+#[test]
+#[serial_test::serial]
+fn final_mcp_approval_previews_show_distinct_safe_arguments_and_limits() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for actual MCP approval previews");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let config = tempfile::tempdir().unwrap();
+    let physical = config.path().canonicalize().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    fs::create_dir_all(physical.join("assistant")).unwrap();
+    fs::write(physical.join("assistant/mcp.json"), json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"PIN":"418731","SHORT_TOKEN":"xy7","FLAG":"false"}}}}).to_string()).unwrap();
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let variants = [json!({"target":"draft-inbox","body":"First readable body","nested":{"text":"xy7","pin":418731,"418731":"Readable key"}}), json!({"target":"published-inbox","body":"Second readable body"}),json!({}),json!({"target":"large-inbox","body":"😀".repeat(9000)})];
+        let mut displays = vec![];
+        for args in variants {
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",args)]));
+            gateway.reply(Reply::Stream("Preview checked".into()));
+            let run = host.send(request(&sid,"Use fixture",json!({}))).await.unwrap();
+            let approval = wait_for(&env,&run.run_id,"approval").await;
+            host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"deny","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            assert_eq!(wait_for(&env,&run.run_id,"run_end").await.data["status"],"completed");
+            displays.push(approval.data.clone());
+        }
+        let previews:Vec<_> = displays.iter().map(|v|v["argumentsPreview"].as_str().expect("every new MCP approval supplies a safe preview")).collect();
+        assert!(previews[0].contains("draft-inbox") && previews[0].contains("First readable body"));
+        assert!(previews[1].contains("published-inbox") && previews[1].contains("Second readable body"));
+        assert!(!previews[0].contains("418731") && !previews[0].contains("xy7"));
+        assert!(previews[0].contains("Readable key") && previews[0].contains("***"));
+        assert_eq!(previews[2],"{}");
+        assert_eq!(previews[3].chars().count(),8000);
+        assert_eq!(displays[3]["argumentsTruncated"],true);
+        assert!(displays[..3].iter().all(|v|v["argumentsTruncated"]==false));
+        let detail=host.get_session(&sid).await.unwrap();
+        assert!(!serde_json::to_string(&detail).unwrap().contains("argumentsPreview"),"previews are ephemeral approval DTOs, not chat metadata");
+    });
+}

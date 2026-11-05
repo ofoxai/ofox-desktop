@@ -263,13 +263,18 @@ test("source boundary scrubs short/long secrets and decoded text blobs, rejects 
       },
     },
     scrub,
+    "tools/call",
   );
   assert.equal(safe.result.content[0].text, "*** *** ***");
   assert.match(safe.result.content[1].text, /unsupported_binary/);
   assert.equal(safe.result.content[2].resource.text, "***");
   assert.throws(
     () =>
-      sanitizeMcpMessage({ result: { tools: [{ name: "abc_tool" }] } }, scrub),
+      sanitizeMcpMessage(
+        { result: { tools: [{ name: "abc_tool" }] } },
+        scrub,
+        "tools/list",
+      ),
     /identifier/,
   );
 });
@@ -805,7 +810,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
     },
   };
   assert.deepEqual(
-    sanitizeMcpMessage(message, cleaner),
+    sanitizeMcpMessage(message, cleaner, "tools/list"),
     message,
     "fixed schema and permission hints are unchanged",
   );
@@ -824,6 +829,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
       },
     },
     cleaner,
+    "tools/call",
   );
   assert.equal(
     sanitizeMcpMessage(
@@ -835,6 +841,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
         },
       },
       cleaner,
+      "tools/call",
     ).result.structuredContent.nested.text,
     "Readable ***",
   );
@@ -857,6 +864,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
             result: { tools: [{ name: "safe_tool", inputSchema: constraint }] },
           },
           cleaner,
+          "tools/list",
         ),
       /control value/,
     );
@@ -874,6 +882,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
           },
         },
         cleaner,
+        "tools/list",
       ),
     /control value/,
   );
@@ -886,6 +895,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
           },
         },
         cleaner,
+        "tools/call",
       ),
     /keys collide/,
   );
@@ -893,6 +903,7 @@ test("MCP JSON payload scalars and keys are scrubbed while fixed control syntax 
     sanitizeMcpMessage(
       { result: { structuredContent: { 418731: "Readable key value" } } },
       cleaner,
+      "tools/call",
     ).result.structuredContent,
     { "***": "Readable key value" },
   );
@@ -1093,13 +1104,303 @@ test("MCP schema root requires an object and only legal subschema positions gran
       sanitizeMcpMessage(
         { result: { tools: [{ name: "fixture", inputSchema }] } },
         cleaner,
+        "tools/list",
       ),
     );
   assert.deepEqual(
     sanitizeMcpMessage(
       { result: { tools: [{ name: "fixture", inputSchema: {} }] } },
       cleaner,
+      "tools/list",
     ),
     { result: { tools: [{ name: "fixture", inputSchema: {} }] } },
+  );
+});
+
+test("final resource metadata stays data before real Pi model content and SDK files", async (t) => {
+  for (const tool of [
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+  ]) {
+    await t.test(tool, async (t) => {
+      const f = await fixture(
+        t,
+        [
+          () => call("tool_search", { query: "fixture resources" }),
+          () =>
+            call(
+              tool,
+              tool === "read_mcp_resource"
+                ? { server: "fixture", uri: "fixture://read" }
+                : {},
+            ),
+          reply,
+        ],
+        () => ({ approved: true }),
+        { localConfig: undefined },
+      );
+      f.params.mcp = {
+        servers: {
+          fixture: {
+            command: process.execPath,
+            args: [
+              fileURLToPath(
+                new URL("./fixtures/mcp-fixture.mjs", import.meta.url),
+              ),
+            ],
+            env: {
+              MCP_SCENARIO: "metadata_boundary",
+              FLAG_TOKEN: "false",
+              TYPE_TOKEN: "object",
+              PIN: "418731",
+              EMPTY_TOKEN: "null",
+            },
+          },
+        },
+      };
+      const sdkResults = [];
+      const originalWrap = f.runtime.wrapTool.bind(f.runtime);
+      f.runtime.wrapTool = (...args) => {
+        const execute = args[4];
+        args[4] = async (...input) => {
+          const output = await execute(...input);
+          if (args[1] === tool) sdkResults.push(structuredClone(output));
+          return output;
+        };
+        return originalWrap(...args);
+      };
+      const result = await f.run();
+      assert.equal(result.status, "completed");
+      assert.equal(sdkResults.length, 1);
+      const nativePayload = sdkResults[0].structuredContent;
+      const nativeItem = (nativePayload.resources ??
+        nativePayload.resourceTemplates ??
+        nativePayload.contents)[0];
+      assert.equal(nativeItem.annotations.readOnlyHint, "***");
+      assert.deepEqual(nativeItem.annotations.audience, ["assistant"]);
+      assert.equal(nativeItem.vendor.inputSchema.type, "***");
+      assert.equal(nativeItem.vendor.inputSchema.additionalProperties, "***");
+      assert.equal(nativeItem.vendor.data.pin, "***");
+      assert.equal(nativeItem.vendor.data.empty, "***");
+      assert.equal(nativeItem.vendor.data["***"], "Readable key");
+      assert.match(nativeItem.vendor.readable, /Readable resource metadata/);
+      const transcript = await readFile(f.params.sessionFile, "utf8");
+      const paths = [
+        ...new Set(
+          [
+            ...transcript.matchAll(/Full output: ([^ ]+pi-mcp-[^ ]+\.txt)/g),
+          ].map((m) => m[1]),
+        ),
+      ];
+      t.after(() =>
+        Promise.all(paths.map((file) => rm(file, { force: true }))),
+      );
+      assert.ok(
+        paths.length > 0,
+        "actual resource output must reach SDK large-file path",
+      );
+      const large = await readFile(paths.at(-1), "utf8");
+      assert.match(large, /Readable resource/);
+      for (const surface of [large, transcript, JSON.stringify(result)])
+        assert.ok(
+          !surface.includes("418731"),
+          "numeric credential absent before generic scrub",
+        );
+      if (tool !== "read_mcp_resource") {
+        const resource = JSON.parse(large);
+        const entry = (resource.resources ?? resource.resourceTemplates)[0];
+        assert.equal(
+          entry.annotations.readOnlyHint,
+          "***",
+          "resource annotations are data, not permission hints",
+        );
+        assert.deepEqual(entry.annotations.audience, ["assistant"]);
+        assert.equal(entry.annotations.priority, 0.5);
+        assert.equal(entry.vendor.inputSchema.type, "***");
+        assert.equal(entry.vendor.inputSchema.additionalProperties, "***");
+        assert.equal(entry.vendor.outputSchema.properties.safe, "***");
+        assert.equal(entry.vendor.nested.isError, "***");
+        assert.equal(
+          entry.vendor.nested.tools[0].annotations.readOnlyHint,
+          "***",
+        );
+        assert.equal(entry.vendor.nested.resources[0].inputSchema.type, "***");
+        assert.equal(entry.vendor.data.pin, "***");
+        assert.equal(entry.vendor.data.empty, "***");
+        assert.equal(entry.vendor.data["***"], "Readable key");
+        const modelText = f.requests
+          .at(-1)
+          .messages.filter((m) => m.role === "tool")
+          .map((m) => JSON.stringify(m.content))
+          .join("\n");
+        assert.match(modelText, /Readable resource metadata/);
+        assert.ok(!modelText.includes('readOnlyHint\\":false'));
+      } else {
+        assert.match(large, /"pin":\*\*\*/);
+        assert.match(large, /"flag":\*\*\*/);
+        assert.match(large, /"empty":\*\*\*/);
+      }
+      const parameters = f.requests[1].tools.find(
+        (t) => t.function.name === "mcp__fixture__read_fixture",
+      ).function.parameters;
+      assert.equal(parameters.type, "object");
+      assert.equal(parameters.additionalProperties, false);
+      assert.ok(
+        f.calls.some(
+          (c) => c.args.toolName === tool && c.args.readOnly === true,
+        ),
+      );
+    });
+  }
+});
+
+test("final protocol trust follows request kind and full position, never metadata key names", async () => {
+  const { sanitizeMcpMessage, mcpScrubber } = await import("../src/mcp.mjs");
+  const cleaner = mcpScrubber(["false", "object", "418731", "null"]);
+  const vendor = {
+    inputSchema: { type: "object", additionalProperties: false },
+    outputSchema: { type: "object" },
+    annotations: { readOnlyHint: false },
+    isError: false,
+    type: "object",
+    resources: [{ annotations: { readOnlyHint: false } }],
+    tools: [{ inputSchema: { type: "object" } }],
+    nested: { 418731: null },
+  };
+  const expected = cleaner.scrub(vendor);
+  for (const [method, body, select] of [
+    [
+      "resources/list",
+      {
+        resources: [
+          {
+            uri: "fixture://safe",
+            name: "Readable",
+            vendor,
+            annotations: { readOnlyHint: false },
+          },
+        ],
+      },
+      (r) => r.resources[0],
+    ],
+    [
+      "resources/templates/list",
+      {
+        resourceTemplates: [
+          { uriTemplate: "fixture://{index}", name: "Readable", vendor },
+        ],
+      },
+      (r) => r.resourceTemplates[0],
+    ],
+    [
+      "resources/read",
+      { contents: [{ uri: "fixture://safe", text: "Readable", vendor }] },
+      (r) => r.contents[0],
+    ],
+    [
+      "tools/list",
+      {
+        tools: [
+          {
+            name: "readable",
+            inputSchema: { type: "object", properties: { safe: false } },
+            outputSchema: { type: "object" },
+            annotations: { readOnlyHint: false, vendor },
+            vendor,
+          },
+        ],
+      },
+      (r) => r.tools[0],
+    ],
+    [
+      "tools/call",
+      {
+        content: [{ type: "text", text: "Readable", vendor }],
+        isError: false,
+        vendor,
+      },
+      (r) => r,
+    ],
+    [
+      "initialize",
+      {
+        protocolVersion: "2025-11-25",
+        capabilities: { resources: { subscribe: false, vendor } },
+        vendor,
+      },
+      (r) => r,
+    ],
+  ]) {
+    const safe = sanitizeMcpMessage(
+      { jsonrpc: "2.0", id: 99, result: body },
+      cleaner,
+      method,
+    );
+    assert.deepEqual(select(safe.result).vendor, expected, method);
+    if (method === "resources/list")
+      assert.equal(select(safe.result).annotations.readOnlyHint, "***");
+    if (method === "tools/list") {
+      assert.equal(select(safe.result).inputSchema.properties.safe, false);
+      assert.equal(select(safe.result).annotations.readOnlyHint, false);
+      assert.deepEqual(select(safe.result).annotations.vendor, expected);
+    }
+    if (method === "tools/call") assert.equal(safe.result.isError, false);
+    if (method === "initialize")
+      assert.equal(safe.result.capabilities.resources.subscribe, false);
+  }
+  assert.throws(
+    () =>
+      sanitizeMcpMessage(
+        { result: { tools: [{ inputSchema: { type: "object" } }] } },
+        cleaner,
+      ),
+    /control value/,
+  );
+  assert.throws(
+    () =>
+      sanitizeMcpMessage(
+        {
+          result: {
+            resources: [{ uri: "fixture://418731", name: "Readable" }],
+          },
+        },
+        cleaner,
+        "resources/list",
+      ),
+    /control value/,
+  );
+  assert.throws(
+    () =>
+      sanitizeMcpMessage(
+        {
+          result: {
+            resources: [
+              {
+                uri: "fixture://safe",
+                name: "Readable",
+                vendor: { 418731: 1, "***": 2 },
+              },
+            ],
+          },
+        },
+        cleaner,
+        "resources/list",
+      ),
+    /keys collide/,
+  );
+  assert.throws(
+    () =>
+      sanitizeMcpMessage(
+        {
+          jsonrpc: "2.0",
+          id: 99,
+          method: "vendor/request",
+          result: { tools: [{ inputSchema: { type: "object" } }] },
+        },
+        cleaner,
+        "tools/list",
+      ),
+    /control value/,
   );
 });

@@ -220,6 +220,21 @@ export function LocalApprovalCard({
           {t("assistant.mcp.approval")}
         </p>
       )}
+      {mcpDetails && typeof approval.argumentsPreview === "string" && (
+        <details className="text-note text-ink-muted">
+          <summary className="cursor-default select-none">
+            {t("assistant.mcp.argumentsPreview")}
+          </summary>
+          <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-ctl bg-pill px-2 py-1 font-mono text-ink-2">
+            {approval.argumentsPreview}
+          </pre>
+        </details>
+      )}
+      {mcpDetails && approval.argumentsTruncated === true && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.mcp.argumentsTruncated")}
+        </p>
+      )}
       {overwrites.length > 0 && (
         <div className="text-note text-ink-2">
           <p>{t("assistant.local.overwrites")}</p>
