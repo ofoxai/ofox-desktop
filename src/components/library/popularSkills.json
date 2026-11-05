@@ -1,6 +1,6 @@
 {
   "source": "magpie market_skills.json (MIT, yetone)",
-  "generatedAt": "2026-11-04T19:44:07.036Z",
+  "generatedAt": "2026-11-05T12:38:58.581Z",
   "skills": [
     {
       "source": "vercel-labs/skills",
@@ -83,52 +83,12 @@
       "description": "Review UI code for Web Interface Guidelines compliance. Use when asked to \"review my UI\", \"check accessibility\", \"audit design\", \"review UX\", or \"check my site…"
     },
     {
-      "source": "genmedia-labs/skills",
-      "skillId": "video-edit",
-      "name": "video-edit",
-      "installs": 654945,
-      "official": false,
-      "description": "Edit existing video on RunComfy — this skill is a smart router that matches the user's intent to the right edit model in the RunComfy catalog. Picks Wan 2.7…"
-    },
-    {
-      "source": "genmedia-labs/skills",
-      "skillId": "ai-music",
-      "name": "ai-music",
-      "installs": 653874,
-      "official": false,
-      "description": "Generate AI music on RunComfy via the `runcomfy` CLI — a smart router across the music-model catalog. Routes to ElevenLabs AI Music Generation (premium 44.1…"
-    },
-    {
-      "source": "genmedia-labs/skills",
-      "skillId": "ai-video-generation",
-      "name": "ai-video-generation",
-      "installs": 653823,
-      "official": false,
-      "description": "Generate AI videos on RunComfy via the `runcomfy` CLI — a smart router across the full video-model catalog: HappyHorse 1.0 (Arena #1, native in-pass audio),…"
-    },
-    {
-      "source": "genmedia-labs/skills",
-      "skillId": "image-to-video",
-      "name": "image-to-video",
-      "installs": 653554,
-      "official": false,
-      "description": "Animate any still image on RunComfy — this skill is a smart router that matches the user's intent to the right i2v model in the RunComfy catalog. Picks…"
-    },
-    {
       "source": "heygen-com/hyperframes",
       "skillId": "hyperframes",
       "name": "hyperframes",
       "installs": 637008,
       "official": false,
       "description": "Read first to make, edit, animate or render any video with HyperFrames (HTML rendered to video), including launch films, explainers, music videos, charts,…"
-    },
-    {
-      "source": "flowkit-labs/skills",
-      "skillId": "reddit-automation",
-      "name": "reddit-automation",
-      "installs": 622419,
-      "official": false,
-      "description": "Find Reddit threads where people are genuinely asking for what you offer, then draft short, genuinely helpful replies — disclosing your affiliation honestly…"
     },
     {
       "source": "microsoft/azure-skills",
@@ -160,7 +120,7 @@
       "name": "azure-ai",
       "installs": 600734,
       "official": true,
-      "description": "Use for Azure AI: Search, Speech, OpenAI, Document Intelligence. Helps with search, vector/hybrid search, speech-to-text, text-to-speech, transcription, OCR.…"
+      "description": "Build and troubleshoot Azure AI Search, Speech, OpenAI, and Document Intelligence apps. WHEN: AI Search, query search, vector search, hybrid search, semantic…"
     },
     {
       "source": "heygen-com/hyperframes",
@@ -267,70 +227,6 @@
       "description": "Rigor Setup skill for README-first deep learning repo reproduction. Use when the task is specifically to prepare a conservative conda-first environment,…"
     },
     {
-      "source": "101-skills/superpowers",
-      "skillId": "ai-video-generation",
-      "name": "ai-video-generation",
-      "installs": 447431,
-      "official": false,
-      "description": "Generate AI videos with Google Veo, Seedance 2.0, HappyHorse, Wan, Grok and 40+ models via inference.sh CLI. Models: Veo 3.1, Veo 3, Seedance 2.0, HappyHorse…"
-    },
-    {
-      "source": "101-skills/superpowers",
-      "skillId": "twitter-automation",
-      "name": "twitter-automation",
-      "installs": 447117,
-      "official": false,
-      "description": "Automate Twitter/X with posting, engagement, and user management via inference.sh CLI. Apps: x/post-tweet, x/post-create (with media), x/post-like,…"
-    },
-    {
-      "source": "101-skills/superpowers",
-      "skillId": "ai-image-generation",
-      "name": "ai-image-generation",
-      "installs": 447072,
-      "official": false,
-      "description": "Generate AI images with GPT-Image-2, FLUX, Gemini, Grok, Seedream, Reve and 50+ models via inference.sh CLI. Models: GPT-Image-2, FLUX Dev LoRA, FLUX.2 Klein…"
-    },
-    {
-      "source": "101-skills/superpowers",
-      "skillId": "ai-avatar-video",
-      "name": "ai-avatar-video",
-      "installs": 446817,
-      "official": false,
-      "description": "Create AI avatar and talking head videos via inference.sh CLI. Recommended: P-Video-Avatar (fastest, cheapest, built-in TTS). Also: OmniHuman, Fabric,…"
-    },
-    {
-      "source": "prime-skills/runcomfy-agent-skills",
-      "skillId": "video-edit",
-      "name": "video-edit",
-      "installs": 424471,
-      "official": false,
-      "description": "Edit existing video on RunComfy — this skill is a smart router that matches the user's intent to the right edit model in the RunComfy catalog. Picks Wan 2.7…"
-    },
-    {
-      "source": "prime-skills/runcomfy-agent-skills",
-      "skillId": "image-to-video",
-      "name": "image-to-video",
-      "installs": 422810,
-      "official": false,
-      "description": "Animate any still image on RunComfy — this skill is a smart router that matches the user's intent to the right i2v model in the RunComfy catalog. Picks…"
-    },
-    {
-      "source": "prime-skills/runcomfy-agent-skills",
-      "skillId": "nano-banana-2",
-      "name": "nano-banana-2",
-      "installs": 422508,
-      "official": false,
-      "description": "Generate images with Google Nano Banana 2 (Gemini-family flash-tier text-to-image) on RunComfy — bundled with the model's documented prompting patterns so the…"
-    },
-    {
-      "source": "prime-skills/runcomfy-agent-skills",
-      "skillId": "image-edit",
-      "name": "image-edit",
-      "installs": 422120,
-      "official": false,
-      "description": "Edit images on RunComfy — this skill is a smart router that matches the user's intent to the right edit model in the RunComfy catalog. Picks Nano Banana Edit…"
-    },
-    {
       "source": "designed-by-ai/skills",
       "skillId": "design-mobile-apps",
       "name": "design-mobile-apps",
@@ -377,14 +273,6 @@
       "installs": 375490,
       "official": false,
       "description": "You MUST use this before any creative work - creating features, building components, adding functionality, modifying behavior, or planning anything new, in…"
-    },
-    {
-      "source": "leonxlnx/taste-skill",
-      "skillId": "redesign-existing-projects",
-      "name": "redesign-existing-projects",
-      "installs": 375243,
-      "official": false,
-      "description": "Retired: redesigns, restyles and design reviews are part of design-taste-frontend. Runs only when called by name."
     },
     {
       "source": "juliusbrussee/caveman",
@@ -459,12 +347,12 @@
       "description": "Classic style skill, opt-in: it runs only when called by name. Editorial product UI with a warm monochrome palette, typographic contrast and flat bento grids."
     },
     {
-      "source": "prisma/skills",
-      "skillId": "prisma-database-setup",
-      "name": "prisma-database-setup",
-      "installs": 312229,
-      "official": true,
-      "description": "Deprecated compatibility name for prisma-orm-setup. Use only when a user or existing integration explicitly invokes prisma-database-setup; otherwise select…"
+      "source": "leonxlnx/taste-skill",
+      "skillId": "full-output-enforcement",
+      "name": "full-output-enforcement",
+      "installs": 332586,
+      "official": false,
+      "description": "Overrides default LLM truncation behavior. Enforces complete code generation, bans placeholder patterns, and handles token-limit splits cleanly. Apply to any…"
     },
     {
       "source": "prisma/skills",
@@ -481,6 +369,22 @@
       "installs": 309452,
       "official": true,
       "description": "Prisma ORM 7 CLI reference for existing Prisma 7 applications or explicitly selected Prisma 7 workflows. Covers prisma init, generate, migrate, db, dev,…"
+    },
+    {
+      "source": "prisma/skills",
+      "skillId": "prisma-postgres",
+      "name": "prisma-postgres",
+      "installs": 304981,
+      "official": true,
+      "description": "Deprecated compatibility name for prisma-postgres-setup. Use only when a user or existing integration explicitly invokes prisma-postgres; otherwise select…"
+    },
+    {
+      "source": "prisma/skills",
+      "skillId": "prisma-driver-adapter-implementation",
+      "name": "prisma-driver-adapter-implementation",
+      "installs": 300037,
+      "official": true,
+      "description": "Required reference for Prisma ORM 7 SQL driver adapter work. Use when implementing or modifying adapters, adding database drivers, or touching…"
     }
   ]
 }

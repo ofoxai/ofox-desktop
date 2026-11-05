@@ -36,6 +36,25 @@ it("selects highest installs before enforcing four per repository and sixty over
   );
 });
 
+it("never recommends excluded repositories or skills", () => {
+  const entry = (source: string, skillId: string, installs: number) => ({
+    source,
+    skillId,
+    name: skillId,
+    installs,
+  });
+  const selected = selectPopularSkills([
+    entry("genmedia-labs/skills", "ai-music", 9),
+    entry("101-skills/superpowers", "ai-video-generation", 8),
+    entry("flowkit-labs/skills", "reddit-automation", 7),
+    entry("leonxlnx/taste-skill", "redesign-existing-projects", 6),
+    entry("leonxlnx/taste-skill", "minimalist-ui", 5),
+  ]);
+  expect(selected.map((skill: { skillId: string }) => skill.skillId)).toEqual([
+    "minimalist-ui",
+  ]);
+});
+
 it("retains zero installs and false official metadata without copying bodies", () => {
   expect(
     selectPopularSkills([

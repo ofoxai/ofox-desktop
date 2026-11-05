@@ -10,6 +10,20 @@ const repoRoot = path.resolve(
 );
 const sourceLabel = "magpie market_skills.json (MIT, yetone)";
 
+// Not recommended: paid media-generation routers that compete with Ofox's own
+// generation, a repository reusing obra/superpowers' name, spam automation,
+// and skills their authors mark retired or deprecated.
+const excludedSources = new Set([
+  "genmedia-labs/skills",
+  "prime-skills/runcomfy-agent-skills",
+  "101-skills/superpowers",
+]);
+const excludedSkills = new Set([
+  "flowkit-labs/skills/reddit-automation",
+  "leonxlnx/taste-skill/redesign-existing-projects",
+  "prisma/skills/prisma-database-setup",
+]);
+
 export function selectPopularSkills(entries) {
   const counts = new Map();
   const seen = new Set();
@@ -26,6 +40,8 @@ export function selectPopularSkills(entries) {
       throw new Error("Invalid skill metadata");
     const source = entry.source.toLowerCase();
     const key = `${source}/${entry.skillId}`;
+    if (excludedSources.has(source) || excludedSkills.has(key.toLowerCase()))
+      continue;
     if ((counts.get(source) ?? 0) >= 4 || seen.has(key)) continue;
     counts.set(source, (counts.get(source) ?? 0) + 1);
     seen.add(key);
