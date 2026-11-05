@@ -590,6 +590,27 @@ it("returns focus to the page discovery button after Escape", async () => {
   await waitFor(() => expect(opener).toHaveFocus());
 });
 
+it("closes featured MCP servers from the header close button", async () => {
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  await userEvent.click(screen.getByRole("button", { name: "发现 MCP 推荐" }));
+  const discovery = await screen.findByRole("dialog", { name: "精选 MCP" });
+  // Opening still lands in search, not on the new close button.
+  await waitFor(() =>
+    expect(within(discovery).getByRole("searchbox")).toHaveFocus(),
+  );
+  // The dialog is 3xl wide: two cards a row, never three narrow ones.
+  const grid = within(discovery).getAllByRole("article")[0].parentElement!;
+  expect(grid.className).toContain("grid-cols-2");
+  expect(grid.className).not.toContain("grid-cols-3");
+  await userEvent.click(
+    within(discovery).getByRole("button", { name: "关闭" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+});
+
 it("hands discovery focus to the recipe editor and restores its page opener on cancel", async () => {
   renderTable();
   await screen.findByTestId("mcp-row-filesystem");

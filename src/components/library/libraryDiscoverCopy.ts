@@ -24,15 +24,12 @@ export const LIBRARY_DISCOVER_COPY = {
       preparationLabel: "准备事项",
       licenseLabel: "许可与条款",
       reviewedAt: "文档核对：{{date}}",
-      reviewBoundary: "文档核对不代表实际连接或工具执行已通过验收。",
       selectedSkillNote:
         "仅下载所选技能目录，保留其中的许可文件，并固定实际提交版本。",
-      configurable: "可配置",
       nativeAuth: "需凭据或原生授权",
       checkLabel: "检查方式",
       checkOfox: "可由 Ofox 发起连接检查",
       checkNative: "请在对应工具中检查",
-      notTested: "尚未实测",
       notCollected: "尚未加入",
       collected: "已加入我的资源",
       nativeOther: "本机有其他配置",
@@ -42,8 +39,6 @@ export const LIBRARY_DISCOVER_COPY = {
       readOnly: "仅提供只读工具集",
       credentialBoundary: "仍需凭据；实际访问权限由凭据决定。",
       githubChoice: "默认选择官方只读工具集；可在表单中按官方说明修改 URL。",
-      compatibilityNote:
-        "以下工具具有既有写入适配；实际加载、授权及服务兼容性需在对应版本确认。",
       runtime: {
         http: "远程 HTTP",
         node: "本地命令 · Node.js",
@@ -135,16 +130,12 @@ export const LIBRARY_DISCOVER_COPY = {
       preparationLabel: "Preparation",
       licenseLabel: "License and terms",
       reviewedAt: "Documentation reviewed: {{date}}",
-      reviewBoundary:
-        "Reviewing documentation does not verify a live connection or execution in a tool.",
       selectedSkillNote:
         "Download only the selected skill directory, retain its license files, and pin the actual commit.",
-      configurable: "Configurable",
       nativeAuth: "Credentials or native authorization required",
       checkLabel: "Check method",
       checkOfox: "Ofox can start a connection check",
       checkNative: "Check in the target tool",
-      notTested: "Not live-tested",
       notCollected: "Not added yet",
       collected: "In My resources",
       nativeOther: "Other local configuration exists",
@@ -157,8 +148,6 @@ export const LIBRARY_DISCOVER_COPY = {
         "Credentials are still required; their scope determines actual access.",
       githubChoice:
         "The official read-only toolset is selected by default. You can edit the URL in the form using the official instructions.",
-      compatibilityNote:
-        "These tools have existing write adapters. Verify loading, authorization, and service compatibility in the actual target version.",
       runtime: {
         http: "Remote HTTP",
         node: "Local command · Node.js",
@@ -263,16 +252,12 @@ export const LIBRARY_DISCOVER_COPY = {
       preparationLabel: "準備するもの",
       licenseLabel: "ライセンスと利用条件",
       reviewedAt: "ドキュメント確認日：{{date}}",
-      reviewBoundary:
-        "ドキュメントの確認は、実際の接続やツールでの実行の検証を意味しません。",
       selectedSkillNote:
         "選択したスキルのディレクトリだけを取得し、その中のライセンスファイルを保持して実際のコミットを固定します。",
-      configurable: "設定可能",
       nativeAuth: "認証情報またはツール側の認可が必要",
       checkLabel: "確認方法",
       checkOfox: "Ofox から接続確認を開始できます",
       checkNative: "対象ツールで確認してください",
-      notTested: "実機での接続は未検証",
       notCollected: "未追加",
       collected: "マイリソースに追加済み",
       nativeOther: "別のローカル設定があります",
@@ -285,8 +270,6 @@ export const LIBRARY_DISCOVER_COPY = {
         "認証情報は別途必要です。実際のアクセス権は認証情報によって決まります。",
       githubChoice:
         "公式の読み取り専用ツールセットが初期値です。公式手順に従い、フォームで URL を変更できます。",
-      compatibilityNote:
-        "以下は既存の書き込みアダプターを持つツールです。読み込み、認可、サービスの互換性は対象バージョンで確認してください。",
       runtime: {
         http: "リモート HTTP",
         node: "ローカルコマンド · Node.js",

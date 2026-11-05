@@ -197,6 +197,28 @@ describe("curated resource workbench", () => {
     expect(within(playwright).getByText(/请在对应工具中检查/)).toBeVisible();
     expect(screen.queryByText("已实测连接成功")).not.toBeInTheDocument();
   });
+
+  it("opens details without stretching the cards beside it, and says each thing once", async () => {
+    render(<LibraryDiscover kind="mcp" onChoose={vi.fn()} />);
+    const card = screen.getByRole("article", { name: "Neon" });
+    await userEvent.click(
+      within(card).getByRole("button", { name: "配置详情" }),
+    );
+    // Cards in the same row keep their own height.
+    expect(card.parentElement).toHaveClass("items-start");
+    expect(
+      within(card).getAllByText(
+        "保持网络连接，并在目标工具中完成浏览器登录授权。",
+      ),
+    ).toHaveLength(1);
+    for (const filler of [
+      "可配置",
+      "以下工具具有既有写入适配；实际加载、授权及服务兼容性需在对应版本确认。",
+      "文档核对不代表实际连接或工具执行已通过验收。",
+    ])
+      expect(within(card).queryByText(filler)).not.toBeInTheDocument();
+    expect(within(card).getByText(/2026-11-05/)).toBeVisible();
+  });
 });
 
 afterEach(async () => {
@@ -303,10 +325,12 @@ describe("curated evidence and keyboard boundaries", () => {
           }),
         );
         expect(container.textContent).not.toMatch(/library\.discover/);
+        const reviewed =
+          LIBRARY_DISCOVER_COPY[language].discover2.reviewedAt.split(
+            "{{date}}",
+          )[0];
         expect(
-          within(card).getByText(
-            LIBRARY_DISCOVER_COPY[language].discover2.reviewBoundary,
-          ),
+          within(card).getByText((text) => text.startsWith(reviewed)),
         ).toBeVisible();
       });
     }

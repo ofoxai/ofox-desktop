@@ -176,6 +176,7 @@ export function LibraryMcpTable({
       .join(", "),
   });
   const searchRef = useRef<HTMLInputElement>(null);
+  const discoverSearchRef = useRef<HTMLInputElement>(null);
   const retryScan = () => {
     searchRef.current?.focus();
     native.rescan();
@@ -902,14 +903,33 @@ export function LibraryMcpTable({
       >
         <DialogContent
           className="sm:max-w-3xl"
+          onOpenAutoFocus={(event) => {
+            // Start in search, not on the header close button.
+            event.preventDefault();
+            discoverSearchRef.current?.focus();
+          }}
           onCloseAutoFocus={restoreDialogFocus}
         >
-          <DialogHeader>
-            <DialogTitle>{t("library.mcpTable.discover")}</DialogTitle>
+          <DialogHeader className="flex-row items-center justify-between gap-3">
+            <DialogTitle className="min-w-0 flex-1">
+              {t("library.mcpTable.discover")}
+            </DialogTitle>
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="icon"
+                size="icon"
+                aria-label={t("common.close")}
+              >
+                <X aria-hidden className="h-4 w-4" />
+              </Button>
+            </DialogClose>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-[18px] py-4">
             <LibraryDiscover
               kind="mcp"
+              maxColumns={2}
+              searchInputRef={discoverSearchRef}
               busy={!!busy}
               onChoose={(recipe) => {
                 if (recipe.kind !== "mcp") return;
