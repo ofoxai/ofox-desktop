@@ -2807,6 +2807,138 @@ mod tests {
     }
     #[tokio::test]
     #[serial_test::serial]
+    async fn skill_tools_save_recovery_is_consumed_before_later_normal_saves() {
+        use crate::services::library::{assistant_target as target, skill_resource};
+        for mode in ["manual", "off"] {
+            let _sandbox = crate::test_sandbox::sandbox();
+            let (_tmp, env, host) = fixture_with_env();
+            let db = Arc::new(crate::Database::memory().unwrap());
+            *env.skill_db.lock().unwrap() = Some(db.clone());
+            let (sid, run) = local_run(&host);
+            let call = |id: &str, body: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"save_skill","args":{"name":"fixture","description":"Fixture","body":body}});
+            env.skill_refresh_fail.store(true, Ordering::SeqCst);
+            let (_, first) =
+                dispatch_answering(&host, &env, &run, call("first", "A"), "once").await;
+            assert_eq!(first.unwrap()["code"], "skill_refresh_failed");
+            if mode == "manual" {
+                target::set_skill_mode("fixture", target::SkillMode::Manual).unwrap();
+            } else {
+                let row = db
+                    .get_all_installed_skills()
+                    .unwrap()
+                    .into_values()
+                    .next()
+                    .unwrap();
+                let off = skill_resource::preview(&db, &row.id, &[]).unwrap();
+                crate::services::library::apply_operation(&db, &off.id).unwrap();
+            }
+            let before = db.library_snapshot().unwrap();
+            let files = [
+                "skill-modes.json",
+                "agent-skills.json",
+                "agent-skill-origins.json",
+            ]
+            .map(|f| std::fs::read(target::assistant_dir().join(f)).unwrap());
+            let body_before = std::fs::read(target::skills_dir().join("fixture/SKILL.md")).ok();
+            let state_stamps = [
+                "skill-modes.json",
+                "agent-skills.json",
+                "agent-skill-origins.json",
+            ]
+            .map(|f| {
+                std::fs::metadata(target::assistant_dir().join(f))
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+            });
+            let target_stamp = std::fs::symlink_metadata(target::skills_dir().join("fixture"))
+                .ok()
+                .map(|m| m.modified().unwrap());
+            let seen = approvals(&env).len();
+            env.skill_refresh_fail.store(false, Ordering::SeqCst);
+            let recovered = host
+                .dispatch_tool(&run, &call("recover", "A"))
+                .await
+                .unwrap();
+            assert_eq!(recovered["saved"], true);
+            assert_eq!(recovered["usable"], false);
+            assert!(recovered.get("code").is_none());
+            assert_eq!(approvals(&env).len(), seen);
+            assert_eq!(db.library_snapshot().unwrap(), before);
+            assert_eq!(
+                [
+                    "skill-modes.json",
+                    "agent-skills.json",
+                    "agent-skill-origins.json"
+                ]
+                .map(|f| std::fs::read(target::assistant_dir().join(f)).unwrap()),
+                files
+            );
+            assert_eq!(
+                std::fs::read(target::skills_dir().join("fixture/SKILL.md")).ok(),
+                body_before
+            );
+            assert_eq!(
+                [
+                    "skill-modes.json",
+                    "agent-skills.json",
+                    "agent-skill-origins.json"
+                ]
+                .map(|f| std::fs::metadata(target::assistant_dir().join(f))
+                    .unwrap()
+                    .modified()
+                    .unwrap()),
+                state_stamps
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(target::skills_dir().join("fixture"))
+                    .ok()
+                    .map(|m| m.modified().unwrap()),
+                target_stamp
+            );
+            let (_, normal) =
+                dispatch_answering(&host, &env, &run, call("normal", "A"), "deny").await;
+            assert_eq!(normal.unwrap()["saved"], false);
+            assert_eq!(approvals(&env).len(), seen + 1);
+            let (_, changed) =
+                dispatch_answering(&host, &env, &run, call("revision-b", "B"), "once").await;
+            assert_eq!(changed.unwrap()["usable"], true);
+            let revision_b = db.library_snapshot().unwrap().definitions.skills;
+            let (_, old_args) =
+                dispatch_answering(&host, &env, &run, call("new-a", "A"), "once").await;
+            assert_eq!(old_args.unwrap()["usable"], true);
+            assert_ne!(
+                db.library_snapshot().unwrap().definitions.skills,
+                revision_b
+            );
+            assert!(
+                std::fs::read_to_string(target::skills_dir().join("fixture/SKILL.md"))
+                    .unwrap()
+                    .ends_with('A')
+            );
+            // A different approved revision can also supersede an outstanding (not yet
+            // recovered) receipt. Old arguments must still reach normal approval.
+            env.skill_refresh_fail.store(true, Ordering::SeqCst);
+            let (_, pending) =
+                dispatch_answering(&host, &env, &run, call("pending-c", "C"), "once").await;
+            assert_eq!(pending.unwrap()["code"], "skill_refresh_failed");
+            env.skill_refresh_fail.store(false, Ordering::SeqCst);
+            let (_, newer) =
+                dispatch_answering(&host, &env, &run, call("newer-d", "D"), "once").await;
+            assert_eq!(newer.unwrap()["usable"], true);
+            let (_, stale) =
+                dispatch_answering(&host, &env, &run, call("stale-c", "C"), "once").await;
+            assert_eq!(stale.unwrap()["usable"], true);
+            assert!(
+                std::fs::read_to_string(target::skills_dir().join("fixture/SKILL.md"))
+                    .unwrap()
+                    .ends_with('C')
+            );
+            host.release_run(&run);
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
     async fn skill_tools_session_approval_rejected_and_epoch_change_fails_closed() {
         let _sandbox = crate::test_sandbox::sandbox();
         let (_tmp, env, host) = fixture_with_env();

@@ -483,6 +483,9 @@ fn compact_finished(op: &mut Operation) {
 }
 
 pub(crate) fn prune_history(snapshot: &mut LibrarySnapshot, keep_id: &str) {
+    if super::assistant_skill_transaction::pending_intent() {
+        return;
+    }
     for (status, limit) in [
         ("previewed", 8usize),
         ("applied", 20usize),

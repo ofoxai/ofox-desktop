@@ -444,6 +444,11 @@ struct StateFile {
 struct Intent {
     version: u8,
     operation_id: String,
+    // Legacy intents have no durable per-operation commit witness and must not guess.
+    #[serde(default)]
+    commit_marker: bool,
+    #[serde(default)]
+    created_at: i64,
     root_identity: String,
     before_entry_identity: Option<String>,
     after_entry_identity: String,
@@ -574,6 +579,9 @@ fn commit_checked(
     {
         return Err(error("library.skillNameConflict"));
     }
+    if current.machine.operations.contains_key(&op.id) {
+        return Err(error("library.revisionChanged"));
+    }
     let mut target = op.targets.remove(0);
     crate::config::create_private_dir_all(&target::skills_dir()).map_err(error)?;
     stage(&mut target)?;
@@ -619,6 +627,8 @@ fn commit_checked(
     let intent = Intent {
         version: 1,
         operation_id: op.id.clone(),
+        commit_marker: true,
+        created_at: op.created_at,
         root_identity: root_identity()?.ok_or_else(|| error("library.targetChanged"))?,
         before_entry_identity: prepared.entry_identity.clone(),
         after_entry_identity: entry_identity(std::path::Path::new(
@@ -669,6 +679,14 @@ fn commit_checked(
         next.machine
             .receipts
             .insert(intent.target.receipt_key.clone(), receipt);
+        // The row/receipt can be identical for an already enabled fixed resource.
+        // This exact operation witness is published by the same atomic CAS.
+        if next.machine.operations.contains_key(&intent.operation_id) {
+            return Err(error("library.revisionChanged"));
+        }
+        next.machine
+            .operations
+            .insert(intent.operation_id.clone(), committed_operation(&intent));
         db.library_commit_skill(&current, &next, Some(&row), None)?;
         checkpoint("committed")?;
         Ok(())
@@ -704,12 +722,44 @@ fn commit_checked(
     }
 }
 
+fn committed_operation(intent: &Intent) -> super::Operation {
+    let mut target = intent.target.clone();
+    target.status = "applied".into();
+    super::Operation {
+        id: intent.operation_id.clone(),
+        kind: super::ResourceKind::Skills,
+        epoch: intent.epoch,
+        resource_id: intent.row.id.clone(),
+        resource_revision: intent.revision.revision,
+        resource_hash: intent.revision.hash.clone(),
+        created_at: intent.created_at,
+        status: "applied".into(),
+        targets: vec![target],
+        desired_updates: BTreeMap::new(),
+        previous_assignments: BTreeMap::new(),
+        resolved_paths: BTreeMap::new(),
+        resolved_physical: BTreeMap::new(),
+        routing: None,
+    }
+}
+
+/// History maintenance must not remove a witness before intent recovery consumes it.
+/// Unknown state keeps history; this guard never enters snapshot/recovery recursively.
+pub(super) fn pending_intent() -> bool {
+    checked_path(JOURNAL).map_or(true, |path| {
+        !matches!(fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    })
+}
+
 fn committed_state(
     current: &LibrarySnapshot,
     row: &Option<InstalledSkill>,
     intent: &Intent,
 ) -> bool {
-    equal(row, &Some(intent.row.clone()))
+    intent.commit_marker
+        && current.machine.operations.get(&intent.operation_id)
+            == Some(&committed_operation(intent))
+        && equal(row, &Some(intent.row.clone()))
         && current.definitions.skills.get(&intent.row.id) == Some(&intent.revision)
         && current
             .machine
@@ -731,6 +781,7 @@ pub fn recover(db: &Database) -> Result<(), AppError> {
         serde_json::from_slice(&bytes).map_err(|_| error("skill_transaction_needs_review"))?;
     let refuse = || error("skill_transaction_needs_review");
     if intent.version != 1
+        || !intent.commit_marker
         || intent.files.len() != 3
         || intent.files.iter().enumerate().any(|(i, f)| {
             f.name != FILES[i]
@@ -794,7 +845,11 @@ pub fn recover(db: &Database) -> Result<(), AppError> {
     let assignment = format!("skills:{}:{}", intent.row.id, target::ID);
     let row = db.get_installed_skill(&intent.row.id)?;
     let committed = committed_state(&current, &row, &intent);
-    let before = equal(&row, &intent.old_row)
+    let before = !current
+        .machine
+        .operations
+        .contains_key(&intent.operation_id)
+        && equal(&row, &intent.old_row)
         && current.definitions.skills.get(&intent.row.id) == intent.old_revision.as_ref()
         && current.machine.assignments.get(&assignment) == intent.old_assignment.as_ref()
         && current.machine.receipts.get(&intent.target.receipt_key)
@@ -960,6 +1015,249 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn skill_tools_reuse_recovery_distinguishes_this_commit_from_existing_install() {
+        for mode in ["auto", "manual", "off"] {
+            for phase in [
+                "journal",
+                "skill-modes.json",
+                "agent-skills.json",
+                "agent-skill-origins.json",
+                "swap",
+                "cas",
+                "committed",
+            ] {
+                for crash in [true, false] {
+                    let _sandbox = crate::test_sandbox::sandbox();
+                    let db = Database::init().unwrap();
+                    let source = tempfile::tempdir().unwrap();
+                    fs::write(
+                        source.path().join("SKILL.md"),
+                        "---\nname: fixture\ndescription: Invented fixture\n---\nFixed body",
+                    )
+                    .unwrap();
+                    let row = InstalledSkill {
+                        id: "fixture/repo:nested/fixture".into(),
+                        name: "User title".into(),
+                        description: Some("User description".into()),
+                        directory: "fixture".into(),
+                        repo_owner: Some("fixture".into()),
+                        repo_name: Some("repo".into()),
+                        repo_branch: Some("main".into()),
+                        readme_url: Some(format!(
+                            "https://github.com/fixture/repo/blob/{}/nested/fixture/SKILL.md",
+                            "a".repeat(40)
+                        )),
+                        apps: Default::default(),
+                        installed_at: 0,
+                        updated_at: 0,
+                        content_hash: None,
+                    };
+                    let row = skills::save_draft(&db, row, source.path(), None).unwrap();
+                    let prepare = |db: &Database| {
+                        prepare_existing(
+                            db,
+                            "fixture/repo",
+                            "fixture",
+                            Some("nested/fixture"),
+                            json!({"source":"fixture/repo"}),
+                        )
+                        .unwrap()
+                        .unwrap()
+                    };
+                    // Real initial install, then a separately managed agent sharing the fixed resource.
+                    commit(&db, &prepare(&db), || Ok(())).unwrap();
+                    let other =
+                        skills::preview(&db, &row.id, &["claude".into(), target::ID.into()])
+                            .unwrap();
+                    super::super::apply_operation(&db, &other.id).unwrap();
+                    if mode == "manual" {
+                        target::set_skill_mode("fixture", target::SkillMode::Manual).unwrap();
+                    }
+                    if mode == "off" {
+                        let off = skills::preview(&db, &row.id, &["claude".into()]).unwrap();
+                        super::super::apply_operation(&db, &off.id).unwrap();
+                    }
+                    let before = db.library_snapshot().unwrap();
+                    let row_before = db.get_installed_skill(&row.id).unwrap();
+                    let files = FILES.map(|s| raw(s).unwrap());
+                    let path = target::skills_dir().join("fixture");
+                    let identity = entry_identity(&path).unwrap();
+                    let other_receipts: Vec<_> = before
+                        .machine
+                        .receipts
+                        .values()
+                        .filter(|r| r.owners.iter().any(|o| o == "claude"))
+                        .cloned()
+                        .collect();
+                    assert_eq!(other_receipts.len(), 1);
+                    let other_identity =
+                        entry_identity(std::path::Path::new(&other_receipts[0].path)).unwrap();
+                    let prepared = prepare(&db);
+                    assert_eq!(prepared.details["commitSha"], "a".repeat(40));
+                    let outcome = catch_unwind(AssertUnwindSafe(|| {
+                        commit_checked(
+                            &db,
+                            &prepared,
+                            || Ok(()),
+                            |point| {
+                                if point == phase {
+                                    if crash {
+                                        panic!("simulated reuse process loss");
+                                    }
+                                    return Err(error("simulated reuse cancellation"));
+                                }
+                                Ok(())
+                            },
+                            skills::stage,
+                        )
+                    }));
+                    if crash {
+                        assert!(outcome.is_err());
+                    } else {
+                        assert_eq!(
+                            outcome.unwrap().is_ok(),
+                            phase == "committed",
+                            "{mode}/{phase}: commit fact"
+                        );
+                    }
+                    drop(db);
+                    let db = Database::init().unwrap();
+                    let snapshot = target::assistant_skill_snapshot(&db, &BTreeSet::new())
+                        .unwrap_or_else(|e| panic!("{mode}/{phase}/{crash}: {e}"));
+                    assert!(!checked_path(JOURNAL).unwrap().exists(), "{mode}/{phase}");
+                    let after = db.library_snapshot().unwrap();
+                    assert!(equal(
+                        &db.get_installed_skill(&row.id).unwrap(),
+                        &row_before
+                    ));
+                    assert_eq!(after.definitions.skills, before.definitions.skills);
+                    assert_eq!(
+                        entry_identity(std::path::Path::new(&other_receipts[0].path)).unwrap(),
+                        other_identity
+                    );
+                    for receipt in &other_receipts {
+                        assert_eq!(
+                            after
+                                .machine
+                                .receipts
+                                .get(&format!("skills:{}", receipt.physical_target)),
+                            Some(receipt)
+                        );
+                        assert!(skills::receipt_intact(receipt));
+                    }
+                    if phase == "committed" {
+                        assert_eq!(snapshot.skills[0].mode, target::SkillMode::Auto);
+                        assert_ne!(entry_identity(&path).unwrap(), identity);
+                        assert!(fs::read_to_string(path.join("SKILL.md"))
+                            .unwrap()
+                            .contains("Fixed body"));
+                    } else {
+                        assert_eq!(after, before, "{mode}/{phase}");
+                        assert_eq!(FILES.map(|s| raw(s).unwrap()), files);
+                        assert_eq!(entry_identity(&path).unwrap(), identity);
+                        assert_eq!(snapshot.skills.len(), usize::from(mode != "off"));
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    #[serial_test::serial]
+    fn skill_tools_pending_commit_witness_survives_history_and_rejects_conflicts() {
+        for conflict in [false, true] {
+            let _sandbox = crate::test_sandbox::sandbox();
+            let db = Database::memory().unwrap();
+            let prepared = prepare_save(&db, "fixture", "Fixture", "Body").unwrap();
+            assert!(catch_unwind(AssertUnwindSafe(|| commit_checked(
+                &db,
+                &prepared,
+                || Ok(()),
+                |phase| {
+                    if phase == "committed" {
+                        panic!("interrupted cleanup");
+                    }
+                    Ok(())
+                },
+                skills::stage
+            )))
+            .is_err());
+            let intent: Intent = serde_json::from_slice(&raw_intent()).unwrap();
+            let before = db.library_snapshot().unwrap();
+            let marker = before.machine.operations[&intent.operation_id].clone();
+            let mut history = before.clone();
+            for i in 0..25 {
+                let mut op = marker.clone();
+                op.id = format!("history-{i}");
+                op.targets.clear();
+                op.created_at += 1;
+                history.machine.operations.insert(op.id.clone(), op);
+            }
+            super::super::coordinator::prune_history(&mut history, "history-24");
+            assert_eq!(
+                history.machine.operations.len(),
+                26,
+                "unresolved intent protects history witness"
+            );
+            if conflict {
+                history
+                    .machine
+                    .operations
+                    .get_mut(&intent.operation_id)
+                    .unwrap()
+                    .created_at += 1;
+                db.library_commit(&before, &history).unwrap();
+                let current = db.library_snapshot().unwrap();
+                let journal = raw_intent();
+                assert!(target::assistant_skill_snapshot(&db, &BTreeSet::new()).is_err());
+                assert_eq!(
+                    db.library_snapshot().unwrap(),
+                    current,
+                    "same-ID mismatching operation never overwritten"
+                );
+                assert_eq!(raw_intent(), journal);
+            } else {
+                target::assistant_skill_snapshot(&db, &BTreeSet::new()).unwrap();
+                assert!(!pending_intent());
+                super::super::coordinator::prune_history(&mut history, "history-24");
+                assert_eq!(
+                    history.machine.operations.len(),
+                    20,
+                    "normal retention resumes after recovery"
+                );
+            }
+        }
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let prepared = prepare_save(&db, "fixture", "Fixture", "Body").unwrap();
+        assert!(catch_unwind(AssertUnwindSafe(|| commit_checked(
+            &db,
+            &prepared,
+            || Ok(()),
+            |phase| {
+                if phase == "journal" {
+                    panic!("legacy intent");
+                }
+                Ok(())
+            },
+            skills::stage
+        )))
+        .is_err());
+        let mut legacy: Value = serde_json::from_slice(&raw_intent()).unwrap();
+        legacy.as_object_mut().unwrap().remove("commitMarker");
+        fs::write(
+            checked_path(JOURNAL).unwrap(),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert!(target::assistant_skill_snapshot(&db, &BTreeSet::new()).is_err());
+        assert!(pending_intent());
+        assert!(db.get_all_installed_skills().unwrap().is_empty());
+    }
+    fn raw_intent() -> Vec<u8> {
+        fs::read(checked_path(JOURNAL).unwrap()).unwrap()
     }
     #[test]
     #[serial_test::serial]

@@ -375,10 +375,29 @@ impl AssistantHost {
                                 &reply,
                             )
                             .await;
+                        return Ok(self.skill_committed_result(run, &success, true, true).await);
                     }
-                    return Ok(self
-                        .skill_committed_result(run, &success, install, true)
-                        .await);
+                    let db = self.env.skill_database()?;
+                    if transaction::verify_success(&db, &success).is_ok() {
+                        let result = self
+                            .skill_committed_result(run, &success, false, true)
+                            .await;
+                        if result["code"] != "skill_refresh_failed" {
+                            run.skill_tools
+                                .lock()
+                                .map_err(|_| "assistant_state_unavailable")?
+                                .saved
+                                .remove(&save_key);
+                        }
+                        return Ok(result);
+                    }
+                    // A superseded receipt is no longer an outstanding recovery.
+                    // The new request still needs current ownership checks and a new click.
+                    run.skill_tools
+                        .lock()
+                        .map_err(|_| "assistant_state_unavailable")?
+                        .saved
+                        .remove(&save_key);
                 }
                 let db = self.env.skill_database()?;
                 let prepared = if let Some(candidate) = candidate {
