@@ -687,6 +687,10 @@ fn commit_checked(
         next.machine
             .operations
             .insert(intent.operation_id.clone(), committed_operation(&intent));
+        // Earlier intents were recovered under the IO lock before this journal.
+        // Bound old history in this same CAS, keeping this intent's exact witness
+        // even when its timestamp ties with (or predates) older operations.
+        super::coordinator::prune_history_preserving(&mut next, &intent.operation_id);
         db.library_commit_skill(&current, &next, Some(&row), None)?;
         checkpoint("committed")?;
         Ok(())
@@ -1258,6 +1262,114 @@ mod tests {
     }
     fn raw_intent() -> Vec<u8> {
         fs::read(checked_path(JOURNAL).unwrap()).unwrap()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn skill_tools_assistant_only_history_is_bounded_with_one_cas_and_restart_witness() {
+        for phase in ["cas", "committed"] {
+            let _sandbox = crate::test_sandbox::sandbox();
+            let db = Database::init().unwrap();
+            let unrelated = prepare_save(&db, "unrelated", "Unrelated", "Keep me").unwrap();
+            let unrelated = commit(&db, &unrelated, || Ok(())).unwrap();
+            let external = skills::preview(&db, &unrelated.row.id, &["claude".into()]).unwrap();
+            super::super::apply_operation(&db, &external.id).unwrap();
+            let external_before = db.library_snapshot().unwrap();
+            let external_receipts = external_before.machine.receipts.clone();
+            let external_assignments = external_before.machine.assignments.clone();
+            let external_row = db.get_installed_skill(&unrelated.row.id).unwrap();
+            let external_bytes: Vec<_> = external_receipts
+                .values()
+                .map(|receipt| fs::read(PathBuf::from(&receipt.path).join("SKILL.md")).unwrap())
+                .collect();
+
+            // Only real assistant commits follow. No ordinary coordinator action
+            // or explicit test-side prune may be required to bound their history.
+            for i in 0..24 {
+                let prepared =
+                    prepare_save(&db, "fixture", "Fixture", &format!("Body {i}")).unwrap();
+                let before = db.library_snapshot().unwrap();
+                commit(&db, &prepared, || Ok(())).unwrap();
+                let after = db.library_snapshot().unwrap();
+                assert_eq!(after.machine.revision, before.machine.revision + 1);
+                assert_eq!(after.definitions.revision, before.definitions.revision + 1);
+                assert!(
+                    after
+                        .machine
+                        .operations
+                        .values()
+                        .filter(|op| op.status == "applied")
+                        .count()
+                        <= 20,
+                    "assistant-only history exceeded the existing applied limit at commit {i}"
+                );
+                assert!(!pending_intent());
+            }
+            let before = db.library_snapshot().unwrap();
+            let prepared = prepare_save(&db, "fixture", "Fixture", "After crash").unwrap();
+            assert!(catch_unwind(AssertUnwindSafe(|| commit_checked(
+                &db,
+                &prepared,
+                || Ok(()),
+                |point| {
+                    if point == phase {
+                        panic!("interrupted around single CAS");
+                    }
+                    Ok(())
+                },
+                skills::stage
+            )))
+            .is_err());
+            let intent: Intent = serde_json::from_slice(&raw_intent()).unwrap();
+            let pending = db.library_snapshot().unwrap();
+            let mut maintenance = pending.clone();
+            super::super::coordinator::prune_history(&mut maintenance, "unrelated-maintenance");
+            assert_eq!(
+                maintenance, pending,
+                "ordinary pruning preserves pending evidence"
+            );
+            if phase == "committed" {
+                assert_eq!(pending.machine.revision, before.machine.revision + 1);
+                assert_eq!(pending.machine.operations.len(), 20);
+                assert_eq!(
+                    pending.machine.operations.get(&intent.operation_id),
+                    Some(&committed_operation(&intent))
+                );
+            } else {
+                assert_eq!(pending, before, "no pruning persisted before the CAS");
+            }
+            drop(db);
+            let db = Database::init().unwrap();
+            target::assistant_skill_snapshot(&db, &BTreeSet::new()).unwrap();
+            assert!(!pending_intent());
+            let recovered = db.library_snapshot().unwrap();
+            assert_eq!(recovered, pending, "recovery does not add a second CAS");
+            let text = fs::read_to_string(target::skills_dir().join("fixture/SKILL.md")).unwrap();
+            assert!(text.contains(if phase == "committed" {
+                "After crash"
+            } else {
+                "Body 23"
+            }));
+            assert!(equal(
+                &db.get_installed_skill(&unrelated.row.id).unwrap(),
+                &external_row
+            ));
+            assert_eq!(
+                recovered.definitions.skills.get(&unrelated.row.id),
+                external_before.definitions.skills.get(&unrelated.row.id)
+            );
+            for (key, assignment) in &external_assignments {
+                assert_eq!(recovered.machine.assignments.get(key), Some(assignment));
+            }
+            for ((key, receipt), bytes) in external_receipts.iter().zip(external_bytes) {
+                assert_eq!(recovered.machine.receipts.get(key), Some(receipt));
+                assert!(skills::receipt_intact(receipt));
+                assert_eq!(
+                    fs::read(PathBuf::from(&receipt.path).join("SKILL.md")).unwrap(),
+                    bytes
+                );
+            }
+        }
     }
     #[test]
     #[serial_test::serial]

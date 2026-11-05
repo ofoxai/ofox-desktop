@@ -174,6 +174,36 @@ it("Backspace removes a chosen chip, while a middle slash never opens", async ()
   expect(screen.queryByText("Skill: manual")).toBeNull();
 });
 
+it.each(["readOnly", "disabled"] as const)(
+  "keeps the chip on Backspace while %s and removes it after becoming writable",
+  async (restriction) => {
+    const onSkill = vi.fn();
+    const props = {
+      value: "",
+      skill: "manual",
+      onSkill,
+      onTextChange: vi.fn(),
+      scope: "keyboard-restriction",
+      "aria-label": "Message",
+    };
+    const { rerender } = render(
+      <SkillPicker {...props} {...{ [restriction]: true }} />,
+    );
+    const input = screen.getByRole("textbox", { name: "Message" });
+    await userEvent.click(input);
+    await userEvent.keyboard("{Backspace}");
+    expect(onSkill).not.toHaveBeenCalled();
+    expect(screen.getByText("Skill: manual")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Remove skill manual" }),
+    ).toBeDisabled();
+    rerender(<SkillPicker {...props} />);
+    await userEvent.click(input);
+    await userEvent.keyboard("{Backspace}");
+    expect(onSkill).toHaveBeenCalledExactlyOnceWith(undefined);
+  },
+);
+
 it("Escape closes the list and IME confirmation never sends or chooses", async () => {
   const input = await open();
   await userEvent.type(input, "/man");

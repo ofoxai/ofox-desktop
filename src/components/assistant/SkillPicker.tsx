@@ -177,6 +177,8 @@ export const SkillPicker = forwardRef<HTMLTextAreaElement, Props>(
       }
       if (
         event.key === "Backspace" &&
+        !disabled &&
+        !readOnly &&
         skill &&
         event.currentTarget.selectionStart === 0 &&
         event.currentTarget.selectionEnd === 0

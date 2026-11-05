@@ -486,6 +486,12 @@ pub(crate) fn prune_history(snapshot: &mut LibrarySnapshot, keep_id: &str) {
     if super::assistant_skill_transaction::pending_intent() {
         return;
     }
+    prune_history_preserving(snapshot, keep_id);
+}
+
+/// Pure retention policy. The intent owner may use this inside its single CAS
+/// only after recovering earlier intents and explicitly preserving its witness.
+pub(super) fn prune_history_preserving(snapshot: &mut LibrarySnapshot, keep_id: &str) {
     for (status, limit) in [
         ("previewed", 8usize),
         ("applied", 20usize),
