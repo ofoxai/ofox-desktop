@@ -643,12 +643,20 @@ fn assistant_mcp_sign_in_validation_covers_preview_batch_and_frozen_metadata() {
             .unwrap_err()
             .to_string()
             .contains("assistantMcpSignInUnsupported"));
-        assert!(
-            super::super::coordinator::recover_operation(&db, &metadata.id)
-                .unwrap_err()
-                .to_string()
-                .contains("assistantMcpSignInUnsupported")
-        );
+        // An interrupted plan that no longer validates settles as needing
+        // review: never claimed as applied, never stuck in progress.
+        metadata.status = "prepared".into();
+        stored
+            .machine
+            .operations
+            .insert(metadata.id.clone(), metadata.clone());
+        db.set_setting(
+            super::super::MACHINE_KEY,
+            &serde_json::to_string(&stored.machine).unwrap(),
+        )
+        .unwrap();
+        let recovered = super::super::coordinator::recover_operation(&db, &metadata.id).unwrap();
+        assert_eq!(recovered.status, "needsReview");
         assert!(!mcp_config_path().exists());
         assert!(db
             .library_snapshot()

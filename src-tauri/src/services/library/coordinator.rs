@@ -796,8 +796,19 @@ pub fn recover_operation(db: &Database, id: &str) -> Result<Operation, AppError>
         .get(id)
         .cloned()
         .ok_or_else(|| error("operationMissing"))?;
-    super::mcp_targets::validate_operation(db, &op)?;
     if op.status == "previewed" || op.status == "applied" || op.status == "cancelled" {
+        return Ok(op);
+    }
+    // A plan that no longer validates is never claimed as applied, but the
+    // interrupted operation still settles instead of staying in progress.
+    if super::mcp_targets::validate_operation(db, &op).is_err() {
+        for target in op.targets.iter_mut().filter(|t| t.status != "applied") {
+            target.status = "needsReview".into();
+            target.reason = Some("library.operationNeedsReview".into());
+        }
+        op.status = "needsReview".into();
+        compact_finished(&mut op);
+        persist(db, &snapshot, &op, None)?;
         return Ok(op);
     }
     let current_version =
