@@ -10,6 +10,7 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from "react";
+import { useLoadingFox } from "@/components/ui/fox-loader";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
@@ -18,18 +19,16 @@ import {
   Download,
   Ellipsis,
   Globe,
-  Loader2,
   ListPlus,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
-  Paperclip,
   Pencil,
   Minimize2,
   Mic,
-  Volume2,
   Pin,
   PinOff,
+  RefreshCw,
   Square,
   Trash2,
   RotateCcw,
@@ -39,28 +38,28 @@ import {
 import {
   assistantApi,
   assistantErrorKey,
-  type AssistantImageRequest,
-  type AssistantVideoRequest,
   type AssistantMessage,
   type AssistantAttachment,
+  type AssistantGenerationKind,
 } from "@/lib/api/assistant";
 import { isMac } from "@/lib/platform";
-import { useAssistant, type VideoConfirmation } from "./useAssistant";
+import { useAssistant } from "./useAssistant";
 import {
   LocalApprovalCard,
   LocalChangesLine,
-  LocalConfigControl,
+  PermissionControl,
   LocalTaskProgress,
 } from "./AssistantLocalConfig";
-import { ImageParams } from "./ImageParams";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
-import { VideoParams, defaultVideoParams } from "./VideoParams";
+import { ComposerPlus } from "./ComposerPlus";
+import { generationModels } from "./MediaDefaultsFields";
+import { GenerationCards } from "./GenerationCards";
+import { useReadAloud } from "./useReadAloud";
 import { AssistantMessageView } from "./AssistantMessageView";
 import { AssistantContextUsage } from "./AssistantContextUsage";
 import { AssistantAudioHistory } from "./AssistantAudioHistory";
 import { AssistantAudioInput } from "./AssistantAudioInput";
-import { AssistantSpeechOutput } from "./AssistantSpeechOutput";
 import { AssistantQueue } from "./AssistantQueue";
 import { MAX_MESSAGE_BYTES, MAX_QUEUED_MESSAGES } from "./useMessageQueue";
 import { AttachmentList } from "./AssistantAttachments";
@@ -108,7 +107,28 @@ import {
 } from "@/components/shell/ShellContext";
 import { cn } from "@/lib/utils";
 
-const STARTERS = ["summary", "writing", "explain"] as const;
+interface Starter {
+  id: string;
+  /** The generation chip it turns on. */
+  kind?: AssistantGenerationKind;
+}
+
+/**
+ * What the assistant can do beyond chat, for a model that takes tools: each
+ * shown only while the account has a model for it, then a summary.
+ */
+const SCENARIO_STARTERS: Starter[] = [
+  { id: "image", kind: "image" },
+  { id: "video", kind: "video" },
+  { id: "speech", kind: "speech" },
+  { id: "localCheck" },
+];
+/** For a model without tools, or an account with none of the above. */
+const TEXT_STARTERS: Starter[] = [
+  { id: "summary" },
+  { id: "writing" },
+  { id: "explain" },
+];
 
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
@@ -168,8 +188,15 @@ export function AssistantLoginRequired({
   onLoginRequested,
 }: Pick<AssistantPageProps, "onLoginRequested">) {
   const { t } = useTranslation();
+  // Beside the sidebar of a wide window the page has no frame (see AssistantPage).
+  const wide = useOptionalShell()?.layout === "wide";
   return (
-    <section className="grid h-full min-h-0 place-items-center rounded-list border border-line bg-card px-6 py-10 text-center">
+    <section
+      className={cn(
+        "grid h-full min-h-0 place-items-center bg-card px-6 py-10 text-center",
+        !wide && "rounded-list border border-line",
+      )}
+    >
       <div className="flex max-w-sm flex-col items-center">
         <div className="mb-5 grid h-11 w-11 place-items-center rounded-card bg-brand-soft text-brand-ink">
           <MessageSquare aria-hidden className="h-5 w-5" />
@@ -204,6 +231,9 @@ function AssistantWorkspace() {
   const { t, i18n } = useTranslation();
   const assistant = useAssistant(true);
   const shell = useOptionalShell();
+  // A wide window (see ShellLayout): no frame, roomier sizes, a wider
+  // column, and the title only where the list does not show it.
+  const wide = shell?.layout === "wide";
   const localEntryPending = useRef<number | null>(null);
   const entry = shell?.assistantLocation;
   useEffect(() => {
@@ -233,20 +263,11 @@ function AssistantWorkspace() {
   const { detail, bootstrap, run, busy } = assistant;
   const [audioDialog, setAudioDialog] =
     useState<Awaited<ReturnType<typeof assistant.prepareAudio>>>(null);
-  const [speechDialog, setSpeechDialog] = useState<{
-    target: NonNullable<Awaited<ReturnType<typeof assistant.prepareAudio>>>;
-    text: string;
-    sourceMessageId?: string;
-  } | null>(null);
-  const speechAvailable = Boolean(
-    bootstrap?.audioModels?.some(
-      (model) => model.kind === "speech" && model.audio,
-    ),
-  );
-  const openSpeech = async (text: string, sourceMessageId?: string) => {
-    const target = await assistant.prepareAudio();
-    if (target) setSpeechDialog({ target, text, sourceMessageId });
-  };
+  // A reply is read aloud in one click with the remembered voice.
+  const readAloud = useReadAloud({
+    bootstrap,
+    prepare: assistant.prepareAudio,
+  });
   const [renaming, setRenaming] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [backupDialog, setBackupDialog] = useState<{
@@ -266,10 +287,7 @@ function AssistantWorkspace() {
   const queueHintId = useId();
   const interactionActive = useInteractionActive();
   useEffect(() => {
-    if (!interactionActive) {
-      setAudioDialog(null);
-      setSpeechDialog(null);
-    }
+    if (!interactionActive) setAudioDialog(null);
   }, [interactionActive]);
   const scroll = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -355,9 +373,9 @@ function AssistantWorkspace() {
   // conversation never keeps it on when it can't be seen to work.
   const searchLocked =
     settingsLocked || (!assistant.webSearch && searchPrice === null);
-  // The switch is lit only for a search that will happen: a conversation
-  // saved with search on while it is unavailable still says "on" to
-  // assistive tech (and can be turned off), but doesn't look on.
+  // The chip is lit only for a search that will happen: a conversation
+  // saved with search on while it is unavailable still shows it (so it can
+  // be turned off), but doesn't look on.
   const searchLit = assistant.webSearch && searchPrice !== null;
   // Tool, system and other internal records stay out of the transcript, and
   // so do the versions of a turn that are not the one shown: the switcher
@@ -410,61 +428,64 @@ function AssistantWorkspace() {
   const composerModel = bootstrap?.models.find(
     (item) => item.id === (session?.modelId ?? assistant.newModelId),
   );
-  const imageMode = composerModel?.kind === "image";
-  const videoMode = composerModel?.kind === "video";
+  // A conversation that generated directly with an image or video model
+  // (before generation became the chat model's tools) opens on a chat model,
+  // with that model as its generation default.
+  const migrated = useRef<string | null>(null);
+  useEffect(() => {
+    const kind = composerModel?.kind;
+    if (!session || !composerModel || (kind !== "image" && kind !== "video"))
+      return;
+    if (migrated.current === session.id || run) return;
+    const chat = [bootstrap?.rememberedModels?.chat, bootstrap?.defaultModelId]
+      .map((id) => bootstrap?.models.find((model) => model.id === id))
+      .find((model) => model && (model.kind ?? "chat") === "chat");
+    if (!chat) return;
+    migrated.current = session.id;
+    void assistant.update({
+      modelId: chat.id,
+      media: {
+        ...session.media,
+        [kind]: { ...session.media?.[kind], model: composerModel.id },
+      },
+    });
+  }, [session, composerModel, run, bootstrap, assistant]);
+  // Every model a generation tool can use: speech models come with the
+  // audio tools.
+  const generationCatalog = useMemo(
+    () => [...(bootstrap?.models ?? []), ...(bootstrap?.audioModels ?? [])],
+    [bootstrap?.models, bootstrap?.audioModels],
+  );
+  const localDefinition = Boolean(bootstrap?.localConfigDefinition);
+  const starters = useMemo(() => {
+    const scenario =
+      composerModel?.tools === false
+        ? []
+        : SCENARIO_STARTERS.filter((starter) =>
+            starter.kind
+              ? generationModels(generationCatalog, starter.kind).length > 0
+              : localDefinition,
+          );
+    return scenario.length > 0
+      ? [...scenario, { id: "summary" }]
+      : TEXT_STARTERS;
+  }, [composerModel?.tools, generationCatalog, localDefinition]);
   const queueCount = assistant.queue?.messages.length ?? 0;
-  const queueMode =
-    !imageMode &&
-    !videoMode &&
-    !session?.audioOnly &&
-    Boolean(run || queueCount);
+  const queueMode = !session?.audioOnly && Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
   const canQueue = assistant.queueAvailable && !files.length && !queueFull;
-  const [videoParams, setVideoParams] = useState<AssistantVideoRequest>({
-    duration: 4,
-    resolution: "",
-  });
-  const [videoConfirmation, setVideoConfirmation] =
-    useState<VideoConfirmation | null>(null);
-  useEffect(() => {
-    if (composerModel?.kind === "video")
-      setVideoParams(defaultVideoParams(composerModel));
-    // Saving the first quote assigns an id without selecting a different
-    // conversation. Keep the parameters the user is about to confirm.
-  }, [assistant.selectionKey, composerModel?.id]);
-  const videoQuoteOpen = Boolean(
-    videoConfirmation &&
-      videoConfirmation.owner === bootstrap?.owner &&
-      videoConfirmation.generation === bootstrap?.authorityGeneration &&
-      videoConfirmation.sessionId === session?.id &&
-      videoConfirmation.modelId === composerModel?.id &&
-      videoConfirmation.text === assistant.draft,
-  );
-  useEffect(() => {
-    if (videoConfirmation && !videoQuoteOpen) setVideoConfirmation(null);
-  }, [videoQuoteOpen, videoConfirmation]);
-  const frameOptions = [
-    ...new Map(
-      [...(detail?.attachments ?? []), ...files].map((file) => [file.id, file]),
-    ).values(),
-  ];
-  const [imageParams, setImageParams] = useState<AssistantImageRequest>({});
-  useEffect(() => setImageParams({}), [session?.id, composerModel?.id]);
-  const invalidImageInput =
-    imageMode &&
-    files.length > 0 &&
-    (!composerModel.image?.edits ||
-      files.length > 1 ||
-      files.some(
-        (file) =>
-          !["image/png", "image/jpeg", "image/webp"].includes(file.mimeType) ||
-          file.sizeBytes > 15 * 1024 * 1024,
-      ));
   const imagesNeedVision =
-    !imageMode &&
-    !videoMode &&
     composerModel?.supportsImages === false &&
     files.some((file) => file.mimeType.startsWith("image/"));
+  // Generation needs a model that takes tools.
+  const generationNeedsTools =
+    (assistant.media.hints?.length ?? 0) > 0 && composerModel?.tools === false;
+  // The API's reference limits, shown on the files before anything is sent.
+  const referenceOverflow =
+    assistant.media.hints?.includes("video") &&
+    (files.filter((file) => file.mimeType.startsWith("image/")).length > 9 ||
+      files.filter((file) => file.mimeType.startsWith("audio/")).length > 3 ||
+      files.filter((file) => file.mimeType.startsWith("video/")).length > 1);
   // The backend refuses a message of more than MAX_MESSAGE_BYTES of text.
   const draftBytes = useMemo(
     () => new TextEncoder().encode(assistant.draft).length,
@@ -518,12 +539,15 @@ function AssistantWorkspace() {
   }
   useEffect(settleFocus);
 
-  useShellRefresh("assistant", async () => {
+  // Reload the models, the list and the open conversation: the ⋯ menu's
+  // 刷新, and the shell's refresh while this page is open.
+  const reloadAll = async () => {
     await assistant.loadBootstrap(true);
     await assistant.refreshSessions();
     if (assistant.selectedId)
       await assistant.refreshDetail(assistant.selectedId);
-  });
+  };
+  useShellRefresh("assistant", reloadAll);
 
   useEffect(() => {
     setRenaming(false);
@@ -548,15 +572,55 @@ function AssistantWorkspace() {
   useLayoutEffect(() => {
     const input = composer.current;
     if (!input) return;
+    const [min, max] = wide ? [96, 200] : [76, 160];
     const resize = () => {
       // Clear the previous height so deleting text can shrink the field.
       input.style.height = "auto";
-      input.style.height = `${Math.max(76, Math.min(160, input.scrollHeight))}px`;
+      input.style.height = `${Math.max(min, Math.min(max, input.scrollHeight))}px`;
     };
     resize();
     window.addEventListener("resize", resize);
     return () => window.removeEventListener("resize", resize);
-  }, [assistant.draft, assistant.selectedId, sidebarCollapsed, trashed]);
+  }, [assistant.draft, assistant.selectedId, sidebarCollapsed, trashed, wide]);
+  // Switching between the narrow and the wide page reflows the transcript
+  // (other sizes, another width). One that followed its end stays there;
+  // otherwise the message at its top stays where it was. Read while
+  // rendering the switch, before the new sizes apply.
+  const reflow = useRef({ wide, id: null as string | null, offset: 0 });
+  if (reflow.current.wide !== wide) {
+    const view = scroll.current;
+    const top = view?.getBoundingClientRect().top ?? 0;
+    const first = follow.current
+      ? undefined
+      : [
+          ...(view?.querySelectorAll<HTMLElement>("[data-message-id]") ?? []),
+        ].find((message) => message.getBoundingClientRect().bottom > top);
+    reflow.current = {
+      wide,
+      id: first?.dataset.messageId ?? null,
+      offset: first ? first.getBoundingClientRect().top - top : 0,
+    };
+  }
+  const reflowed = useRef(wide);
+  useLayoutEffect(() => {
+    if (reflowed.current === wide) return;
+    reflowed.current = wide;
+    const view = scroll.current;
+    if (!view) return;
+    if (follow.current) {
+      view.scrollTop = view.scrollHeight;
+      return;
+    }
+    const { id, offset } = reflow.current;
+    const message = id
+      ? view.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(id)}"]`)
+      : null;
+    if (message)
+      view.scrollTop +=
+        message.getBoundingClientRect().top -
+        view.getBoundingClientRect().top -
+        offset;
+  }, [wide]);
   useLayoutEffect(() => {
     if (!focusStarter.current) return;
     focusStarter.current = false;
@@ -572,21 +636,8 @@ function AssistantWorkspace() {
       if (assistant.enqueue()) focusComposer();
       return;
     }
-    if (invalidImageInput) return;
-    if (videoMode) {
-      void assistant.quoteVideo(videoParams).then((confirmation) => {
-        if (confirmation) setVideoConfirmation(confirmation);
-      });
-      return;
-    }
     follow.current = true;
-    const media = imageMode
-      ? {
-          ...imageParams,
-          ...(files[0] ? { inputAttachmentId: files[0].id } : {}),
-        }
-      : undefined;
-    void assistant.send(media ? { media } : undefined).then((sent) => {
+    void assistant.send().then((sent) => {
       if (sent) composer.current?.focus();
     });
   };
@@ -623,6 +674,43 @@ function AssistantWorkspace() {
             expectedOwner: bootstrap.owner!,
             expectedGeneration: bootstrap.authorityGeneration,
           })
+        }
+      />
+    ) : undefined;
+  const generationCards = (message: AssistantMessage, live = false) =>
+    session && bootstrap?.owner && message.generations?.length ? (
+      <GenerationCards
+        message={message}
+        sessionId={session.id}
+        owner={bootstrap.owner}
+        generation={bootstrap.authorityGeneration}
+        models={generationCatalog}
+        disabled={!available || assistant.loading || trashed}
+        onSave={(file) =>
+          assistantApi.saveMedia({
+            sessionId: session.id,
+            attachmentId: file.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+          })
+        }
+        onCancelVideo={(item) =>
+          item.status === "submitting"
+            ? assistant.stop()
+            : assistant.generationVideo("cancel", message, item)
+        }
+        onResumeVideo={(item) =>
+          assistant.generationVideo("resume", message, item)
+        }
+        onRegenerate={
+          live || !writable
+            ? undefined
+            : (item, input) => assistant.regenerateMedia(message, item, input)
+        }
+        sourceFile={(id) =>
+          messages
+            .flatMap((item) => item.attachments ?? [])
+            .find((file) => file.id === id)
         }
       />
     ) : undefined;
@@ -896,16 +984,81 @@ function AssistantWorkspace() {
     </Button>
   );
 
+  const column = wide
+    ? "w-[clamp(840px,72%,1040px)] max-w-full"
+    : "w-full max-w-[760px]";
+  // A new conversation of a wide window starts with its composer in the
+  // middle of the page, the starters under it.
+  const centred = wide && emptyTranscript && !assistant.loading && !trashed;
+  const drag = wide && isMac() ? { "data-tauri-drag-region": true } : {};
+  const titleShown = !wide || sidebarCollapsed;
+  const modelPicker = Boolean(session || bootstrap?.models.length) && (
+    <AssistantModelPicker
+      models={(bootstrap?.models ?? []).filter(
+        (model) => (model.kind ?? "chat") === "chat",
+      )}
+      rememberedModels={bootstrap?.rememberedModels}
+      value={session?.modelId ?? assistant.newModelId}
+      onChange={(modelId) =>
+        session
+          ? void assistant.update({ modelId })
+          : assistant.chooseNewModel(modelId)
+      }
+      partial={Boolean(bootstrap?.partial?.length)}
+      disabled={!writable}
+      placeholder={session?.modelId || t("assistant.model")}
+    />
+  );
+  const starterButtons = writable && !assistant.draft.trim() && (
+    <div
+      className={cn(
+        "flex flex-wrap justify-center gap-2",
+        centred ? "mt-4" : "mt-5",
+      )}
+    >
+      {starters.map(({ id, kind }) => (
+        <Button
+          key={id}
+          variant="pill"
+          className="h-8 px-3.5 text-ctl"
+          onClick={() => {
+            focusStarter.current = true;
+            const hints = assistant.media.hints ?? [];
+            if (kind && !hints.includes(kind))
+              assistant.setMedia({
+                ...assistant.media,
+                hints: [...hints, kind],
+              });
+            assistant.setDraft(t(`assistant.starters.${id}.prompt`));
+          }}
+        >
+          {t(`assistant.starters.${id}.label`)}
+        </Button>
+      ))}
+    </div>
+  );
+
+  const opening = useLoadingFox(assistant.loading, {
+    size: "block",
+    label: t("assistant.loading"),
+  });
   return (
     <div
       ref={workspace}
       tabIndex={-1}
-      className="flex h-full min-h-0 overflow-hidden rounded-list border border-line bg-card outline-none"
+      data-layout={wide ? "wide" : "narrow"}
+      className={cn(
+        "flex h-full min-h-0 overflow-hidden bg-card outline-none",
+        wide
+          ? "[--ctl-h:30px] [--fs-ctl:13.5px] [--fs-micro:11.5px] [--fs-nav:14px] [--fs-note:12px] [--fs-sub:12.5px] [--fs-title:17px] [--fs-ui:15px] [--icon-btn:30px]"
+          : "rounded-list border border-line",
+      )}
       onKeyDown={handleShortcuts}
     >
       <AssistantSidebar
         ref={sidebarHandle}
         id={sidebarId}
+        wide={wide}
         collapsed={sidebarCollapsed}
         assistant={assistant}
         canCreate={available && !busy}
@@ -935,8 +1088,20 @@ function AssistantWorkspace() {
         className="flex min-h-0 min-w-0 flex-1 flex-col"
         aria-label={t("assistant.chat")}
       >
-        <header className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2.5">
-          <div className="flex min-w-0 flex-1 items-center gap-1">
+        <header
+          // The top of a wide window, the top bar gone, drags it.
+          {...drag}
+          className={cn(
+            "flex shrink-0 items-center gap-3 px-4 py-2.5",
+            !wide && "border-b border-line",
+          )}
+        >
+          <div
+            className={cn(
+              "flex min-w-0 items-center gap-1",
+              wide ? "shrink" : "flex-1",
+            )}
+          >
             <Button
               ref={sidebarToggle}
               variant="icon"
@@ -967,7 +1132,11 @@ function AssistantWorkspace() {
               />
             ) : (
               <h1
-                className="min-w-0 truncate text-ui font-semibold"
+                // Kept for a screen reader where the list already shows it.
+                className={cn(
+                  "min-w-0 truncate text-ui font-semibold",
+                  !titleShown && "sr-only",
+                )}
                 // A conversation in the trash is read-only until restored.
                 onDoubleClick={
                   session && !sessionTrashed
@@ -979,20 +1148,11 @@ function AssistantWorkspace() {
               </h1>
             )}
           </div>
-          {Boolean(session || bootstrap?.models.length) && (
-            <AssistantModelPicker
-              models={bootstrap?.models ?? []}
-              rememberedModels={bootstrap?.rememberedModels}
-              value={session?.modelId ?? assistant.newModelId}
-              onChange={(modelId) =>
-                session
-                  ? void assistant.update({ modelId })
-                  : assistant.chooseNewModel(modelId)
-              }
-              partial={Boolean(bootstrap?.partial?.length)}
-              disabled={!writable}
-              placeholder={session?.modelId || t("assistant.model")}
-            />
+          {modelPicker}
+          {/* The empty rest of a wide top row: it drags the window, since
+              Tauri drags only from the element pressed. */}
+          {wide && (
+            <div aria-hidden className="flex-1 self-stretch" {...drag} />
           )}
           {session && (
             <DropdownMenu modal={false}>
@@ -1023,6 +1183,16 @@ function AssistantWorkspace() {
                   action();
                 }}
               >
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void reloadAll().catch((e) =>
+                      console.error("[Assistant] refresh failed", e),
+                    )
+                  }
+                >
+                  <RefreshCw aria-hidden className="h-3.5 w-3.5 shrink-0" />
+                  {t("shell.refresh")}
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={sessionTrashed}
                   onSelect={() => {
@@ -1067,8 +1237,6 @@ function AssistantWorkspace() {
                     Boolean(run) ||
                     assistant.loading ||
                     sessionTrashed ||
-                    imageMode ||
-                    videoMode ||
                     !messages.length
                   }
                   onSelect={() => {
@@ -1240,8 +1408,19 @@ function AssistantWorkspace() {
         )}
         {/* The drop overlay covers what the files would be added to: the
             transcript and the composer. */}
-        <div className="relative flex min-h-0 flex-1 flex-col">
-          <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          data-centred={centred ? "true" : "false"}
+          className={cn(
+            "relative flex min-h-0 flex-1 flex-col",
+            centred && "justify-center pb-[12vh]",
+          )}
+        >
+          <div
+            className={cn(
+              "relative flex min-h-0 flex-col",
+              centred ? "flex-none" : "flex-1",
+            )}
+          >
             <div
               ref={scroll}
               onScroll={trackScroll}
@@ -1249,21 +1428,23 @@ function AssistantWorkspace() {
               onTouchMove={endJump}
               onPointerDown={endJump}
               onKeyDown={endJump}
-              className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
+              className={cn(
+                "min-h-0 overflow-y-auto overscroll-contain px-4",
+                centred ? "flex-none" : "flex-1",
+              )}
               aria-busy={assistant.loading}
             >
-              {assistant.loading ? (
-                <div
-                  role="status"
-                  className="flex justify-center gap-2 py-12 text-ctl text-ink-muted"
-                >
-                  <Loader2 aria-hidden className="h-4 w-4 animate-spin" />
-                  {t("assistant.loading")}
-                </div>
+              {opening.loading ? (
+                opening.fox
               ) : (
                 <>
                   {emptyTranscript && (
-                    <div className="mx-auto flex min-h-full max-w-lg flex-col items-center justify-center py-8 text-center">
+                    <div
+                      className={cn(
+                        "mx-auto flex max-w-lg flex-col items-center justify-center text-center",
+                        centred ? "pb-2" : "min-h-full py-8",
+                      )}
+                    >
                       <h2 className="text-title font-semibold">
                         {t(trashed ? "assistant.trash" : "assistant.welcome")}
                       </h2>
@@ -1274,25 +1455,7 @@ function AssistantWorkspace() {
                           {t("assistant.trashSelect")}
                         </p>
                       )}
-                      {writable && !assistant.draft.trim() && (
-                        <div className="mt-5 flex flex-wrap justify-center gap-2">
-                          {STARTERS.map((id) => (
-                            <Button
-                              key={id}
-                              variant="pill"
-                              className="h-8 px-3.5 text-ctl"
-                              onClick={() => {
-                                focusStarter.current = true;
-                                assistant.setDraft(
-                                  t(`assistant.starters.${id}.prompt`),
-                                );
-                              }}
-                            >
-                              {t(`assistant.starters.${id}.label`)}
-                            </Button>
-                          ))}
-                        </div>
-                      )}
+                      {!centred && starterButtons}
                       {!trashed && (
                         <p className="mt-4 text-balance text-note text-ink-muted">
                           {t(
@@ -1309,7 +1472,12 @@ function AssistantWorkspace() {
                       )}
                     </div>
                   )}
-                  <div className="mx-auto max-w-[760px] py-2">
+                  <div
+                    className={cn(
+                      "mx-auto py-2",
+                      wide ? column : "max-w-[760px]",
+                    )}
+                  >
                     {messages.map((message) => {
                       const turn = versions.get(message.id);
                       return (
@@ -1352,59 +1520,10 @@ function AssistantWorkspace() {
                                       bootstrap.authorityGeneration,
                                   })
                                 }
-                                onUseInput={(file) => {
-                                  const target =
-                                    (composerModel?.kind === "image" &&
-                                    composerModel.image?.edits
-                                      ? composerModel
-                                      : bootstrap.models.find(
-                                          (model) =>
-                                            model.id === message.media?.model &&
-                                            model.image?.edits,
-                                        )) ??
-                                    bootstrap.models.find(
-                                      (model) =>
-                                        model.kind === "image" &&
-                                        model.image?.edits,
-                                    );
-                                  if (target)
-                                    void assistant
-                                      .useMediaInput(file, target.id)
-                                      .then((ok) => {
-                                        if (ok) focusComposer();
-                                      });
-                                }}
-                                onRegenerate={() =>
-                                  void (async () => {
-                                    const media = message.media!;
-                                    if (media.kind !== "image") return;
-                                    const question = messages.find(
-                                      (item) =>
-                                        item.role === "user" &&
-                                        item.runId === message.runId,
-                                    );
-                                    if (!question) return;
-                                    if (
-                                      session.modelId !== media.model &&
-                                      !(await actions.current.update({
-                                        modelId: media.model,
-                                      }))
-                                    )
-                                      return;
-                                    await actions.current.send({
-                                      text: question.content,
-                                      attachments:
-                                        assistant.detail?.attachments.filter(
-                                          (file) =>
-                                            media.inputIds.includes(file.id),
-                                        ),
-                                      media: media.params,
-                                    });
-                                  })()
-                                }
                               />
                             ) : undefined
                           }
+                          generations={generationCards(message)}
                           models={bootstrap?.models}
                           currentModelId={session?.modelId}
                           versions={turn}
@@ -1421,10 +1540,9 @@ function AssistantWorkspace() {
                           onSwitchVersion={switchVersion}
                           onFork={forkMessage}
                           onSpeak={
-                            speechAvailable
-                              ? (messageId, text) => {
-                                  void openSpeech(text, messageId);
-                                }
+                            readAloud.available
+                              ? (messageId, text) =>
+                                  void readAloud.speak(messageId, text)
                               : undefined
                           }
                           onQuote={
@@ -1468,11 +1586,10 @@ function AssistantWorkspace() {
                                 generation={bootstrap.authorityGeneration}
                                 disabled
                                 onSave={async () => false}
-                                onUseInput={() => {}}
-                                onRegenerate={() => {}}
                               />
                             ) : undefined
                           }
+                          generations={generationCards(assistant.stream, true)}
                           activity={assistant.activity}
                           thinking={assistant.thinking}
                           searchUnavailable={assistant.searchSkipped.has(
@@ -1546,7 +1663,10 @@ function AssistantWorkspace() {
               // Read-only until restored: no composer, and the way back.
               <div
                 role="status"
-                className="mx-auto flex w-full max-w-[760px] flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4"
+                className={cn(
+                  "mx-auto flex flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4",
+                  column,
+                )}
               >
                 <p className="text-center text-ctl text-ink-2">
                   {t("assistant.trashHint")}
@@ -1561,7 +1681,7 @@ function AssistantWorkspace() {
                 </Button>
               </div>
             ) : (
-              <div className="mx-auto flex min-h-0 w-full max-w-[760px] flex-col">
+              <div className={cn("mx-auto flex min-h-0 flex-col", column)}>
                 <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
                   {queueCount > 0 && assistant.queue && (
                     <AssistantQueue
@@ -1598,23 +1718,6 @@ function AssistantWorkspace() {
                       removeDisabled={busy || Boolean(run) || trashed}
                     />
                   </div>
-                  {videoMode && composerModel && (
-                    <VideoParams
-                      model={composerModel}
-                      value={videoParams}
-                      attachments={frameOptions}
-                      onChange={setVideoParams}
-                      disabled={!writable}
-                    />
-                  )}
-                  {imageMode && composerModel && (
-                    <ImageParams
-                      model={composerModel}
-                      value={imageParams}
-                      onChange={setImageParams}
-                      disabled={!writable}
-                    />
-                  )}
                   <div aria-live="polite" className="shrink-0 px-3">
                     {queueMode && (queueFull || files.length > 0) && (
                       <p
@@ -1629,13 +1732,14 @@ function AssistantWorkspace() {
                         )}
                       </p>
                     )}
-                    {invalidImageInput && (
-                      <p className="text-note text-danger">
-                        {t(
-                          composerModel?.image?.edits
-                            ? "assistant.media.inputHint"
-                            : "assistant.media.noInput",
-                        )}
+                    {referenceOverflow && (
+                      <p className="mt-1.5 text-note text-danger">
+                        {t("assistant.generation.overLimit")}
+                      </p>
+                    )}
+                    {generationNeedsTools && (
+                      <p className="mt-1.5 text-note text-warn">
+                        {t("assistant.generation.needsTools")}
                       </p>
                     )}
                     {blockedFiles && (
@@ -1663,7 +1767,12 @@ function AssistantWorkspace() {
                   <Textarea
                     ref={composer}
                     rows={3}
-                    className="max-h-40 min-h-[76px] shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0"
+                    className={cn(
+                      "shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0",
+                      wide
+                        ? "max-h-[200px] min-h-[96px]"
+                        : "max-h-40 min-h-[76px]",
+                    )}
                     aria-label={t("assistant.message")}
                     placeholder={t("assistant.composerPlaceholder")}
                     value={assistant.draft}
@@ -1709,97 +1818,74 @@ function AssistantWorkspace() {
                   />
                   <div className="flex shrink-0 items-center justify-between gap-2 pb-2 pl-2 pr-3">
                     <div className="flex min-w-0 items-center gap-1.5">
-                      <Button
-                        variant="icon"
-                        aria-label={t("assistant.attach")}
-                        title={t("assistant.attach")}
-                        disabled={
-                          !writable ||
-                          queueCount > 0 ||
-                          (imageMode &&
-                            (!composerModel?.image?.edits || files.length > 0))
-                        }
-                        onClick={() =>
+                      <ComposerPlus
+                        models={generationCatalog}
+                        media={assistant.media}
+                        onMedia={assistant.setMedia}
+                        canAttach={writable && queueCount === 0}
+                        onAttach={() =>
                           // The dialog leaves focus on a button disabled while
                           // it was open: the message takes it back.
                           void assistant.pickAttachments().then(focusComposer)
                         }
-                      >
-                        <Paperclip aria-hidden className="h-3.5 w-3.5" />
-                      </Button>
-                      {!imageMode &&
-                        !videoMode &&
-                        bootstrap?.audioModels?.some(
-                          (model) =>
-                            model.kind === "transcription" && model.audio,
-                        ) && (
-                          <Button
-                            variant="icon"
-                            aria-label={t("assistant.audio.title")}
-                            title={t("assistant.audio.title")}
-                            disabled={!writable || queueCount > 0}
-                            onClick={() => {
-                              void assistant.prepareAudio().then((target) => {
-                                if (target) setAudioDialog(target);
-                              });
-                            }}
-                          >
-                            <Mic aria-hidden className="h-3.5 w-3.5" />
-                          </Button>
-                        )}
-                      {!imageMode && !videoMode && speechAvailable && (
+                        disabled={!available || trashed}
+                      />
+                      {bootstrap?.audioModels?.some(
+                        (model) =>
+                          model.kind === "transcription" && model.audio,
+                      ) && (
                         <Button
                           variant="icon"
-                          aria-label={t("assistant.speech.title")}
-                          title={t("assistant.speech.title")}
+                          aria-label={t("assistant.audio.title")}
+                          title={t("assistant.audio.title")}
                           disabled={!writable || queueCount > 0}
-                          onClick={() => void openSpeech(assistant.draft)}
+                          onClick={() => {
+                            void assistant.prepareAudio().then((target) => {
+                              if (target) setAudioDialog(target);
+                            });
+                          }}
                         >
-                          <Volume2 aria-hidden className="h-3.5 w-3.5" />
+                          <Mic aria-hidden className="h-3.5 w-3.5" />
                         </Button>
                       )}
-                      {!imageMode &&
-                        !videoMode &&
-                        (showSearchNote ? (
-                          <Tooltip>
-                            {/* The wrapper takes the hover while the switch is off. */}
-                            <TooltipTrigger asChild>
-                              <span className="inline-flex shrink-0">
-                                {webSearchToggle}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              {searchNote}
-                            </TooltipContent>
-                          </Tooltip>
-                        ) : (
-                          webSearchToggle
-                        ))}
-                      {!imageMode && !videoMode && (
-                        <LocalConfigControl
-                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
-                          on={assistant.localConfig}
-                          mode={assistant.localMode}
-                          disabled={settingsLocked || !!assistant.run}
-                          onToggle={(on) => void assistant.setLocalConfig(on)}
-                          onMode={assistant.setLocalPermission}
-                        />
+                      {showSearchNote ? (
+                        <Tooltip>
+                          {/* The wrapper takes the hover while the switch is off. */}
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex shrink-0">
+                              {webSearchToggle}
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top">
+                            {searchNote}
+                          </TooltipContent>
+                        </Tooltip>
+                      ) : (
+                        webSearchToggle
                       )}
-                      {!imageMode && !videoMode && showSearchNote && (
+                      {showSearchNote && (
                         <span id={searchNoteId} className="sr-only">
                           {searchNote}
                         </span>
                       )}
+                      {composerModel?.tools !== false && (
+                        <PermissionControl
+                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
+                          mode={assistant.localMode}
+                          disabled={settingsLocked || !!assistant.run}
+                          onMode={assistant.setLocalPermission}
+                        />
+                      )}
                       {/* A reply under way goes on as it began: the choice is
                       for the next message. */}
-                      {!imageMode && !videoMode && (
+                      {
                         <ThinkingMenu
                           model={composerModel}
                           level={assistant.thinkingLevel}
                           disabled={settingsLocked}
                           onChange={assistant.setThinkingLevel}
                         />
-                      )}
+                      }
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       {showLength && (
@@ -1809,7 +1895,7 @@ function AssistantWorkspace() {
                           })}
                         </span>
                       )}
-                      {!imageMode && !videoMode && (
+                      {
                         <AssistantContextUsage
                           modelId={session?.modelId ?? ""}
                           usage={
@@ -1818,7 +1904,7 @@ function AssistantWorkspace() {
                               : session?.contextUsage
                           }
                         />
-                      )}
+                      }
                       {run && queueMode && (
                         <Button
                           variant="ghost"
@@ -1882,7 +1968,7 @@ function AssistantWorkspace() {
                                 disabled={
                                   !(queueMode ? canQueue : writable) ||
                                   blockedFiles ||
-                                  invalidImageInput ||
+                                  referenceOverflow ||
                                   overLength ||
                                   (!assistant.draft.trim() && !files.length)
                                 }
@@ -1922,6 +2008,7 @@ function AssistantWorkspace() {
                     {t("assistant.webSearchNextMessage")}
                   </p>
                 )}
+                {centred && starterButtons}
               </div>
             )}
           </footer>
@@ -1961,70 +2048,6 @@ function AssistantWorkspace() {
             }}
           />
         )}
-      {interactionActive &&
-        speechDialog &&
-        speechDialog.target.expectedOwner === bootstrap?.owner &&
-        speechDialog.target.expectedGeneration ===
-          bootstrap.authorityGeneration &&
-        speechDialog.target.sessionId === assistant.selectedId &&
-        speechDialog.target.selectionKey === assistant.selectionKey &&
-        !trashed && (
-          <AssistantSpeechOutput
-            key={`${speechDialog.target.expectedOwner}:${speechDialog.target.expectedGeneration}:${speechDialog.target.sessionId}:${speechDialog.target.selectionKey}`}
-            target={speechDialog.target}
-            models={bootstrap.audioModels ?? []}
-            rememberedModel={bootstrap.rememberedModels?.speech}
-            speechPreferences={bootstrap.speechPreferences}
-            initialText={speechDialog.text}
-            sourceMessageId={speechDialog.sourceMessageId}
-            history={detail?.audioOperations}
-            onClose={() => {
-              setSpeechDialog(null);
-              requestAnimationFrame(focusComposer);
-            }}
-          />
-        )}
-      <ConfirmDialog
-        isOpen={videoQuoteOpen}
-        title={t("assistant.video.confirmTitle")}
-        message={
-          videoConfirmation?.quote.estimatedCostUsd != null
-            ? t("assistant.video.estimate", {
-                cost: videoConfirmation.quote.estimatedCostUsd,
-              })
-            : t("assistant.video.unknownPrice")
-        }
-        details={
-          videoConfirmation && (
-            <p>
-              {composerModel?.name} ·{" "}
-              {t("assistant.video.seconds", {
-                count: videoConfirmation.video.duration,
-              })}{" "}
-              · {videoConfirmation.video.resolution}
-            </p>
-          )
-        }
-        variant="info"
-        confirmText={t(
-          videoConfirmation?.quote.estimatedCostUsd == null
-            ? "assistant.video.submitAnyway"
-            : "assistant.video.confirm",
-        )}
-        onCancel={() => setVideoConfirmation(null)}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          focusComposer();
-        }}
-        onConfirm={() => {
-          const confirmation = videoConfirmation;
-          setVideoConfirmation(null);
-          if (confirmation && videoQuoteOpen)
-            void assistant.sendVideo(confirmation).then((sent) => {
-              if (sent) focusComposer();
-            });
-        }}
-      />
       <ConfirmDialog
         isOpen={
           backupDialog !== null &&

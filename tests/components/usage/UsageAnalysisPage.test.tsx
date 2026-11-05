@@ -564,12 +564,9 @@ it("keeps ranking-selected filters visible without jumping and removes only the 
   );
   await userEvent.click(screen.getByRole("option", { name: "model-a" }));
   await userEvent.keyboard("{Escape}");
-  await userEvent.click(
-    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
-      "button",
-      { name: "Codex" },
-    ),
-  );
+  await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
+  await userEvent.click(screen.getByRole("option", { name: "Codex" }));
+  await userEvent.keyboard("{Escape}");
   await waitFor(() =>
     expect(mocks.invoke).toHaveBeenLastCalledWith(
       "get_session_usage_analytics",
@@ -712,12 +709,9 @@ it("removes one project from a multi-selected ranking without altering other dim
   await userEvent.click(screen.getByRole("option", { name: "project" }));
   await userEvent.click(screen.getByRole("option", { name: "second" }));
   await userEvent.keyboard("{Escape}");
-  await userEvent.click(
-    within(screen.getByRole("group", { name: "工具筛选" })).getByRole(
-      "button",
-      { name: "Codex" },
-    ),
-  );
+  await userEvent.click(screen.getByRole("combobox", { name: "工具筛选" }));
+  await userEvent.click(screen.getByRole("option", { name: "Codex" }));
+  await userEvent.keyboard("{Escape}");
   await waitFor(() =>
     expect(
       screen.getByRole("button", { name: "移除 project 筛选" }),

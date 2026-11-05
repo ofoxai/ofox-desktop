@@ -7,7 +7,7 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
 import zh from "@/i18n/locales/zh.json";
 import en from "@/i18n/locales/en.json";
@@ -184,7 +184,8 @@ it.each([
         onLoginRequested={onLoginRequested}
       />,
     );
-    const next = await screen.findByRole("button", { name });
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    const next = await within(tools).findByRole("button", { name });
     expect(next).toHaveClass("bg-brand");
     fireEvent.click(next);
     expect(onLoginRequested).toHaveBeenCalledOnce();
@@ -346,17 +347,32 @@ beforeEach(async () => {
   await cacheUpdates([]);
 });
 
-describe("Console title bar", () => {
-  it("draws its own brand under the macOS overlay title bar", async () => {
+afterEach(() => {
+  window.innerWidth = 1024;
+});
+
+describe("Console title bar of a wide window", () => {
+  it("drags the window from the sidebar's top and the page title under the macOS overlay title bar", async () => {
+    window.innerWidth = 1512;
     render(<ConsolePage boundTools={[]} />);
-    expect(await screen.findByText("Ofox Desktop")).toBeVisible();
+    await screen.findByText("Test User");
+    expect(screen.getByTestId("sidebar-top")).toHaveAttribute(
+      "data-tauri-drag-region",
+    );
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    expect(tools.querySelector("[data-page-header]")).toHaveAttribute(
+      "data-tauri-drag-region",
+    );
   });
 
-  it("leaves the title to the native title bar elsewhere", async () => {
+  it("leaves the dragging to the native title bar elsewhere", async () => {
+    window.innerWidth = 1512;
     mocks.mac = false;
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
-    expect(screen.queryByText("Ofox Desktop")).toBeNull();
+    expect(screen.getByTestId("sidebar-top")).not.toHaveAttribute(
+      "data-tauri-drag-region",
+    );
   });
 
   it("draws on the canvas, without the orange gradient", async () => {
@@ -368,15 +384,15 @@ describe("Console title bar", () => {
 });
 
 describe("Console navigation", () => {
-  it("offers 工具, 会话, 资源库, 用量 and 助手, and no 模型方案 tab", async () => {
+  it("offers 工具, 会话, 资源库, 助手 and 用量, and no 模型方案 tab", async () => {
     render(<ConsolePage boundTools={[]} />);
     await screen.findByText("Test User");
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "工具",
       "会话",
       "资源库",
-      "用量",
       "助手",
+      "用量",
     ]);
   });
 
@@ -396,6 +412,19 @@ describe("Console navigation", () => {
     fireEvent.click(screen.getByRole("tab", { name: "工具" }));
     expect(screen.getByRole("group", { name: "WorkBuddy" })).toBe(row);
     expect(fold).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("titles the sessions page 会话, with its refresh in the title row", async () => {
+    window.innerWidth = 1512;
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    fireEvent.click(screen.getByRole("tab", { name: "会话" }));
+    const sessions = screen.getByRole("tabpanel", { name: "会话" });
+    const header = sessions.querySelector<HTMLElement>("[data-page-header]")!;
+    expect(
+      within(header).getByRole("heading", { level: 1, name: "会话" }),
+    ).toBeVisible();
+    expect(within(header).getByRole("button", { name: "刷新" })).toBeVisible();
   });
 
   it("mounts 用量 on its first visit and keeps it, hidden, after", async () => {
@@ -439,9 +468,11 @@ describe("Console assistant", () => {
       fireEvent.click(screen.getByRole("tab", { name: "助手" }));
       await act(async () => undefined);
       expect(assistantCalls()).toHaveLength(0);
-      expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
       expect(onLoginRequested).not.toHaveBeenCalled();
-      fireEvent.click(screen.getByRole("button", { name: "登录 Ofox" }));
+      const assistant = screen.getByRole("tabpanel", { name: "助手" });
+      fireEvent.click(
+        within(assistant).getByRole("button", { name: "登录 Ofox" }),
+      );
       expect(onLoginRequested).toHaveBeenCalledOnce();
       expect(mocks.openExternal).not.toHaveBeenCalled();
     },
@@ -509,7 +540,8 @@ describe("Console model profiles", () => {
 });
 
 describe("Console tools page", () => {
-  it("heads the list 已绑定的工具 with its count, the 方案 menu and 添加", async () => {
+  it("heads the list 已绑定的工具 with its count, with 方案, 添加 and refresh in the page title row", async () => {
+    window.innerWidth = 1512;
     localTools = [localTool("claude", "2.1.293")];
     render(<ConsolePage boundTools={["claude"]} />);
     await screen.findByRole("group", { name: "Claude Code" });
@@ -517,13 +549,18 @@ describe("Console tools page", () => {
     const heading = within(tools).getByRole("heading", {
       name: "已绑定的工具",
     });
-    const toolbar = heading.parentElement!;
-    expect(within(toolbar).getByText("1")).toBeVisible();
+    expect(within(heading.parentElement!).getByText("1")).toBeVisible();
+    const header = tools.querySelector<HTMLElement>("[data-page-header]")!;
     expect(
-      within(toolbar)
+      within(header).getByRole("heading", { level: 1, name: "工具" }),
+    ).toBeVisible();
+    expect(
+      within(header)
         .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(["方案", "添加"]);
+        .map(
+          (button) => button.getAttribute("aria-label") ?? button.textContent,
+        ),
+    ).toEqual(["方案", "添加", "刷新"]);
   });
 
   it("folds the tools that are not installed into a card of their own", async () => {
@@ -561,7 +598,7 @@ describe("Console tools page", () => {
       fireEvent.click(
         within(tools).getByRole("button", { name: /^Not installed/ }),
       );
-      await within(tools).findByText("$12.50");
+      await screen.findByText(/\$12\.50/);
       expect(
         within(tools).getByRole("heading", { name: "Bound tools" }),
       ).toBeVisible();
@@ -604,7 +641,10 @@ describe("Console header", () => {
     ).length;
 
     fireEvent.click(screen.getByRole("tab", { name: "用量" }));
-    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    const usage = screen.getByRole("tabpanel", { name: "用量" });
+    fireEvent.click(
+      within(usage).getByRole("button", { name: "刷新本机数据" }),
+    );
 
     await waitFor(() =>
       expect(mocks.invoke).toHaveBeenCalledWith("sync_session_usage"),
@@ -625,7 +665,7 @@ describe("Console usage page", () => {
       balance: { balance: 12.5 },
     });
     render(<ConsolePage boundTools={[]} />);
-    await screen.findAllByText("$12.50");
+    await screen.findAllByText(/\$12\.50/);
 
     fireEvent.click(screen.getByRole("tab", { name: "用量" }));
     const usage = screen.getByRole("tabpanel", { name: "用量" });
@@ -641,39 +681,33 @@ describe("Console usage page", () => {
   });
 });
 
-describe("Console balance card", () => {
-  it("highlights the card when the balance is zero", async () => {
+describe("Console sidebar balance of a wide window", () => {
+  it("shows a spent balance in red", async () => {
+    window.innerWidth = 1512;
     mocks.getUserInfo.mockResolvedValue({
       name: "Test User",
       balance: { balance: 0 },
     });
     render(<ConsolePage boundTools={[]} />);
 
-    expect(await screen.findByText("$0.00")).toBeVisible();
-    expect(screen.getByTestId("balance-card")).toHaveAttribute(
-      "data-empty",
-      "true",
-    );
+    expect(await screen.findByText("余额 $0.00")).toHaveClass("text-danger");
   });
 
   it("does not highlight a positive or unknown balance", async () => {
+    window.innerWidth = 1512;
     mocks.getUserInfo.mockResolvedValue({
       name: "Test User",
       balance: { balance: 12.5 },
     });
     const { unmount } = render(<ConsolePage boundTools={[]} />);
-    expect(await screen.findByText("$12.50")).toBeVisible();
-    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
-      "data-empty",
+    expect(await screen.findByText("余额 $12.50")).not.toHaveClass(
+      "text-danger",
     );
     unmount();
 
     mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
     render(<ConsolePage boundTools={[]} />);
-    expect(await screen.findByText("—")).toBeVisible();
-    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
-      "data-empty",
-    );
+    expect(await screen.findByText("余额 —")).not.toHaveClass("text-danger");
   });
 });
 
@@ -1189,7 +1223,12 @@ describe("Bound tool lifecycle", () => {
     expect(screen.getByText("2")).toBeVisible();
     fireEvent.click(fold);
     const row = screen.getByRole("group", { name: "WorkBuddy" });
-    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "前往下载", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual([
+      "用不了？让助手看看",
+      "前往下载",
+      "配置",
+      "更多操作",
+    ]);
     expect(
       within(row).getByRole("combobox", { name: "0 个模型" }),
     ).toBeVisible();
@@ -1216,7 +1255,12 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["codex"]} />);
     const row = await screen.findByRole("group", { name: "Codex" });
     expect(within(row).getByText("检测失败")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "重新检测", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual([
+      "用不了？让助手看看",
+      "重新检测",
+      "配置",
+      "更多操作",
+    ]);
     expect(
       screen.queryByRole("button", { name: /未安装工具/ }),
     ).not.toBeInTheDocument();
@@ -1243,9 +1287,52 @@ describe("Bound tool lifecycle", () => {
       ).toBeEnabled(),
     );
     expect(within(row).getByText("安装异常")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "修复安装", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual([
+      "用不了？让助手看看",
+      "修复安装",
+      "配置",
+      "更多操作",
+    ]);
     fireEvent.click(within(row).getByRole("button", { name: "修复安装" }));
     expect(mocks.install).toHaveBeenCalledWith("codex");
+  });
+
+  it("offers the assistant's help only on a row that has a problem", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    const original = mocks.invoke.getMockImplementation()!;
+    let status = "configured";
+    mocks.invoke.mockImplementation(
+      async (command: string, ...args: unknown[]) => {
+        if (command === "get_tool_binding_status")
+          return {
+            status,
+            message: null,
+            missingFiles: [],
+            modifiedFields:
+              status === "modified" ? ["~/.claude/settings.json · model"] : [],
+            envOverrides: [],
+          };
+        return original(command, ...args);
+      },
+    );
+    const view = render(<ConsolePage boundTools={["claude"]} />);
+    const healthy = await screen.findByRole("group", { name: "Claude Code" });
+    await waitFor(() =>
+      expect(
+        within(healthy).getByRole("button", { name: "打开" }),
+      ).toBeVisible(),
+    );
+    expect(
+      within(healthy).queryByRole("button", { name: "用不了？让助手看看" }),
+    ).toBeNull();
+    view.unmount();
+    status = "modified";
+    render(<ConsolePage boundTools={["claude"]} />);
+    const conflict = await screen.findByRole("group", { name: "Claude Code" });
+    expect(await within(conflict).findByText("配置冲突")).toBeVisible();
+    expect(
+      within(conflict).getByRole("button", { name: "用不了？让助手看看" }),
+    ).toBeVisible();
   });
 
   it("offers explicit configuration recovery without automatically rebinding", async () => {
@@ -1267,7 +1354,12 @@ describe("Bound tool lifecycle", () => {
     render(<ConsolePage boundTools={["claude"]} />);
     const row = await screen.findByRole("group", { name: "Claude Code" });
     expect(within(row).getByText("绑定配置缺失")).toBeVisible();
-    expect(buttonNames(row)).toEqual(["用不了？让助手看看", "恢复绑定", "配置", "更多操作"]);
+    expect(buttonNames(row)).toEqual([
+      "用不了？让助手看看",
+      "恢复绑定",
+      "配置",
+      "更多操作",
+    ]);
     fireEvent.click(within(row).getByRole("button", { name: "恢复绑定" }));
     expect(screen.getByRole("dialog")).toHaveTextContent("管理：Claude Code");
     expect(
@@ -1428,5 +1520,131 @@ describe("Bound tool lifecycle", () => {
     expect(
       screen.queryByRole("group", { name: "Codex" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+it("greets the first scan of the bound tools with the fox", async () => {
+  const tauri = mocks.invoke.getMockImplementation()!;
+  mocks.invoke.mockImplementation((command: string, args) =>
+    command === "get_tool_versions"
+      ? new Promise(() => undefined)
+      : tauri(command, args),
+  );
+  render(<ConsolePage boundTools={["claude"]} />);
+  const tools = screen.getByRole("tabpanel", { name: "工具" });
+  expect(
+    await within(tools).findByRole("status", {
+      name: zh.pages.tools.loading,
+    }),
+  ).toBeVisible();
+});
+
+it("keeps every page mounted when the console switches between local and signed-in mode", async () => {
+  const view = render(<ConsolePage boundTools={[]} localSignedIn />);
+  await screen.findByText("Test User");
+  fireEvent.click(screen.getByRole("tab", { name: "会话" }));
+  const sessions = screen.getByRole("tabpanel", { name: "会话" });
+  view.rerender(<ConsolePage boundTools={[]} localOnly localSignedIn />);
+  expect(screen.getByRole("tabpanel", { name: "会话" })).toBe(sessions);
+});
+
+it("lets every page panel hide: none carries a display class that beats the hidden attribute", async () => {
+  // Tailwind's .flex / .grid / .block sit after preflight's [hidden] rule
+  // with the same specificity, so on a panel they keep a hidden page on
+  // screen over the one the user opened (jsdom does not apply the CSS).
+  render(<ConsolePage boundTools={[]} localSignedIn />);
+  await screen.findByText("Test User");
+  // 资源库 needs a query client this file does not provide; its panel's
+  // classes are static like the others.
+  for (const name of ["会话", "助手", "用量", "工具"])
+    fireEvent.click(screen.getByRole("tab", { name }));
+  const panels = document.querySelectorAll<HTMLElement>(
+    '[id^="shell-panel-"][role="tabpanel"]',
+  );
+  expect(panels.length).toBe(4);
+  for (const panel of panels)
+    expect(panel.className.split(/\s+/)).not.toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^(flex|inline-flex|grid|inline-grid|block|inline-block|table|contents)$/,
+        ),
+      ]),
+    );
+});
+
+// A narrow window keeps the top bar and the old pages.
+describe("Console title bar of a narrow window", () => {
+  it("draws its own brand under the macOS overlay title bar", async () => {
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("Ofox Desktop")).toBeVisible();
+  });
+
+  it("leaves the title to the native title bar elsewhere", async () => {
+    mocks.mac = false;
+    render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(screen.queryByText("Ofox Desktop")).toBeNull();
+  });
+
+  it("draws on the canvas, without the orange gradient", async () => {
+    const { container } = render(<ConsolePage boundTools={[]} />);
+    await screen.findByText("Test User");
+    expect(container.firstChild).toHaveClass("bg-canvas");
+    expect(container.firstChild).not.toHaveClass("bg-gradient-to-br");
+  });
+});
+
+describe("Console balance card of a narrow window", () => {
+  it("highlights the card when the balance is zero", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 0 },
+    });
+    render(<ConsolePage boundTools={[]} />);
+
+    expect(await screen.findByText("$0.00")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).toHaveAttribute(
+      "data-empty",
+      "true",
+    );
+  });
+
+  it("does not highlight a positive or unknown balance", async () => {
+    mocks.getUserInfo.mockResolvedValue({
+      name: "Test User",
+      balance: { balance: 12.5 },
+    });
+    const { unmount } = render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("$12.50")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+    unmount();
+
+    mocks.getUserInfo.mockResolvedValue({ name: "Test User" });
+    render(<ConsolePage boundTools={[]} />);
+    expect(await screen.findByText("—")).toBeVisible();
+    expect(screen.getByTestId("balance-card")).not.toHaveAttribute(
+      "data-empty",
+    );
+  });
+});
+
+describe("Console tools page of a narrow window", () => {
+  it("heads the list 已绑定的工具 with its count, the 方案 menu and 添加", async () => {
+    localTools = [localTool("claude", "2.1.293")];
+    render(<ConsolePage boundTools={["claude"]} />);
+    await screen.findByRole("group", { name: "Claude Code" });
+    const tools = screen.getByRole("tabpanel", { name: "工具" });
+    const heading = within(tools).getByRole("heading", {
+      name: "已绑定的工具",
+    });
+    const toolbar = heading.parentElement!;
+    expect(within(toolbar).getByText("1")).toBeVisible();
+    expect(
+      within(toolbar)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["方案", "添加"]);
   });
 });

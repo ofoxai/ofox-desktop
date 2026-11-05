@@ -55,12 +55,15 @@ export function useModelOptions(
         }
         if (kind === "video") {
           const caps = model.video;
-          const notes = [
+          const price =
             caps?.fromPricePerSecond != null
               ? t("assistant.video.fromPrice", {
                   price: caps.fromPricePerSecond,
                 })
-              : "",
+              : "";
+          // The price beside the name, the rest on a line of its own: all of
+          // it on one line leaves the name a few letters.
+          const specs = [
             caps?.minDuration != null && caps.maxDuration != null
               ? t("assistant.video.durationRange", {
                   min: caps.minDuration,
@@ -73,8 +76,46 @@ export function useModelOptions(
           return {
             value: model.id,
             label: model.shortName || model.name,
-            meta: notes.join(" · ") || undefined,
-            title: [model.name, ...notes].join(" · "),
+            meta: price || undefined,
+            note: specs.join(" · ") || undefined,
+            title: [model.name, price, ...specs].filter(Boolean).join(" · "),
+            group: vendor,
+            groupLabel: label,
+          };
+        }
+        if (kind === "speech" && model.audio) {
+          // A speech model is billed per character read, or per token of the
+          // text in and the audio out; never by its chat prices (0 / 0).
+          const pricing = model.audio.pricing as
+            | NonNullable<AssistantModel["audio"]>["pricing"]
+            | undefined;
+          const perThousand = (rate: string) =>
+            String(Number((Number(rate) * 1000).toPrecision(6)));
+          const price =
+            pricing?.unit === "characters" && pricing.inputTextPerCharacter
+              ? t("assistant.media.perThousandChars", {
+                  price: perThousand(pricing.inputTextPerCharacter),
+                })
+              : pricing?.unit === "tokens" &&
+                  pricing.inputTextPerMillion &&
+                  pricing.outputAudioPerMillion
+                ? t("assistant.media.audioTokenPrice", {
+                    input: pricing.inputTextPerMillion,
+                    output: pricing.outputAudioPerMillion,
+                  })
+                : "";
+          const long =
+            pricing?.unit === "tokens" && price
+              ? t("assistant.media.audioTokenPriceLong", {
+                  input: pricing.inputTextPerMillion,
+                  output: pricing.outputAudioPerMillion,
+                })
+              : price;
+          return {
+            value: model.id,
+            label: model.shortName || model.name,
+            meta: price || undefined,
+            title: [model.name, long].filter(Boolean).join("\n"),
             group: vendor,
             groupLabel: label,
           };

@@ -323,7 +323,7 @@ describe("the drop overlay", () => {
     // Once the import is over the page takes files again: still no overlay.
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Attach files" }),
+        screen.getByRole("button", { name: "Add content or a feature" }),
       ).toBeEnabled(),
     );
     expect(overlay()).toBeNull();

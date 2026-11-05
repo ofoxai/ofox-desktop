@@ -10,8 +10,9 @@ import { SHELL_PAGES, shellPanelId, useShell } from "./ShellContext";
 import { UpdatePill } from "./UpdatePill";
 
 /**
- * magpie's `.top`: 46px, the page tabs centred in the window, the update
- * pill, refresh and settings at the right.
+ * The page navigation of a narrow window (a wide one has AppSidebar):
+ * 46px, the page tabs centred in the window, the update pill, refresh and
+ * settings at the right.
  *
  * On macOS the window draws its traffic lights over this header
  * (`titleBarStyle: "Overlay"`, `trafficLightPosition` 14,17 in
@@ -21,8 +22,11 @@ import { UpdatePill } from "./UpdatePill";
  */
 export function AppHeader({
   settingsButtonRef,
+  navRef,
 }: {
   settingsButtonRef?: Ref<HTMLButtonElement>;
+  /** The element holding the page tabs. */
+  navRef?: Ref<HTMLElement>;
 }) {
   const { t } = useTranslation();
   const shell = useShell();
@@ -34,6 +38,7 @@ export function AppHeader({
 
   return (
     <header
+      ref={navRef}
       {...drag}
       className={cn(
         "relative flex h-[46px] shrink-0 items-center gap-2 pr-2.5",
@@ -69,7 +74,7 @@ export function AppHeader({
       />
 
       <div className="no-drag ml-auto flex items-center gap-0.5">
-        <UpdatePill />
+        <UpdatePill variant="pill" />
         <Button
           variant="icon"
           aria-label={t("shell.refresh")}

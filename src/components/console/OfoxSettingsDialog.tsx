@@ -23,7 +23,7 @@ import type { Settings } from "@/types";
 
 /**
  * Ofox-flavored settings dialog, opened by the settings icon in the console
- * header (`AppHeader`) or by the tray popover's `ofox-open-settings` event.
+ * sidebar (`AppSidebar`) or by the tray popover's `ofox-open-settings` event.
  *
  *   · Account     — show identity, allow logout
  *   · Region      — ofox.ai / ofox.io (`OfoxApexSwitch`)

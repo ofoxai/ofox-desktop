@@ -261,7 +261,8 @@
     "enabled": "有効",
     "notSet": "未設定",
     "noMatches": "一致する項目はありません",
-    "retry": "再試行"
+    "retry": "再試行",
+    "loadingFox": "読み込み中…"
   },
   "update": {
     "promptTitle": "新しいバージョンがあります",
@@ -291,7 +292,20 @@
     "usage": {
       "webDetails": "ウェブで詳しい使用量を見る ↗"
     },
-    "website": "Ofox ウェブサイト ↗"
+    "website": "Ofox ウェブサイト ↗",
+    "groups": {
+      "use": "使う",
+      "observe": "観測"
+    },
+    "sidebar": {
+      "collapse": "サイドバーを閉じる",
+      "expand": "サイドバーを開く"
+    },
+    "account": {
+      "balance": "残高 {{amount}}",
+      "refresh": "残高を更新",
+      "settings": "アカウント設定"
+    }
   },
   "firstRunNotice": {
     "title": "Ofox Desktop へようこそ",
@@ -4688,6 +4702,13 @@
     "reader": "セッション閲覧",
     "copyMessage": "メッセージをコピー",
     "copyCode": "コードをコピー",
+    "showDiagram": "図を表示",
+    "showSource": "ソースを表示",
+    "previewHtml": "プレビュー",
+    "showCode": "コードを表示",
+    "diagram": "Mermaid 図",
+    "previewFrame": "HTML プレビュー",
+    "previewNoScripts": "プレビューではページのスクリプトを実行せず、ネットワーク上のリソースも読み込みません。",
     "imageBlocked": "画像は未読み込み",
     "imageHint": "プライバシー保護のため、画像は自動的に読み込まれません。",
     "questions": "質問一覧",
@@ -4978,10 +4999,19 @@
       "mediaQueryExpired": "24 時間が経過したため自動確認を停止しました。結果の確認を再開できます。",
       "mediaDeletePending": "この会話には未完了の動画ジョブがあります。会話を復元し、完了を待つかジョブをキャンセルしてから完全に削除してください。",
       "mediaVideoLimit": "現在の動画タスクが完了するまでお待ちください。同時実行は会話ごとに 1 件、アカウントごとに 3 件までです。",
+      "mediaFramesImagesOnly": "動画の最初または最後のフレームにできるのは画像だけです。",
+      "mediaTooManyFrames": "動画のフレームは開始用と終了用の画像 1 枚ずつまでです。",
+      "mediaTooManyReferences": "動画の参照は画像 9 枚、音声 3 本、動画 1 本までです。",
+      "mediaReferenceAudioTooLong": "参照音声は 1 本 15 秒以内にしてください。",
+      "mediaMaterialUnsupported": "このファイルはこの動画に使えません。PNG・JPEG・WebP の画像、MP3・WAV の音声、MP4 の動画と、それに対応するモデルを使ってください。",
+      "mediaModelUnavailable": "この生成モデルは利用できません。入力欄の下で別のモデルを選んでください。",
+      "mediaImageTurnLimit": "1 回の返答で作れる画像は 4 枚までです。続きはもう一度依頼してください。",
+      "mediaDeclined": "この生成を取り消したため、料金は発生していません。",
+      "mediaSpeechTurnLimit": "1 回の返答で作れる音声は 3 本までです。続きはもう一度依頼してください。",
       "mediaInvalidParams": "このモデルは選択したメディア設定に対応していません。",
       "mediaOutcomeUnknown": "メディアのリクエストは課金された可能性がありますが、結果を確認できませんでした。再送信前に利用履歴を確認してください。",
       "mediaSafetyRejected": "画像リクエストはプロバイダーの安全性チェックで拒否されました。プロンプトまたは入力画像を変更して再試行してください。",
-      "mediaInsufficientCredits": "画像を生成するための残高が不足しています。",
+      "mediaInsufficientCredits": "生成に必要な残高が不足しています。",
       "visionModelRequired": "このモデルは画像を読み取れません。画像を読み取れるモデルを選んでから、メッセージをもう一度送信してください。",
       "modelRequired": "先にモデルを選んでください。",
       "modelUnavailable": "このモデルは現在利用できません。別のモデルを選んでください。",
@@ -5126,7 +5156,9 @@
       "cacheWrite": "キャッシュ書き込み",
       "output": "出力トークン",
       "search": "ウェブ検索 ×{{count}}",
-      "total": "今回の費用（推定）"
+      "total": "今回の費用（推定）",
+      "chat": "チャットモデル",
+      "generationUnpriced": "この生成には見積もれる価格がありません（トークン課金の音声や生成中の動画など）。合計は請求でご確認ください。"
     },
     "replyDetails": "返信の詳細",
     "replyDuration": "所要時間 {{duration}}",
@@ -5232,6 +5264,22 @@
       "assistant": "アシスタント"
     },
     "starters": {
+      "image": {
+        "label": "画像を作る",
+        "prompt": "画像を描いて：夜明けの海辺の町、水彩画風、暖かい色合い。"
+      },
+      "video": {
+        "label": "短い動画を作る",
+        "prompt": "短い動画を作って：窓辺で伸びをする茶トラ猫、差し込む朝日、カメラはゆっくり寄っていく。"
+      },
+      "speech": {
+        "label": "ナレーションを付ける",
+        "prompt": "落ち着いた温かい声で、次の文をナレーションとして読んで：\n\nOfox へようこそ。ひとつのアカウントで主要な AI モデルを使えます。"
+      },
+      "localCheck": {
+        "label": "Claude Code の設定を確認",
+        "prompt": "このパソコンの Claude Code の設定に問題がないか確認して、問題があれば直し方を教えて。"
+      },
       "summary": {
         "label": "内容を要約",
         "prompt": "以下の内容を要約し、要点を示して、対応が必要な事項を挙げてください：\n\n"
@@ -5369,6 +5417,9 @@
     },
     "media": {
       "perImage": "${{price}}/枚",
+      "perThousandChars": "${{price}}/1000文字",
+      "audioTokenPrice": "入力 ${{input}} · 音声 ${{output}}/M",
+      "audioTokenPriceLong": "100万トークンあたり：入力テキスト ${{input}}、出力音声 ${{output}}",
       "imageTokenPrice": "画像 ${{price}}/百万トークン",
       "canEdit": "画像編集対応",
       "size": "サイズ",
@@ -5401,7 +5452,7 @@
     "compactCost": "選択中のモデルを使用し、料金が発生する場合があります。",
     "speech": {
       "title": "音声を生成",
-      "read": "読み上げ…",
+      "read": "読み上げ",
       "hint": "生成前にテキスト、声、形式を確認してください。専用の音声モデルを使用し、チャットは送信しません。",
       "text": "読み上げるテキスト",
       "generate": "音声を生成",
@@ -5509,7 +5560,7 @@
       "modelSwitched": "設定作業に推奨されるモデルに切り替えました。手動で戻すこともできます。",
       "modelUnconfigured": "推奨モデルが未設定、または利用できません。現在のモデルを使います。",
       "enable": "ローカル設定を有効にする",
-      "boundary": "ローカル設定がオンです：アシスタントはこのコンピューターの AI ツールを確認・修正できます。",
+      "boundary": "アシスタントはこのコンピュータの AI ツールを確認・修復でき、添付したファイルを読みます。Web 検索はオンのときだけ行います。",
       "modes": {
         "default": "デフォルト",
         "autoEdit": "自動編集",
@@ -5549,7 +5600,101 @@
         "install_tool": "ツールをインストール",
         "update_tool": "ツールを更新",
         "uninstall_tool": "ツールを削除"
-      }
+      },
+      "permissionValue": "権限：{{mode}}"
+    },
+    "generation": {
+      "plus": "コンテンツや機能を追加",
+      "attach": "画像とファイルを追加",
+      "on": "オン",
+      "kinds": {
+        "image": "画像を生成",
+        "video": "動画を生成",
+        "speech": "音声を生成"
+      },
+      "chipLabel": "{{name}}：モデルとパラメータ",
+      "remove": "{{name}}を外す",
+      "defaultsNote": "チャットモデルは既定でここのモデルとパラメータで生成します。会話で明示した指定が優先されます。",
+      "noModel": "利用できる生成モデルがありません。",
+      "model": "モデル",
+      "sound": "音声",
+      "voice": "声",
+      "format": "形式",
+      "silent": "無音",
+      "withSound": "音声あり",
+      "firstFrame": "最初のフレーム",
+      "firstLastFrames": "最初 + 最後のフレーム",
+      "references": "参照素材 {{count}} 件",
+      "speaking": "音声を生成中…",
+      "text": "読み上げるテキスト",
+      "prompt": "送信したプロンプト",
+      "regenerate": "パラメータを変えて再生成",
+      "regenerateTitle": "パラメータを変えて再生成",
+      "regenerateNote": "チャットモデルを通さずにこのパラメータで再生成し、結果はこの返答の下に追加されます。",
+      "details": "詳細",
+      "useVoice": "「{{voice}}」を使う",
+      "voiceSearchName": "音声名を検索または入力",
+      "voiceSearchId": "音声 ID を検索または貼り付け",
+      "voiceNameHint": "Gemini の音声名を入力できます（例：Charon）。",
+      "voiceIdHint": "ElevenLabs のライブラリの音声 ID（英数字 20 文字）を貼り付けます。",
+      "sourceImage": "元の画像",
+      "reference": "参考画像",
+      "characters_one": "{{count}} 文字",
+      "characters_other": "{{count}} 文字",
+      "estimate": "見積もり ${{cost}}",
+      "estimateUnknown": "現在、料金を見積もれません",
+      "confirmGenerate": "確認して生成",
+      "generateAgain": "再生成",
+      "confirmTitle": "この動画を生成しますか？",
+      "generate": "生成",
+      "allowSession": "この会話では確認しない",
+      "decline": "生成しない",
+      "overLimit": "動画に使えるのは参照画像 9 枚、音声 3 本（各 15 秒以内）、動画 1 本までです。余分なファイルを外してください。",
+      "needsTools": "このモデルはツールを使えないため、画像・動画・音声を生成できません。別のモデルを選んでください。",
+      "readAloudFailed": "読み上げに失敗しました。しばらくしてからもう一度お試しください。"
+    }
+  },
+  "pages": {
+    "tools": {
+      "title": "ツール",
+      "description": "1 つの Ofox アカウントで AI コーディングツールを管理",
+      "loading": "ツールを読み込み中…"
+    },
+    "sessions": {
+      "title": "セッション",
+      "description": "各ツールの過去のセッションを検索・再開し、使用量を確認",
+      "loading": "セッションを探しています…",
+      "loadingTranscript": "セッションを開いています…"
+    },
+    "library": {
+      "instructions": {
+        "title": "指示",
+        "description": "各ツールで共有するプロンプトとルール"
+      },
+      "mcp": {
+        "title": "MCP サーバー",
+        "description": "一か所で設定し、各ツールに配布"
+      },
+      "skills": {
+        "title": "スキル",
+        "description": "スキルフォルダを必要なツールにリンク"
+      },
+      "loading": "リソースライブラリを読み込み中…"
+    },
+    "usage": {
+      "overview": {
+        "title": "使用量の概要",
+        "description": "この期間に各ツールが使ったトークンと費用"
+      },
+      "requests": {
+        "title": "使用量の明細",
+        "description": "リクエストごとのモデル・トークン・費用"
+      },
+      "sessions": {
+        "title": "セッション分析",
+        "description": "セッションごとの使用量と所要時間"
+      },
+      "loading": "使用量を読み込み中…"
     }
   }
 }

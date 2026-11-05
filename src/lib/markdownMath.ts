@@ -20,7 +20,8 @@ export function loadMarkdownMath(): Promise<void> {
   ])
     .then(([{ default: remarkMath }, { default: rehypeKatex }]) => {
       plugins = {
-        // Only `$$ … $$`: a lone `$` is money far more often than math.
+        // remark-math reads `$$ … $$` only: a `$ … $` formula is rewritten
+        // to it first, by Pandoc's rule, so that money stays text.
         remark: [[remarkMath, { singleDollarTextMath: false }]],
         // `trust: false` leaves out \href, \url, \includegraphics and \htmlData;
         // a formula that will not parse is shown as its text, never thrown.
@@ -47,8 +48,24 @@ export const markdownMathPlugins = () => plugins;
 /** Only text that can hold a formula is worth loading KaTeX for. */
 export function hasMathMarkers(content: string): boolean {
   return (
-    content.includes("$$") || content.includes("\\(") || content.includes("\\[")
+    content.includes("$$") ||
+    content.includes("\\(") ||
+    content.includes("\\[") ||
+    hasDollarMath(content)
   );
+}
+
+/** A `$ … $` formula somewhere in `content`. */
+function hasDollarMath(content: string): boolean {
+  for (let index = content.indexOf("$"); index >= 0; ) {
+    const lone =
+      content[index - 1] !== "$" &&
+      content[index - 1] !== "\\" &&
+      content[index + 1] !== "$";
+    if (lone && dollarClose(content, index) > 0) return true;
+    index = content.indexOf("$", index + 1);
+  }
+  return false;
 }
 
 // A backtick fence's info string holds no backtick, or it is inline code.
@@ -123,6 +140,36 @@ function closing(text: string, from: number, closer: string): number {
   return -1;
 }
 
+/**
+ * The `$` that closes the formula a lone `$` at `from` opens, or -1, as Pandoc
+ * reads one: a non-space right after the opener, a non-space right before the
+ * closer and no digit right after it; the first `$` that follows decides. So
+ * `$5 and $10` and `$0.014–$0.028` stay money. It never crosses a paragraph
+ * break, code or `$$`.
+ */
+function dollarClose(text: string, from: number): number {
+  const first = text[from + 1];
+  if (first === undefined || first === "$" || /\s/.test(first)) return -1;
+  for (let index = from + 1; index < text.length; ) {
+    const char = text[index];
+    if (char === "\\") {
+      index += 2;
+    } else if (char === "`") {
+      return -1;
+    } else if (char === "\n" && endsParagraph(text, index)) {
+      return -1;
+    } else if (char === "$") {
+      const after = text[index + 1] ?? "";
+      return after !== "$" && !/\s/.test(text[index - 1]) && !/\d/.test(after)
+        ? index
+        : -1;
+    } else {
+      index += 1;
+    }
+  }
+  return -1;
+}
+
 /** The end of the code span whose backtick run starts at `from`, or the run's end. */
 function codeSpanEnd(text: string, from: number): number {
   let run = from;
@@ -163,6 +210,29 @@ function rewriteProse(text: string): string {
       continue;
     }
     const next = text[index + 1];
+    if (char === "$") {
+      // `$$ … $$` is remark-math's own; a lone `$` may open a formula.
+      if (next === "$") {
+        const end = text.indexOf("$$", index + 2);
+        const stop = end < 0 ? index + 2 : end + 2;
+        out += text.slice(index, stop);
+        index = stop;
+        continue;
+      }
+      const end = dollarClose(text, index);
+      if (end < 0) {
+        out += char;
+        index += 1;
+        continue;
+      }
+      out += textMath(
+        text.slice(index + 1, end),
+        out.slice(-1),
+        text[end + 1] ?? "",
+      );
+      index = end + 1;
+      continue;
+    }
     if (char !== "\\" || (next !== "(" && next !== "[")) {
       // A backslash and what it escapes go together, so `\\(` is not an opener.
       const length = char === "\\" ? 2 : 1;
@@ -197,7 +267,7 @@ function rewriteProse(text: string): string {
 const MAX_REWRITE = 64 * 1024;
 
 /**
- * Writes `\(…\)` and `\[…\]` as the `$$` math remark-math reads, outside code.
+ * Writes `$…$`, `\(…\)` and `\[…\]` as the `$$` math remark-math reads, outside code.
  * Markdown reads `\(` as an escaped bracket and drops the backslash, so this
  * must run on the text before it is parsed. A `\[` that stands on its own
  * lines becomes a `$$` block; every other formula becomes text math. A message

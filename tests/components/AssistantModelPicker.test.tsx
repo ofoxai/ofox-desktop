@@ -453,9 +453,11 @@ it("shows video prices per second and capabilities rather than zero token prices
   );
   const list = await open();
   const option = within(list).getByRole("option");
-  expect(option).toHaveTextContent("From $0.04/s");
-  expect(option).toHaveTextContent("4–15 s");
-  expect(option).toHaveTextContent("1080p");
+  // The name keeps its line: the price sits beside it, the rest below.
+  expect(within(option).getByText("From $0.04/s")).toBeInTheDocument();
+  expect(
+    within(option).getByText("4–15 s · 480p / 1080p · Audio"),
+  ).toBeInTheDocument();
   expect(option).not.toHaveTextContent("$0 / $0");
   expect(option).toHaveAttribute("title", expect.stringContaining("Audio"));
 });

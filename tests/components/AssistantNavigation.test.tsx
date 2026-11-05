@@ -15,13 +15,13 @@ function keys(tree: Tree, prefix = ""): string[] {
 }
 
 describe("assistant navigation", () => {
-  it("places the built-in assistant after tools, sessions, library and usage", () => {
+  it("places the built-in assistant last in the 使用 group, before usage", () => {
     expect(SHELL_PAGES).toEqual([
       "tools",
       "sessions",
       "library",
-      "usage",
       "assistant",
+      "usage",
     ]);
   });
 

@@ -8,8 +8,17 @@ import {
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { libraryApi, type LibraryKind } from "@/lib/api/library";
-import { useShell, useShellRefresh } from "@/components/shell/ShellContext";
-import { SegmentedNav } from "@/components/ui/segmented";
+import {
+  useShell,
+  useShellRefresh,
+  useShellSubnav,
+} from "@/components/shell/ShellContext";
+import {
+  PAGE_BODY,
+  PageHeader,
+  ShellRefreshButton,
+} from "@/components/shell/PageHeader";
+import { cn } from "@/lib/utils";
 import {
   InteractionScope,
   useInteractionActive,
@@ -41,7 +50,7 @@ export function LibraryPage({
     () => new Set(["instructions"]),
   );
   const root = useRef<HTMLDivElement>(null);
-  const header = useRef<HTMLDivElement>(null);
+  const header = useRef<HTMLElement>(null);
   const positions = useRef(new Map<LibraryKind, number>());
   useLayoutEffect(() => {
     if (!active) return;
@@ -155,114 +164,119 @@ export function LibraryPage({
   useEffect(() => {
     if (visited.size > 1) void summary.refetch();
   }, [visited.size, summary.refetch]);
+  // The sub-pages live in the sidebar; switching there passes the same
+  // unsaved-changes guard the page's own tabs did.
+  useShellSubnav("library", {
+    items: KINDS.map((kind) => ({
+      value: kind,
+      label: t(`library.tabs.${kind}`),
+      count: summary.data?.[kind],
+      controls: `library-panel-${kind}`,
+    })),
+    value: tab,
+    onChange: (kind) => guarded(() => changeTab(kind)),
+  });
   return (
-    <div ref={root} className="min-w-0 space-y-3">
-      <div
-        ref={header}
-        data-library-header
-        className="sticky top-0 z-20 -mx-4 flex flex-wrap items-center justify-between gap-3 border-b border-line-2 bg-canvas px-4 py-3"
-      >
-        <SegmentedNav
-          aria-label={t("library.nav")}
-          value={tab}
-          onChange={(kind) => {
-            guarded(() => {
-              changeTab(kind);
-            });
-          }}
-          items={KINDS.map((kind) => ({
-            value: kind,
-            label: `${t(`library.tabs.${kind}`)}${summary.data ? ` · ${summary.data[kind]}` : ""}`,
-            controls: `library-panel-${kind}`,
-          }))}
-        />
-        <div className="flex flex-wrap items-center gap-2">
-          <LibraryScenarioWizard
-            request={scenarioRequest}
-            returnFocusRef={scenarioTrigger}
-            onChanged={async () => {
-              await Promise.all([
-                summary.refetch(),
-                ...Array.from(actions.current.values(), (action) => action()),
-              ]);
-            }}
-          />
-          <Button
-            variant="ghost"
-            onClick={(event) =>
-              discoverActions.current.get(tab)?.(event.currentTarget)
-            }
+    <div ref={root} className="min-w-0">
+      <PageHeader
+        headerRef={header}
+        page="library"
+        navLabel={t("library.nav")}
+        compactClassName="mb-3 border-b border-line-2 py-1"
+        title={t(`pages.library.${tab}.title`)}
+        description={t(`pages.library.${tab}.description`)}
+        actions={
+          <>
+            <LibraryScenarioWizard
+              request={scenarioRequest}
+              returnFocusRef={scenarioTrigger}
+              onChanged={async () => {
+                await Promise.all([
+                  summary.refetch(),
+                  ...Array.from(actions.current.values(), (action) => action()),
+                ]);
+              }}
+            />
+            <Button
+              variant="ghost"
+              onClick={(event) =>
+                discoverActions.current.get(tab)?.(event.currentTarget)
+              }
+            >
+              <Compass className="mr-1 h-3.5 w-3.5" />
+              {t(
+                tab === "instructions"
+                  ? "library.interaction.templates"
+                  : "library.interaction.discover",
+              )}
+            </Button>
+            <ResourcePackDialog
+              menuRef={scenarioTrigger}
+              beforeAction={guarded}
+              additionalActions={[
+                {
+                  label: t("library.interaction.scenarioAction"),
+                  onSelect: () =>
+                    guarded(() => setScenarioRequest((value) => value + 1)),
+                },
+                // Only the list-style tab keeps an operation history to show.
+                ...(tab === "instructions"
+                  ? [
+                      {
+                        label: t("library.interaction.historyAction"),
+                        onSelect: () => historyActions.current.get(tab)?.(),
+                      },
+                    ]
+                  : []),
+              ]}
+              onChanged={async () => {
+                await Promise.all([
+                  summary.refetch(),
+                  ...Array.from(actions.current.values(), (action) => action()),
+                ]);
+              }}
+            />
+            <ShellRefreshButton />
+          </>
+        }
+      />
+      <div className={cn(PAGE_BODY, "space-y-3")}>
+        {KINDS.filter((kind) => visited.has(kind)).map((kind) => (
+          <div
+            key={kind}
+            id={`library-panel-${kind}`}
+            role="tabpanel"
+            aria-label={t(`library.tabs.${kind}`)}
+            hidden={kind !== tab}
           >
-            <Compass className="mr-1 h-3.5 w-3.5" />
-            {t(
-              tab === "instructions"
-                ? "library.interaction.templates"
-                : "library.interaction.discover",
-            )}
-          </Button>
-          <ResourcePackDialog
-            menuRef={scenarioTrigger}
-            beforeAction={guarded}
-            additionalActions={[
-              {
-                label: t("library.interaction.scenarioAction"),
-                onSelect: () =>
-                  guarded(() => setScenarioRequest((value) => value + 1)),
-              },
-              // Only the list-style tab keeps an operation history to show.
-              ...(tab === "instructions"
-                ? [
-                    {
-                      label: t("library.interaction.historyAction"),
-                      onSelect: () => historyActions.current.get(tab)?.(),
-                    },
-                  ]
-                : []),
-            ]}
-            onChanged={async () => {
-              await Promise.all([
-                summary.refetch(),
-                ...Array.from(actions.current.values(), (action) => action()),
-              ]);
-            }}
-          />
-        </div>
+            <InteractionScope active={active && kind === tab}>
+              {kind === "mcp" ? (
+                <LibraryMcpTable
+                  registerRefresh={register}
+                  registerDiscover={registerDiscover}
+                  onChanged={() => void summary.refetch()}
+                />
+              ) : kind === "skills" ? (
+                <LibrarySkillsPage
+                  managementRequest={skillsManagementRequest}
+                  registerRefresh={register}
+                  registerDiscover={registerDiscover}
+                  onChanged={() => void summary.refetch()}
+                />
+              ) : (
+                <LibrarySection
+                  kind={kind}
+                  registerRefresh={register}
+                  registerDiscover={registerDiscover}
+                  registerLeave={registerLeave}
+                  registerHistory={registerHistory}
+                  onChanged={() => void summary.refetch()}
+                />
+              )}
+            </InteractionScope>
+          </div>
+        ))}
       </div>
-      {KINDS.filter((kind) => visited.has(kind)).map((kind) => (
-        <div
-          key={kind}
-          id={`library-panel-${kind}`}
-          role="tabpanel"
-          aria-label={t(`library.tabs.${kind}`)}
-          hidden={kind !== tab}
-        >
-          <InteractionScope active={active && kind === tab}>
-            {kind === "mcp" ? (
-              <LibraryMcpTable
-                registerRefresh={register}
-                registerDiscover={registerDiscover}
-                onChanged={() => void summary.refetch()}
-              />
-            ) : kind === "skills" ? (
-              <LibrarySkillsPage
-                managementRequest={skillsManagementRequest}
-                registerRefresh={register}
-                registerDiscover={registerDiscover}
-                onChanged={() => void summary.refetch()}
-              />
-            ) : (
-              <LibrarySection
-                kind={kind}
-                registerRefresh={register}
-                registerDiscover={registerDiscover}
-                registerLeave={registerLeave}
-                registerHistory={registerHistory}
-                onChanged={() => void summary.refetch()}
-              />
-            )}
-          </InteractionScope>
-        </div>
-      ))}
     </div>
   );
 }

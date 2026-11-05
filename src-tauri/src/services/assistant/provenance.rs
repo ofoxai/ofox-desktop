@@ -92,6 +92,7 @@ impl AssistantHost {
         let sid = run.session_id.clone();
         let mid = run.message_id.clone();
         let job = job.to_owned();
+        let artifact = run.artifact.clone();
         scrub_secrets_in(&mut usage, &self.known_keys());
         blocking(move || {
             store.mutate(&sid, |record| {
@@ -99,13 +100,15 @@ impl AssistantHost {
                     return Ok(());
                 };
                 let Some(media) = message
-                    .media
-                    .as_mut()
+                    .media_for_mut(artifact.as_deref())
                     .filter(|m| m.job_id.as_ref() == Some(&job))
                 else {
                     return Ok(());
                 };
                 media.response_usage = Some(usage);
+                if artifact.is_some() {
+                    return Ok(());
+                }
                 let media = media.clone();
                 let rid = message.run_id.clone();
                 for op in record

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useTranslation } from "react-i18next";
@@ -212,9 +213,10 @@ export function SessionTranscript({
         style={{ minHeight: 180 }}
       >
         {(!query.isFetchedAfterMount || query.isPending) && !query.isError && (
-          <p role="status" className="p-4">
-            {t("common.loading")}
-          </p>
+          <FoxLoader
+            size="block"
+            label={t("pages.sessions.loadingTranscript")}
+          />
         )}
         {query.isError && (
           <div role="alert" className="p-4 text-sub text-danger">

@@ -125,14 +125,16 @@ module.exports = {
         pop: "11px",
         dialog: "14px",
       },
+      // Variables a page can set for its own subtree (the wide assistant
+      // page does); unset, each is the value after the comma.
       fontSize: {
-        ui: "13px",
-        nav: "12.5px",
-        ctl: "12px",
-        sub: "11.5px",
-        note: "11px",
-        micro: "10.5px",
-        title: "15px",
+        ui: "var(--fs-ui, 13px)",
+        nav: "var(--fs-nav, 12.5px)",
+        ctl: "var(--fs-ctl, 12px)",
+        sub: "var(--fs-sub, 11.5px)",
+        note: "var(--fs-note, 11px)",
+        micro: "var(--fs-micro, 10.5px)",
+        title: "var(--fs-title, 15px)",
         kpi: "20px",
       },
       transitionTimingFunction: {

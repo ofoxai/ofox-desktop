@@ -261,7 +261,8 @@
     "enabled": "已开启",
     "notSet": "未设置",
     "noMatches": "无匹配项",
-    "retry": "重试"
+    "retry": "重试",
+    "loadingFox": "加载中…"
   },
   "update": {
     "promptTitle": "发现新版本",
@@ -291,7 +292,20 @@
     "usage": {
       "webDetails": "在网页查看详细用量 ↗"
     },
-    "website": "Ofox 网站 ↗"
+    "website": "Ofox 网站 ↗",
+    "groups": {
+      "use": "使用",
+      "observe": "观测"
+    },
+    "sidebar": {
+      "collapse": "收起侧栏",
+      "expand": "展开侧栏"
+    },
+    "account": {
+      "balance": "余额 {{amount}}",
+      "refresh": "刷新余额",
+      "settings": "账户设置"
+    }
   },
   "firstRunNotice": {
     "title": "欢迎使用 Ofox Desktop",
@@ -4688,6 +4702,13 @@
     "reader": "会话阅读",
     "copyMessage": "复制消息",
     "copyCode": "复制代码",
+    "showDiagram": "查看图表",
+    "showSource": "查看源码",
+    "previewHtml": "预览",
+    "showCode": "查看代码",
+    "diagram": "Mermaid 图表",
+    "previewFrame": "HTML 预览",
+    "previewNoScripts": "预览不运行页面里的脚本，也不加载网络上的资源。",
     "imageBlocked": "图片未加载",
     "imageHint": "为保护隐私，不自动加载图片。",
     "questions": "提问目录",
@@ -4978,10 +4999,19 @@
       "mediaQueryExpired": "自动查询已满 24 小时。可继续查询结果。",
       "mediaDeletePending": "此对话仍有未结束的视频任务。请先恢复对话，等待任务完成或取消任务，再永久删除。",
       "mediaVideoLimit": "请等待当前视频任务完成。每个对话最多 1 个、每个账号最多 3 个进行中的任务。",
+      "mediaFramesImagesOnly": "只有图片可以作为视频的首帧或尾帧。",
+      "mediaTooManyFrames": "视频只能用一张图作首帧、一张图作尾帧。",
+      "mediaTooManyReferences": "视频最多使用 9 张参考图、3 段参考音频和 1 个参考视频。",
+      "mediaReferenceAudioTooLong": "参考音频每段不能超过 15 秒。",
+      "mediaMaterialUnsupported": "这个文件不能用于此视频。请使用 PNG、JPEG、WebP 图片，MP3、WAV 音频或 MP4 视频，并选择支持它们的模型。",
+      "mediaModelUnavailable": "这个生成模型暂不可用，请在输入框下方换一个。",
+      "mediaImageTurnLimit": "每次回答最多生成 4 张图片，需要更多请再发一次。",
+      "mediaDeclined": "你取消了这次生成，未产生费用。",
+      "mediaSpeechTurnLimit": "每次回答最多生成 3 段语音，需要更多请再发一次。",
       "mediaInvalidParams": "此模型不支持所选媒体参数。",
       "mediaOutcomeUnknown": "此媒体请求可能已计费，但无法确认结果。再次提交前请查看使用记录。",
       "mediaSafetyRejected": "图像请求未通过提供方的安全检查，请修改提示词或输入图片后重试。",
-      "mediaInsufficientCredits": "余额不足，无法生成图像。",
+      "mediaInsufficientCredits": "余额不足，无法完成这次生成。",
       "visionModelRequired": "此模型无法读取图片。请选择能读取图片的模型，然后再发一次这条消息。",
       "modelRequired": "请先选择模型。",
       "modelUnavailable": "这个模型暂时不可用，请换一个模型。",
@@ -5126,7 +5156,9 @@
       "cacheWrite": "缓存写入",
       "output": "输出 Tokens",
       "search": "联网搜索 ×{{count}}",
-      "total": "本轮费用（估算）"
+      "total": "本轮费用（估算）",
+      "chat": "对话模型",
+      "generationUnpriced": "这项生成没有可预估的价格（例如按 Token 计费的语音，或仍在生成的视频），总费用以账单为准。"
     },
     "replyDetails": "回复详情",
     "replyDuration": "耗时 {{duration}}",
@@ -5232,6 +5264,22 @@
       "assistant": "助手"
     },
     "starters": {
+      "image": {
+        "label": "做张图",
+        "prompt": "画一张图：清晨的海边小镇，水彩风格，暖色调。"
+      },
+      "video": {
+        "label": "做个短视频",
+        "prompt": "做一段短视频：一只橘猫在窗台上伸懒腰，阳光照进来，镜头慢慢推近。"
+      },
+      "speech": {
+        "label": "配段旁白",
+        "prompt": "用沉稳、温和的声音把这段话读成旁白：\n\n欢迎来到 Ofox，一个账号就能用上主流的 AI 模型。"
+      },
+      "localCheck": {
+        "label": "检查 Claude Code 配置",
+        "prompt": "检查一下我电脑上 Claude Code 的配置有没有问题；有问题的话告诉我怎么修。"
+      },
       "summary": {
         "label": "总结内容",
         "prompt": "请总结以下内容，标出要点，并列出需要跟进的事项：\n\n"
@@ -5369,6 +5417,9 @@
     },
     "media": {
       "perImage": "${{price}}/张",
+      "perThousandChars": "${{price}}/千字符",
+      "audioTokenPrice": "输入 ${{input}} · 音频 ${{output}}/M",
+      "audioTokenPriceLong": "每百万 Token：输入文字 ${{input}}，输出音频 ${{output}}",
       "imageTokenPrice": "图片 ${{price}}/百万 Token",
       "canEdit": "可改图",
       "size": "尺寸",
@@ -5401,7 +5452,7 @@
     "compactCost": "使用当前模型整理，可能产生相应费用。",
     "speech": {
       "title": "生成语音",
-      "read": "朗读…",
+      "read": "朗读",
       "hint": "先检查文字、音色和格式，再生成语音。使用独立的语音模型，不会发送聊天消息。",
       "text": "朗读文字",
       "generate": "生成语音",
@@ -5509,7 +5560,7 @@
       "modelSwitched": "已切换到推荐的配置任务模型，你可以手动换回。",
       "modelUnconfigured": "尚未配置推荐的配置任务模型，或该模型暂不可用。继续使用当前模型。",
       "enable": "开启本机配置",
-      "boundary": "已开启本机配置：助手可以检查和修复本机的 AI 工具。",
+      "boundary": "助手可以检查和修复本机的 AI 工具，并读取你附加的文件；开启联网后才会搜索网页。",
       "modes": {
         "default": "默认",
         "autoEdit": "自动编辑",
@@ -5549,7 +5600,101 @@
         "install_tool": "安装工具",
         "update_tool": "更新工具",
         "uninstall_tool": "卸载工具"
-      }
+      },
+      "permissionValue": "权限：{{mode}}"
+    },
+    "generation": {
+      "plus": "添加内容或功能",
+      "attach": "添加图片和文件",
+      "on": "已开启",
+      "kinds": {
+        "image": "生成图片",
+        "video": "生成视频",
+        "speech": "生成语音"
+      },
+      "chipLabel": "{{name}}：模型和参数",
+      "remove": "去掉{{name}}",
+      "defaultsNote": "对话模型生成时默认用这里的模型和参数；你在对话里明确说的参数优先。",
+      "noModel": "暂无可用的生成模型。",
+      "model": "模型",
+      "sound": "声音",
+      "voice": "音色",
+      "format": "格式",
+      "silent": "无声",
+      "withSound": "有声",
+      "firstFrame": "首帧",
+      "firstLastFrames": "首帧 + 尾帧",
+      "references": "参考素材 {{count}} 个",
+      "speaking": "正在生成语音…",
+      "text": "朗读的文字",
+      "prompt": "提交的提示词",
+      "regenerate": "改参数重新生成",
+      "regenerateTitle": "改参数重新生成",
+      "regenerateNote": "直接用这些参数重新生成，不经过对话模型；结果会加在这条回答下面。",
+      "details": "详情",
+      "useVoice": "使用「{{voice}}」",
+      "voiceSearchName": "搜索或输入音色名",
+      "voiceSearchId": "搜索或粘贴音色 ID",
+      "voiceNameHint": "可输入任意 Gemini 音色名，例如 Charon。",
+      "voiceIdHint": "粘贴 ElevenLabs 音色库里的音色 ID（20 位字母和数字）。",
+      "sourceImage": "原图",
+      "reference": "参考图",
+      "characters_one": "{{count}} 字",
+      "characters_other": "{{count}} 字",
+      "estimate": "预估费用 ${{cost}}",
+      "estimateUnknown": "暂时无法预估费用",
+      "confirmGenerate": "确认并生成",
+      "generateAgain": "重新生成",
+      "confirmTitle": "生成这个视频？",
+      "generate": "生成",
+      "allowSession": "本对话不再询问",
+      "decline": "不生成",
+      "overLimit": "生成视频最多使用 9 张参考图、3 段音频（每段不超过 15 秒）和 1 个视频，请删掉多余的附件。",
+      "needsTools": "当前模型不能调用工具，无法生成图片、视频或语音。请换一个模型。",
+      "readAloudFailed": "朗读失败，请稍后再试。"
+    }
+  },
+  "pages": {
+    "tools": {
+      "title": "工具",
+      "description": "用一个 Ofox 账户管理你的 AI 编程工具",
+      "loading": "正在读取你的工具…"
+    },
+    "sessions": {
+      "title": "会话",
+      "description": "各工具的历史会话，搜索、续聊、查看用量",
+      "loading": "正在找你的会话…",
+      "loadingTranscript": "正在打开会话…"
+    },
+    "library": {
+      "instructions": {
+        "title": "指令",
+        "description": "给各工具共用的提示和规则"
+      },
+      "mcp": {
+        "title": "MCP 服务器",
+        "description": "一处配置，分发到各工具"
+      },
+      "skills": {
+        "title": "技能",
+        "description": "技能文件夹，按需链接到各工具"
+      },
+      "loading": "正在读取资源库…"
+    },
+    "usage": {
+      "overview": {
+        "title": "用量概览",
+        "description": "各工具这段时间用了多少 token、花了多少钱"
+      },
+      "requests": {
+        "title": "用量明细",
+        "description": "每一次请求的模型、token 和费用"
+      },
+      "sessions": {
+        "title": "会话分析",
+        "description": "按会话看用量和耗时"
+      },
+      "loading": "正在读取用量…"
     }
   }
 }

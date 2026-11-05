@@ -52,6 +52,8 @@ const mocks = vi.hoisted(() => ({
   resumeVideo: vi.fn(),
   saveMedia: vi.fn(),
   speech: vi.fn(),
+  synthesize: vi.fn(),
+  regenerateMedia: vi.fn(),
   transcribe: vi.fn(),
   pickAudio: vi.fn(),
   stop: vi.fn(),
@@ -134,6 +136,18 @@ const capabilities: AssistantBootstrap = {
   },
 };
 let current: AssistantSessionDetail;
+const speechModel: AssistantModel = {
+  ...model("google/gemini-3.8-flash-tts", "Gemini TTS"),
+  kind: "speech",
+  audio: {
+    family: "gemini-tts",
+    suggestedVoices: ["Kore", "Puck"],
+    responseFormats: ["wav", "pcm"],
+    defaultFormat: "wav",
+    voiceKind: "name",
+    pricing: { unit: "tokens" },
+  } as unknown as NonNullable<AssistantModel["audio"]>,
+};
 const listOf = (
   sessions: AssistantSession[],
   unreadable: AssistantSessionList["unreadable"] = [],
@@ -209,6 +223,23 @@ async function openConversationMenu() {
 async function chooseFromConversationMenu(name: string) {
   await openConversationMenu();
   const item = await screen.findByRole("menuitem", { name });
+  await waitFor(() =>
+    expect(item).not.toHaveAttribute("aria-disabled", "true"),
+  );
+  await userEvent.click(item);
+}
+/** The composer's "+": files, generation, web search and local config. */
+const plusButton = () =>
+  screen.getByRole("button", { name: "Add content or a feature" });
+/** The entry `name` of the composer's "+" menu, with the menu open. */
+async function plusItem(name: string | RegExp) {
+  if (plusButton().getAttribute("aria-expanded") !== "true")
+    await userEvent.click(plusButton());
+  return screen.findByRole("menuitem", { name });
+}
+/** Pick an entry of the composer's "+" menu once it can run. */
+async function choosePlus(name: string | RegExp) {
+  const item = await plusItem(name);
   await waitFor(() =>
     expect(item).not.toHaveAttribute("aria-disabled", "true"),
   );
@@ -384,55 +415,39 @@ it("audio entry opens only when dedicated transcription models are available", a
   expect(mocks.send).not.toHaveBeenCalled();
 });
 
-it("speech generation opens from the composer without changing the chat draft", async () => {
+it("offers speech generation in the + menu instead of a composer button", async () => {
   mocks.bootstrap.mockResolvedValue({
     ...capabilities,
-    audioModels: [
-      {
-        ...model("google/gemini-3.8-flash-tts", "Gemini TTS"),
-        kind: "speech",
-        audio: {
-          family: "gemini-tts",
-          suggestedVoices: ["Kore"],
-          responseFormats: ["wav", "pcm"],
-          defaultFormat: "wav",
-          pricing: { unit: "tokens" },
-        },
-      },
-    ],
+    audioModels: [speechModel],
   });
   await openConversation();
-  fireEvent.change(composer(), { target: { value: "Keep this draft" } });
-  await userEvent.click(
-    screen.getByRole("button", { name: "Generate speech" }),
+  expect(screen.queryByRole("button", { name: "Generate speech" })).toBeNull();
+  expect(await plusItem("Generate speech")).not.toHaveAttribute(
+    "aria-disabled",
+    "true",
   );
-  expect(
-    await screen.findByRole("dialog", { name: "Generate speech" }),
-  ).toBeVisible();
-  expect(screen.getByRole("textbox", { name: "Text to speak" })).toHaveValue(
-    "Keep this draft",
-  );
-  await userEvent.click(screen.getByRole("button", { name: "Close" }));
-  expect(composer()).toHaveValue("Keep this draft");
-  expect(mocks.send).not.toHaveBeenCalled();
 });
 
-it("completed assistant replies expose a read-aloud preview using an independent speech model", async () => {
+it("reads a completed reply aloud at once with the remembered voice, without a dialog", async () => {
   mocks.bootstrap.mockResolvedValue({
     ...capabilities,
-    audioModels: [
-      {
-        ...model("google/gemini-3.8-flash-tts", "Gemini TTS"),
-        kind: "speech",
-        audio: {
-          family: "gemini-tts",
-          suggestedVoices: ["Kore"],
-          responseFormats: ["wav"],
-          defaultFormat: "wav",
-          pricing: { unit: "tokens" },
-        },
-      },
-    ],
+    audioModels: [speechModel],
+    rememberedModels: { speech: speechModel.id },
+    speechPreferences: { [speechModel.id]: { voice: "Puck", format: "wav" } },
+  });
+  const play = vi
+    .spyOn(window.HTMLMediaElement.prototype, "play")
+    .mockResolvedValue(undefined);
+  mocks.synthesize.mockResolvedValue({
+    operationId: "op",
+    runId: "run",
+    kind: "speech",
+    model: speechModel.id,
+    params: {},
+    outputs: ["audio-1"],
+    status: "completed",
+    cost: null,
+    audio: { pricing: { unit: "tokens" } },
   });
   current.messages = [
     {
@@ -445,11 +460,21 @@ it("completed assistant replies expose a read-aloud preview using an independent
     },
   ];
   await openConversation();
-  await userEvent.click(screen.getByRole("button", { name: "Read aloud…" }));
-  expect(
-    await screen.findByRole("textbox", { name: "Text to speak" }),
-  ).toHaveValue("A completed reply");
+  await userEvent.click(screen.getByRole("button", { name: "Read aloud" }));
+  await waitFor(() => expect(play).toHaveBeenCalled());
+  expect(mocks.synthesize).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sessionId: "session-a",
+      modelId: speechModel.id,
+      input: "A completed reply",
+      voice: "Puck",
+      responseFormat: "wav",
+      sourceMessageId: "read-reply",
+    }),
+  );
+  expect(screen.queryByRole("dialog")).toBeNull();
   expect(mocks.send).not.toHaveBeenCalled();
+  play.mockRestore();
 });
 
 beforeEach(async () => {
@@ -465,7 +490,7 @@ beforeEach(async () => {
   mocks.bootstrap.mockResolvedValue(capabilities);
   mocks.localChanges.mockResolvedValue([]);
   mocks.restoreLocalChanges.mockResolvedValue([]);
-  mocks.setPermission.mockImplementation(async r=>r.mode);
+  mocks.setPermission.mockImplementation(async (r) => r.mode);
   mocks.respondApproval.mockResolvedValue(undefined);
   mocks.getPreferences.mockResolvedValue({
     instructions: "",
@@ -761,6 +786,26 @@ describe("the empty state", () => {
     );
     expect(new Set(buttons.map((button) => button.parentElement)).size).toBe(1);
     for (const button of buttons) expect(button).toHaveClass("rounded-full");
+  });
+
+  it("offers the Claude Code check where the assistant can read this computer's configuration", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      localConfigDefinition: {
+        id: "local_config",
+        version: 1,
+        recommendedModel: capabilities.models[1].id,
+        suitableModels: [],
+      },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Check Claude Code setup" }),
+    );
+    expect(composer()).toHaveValue(
+      "Check the Claude Code configuration on my computer for problems, and tell me how to fix any you find.",
+    );
   });
 
   it("is a title, one row of starters and one line, with no brand icon", async () => {
@@ -1778,7 +1823,7 @@ describe("attachments", () => {
   const footer = () => composer().closest("footer") as HTMLElement;
   const composerFiles = () =>
     within(footer()).queryByRole("list", { name: "Attached files" });
-  const attach = () => screen.getByRole("button", { name: "Attach files" });
+  const attach = () => choosePlus("Add images and files");
   const sendButton = () => screen.getByRole("button", { name: "Send" });
   const withDraftFiles = (
     files: AssistantAttachment[],
@@ -1794,7 +1839,7 @@ describe("attachments", () => {
   });
   async function pick(files: AssistantAttachment[]) {
     mocks.pickAttachments.mockResolvedValueOnce(files);
-    await userEvent.click(attach());
+    await attach();
     await waitFor(() =>
       expect(composerFiles()).toHaveTextContent(files[0].name),
     );
@@ -1977,7 +2022,7 @@ describe("attachments", () => {
     it("is warned about before the first message, for the model chosen", async () => {
       mocks.listSessions.mockResolvedValue(listOf([]));
       render(page());
-      await waitFor(() => expect(attach()).toBeEnabled());
+      await waitFor(() => expect(plusButton()).toBeEnabled());
       await pick([photo]);
       expect(screen.getByText(warning)).toBeVisible();
     });
@@ -2058,9 +2103,9 @@ describe("attachments", () => {
 
   it("changes nothing when the file dialog is cancelled", async () => {
     await openConversation();
-    await userEvent.click(attach());
+    await attach();
     await waitFor(() => expect(mocks.pickAttachments).toHaveBeenCalled());
-    await waitFor(() => expect(attach()).toBeEnabled());
+    await waitFor(() => expect(plusButton()).toBeEnabled());
     expect(composerFiles()).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -2081,20 +2126,20 @@ describe("attachments", () => {
   ])("explains a refused pick (%s) in words", async (code, expected) => {
     mocks.pickAttachments.mockRejectedValueOnce(code);
     await openConversation();
-    await userEvent.click(attach());
+    await attach();
     const alert = await screen.findByRole("alert");
     expect(alert).toHaveTextContent(expected);
     expect(document.body).not.toHaveTextContent("assistant_");
     expect(composerFiles()).toBeNull();
-    expect(attach()).toBeEnabled();
+    expect(plusButton()).toBeEnabled();
   });
 
   it("starts a conversation for files picked before there is one", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
-    await waitFor(() => expect(attach()).toBeEnabled());
+    await waitFor(() => expect(plusButton()).toBeEnabled());
     mocks.pickAttachments.mockResolvedValueOnce([pdf]);
-    await userEvent.click(attach());
+    await attach();
     await waitFor(() =>
       expect(mocks.pickAttachments).toHaveBeenCalledWith("session-a"),
     );
@@ -2123,12 +2168,12 @@ describe("attachments", () => {
 
     it("leaves no empty conversation behind when the dialog is cancelled", async () => {
       render(page());
-      await waitFor(() => expect(attach()).toBeEnabled());
+      await waitFor(() => expect(plusButton()).toBeEnabled());
       await userEvent.click(screen.getByRole("button", { name: "Web search" }));
       await userEvent.type(composer(), "Compare these");
-      await userEvent.click(attach());
+      await attach();
       await waitFor(trashed);
-      await waitFor(() => expect(attach()).toBeEnabled());
+      await waitFor(() => expect(plusButton()).toBeEnabled());
       // Back to no conversation, with the unsent words and search choice.
       expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent(
         "Assistant",
@@ -2146,8 +2191,8 @@ describe("attachments", () => {
         "assistant_attachment_too_many",
       );
       render(page());
-      await waitFor(() => expect(attach()).toBeEnabled());
-      await userEvent.click(attach());
+      await waitFor(() => expect(plusButton()).toBeEnabled());
+      await attach();
       expect(await screen.findByRole("alert")).toHaveTextContent(
         "Too many files.",
       );
@@ -2161,9 +2206,9 @@ describe("attachments", () => {
     it("keeps a conversation that was open before the pick", async () => {
       mocks.listSessions.mockResolvedValue(listOf([current.session]));
       await openConversation();
-      await userEvent.click(attach());
+      await attach();
       await waitFor(() => expect(mocks.pickAttachments).toHaveBeenCalled());
-      await waitFor(() => expect(attach()).toBeEnabled());
+      await waitFor(() => expect(plusButton()).toBeEnabled());
       expect(mocks.updateSession).not.toHaveBeenCalledWith(
         expect.objectContaining({ deleted: true }),
       );
@@ -2175,9 +2220,9 @@ describe("attachments", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: /My conversation/ }),
     );
-    await waitFor(() => expect(attach()).toBeEnabled());
+    await waitFor(() => expect(plusButton()).toBeEnabled());
     mocks.pickAttachments.mockResolvedValueOnce([pdf]);
-    await userEvent.click(attach());
+    await attach();
     await waitFor(() =>
       expect(composerFiles()).toHaveTextContent("report.pdf"),
     );
@@ -2244,7 +2289,10 @@ describe("attachments", () => {
     await userEvent.type(composer(), "Hello");
     await userEvent.click(sendButton());
     await screen.findByRole("button", { name: "Stop" });
-    expect(attach()).toBeDisabled();
+    expect(await plusItem("Add images and files")).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
   });
 
   it("shows each file's outcome as the run reads it, and why the turn was blocked", async () => {
@@ -4505,7 +4553,7 @@ describe("sign-in changes", () => {
       });
     await openConversation();
     mocks.pickAttachments.mockResolvedValueOnce([file]);
-    await userEvent.click(screen.getByRole("button", { name: "Attach files" }));
+    await choosePlus("Add images and files");
     await waitFor(() => expect(files()).toHaveTextContent("private.pdf"));
     // The account's saved draft names no file.
     mocks.getSession.mockResolvedValue({
@@ -5138,7 +5186,9 @@ describe("conversation trash, in detail", () => {
     ];
     await openTrashed();
     expect(screen.queryByRole("textbox", { name: "Message" })).toBeNull();
-    expect(screen.queryByRole("button", { name: "Attach files" })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Add content or a feature" }),
+    ).toBeNull();
     const notice = screen.getByText(hint).closest("footer") as HTMLElement;
     expect(notice).not.toBeNull();
     expect(notice).toContainElement(restoreButton());
@@ -6033,9 +6083,8 @@ describe("a pick that imported files", () => {
     });
     mocks.pickAttachments.mockResolvedValueOnce([pdf]);
     render(page());
-    const attach = screen.getByRole("button", { name: "Attach files" });
-    await waitFor(() => expect(attach).toBeEnabled());
-    await userEvent.click(attach);
+    await waitFor(() => expect(plusButton()).toBeEnabled());
+    await choosePlus("Add images and files");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "couldn't be read or saved",
     );
@@ -7043,7 +7092,7 @@ describe("the followed reply's thinking", () => {
   });
 });
 
-describe("image conversations", () => {
+describe("generation tools", () => {
   const imageModel: AssistantModel = {
     ...model("image/test", "Image Test"),
     kind: "image",
@@ -7051,172 +7100,387 @@ describe("image conversations", () => {
       generations: true,
       edits: true,
       n: true,
-      sizes: ["1024x1024"],
-      qualities: ["low"],
+      sizes: ["1024x1024", "1536x1024"],
+      qualities: ["low", "high"],
       perImagePrice: "0.02",
       tokenPricing: null,
     },
   };
-  function images() {
+  const videoModel: AssistantModel = {
+    ...model("video/test", "Video Test"),
+    kind: "video",
+    video: {
+      modes: ["t2v", "i2v"],
+      resolutions: ["480p", "720p"],
+      defaultResolution: "480p",
+      minDuration: 4,
+      maxDuration: 8,
+      supportsAudio: true,
+      aspectRatios: ["16:9"],
+      fromPricePerSecond: "0.02",
+    },
+  };
+  const withMedia = () =>
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
-      models: [...capabilities.models, imageModel],
+      models: [...capabilities.models, imageModel, videoModel],
     });
+  const startRun = async () => {
+    await userEvent.type(composer(), "Draw a fox");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByRole("button", { name: "Stop" });
+    const sent = mocks.send.mock.calls[0][0];
+    const emit = (type: string, data: Record<string, unknown>) =>
+      act(() =>
+        mocks.listener?.({ ...sent, type, data } as unknown as AssistantEvent),
+      );
+    emit("run_start", { messageId: "reply", webSearch: false });
+    return emit;
+  };
+  const imageResult = {
+    toolCallId: "call-1",
+    kind: "image",
+    model: "image/test",
+    params: { size: "1024x1024", quality: "low" },
+    prompt: "a red fox in snow",
+    inputIds: [],
+    status: "completed",
+    outputs: ["file-1"],
+    cost: "0.02",
+    apex: "ofox.ai",
+  };
+  const generatedFile: AssistantAttachment = {
+    id: "file-1",
+    name: "generated-1.png",
+    mimeType: "image/png",
+    sizeBytes: 10,
+    status: "ready",
+    reason: null,
+    details: null,
+    origin: "generated",
+    sourceMessageId: "reply",
+  };
+  beforeEach(() => {
+    withMedia();
+    mocks.updateSession.mockImplementation(async (patch) => ({
+      ...current.session,
+      ...patch,
+    }));
+  });
+
+  it("opens a conversation that generated directly on a chat model, keeping that model as its default", async () => {
     current.session = { ...current.session, modelId: "image/test" };
-  }
-  it("updates remembered kinds immediately after a successful model change", async () => {
-    images();
-    const hook = renderHook(() => useAssistant(true));
-    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
-    act(() => hook.result.current.select(session.id));
-    await waitFor(() => expect(hook.result.current.detail).not.toBeNull());
-    await act(async () => {
-      await hook.result.current.update({ modelId: imageModel.id });
-    });
-    expect(hook.result.current.bootstrap?.rememberedModels?.image).toBe(
-      imageModel.id,
-    );
-    const chat = capabilities.models[0].id;
-    await act(async () => {
-      await hook.result.current.update({ modelId: chat });
-    });
-    expect(hook.result.current.bootstrap?.rememberedModels).toMatchObject({
-      image: imageModel.id,
-      chat,
-    });
-  });
-  it("sends explicit image parameters and hides chat controls", async () => {
-    images();
     await openConversation();
-    expect(screen.queryByRole("switch", { name: /Web search/ })).toBeNull();
-    await userEvent.click(screen.getByRole("combobox", { name: "Quality" }));
-    await userEvent.click(screen.getByRole("option", { name: "low" }));
-    await userEvent.type(composer(), "blue square");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(mocks.send).toHaveBeenCalledWith(
+      expect(mocks.updateSession).toHaveBeenCalledWith(
         expect.objectContaining({
-          text: "blue square",
-          media: { quality: "low" },
+          sessionId: "session-a",
+          modelId: "balanced",
+          media: { image: { model: "image/test" } },
         }),
       ),
     );
   });
-  it("sends a WebP reference image to an edit-capable model", async () => {
-    images();
-    current.attachments = [
-      {
-        id: "webp",
-        name: "reference.webp",
-        mimeType: "image/webp",
-        sizeBytes: 64,
-        status: "ready",
-        reason: null,
-        details: null,
-      },
-    ];
-    current.session.draftAttachmentIds = ["webp"];
+
+  it("offers only chat models as the conversation's model", async () => {
     await openConversation();
-    await userEvent.type(composer(), "make it blue");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
-    await waitFor(() =>
-      expect(mocks.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          text: "make it blue",
-          attachmentIds: ["webp"],
-        }),
-      ),
+    await userEvent.click(
+      screen.getByRole("combobox", { name: i18n.t("assistant.model") }),
     );
+    expect(screen.queryByRole("option", { name: /Image Test/ })).toBeNull();
+    expect(screen.queryByRole("radio", { name: /Image/ })).toBeNull();
   });
-  it("blocks non-image attachments in image mode before sending", async () => {
-    images();
-    current.attachments = [
-      {
-        id: "text",
-        name: "notes.txt",
-        mimeType: "text/plain",
-        sizeBytes: 5,
-        status: "ready",
-        reason: null,
-        details: null,
-      },
-    ];
-    current.session.draftAttachmentIds = ["text"];
-    await openConversation();
-    await userEvent.type(composer(), "blue square");
-    expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
-    await userEvent.keyboard("{Enter}");
+
+  it("starts a generation from the empty state with its chip on and an example to edit", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make an image" }),
+    );
+    expect(composer()).toHaveValue(
+      "Draw an image: a seaside town at dawn, watercolor style, warm colors.",
+    );
+    expect(composer()).toHaveFocus();
+    expect(
+      screen.getByRole("button", {
+        name: "Generate image: model and parameters",
+      }),
+    ).toBeInTheDocument();
     expect(mocks.send).not.toHaveBeenCalled();
-    expect(screen.getByText(/one PNG, JPEG or WebP/)).toBeVisible();
   });
-  it("media inputs cannot be edited and generated images can become a draft input", async () => {
-    images();
-    const output: AssistantAttachment = {
-      id: "output",
-      name: "result.png",
-      mimeType: "image/png",
-      sizeBytes: 100,
-      status: "ready",
-      reason: null,
-      details: null,
-      origin: "generated",
+
+  it("offers a starter only for a kind the account has a model for", async () => {
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(
+      await screen.findByRole("button", { name: "Make a short video" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Record a voice-over" }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Summarize content" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Polish writing" })).toBeNull();
+  });
+
+  it("keeps the writing starters for a chat model without tools", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [
+        { ...model("balanced", "Balanced model"), tools: false },
+        imageModel,
+      ],
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    expect(
+      await screen.findByRole("button", { name: "Polish writing" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Make an image" })).toBeNull();
+  });
+
+  it("adds a generation chip from + and saves it with the conversation", async () => {
+    await openConversation();
+    await choosePlus("Generate image");
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({ media: { hints: ["image"] } }),
+      ),
+    );
+    const chip = screen.getByRole("button", {
+      name: "Generate image: model and parameters",
+    });
+    // The chip names what it makes; the model is in its tooltip.
+    expect(chip).toHaveTextContent(/^Generate image$/);
+    expect(chip).toHaveAttribute(
+      "title",
+      expect.stringContaining("Image Test"),
+    );
+  });
+
+  it("saves the chip's model and parameters as the conversation's defaults, and × removes only the chip", async () => {
+    current.session = {
+      ...current.session,
+      media: { hints: ["image"], image: { model: "image/test" } },
     };
-    current.attachments = [output];
+    await openConversation();
+    await userEvent.click(
+      screen.getByRole("button", {
+        name: "Generate image: model and parameters",
+      }),
+    );
+    await userEvent.click(
+      await screen.findByRole("combobox", { name: "Size" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("option", { name: "1536x1024" }),
+    );
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          media: {
+            hints: ["image"],
+            image: { model: "image/test", size: "1536x1024" },
+          },
+        }),
+      ),
+    );
+    await userEvent.keyboard("{Escape}");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove Generate image" }),
+    );
+    await waitFor(() =>
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          media: {
+            hints: [],
+            image: { model: "image/test", size: "1536x1024" },
+          },
+        }),
+      ),
+    );
+  });
+
+  it("warns that a model without tools cannot generate while a generation chip is on", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      models: [
+        { ...capabilities.models[0], tools: false },
+        ...capabilities.models.slice(1),
+        imageModel,
+      ],
+    });
+    current.session = { ...current.session, media: { hints: ["image"] } };
+    await openConversation();
+    expect(
+      await screen.findByText(/This model cannot use tools/),
+    ).toBeVisible();
+  });
+
+  it("shows a generation on the reply being written as soon as it is made", async () => {
+    await openConversation();
+    const emit = await startRun();
+    emit("generation", {
+      messageId: "reply",
+      generation: imageResult,
+      attachments: [generatedFile],
+    });
+    const card = await screen.findByRole("region", { name: "Generate image" });
+    expect(within(card).getByRole("img")).toHaveAttribute(
+      "alt",
+      "generated-1.png",
+    );
+    // The model and parameters are in its details, not on the result.
+    expect(card).not.toHaveTextContent("Image Test");
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Details" }),
+    );
+    const details = await screen.findByRole("dialog", { name: "Details" });
+    expect(details).toHaveTextContent("Image Test");
+    expect(details).toHaveTextContent("1024x1024");
+  });
+
+  it("confirms a video's estimate on its card before it is made", async () => {
+    await openConversation();
+    const emit = await startRun();
+    emit("approval", {
+      approvalId: "approval-v",
+      toolCallId: "call-v",
+      name: "generate_video",
+      category: "generation",
+      details: {
+        model: "video/test",
+        prompt: "waves",
+        duration: 5,
+        resolution: "480p",
+        generateAudio: true,
+        materials: { firstFrame: "img-1", references: [] },
+        estimatedCostUsd: "0.1",
+      },
+      allowSession: true,
+      expectedOwner: capabilities.owner,
+      expectedGeneration: 1,
+    });
+    const card = await screen.findByRole("group", {
+      name: "Generate this video?",
+    });
+    expect(card).toHaveTextContent("Estimated cost $0.1");
+    expect(card).toHaveTextContent("First frame");
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Generate" }),
+    );
+    expect(mocks.respondApproval).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalId: "approval-v", choice: "once" }),
+    );
+  });
+
+  it("regenerates a result with changed parameters straight from its card", async () => {
+    mocks.regenerateMedia.mockResolvedValue({
+      status: "started",
+      toolCallId: "regen-1",
+    });
     current.messages = [
       {
-        id: "question",
+        id: "q",
         role: "user",
-        runId: "run-image",
-        nativeEntryId: "entry",
-        content: "blue square",
+        content: "Draw a fox",
         createdAt: 1,
-        status: "completed",
+        runId: "r",
       },
       {
-        id: "image",
-        role: "media",
-        runId: "run-image",
-        content: "",
-        createdAt: 2,
+        id: "reply",
+        role: "assistant",
+        content: "Here it is.",
         status: "completed",
-        attachments: [output],
-        media: {
-          kind: "image",
-          model: "image/test",
-          params: { quality: "low" },
-          inputIds: [],
-          outputs: [output.id],
-          cost: "0.02",
-          status: "completed",
-        },
+        createdAt: 2,
+        runId: "r",
+        attachments: [generatedFile],
+        generations: [imageResult as never],
       },
     ];
     await openConversation();
-    expect(screen.queryByRole("button", { name: /Edit message/ })).toBeNull();
-    await userEvent.click(screen.getByRole("button", { name: "Use as input" }));
-    await userEvent.type(composer(), "red square");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    const card = screen.getByRole("region", { name: "Generate image" });
+    await userEvent.click(
+      within(card).getByRole("button", {
+        name: "Regenerate with other parameters",
+      }),
+    );
+    const dialog = await screen.findByRole("dialog", {
+      name: "Regenerate with other parameters",
+    });
+    const prompt = within(dialog).getByRole("textbox", { name: "Prompt sent" });
+    expect(prompt).toHaveValue("a red fox in snow");
+    await userEvent.type(prompt, ", at night");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Generate again" }),
+    );
     await waitFor(() =>
-      expect(mocks.send).toHaveBeenCalledWith(
+      expect(mocks.regenerateMedia).toHaveBeenCalledWith(
         expect.objectContaining({
-          attachmentIds: ["output"],
-          media: { inputAttachmentId: "output" },
+          sessionId: "session-a",
+          messageId: "reply",
+          toolCallId: "call-1",
+          prompt: "a red fox in snow, at night",
+          model: "image/test",
+          params: { size: "1024x1024", quality: "low" },
         }),
       ),
     );
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(mocks.send).not.toHaveBeenCalled();
   });
-  it("shows the host-scrubbed image refusal diagnostic as plain text", async () => {
-    images();
-    mocks.send.mockRejectedValueOnce({
-      code: "assistant_media_safety_rejected",
-      detail: "Provider refused this prompt <b>safely</b>",
-    });
+
+  it("asks to confirm a regenerated video's estimate before it is submitted", async () => {
+    mocks.regenerateMedia
+      .mockResolvedValueOnce({
+        needsConfirmation: true,
+        estimatedCostUsd: "0.12",
+      })
+      .mockResolvedValueOnce({ status: "started", toolCallId: "regen-2" });
+    current.messages = [
+      {
+        id: "reply",
+        role: "assistant",
+        content: "On its way.",
+        status: "completed",
+        createdAt: 2,
+        runId: "r",
+        generations: [
+          {
+            toolCallId: "call-v",
+            kind: "video",
+            model: "video/test",
+            params: { duration: 4, resolution: "480p", generateAudio: true },
+            prompt: "waves",
+            inputIds: [],
+            status: "completed",
+            outputs: [],
+            cost: "0.08",
+            apex: "ofox.ai",
+          } as never,
+        ],
+      },
+    ];
     await openConversation();
-    await userEvent.type(composer(), "blue square");
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Regenerate with other parameters" }),
+    );
+    const dialog = await screen.findByRole("dialog");
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Generate again" }),
+    );
     expect(
-      await screen.findByText("Provider refused this prompt <b>safely</b>"),
+      await within(dialog).findByText("Estimated cost $0.12"),
     ).toBeVisible();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Confirm and generate" }),
+    );
+    await waitFor(() =>
+      expect(mocks.regenerateMedia).toHaveBeenLastCalledWith(
+        expect.objectContaining({ confirmedCostUsd: "0.12" }),
+      ),
+    );
   });
 });
 
@@ -7255,115 +7519,6 @@ describe("video backup options", () => {
         excludeVideos: true,
       }),
     );
-  });
-});
-
-describe("quoted video submission", () => {
-  const videoModel: AssistantModel = {
-    ...model("video/test", "Video model"),
-    kind: "video",
-    video: {
-      modes: ["t2v", "i2v"],
-      resolutions: ["480p"],
-      defaultResolution: "480p",
-      minDuration: 4,
-      maxDuration: 6,
-      supportsAudio: false,
-      aspectRatios: [],
-      fromPricePerSecond: "0.02",
-    },
-  };
-  beforeEach(() => {
-    mocks.quoteMedia.mockReset().mockResolvedValue({
-      id: "quote-1",
-      estimatedCostUsd: "0.08",
-      expiresAt: Date.now() + 600000,
-    });
-    mocks.cancelVideo.mockReset().mockResolvedValue(undefined);
-    mocks.resumeVideo.mockReset().mockResolvedValue(undefined);
-    mocks.bootstrap.mockResolvedValue({
-      ...capabilities,
-      models: [...capabilities.models, videoModel],
-    });
-    current.session.modelId = videoModel.id;
-    current.session.draft = "A quiet lake";
-  });
-  it("quotes before submitting and preserves the draft when confirmation is cancelled", async () => {
-    await openConversation();
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Generate video?",
-    });
-    expect(dialog).toHaveTextContent("0.08");
-    expect(mocks.quoteMedia).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: session.id,
-        params: { duration: 4, resolution: "480p", generateAudio: false },
-        expectedOwner: capabilities.owner,
-        expectedGeneration: 1,
-      }),
-    );
-    expect(mocks.send).not.toHaveBeenCalled();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "Cancel" }),
-    );
-    expect(composer()).toHaveValue("A quiet lake");
-    expect(mocks.send).not.toHaveBeenCalled();
-  });
-  it("submits only the explicitly confirmed quote and exact parameters", async () => {
-    await openConversation();
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Generate video?",
-    });
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "Generate video" }),
-    );
-    await waitFor(() =>
-      expect(mocks.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          quoteId: "quote-1",
-          video: { duration: 4, resolution: "480p", generateAudio: false },
-          text: "A quiet lake",
-          attachmentIds: [],
-        }),
-      ),
-    );
-    expect(mocks.send).toHaveBeenCalledOnce();
-  });
-  it("requires an explicit submit anyway choice when a price is unknown", async () => {
-    mocks.quoteMedia.mockResolvedValue({
-      id: "unknown-price",
-      estimatedCostUsd: null,
-      expiresAt: Date.now() + 600000,
-    });
-    await openConversation();
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
-    const dialog = await screen.findByRole("dialog", {
-      name: "Generate video?",
-    });
-    expect(dialog).toHaveTextContent("The cost cannot be estimated");
-    expect(mocks.send).not.toHaveBeenCalled();
-    await userEvent.click(
-      within(dialog).getByRole("button", { name: "Submit anyway" }),
-    );
-    await waitFor(() =>
-      expect(mocks.send).toHaveBeenCalledWith(
-        expect.objectContaining({ quoteId: "unknown-price" }),
-      ),
-    );
-  });
-  it("dismisses a quote when its account authority expires", async () => {
-    await openConversation();
-    await userEvent.click(screen.getByRole("button", { name: "Send" }));
-    await screen.findByRole("dialog", { name: "Generate video?" });
-    act(() => mocks.auth?.("expired"));
-    await waitFor(() =>
-      expect(
-        screen.queryByRole("dialog", { name: "Generate video?" }),
-      ).toBeNull(),
-    );
-    expect(mocks.send).not.toHaveBeenCalled();
   });
 });
 
@@ -7531,152 +7686,6 @@ it("keeps a video completion that arrives during a transcript refresh", async ()
     "completed",
   );
   expect(hook.result.current.detail?.usage.mediaCostUsd).toBe("0.08");
-});
-
-describe("video confirmation scope", () => {
-  const params = { duration: 4, resolution: "480p" };
-  beforeEach(() => {
-    current.session.modelId = "video/test";
-    current.session.draft = "Lake";
-    mocks.bootstrap.mockResolvedValue({
-      ...capabilities,
-      models: [{ ...model("video/test", "Video"), kind: "video" }],
-    });
-    mocks.quoteMedia.mockReset().mockResolvedValue({
-      id: "q",
-      estimatedCostUsd: "0.1",
-      expiresAt: Date.now() + 600000,
-    });
-  });
-  const openHook = async () => {
-    const hook = renderHook(() => useAssistant(true));
-    await waitFor(() => expect(hook.result.current.connected).toBe(true));
-    act(() => hook.result.current.select(session.id));
-    await waitFor(() => expect(hook.result.current.loading).toBe(false));
-    return hook;
-  };
-  it("ignores a quote returned after leaving its conversation", async () => {
-    const hook = await openHook();
-    let resolve!: (value: unknown) => void;
-    mocks.quoteMedia.mockReturnValue(new Promise((done) => (resolve = done)));
-    let quote: unknown;
-    act(() => {
-      void hook.result.current
-        .quoteVideo(params)
-        .then((value) => (quote = value));
-    });
-    await waitFor(() => expect(mocks.quoteMedia).toHaveBeenCalled());
-    act(() => hook.result.current.select(null));
-    await act(async () =>
-      resolve({
-        id: "q",
-        estimatedCostUsd: "0.1",
-        expiresAt: Date.now() + 600000,
-      }),
-    );
-    expect(quote).toBeNull();
-    expect(mocks.send).not.toHaveBeenCalled();
-  });
-  it.each(["model", "draft", "expiry"])(
-    "refuses a confirmation after %s changes",
-    async (change) => {
-      const hook = await openHook();
-      let quote: Awaited<ReturnType<typeof hook.result.current.quoteVideo>> =
-        null;
-      await act(async () => {
-        quote = await hook.result.current.quoteVideo(params);
-      });
-      expect(quote).not.toBeNull();
-      if (change === "model")
-        await act(async () => {
-          await hook.result.current.update({ modelId: "balanced" });
-        });
-      if (change === "draft")
-        act(() => hook.result.current.setDraft("Different prompt"));
-      if (change === "expiry") quote!.quote.expiresAt = Date.now() - 1;
-      await act(async () => {
-        expect(await hook.result.current.sendVideo(quote!)).toBe(false);
-      });
-      expect(mocks.send).not.toHaveBeenCalled();
-    },
-  );
-  it("submits only the selected historical frame instead of unrelated draft files", async () => {
-    const frame: AssistantAttachment = {
-      id: "frame",
-      name: "frame.webp",
-      mimeType: "image/webp",
-      sizeBytes: 5,
-      status: "ready",
-      reason: null,
-      details: null,
-    };
-    current.attachments = [
-      frame,
-      { ...frame, id: "unrelated", name: "other.webp" },
-    ];
-    current.session.draftAttachmentIds = ["unrelated"];
-    const hook = await openHook();
-    let quote: Awaited<ReturnType<typeof hook.result.current.quoteVideo>> =
-      null;
-    await act(async () => {
-      quote = await hook.result.current.quoteVideo({
-        ...params,
-        firstFrameId: frame.id,
-      });
-    });
-    await act(async () => {
-      await hook.result.current.sendVideo(quote!);
-    });
-    expect(mocks.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        attachmentIds: ["frame"],
-        video: { ...params, firstFrameId: "frame" },
-        quoteId: "q",
-      }),
-    );
-  });
-});
-
-it("preserves video parameters when the first quote creates the conversation", async () => {
-  const video: AssistantModel = {
-    ...model("video/test", "Video"),
-    kind: "video",
-    video: {
-      modes: ["t2v"],
-      resolutions: ["480p", "720p"],
-      defaultResolution: "720p",
-      minDuration: 4,
-      maxDuration: 6,
-      supportsAudio: false,
-      aspectRatios: [],
-      fromPricePerSecond: "0.02",
-    },
-  };
-  current.session.modelId = video.id;
-  mocks.bootstrap.mockResolvedValue({
-    ...capabilities,
-    defaultModelId: video.id,
-    models: [video],
-  });
-  mocks.quoteMedia.mockReset().mockResolvedValue({
-    id: "q",
-    estimatedCostUsd: "0.08",
-    expiresAt: Date.now() + 600000,
-  });
-  render(page());
-  await userEvent.click(
-    await screen.findByRole("combobox", { name: "Resolution" }),
-  );
-  await userEvent.click(screen.getByRole("option", { name: "480p" }));
-  await userEvent.type(composer(), "Lake");
-  await userEvent.click(screen.getByRole("button", { name: "Send" }));
-  const dialog = await screen.findByRole("dialog", { name: "Generate video?" });
-  await userEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
-  expect(
-    screen.getByRole("combobox", { name: "Resolution" }),
-  ).toHaveTextContent("480p");
-  expect(composer()).toHaveValue("Lake");
-  expect(mocks.send).not.toHaveBeenCalled();
 });
 
 describe("fork navigation", () => {
@@ -8300,42 +8309,112 @@ it("does not offer audio history when there is no saved audio operation", async 
   expect(screen.queryByRole("menuitem", { name: "Audio history" })).toBeNull();
 });
 
-describe('local configuration capability',()=>{
- it('starts disabled and only an explicit user toggle persists it in a new conversation',async()=>{
-  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
-  expect(hook.result.current.localConfig).toBe(false);
-  await act(async()=>{await hook.result.current.setLocalConfig(true);});
-  expect(hook.result.current.localConfig).toBe(true);
-  act(()=>hook.result.current.setDraft('Diagnose codex'));
-  await act(async()=>{await hook.result.current.send();});
-  expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
- });
- it('switches an unsuitable model only when the configured recommendation exists in the catalog',async()=>{
-  mocks.bootstrap.mockResolvedValue({...capabilities,localConfigDefinition:{id:'local_config',version:1,recommendedModel:capabilities.models[1].id,suitableModels:[]}});
-  const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
-  await act(async()=>{await hook.result.current.setLocalConfig(true);});
-  expect(hook.result.current.newModelId).toBe(capabilities.models[1].id);
- });
+describe("local configuration capability", () => {
+  it("starts disabled and only an explicit user toggle persists it in a new conversation", async () => {
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    expect(hook.result.current.localConfig).toBe(false);
+    await act(async () => {
+      await hook.result.current.setLocalConfig(true);
+    });
+    expect(hook.result.current.localConfig).toBe(true);
+    act(() => hook.result.current.setDraft("Diagnose codex"));
+    await act(async () => {
+      await hook.result.current.send();
+    });
+    expect(mocks.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilities: [{ id: "local_config", version: 1 }],
+      }),
+    );
+  });
+  it("switches an unsuitable model only when the configured recommendation exists in the catalog", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      localConfigDefinition: {
+        id: "local_config",
+        version: 1,
+        recommendedModel: capabilities.models[1].id,
+        suitableModels: [],
+      },
+    });
+    const hook = renderHook(() => useAssistant(true));
+    await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+    await act(async () => {
+      await hook.result.current.setLocalConfig(true);
+    });
+    expect(hook.result.current.newModelId).toBe(capabilities.models[1].id);
+  });
 });
 
-it('local permission display uses host memory after a renderer remount and approvals expire with their run',async()=>{
- current.session.capabilities=[{id:'local_config',version:1}];current.permissionMode='autoEdit';current.session.activeRun={runId:'local-run',operationId:'local-op'};
- const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
- act(()=>hook.result.current.select(session.id));await waitFor(()=>expect(hook.result.current.run?.runId).toBe('local-run'));
- expect(hook.result.current.localMode).toBe('autoEdit');
- act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval',data:{approvalId:'approval-1',toolCallId:'tool-1',name:'bash',category:'exec',details:'run diagnostic',allowSession:true,expectedOwner:capabilities.owner,expectedGeneration:1}} as AssistantEvent));
- expect(hook.result.current.localApprovals).toHaveLength(1);
- await act(async()=>{await hook.result.current.respondLocalApproval('approval-1','once');});
- expect(mocks.respondApproval).toHaveBeenCalledWith(expect.objectContaining({sessionId:session.id,runId:'local-run',operationId:'local-op',expectedGeneration:1,choice:'once'}));
- act(()=>mocks.listener?.({sessionId:session.id,runId:'local-run',operationId:'local-op',type:'approval_end',data:{approvalId:'approval-1'}} as AssistantEvent));
- expect(hook.result.current.localApprovals).toHaveLength(0);
+it("local permission display uses host memory after a renderer remount and approvals expire with their run", async () => {
+  current.session.capabilities = [{ id: "local_config", version: 1 }];
+  current.permissionMode = "autoEdit";
+  current.session.activeRun = { runId: "local-run", operationId: "local-op" };
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  act(() => hook.result.current.select(session.id));
+  await waitFor(() => expect(hook.result.current.run?.runId).toBe("local-run"));
+  expect(hook.result.current.localMode).toBe("autoEdit");
+  act(() =>
+    mocks.listener?.({
+      sessionId: session.id,
+      runId: "local-run",
+      operationId: "local-op",
+      type: "approval",
+      data: {
+        approvalId: "approval-1",
+        toolCallId: "tool-1",
+        name: "bash",
+        category: "exec",
+        details: "run diagnostic",
+        allowSession: true,
+        expectedOwner: capabilities.owner,
+        expectedGeneration: 1,
+      },
+    } as AssistantEvent),
+  );
+  expect(hook.result.current.localApprovals).toHaveLength(1);
+  await act(async () => {
+    await hook.result.current.respondLocalApproval("approval-1", "once");
+  });
+  expect(mocks.respondApproval).toHaveBeenCalledWith(
+    expect.objectContaining({
+      sessionId: session.id,
+      runId: "local-run",
+      operationId: "local-op",
+      expectedGeneration: 1,
+      choice: "once",
+    }),
+  );
+  act(() =>
+    mocks.listener?.({
+      sessionId: session.id,
+      runId: "local-run",
+      operationId: "local-op",
+      type: "approval_end",
+      data: { approvalId: "approval-1" },
+    } as AssistantEvent),
+  );
+  expect(hook.result.current.localApprovals).toHaveLength(0);
 });
-it('tool-page entry creates a separate enabled conversation with tool context, without sending a model request',async()=>{
- const hook=renderHook(()=>useAssistant(true));await waitFor(()=>expect(hook.result.current.bootstrap).not.toBeNull());
- await act(async()=>{await hook.result.current.startLocalConfig('Diagnose codex in the problem folder');});
- expect(mocks.createSession).toHaveBeenCalledWith(expect.objectContaining({capabilities:[{id:'local_config',version:1}]}));
- expect(mocks.updateSession).toHaveBeenCalledWith(expect.objectContaining({draft:'Diagnose codex in the problem folder'}));
- expect(mocks.send).not.toHaveBeenCalled();
+it("tool-page entry creates a separate enabled conversation with tool context, without sending a model request", async () => {
+  const hook = renderHook(() => useAssistant(true));
+  await waitFor(() => expect(hook.result.current.bootstrap).not.toBeNull());
+  await act(async () => {
+    await hook.result.current.startLocalConfig(
+      "Diagnose codex in the problem folder",
+    );
+  });
+  expect(mocks.createSession).toHaveBeenCalledWith(
+    expect.objectContaining({
+      capabilities: [{ id: "local_config", version: 1 }],
+    }),
+  );
+  expect(mocks.updateSession).toHaveBeenCalledWith(
+    expect.objectContaining({ draft: "Diagnose codex in the problem folder" }),
+  );
+  expect(mocks.send).not.toHaveBeenCalled();
 });
 
 describe("local configuration in the conversation", () => {
@@ -8379,27 +8458,24 @@ describe("local configuration in the conversation", () => {
     expect(screen.queryByText(/This round/)).toBeNull();
     expect(
       screen.getByText(
-        "Local configuration is on: the assistant can check and fix the AI tools on this computer.",
+        "The assistant can check and repair the AI tools on this computer and reads the files you attach; it searches the web only with web search on.",
       ),
     ).toBeVisible();
   });
 
-  it("turns on from the composer and starts in the default mode", async () => {
+  it("always offers the three permission modes, with no switch to turn local configuration on or off", async () => {
     await openConversation();
-    expect(screen.queryByRole("combobox", { name: "Permission" })).toBeNull();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Local configuration" }),
-    );
-    await waitFor(() =>
-      expect(mocks.updateSession).toHaveBeenCalledWith(
-        expect.objectContaining({
-          capabilities: [{ id: "local_config", version: 1 }],
-        }),
-      ),
-    );
+    expect(permission()).toHaveTextContent("Permission: Default");
     expect(
-      await screen.findByRole("combobox", { name: "Permission" }),
-    ).toHaveTextContent("Default");
+      screen.queryByRole("button", { name: "Local configuration" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("menuitem", { name: /Local configuration/ }),
+    ).toBeNull();
+    await userEvent.click(permission());
+    expect(
+      screen.queryByRole("option", { name: "Turn off local configuration" }),
+    ).toBeNull();
   });
 
   it("switches modes from the composer, confirming full auto first", async () => {
@@ -8434,33 +8510,11 @@ describe("local configuration in the conversation", () => {
     await waitFor(() => expect(permission()).toHaveTextContent("Full auto"));
   });
 
-  it("turns off from the mode menu", async () => {
-    localSession();
-    await openConversation();
-    await userEvent.click(permission());
-    await userEvent.click(
-      await screen.findByRole("option", {
-        name: "Turn off local configuration",
-      }),
-    );
-    await waitFor(() =>
-      expect(mocks.updateSession).toHaveBeenCalledWith(
-        expect.objectContaining({ capabilities: [] }),
-      ),
-    );
-    await waitFor(() =>
-      expect(screen.queryByRole("combobox", { name: "Permission" })).toBeNull(),
-    );
-  });
-
   it("can't change the mode while a reply runs", async () => {
     localSession();
     await openConversation();
     await startRun();
     expect(permission()).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "Local configuration" }),
-    ).toBeDisabled();
   });
 
   it("shows the run's step and plan inside the streaming reply, and an approval card after it", async () => {

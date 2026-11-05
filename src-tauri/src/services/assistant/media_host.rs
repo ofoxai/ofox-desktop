@@ -344,7 +344,7 @@ impl AssistantHost {
                         bytes,
                     })
                     .collect();
-                attachments::generated(&store, &sid, &mid, &sources, media, |record| {
+                attachments::generated(&store, &sid, &mid, None, &sources, media, |record| {
                     if control.cancelled()
                         || record.session.deleted_at.is_some()
                         || record

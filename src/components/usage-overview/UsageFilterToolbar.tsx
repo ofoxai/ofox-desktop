@@ -1,10 +1,9 @@
-import { useRef, useState, type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { X } from "lucide-react";
 import { ToolBadge } from "@/components/tools/ToolBadge";
 import { Button } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
-import type { UsageFilterOption } from "./UsageFilterMenu";
+import { UsageFilterMenu, type UsageFilterOption } from "./UsageFilterMenu";
 
 export interface UsageFilterChip {
   key: string;
@@ -21,6 +20,8 @@ export function UsageFilterToolbar({
   disabled,
   chips,
   onReset,
+  leading,
+  trailing,
   children,
 }: {
   tools: UsageFilterOption[];
@@ -29,94 +30,48 @@ export function UsageFilterToolbar({
   disabled: boolean;
   chips: UsageFilterChip[];
   onReset: () => void;
+  /** Before the tools menu on the same row (the period). */
+  leading?: ReactNode;
+  /** At the row's right end (the estimate). */
+  trailing?: ReactNode;
   children: ReactNode;
 }) {
   const { t } = useTranslation();
-  const [focused, setFocused] = useState(0);
-  const buttons = useRef<(HTMLButtonElement | null)[]>([]),
+  const toolsMenu = useRef<HTMLDivElement>(null),
     chipButtons = useRef(new Map<string, HTMLButtonElement>());
-  const rows = [{ value: "", label: t("usageFilters.allTools") }, ...tools];
   const restore = (next?: string) =>
     window.requestAnimationFrame(() => {
       const target = next ? chipButtons.current.get(next) : undefined;
-      (target ?? buttons.current[0])?.focus({ preventScroll: true });
+      (
+        target ??
+        toolsMenu.current?.querySelector<HTMLElement>('[role="combobox"]')
+      )?.focus({ preventScroll: true });
     });
   return (
     <div className="min-w-0 space-y-2">
-      <div
-        role="group"
-        aria-label={t("usageWorkbench.toolsFilter")}
-        title={t("usageFilters.toolsHint")}
-        className="flex w-full min-w-0 flex-wrap items-center gap-x-0.5 gap-y-1 rounded-[8px] bg-pill p-[2px]"
-      >
-        {rows.map((row, index) => {
-          const selected = row.value
-            ? selectedTools.includes(row.value)
-            : !selectedTools.length;
-          return (
-            <button
-              key={row.value}
-              type="button"
-              aria-label={row.label}
-              aria-pressed={selected}
-              disabled={disabled}
-              ref={(node) => {
-                buttons.current[index] = node;
-              }}
-              tabIndex={index === Math.min(focused, rows.length - 1) ? 0 : -1}
-              onFocus={() => setFocused(index)}
-              onClick={() =>
-                onToolsChange(
-                  row.value
-                    ? selected
-                      ? selectedTools.filter((value) => value !== row.value)
-                      : [...selectedTools, row.value].sort()
-                    : [],
-                )
-              }
-              onKeyDown={(event) => {
-                const next =
-                  event.key === "ArrowRight"
-                    ? (index + 1) % rows.length
-                    : event.key === "ArrowLeft"
-                      ? (index - 1 + rows.length) % rows.length
-                      : event.key === "Home"
-                        ? 0
-                        : event.key === "End"
-                          ? rows.length - 1
-                          : undefined;
-                if (next != null) {
-                  event.preventDefault();
-                  buttons.current[next]?.focus({ preventScroll: true });
-                  buttons.current[next]?.scrollIntoView({
-                    block: "nearest",
-                    inline: "nearest",
-                  });
-                }
-              }}
-              className={cn(
-                "inline-flex min-h-[24px] min-w-0 max-w-full flex-none items-center gap-1.5 rounded-[6px] px-2.5 py-1 text-ctl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 disabled:opacity-45",
-                selected
-                  ? "bg-card text-ink shadow-[0_1px_2px_rgba(0,0,0,.14),0_0_0_.5px_rgba(0,0,0,.08)]"
-                  : "text-ink-muted hover:text-ink",
-              )}
-            >
-              {row.value && (
-                <ToolBadge toolId={row.value} size={14} variant="plain" />
-              )}
-              <span className="min-w-0 whitespace-normal break-words text-left [overflow-wrap:anywhere]">
-                {row.label}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-      <div
-        role="group"
-        aria-label={t("usageFilters.otherFilters")}
-        className="flex min-w-0 flex-wrap items-center gap-2"
-      >
-        {children}
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        {leading}
+        <div ref={toolsMenu} title={t("usageFilters.toolsHint")}>
+          <UsageFilterMenu
+            label={t("usageWorkbench.toolsFilter")}
+            allLabel={t("usageFilters.allTools")}
+            options={tools.map((tool) => ({
+              ...tool,
+              icon: <ToolBadge toolId={tool.value} size={14} variant="plain" />,
+            }))}
+            selected={selectedTools}
+            onChange={onToolsChange}
+            disabled={disabled}
+          />
+        </div>
+        <div
+          role="group"
+          aria-label={t("usageFilters.otherFilters")}
+          className="flex min-w-0 flex-wrap items-center gap-2"
+        >
+          {children}
+        </div>
+        {trailing && <div className="ml-auto flex-none">{trailing}</div>}
       </div>
       {!!chips.length && (
         <div

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
@@ -444,7 +445,7 @@ export function SessionsPage({
           </div>
         )}
         {(trash ? trashQuery : query).isPending && (
-          <p role="status">{t("common.loading")}</p>
+          <FoxLoader label={t("pages.sessions.loading")} />
         )}
         {!trash && searchMode === "content" ? (
           <SessionSearchResults

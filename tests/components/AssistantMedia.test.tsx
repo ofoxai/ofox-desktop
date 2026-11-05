@@ -2,7 +2,6 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, it, vi } from "vitest";
 import i18n from "i18next";
-import { ImageParams } from "@/components/assistant/ImageParams";
 import { MediaBlock } from "@/components/assistant/MediaBlock";
 import type { AssistantModel, AssistantMessage } from "@/lib/api/assistant";
 import en from "@/i18n/locales/en.json";
@@ -27,43 +26,6 @@ const model = {
     tokenPricing: null,
   },
 } as AssistantModel;
-it("offers only advertised image parameters and estimates count times price", async () => {
-  const change = vi.fn();
-  render(
-    <ImageParams
-      model={model}
-      value={{ n: 2 }}
-      onChange={change}
-      disabled={false}
-    />,
-  );
-  expect(screen.getByText(/0.04/)).toBeVisible();
-  await userEvent.click(screen.getByRole("combobox", { name: "Quality" }));
-  expect(screen.queryByRole("option", { name: "medium" })).toBeNull();
-  await userEvent.click(screen.getByRole("option", { name: "low" }));
-  expect(change).toHaveBeenCalledWith({ n: 2, quality: "low" });
-});
-it("does not invent controls or a token-based price estimate", () => {
-  render(
-    <ImageParams
-      model={{
-        ...model,
-        image: {
-          ...model.image!,
-          n: false,
-          sizes: [],
-          qualities: [],
-          perImagePrice: null,
-        },
-      }}
-      value={{}}
-      onChange={vi.fn()}
-      disabled={false}
-    />,
-  );
-  expect(screen.queryByRole("combobox")).toBeNull();
-  expect(screen.getByText("Cost depends on actual token usage")).toBeVisible();
-});
 const file = {
   id: "f".repeat(32),
   name: "result.png",

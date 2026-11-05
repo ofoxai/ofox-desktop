@@ -10,7 +10,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useTranslation } from "react-i18next";
 import { settingsApi } from "@/lib/api/settings";
-import { CopyButton } from "@/components/ui/copy-button";
+import { CodeBlock, codePreview } from "./CodeBlock";
 import { toast } from "sonner";
 import {
   loadMarkdownSyntax,
@@ -36,6 +36,16 @@ function codeText(children: ReactNode): string {
         : "";
     })
     .join("");
+}
+
+/** The language of a fenced block's code (`language-…` on its `<code>`). */
+function codeLanguage(children: ReactNode): string | null {
+  for (const child of Children.toArray(children)) {
+    if (!isValidElement<{ className?: string }>(child)) continue;
+    const found = /(?:^|\s)language-(\S+)/.exec(child.props.className ?? "");
+    if (found) return found[1].toLowerCase();
+  }
+  return null;
 }
 
 interface MarkdownNode {
@@ -193,6 +203,7 @@ export function SessionMarkdown({
   highlight = "",
   syntaxHighlight = false,
   math = false,
+  previews = false,
 }: {
   content: string;
   highlight?: string;
@@ -200,6 +211,8 @@ export function SessionMarkdown({
   syntaxHighlight?: boolean;
   /** Draws `$$…$$`, `\(…\)` and `\[…\]` formulas; external session transcripts leave it off. */
   math?: boolean;
+  /** Draws Mermaid diagrams and previews HTML blocks; external session transcripts leave it off. */
+  previews?: boolean;
 }) {
   const { t } = useTranslation();
   const syntax = useMarkdownSyntax(syntaxHighlight);
@@ -276,17 +289,12 @@ export function SessionMarkdown({
             <span aria-hidden>{checked ? "☑" : "☐"}</span>
           ),
           pre: ({ children }) => (
-            <div className="my-3 overflow-hidden rounded-[9px] border border-line-2 bg-canvas">
-              <div className="flex justify-end border-b border-line-2 px-2 py-1">
-                <CopyButton
-                  text={codeText(children).replace(/\n$/, "")}
-                  aria-label={t("sessionExperience.copyCode")}
-                />
-              </div>
-              <pre className="max-w-full overflow-x-auto p-3 font-mono text-[12px] leading-relaxed [&_code]:bg-transparent [&_code]:p-0">
-                {children}
-              </pre>
-            </div>
+            <CodeBlock
+              text={codeText(children).replace(/\n$/, "")}
+              preview={previews ? codePreview(codeLanguage(children)) : null}
+            >
+              {children}
+            </CodeBlock>
           ),
         }}
       >

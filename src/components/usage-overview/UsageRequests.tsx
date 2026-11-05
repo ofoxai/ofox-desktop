@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useLoadingFox } from "@/components/ui/fox-loader";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import { save } from "@tauri-apps/plugin-dialog";
@@ -297,6 +298,9 @@ export function UsageRequests({
       if (exportOwner.current === owner) setExporting(false);
     }
   };
+  const firstLoad = useLoadingFox(result.isPending, {
+    label: t("pages.usage.loading"),
+  });
   return (
     <section
       aria-label={t("usageWorkbench.requestConditions")}
@@ -558,10 +562,8 @@ export function UsageRequests({
           {t("usageWorkbench.requestAnalyticsUnavailable")}
         </p>
       )}
-      {result.isPending ? (
-        <p role="status" className="p-6 text-center text-sub text-ink-muted">
-          {t("common.loading")}
-        </p>
+      {firstLoad.loading ? (
+        firstLoad.fox
       ) : result.isError ? (
         <div
           role="alert"

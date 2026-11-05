@@ -6,7 +6,7 @@ import en from "@/i18n/locales/en.json";
 import {
   LocalApprovalCard,
   LocalChangesLine,
-  LocalConfigControl,
+  PermissionControl,
   LocalTaskProgress,
   type LocalApproval,
 } from "@/components/assistant/AssistantLocalConfig";
@@ -24,38 +24,24 @@ const pick = async (name: RegExp) => {
   await userEvent.click(await screen.findByRole("option", { name }));
 };
 
-describe("the composer's local configuration control", () => {
+describe("the composer's permission control", () => {
   const props = () => ({
-    on: true,
     mode: "default" as const,
     disabled: false,
-    onToggle: vi.fn(),
     onMode: vi.fn().mockResolvedValue(true),
   });
 
-  it("is a plain toggle while off", async () => {
-    const p = { ...props(), on: false };
-    render(<LocalConfigControl {...p} />);
-    const toggle = screen.getByRole("button", { name: "Local configuration" });
-    expect(toggle).toHaveAttribute("aria-pressed", "false");
-    expect(screen.queryByRole("combobox")).toBeNull();
-    await userEvent.click(toggle);
-    expect(p.onToggle).toHaveBeenCalledWith(true);
+  it("names the mode, with no switch to turn local configuration off", () => {
+    render(<PermissionControl {...props()} />);
+    expect(permission()).toHaveTextContent("Permission: Default");
+    expect(
+      screen.queryByRole("button", { name: "Local configuration" }),
+    ).toBeNull();
   });
 
-  it("names the mode while on, and its name turns it off", async () => {
+  it("offers the three modes only", async () => {
     const p = props();
-    render(<LocalConfigControl {...p} />);
-    expect(permission()).toHaveTextContent("Default");
-    const toggle = screen.getByRole("button", { name: "Local configuration" });
-    expect(toggle).toHaveAttribute("aria-pressed", "true");
-    await userEvent.click(toggle);
-    expect(p.onToggle).toHaveBeenCalledWith(false);
-  });
-
-  it("offers the three modes and turning it off", async () => {
-    const p = props();
-    render(<LocalConfigControl {...p} />);
+    render(<PermissionControl {...p} />);
     await userEvent.click(permission());
     const names = (await screen.findAllByRole("option")).map(
       (option) => option.textContent,
@@ -64,23 +50,19 @@ describe("the composer's local configuration control", () => {
       expect.stringMatching(/^Default/),
       expect.stringMatching(/^Auto edit/),
       expect.stringMatching(/^Full auto/),
-      "Turn off local configuration",
     ]);
     await userEvent.click(screen.getByRole("option", { name: /^Auto edit/ }));
     expect(p.onMode).toHaveBeenCalledWith("autoEdit", undefined);
-    await pick(/^Turn off/);
-    expect(p.onToggle).toHaveBeenCalledWith(false);
   });
 
   it("asks before full auto, and cancelling changes nothing", async () => {
     const p = props();
-    render(<LocalConfigControl {...p} />);
+    render(<PermissionControl {...p} />);
     await pick(/^Full auto/);
     const dialog = await screen.findByRole("dialog", {
       name: "Turn on full auto?",
     });
     expect(dialog).toHaveTextContent(/install, update or remove tools/);
-    expect(dialog).not.toHaveTextContent(/separate approval/);
     await userEvent.click(
       within(dialog).getByRole("button", { name: "Cancel" }),
     );
@@ -96,10 +78,7 @@ describe("the composer's local configuration control", () => {
   });
 
   it("can't be changed while locked", () => {
-    render(<LocalConfigControl {...props()} disabled />);
-    expect(
-      screen.getByRole("button", { name: "Local configuration" }),
-    ).toBeDisabled();
+    render(<PermissionControl {...props()} disabled />);
     expect(permission()).toBeDisabled();
   });
 });

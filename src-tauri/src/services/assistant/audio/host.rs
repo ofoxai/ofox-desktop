@@ -236,7 +236,7 @@ impl AssistantHost {
                 match result {
                     Ok(response) => {
                         media.status = "completed".into();
-                        media.cost = if media.kind == "transcription" { cost(&trace.pricing, &response.usage).map(|amount| amount.normalize().to_string()) } else { None };
+                        media.cost = if media.kind == "transcription" { cost(&trace.pricing, &response.usage).map(|amount| amount.normalize().to_string()) } else { trace.estimate.clone() };
                         trace.text = response.text;
                         if let Some((bytes, info)) = response.output { trace.output = Some(info.clone()); output = Some((bytes, info)); }
                         trace.usage = response.usage;
@@ -280,7 +280,7 @@ impl AssistantHost {
                             Ok((ResultRecord { operation_id: done.operation_id.clone(), run_id: done.run_id.clone(), media: media.clone() }, r.usage.clone(), r.session.updated_at))
                         };
                         if let Some((bytes, info)) = output {
-                            let published = crate::services::assistant::attachments::generated_audio(&store, &sid, &mut media, &bytes, &info, |record, media| {
+                            let published = crate::services::assistant::attachments::generated_audio(&store, &sid, None, &mut media, &bytes, &info, |record, media, _| {
                                 host.admit(generation)?;
                                 host.validate_run(&done)?;
                                 if record.session.deleted_at.is_some() {return Err("assistant_session_deleted".into());}
@@ -693,7 +693,12 @@ mod tests {
                 .cleanup_orphan_attachments(&request.session_id)
                 .unwrap();
             assert!(path.is_file());
-            assert_eq!(record.usage["usageCoverage"], "incomplete");
+            // Billed by tokens: the cost is unknown, here and in the summary.
+            assert!(record.usage["estimatedCostUsd"].is_null());
+            assert_eq!(
+                store.usage_summary().unwrap()["usageCoverage"],
+                "incomplete"
+            );
             assert_eq!(
                 store.remembered_models().unwrap()["speech"],
                 request.model_id

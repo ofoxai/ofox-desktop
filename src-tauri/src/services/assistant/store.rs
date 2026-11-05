@@ -141,6 +141,10 @@ struct Prefs {
     auto_title: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     notify_on_finish: Option<bool>,
+    /// The generation defaults a new conversation starts with. Read
+    /// leniently: a value this version cannot use is ignored, not damage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    media_defaults: Option<Value>,
 }
 
 impl Prefs {
@@ -306,7 +310,7 @@ impl AssistantStore {
     ) -> Result<Detail, String> {
         super::capabilities::validate(assistant_id, capabilities)?;
         let at = now();
-        let record = SessionRecord {
+        let mut record = SessionRecord {
             session: Session {
                 assistant_id: assistant_id.into(),
                 capabilities: capabilities.to_vec(),
@@ -318,6 +322,7 @@ impl AssistantStore {
                 title_source: Some(TitleSource::Auto),
                 model_id: model_id.into(),
                 web_search,
+                media: self.remembered_media_defaults(),
                 thinking_level: None,
                 created_at: at,
                 updated_at: at,
@@ -334,6 +339,7 @@ impl AssistantStore {
             operations: vec![],
             inherited_usage: vec![],
         };
+        derive_local_config(&mut record.session);
         let directory = private_subdir(&self.ensure_root()?, &record.session.id)?;
         let path = directory.join(SESSION_FILE);
         let lock = file_lock(&path);
@@ -655,6 +661,51 @@ impl AssistantStore {
         ))
     }
 
+    /// Remember a conversation's generation defaults for the next new one;
+    /// its chips stay with the conversation.
+    pub fn remember_media_defaults(
+        &self,
+        defaults: &super::media_tools::MediaDefaults,
+    ) -> Result<(), String> {
+        let mut kept = defaults.clone();
+        kept.hints.clear();
+        let value = serde_json::to_value(kept).map_err(|_| INVALID_PREFERENCES)?;
+        self.update_prefs(|prefs| prefs.media_defaults = Some(value))
+    }
+
+    /// What a new conversation generates with: the last defaults saved, else
+    /// the media models remembered from direct media turns.
+    pub fn remembered_media_defaults(&self) -> super::media_tools::MediaDefaults {
+        use super::media_tools::{ImageDefaults, MediaDefaults, SpeechDefaults, VideoDefaults};
+        let prefs = self.read_prefs().ok().flatten().unwrap_or_default();
+        let mut defaults: MediaDefaults = prefs
+            .media_defaults
+            .clone()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .filter(|d: &MediaDefaults| d.validate().is_ok())
+            .unwrap_or_default();
+        defaults.hints.clear();
+        if defaults.image.is_none() {
+            defaults.image = prefs.image_model_id.clone().map(|model| ImageDefaults {
+                model: Some(model),
+                ..Default::default()
+            });
+        }
+        if defaults.video.is_none() {
+            defaults.video = prefs.video_model_id.clone().map(|model| VideoDefaults {
+                model: Some(model),
+                ..Default::default()
+            });
+        }
+        if defaults.speech.is_none() {
+            defaults.speech = prefs.speech_model_id.clone().map(|model| SpeechDefaults {
+                model: Some(model),
+                ..Default::default()
+            });
+        }
+        defaults
+    }
+
     pub fn remembered_models(&self) -> Result<Value, String> {
         let prefs = self.read_prefs()?.unwrap_or_default();
         Ok(
@@ -926,6 +977,7 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     super::capabilities::validate(assistant_id, capabilities)?;
     record.session.assistant_id = assistant_id.into();
     record.session.capabilities = capabilities.to_vec();
+    derive_local_config(&mut record.session);
     if let Some(title) = &request.title {
         if title.len() > MAX_TITLE_BYTES {
             return Err("assistant_title_too_long".into());
@@ -941,6 +993,10 @@ fn apply_update(record: &mut SessionRecord, request: &UpdateRequest) -> Result<(
     }
     if let Some(web) = request.web_search {
         record.session.web_search = web;
+    }
+    if let Some(media) = &request.media {
+        media.validate()?;
+        record.session.media = media.clone();
     }
     // Checked against the model by `update_checked`.
     if let Some(level) = &request.thinking_level {
@@ -1201,7 +1257,24 @@ fn parse_record(bytes: &[u8], sid: &str) -> Result<SessionRecord, String> {
     }
     let mut record = file.record;
     derive_title_source(&mut record);
+    derive_local_config(&mut record.session);
     Ok(record)
+}
+
+/// Every conversation may look after this computer's AI tools; its
+/// permission mode says how much it does without asking. One saved before
+/// that, or saved without it, reads with local configuration.
+fn derive_local_config(session: &mut Session) {
+    if session.assistant_id == super::capabilities::default_assistant_id()
+        && session.capabilities.is_empty()
+    {
+        session
+            .capabilities
+            .push(super::capabilities::CapabilityRef {
+                id: super::capabilities::LOCAL_CONFIG.into(),
+                version: super::capabilities::LOCAL_CONFIG_VERSION,
+            });
+    }
 }
 
 /// A record saved before titles had a source gets one: its title is the
@@ -1331,9 +1404,14 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn local_capabilities_default_for_legacy_sessions_and_persist_user_updates() {
+    fn every_conversation_reads_with_local_configuration_and_keeps_it() {
         let (config, store) = fixture();
         let sid = store.create("model", false).unwrap().session.id;
+        let local = json!([{"id": "local_config", "version": 1}]);
+        assert_eq!(
+            serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap()["capabilities"],
+            local
+        );
         let path = session_file(config.path(), &store, &sid);
         let mut legacy: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         legacy["session"]
@@ -1347,23 +1425,18 @@ mod tests {
         fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let loaded = serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap();
         assert_eq!(loaded["assistantId"], "ofox");
-        assert_eq!(loaded["capabilities"], json!([]));
-        let change = serde_json::from_value(json!({"sessionId": sid,
-            "capabilities": [{"id": "local_config", "version": 1}]}))
-        .unwrap();
-        store.update(&change, no_precondition).unwrap();
-        let saved = serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap();
         assert_eq!(
-            saved["capabilities"],
-            json!([{"id": "local_config", "version": 1}])
+            loaded["capabilities"], local,
+            "a legacy record reads with it"
         );
-        assert!(saved.get("permissionMode").is_none());
+        assert!(loaded.get("permissionMode").is_none());
         let disable =
             serde_json::from_value(json!({"sessionId": sid, "capabilities": []})).unwrap();
         store.update(&disable, no_precondition).unwrap();
         assert_eq!(
             serde_json::to_value(store.load_record(&sid).unwrap().session).unwrap()["capabilities"],
-            json!([])
+            local,
+            "it cannot be turned off"
         );
     }
 
@@ -2632,6 +2705,7 @@ mod tests {
                 title_source: Some(TitleSource::Auto),
                 model_id: "test/model".into(),
                 web_search: false,
+                media: Default::default(),
                 thinking_level: None,
                 created_at: 1,
                 updated_at: 1,

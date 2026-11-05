@@ -65,6 +65,8 @@ enum Reply {
     Json(u16, Value),
     /// This reply, once the gate opens.
     Wait(Arc<AtomicBool>, Box<Reply>),
+    /// A 200 with these bytes, as a speech request is answered.
+    Bytes(&'static str, Vec<u8>),
 }
 
 /// Tool-call ids are unique, as a provider's are.
@@ -300,6 +302,16 @@ fn serve(stream: TcpStream, script: &Script) {
             );
         }
         Reply::Wait(..) => unreachable!("opened above"),
+        Reply::Bytes(mime, bytes) => {
+            let _ = out.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: {mime}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    bytes.len()
+                )
+                .as_bytes(),
+            );
+            let _ = out.write_all(&bytes);
+        }
         Reply::Json(code, body) => {
             let body = body.to_string();
             let _ = out.write_all(
@@ -5661,4 +5673,358 @@ fn manual_compaction_is_an_exclusive_billed_native_run_without_a_fake_turn() {
             assert!(compacting,"returning to an active compaction must expose its state");
         });
     }
+}
+
+// ── generation tools ─────────────────────────────────────────────────────
+
+const PNG_1X1: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+fn png_bytes() -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(PNG_1X1)
+        .unwrap()
+}
+
+fn generation_events(env: &TestEnv, run: &str) -> Vec<Value> {
+    of_type(env, run, "generation")
+}
+
+#[test]
+fn a_chat_model_generates_an_image_with_the_conversation_defaults_on_both_apexes() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let config = tempfile::tempdir().unwrap();
+            let gateway = Gateway::start();
+            let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+            env.catalog.lock().unwrap().push(image_model());
+            let host = AssistantHost::new(env.clone());
+            let sid = create(&host).await;
+            host.update_session(serde_json::from_value(json!({"sessionId":sid,
+                "media":{"image":{"model":"test/image","size":"1024x1024","quality":"low"}}})).unwrap())
+                .await
+                .unwrap();
+            gateway.reply(Reply::ToolCalls(vec![("generate_image", json!({"prompt":"a blue square"}))]));
+            gateway.reply(Reply::Json(200, json!({"data":[{"b64_json":PNG_1X1}]})));
+            gateway.reply(Reply::Stream("Here is your blue square.".into()));
+            let (run, end) = turn(&host, &env, request(&sid, "Draw a blue square", json!({}))).await;
+            assert_eq!(end.data["status"], "completed", "{:?} {:?} {:?}", of_type(&env, &run, "error"), of_type(&env, &run, "tool_end"), gateway.requests().iter().map(tool_results).collect::<Vec<_>>());
+            let calls = gateway.requests();
+            assert_eq!(calls.len(), 3);
+            assert!(tool_names(&calls[0]).contains(&"generate_image".to_string()));
+            assert_eq!(calls[1].path, "/v1/images/generations");
+            assert_eq!(calls[1].authorization, format!("Bearer {KEY}"));
+            assert_eq!(
+                calls[1].body,
+                json!({"model":"test/image","prompt":"a blue square","size":"1024x1024","quality":"low"})
+            );
+            let answer = calls[2].text();
+            assert!(answer.contains("attachment id"), "{answer}");
+            assert!(!answer.contains(&PNG_1X1[..24]), "the model never gets image bytes");
+            let detail = host.get_session(&sid).await.unwrap();
+            let reply = detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && m.content.contains("blue square"))
+                .expect("the reply");
+            assert_eq!(reply.generations.len(), 1);
+            let made = &reply.generations[0];
+            assert_eq!(made.status, "completed");
+            assert_eq!(made.cost.as_deref(), Some("0.02"));
+            assert_eq!(made.prompt.as_deref(), Some("a blue square"));
+            assert_eq!(made.apex.as_deref(), Some(apex));
+            assert!(made.tool_call_id.is_some());
+            assert_eq!(made.outputs.len(), 1);
+            assert_eq!(reply.attachments.len(), 1);
+            assert_eq!(reply.attachments[0].origin.as_deref(), Some("generated"));
+            assert_eq!(reply.attachments[0].source_message_id.as_deref(), Some(reply.id.as_str()));
+            assert_eq!(detail.attachments.len(), 1);
+            let usage = reply.usage.as_ref().expect("reply usage");
+            assert_eq!(usage["mediaCostUsd"], "0.02");
+            let lines = usage["requests"].as_array().unwrap();
+            assert!(lines.iter().any(|l| l["kind"] == "image" && l["estimatedCostUsd"] == "0.02" && l["toolCallId"] == json!(made.tool_call_id)));
+            assert_eq!(detail.usage["mediaCostUsd"], "0.02");
+            let events = generation_events(&env, &run);
+            assert!(events.iter().any(|e| e["generation"]["status"] == "completed" && e["attachments"].as_array().is_some_and(|a| a.len() == 1)));
+            // Regenerate with another prompt from the result card: no chat
+            // model, a second generation on the same reply.
+            gateway.reply(Reply::Json(200, json!({"data":[{"b64_json":PNG_1X1}]})));
+            let started = host
+                .regenerate_media(serde_json::from_value(json!({
+                    "sessionId": sid, "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                    "operationId": types::id(), "messageId": reply.id, "toolCallId": made.tool_call_id,
+                    "prompt": "a blue square, larger", "model": "test/image",
+                    "params": {"size": "1024x1024", "quality": "low"},
+                })).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(started["status"], "started");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let again = loop {
+                let detail = host.get_session(&sid).await.unwrap();
+                let shown = detail.messages.into_iter().find(|m| m.id == reply.id).unwrap();
+                if shown.generations.len() == 2 && shown.generations[1].status == "completed" && detail.session.active_run.is_none() {
+                    break shown;
+                }
+                assert!(Instant::now() < deadline, "the regeneration did not finish: {:?}", shown.generations);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            };
+            let calls = gateway.requests();
+            assert_eq!(calls.len(), 4, "one more image request and no chat request");
+            assert_eq!(calls[3].path, "/v1/images/generations");
+            assert_eq!(calls[3].body["prompt"], "a blue square, larger");
+            assert_eq!(again.attachments.len(), 2);
+            assert_eq!(again.generations[1].prompt.as_deref(), Some("a blue square, larger"));
+            let detail = host.get_session(&sid).await.unwrap();
+            assert_eq!(detail.usage["mediaCostUsd"], "0.04");
+            assert_eq!(again.usage.as_ref().unwrap()["mediaCostUsd"], "0.04");
+            assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
+            host.shutdown().await;
+        }
+    });
+}
+
+#[test]
+fn a_model_that_takes_no_tools_gets_no_generation_tools() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        env.catalog.lock().unwrap().push(image_model());
+        let mut plain = serde_json::to_value(test_model()).unwrap();
+        plain["id"] = json!("test/no-tools");
+        plain["tools"] = json!(false);
+        env.catalog
+            .lock()
+            .unwrap()
+            .push(serde_json::from_value(plain).unwrap());
+        let host = AssistantHost::new(env.clone());
+        let sid = host
+            .create_session(serde_json::from_value(json!({"modelId":"test/no-tools"})).unwrap())
+            .await
+            .unwrap()
+            .id;
+        gateway.reply(Reply::Stream("Hello.".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Draw a cat", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(tool_names(&gateway.requests()[0]).is_empty());
+        host.shutdown().await;
+    });
+}
+
+fn vision_model() -> Model {
+    let mut model = serde_json::to_value(test_model()).unwrap();
+    model["supportsImages"] = json!(true);
+    model["inputModalities"] = json!(["text", "image"]);
+    serde_json::from_value(model).unwrap()
+}
+
+#[test]
+fn a_video_asks_first_and_a_declined_one_is_never_submitted() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        use cc_switch_lib::assistant::host::local::ApprovalRequest;
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        {
+            let mut catalog = env.catalog.lock().unwrap();
+            catalog.clear();
+            catalog.push(vision_model());
+            catalog.push(video_model());
+        }
+        let host = AssistantHost::new(env.clone());
+        let sid = create(&host).await;
+        let image = host
+            .pick_attachments(&sid, {
+                let path = picked(config.path(), "start.png", &png_bytes());
+                move || Ok(vec![path])
+            })
+            .await
+            .unwrap()
+            .remove(0);
+        let answer = |choice: &'static str| {
+            let host = host.clone();
+            let env = env.clone();
+            let sid = sid.clone();
+            async move {
+                let run = host
+                    .send(request(&sid, "Animate this", json!({"attachmentIds":[]})))
+                    .await
+                    .unwrap();
+                let approval = wait_for(&env, &run.run_id, "approval").await;
+                assert_eq!(approval.data["name"], "generate_video");
+                assert_eq!(approval.data["category"], "generation");
+                assert_eq!(
+                    approval.data["details"]["estimatedCostUsd"], "0.15",
+                    "5 s at the 480p rate"
+                );
+                let respond: ApprovalRequest = serde_json::from_value(json!({
+                    "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+                    "approvalId": approval.data["approvalId"], "choice": choice,
+                    "expectedOwner": owner(), "expectedGeneration": host.generation()}))
+                .unwrap();
+                host.respond_approval(respond).await.unwrap();
+                wait_for(&env, &run.run_id, "run_end").await
+            }
+        };
+        let call = json!({"prompt":"the square spins","duration":5,"material_ids":[image.id]});
+        gateway.reply(Reply::ToolCalls(vec![("generate_video", call.clone())]));
+        gateway.reply(Reply::Stream("Okay, I will not make it.".into()));
+        let end = answer("deny").await;
+        assert_eq!(end.data["status"], "completed");
+        let calls = gateway.requests();
+        assert!(
+            calls.iter().all(|r| r.path != "/v1/videos"),
+            "declined: nothing submitted"
+        );
+        assert!(calls[1].text().contains("assistant_media_declined"));
+
+        gateway.reply(Reply::ToolCalls(vec![("generate_video", call)]));
+        let job = types::id();
+        gateway.reply(Reply::Json(202, json!({"id":job,"status":"pending"})));
+        gateway.reply(Reply::Stream("Your video is on its way.".into()));
+        let end = answer("once").await;
+        assert_eq!(
+            end.data["status"],
+            "completed",
+            "{:?} {:?}",
+            env.events(&end.run_id)
+                .iter()
+                .filter(|e| e.r#type == "error")
+                .map(|e| e.data.clone())
+                .collect::<Vec<_>>(),
+            gateway
+                .requests()
+                .iter()
+                .map(|r| (r.path.clone(), tool_results(r)))
+                .collect::<Vec<_>>()
+        );
+        let calls = gateway.requests();
+        let submitted = calls
+            .iter()
+            .find(|r| r.path == "/v1/videos")
+            .expect("submitted");
+        assert_eq!(submitted.body["duration"], 5);
+        assert_eq!(
+            submitted.body["frame_images"][0]["frame_type"],
+            "first_frame"
+        );
+        assert!(submitted.body["frame_images"][0]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+        assert!(submitted.body.get("input_references").is_none());
+        let detail = host.get_session(&sid).await.unwrap();
+        let reply = detail
+            .messages
+            .iter()
+            .find(|m| m.content.contains("on its way"))
+            .unwrap();
+        let video = &reply.generations[0];
+        assert_eq!(video.kind, "video");
+        assert_eq!(video.job_id.as_deref(), Some(job.as_str()));
+        assert!(
+            matches!(video.status.as_str(), "queued" | "in_progress"),
+            "{}",
+            video.status
+        );
+        assert_eq!(video.input_ids, vec![image.id.clone()]);
+        assert_eq!(
+            reply.status, "completed",
+            "the reply's own status stays its chat run's"
+        );
+        // A video made again from its card answers with the estimate first,
+        // and is never submitted without it.
+        let regenerate =
+            |confirmed: Value| -> cc_switch_lib::assistant::media_tools::RegenerateRequest {
+                serde_json::from_value(json!({
+                "sessionId": sid, "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                "operationId": types::id(), "messageId": reply.id, "toolCallId": video.tool_call_id,
+                "prompt": "the square spins faster", "model": "test/video",
+                "params": {"duration": 4}, "confirmedCostUsd": confirmed,
+            })).unwrap()
+            };
+        let quoted = host
+            .regenerate_media(regenerate(Value::Null))
+            .await
+            .unwrap();
+        assert_eq!(quoted["needsConfirmation"], true);
+        assert_eq!(quoted["estimatedCostUsd"], "0.12");
+        assert_eq!(
+            gateway
+                .requests()
+                .iter()
+                .filter(|r| r.path == "/v1/videos")
+                .count(),
+            1,
+            "nothing submitted before the estimate is confirmed"
+        );
+        host.shutdown().await;
+    });
+}
+
+fn wav(seconds: u32) -> Vec<u8> {
+    let size = 8000 * 2 * seconds;
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + size).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes());
+    b.extend_from_slice(&8000u32.to_le_bytes());
+    b.extend_from_slice(&16000u32.to_le_bytes());
+    b.extend_from_slice(&2u16.to_le_bytes());
+    b.extend_from_slice(&16u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&size.to_le_bytes());
+    b.resize(44 + size as usize, 0);
+    b
+}
+
+#[test]
+fn a_chat_model_reads_text_aloud_into_a_file_on_its_reply() {
+    let Some(bundle) = runtime_dir() else { return };
+    runtime().block_on(async {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.io", &gateway)]);
+        let speech = parse_models(
+            json!({"data":[{"id":"elevenlabs/eleven_v4","supported_endpoints":["/v1/audio/speech"],"pricing":{"input_text_per_character":"0.0002"}}]}),
+            Source::V1,
+        )
+        .remove(0);
+        env.catalog.lock().unwrap().push(speech);
+        let host = AssistantHost::new(env.clone());
+        let sid = create(&host).await;
+        host.update_session(serde_json::from_value(json!({"sessionId":sid,
+            "media":{"speech":{"model":"elevenlabs/eleven_v4","voice":"21m00Tcm4TlvDq8ikWAM","format":"wav"}}})).unwrap())
+            .await
+            .unwrap();
+        gateway.reply(Reply::ToolCalls(vec![("generate_speech", json!({"text":"Welcome in"}))]));
+        gateway.reply(Reply::Bytes("audio/wav", wav(1)));
+        gateway.reply(Reply::Stream("Here is the voice-over.".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Read: Welcome in", json!({}))).await;
+        assert_eq!(end.data["status"], "completed", "{:?}", gateway.requests().iter().map(tool_results).collect::<Vec<_>>());
+        let calls = gateway.requests();
+        assert_eq!(calls[1].path, "/v1/audio/speech");
+        assert_eq!(calls[1].body["input"], "Welcome in");
+        assert_eq!(calls[1].body["voice"], "21m00Tcm4TlvDq8ikWAM");
+        assert_eq!(calls[1].body["response_format"], "wav");
+        let detail = host.get_session(&sid).await.unwrap();
+        let reply = detail.messages.iter().find(|m| m.content.contains("voice-over")).unwrap();
+        let spoken = &reply.generations[0];
+        assert_eq!(spoken.kind, "speech");
+        assert_eq!(spoken.status, "completed");
+        assert_eq!(spoken.cost.as_deref(), Some("0.002"), "10 characters at the catalog rate");
+        assert_eq!(reply.attachments.len(), 1);
+        assert_eq!(reply.attachments[0].mime_type, "audio/wav");
+        assert_eq!(reply.attachments[0].source_message_id.as_deref(), Some(reply.id.as_str()));
+        assert_eq!(spoken.outputs, vec![reply.attachments[0].id.clone()]);
+        host.shutdown().await;
+    });
 }

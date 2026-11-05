@@ -64,32 +64,47 @@ function Fixture() {
     </UsageFilterToolbar>
   );
 }
-it("keeps tool selection additive and all-tools clears only the tool scope", async () => {
+const toolsMenu = () => screen.getByRole("combobox", { name: "工具筛选" });
+const pickTool = async (name: string) => {
+  if (toolsMenu().getAttribute("aria-expanded") !== "true")
+    await userEvent.click(toolsMenu());
+  await userEvent.click(screen.getByRole("option", { name }));
+};
+
+it("filters tools from a menu: picks add up, and 全部工具 clears only the tool scope", async () => {
   render(<Fixture />);
-  const group = within(screen.getByRole("group", { name: "工具筛选" }));
-  await userEvent.click(group.getByRole("button", { name: "Claude Code" }));
-  await userEvent.click(group.getByRole("button", { name: "Codex" }));
-  expect(group.getByRole("button", { name: "Claude Code" })).toHaveAttribute(
-    "aria-pressed",
+  expect(toolsMenu()).toHaveTextContent("全部工具");
+  await pickTool("Claude Code");
+  await pickTool("Codex");
+  expect(screen.getByRole("option", { name: "Claude Code" })).toHaveAttribute(
+    "aria-selected",
     "true",
   );
-  expect(group.getByRole("button", { name: "Codex" })).toHaveAttribute(
-    "aria-pressed",
+  expect(screen.getByRole("option", { name: "Codex" })).toHaveAttribute(
+    "aria-selected",
     "true",
   );
-  await userEvent.click(group.getByRole("button", { name: "全部工具" }));
-  expect(group.getByRole("button", { name: "全部工具" })).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
+  await userEvent.click(screen.getByRole("button", { name: "全部工具" }));
   expect(
     screen.getByRole("button", { name: "移除Model：model-a" }),
   ).toBeVisible();
   expect(screen.queryByRole("button", { name: "移除Tool：codex" })).toBeNull();
 });
+
+it("shows each tool's badge in the menu", async () => {
+  render(<Fixture />);
+  await userEvent.click(toolsMenu());
+  expect(
+    screen
+      .getByRole("option", { name: "Codex" })
+      .querySelector("[data-tool-badge], svg, img"),
+  ).not.toBeNull();
+});
+
 it("removes one condition, keeps the others and gives the next chip focus without scrolling", async () => {
   render(<Fixture />);
-  await userEvent.click(screen.getByRole("button", { name: "Codex" }));
+  await pickTool("Codex");
+  await userEvent.keyboard("{Escape}");
   const focus = vi.spyOn(HTMLElement.prototype, "focus");
   await userEvent.click(
     screen.getByRole("button", { name: "移除Tool：codex" }),
@@ -97,30 +112,21 @@ it("removes one condition, keeps the others and gives the next chip focus withou
   const model = screen.getByRole("button", { name: "移除Model：model-a" });
   await waitFor(() => expect(model).toHaveFocus());
   expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-  expect(screen.getByRole("button", { name: "全部工具" })).not.toHaveFocus();
   focus.mockRestore();
   await userEvent.click(model);
-  await waitFor(() =>
-    expect(screen.getByRole("button", { name: "全部工具" })).toHaveFocus(),
-  );
+  await waitFor(() => expect(toolsMenu()).toHaveFocus());
   expect(screen.queryByRole("group", { name: "已选筛选" })).toBeNull();
 });
-it("offers a one-stop reset and arrow-key tool navigation without changing selection", async () => {
+
+it("offers a one-stop reset that returns focus to the tools menu", async () => {
   render(<Fixture />);
-  const all = screen.getByRole("button", { name: "全部工具" });
-  all.focus();
-  await userEvent.keyboard("{ArrowRight}");
-  expect(screen.getByRole("button", { name: "Claude Code" })).toHaveFocus();
-  expect(all).toHaveAttribute("aria-pressed", "true");
-  await userEvent.keyboard("{End}{Enter}");
-  expect(screen.getByRole("button", { name: "Codex" })).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
+  await pickTool("Codex");
+  await userEvent.keyboard("{Escape}");
   await userEvent.click(screen.getByRole("button", { name: "重置条件" }));
-  await waitFor(() => expect(all).toHaveFocus());
+  await waitFor(() => expect(toolsMenu()).toHaveFocus());
   expect(screen.queryByRole("group", { name: "已选筛选" })).toBeNull();
 });
+
 it("does not move focus or scroll when a ranking updates the filters externally", async () => {
   const props = {
     tools,
@@ -183,43 +189,26 @@ function DenseToolbar({ count }: { count: number }) {
 }
 
 it.each([6, 12])(
-  "keeps all %i tool choices and their selection independent of secondary filters with keyboard access to the last long-named tool",
+  "offers all %i tools in the menu, apart from the secondary filters",
   async (count) => {
     render(<DenseToolbar count={count} />);
-    const toolGroup = screen.getByRole("group", { name: "工具筛选" });
     const secondaryGroup = screen.getByRole("group", {
       name: "模型、项目及其他筛选",
     });
-    expect(toolGroup).not.toContainElement(secondaryGroup);
+    expect(secondaryGroup).not.toContainElement(toolsMenu());
     for (const name of ["Model filter", "Project filter", "Hermes statistics"])
       expect(
         within(secondaryGroup).getByRole("button", { name }),
       ).toBeEnabled();
-    const choices = within(toolGroup).getAllByRole("button");
-    expect(choices).toHaveLength(count + 1);
+    await userEvent.click(toolsMenu());
     for (const option of manyTools.slice(0, count))
-      expect(
-        within(toolGroup).getByRole("button", { name: option.label }),
-      ).toHaveTextContent(option.label);
-    const first = within(toolGroup).getByRole("button", { name: "全部工具" });
-    const lastOption = manyTools[count - 1];
-    const last = within(toolGroup).getByRole("button", {
-      name: lastOption.label,
+      expect(screen.getByRole("option", { name: option.label })).toBeVisible();
+    const last = screen.getByRole("option", {
+      name: manyTools[count - 1].label,
     });
-    expect(last).toHaveAttribute("aria-pressed", "true");
-    first.focus();
-    await userEvent.keyboard("{End}");
-    expect(last).toHaveFocus();
-    expect(choices.filter((choice) => choice.tabIndex === 0)).toHaveLength(1);
-    await userEvent.keyboard("{Enter}");
-    expect(last).toHaveAttribute("aria-pressed", "false");
-    expect(
-      within(toolGroup).getByRole("button", { name: "Claude Code" }),
-    ).toHaveAttribute("aria-pressed", "true");
-    await userEvent.tab();
-    expect(
-      within(secondaryGroup).getByRole("button", { name: "Model filter" }),
-    ).toHaveFocus();
+    expect(last).toHaveAttribute("aria-selected", "true");
+    await userEvent.click(last);
+    expect(last).toHaveAttribute("aria-selected", "false");
     expect(
       screen.getByRole("button", { name: "移除Tool：claude" }),
     ).toBeInTheDocument();

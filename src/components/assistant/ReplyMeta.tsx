@@ -56,6 +56,7 @@ export function ReplyMeta({
     breakdown !== null &&
     (breakdown.lines.length > 0 ||
       breakdown.search !== null ||
+      breakdown.generations.length > 0 ||
       breakdown.total !== null ||
       (message.usage?.modelRequests ?? 0) > 0);
   return (
@@ -107,6 +108,19 @@ export function ReplyMeta({
               <>
                 {(breakdown.lines.length > 0 || breakdown.search) && (
                   <div className="space-y-1 px-3 py-2">
+                    {breakdown.chat !== undefined && (
+                      <div
+                        data-usage-line
+                        className="flex items-baseline gap-3 font-medium text-ink"
+                      >
+                        <span className="flex-1">
+                          {t("assistant.usageLines.chat")}
+                        </span>
+                        <span className="w-20 text-right tabular-nums">
+                          {fmtUsd(breakdown.chat)}
+                        </span>
+                      </div>
+                    )}
                     {breakdown.lines.map((line) => (
                       <div
                         key={line.key}
@@ -138,6 +152,40 @@ export function ReplyMeta({
                           {fmtUsd(breakdown.search.usd)}
                         </span>
                       </div>
+                    )}
+                  </div>
+                )}
+                {breakdown.generations.length > 0 && (
+                  <div className="space-y-1 border-t border-line px-3 py-2">
+                    {breakdown.generations.map((line) => (
+                      <div
+                        key={line.key}
+                        data-usage-line
+                        className="flex items-baseline gap-3"
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {[
+                            t(`assistant.generation.kinds.${line.kind}`, {
+                              defaultValue: line.kind,
+                            }),
+                            line.modelId
+                              ? modelName(models, line.modelId).label
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                        <span className="w-20 text-right tabular-nums text-ink-muted">
+                          {fmtUsd(line.usd)}
+                        </span>
+                      </div>
+                    ))}
+                    {breakdown.generations.some(
+                      (line) => line.usd === null,
+                    ) && (
+                      <p className="pt-0.5 leading-snug text-ink-muted">
+                        {t("assistant.usageLines.generationUnpriced")}
+                      </p>
                     )}
                   </div>
                 )}

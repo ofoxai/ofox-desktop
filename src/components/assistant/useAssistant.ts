@@ -15,7 +15,6 @@ import {
   type AssistantPasteTarget,
   type AssistantImageRequest,
   type AssistantVideoRequest,
-  type AssistantMediaQuote,
   type AssistantBackupReport,
   type AssistantBootstrap,
   type AssistantCatalogSnapshot,
@@ -30,6 +29,9 @@ import {
   type AssistantUnreadableSession,
   type AssistantUpdateRequest,
   type AssistantUsage,
+  type AssistantGeneration,
+  type AssistantMediaDefaults,
+  type AssistantRegenerateResult,
 } from "@/lib/api/assistant";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
 import { currentThinking, type ThinkingChoice } from "@/utils/assistantModels";
@@ -137,19 +139,6 @@ interface DraftWriteScope {
   held: boolean;
 }
 
-export interface VideoConfirmation {
-  quote: AssistantMediaQuote;
-  sessionId: string;
-  modelId: string;
-  owner: string;
-  generation: number;
-  video: AssistantVideoRequest;
-  text: string;
-  attachments: AssistantAttachment[];
-  epoch: number;
-  selection: number;
-}
-
 interface PendingSend extends AssistantRunRef {
   compactOnly?: boolean;
   sessionId: string;
@@ -218,6 +207,11 @@ export function useAssistant(enabled: boolean) {
   const lastWebSearch = useRef(false);
   const [newLocalConfig, setNewLocalConfig] = useState(false);
   const newLocalConfigRef = useRef(false);
+  // The generation defaults and chips of the conversation the first message
+  // creates; saved on it once it exists.
+  const [newMedia, setNewMedia] = useState<AssistantMediaDefaults>({});
+  const newMediaRef = useRef(newMedia);
+  newMediaRef.current = newMedia;
   const [localModes, setLocalModes] = useState<
     Record<string, AssistantPermissionMode>
   >({});
@@ -322,6 +316,21 @@ export function useAssistant(enabled: boolean) {
   const selectedRef = useRef(selectedId);
   const showTrashRef = useRef(showTrash);
   const runRef = useRef(run);
+  // A regenerate under way, by its run: the question of the version it
+  // would replace, and whether the user called it off (declined what it
+  // asked to generate, or stopped it). Called off, that version is shown
+  // again once the run ends; the new one stays among the versions.
+  const regenerating = useRef<{
+    runId: string;
+    sessionId: string;
+    questionId: string;
+    cancelled: boolean;
+  } | null>(null);
+  const [restoreVersion, setRestoreVersion] = useState<{
+    sessionId: string;
+    questionId: string;
+  } | null>(null);
+  const stopRef = useRef<() => Promise<void>>(async () => undefined);
   const draftRef = useRef(draft);
   const drafts = useRef(new Map<string, string>());
   // The files of each conversation's draft, kept like its text.
@@ -346,8 +355,6 @@ export function useAssistant(enabled: boolean) {
       { sequence: number; event: AssistantEvent & { type: "media_progress" } }
     >(),
   );
-  const quoting = useRef(false);
-  const confirmedQuote = useRef<VideoConfirmation | null>(null);
   const pendingSends = useRef(new Map<string, PendingSend>());
   const refreshSessionsRef = useRef<(generation?: number) => Promise<void>>(
     async () => undefined,
@@ -936,7 +943,6 @@ export function useAssistant(enabled: boolean) {
       catalogEvents.current.clear();
       videoProgress.current.clear();
       videoNotices.current.clear();
-      confirmedQuote.current = null;
       setChosenModel(null);
       lastWebSearch.current = false;
       newLocalConfigRef.current = false;
@@ -1301,16 +1307,22 @@ export function useAssistant(enabled: boolean) {
             usage,
           } = event.data;
           const identity = bootstrapRef.current;
+          const toolCallId = event.data.toolCallId ?? null;
+          const video = toolCallId
+            ? message?.generations?.find(
+                (item) => item.toolCallId === toolCallId,
+              )
+            : message?.media;
           if (
             signedOut.current ||
             !identity ||
             owner !== identity.owner ||
             authority !== identity.authorityGeneration ||
             message?.id !== messageId ||
-            message.media?.kind !== "video" ||
-            message.media.apex !== apex ||
-            message.runId !== event.runId ||
-            message.media.status !== status
+            video?.kind !== "video" ||
+            video.apex !== apex ||
+            (!toolCallId && message.runId !== event.runId) ||
+            video.status !== status
           )
             return;
           const progressKey = `${event.sessionId}:${messageId}`;
@@ -1330,12 +1342,19 @@ export function useAssistant(enabled: boolean) {
             )
               return old;
             const previous = old.messages.find(
-              (item) => item.id === messageId && item.runId === event.runId,
+              (item) =>
+                item.id === messageId &&
+                (toolCallId !== null || item.runId === event.runId),
             );
+            const before = toolCallId
+              ? previous?.generations?.find(
+                  (item) => item.toolCallId === toolCallId,
+                )
+              : previous?.media;
             if (
               !previous ||
-              previous.media?.kind !== "video" ||
-              (previous.media.status === "completed" && status !== "completed")
+              before?.kind !== "video" ||
+              (before.status === "completed" && status !== "completed")
             )
               return old;
             return {
@@ -1355,7 +1374,7 @@ export function useAssistant(enabled: boolean) {
             };
           });
           if (["completed", "failed", "error", "expired"].includes(status)) {
-            const key = `${owner}:${authority}:${event.sessionId}:${messageId}`;
+            const key = `${owner}:${authority}:${event.sessionId}:${messageId}:${toolCallId ?? ""}`;
             if (!videoNotices.current.has(key)) {
               videoNotices.current.add(key);
               notifyFinish({
@@ -1365,6 +1384,59 @@ export function useAssistant(enabled: boolean) {
               void refreshSessionsRef.current(generation);
             }
           }
+          return;
+        }
+        // A generation shows as soon as it changes, from a reply being
+        // written or from a regeneration started on its card.
+        if (event.type === "generation") {
+          if (event.sessionId !== selectedRef.current) return;
+          const { messageId, generation: made, attachments } = event.data;
+          const apply = (message: AssistantMessage): AssistantMessage => {
+            const others = (message.generations ?? []).filter(
+              (item) => item.toolCallId !== made.toolCallId,
+            );
+            const kept = message.generations?.findIndex(
+              (item) => item.toolCallId === made.toolCallId,
+            );
+            const generations =
+              kept !== undefined && kept >= 0
+                ? message.generations!.map((item, index) =>
+                    index === kept ? made : item,
+                  )
+                : [...others, made];
+            return {
+              ...message,
+              generations,
+              attachments: [
+                ...new Map(
+                  [...(message.attachments ?? []), ...attachments].map(
+                    (file) => [file.id, file],
+                  ),
+                ).values(),
+              ],
+            };
+          };
+          setStream((previous) =>
+            previous?.id === messageId ? apply(previous) : previous,
+          );
+          setDetail((old) =>
+            old?.session.id === event.sessionId
+              ? {
+                  ...old,
+                  messages: old.messages.map((item) =>
+                    item.id === messageId ? apply(item) : item,
+                  ),
+                  attachments: [
+                    ...new Map(
+                      [...old.attachments, ...attachments].map((file) => [
+                        file.id,
+                        file,
+                      ]),
+                    ).values(),
+                  ],
+                }
+              : old,
+          );
           return;
         }
         if (event.type === "run_start")
@@ -1581,23 +1653,34 @@ export function useAssistant(enabled: boolean) {
             endThinking(event.runId);
             showError(event.data);
             return;
-          case "run_end":
+          case "run_end": {
             if (event.data.status !== "completed" || event.data.stopped)
               messageQueue.pause(event.sessionId);
             writeThinking(null);
             setRun(null);
             setCompacting(false);
+            const regenerate =
+              regenerating.current?.runId === event.runId
+                ? regenerating.current
+                : null;
+            if (regenerate) regenerating.current = null;
             // A successful event alone is not enough to dispatch another run:
             // its saved history must be visible first. A failed read pauses.
             void refreshDetail(event.sessionId).then((loaded) => {
               if (generation !== epoch.current || !mounted.current) return;
               if (loaded && selectedRef.current === event.sessionId) {
+                if (regenerate?.cancelled)
+                  setRestoreVersion({
+                    sessionId: regenerate.sessionId,
+                    questionId: regenerate.questionId,
+                  });
                 setStream(null);
                 if (!runRef.current) messageQueue.completed(event.sessionId);
               } else messageQueue.pause(event.sessionId);
             });
             void refreshSessionsRef.current(generation);
             return;
+          }
         }
       })
       .then((unsubscribe) => {
@@ -1775,6 +1858,19 @@ export function useAssistant(enabled: boolean) {
     )
       throw new Error("assistant_request_expired");
     if (thinkingFailure !== undefined) showError(thinkingFailure);
+    const chosenMedia = newMediaRef.current;
+    if (Object.keys(chosenMedia).length > 0) {
+      try {
+        value = await assistantApi.updateSession({
+          sessionId: value.id,
+          media: { ...value.media, ...chosenMedia },
+          ...expectedIdentity(bootstrapRef.current),
+        });
+        setNewMedia({});
+      } catch (reason) {
+        showError(reason);
+      }
+    }
     setNewThinking(null);
     selectedRef.current = value.id;
     createdSession.current = value.id;
@@ -2268,6 +2364,79 @@ export function useAssistant(enabled: boolean) {
   );
 
   /**
+   * The generation defaults and chips of the open conversation, or of the
+   * one the first message creates. Shown at once; saved for the account's
+   * next conversation too.
+   */
+  const setMedia = useCallback(
+    (media: AssistantMediaDefaults) => {
+      if (!selectedRef.current) {
+        setNewMedia(media);
+        return;
+      }
+      setDetail((old) =>
+        old ? { ...old, session: { ...old.session, media } } : old,
+      );
+      void update({ media });
+    },
+    [update],
+  );
+
+  /** Make a result card's generation again; null when it was refused. */
+  const regenerateMedia = useCallback(
+    async (
+      message: AssistantMessage,
+      item: AssistantGeneration,
+      input: {
+        prompt: string;
+        model: string;
+        params: Record<string, unknown>;
+        confirmedCostUsd?: string | null;
+        confirmUnknownCost?: boolean;
+      },
+    ): Promise<AssistantRegenerateResult | null> => {
+      const sessionId = selectedRef.current;
+      if (!sessionId) return null;
+      try {
+        return await assistantApi.regenerateMedia({
+          sessionId,
+          operationId: freshId(),
+          messageId: message.id,
+          toolCallId: item.toolCallId,
+          ...input,
+          ...requireIdentity(bootstrapRef.current),
+        });
+      } catch (reason) {
+        showError(reason);
+        return null;
+      }
+    },
+    [showError],
+  );
+
+  /** Cancel or resume a generation tool's video. */
+  const generationVideo = useCallback(
+    (
+      action: "cancel" | "resume",
+      message: AssistantMessage,
+      item: AssistantGeneration,
+    ) => {
+      const sessionId = selectedRef.current;
+      if (!sessionId) return Promise.resolve();
+      const request = {
+        sessionId,
+        messageId: message.id,
+        toolCallId: item.toolCallId,
+        ...requireIdentity(bootstrapRef.current),
+      };
+      return action === "cancel"
+        ? assistantApi.cancelVideo(request)
+        : assistantApi.resumeVideo(request);
+    },
+    [],
+  );
+
+  /**
    * Web search for the open conversation, or for the one the first message
    * creates. A running reply goes on as it started; the next send uses it.
    * A change the open conversation refused is not the last choice a new
@@ -2391,6 +2560,13 @@ export function useAssistant(enabled: boolean) {
           expectedGeneration: event.data.expectedGeneration,
         });
         setLocalApprovals((old) => old.filter((a) => a !== event));
+        // A regenerate whose generation is declined is called off: nothing
+        // more is asked of the model, and the version it replaced comes back.
+        const regenerate = regenerating.current;
+        if (choice === "deny" && regenerate?.runId === event.runId) {
+          regenerate.cancelled = true;
+          void stopRef.current();
+        }
         return true;
       } catch (reason) {
         if (selectedRef.current === event.sessionId) showError(reason);
@@ -2488,76 +2664,6 @@ export function useAssistant(enabled: boolean) {
    * or (`text`, with the question's `attachments`) send a stored question
    * again as a new turn, leaving the draft.
    */
-  const quoteVideo = useCallback(
-    async (video: AssistantVideoRequest): Promise<VideoConfirmation | null> => {
-      if (
-        busy ||
-        loading ||
-        showTrash ||
-        detail?.session.deletedAt != null ||
-        runRef.current ||
-        quoting.current
-      )
-        return null;
-      quoting.current = true;
-      confirmedQuote.current = null;
-      setBusy(true);
-      const generation = epoch.current;
-      const selection = selectionSequence.current;
-      const modelId = modelRef.current;
-      const text = draftRef.current;
-      try {
-        const identity = requireIdentity(bootstrapRef.current);
-        const session = await ensureSession();
-        const valid = () =>
-          generation === epoch.current &&
-          selection === selectionSequence.current &&
-          selectedRef.current === session.id &&
-          modelRef.current === modelId &&
-          draftRef.current === text;
-        if (!valid() || session.modelId !== modelId)
-          throw new Error("assistant_request_expired");
-        const params = { ...video };
-        const quote = await assistantApi.quoteMedia({
-          sessionId: session.id,
-          params,
-          ...identity,
-        });
-        if (!valid()) throw new Error("assistant_request_expired");
-        const frameIds = [params.firstFrameId, params.lastFrameId].filter(
-          Boolean,
-        );
-        const available = new Map(
-          [...(detail?.attachments ?? []), ...attachmentsRef.current].map(
-            (file) => [file.id, file],
-          ),
-        );
-        const confirmation: VideoConfirmation = {
-          quote,
-          sessionId: session.id,
-          modelId,
-          owner: identity.expectedOwner,
-          generation: identity.expectedGeneration,
-          video: params,
-          text,
-          attachments: [...available.values()].filter((file) =>
-            frameIds.includes(file.id),
-          ),
-          epoch: generation,
-          selection,
-        };
-        confirmedQuote.current = confirmation;
-        return confirmation;
-      } catch (reason) {
-        if (generation === epoch.current) showError(reason);
-        return null;
-      } finally {
-        quoting.current = false;
-        if (generation === epoch.current) setBusy(false);
-      }
-    },
-    [busy, loading, showTrash, detail, ensureSession, showError],
-  );
 
   const send = useCallback(
     async (options?: {
@@ -2594,14 +2700,15 @@ export function useAssistant(enabled: boolean) {
       const regenerated = regenerateMessageId
         ? detail?.messages.find((message) => message.id === regenerateMessageId)
         : undefined;
-      const read = regenerated
-        ? (detail?.messages.find(
+      const question = regenerated
+        ? detail?.messages.find(
             (message) =>
               message.role === "user" &&
               Boolean(message.runId) &&
               message.runId === regenerated.runId,
-          )?.attachments ?? [])
-        : files;
+          )
+        : undefined;
+      const read = regenerated ? (question?.attachments ?? []) : files;
       if (
         busy ||
         operationBusyRef.current ||
@@ -2659,6 +2766,15 @@ export function useAssistant(enabled: boolean) {
         }
         const reference = { runId: freshId(), operationId: freshId() };
         preparingRunId = reference.runId;
+        // Only a version the model kept can be shown again.
+        regenerating.current = question?.nativeEntryId
+          ? {
+              runId: reference.runId,
+              sessionId,
+              questionId: question.id,
+              cancelled: false,
+            }
+          : null;
         preparation = { ...reference, sessionId, cancelled: false };
         pendingSends.current.set(reference.runId, preparation);
         detailSequence.current += 1;
@@ -2791,6 +2907,8 @@ export function useAssistant(enabled: boolean) {
           await refreshDetail(sessionId);
         return true;
       } catch (reason) {
+        if (regenerating.current?.runId === preparingRunId)
+          regenerating.current = null;
         if (fromComposer && sessionId && generation === epoch.current) {
           if (!drafts.current.get(sessionId))
             drafts.current.set(sessionId, originalDraft);
@@ -3227,6 +3345,8 @@ export function useAssistant(enabled: boolean) {
     const generation = epoch.current;
     const preparing = pendingSends.current.get(active.runId);
     if (preparing) preparing.cancelled = true;
+    if (regenerating.current?.runId === active.runId)
+      regenerating.current.cancelled = true;
     try {
       await assistantApi.stop(sessionId, active.runId, active.operationId);
     } catch (reason) {
@@ -3234,6 +3354,9 @@ export function useAssistant(enabled: boolean) {
         showError(reason);
     }
   }, [showError, messageQueue]);
+  useEffect(() => {
+    stopRef.current = stop;
+  }, [stop]);
 
   // Set at once: a second press that comes before the render that disables
   // the switcher must not start a second switch.
@@ -3301,6 +3424,15 @@ export function useAssistant(enabled: boolean) {
       messageQueue,
     ],
   );
+
+  // A regenerate called off: once nothing runs, the version it would have
+  // replaced is shown again.
+  useEffect(() => {
+    if (!restoreVersion || busy || loading || run) return;
+    setRestoreVersion(null);
+    if (selectedRef.current === restoreVersion.sessionId)
+      void switchVersion(restoreVersion.questionId);
+  }, [restoreVersion, busy, loading, run, switchVersion]);
 
   const forkSession = useCallback(
     async (messageId: string, title: string) => {
@@ -3467,33 +3599,14 @@ export function useAssistant(enabled: boolean) {
 
   return {
     bootstrap,
+    media: detail?.session.media ?? newMedia,
+    setMedia,
+    regenerateMedia,
+    generationVideo,
     prepareAudio,
     insertAudioDraft,
     newModelId,
     chooseNewModel,
-    quoteVideo,
-    sendVideo: async (confirmation: VideoConfirmation) => {
-      if (
-        confirmedQuote.current !== confirmation ||
-        confirmation.epoch !== epoch.current ||
-        confirmation.selection !== selectionSequence.current ||
-        confirmation.sessionId !== selectedRef.current ||
-        confirmation.modelId !== modelRef.current ||
-        confirmation.owner !== bootstrapRef.current?.owner ||
-        confirmation.generation !== bootstrapRef.current?.authorityGeneration ||
-        confirmation.text !== draftRef.current ||
-        confirmation.quote.expiresAt <= Date.now()
-      ) {
-        showError(new Error("assistant_media_quote_expired"));
-        return false;
-      }
-      confirmedQuote.current = null;
-      return send({
-        video: confirmation.video,
-        quoteId: confirmation.quote.id,
-        attachments: confirmation.attachments,
-      });
-    },
     thinkingLevel,
     setThinkingLevel,
     thinking: liveThinking,
@@ -3554,32 +3667,6 @@ export function useAssistant(enabled: boolean) {
       if (selectedRef.current) messageQueue.remove(selectedRef.current, id);
     },
     attachments,
-    useMediaInput: async (file: AssistantAttachment, modelId: string) => {
-      if (
-        busy ||
-        runRef.current ||
-        !detail ||
-        detail.session.deletedAt != null ||
-        !detail.attachments.some((item) => item.id === file.id)
-      )
-        return false;
-      const sid = selectedRef.current,
-        generation = epoch.current;
-      const target = bootstrapRef.current?.models.find(
-        (model) => model.id === modelId,
-      );
-      if (target?.kind !== "image" || !target.image?.edits) return false;
-      if (detail.session.modelId !== modelId && !(await update({ modelId })))
-        return false;
-      if (
-        selectedRef.current !== sid ||
-        epoch.current !== generation ||
-        runRef.current
-      )
-        return false;
-      setAttachments([asDraftFile(file)]);
-      return true;
-    },
     pickAttachments,
     dropAttachments,
     pasteAttachments,

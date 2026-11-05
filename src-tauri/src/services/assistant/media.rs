@@ -291,6 +291,7 @@ mod tests {
             &store,
             &sid,
             &mid,
+            None,
             &[Source::Bytes {
                 name: "generated.png".into(),
                 bytes: png.clone(),
@@ -337,6 +338,7 @@ mod tests {
             &store,
             &sid,
             &mid,
+            None,
             &[Source::Bytes {
                 name: "refused.png".into(),
                 bytes: png

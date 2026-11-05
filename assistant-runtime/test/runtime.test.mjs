@@ -1547,6 +1547,12 @@ async function systemPreamble(t, extra) {
   return preamble;
 }
 
+test("every run knows a mermaid block is drawn as a diagram", async (t) => {
+  const plain = await systemPreamble(t, {});
+  assert.match(plain, /mermaid code block is drawn as a diagram/);
+  assert.match(plain, /flowchart/);
+});
+
 test("custom instructions follow the role as standing instructions, without the run's key", async (t) => {
   const plain = await systemPreamble(t, {});
   // Empty or blank instructions are none.

@@ -42,7 +42,11 @@ const buttonVariants = cva(
     // These shapes are part of the variant: they win over any size.
     compoundVariants: [
       { variant: "pill", class: "h-6 rounded-full px-2.5 text-sub" },
-      { variant: "icon", class: "h-[26px] w-[26px] rounded-ctl p-0" },
+      {
+        variant: "icon",
+        class:
+          "h-[var(--icon-btn,26px)] w-[var(--icon-btn,26px)] rounded-ctl p-0",
+      },
       { variant: "copy", class: "h-[22px] w-[22px] rounded-[5px] p-0" },
     ],
     defaultVariants: {

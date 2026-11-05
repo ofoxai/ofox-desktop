@@ -261,7 +261,8 @@
     "enabled": "Enabled",
     "notSet": "Not Set",
     "noMatches": "No matches",
-    "retry": "Retry"
+    "retry": "Retry",
+    "loadingFox": "Loading…"
   },
   "update": {
     "promptTitle": "Update available",
@@ -291,7 +292,20 @@
     "usage": {
       "webDetails": "View detailed usage on the web ↗"
     },
-    "website": "Ofox website ↗"
+    "website": "Ofox website ↗",
+    "groups": {
+      "use": "Use",
+      "observe": "Observe"
+    },
+    "sidebar": {
+      "collapse": "Collapse sidebar",
+      "expand": "Expand sidebar"
+    },
+    "account": {
+      "balance": "Balance {{amount}}",
+      "refresh": "Refresh balance",
+      "settings": "Account settings"
+    }
   },
   "firstRunNotice": {
     "title": "Welcome to Ofox Desktop",
@@ -4688,6 +4702,13 @@
     "reader": "Session reader",
     "copyMessage": "Copy message",
     "copyCode": "Copy code",
+    "showDiagram": "Diagram",
+    "showSource": "Source",
+    "previewHtml": "Preview",
+    "showCode": "Code",
+    "diagram": "Mermaid diagram",
+    "previewFrame": "HTML preview",
+    "previewNoScripts": "The preview runs none of the page's scripts and loads nothing from the network.",
     "imageBlocked": "Image not loaded",
     "imageHint": "Images are not loaded automatically to protect your privacy.",
     "questions": "Questions",
@@ -4978,10 +4999,19 @@
       "mediaQueryExpired": "Automatic video queries paused after 24 hours. Continue querying to check the result.",
       "mediaDeletePending": "This conversation still has an unresolved video job. Restore it and wait for completion or cancel the job before deleting permanently.",
       "mediaVideoLimit": "Wait for the current video task to finish. Each conversation allows one active task and each account allows three.",
+      "mediaFramesImagesOnly": "Only images can be the first or last frame of a video.",
+      "mediaTooManyFrames": "A video takes one image to start and one to end.",
+      "mediaTooManyReferences": "A video takes at most 9 reference images, 3 audio clips and 1 video.",
+      "mediaReferenceAudioTooLong": "Reference audio must be 15 seconds or shorter.",
+      "mediaMaterialUnsupported": "This file cannot be used for this video. Use PNG, JPEG or WebP images, MP3 or WAV audio, or MP4 video, and a model that takes them.",
+      "mediaModelUnavailable": "This generation model is not available. Choose another one under the composer.",
+      "mediaImageTurnLimit": "One reply makes at most 4 images. Ask again for more.",
+      "mediaDeclined": "You declined this generation, so nothing was charged.",
+      "mediaSpeechTurnLimit": "One reply makes at most 3 speech files. Ask again for more.",
       "mediaInvalidParams": "This model does not support the selected media parameters.",
       "mediaOutcomeUnknown": "The media request may have been charged, but its result could not be confirmed. Check your activity before submitting again.",
       "mediaSafetyRejected": "The image request was rejected by the provider’s safety checks. Change the prompt or input image and try again.",
-      "mediaInsufficientCredits": "There are not enough credits to generate this image.",
+      "mediaInsufficientCredits": "There are not enough credits for this generation.",
       "visionModelRequired": "This model can't read images. Choose a model that can read images, then send the message again.",
       "modelRequired": "Choose a model first.",
       "modelUnavailable": "This model isn't available right now. Choose another model.",
@@ -5126,7 +5156,9 @@
       "cacheWrite": "Cache writes",
       "output": "Output tokens",
       "search": "Web search ×{{count}}",
-      "total": "This reply (estimate)"
+      "total": "This reply (estimate)",
+      "chat": "Chat model",
+      "generationUnpriced": "This generation has no price to estimate from (speech billed by tokens, or a video still being made); the bill has the total."
     },
     "replyDetails": "Reply details",
     "replyDuration": "Took {{duration}}",
@@ -5232,6 +5264,22 @@
       "assistant": "Assistant"
     },
     "starters": {
+      "image": {
+        "label": "Make an image",
+        "prompt": "Draw an image: a seaside town at dawn, watercolor style, warm colors."
+      },
+      "video": {
+        "label": "Make a short video",
+        "prompt": "Make a short video: an orange cat stretching on a windowsill as sunlight comes in, the camera slowly pushing in."
+      },
+      "speech": {
+        "label": "Record a voice-over",
+        "prompt": "Read this as a voice-over in a calm, warm voice:\n\nWelcome to Ofox: one account for the leading AI models."
+      },
+      "localCheck": {
+        "label": "Check Claude Code setup",
+        "prompt": "Check the Claude Code configuration on my computer for problems, and tell me how to fix any you find."
+      },
       "summary": {
         "label": "Summarize content",
         "prompt": "Please summarize the following content, highlight the key points, and list any action items:\n\n"
@@ -5369,6 +5417,9 @@
     },
     "media": {
       "perImage": "${{price}}/image",
+      "perThousandChars": "${{price}}/1K chars",
+      "audioTokenPrice": "In ${{input}} · audio ${{output}}/M",
+      "audioTokenPriceLong": "Per million tokens: text in ${{input}}, audio out ${{output}}",
       "imageTokenPrice": "Images ${{price}}/M tokens",
       "canEdit": "Image editing",
       "size": "Size",
@@ -5401,7 +5452,7 @@
     "compactCost": "Uses the selected model and may incur a charge.",
     "speech": {
       "title": "Generate speech",
-      "read": "Read aloud…",
+      "read": "Read aloud",
       "hint": "Review the text, voice and format before generating. Speech uses a separate model and does not send a chat message.",
       "text": "Text to speak",
       "generate": "Generate speech",
@@ -5509,7 +5560,7 @@
       "modelSwitched": "Switched to the recommended configuration model. You can change it back.",
       "modelUnconfigured": "A recommended configuration model has not been configured or is unavailable. Your current model is unchanged.",
       "enable": "Enable local configuration",
-      "boundary": "Local configuration is on: the assistant can check and fix the AI tools on this computer.",
+      "boundary": "The assistant can check and repair the AI tools on this computer and reads the files you attach; it searches the web only with web search on.",
       "modes": {
         "default": "Default",
         "autoEdit": "Auto edit",
@@ -5549,7 +5600,101 @@
         "install_tool": "Install tool",
         "update_tool": "Update tool",
         "uninstall_tool": "Uninstall tool"
-      }
+      },
+      "permissionValue": "Permission: {{mode}}"
+    },
+    "generation": {
+      "plus": "Add content or a feature",
+      "attach": "Add images and files",
+      "on": "On",
+      "kinds": {
+        "image": "Generate image",
+        "video": "Generate video",
+        "speech": "Generate speech"
+      },
+      "chipLabel": "{{name}}: model and parameters",
+      "remove": "Remove {{name}}",
+      "defaultsNote": "The chat model generates with this model and these parameters by default; what you say in the conversation comes first.",
+      "noModel": "No generation model is available.",
+      "model": "Model",
+      "sound": "Sound",
+      "voice": "Voice",
+      "format": "Format",
+      "silent": "Silent",
+      "withSound": "With sound",
+      "firstFrame": "First frame",
+      "firstLastFrames": "First + last frame",
+      "references": "{{count}} references",
+      "speaking": "Generating speech…",
+      "text": "Text read aloud",
+      "prompt": "Prompt sent",
+      "regenerate": "Regenerate with other parameters",
+      "regenerateTitle": "Regenerate with other parameters",
+      "regenerateNote": "Generates again with these parameters, without the chat model; the result is added under this reply.",
+      "details": "Details",
+      "useVoice": "Use “{{voice}}”",
+      "voiceSearchName": "Search or type a voice name",
+      "voiceSearchId": "Search or paste a voice ID",
+      "voiceNameHint": "Type any Gemini voice name, such as Charon.",
+      "voiceIdHint": "Paste a voice ID from your ElevenLabs library (20 letters and digits).",
+      "sourceImage": "Source image",
+      "reference": "Reference",
+      "characters_one": "{{count}} character",
+      "characters_other": "{{count}} characters",
+      "estimate": "Estimated cost ${{cost}}",
+      "estimateUnknown": "The cost cannot be estimated right now",
+      "confirmGenerate": "Confirm and generate",
+      "generateAgain": "Generate again",
+      "confirmTitle": "Generate this video?",
+      "generate": "Generate",
+      "allowSession": "Don't ask again in this conversation",
+      "decline": "Don't generate",
+      "overLimit": "A video can use at most 9 reference images, 3 audio clips (15 seconds each at most) and 1 video. Remove the extra files.",
+      "needsTools": "This model cannot use tools, so it cannot generate images, videos or speech. Choose another model.",
+      "readAloudFailed": "Reading aloud failed. Try again later."
+    }
+  },
+  "pages": {
+    "tools": {
+      "title": "Tools",
+      "description": "Run your AI coding tools on one Ofox account",
+      "loading": "Reading your tools…"
+    },
+    "sessions": {
+      "title": "Sessions",
+      "description": "Every tool's past sessions: search, resume, see what they used",
+      "loading": "Finding your sessions…",
+      "loadingTranscript": "Opening the session…"
+    },
+    "library": {
+      "instructions": {
+        "title": "Instructions",
+        "description": "Prompts and rules your tools share"
+      },
+      "mcp": {
+        "title": "MCP servers",
+        "description": "Set up once, hand out to every tool"
+      },
+      "skills": {
+        "title": "Skills",
+        "description": "Skill folders, linked into the tools that need them"
+      },
+      "loading": "Reading the library…"
+    },
+    "usage": {
+      "overview": {
+        "title": "Usage overview",
+        "description": "What each tool used and spent over this period"
+      },
+      "requests": {
+        "title": "Usage details",
+        "description": "The model, tokens and cost of every request"
+      },
+      "sessions": {
+        "title": "Session analysis",
+        "description": "Usage and time, session by session"
+      },
+      "loading": "Reading usage…"
     }
   }
 }

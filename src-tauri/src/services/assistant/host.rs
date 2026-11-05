@@ -170,6 +170,10 @@ pub(super) struct Runtime {
 
 pub struct RunControl {
     local_calls: local::Calls,
+    /// The generation tools of a chat run; `None` for a model without tools.
+    pub(super) media: Option<super::media_tools::host::MediaRun>,
+    /// For a background job of a generation tool: its tool call.
+    pub(super) artifact: Option<String>,
     pub(super) local_enabled: bool,
     pub identity: Identity,
     pub session_id: String,
@@ -193,6 +197,8 @@ impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
             local_calls: local::Calls::default(),
+            media: None,
+            artifact: None,
             local_enabled: false,
             identity,
             session_id: request.session_id.clone(),
@@ -1428,7 +1434,7 @@ impl AssistantHost {
     /// The refused attempt is rolled out of the native history first, so the
     /// conversation holds the turn once.
     async fn run_with_retry(
-        &self,
+        self: &Arc<Self>,
         control: &Arc<RunControl>,
         mut params: Value,
     ) -> Result<Finish, Failure> {
@@ -1544,7 +1550,7 @@ impl AssistantHost {
     }
 
     async fn run_once(
-        &self,
+        self: &Arc<Self>,
         control: &Arc<RunControl>,
         params: &Value,
         may_retry: bool,
@@ -1612,7 +1618,7 @@ impl AssistantHost {
     }
 
     async fn converse<I, O>(
-        &self,
+        self: &Arc<Self>,
         control: &Arc<RunControl>,
         params: &Value,
         may_retry: bool,
@@ -1698,7 +1704,14 @@ impl AssistantHost {
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
-                let result = self.dispatch_tool(control, &value["params"]).await;
+                let result = if value["params"]["name"]
+                    .as_str()
+                    .is_some_and(super::media_tools::is_media_tool)
+                {
+                    self.dispatch_media_tool(control, &value["params"]).await
+                } else {
+                    self.dispatch_tool(control, &value["params"]).await
+                };
                 let reply = tool_reply(&value["id"], result, &self.known_keys())?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {
@@ -2115,6 +2128,7 @@ impl AssistantHost {
             "run_end",
             json!({ "stopped": stopped, "status": status }),
         );
+        self.start_media_polls(control);
         if let Some(input) = first_answer {
             self.spawn_title(control, input);
         }
@@ -2638,8 +2652,12 @@ mod tests {
         Arc::get_mut(&mut run).unwrap().local_enabled = true;
         let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
             "toolCallId":"probe-1","name":"probe_write","args":{"command":"synthetic"}});
+        // A run without local access (none on this computer) gets no local tool.
+        let plain = control(&sid);
+        let plain_params = json!({"sessionId":sid,"runId":plain.run_id,"operationId":plain.operation_id,
+            "toolCallId":"probe-0","name":"probe_write","args":{"command":"synthetic"}});
         assert_eq!(
-            host.dispatch_tool(&run, &params).await.unwrap_err(),
+            host.dispatch_tool(&plain, &plain_params).await.unwrap_err(),
             "assistant_capability_disabled"
         );
         store

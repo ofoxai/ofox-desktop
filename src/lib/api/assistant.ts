@@ -357,6 +357,8 @@ export interface AssistantSession {
   titleSource: AssistantTitleSource;
   modelId: string;
   webSearch: boolean;
+  /** What the generation tools use unless the user says otherwise. */
+  media?: AssistantMediaDefaults;
   /**
    * The chosen thinking level; null is the default (no thinking parameter).
    * A level the model no longer offers is not sent.
@@ -376,6 +378,40 @@ export interface AssistantSession {
 }
 
 export type AssistantTitleSource = "auto" | "user";
+
+/** The kinds the chat model can generate with its tools. */
+export type AssistantGenerationKind = "image" | "video" | "speech";
+
+export interface AssistantImageDefaults {
+  model?: string | null;
+  size?: string | null;
+  quality?: string | null;
+  n?: number | null;
+}
+export interface AssistantVideoDefaults {
+  model?: string | null;
+  duration?: number | null;
+  resolution?: string | null;
+  aspectRatio?: string | null;
+  generateAudio?: boolean | null;
+}
+export interface AssistantSpeechDefaults {
+  model?: string | null;
+  voice?: string | null;
+  format?: string | null;
+  language?: string | null;
+}
+/**
+ * A conversation's generation defaults, set under the composer. `hints` are
+ * the generation chips beside "+": they tell the model what the user is
+ * about to ask for; the tools are there without them.
+ */
+export interface AssistantMediaDefaults {
+  image?: AssistantImageDefaults;
+  video?: AssistantVideoDefaults;
+  speech?: AssistantSpeechDefaults;
+  hints?: AssistantGenerationKind[];
+}
 
 /** A saved conversation the backend could not read: nothing but its id is known. */
 export interface AssistantUnreadableSession {
@@ -455,6 +491,8 @@ export interface AssistantAttachment {
  */
 export interface AssistantMessage {
   media?: AssistantMedia;
+  /** What the reply's generation tools made, one per tool call. */
+  generations?: AssistantGeneration[];
   id: string;
   role: "user" | "assistant" | "media";
   content: string;
@@ -529,6 +567,8 @@ export interface AssistantMessage {
  */
 export interface AssistantRequestRecord {
   kind: string;
+  /** A generation line: the tool call that made it. */
+  toolCallId?: string | null;
   modelId?: string | null;
   apex?: string | null;
   status: string;
@@ -546,6 +586,8 @@ export interface AssistantRequestRecord {
 export interface AssistantUsage {
   requests?: AssistantRequestRecord[];
   mediaCostUsd?: string | null;
+  /** A reply with generations: the chat model's part of the cost. */
+  chatCostUsd?: string | null;
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
@@ -621,6 +663,8 @@ export interface AssistantUpdateRequest {
    * not change `updatedAt`.
    */
   pinned?: boolean;
+  /** The whole set of generation defaults; remembered for new conversations. */
+  media?: AssistantMediaDefaults;
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
@@ -675,9 +719,31 @@ export interface AssistantMediaQuote {
 export interface AssistantVideoActionRequest {
   sessionId: string;
   messageId: string;
+  /** A generation tool's video; left out for a direct media turn. */
+  toolCallId?: string;
   expectedOwner: string;
   expectedGeneration: number;
 }
+
+/** Make a result card's generation again, without the chat model. */
+export interface AssistantRegenerateRequest {
+  sessionId: string;
+  expectedOwner: string;
+  expectedGeneration: number;
+  operationId: string;
+  messageId: string;
+  toolCallId?: string;
+  prompt: string;
+  model: string;
+  params: Record<string, unknown>;
+  /** A video's estimate the user confirmed. */
+  confirmedCostUsd?: string | null;
+  /** A video without an estimate: the user accepted an unknown cost. */
+  confirmUnknownCost?: boolean;
+}
+export type AssistantRegenerateResult =
+  | { status: "started"; toolCallId: string }
+  | { needsConfirmation: true; estimatedCostUsd: string | null };
 
 export type AssistantMediaStatus =
   | "submitting"
@@ -710,11 +776,55 @@ interface AssistantMediaBase {
   apex?: string | null;
   submittedAt?: number | null;
   pollStartedAt?: number | null;
+  /** The tool call that asked for it; absent on a direct media turn. */
+  toolCallId?: string;
+  /** The prompt (for speech, the text) that was sent. */
+  prompt?: string;
+  /** Why a generation failed. */
+  errorCode?: string | null;
 }
 export type AssistantMedia = AssistantMediaBase &
   (
     | { kind: "image"; params: AssistantImageRequest }
     | { kind: "video"; params: AssistantVideoRequest }
+  );
+/** What a generation's confirmation shows. */
+export interface AssistantGenerationApproval {
+  model: string;
+  prompt: string;
+  duration?: number;
+  resolution?: string;
+  aspectRatio?: string | null;
+  generateAudio?: boolean;
+  materials?: {
+    firstFrame?: string | null;
+    lastFrame?: string | null;
+    references?: { id: string; kind: string }[];
+  };
+  estimatedCostUsd?: string | null;
+}
+
+/** A generation tool's result on a reply. */
+export type AssistantGeneration = AssistantMediaBase & {
+  toolCallId: string;
+} & (
+    | { kind: "image"; params: AssistantImageRequest }
+    | {
+        kind: "video";
+        params: AssistantVideoRequest & {
+          references?: { id: string; kind: "image" | "audio" | "video" }[];
+        };
+      }
+    | {
+        kind: "speech";
+        params: {
+          voice?: string;
+          responseFormat?: string;
+          language?: string | null;
+          instructions?: string | null;
+        };
+        audio?: { output?: { durationMs?: number; mimeType?: string } };
+      }
   );
 
 /**
@@ -813,6 +923,8 @@ export type AssistantRunEvent =
         generation: number;
         apex: string;
         messageId: string;
+        /** A generation tool's video; null for a direct media turn. */
+        toolCallId?: string | null;
         status: AssistantMediaStatus;
         message: AssistantMessage;
         usage: AssistantUsage;
@@ -875,8 +987,15 @@ export type AssistantRunEvent =
         approvalId: string;
         toolCallId: string;
         name: string;
-        category: "read" | "write_config" | "exec" | "network" | "paid";
-        details: string;
+        category:
+          | "read"
+          | "write_config"
+          | "exec"
+          | "network"
+          | "paid"
+          | "generation";
+        /** Text for a local operation; what will be made for a generation. */
+        details: string | AssistantGenerationApproval;
         allowSession: boolean;
         /**
          * The config fields the user changed that the operation sets back to
@@ -888,6 +1007,18 @@ export type AssistantRunEvent =
       };
     }
   | { type: "approval_end"; data: { approvalId: string } }
+  /**
+   * A generation tool's result on reply `messageId` changed: made, failed or
+   * submitted. `attachments` are its new files, once saved.
+   */
+  | {
+      type: "generation";
+      data: {
+        messageId: string;
+        generation: AssistantGeneration;
+        attachments: AssistantAttachment[];
+      };
+    }
   /**
    * A tool call of the run's reply. `args` holds only what may be shown:
    * `query` (web_search), `url` (web_fetch) or `id` (read_attachment).
@@ -1066,6 +1197,10 @@ export const assistantApi = {
     expectedGeneration: number;
     params: AssistantVideoRequest;
   }) => invoke<AssistantMediaQuote>("assistant_quote_media", { request }),
+  regenerateMedia: (request: AssistantRegenerateRequest) =>
+    invoke<AssistantRegenerateResult>("assistant_regenerate_media", {
+      request,
+    }),
   cancelVideo: (request: AssistantVideoActionRequest) =>
     invoke<void>("assistant_cancel_video", { request }),
   resumeVideo: (request: AssistantVideoActionRequest) =>
@@ -1359,6 +1494,15 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_outcome_unknown: "mediaOutcomeUnknown",
   assistant_media_safety_rejected: "mediaSafetyRejected",
   assistant_media_insufficient_credits: "mediaInsufficientCredits",
+  assistant_media_frames_images_only: "mediaFramesImagesOnly",
+  assistant_media_too_many_frames: "mediaTooManyFrames",
+  assistant_media_too_many_references: "mediaTooManyReferences",
+  assistant_media_reference_audio_too_long: "mediaReferenceAudioTooLong",
+  assistant_media_material_unsupported: "mediaMaterialUnsupported",
+  assistant_media_model_unavailable: "mediaModelUnavailable",
+  assistant_media_image_turn_limit: "mediaImageTurnLimit",
+  assistant_media_declined: "mediaDeclined",
+  assistant_media_speech_turn_limit: "mediaSpeechTurnLimit",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",

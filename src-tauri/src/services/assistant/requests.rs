@@ -354,7 +354,11 @@ impl AssistantHost {
                         store.remember_model_kind(&session.model_id, new_kind.unwrap_or_default())
                     }
                     None => Ok(()),
-                };
+                }
+                .and_then(|_| match &request.media {
+                    Some(_) => store.remember_media_defaults(&session.media),
+                    None => Ok(()),
+                });
                 Ok((session, remembered))
             }
         })
@@ -562,6 +566,15 @@ impl AssistantHost {
         } else {
             None
         };
+        // A model that takes tools can generate images, videos and speech.
+        let media_params = if model.tools {
+            Some(super::media_tools::run_params(
+                &self.models(&identity.apex).await?.models,
+                &record.session.media,
+            ))
+        } else {
+            None
+        };
         let base_url = self.env.gateway_base(&identity.apex)?;
         let proxy = blocking({
             let env = self.env.clone();
@@ -575,17 +588,30 @@ impl AssistantHost {
         let key = self.env.api_key(&identity, None, &admit).await?;
         self.ensure_current(&identity, generation).await?;
 
-        let local_config = if super::capabilities::enabled(&record.session.capabilities) {
-            let paths = self.env.local_paths().await?;
-            Some(
-                json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)}),
-            )
+        // Local configuration where this computer offers it: a conversation
+        // still chats when its paths are unavailable.
+        let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
+            match self.env.local_paths().await {
+                Ok(paths) => Some(paths),
+                Err(error) => {
+                    log::warn!("[Assistant] local configuration is unavailable: {error}");
+                    None
+                }
+            }
         } else {
             None
         };
+        let local_config = local_paths.map(|paths| {
+            json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
+        });
         self.remember_key(&key);
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
-        control.local_enabled = super::capabilities::enabled(&record.session.capabilities);
+        control.local_enabled = local_config.is_some();
+        if media_params.is_some() {
+            control.media = Some(super::media_tools::host::MediaRun::new(
+                record.session.media.clone(),
+            ));
+        }
         if control.local_enabled {
             control.deadline = tokio::time::Instant::now()
                 + std::time::Duration::from_secs(
@@ -646,6 +672,9 @@ impl AssistantHost {
         if let Some(params) = params.as_object_mut() {
             if let Some(local_config) = local_config {
                 params.insert("localConfig".into(), local_config);
+            }
+            if let Some(media) = media_params {
+                params.insert("media".into(), media);
             }
             params.extend(attachment_params(
                 &record,
@@ -1414,6 +1443,7 @@ pub(super) fn publish_turn(
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
         media: None,
+        generations: vec![],
         id: id(),
         role: "user".into(),
         content: user_text.into(),
@@ -1436,6 +1466,7 @@ pub(super) fn publish_turn(
     });
     record.messages.push(Message {
         media: None,
+        generations: vec![],
         id: control.message_id.clone(),
         role: "assistant".into(),
         content: String::new(),

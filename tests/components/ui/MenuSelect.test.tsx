@@ -85,7 +85,7 @@ describe("MenuSelect", () => {
     render(<Harness />);
     const trigger = screen.getByRole("combobox", { name: "Agent" });
     expect(trigger).toHaveClass(
-      "h-[26px]",
+      "h-[var(--ctl-h,26px)]",
       "max-w-[180px]",
       "gap-1",
       "rounded-ctl",

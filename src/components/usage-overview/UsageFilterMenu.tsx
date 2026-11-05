@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import {
@@ -15,6 +15,8 @@ export interface UsageFilterOption {
   value: string;
   label: string;
   title?: string;
+  /** Shown before the label in the list, e.g. a tool's badge. */
+  icon?: ReactNode;
 }
 export function UsageFilterMenu({
   label,
@@ -252,6 +254,11 @@ export function UsageFilterMenu({
                     <Check className="h-3.5 w-3.5" />
                   )}
                 </span>
+                {option.icon && (
+                  <span aria-hidden className="flex shrink-0 items-center">
+                    {option.icon}
+                  </span>
+                )}
                 <span
                   className="min-w-0 flex-1"
                   title={option.title ?? option.label}

@@ -999,6 +999,13 @@ pub async fn assistant_quote_media(
     host.quote_media(request).await
 }
 #[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_regenerate_media(
+    host: Host<'_>,
+    request: crate::services::assistant::media_tools::RegenerateRequest,
+) -> Result<serde_json::Value, String> {
+    host.regenerate_media(request).await
+}
+#[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_cancel_video(
     host: Host<'_>,
     request: crate::services::assistant::video::VideoActionRequest,
