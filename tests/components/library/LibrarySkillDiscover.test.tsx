@@ -64,6 +64,41 @@ beforeEach(async () => {
     item("alpha"),
     item("beta"),
   ]);
+  // Browsing reads the catalog; a test sets the live skills through discoverRepository.
+  vi.spyOn(skillsApi, "discoverRepositoryCatalog").mockImplementation(
+    async (repo) => ({ skills: await skillsApi.discoverRepository(repo) }),
+  );
+});
+it("names GitHub's rate limit when a repository cannot be read", async () => {
+  const reset = Math.floor(Date.UTC(2026, 10, 6, 2, 18) / 1000);
+  vi.mocked(skillsApi.discoverRepository).mockRejectedValue(
+    `library.githubRateLimited@${reset}`,
+  );
+  page();
+  await userEvent.click(screen.getByRole("radio", { name: /仓库/ }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("example/catalog");
+  expect(alert).toHaveTextContent("每小时 60 次上限");
+  expect(alert).toHaveTextContent(
+    new Date(reset * 1000).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+    }),
+  );
+});
+it("lists a repository's saved skills while GitHub is rate limited, and says so", async () => {
+  vi.mocked(skillsApi.discoverRepositoryCatalog).mockResolvedValue({
+    skills: [item("alpha")],
+    savedAt: 1_793_890_000,
+    reason: "library.githubRateLimited",
+  });
+  page();
+  await userEvent.click(screen.getByRole("radio", { name: /仓库/ }));
+  expect(await screen.findByRole("article", { name: "alpha" })).toBeVisible();
+  const note = screen.getByText(/显示的是 .* 保存的列表/);
+  expect(note).toHaveTextContent("example/catalog");
+  expect(note).toHaveTextContent("每小时 60 次上限");
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 it("filters by description and exact provenance, and never installs while browsing", async () => {
   page([

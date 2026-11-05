@@ -21,6 +21,7 @@ import {
 } from "@/lib/api/skills";
 import type { SkillDefinition } from "@/lib/api/library";
 import { collectedRepositorySkill } from "./skillIdentity";
+import { libraryError } from "./libraryText";
 import { LibraryDiscover } from "./LibraryDiscover";
 import { LibraryResourceIcon } from "./LibraryResourceIcon";
 import { POPULAR_SKILLS, formatInstalls } from "./popularSkills";
@@ -128,9 +129,10 @@ export function LibrarySkillDiscover({
         repo.name.toLowerCase(),
         repo.branch,
       ],
-      queryFn: () => skillsApi.discoverRepository(repo),
+      queryFn: () => skillsApi.discoverRepositoryCatalog(repo),
       enabled: enabled && source === "repos",
-      staleTime: 300_000,
+      // Each read costs two of GitHub's 60 anonymous requests an hour; Refresh still reads now.
+      staleTime: 1_800_000,
       gcTime: 1_800_000,
       retry: false,
     })),
@@ -173,7 +175,7 @@ export function LibrarySkillDiscover({
           };
         })
       : source === "repos"
-        ? catalogs.flatMap((catalog) => catalog.data ?? [])
+        ? catalogs.flatMap((catalog) => catalog.data?.skills ?? [])
         : (online.data?.skills ?? []).map((skill) => ({
             ...skill,
             key: `${skill.repoOwner}/${skill.repoName}:${skill.directory}`,
@@ -249,6 +251,22 @@ export function LibrarySkillDiscover({
         search.trim().length >= 2 &&
         (online.isFetching || pendingSearch);
   const failures = enabledRepos.filter((_, i) => catalogs[i]?.isError);
+  const failureReasons = [
+    ...new Set(
+      catalogs
+        .filter((catalog) => catalog.isError)
+        .map((catalog) => libraryError(catalog.error, t)),
+    ),
+  ];
+  const saved = enabledRepos.flatMap((repo, i) => {
+    const data = catalogs[i]?.data;
+    return data?.savedAt
+      ? [{ repo, savedAt: data.savedAt, reason: data.reason }]
+      : [];
+  });
+  const savedReasons = [
+    ...new Set(saved.map((entry) => libraryError(entry.reason, t))),
+  ];
   const refresh = () => {
     if (source === "skillssh") {
       if (search.trim().length >= 2 && submitted === search.trim())
@@ -435,6 +453,23 @@ export function LibrarySkillDiscover({
               >
                 {t("common.retry")}
               </Button>
+              <span className="block">{failureReasons.join(" ")}</span>
+            </p>
+          )}
+          {source === "repos" && saved.length > 0 && (
+            <p className="text-note text-ink-muted">
+              {t("library.skillDiscover.saved", {
+                repos: saved.map((entry) => repoId(entry.repo)).join(", "),
+                time: new Date(
+                  Math.min(...saved.map((entry) => entry.savedAt)) * 1000,
+                ).toLocaleString([], {
+                  month: "numeric",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+              })}{" "}
+              {savedReasons.join(" ")}
             </p>
           )}
           {showingPopular && (

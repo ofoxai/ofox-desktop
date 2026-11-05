@@ -168,6 +168,10 @@ beforeEach(async () => {
     ],
   };
   vi.restoreAllMocks();
+  // Browsing reads the catalog; tests set the live skills through discoverRepository.
+  vi.spyOn(skillsApi, "discoverRepositoryCatalog").mockImplementation(
+    async (repo) => ({ skills: await skillsApi.discoverRepository(repo) }),
+  );
   vi.spyOn(libraryApi, "list").mockImplementation(async () => ({
     epoch: 4,
     skills,

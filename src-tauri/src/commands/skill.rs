@@ -7,9 +7,9 @@
 use crate::app_config::{AppType, InstalledSkill, UnmanagedSkill};
 use crate::error::format_skill_error;
 use crate::services::skill::{
-    DiscoverableSkill, ImportSkillSelection, MigrationResult, Skill, SkillBackupEntry, SkillRepo,
-    SkillService, SkillStorageLocation, SkillUninstallResult, SkillUpdateInfo,
-    SkillsShSearchResult,
+    DiscoverableSkill, ImportSkillSelection, MigrationResult, RepositoryCatalog, Skill,
+    SkillBackupEntry, SkillRepo, SkillService, SkillStorageLocation, SkillUninstallResult,
+    SkillUpdateInfo, SkillsShSearchResult,
 };
 use crate::store::AppState;
 use std::sync::Arc;
@@ -106,7 +106,7 @@ pub async fn collect_library_skill(
 pub async fn discover_skill_repository(
     repo: SkillRepo,
     service: State<'_, SkillServiceState>,
-) -> Result<Vec<DiscoverableSkill>, String> {
+) -> Result<RepositoryCatalog, String> {
     service
         .0
         .discover_repository(&repo)

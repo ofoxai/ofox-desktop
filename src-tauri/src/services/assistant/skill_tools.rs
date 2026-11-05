@@ -196,6 +196,27 @@ fn merge_search(
     Ok(entries)
 }
 
+/// The model relays this text, so GitHub's anonymous limit is spelled out
+/// with its local reset time instead of a bare `library.*` key.
+fn source_error(error: anyhow::Error) -> String {
+    let message = error.to_string();
+    let Some(rest) = message.strip_prefix("library.githubRateLimited") else {
+        return message;
+    };
+    let limit = "github_rate_limited: GitHub's anonymous API limit (60 requests an hour for this network) is used up";
+    match rest
+        .strip_prefix('@')
+        .and_then(|at| at.parse::<i64>().ok())
+        .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+    {
+        Some(at) => format!(
+            "{limit}; it resets at {} local time",
+            at.with_timezone(&chrono::Local).format("%H:%M")
+        ),
+        None => format!("{limit}; try again later"),
+    }
+}
+
 pub async fn prepare_install(
     db: Arc<Database>,
     candidate: Candidate,
@@ -227,7 +248,7 @@ pub async fn prepare_install(
     let choices = service
         .discover_assistant_repository(&repo)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(source_error)?;
     let selected = select_source(choices, &candidate)?;
     let directory = selected.key.split_once(':').ok_or("source_ambiguous")?.1;
     let url = url::Url::parse(selected.readme_url.as_deref().ok_or("source_ambiguous")?)
@@ -245,7 +266,7 @@ pub async fn prepare_install(
     let (download, sha) = service
         .download_selected_repo(&fixed, directory)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(source_error)?;
     if sha != commit {
         return Err("source_changed".into());
     }
@@ -656,6 +677,24 @@ impl AssistantHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_github_rate_limit_reads_as_a_sentence_the_model_can_relay() {
+        let at = chrono::DateTime::from_timestamp(1_793_901_507, 0)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%H:%M")
+            .to_string();
+        let message = source_error(anyhow::anyhow!("library.githubRateLimited@1793901507"));
+        assert!(message.starts_with("github_rate_limited:"), "{message}");
+        assert!(message.contains("60"), "{message}");
+        assert!(message.contains(&at), "{message}");
+        assert!(source_error(anyhow::anyhow!("library.githubRateLimited"))
+            .starts_with("github_rate_limited:"));
+        assert_eq!(
+            source_error(anyhow::anyhow!("library.skillDownloadFailed")),
+            "library.skillDownloadFailed"
+        );
+    }
     #[test]
     fn skill_tools_catalog_metadata_merges_deduplicates_and_caps() {
         let remote = (0..10)

@@ -38,6 +38,19 @@ export function inventoryEntryDescription(
 }
 
 export function libraryError(error: unknown, t: TFunction) {
+  // The backend appends GitHub's reset time as `@<unix seconds>`.
+  const limited = String(error).match(
+    /\blibrary\.githubRateLimited(?:@(\d+))?/,
+  );
+  if (limited)
+    return limited[1]
+      ? t("library.githubRateLimitedUntil", {
+          time: new Date(Number(limited[1]) * 1000).toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        })
+      : t("library.githubRateLimited");
   const key = String(error).match(/\blibrary\.[A-Za-z]+\b/)?.[0];
   return key
     ? t(key, { defaultValue: t("library.failed") })
