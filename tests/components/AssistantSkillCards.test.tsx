@@ -34,7 +34,11 @@ it("install approval shows the frozen source and only installs on click", async 
   );
   render(<LocalApprovalCard approval={approval} onRespond={onRespond} />);
   expect(screen.getByText("fixture/repo")).toBeInTheDocument();
-  expect(screen.getByText("nested/fixture")).toBeInTheDocument();
+  expect(screen.getByText(/nested\/fixture/)).toBeInTheDocument();
+  // A short commit with the full value on hover, not a bare 40-digit line.
+  expect(screen.queryByText("a".repeat(40))).toBeNull();
+  expect(screen.getByTitle("a".repeat(40))).toHaveTextContent("aaaaaaa");
+  expect(screen.getAllByText(/Catalog origin labels/)).toHaveLength(1);
   expect(onRespond).not.toHaveBeenCalled();
   expect(screen.queryByRole("button", { name: /session/i })).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Install" }));
@@ -85,6 +89,8 @@ it("historic search cards are bounded and have no mutation controls", async () =
     />,
   );
   expect(screen.getByText("fixture-skill")).toBeInTheDocument();
+  // The origin disclaimer belongs to the install confirmation, shown once.
+  expect(screen.queryByText(/Catalog origin labels/)).toBeNull();
   expect(container.querySelector("button,a,input,select,form")).toBeNull();
   await userEvent.click(screen.getByText("fixture-skill"));
   expect(container.querySelector("button")).toBeNull();

@@ -58,9 +58,6 @@ export function SkillResultCards({
           ))}
         </ul>
       ))}
-      <p className="text-note text-ink-muted">
-        {t("assistant.skillTools.originHint")}
-      </p>
     </div>
   );
 }
@@ -97,8 +94,15 @@ export function SkillApprovalCard({
       {install && (
         <div className="space-y-1 text-note text-ink-2">
           <p className="break-all">{details.source}</p>
-          <p className="break-all">{details.directory || "/"}</p>
-          <p className="break-all font-mono">{details.commitSha}</p>
+          <p className="break-all">
+            {details.directory || "/"}
+            {details.commitSha && (
+              <span className="font-mono" title={details.commitSha}>
+                {" @ "}
+                {details.commitSha.slice(0, 7)}
+              </span>
+            )}
+          </p>
           <p>
             {t(
               details.reviewed
