@@ -4,7 +4,6 @@ import type {
   AssistantSkillApproval,
 } from "@/lib/api/assistant";
 import { Button } from "@/components/ui/button";
-import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 
 export function SkillResultCards({
   groups,
@@ -123,13 +122,15 @@ export function SkillApprovalCard({
         <p className="break-words text-ctl text-ink-2">{details.description}</p>
       )}
       {!install && (
-        <div
+        // The exact text that will be saved: rendered Markdown would hide
+        // comments and link targets the assistant reads as instructions.
+        <pre
           tabIndex={0}
           aria-label={t("assistant.skillTools.preview")}
-          className="max-h-80 overflow-auto rounded-ctl border border-line p-2"
+          className="max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-ctl border border-line p-2 font-mono text-note text-ink-2"
         >
-          <SessionMarkdown content={details.body ?? ""} />
-        </div>
+          {details.body ?? ""}
+        </pre>
       )}
       <div className="flex flex-wrap gap-2">
         <Button
