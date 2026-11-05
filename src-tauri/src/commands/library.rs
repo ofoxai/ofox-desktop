@@ -204,6 +204,9 @@ fn verify_selected_tools(
             .get(&key)
             .is_some_and(|value| value == id)
             || (tool == "shared" && kind == library::ResourceKind::Skills)
+            // Built into Ofox: always present, and never in an installed-client probe.
+            || (tool == library::assistant_target::ID
+                && kind != library::ResourceKind::Instructions)
         {
             continue;
         }
@@ -1003,6 +1006,24 @@ mod import_tests {
             &discovery
         )
         .is_err());
+    }
+    #[test]
+    fn the_built_in_assistant_takes_a_new_mcp_or_skill_without_a_cli() {
+        use crate::services::library::{assistant_target, LibrarySnapshot, ResourceKind};
+        // MCP discovery only probes installed clients; the assistant ships inside Ofox.
+        let discovery = Default::default();
+        for kind in [ResourceKind::Mcp, ResourceKind::Skills] {
+            assert_eq!(
+                super::verify_selected_tools(
+                    &LibrarySnapshot::default(),
+                    kind,
+                    "fixture",
+                    &[assistant_target::ID.into()],
+                    &discovery
+                ),
+                Ok(())
+            );
+        }
     }
     #[test]
     #[serial_test::serial]
