@@ -204,8 +204,8 @@ export function LibrarySkillDiscover({
       `${skill.repoOwner}/${skill.repoName}` !== repository
     )
       return false;
-    if (onlyNew && (collectionKey(skill) === undefined || isCollected(skill)))
-      return false;
+    // Unconfirmed skills.sh identities stay listed: only known ones are hidden.
+    if (onlyNew && isCollected(skill)) return false;
     return (
       source !== "repos" ||
       !needle ||
@@ -371,11 +371,7 @@ export function LibrarySkillDiscover({
                   setPage(0);
                 }}
               />
-              {t(
-                source === "skillssh"
-                  ? "library.skillDiscover.onlyConfirmedNew"
-                  : "library.skillDiscover.onlyNew",
-              )}
+              {t("library.skillDiscover.onlyNew")}
             </label>
             <span
               role="status"
@@ -399,11 +395,6 @@ export function LibrarySkillDiscover({
                   })}
             </span>
           </div>
-          {source === "skillssh" && onlyNew && (
-            <p className="text-note text-ink-muted">
-              {t("library.skillDiscover.confirmedFilterHelp")}
-            </p>
-          )}
           {((repos.isError && source === "repos") ||
             (online.isError &&
               source === "skillssh" &&
@@ -461,7 +452,6 @@ export function LibrarySkillDiscover({
           >
             {visible.map((skill) => {
               const collected = isCollected(skill);
-              const unresolved = collectionKey(skill) === undefined;
               return (
                 <article
                   key={skill.key}
@@ -507,11 +497,6 @@ export function LibrarySkillDiscover({
                           {skill.repoOwner}/{skill.repoName}
                         </button>
                       </div>
-                      {unresolved && (
-                        <p className="mt-1 text-note text-ink-faint">
-                          {t("library.skillDiscover.collectionUnresolved")}
-                        </p>
-                      )}
                       {skill.description && (
                         <p className="mt-1 line-clamp-2 text-note text-ink-muted">
                           {skill.description}

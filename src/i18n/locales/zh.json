@@ -4436,9 +4436,6 @@
       "showMine": "查看我的资源"
     },
     "skillDiscover": {
-      "onlyConfirmedNew": "只看已确认未收录",
-      "confirmedFilterHelp": "仅显示本次打开应用后已确认来源、且尚未收录的技能。其他技能的收录状态待确认。",
-      "collectionUnresolved": "收录状态待确认",
       "popular": "热门技能",
       "add": "添加",
       "official": "官方",

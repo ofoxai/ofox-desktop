@@ -4436,9 +4436,6 @@
       "showMine": "View My resources"
     },
     "skillDiscover": {
-      "onlyConfirmedNew": "Confirmed, uncollected only",
-      "confirmedFilterHelp": "Only shows skills whose source you confirmed since opening the app and which are not collected. Other collection statuses are unconfirmed.",
-      "collectionUnresolved": "Collection status unconfirmed",
       "popular": "Popular skills",
       "add": "Add",
       "official": "Official",

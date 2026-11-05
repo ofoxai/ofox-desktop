@@ -4436,9 +4436,6 @@
       "showMine": "マイリソースを見る"
     },
     "skillDiscover": {
-      "onlyConfirmedNew": "確認済み・未登録のみ",
-      "confirmedFilterHelp": "今回アプリを開いてから提供元を確認し、まだ登録していないスキルのみを表示します。その他の登録状態は未確認です。",
-      "collectionUnresolved": "登録状態は未確認",
       "popular": "人気のスキル",
       "add": "追加",
       "official": "公式",

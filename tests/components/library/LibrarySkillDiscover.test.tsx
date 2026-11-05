@@ -359,20 +359,18 @@ it("keeps a confirmed nested identity collected after rows update and discovery 
       { name: "已收录" },
     ),
   ).toBeDisabled();
-  await userEvent.click(
-    screen.getByRole("checkbox", { name: "只看已确认未收录" }),
-  );
+  await userEvent.click(screen.getByRole("checkbox", { name: "只看未收录" }));
   expect(screen.queryByRole("article", { name: popular.name })).toBeNull();
   reopened.unmount();
   page([collectedRow(actual)]);
   const restarted = screen.getByRole("article", { name: popular.name });
-  expect(within(restarted).getByText("收录状态待确认")).toBeVisible();
+  expect(within(restarted).getByRole("button", { name: "添加" })).toBeEnabled();
   expect(
     within(restarted).queryByRole("button", { name: "已收录" }),
   ).toBeNull();
 });
 
-it("keeps initial or restarted popular identities unresolved even when a row has the same name or slug", async () => {
+it("keeps unconfirmed popular identities addable and unfiltered even when a row has the same name or slug", async () => {
   const popular = POPULAR_SKILLS[0];
   const [owner, name] = popular.source.split("/");
   const actual = {
@@ -383,17 +381,10 @@ it("keeps initial or restarted popular identities unresolved even when a row has
   };
   page([collectedRow(actual)]);
   const card = screen.getByRole("article", { name: popular.name });
-  expect(within(card).getByText("收录状态待确认")).toBeVisible();
+  expect(within(card).queryByText("收录状态待确认")).toBeNull();
   expect(within(card).queryByRole("button", { name: "已收录" })).toBeNull();
-  await userEvent.click(
-    screen.getByRole("checkbox", { name: "只看已确认未收录" }),
-  );
-  expect(screen.queryByRole("article", { name: popular.name })).toBeNull();
-  expect(
-    screen.getByText(
-      "仅显示本次打开应用后已确认来源、且尚未收录的技能。其他技能的收录状态待确认。",
-    ),
-  ).toBeVisible();
+  await userEvent.click(screen.getByRole("checkbox", { name: "只看未收录" }));
+  expect(screen.getByRole("article", { name: popular.name })).toBeVisible();
 });
 
 it("does not merge same-name or same-basename candidates until each upstream identity is explicitly confirmed", async () => {
@@ -434,7 +425,6 @@ it("does not merge same-name or same-basename candidates until each upstream ide
       within(dialog).getAllByRole("button", { name: "使用此来源" }),
     ).toHaveLength(2);
     expect(choose).not.toHaveBeenCalled();
-    expect(within(cards[0]).getByText("收录状态待确认")).toBeVisible();
     await userEvent.click(
       within(
         within(dialog).getByText("a/foo").parentElement!.parentElement!,
@@ -444,7 +434,6 @@ it("does not merge same-name or same-basename candidates until each upstream ide
     expect(
       within(cards[0]).getByRole("button", { name: "已收录" }),
     ).toBeDisabled();
-    expect(within(cards[1]).getByText("收录状态待确认")).toBeVisible();
     expect(
       within(cards[1]).getByRole("button", { name: "添加" }),
     ).toBeEnabled();
@@ -458,9 +447,7 @@ it("does not merge same-name or same-basename candidates until each upstream ide
       ).getByRole("button", { name: "使用此来源" }),
     );
     expect(choose).toHaveBeenLastCalledWith(actualB);
-    await userEvent.click(
-      screen.getByRole("checkbox", { name: "只看已确认未收录" }),
-    );
+    await userEvent.click(screen.getByRole("checkbox", { name: "只看未收录" }));
     cards = screen.getAllByRole("article", { name: first.name });
     expect(cards).toHaveLength(1);
     expect(cards[0]).toHaveTextContent("second upstream");
