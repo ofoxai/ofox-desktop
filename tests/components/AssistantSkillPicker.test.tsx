@@ -142,6 +142,14 @@ it("typing / at the start opens Auto and Manual with honest origin labels", asyn
   expect(within(list).getByText("Unreviewed")).toBeVisible();
   expect(within(list).getByText("Assistant created")).toBeVisible();
 });
+it("keeps a long description to two lines, with the full text on hover", async () => {
+  const input = await open();
+  await userEvent.type(input, "/");
+  const list = await screen.findByRole("listbox", { name: "Choose a skill" });
+  const description = within(list).getByText("Automatic instructions");
+  expect(description).toHaveClass("line-clamp-2");
+  expect(description).toHaveAttribute("title", "Automatic instructions");
+});
 it("chooses by keyboard and sends the name through Page hook and real API IPC", async () => {
   const input = await open();
   await userEvent.type(input, "/man");

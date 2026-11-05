@@ -295,7 +295,10 @@ export const SkillPicker = forwardRef<HTMLTextAreaElement, Props>(
                       </span>
                     )}
                   </span>
-                  <span className="block break-words text-note text-ink-muted">
+                  <span
+                    title={item.description}
+                    className="line-clamp-2 break-words text-note text-ink-muted"
+                  >
                     {item.description}
                   </span>
                 </button>
