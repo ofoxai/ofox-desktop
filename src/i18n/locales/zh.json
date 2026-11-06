@@ -5110,6 +5110,7 @@
       "deletePending": "对话已移除，但部分文件尚未删除。重启应用后将重试清理。",
       "exportFailed": "无法保存导出文件，请检查保存位置后重试。",
       "exportDestinationInvalid": "请选择应用数据目录以外的普通文件。",
+      "openFailed": "文件已保存，但无法用默认应用打开。请到保存位置手动打开。",
       "exportTooLarge": "此对话超出 Markdown 导出的 64 MiB 大小上限。",
       "backupInvalid": "备份文件已损坏，或格式不受支持。没有替换任何已有的对话。",
       "backupTooLarge": "备份超过大小或文件数限制：ZIP 最大 512 MiB，解压后最大 2 GiB，最多 20,000 个文件。",

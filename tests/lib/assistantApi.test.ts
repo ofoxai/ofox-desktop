@@ -43,6 +43,33 @@ it("keeps default bootstrap IPC unchanged and requests catalog refresh only expl
   });
 });
 
+describe("saving generated media", () => {
+  const request = {
+    sessionId: "session",
+    attachmentId: "attachment",
+    expectedOwner: "owner",
+    expectedGeneration: 7,
+  };
+
+  it("passes open:true through to the command, and omits it for a plain save", async () => {
+    invoke.mockResolvedValue(true);
+    expect(await assistantApi.saveMedia({ ...request, open: true })).toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("assistant_save_media", {
+      request: { ...request, open: true },
+    });
+    await assistantApi.saveMedia(request);
+    expect(invoke).toHaveBeenLastCalledWith("assistant_save_media", {
+      request,
+    });
+  });
+
+  it("maps a failed open to its own message", () => {
+    expect(assistantErrorKey("assistant_open_failed")).toBe(
+      "assistant.errors.openFailed",
+    );
+  });
+});
+
 describe("private audio import commands", () => {
   const target = {
     sessionId: "session",

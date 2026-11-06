@@ -5110,6 +5110,7 @@
       "deletePending": "The conversation was removed, but some files could not be deleted. Restart the app to retry cleanup.",
       "exportFailed": "Could not save the export. Check the destination and try again.",
       "exportDestinationInvalid": "Choose a regular file outside the application data folder.",
+      "openFailed": "The file was saved, but its default app couldn't open it. Open it from where you saved it.",
       "exportTooLarge": "This conversation is too large for a Markdown export (64 MiB maximum).",
       "backupInvalid": "The backup is damaged or uses an unsupported format. No conflicting conversation was replaced.",
       "backupTooLarge": "The backup exceeds the size or file-count limit (512 MiB ZIP, 2 GiB expanded, 20,000 files).",

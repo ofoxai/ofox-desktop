@@ -1300,6 +1300,8 @@ export const assistantApi = {
     attachmentId: string;
     expectedOwner: string;
     expectedGeneration: number;
+    /** Also open the saved copy with the default app. */
+    open?: boolean;
   }) => invoke<boolean>("assistant_save_media", { request }),
   exportMarkdown: (request: {
     sessionId: string;
@@ -1544,6 +1546,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_backup_owner_mismatch: "backupOwnerMismatch",
   assistant_export_failed: "exportFailed",
   assistant_export_destination_invalid: "exportDestinationInvalid",
+  assistant_open_failed: "openFailed",
   assistant_export_too_large: "exportTooLarge",
   assistant_invalid_identifier: "sessionMissing",
   assistant_invalid_session: "sessionUnreadable",
