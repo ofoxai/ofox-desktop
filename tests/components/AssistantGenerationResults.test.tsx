@@ -26,8 +26,11 @@ vi.mock("@/hooks/useOfoxAuth", () => ({
 vi.mock("@/lib/api/settings", () => ({
   settingsApi: { openExternal: vi.fn() },
 }));
+const toasts = vi.hoisted(() => ({ error: vi.fn() }));
+vi.mock("sonner", () => ({ toast: toasts }));
 
 beforeEach(async () => {
+  toasts.error.mockReset();
   i18n.addResourceBundle("en", "translation", en, true, true);
   await i18n.changeLanguage("en");
 });
@@ -345,15 +348,61 @@ describe("a generated document", () => {
     expect(screen.queryByRole("button", { name: "Save and open" })).toBeNull();
   });
 
+  it("reports a failed save and open in a notice, and lets the user try again", async () => {
+    const onSaveAndOpen = vi
+      .fn()
+      .mockRejectedValueOnce("assistant_open_failed")
+      .mockResolvedValue(true);
+    documentCards(document(), { onSaveAndOpen });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save and open" }),
+    );
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledExactlyOnceWith(
+        en.assistant.errors.openFailed,
+      ),
+    );
+    // The card stays: the copy may be saved, and both buttons work again.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Save and open" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.getByRole("button", { name: "Save…" })).toBeEnabled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Save and open" }),
+    );
+    expect(onSaveAndOpen).toHaveBeenCalledTimes(2);
+    expect(toasts.error).toHaveBeenCalledOnce();
+  });
+
+  it("reports a failed plain save the same way", async () => {
+    const onSave = vi.fn().mockRejectedValue("assistant_export_failed");
+    documentCards(document(), { onSave });
+    await userEvent.click(screen.getByRole("button", { name: "Save…" }));
+    await waitFor(() =>
+      expect(toasts.error).toHaveBeenCalledExactlyOnceWith(
+        en.assistant.errors.exportFailed,
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Save…" })).toBeEnabled(),
+    );
+  });
+
   it("says why it failed without offering to regenerate it", () => {
     documentCards(
       document(
         {},
-        { status: "error", outputs: [], errorCode: "assistant_open_failed" },
+        {
+          status: "error",
+          outputs: [],
+          errorCode: "assistant_model_request_failed",
+        },
       ),
     );
     expect(screen.getByRole("alert")).toHaveTextContent(
-      en.assistant.errors.openFailed,
+      en.assistant.errors.modelRequestFailed,
     );
     expect(screen.queryByRole("button", { name: /Regenerate/ })).toBeNull();
     expect(screen.queryByRole("button", { name: "Details" })).toBeNull();

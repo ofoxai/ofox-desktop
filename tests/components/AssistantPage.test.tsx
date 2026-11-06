@@ -7416,6 +7416,33 @@ describe("generation tools", () => {
     expect(mocks.send).not.toHaveBeenCalled();
   });
 
+  it("keeps three starters when the deck is the only scenario on offer", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await screen.findByRole("button", { name: "Make a deck" });
+    const offered = screen
+      .getAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((name) =>
+        [
+          "Make a deck",
+          "Summarize content",
+          "Polish writing",
+          "Explain a question",
+        ].includes(name ?? ""),
+      );
+    // The deck first, then the text starters in their own order.
+    expect(offered).toEqual([
+      "Make a deck",
+      "Summarize content",
+      "Polish writing",
+    ]);
+  });
+
   it("saves a generated document and opens it from its card", async () => {
     mocks.saveMedia.mockReset().mockResolvedValue(true);
     current.messages = [

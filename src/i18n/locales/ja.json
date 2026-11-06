@@ -5775,7 +5775,7 @@
       "severity": {
         "error": "エラー",
         "warning": "警告",
-        "info": "お知らせ"
+        "info": "情報"
       }
     },
     "skills": {

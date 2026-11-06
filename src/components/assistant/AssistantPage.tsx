@@ -132,6 +132,8 @@ const TEXT_STARTERS: Starter[] = [
   { id: "writing" },
   { id: "explain" },
 ];
+/** A short scenario list is filled up from the text starters. */
+const MIN_STARTERS = 3;
 
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
@@ -458,9 +460,15 @@ function AssistantWorkspace() {
           : localDefinition;
     const scenario =
       composerModel?.tools === false ? [] : SCENARIO_STARTERS.filter(offered);
-    return scenario.length > 0
-      ? [...scenario, { id: "summary" }]
-      : TEXT_STARTERS;
+    if (scenario.length === 0) return TEXT_STARTERS;
+    const offeredStarters: Starter[] = [...scenario, { id: "summary" }];
+    for (const starter of TEXT_STARTERS)
+      if (
+        offeredStarters.length < MIN_STARTERS &&
+        !offeredStarters.some(({ id }) => id === starter.id)
+      )
+        offeredStarters.push(starter);
+    return offeredStarters;
   }, [composerModel?.tools, generationCatalog, localDefinition, deckAvailable]);
   const queueCount = assistant.queue?.messages.length ?? 0;
   const queueMode = !session?.audioOnly && Boolean(run || queueCount);
