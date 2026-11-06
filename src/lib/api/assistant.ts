@@ -256,6 +256,8 @@ export interface AssistantBootstrap {
     available: boolean;
     reason: string | null;
     version: string | null;
+    /** Document formats the runtime can make; absent when it makes none. */
+    documents?: { formats: string[] };
   };
   models: AssistantModel[];
   /** Dedicated tool models, separate from the conversation model picker. */
@@ -854,6 +856,13 @@ export interface AssistantGenerationApproval {
   estimatedCostUsd?: string | null;
 }
 
+/** One problem a document's checks found, as its record keeps it. */
+export interface AssistantDocumentIssue {
+  severity: string;
+  message: string;
+  path?: string;
+}
+
 /** A generation tool's result on a reply. */
 export type AssistantGeneration = AssistantMediaBase & {
   toolCallId: string;
@@ -874,6 +883,18 @@ export type AssistantGeneration = AssistantMediaBase & {
           instructions?: string | null;
         };
         audio?: { output?: { durationMs?: number; mimeType?: string } };
+      }
+    | {
+        kind: "document";
+        /** Free: made on this computer, so it has no model and no price. */
+        params: {
+          name?: string;
+          format: string;
+          pages?: number;
+          slides?: number;
+          sheets?: number;
+          issues?: AssistantDocumentIssue[];
+        };
       }
   );
 

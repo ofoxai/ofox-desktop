@@ -5379,6 +5379,10 @@
         "label": "ナレーションを付ける",
         "prompt": "落ち着いた温かい声で、次の文をナレーションとして読んで：\n\nOfox へようこそ。ひとつのアカウントで主要な AI モデルを使えます。"
       },
+      "deck": {
+        "label": "スライドを作る",
+        "prompt": "プレゼン資料を作って：新しいメンバー向けに、リモートワークのコツを紹介する全 6 枚。レイアウトは簡潔に、1 枚につき要点は 1 つだけ。"
+      },
       "localCheck": {
         "label": "Claude Code の設定を確認",
         "prompt": "このパソコンの Claude Code の設定に問題がないか確認して、問題があれば直し方を教えて。"
@@ -5713,7 +5717,8 @@
       "kinds": {
         "image": "画像を生成",
         "video": "動画を生成",
-        "speech": "音声を生成"
+        "speech": "音声を生成",
+        "document": "ドキュメント"
       },
       "chipLabel": "{{name}}：モデルとパラメータ",
       "remove": "{{name}}を外す",
@@ -5755,6 +5760,23 @@
       "overLimit": "動画に使えるのは参照画像 9 枚、音声 3 本（各 15 秒以内）、動画 1 本までです。余分なファイルを外してください。",
       "needsTools": "このモデルはツールを使えないため、画像・動画・音声を生成できません。別のモデルを選んでください。",
       "readAloudFailed": "読み上げに失敗しました。しばらくしてからもう一度お試しください。"
+    },
+    "document": {
+      "saveAndOpen": "保存して開く",
+      "making": "ドキュメントを生成中…",
+      "issues_one": "{{count}} 件の問題",
+      "issues_other": "{{count}} 件の問題",
+      "pages_one": "{{count}} ページ",
+      "pages_other": "{{count}} ページ",
+      "slides_one": "{{count}} スライド",
+      "slides_other": "{{count}} スライド",
+      "sheets_one": "{{count}} シート",
+      "sheets_other": "{{count}} シート",
+      "severity": {
+        "error": "エラー",
+        "warning": "警告",
+        "info": "お知らせ"
+      }
     },
     "skills": {
       "choose": "スキルを選ぶ",
