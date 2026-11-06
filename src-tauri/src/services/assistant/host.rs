@@ -183,6 +183,11 @@ pub trait Environment: Send + Sync + 'static {
     fn config_dir(&self) -> PathBuf;
     /// The prepared runtime: `node/`, `runtime/src/main.mjs`, `manifest.json`.
     fn runtime_dir(&self) -> Result<PathBuf, String>;
+    /// macOS's `sandbox-exec`, which keeps officecli from the network and
+    /// from the user's files (see `documents::create`); `None` elsewhere.
+    fn sandbox_exec(&self) -> Option<PathBuf> {
+        cfg!(target_os = "macos").then(|| PathBuf::from("/usr/bin/sandbox-exec"))
+    }
     /// Publish an `assistant:event`.
     fn emit(&self, event: Event);
     /// The proxy for model requests, as the app's other requests take it;
@@ -214,6 +219,9 @@ pub struct RunControl {
     pub(super) media: Option<super::media_tools::host::MediaRun>,
     /// For a background job of a generation tool: its tool call.
     pub(super) artifact: Option<String>,
+    /// The interface language (`zh`, `en` or `ja`) a chat run was sent in:
+    /// the language its documents are set in.
+    pub(super) ui_language: String,
     pub(super) local_enabled: bool,
     pub identity: Identity,
     pub session_id: String,
@@ -243,6 +251,7 @@ impl RunControl {
             skill_tools: Mutex::new(Default::default()),
             media: None,
             artifact: None,
+            ui_language: "zh".into(),
             local_enabled: false,
             identity,
             session_id: request.session_id.clone(),
@@ -346,6 +355,11 @@ pub struct AssistantHost {
     /// The bundled document engines; found once, as they never change while
     /// the app runs.
     engines: OnceLock<Engines>,
+    /// The `sandbox-exec` officecli runs under, once its first run showed it
+    /// works there; `None` when it does not (see `documents::create`).
+    pub(super) office_sandbox: tokio::sync::OnceCell<Option<PathBuf>>,
+    /// The same for Typst.
+    pub(super) typst_sandbox: tokio::sync::OnceCell<Option<PathBuf>>,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -758,6 +772,8 @@ impl AssistantHost {
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
             engines: OnceLock::new(),
+            office_sandbox: tokio::sync::OnceCell::new(),
+            typst_sandbox: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -1782,6 +1798,11 @@ impl AssistantHost {
                 attempt.progressed = true;
                 let result = if value["params"]["name"] == "authorize_mcp" {
                     self.authorize_mcp(control, &value["params"]).await
+                } else if value["params"]["name"]
+                    .as_str()
+                    .is_some_and(super::documents::is_document_tool)
+                {
+                    self.dispatch_document_tool(control, &value["params"]).await
                 } else if value["params"]["name"]
                     .as_str()
                     .is_some_and(super::media_tools::is_media_tool)
@@ -6746,16 +6767,16 @@ while read line; do :; done"#,
     async fn bootstrap_reports_document_formats() {
         let (_config, host) = fixture();
         let boot = host.bootstrap().await.unwrap();
-        // No runtime folder: only the formats that need no engine.
-        assert_eq!(
-            boot["runtime"]["documents"]["formats"],
-            json!(["md", "txt", "csv", "html", "json"])
-        );
+        // No runtime: nothing could register the tool, so no formats.
+        assert_eq!(boot["runtime"]["available"], false);
+        assert!(boot["runtime"].get("documents").is_none());
 
         let (config, env, host) = fixture_with_env();
         let base = config.path().join("runtime-with-engines");
-        std::fs::create_dir_all(base.join("engines/typst")).unwrap();
-        std::fs::write(base.join("engines/typst/typst"), "").unwrap();
+        for file in ["node/node", "runtime/src/main.mjs", "engines/typst/typst"] {
+            std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
+            std::fs::write(base.join(file), "").unwrap();
+        }
         std::fs::write(
             base.join("manifest.json"),
             json!({"engines": {"typst": {"path": "engines/typst/typst"}}}).to_string(),
@@ -6763,8 +6784,10 @@ while read line; do :; done"#,
         .unwrap();
         *env.runtime.lock().unwrap() = Some(base);
         let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["runtime"]["available"], true);
         let formats = boot["runtime"]["documents"]["formats"].as_array().unwrap();
         assert!(formats.contains(&json!("pdf")));
+        assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
     }
     fn audio_target(host: &AssistantHost, sid: &str) -> DeleteRequest {
