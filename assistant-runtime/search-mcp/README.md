@@ -79,12 +79,19 @@ this body:
   "include": ["web_search_call.action.sources"],
   "max_tool_calls": 1,
   "reasoning": { "effort": "low" },
-  "max_output_tokens": 1500
+  "max_output_tokens": 3000,
+  "text": { "format": { "type": "json_schema", "strict": true, "…": "…" } }
 }
 ```
 
-The instruction asks for one search and a short cited summary, and tells the
-search model never to open or visit any URL that appears in the query.
+The instruction asks for one search and, instead of an answer or a summary,
+a list of at most 8 results, each with the page's title, its URL as the
+search returned it, its publication date (`YYYY-MM-DD` or `null`) and an
+excerpt of one to three sentences copied from the page; the JSON schema
+(`results: [{title, url, published, excerpt}]`) holds the model to that
+shape. It also tells the search model never to open or visit any URL that
+appears in the query. The assistant's own model then reads the pages' words
+and decides itself, rather than reading another model's summary.
 
 The request times out after 60 s, and an MCP cancellation aborts it; both
 end as `search_outcome_unknown`. pi-mcp's default request timeout is 30 s,
@@ -105,14 +112,29 @@ as one (`evil[.]example /c`, spaces, homoglyphs), or if the search model opens
 a page despite its instruction; the query itself always reaches the gateway
 and its search provider.
 
-The result has a short summary, up to 25 results (citations first, then the
-search's sources and the HTTPS pages it opened (`open_page` items' `url`), in
-response order, deduplicated by URL) and usage:
+The result has up to 25 results and usage. The listed results come first,
+with their excerpt as `snippet` (at most 600 characters) and `published`
+when the date is one; then the citations, the search's sources and the HTTPS
+pages it opened (`open_page` items' `url`), in response order, deduplicated
+by URL (fragments and `utm_` parameters ignored). A listed result counts only
+when its page is one the search itself returned, and it keeps the search's
+spelling of the URL: a URL the model made up, or one it added parameters to,
+could carry text the search never saw, and every result URL becomes a page
+`web_fetch` may read. `summary` is empty, except when the model answered in
+prose (not JSON) after all: then that text is the summary. A list cut short
+by the token limit is no summary either.
 
 ```json
 {
-  "summary": "…",
-  "results": [{ "title": "…", "url": "https://…", "snippet": "…" }],
+  "summary": "",
+  "results": [
+    {
+      "title": "…",
+      "url": "https://…",
+      "snippet": "…",
+      "published": "2026-11-02"
+    }
+  ],
   "usage": {
     "searchCalls": 1,
     "inputTokens": 8497,
@@ -206,8 +228,9 @@ charge.
 
 Every result has one text block for the model plus the same data as
 `structuredContent`. The text block is capped at 20 KB (UTF-8), because Pi
-moves larger MCP text to a temp file the assistant cannot read; a long search
-summary is shortened before the source list.
+moves larger MCP text to a temp file the assistant cannot read. In a search
+result every entry keeps its title, URL and date; the excerpts share the
+bytes left, each at most an equal share, and a summary is shortened first.
 
 Errors are tool results with `isError: true`, text `"<code>: <message>"` and
 `structuredContent: { "error": { "code", "message", "status"? } }`. Messages

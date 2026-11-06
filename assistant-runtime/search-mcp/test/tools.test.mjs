@@ -92,6 +92,29 @@ test("the largest possible search result still fits in 20 KB of text", () => {
   assert.equal(tool.structuredContent.results.length, 25);
 });
 
+test("results show their date, and long excerpts share the space so every link stays", () => {
+  const results = Array.from({ length: 10 }, (_v, index) => ({
+    title: `Result ${index}`,
+    url: `https://example.com/${index}`,
+    snippet: "抜".repeat(3000),
+    ...(index === 0 ? { published: "2026-11-02" } : {}),
+  }));
+  const tool = searchToolResult({
+    summary: "",
+    results,
+    usage: { searchCalls: 1, inputTokens: 1, outputTokens: 1, model: "m" },
+  });
+  const text = tool.content[0].text;
+  assert.ok(bytes(text) <= MAX_TEXT_BYTES);
+  assert.equal(text.includes("[Output truncated"), false);
+  for (const result of results) assert.ok(text.includes(result.url));
+  assert.match(
+    text,
+    /\n1\. Result 0\n {3}https:\/\/example\.com\/0\n {3}Published: 2026-11-02\n {3}抜+…\n/,
+  );
+  assert.deepEqual(tool.structuredContent.results, results);
+});
+
 test("a long summary is shortened before the source list is", () => {
   const tool = searchToolResult({
     summary: "要".repeat(8000),

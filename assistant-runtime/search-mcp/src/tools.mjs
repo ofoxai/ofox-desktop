@@ -42,19 +42,43 @@ export function capText(text, maxBytes = MAX_TEXT_BYTES) {
   );
 }
 
-function sourceLines(results) {
+// Every result keeps its title, link and date; the excerpts share the bytes
+// left, each at most an equal share, so no result loses its link to another's
+// long excerpt.
+function sourceLines(results, budget) {
   if (results.length === 0) return "No source links were returned.";
+  const heads = results.map((result, index) =>
+    [
+      `${index + 1}. ${result.title}`,
+      `   ${result.url}`,
+      ...(result.published ? [`   Published: ${result.published}`] : []),
+    ].join("\n"),
+  );
+  const excerpts = results.filter((result) => result.snippet).length;
+  const left = budget - byteLength(["Sources:", ...heads].join("\n"));
+  const share = excerpts ? Math.floor(left / excerpts) - 4 : 0;
   const lines = ["Sources:"];
   results.forEach((result, index) => {
-    lines.push(`${index + 1}. ${result.title}`, `   ${result.url}`);
-    if (result.snippet) lines.push(`   ${result.snippet}`);
+    lines.push(heads[index]);
+    if (!result.snippet || share <= 3) return;
+    lines.push(
+      `   ${
+        byteLength(result.snippet) > share
+          ? `${prefixWithin(result.snippet, share - 3)}…`
+          : result.snippet
+      }`,
+    );
   });
   return lines.join("\n");
 }
 
-// The summary gives way first, so the source links survive a long answer.
+// The summary (only an older answer has one) gives way first, so the source
+// links survive a long answer.
 export function searchToolResult(result) {
-  const sources = sourceLines(result.results);
+  const sources = sourceLines(
+    result.results,
+    MAX_TEXT_BYTES - byteLength(UNTRUSTED_NOTE),
+  );
   let summary = result.summary;
   if (summary) {
     const budget =
@@ -143,8 +167,9 @@ export function createSearchServer(
     {
       title: "Web search",
       description:
-        "Search the web through Ofox and get a short summary with source " +
-        "links. Each call is paid, one or two billed search calls (a " +
+        "Search the web through Ofox and get the most relevant results, " +
+        "each with its title, link and an excerpt from the page. Each call " +
+        "is paid, one or two billed search calls (a " +
         "search, sometimes an opened page): search only when current or " +
         "outside information is needed, and never repeat a search that " +
         "returned search_outcome_unknown.",

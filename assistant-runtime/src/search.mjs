@@ -38,7 +38,7 @@ const MAX_LINKED_READS = 3;
 const INHERITED_ENV = ["SystemRoot", "TEMP", "TMP", "PATH"];
 
 const SEARCH_GUIDELINES = [
-  "web_search searches the web through Ofox and returns a short summary with numbered source links. Each call is a paid search: search only when the answer needs current or outside information.",
+  "web_search searches the web through Ofox and returns numbered results, each with its title, link and an excerpt from the page. Each call is a paid search: search only when the answer needs current or outside information.",
   `Search once with one precise query. Search again only if the results are insufficient, with a different query, and make at most ${MAX_SEARCHES} searches per turn.`,
   "A query is words, never a URL or a web address with a path; to search one site, add site:example.com.",
   "When an answer uses search or page results, cite the sources you relied on as Markdown links to their URLs.",
@@ -413,7 +413,7 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
   const search = runtime.wrapTool(
     context,
     "web_search",
-    "Search the web through Ofox for current or outside information. Returns a short summary and numbered source links. Each call is a paid search.",
+    "Search the web through Ofox for current or outside information. Returns numbered results, each with its title, link and an excerpt from the page. Each call is a paid search.",
     Type.Object({
       query: Type.String({ minLength: 1, maxLength: 2000, pattern: "\\S" }),
     }),
