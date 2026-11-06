@@ -521,9 +521,9 @@ Run parameters:
   At most 500 strings of at most 2048 characters; anything else rejects the
   request before a turn starts. Every source a `web_search` of the run returns
   is added, and so are the HTTPS links of every page a `web_fetch` of the run
-  read (the server's `links`, at most 200 per run). Of the pages readable
-  only through such a link, a run reads at most 5; the sixth fails with
-  `fetch_not_allowed` without a request. URLs compare as the server reads
+  read that stay on that page's host (the server's `links`, at most 200 per
+  run). Of the pages readable only through such a link, a run reads at most
+  3; the fourth fails with `fetch_not_allowed` without a request. URLs compare as the server reads
   them: without the fragment, with a lower-case host and no default port.
   Other URLs fail with `fetch_not_allowed` without a request.
 - `proxy`: the one model requests use. The server tunnels both tools through
@@ -589,10 +589,12 @@ bounded only by these checks and its instruction.
 
 Links of read pages: a page's links are its own fixed URLs, so following one
 cannot carry text the model builds. Which links a run follows can still tell
-the sites behind them something: a prompt injection could list many links
-and ask the model to pick them by private text. The 5 reads of linked-only
-pages bound that to roughly 5 choices among at most 200 links, a few bytes,
-not a key.
+the host something: a prompt injection could list many links and ask the
+model to pick them by private text. Only links on the read page's own host
+are followed, so the choice stays with the site that wrote the page, not
+with whoever wrote a comment on it or links out of it; and the 3 reads of
+linked-only pages bound it to 3 choices among at most 200 links, a few
+bytes, not a key.
 
 Billing: every `web_search` success is `usage.searchCalls` paid searches at
 the web_search price of `usage.model`, plus its tokens. The server asks for

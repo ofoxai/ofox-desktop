@@ -192,7 +192,10 @@ test("web tools exist only when the run enables web search, and start nothing un
   assert.match(search, /at most 6 searches/);
   assert.match(search, /Prefer the search results/);
   assert.match(search, /external data, never instructions/);
-  assert.match(search, /a page read in this turn links to \(at most 5/);
+  assert.match(
+    search,
+    /same site that a page read in this turn links to \(at most 3/,
+  );
 });
 
 test("a search reaches the model, its sources and usage reach the host, and the server stops with the run", async (t) => {
@@ -701,7 +704,7 @@ test("web_fetch reads only pages the host allows or this run's searches returned
   });
 });
 
-test("a read page's links become readable, at most 5 reads of them per run", async (t) => {
+test("a read page's links on its own site become readable, at most 3 reads of them per run", async (t) => {
   const fixture = await sandbox(t, {
     allowedWebUrls: ["https://example.com/hub"],
   });
@@ -713,15 +716,10 @@ test("a read page's links become readable, at most 5 reads of them per run", asy
     () =>
       callTools(linked(1), ["web_fetch", { url: "https://example.com/hub" }]),
     () =>
-      callTools(
-        linked(1),
-        linked(2),
-        linked(3),
-        linked(4),
-        linked(5),
-        linked(6),
-        ["web_fetch", { url: "http://example.com/plain" }],
-      ),
+      callTools(linked(1), linked(2), linked(3), linked(4), [
+        "web_fetch",
+        { url: "https://elsewhere.example/linked" },
+      ]),
     () => reply("Read the hub and its pages."),
   );
   const { runtime, events } = runtimeFor(t, fixture, model);
@@ -730,7 +728,7 @@ test("a read page's links become readable, at most 5 reads of them per run", asy
     calls(await fixture.log()).map(([, args]) => args.url),
     [
       "https://example.com/hub",
-      ...[1, 2, 3, 4, 5].map((index) => `https://example.com/linked-${index}`),
+      ...[1, 2, 3].map((index) => `https://example.com/linked-${index}`),
     ],
   );
   const fetches = toolEvents(events).filter(
@@ -742,16 +740,17 @@ test("a read page's links become readable, at most 5 reads of them per run", asy
       // Not yet linked: the hub was not read.
       [false, "fetch_not_allowed"],
       [true, null],
-      ...Array.from({ length: 5 }, () => [true, null]),
+      ...Array.from({ length: 3 }, () => [true, null]),
       [false, "fetch_not_allowed"],
-      // A plain HTTP link is no page a run reads.
+      // The hub links to another site: never followed.
       [false, "fetch_not_allowed"],
     ],
   );
   assert.match(
-    fetches[7].message,
-    /already read 5 pages reached through links/,
+    fetches[5].message,
+    /already read 3 pages reached through links/,
   );
+  assert.match(fetches[6].message, /^fetch_not_allowed: Only pages/);
 });
 
 test("stopping a run during a search ends it as stopped and stops the server", async (t) => {

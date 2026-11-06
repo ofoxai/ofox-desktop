@@ -24,13 +24,16 @@ const MAX_URL_CHARS = 2048;
 // model that keeps searching or retrying stops.
 const MAX_SEARCHES = 6;
 const MAX_FETCH_FAILURES = 3;
-// Pages a run may read because a page it read links to them: at most this
-// many become readable, and at most MAX_LINKED_READS are read. Their URLs are
-// the linking page's own, so the model cannot build one out of private text,
-// but which links it follows can still tell the sites behind them something;
-// a few reads bound that to a few bytes.
+// Pages a run may read because a page it read links to them: only on that
+// page's own host, at most this many become readable, and at most
+// MAX_LINKED_READS are read. Their URLs are the linking page's own, so the
+// model cannot build one out of private text, but which links it follows can
+// still tell the host something: an injection could list many links and ask
+// for a choice made by private text. Same-host links keep that choice with
+// the site that wrote the page (not with whoever wrote a comment on it), and
+// a few reads bound it to a few bytes.
 const MAX_PAGE_LINKS = 200;
-const MAX_LINKED_READS = 5;
+const MAX_LINKED_READS = 3;
 // What Node itself may need on Windows and macOS; nothing else is inherited.
 const INHERITED_ENV = ["SystemRoot", "TEMP", "TMP", "PATH"];
 
@@ -62,7 +65,7 @@ export function queryHasUrl(query) {
   return QUERY_URL.test(query);
 }
 const FETCH_GUIDELINES = [
-  `web_fetch reads one public HTTPS page as Markdown: a page the user linked, one a web search in this turn returned, or one a page read in this turn links to (at most ${MAX_LINKED_READS} of those per turn); other pages are refused.`,
+  `web_fetch reads one public HTTPS page as Markdown: a page the user linked, one a web search in this turn returned, or one on the same site that a page read in this turn links to (at most ${MAX_LINKED_READS} of those per turn); other pages are refused: search for them instead.`,
   "Prefer the search results: read a page only when they lack what the answer needs, and do not retry a page that failed.",
 ];
 
@@ -481,13 +484,16 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
         throw error;
       }
       const data = result.structuredContent ?? {};
+      const read = webUrlKey(typeof data.url === "string" ? data.url : url);
+      const host = read && new URL(read).host;
       for (const link of Array.isArray(data.links) ? data.links : []) {
-        if (linkedOnly.size >= MAX_PAGE_LINKS) break;
+        if (!host || linkedOnly.size >= MAX_PAGE_LINKS) break;
         const linked =
           typeof link === "string" && link.length <= MAX_URL_CHARS
             ? webUrlKey(link)
             : null;
-        if (!linked || context.webUrls.has(linked)) continue;
+        if (!linked || new URL(linked).host !== host) continue;
+        if (context.webUrls.has(linked)) continue;
         context.webUrls.add(linked);
         linkedOnly.add(linked);
       }

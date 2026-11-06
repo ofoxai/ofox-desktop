@@ -182,8 +182,8 @@ string. Without fake-IP DNS nothing goes there.
 **The allowlist is not here.** `web_fetch` reads any URL that passes the
 rules above. The runtime only lets the model fetch URLs that the host allows
 (`allowedWebUrls`: the user's links and earlier sources), that a
-`web_search` of the same run returned, or that a page it read links to (at
-most 5 of those reads per run).
+`web_search` of the same run returned, or that a page it read links to on
+the same host (at most 3 of those reads per run).
 
 ## Billing
 

@@ -77,6 +77,7 @@ function fetchPage(url) {
           { length: 7 },
           (_, index) => `https://example.com/linked-${index + 1}#top`,
         ),
+        "https://elsewhere.example/linked",
         "http://example.com/plain",
         "not a url",
         42,
