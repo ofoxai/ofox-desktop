@@ -341,3 +341,91 @@ These are host tool and direct-command checks, not filesystem isolation. Approve
 Assistant chat skill transactions reject stale approval epochs rather than rebasing automatically. An unresolved private intent blocks the assistant skill snapshot until its affected state can be verified; recovery never guesses or replays a pending install. A commit followed by snapshot-refresh failure remains installed/saved but unusable for that response; retry verifies the receipt and refreshes without overwriting later mode changes. If storing the installed-card update fails after commit, the tool reports the committed result with cardPersisted:false and does not reinstall. Private orphan staging/artifacts from a failure before intent publication confer no runtime authority.
 
 This chat-skill increment has macOS sandbox transaction/restart/fault tests, prepared Node/Pi with a local synthetic gateway and real Rust callbacks on both apexes, and 900px Chrome light/dark checks in three languages. It does not establish live public-source downloads, billed model behavior, native Ofox rendering, or native Windows replacement/recovery. Only invented skill bodies are used in acceptance fixtures.
+
+## Assistant document engines (2026-11-07)
+
+The assistant's `create_document` tool makes PDF, Word, PowerPoint and Excel
+files (and md, txt, csv, html and json) with two bundled engines. See
+[document engines](assistant-engines.md) for how it works and for the
+acceptance checklist. Everything below is known and not claimed fixed or
+verified. The engines ran on macOS arm64 only; none of this validates Windows
+or Linux.
+
+Isolation and platforms:
+
+- The engines' read sandbox is macOS only (`sandbox-exec` with a profile that
+  hides `/Users` and `/Volumes` from officecli and the network from both).
+  Windows and Linux rely on the host's batch validator (which refuses any
+  property that names a file or an address) and on the dead proxy every engine
+  gets. A batch the validator misses would not be stopped by the operating
+  system there.
+- Windows: .NET may resolve the profile folder through the Known Folder API
+  rather than `USERPROFILE`, so officecli's private `HOME` may not be what it
+  uses; this is unverified. The Windows branches of the runner (process jobs,
+  no sandbox) are not compiled in the macOS development environment, so they
+  have had no compiler or test run. Windows acceptance is a separate gate.
+- A `/tmp/officecli-<uid>` folder that is not the current user's own private
+  folder (another owner, a link, a file) makes every Word, Excel and PowerPoint
+  document fail closed on macOS: officecli keeps temporary files there whatever
+  `TMPDIR` says, and the sandbox profile needs to allow exactly that folder.
+  Documents work again once the folder is removed.
+- A crash or a forced quit during a run leaves that run's `outputs/<docId>`
+  folders in the conversation's folder until the conversation is removed; a
+  normal end of a run, including a stop or a failure, removes them.
+
+Signing and packaging:
+
+- officecli is signed with the hardened runtime and `allow-jit` only. That is
+  what upstream's own signature carries and what the signed binary needed in
+  the spike, but notarization has not been run: it needs the release owner's
+  `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID`. Until a notarized build has
+  run both engines from the installed bundle, a hardened-runtime failure that
+  only appears under Gatekeeper is not ruled out. See
+  [notarization](assistant-engines.md#notarization-to-do-by-the-release-owner).
+- The branch-package and CI smoke tests run the engines unsigned, so they do not
+  exercise the hardened runtime or the entitlements.
+
+What the files and previews are:
+
+- A PDF's page count is a heuristic: the number of `/Type /Page` objects in the
+  file. It can be off for unusual PDFs; Typst's own output is what it was
+  checked against.
+- The PowerPoint preview (first slide) depends on the runtime rasterizing
+  officecli's SVG with `@napi-rs/canvas`. Where the canvas build cannot read the
+  SVG, or the model cannot see images, the file is still made and the reply has
+  no thumbnail. Word and Excel files have no preview.
+- There are no `submitting` or `failed` document cards: a record is written
+  only once the file exists, so a failed or interrupted document leaves no card
+  (the model gets the error and may retry, at most twice).
+
+Features of the engines that are deliberately unavailable, because a batch must
+read nothing outside the document and run nothing:
+
+- diagrams (officecli renders them in a browser it starts and loads a script
+  from the network), OLE objects and embedded packages;
+- pictures and any other file from a path or an address: images are `data:`
+  URIs only (the document's own bytes, up to the content limit);
+- Word fields other than PAGE, NUMPAGES, DATE, TIME and TOC, and any field
+  instruction that runs, fetches or links (DDE, INCLUDEPICTURE, LINK, and so on);
+- number formats that escape a character with a backslash, such as `\$`: a
+  backslash reads as a path separator to the check. `$#,##0` is accepted;
+- Typst packages (`#import "@…"`).
+
+Tool behavior changed in this round:
+
+- `wrapTool` now reports `success:false` for a tool result with `isError`. In
+  local-config mode pi's bash tool returns a non-zero exit as such a result, so
+  those calls now show as failed.
+- The bundled skill folders (`ofox-office-*`) are neither denied nor added as
+  readable roots for the generic file tools in local-config mode: they have no
+  rule of their own there. The model reads a bundled skill through `use_skill`.
+
+Tests:
+
+- The runner's 3 s timeout test (`run_engine_kills_what_the_engine_started_and_keeps_its_output`)
+  is fragile under heavy parallel load: a new stand-in executable can take longer
+  than the deadline to start for the first time on macOS. The document tests take
+  turns for that reason; a run of the whole workspace beside other heavy jobs can
+  still fail it.
+- The process-reaping case of `assistant-runtime/test/mcp.test.mjs` failed once
+  under load and passed on rerun; its cause is not established.
