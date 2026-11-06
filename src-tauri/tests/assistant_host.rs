@@ -3242,7 +3242,13 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         assert_eq!(end.data["status"], "completed");
         assert_eq!(
             tool_names(&gateway.requests()[0]),
-            ["use_skill", "find_skills", "install_skill", "save_skill"]
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "create_document"
+            ]
         );
         // The run says it could not search, although the switch is on.
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
@@ -3263,7 +3269,13 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let (run, _) = turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[1]),
-            ["use_skill", "find_skills", "install_skill", "save_skill"]
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "create_document"
+            ]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
@@ -3277,6 +3289,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "find_skills",
                 "install_skill",
                 "save_skill",
+                "create_document",
                 "web_search",
                 "web_fetch"
             ]
@@ -3357,6 +3370,7 @@ fn exa_search_is_offered_without_a_price_and_the_choice_is_kept_per_account() {
                 "find_skills",
                 "install_skill",
                 "save_skill",
+                "create_document",
                 "web_search",
                 "web_fetch"
             ]
