@@ -943,6 +943,29 @@ impl AssistantStore {
         private_subdir(&private_subdir(&self.root.join(sid), OUTPUTS_DIR)?, doc_id)
     }
 
+    /// Remove `<sid>/outputs/<doc_id>` with everything in it; a folder that
+    /// is already gone is fine. A link on the way is refused, and one at the
+    /// end is removed as a link, never followed.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn remove_outputs_dir(&self, sid: &str, doc_id: &str) -> Result<(), String> {
+        validate_id(sid)?;
+        validate_id(doc_id)?;
+        let outputs = self.root.join(sid).join(OUTPUTS_DIR);
+        if !real_dir(&self.root)? || !real_dir(&self.root.join(sid))? || !real_dir(&outputs)? {
+            return Ok(());
+        }
+        let dir = outputs.join(doc_id);
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                fs::remove_file(&dir).map_err(|_| UNAVAILABLE.into())
+            }
+            Ok(_) => fs::remove_dir_all(&dir).map_err(|_| UNAVAILABLE.into()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(UNAVAILABLE.into()),
+        }
+    }
+
     fn ensure_root(&self) -> Result<PathBuf, String> {
         private_subdir(
             &private_subdir(&self.config_dir, ASSISTANT_DIR)?,
@@ -3189,6 +3212,69 @@ mod tests {
             store.outputs_dir(&id(), &doc).unwrap_err(),
             "assistant_session_not_found"
         );
+    }
+
+    #[test]
+    fn a_document_folder_is_removed_with_what_is_in_it() {
+        let (_config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let (doc, other) = (id(), id());
+        let dir = store.outputs_dir(&sid, &doc).unwrap();
+        let kept = store.outputs_dir(&sid, &other).unwrap();
+        fs::create_dir_all(dir.join(".home/nested")).unwrap();
+        fs::write(dir.join(".home/nested/out.pdf"), b"%PDF").unwrap();
+
+        store.remove_outputs_dir(&sid, &doc).unwrap();
+        assert!(!dir.exists());
+        // Only that document's folder.
+        assert!(kept.is_dir());
+        // Already gone, or never made: nothing to do.
+        store.remove_outputs_dir(&sid, &doc).unwrap();
+        store.remove_outputs_dir(&id(), &doc).unwrap();
+        assert_eq!(
+            store.remove_outputs_dir(&sid, "../x").unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_document_folder_is_unlinked_not_followed() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let doc = id();
+        let outputs = store
+            .outputs_dir(&sid, &id())
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let elsewhere = config.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("keep.txt"), b"mine").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, outputs.join(&doc)).unwrap();
+
+        store.remove_outputs_dir(&sid, &doc).unwrap();
+        assert!(fs::symlink_metadata(outputs.join(&doc)).is_err());
+        assert_eq!(fs::read(elsewhere.join("keep.txt")).unwrap(), b"mine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_outputs_folder_is_refused_when_removing() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let doc = id();
+        let outputs = session_file(config.path(), &store, &sid).with_file_name("outputs");
+        let elsewhere = config.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join(&doc)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &outputs).unwrap();
+
+        assert_eq!(
+            store.remove_outputs_dir(&sid, &doc).unwrap_err(),
+            "assistant_invalid_storage_path"
+        );
+        assert!(elsewhere.join(&doc).is_dir());
     }
 
     #[cfg(unix)]

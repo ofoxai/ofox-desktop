@@ -44,6 +44,9 @@ pub(in crate::services::assistant) struct MediaRun {
     speech: AtomicUsize,
     /// Documents made so far (see `documents::create`).
     documents: AtomicUsize,
+    /// The ids of the `outputs/<id>` folders documents were made in; they
+    /// are removed when the run ends.
+    document_folders: Mutex<Vec<String>>,
     calls: Mutex<HashMap<String, CallRecord>>,
     /// Submitted videos, polled once the run ends: (reply, tool call,
     /// authority generation).
@@ -58,6 +61,7 @@ impl MediaRun {
             images: AtomicUsize::new(0),
             speech: AtomicUsize::new(0),
             documents: AtomicUsize::new(0),
+            document_folders: Mutex::new(vec![]),
             calls: Mutex::new(HashMap::new()),
             polls: Mutex::new(vec![]),
         }
@@ -105,6 +109,24 @@ impl MediaRun {
                 (made < limit).then_some(made + 1)
             })
             .is_ok()
+    }
+
+    /// Remember the folder `outputs/<doc_id>` before it is made, so that the
+    /// end of the run removes it however the document went.
+    pub fn track_document_folder(&self, doc_id: &str) {
+        self.document_folders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(doc_id.to_owned());
+    }
+
+    pub fn take_document_folders(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .document_folders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Give back a document that was not made.

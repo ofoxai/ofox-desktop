@@ -13,7 +13,7 @@ description: Read before writing a PDF with create_document. How to write the Ty
 - Write the body only. Never write `#set page`, `#set text`, `#import`, `#include` or package names (`@preview/…`); do not pick fonts or redefine headings. The one allowed `#set` is the paragraph indent below.
 - Do not use images in this version: the body cannot reference your files. Use text and tables.
 - All text in the user's language; no placeholders (`TODO`, `xxxx`).
-- A compile error returns the message and quotes the offending source line (line numbers also count the prelude). Fix that spot and resend the whole body (at most 2 retries).
+- A compile error returns the message with its line and column in the body you wrote (the prelude's lines are not counted) and quotes that source line. Fix that spot and resend the whole body (at most 2 retries).
 
 ## Structure
 
