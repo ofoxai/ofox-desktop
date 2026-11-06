@@ -158,7 +158,7 @@
                               │ hostTool
                               ▼
 宿主 dispatch_document_tool
-  1. 产出目录 <sid>/workspace/outputs/<docId>/（0700）
+  1. 产出目录 <sid>/outputs/<docId>/（0700；不放进运行时自己推导的 workspace/，宿主用 store 的 private_subdir 创建）
   2. 写入 content（batch.json 或 main.typ）
   3. spawn 引擎：清洗后的环境变量，HOME 和 TMPDIR 指向 outputs/<docId>/.home（officecli
      会写 ~/.officecli/config.json，batch 输出超过 8 KB 会落临时文件）；
