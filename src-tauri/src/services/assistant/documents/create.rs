@@ -197,8 +197,60 @@ impl Document {
     }
 }
 
-/// A batch officecli may run: commands only, which read nothing outside the
-/// document's folder, fetch nothing and start no browser. A diagram is drawn
+/// The commands a batch may hold: they change the document and nothing else.
+/// The host validates and views the file itself.
+const COMMANDS: &[&str] = &["add", "set", "remove", "move", "swap"];
+/// The fields a command may carry (`op` is officecli's alias of `command`,
+/// `path2` the second element of a swap).
+const FIELDS: &[&str] = &[
+    "command", "op", "parent", "path", "path2", "type", "props", "after", "before", "index",
+    "from", "to", "selector",
+];
+/// The fields that name an element of the document (`/slide[1]/shape[2]`),
+/// never a file.
+const ELEMENT_FIELDS: &[&str] = &[
+    "parent", "path", "path2", "after", "before", "from", "to", "selector",
+];
+/// First folders of an absolute path that is a file's, not an element's.
+const SYSTEM_FOLDERS: &[&str] = &[
+    "applications",
+    "bin",
+    "cores",
+    "dev",
+    "etc",
+    "home",
+    "library",
+    "mnt",
+    "network",
+    "opt",
+    "private",
+    "proc",
+    "root",
+    "sbin",
+    "system",
+    "tmp",
+    "users",
+    "usr",
+    "var",
+    "volumes",
+];
+/// Address schemes without `//` that a document could act on; any `ms-…`
+/// one too.
+const SCHEMES: &[&str] = &[
+    "file",
+    "mailto",
+    "tel",
+    "javascript",
+    "vbscript",
+    "smb",
+    "afp",
+    "nfs",
+    "onenote",
+];
+
+/// A batch officecli may run: commands that change the document, whose
+/// values read nothing outside the document's folder and fetch nothing (a
+/// picture or any other file comes as a `data:` URI). A diagram is drawn
 /// with shapes: officecli would otherwise render it in a browser it starts,
 /// with mermaid.js from the network.
 fn check_batch(commands: &mut [Value]) -> Result<(), String> {
@@ -216,80 +268,123 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
     }
     for (index, item) in commands.iter_mut().enumerate() {
         let problem = |why: &str| refuse(FAILED, format!("item {index}: {why}"));
-        let Some(command) = item.get("command").and_then(Value::as_str) else {
+        let Some(fields) = item.as_object_mut() else {
             return Err(problem(
                 "each command is an object with a \"command\" field",
             ));
         };
-        if command.eq_ignore_ascii_case("view") {
-            return Err(problem(
-                "view is not available in a batch; the host checks the file itself",
-            ));
-        }
-        let adds = command.eq_ignore_ascii_case("add");
-        if let Some(key) = reaching_key(&item["props"]) {
+        let verb = match (
+            fields.get("command").and_then(Value::as_str),
+            fields.get("op").and_then(Value::as_str),
+        ) {
+            (Some(verb), None) | (None, Some(verb)) => verb.to_ascii_lowercase(),
+            (Some(verb), Some(op)) if verb.eq_ignore_ascii_case(op) => verb.to_ascii_lowercase(),
+            _ => {
+                return Err(problem(
+                    "each command is an object with a \"command\" field",
+                ))
+            }
+        };
+        if !COMMANDS.contains(&verb.as_str()) {
             return Err(problem(&format!(
-                "\"{key}\" must be a data: URI; files and web addresses cannot be used"
+                "\"{verb}\" is not available; a batch uses {}",
+                COMMANDS.join(", ")
             )));
         }
-        let diagram = item["type"]
-            .as_str()
+        if let Some(field) = fields.keys().find(|key| !FIELDS.contains(&key.as_str())) {
+            return Err(problem(&format!(
+                "unknown field \"{field}\"; a command takes {}",
+                FIELDS.join(", ")
+            )));
+        }
+        for (field, value) in fields.iter() {
+            let element = ELEMENT_FIELDS.contains(&field.as_str());
+            if let Some(key) = reaching(field.clone(), value, element) {
+                return Err(problem(&if element {
+                    format!("\"{key}\" must name an element of the document, such as /slide[1]")
+                } else {
+                    format!("\"{key}\" names a file or an address; files can only be data: URIs")
+                }));
+            }
+        }
+        let diagram = fields
+            .get("type")
+            .and_then(Value::as_str)
             .is_some_and(|kind| kind.eq_ignore_ascii_case("diagram"));
-        if adds && diagram {
-            if let Some(item) = item.as_object_mut() {
-                let props = item.entry("props").or_insert_with(|| json!({}));
-                if let Some(props) = props.as_object_mut() {
-                    props.insert("render".into(), json!("native"));
-                }
+        if verb == "add" && diagram {
+            let props = fields.entry("props").or_insert_with(|| json!({}));
+            if let Some(props) = props.as_object_mut() {
+                props.insert("render".into(), json!("native"));
             }
         }
     }
     Ok(())
 }
 
-/// The first property under `value` that names a file or a web address
-/// officecli would read: a picture's `src`, a fill `image`, table `data`…
-fn reaching_key(value: &Value) -> Option<String> {
+/// The first string under `value` (named `key`) that leaves the document:
+/// as an element's name when `element`, else as any other value.
+fn reaching(key: String, value: &Value, element: bool) -> Option<String> {
     match value {
-        Value::Object(map) => map.iter().find_map(|(key, value)| match value {
-            Value::String(text) if source_key(key) && reaches_out(text) => Some(key.clone()),
-            _ => reaching_key(value),
-        }),
-        Value::Array(items) => items.iter().find_map(reaching_key),
+        Value::String(text) if element && names_a_file(text) => Some(key),
+        Value::String(text) if !element && leaves_the_document(text) => Some(key),
+        Value::Object(map) => map
+            .iter()
+            .find_map(|(name, value)| reaching(format!("{key}.{name}"), value, element)),
+        Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(at, value)| reaching(format!("{key}[{at}]"), value, element)),
         _ => None,
     }
 }
 
-/// A property officecli resolves as a file source (its `FileSource`: a
-/// path, a URL or a data URI).
-fn source_key(key: &str) -> bool {
-    let key = key.to_ascii_lowercase();
-    matches!(
-        key.as_str(),
-        "data" | "source" | "preview" | "poster" | "fallback"
-    ) || ["src", "path", "image", "file"]
-        .iter()
-        .any(|end| key.ends_with(end))
-}
-
-/// A value that leaves the document's folder: an absolute, home or parent
-/// path, a share, or a web or file address. A data URI stays inside.
-fn reaches_out(text: &str) -> bool {
+/// A value officecli could read as a file or fetch: an absolute, home or
+/// parent path, a share, a drive, or an address. A `data:` URI stays
+/// inside; so does text that only mentions a path or an address after its
+/// first word.
+fn leaves_the_document(text: &str) -> bool {
     let text = text.trim();
     let lower = text.to_ascii_lowercase();
     if lower.starts_with("data:") {
         return false;
     }
     let bytes = text.as_bytes();
-    let drive = bytes.len() > 2
+    // `C:\x`, `C:x` and `C:`, not "Q: why?".
+    let drive = bytes.len() >= 2
         && bytes[0].is_ascii_alphabetic()
         && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\');
+        && bytes.get(2).is_none_or(|b| !b.is_ascii_whitespace());
+    // `https://…`, `mailto:…`; a scheme is a letter, then letters, digits,
+    // `+`, `.` or `-`.
+    let address = lower.split_once(':').is_some_and(|(scheme, rest)| {
+        let scheme_like = scheme.len() >= 2
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
+        scheme_like
+            && (rest.starts_with("//") || SCHEMES.contains(&scheme) || scheme.starts_with("ms-"))
+    });
     drive
-        || lower.contains("://")
-        || lower.starts_with("file:")
+        || address
         || text.starts_with(['/', '\\', '~'])
-        || text.split(['/', '\\']).any(|part| part == "..")
+        || text.split(['/', '\\']).any(|part| part.trim() == "..")
+}
+
+/// An element's name that is a file's instead: a system folder, a share, a
+/// backslash, or anything [`leaves_the_document`] after its leading `/`.
+fn names_a_file(text: &str) -> bool {
+    let text = text.trim();
+    let first = text
+        .trim_start_matches('/')
+        .split(['/', '['])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    text.starts_with("//")
+        || text.contains('\\')
+        || (text.starts_with('/') && SYSTEM_FOLDERS.contains(&first.as_str()))
+        || leaves_the_document(text.strip_prefix('/').unwrap_or(text))
 }
 
 /// Whether a Typst body imports or includes a package, which would be
@@ -559,19 +654,52 @@ struct Work<'a> {
     home: &'a Path,
     /// How the model knows the engine.
     name: &'static str,
+    /// `sandbox-exec`, to run the engine under [`OFFICE_SANDBOX`].
+    sandbox: Option<&'a Path>,
+}
+
+/// What officecli may do on macOS: no network, and of the user's folders
+/// (`/Users`, `/Volumes`) only the document's own and the engine's. File
+/// names and sizes stay readable, so that paths resolve.
+const OFFICE_SANDBOX: &str = r#"(version 1)
+(allow default)
+(deny network*)
+(deny file-read-data file-write* (subpath "/Users") (subpath "/Volumes"))
+(allow file-read-data file-write* (subpath (param "DOC")))
+(allow file-read-data (subpath (param "ENGINE")))"#;
+
+/// `path` as the sandbox matches it: with its links resolved.
+fn real(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 impl Work<'_> {
     async fn run(&self, args: &[&str]) -> Result<EngineOutput, String> {
-        let output = run_engine(self.exe, args, self.dir, self.home, ENGINE_TIMEOUT)
-            .await
-            .map_err(|error| {
-                log::warn!("[Assistant] {} could not run: {error}", self.name);
-                refuse(
-                    FAILED,
-                    format!("{} could not run on this computer", self.name),
-                )
-            })?;
+        let output = match self.sandbox {
+            Some(sandbox) => {
+                let doc = format!("DOC={}", real(self.dir));
+                let real_exe = PathBuf::from(real(self.exe));
+                let engine = format!("ENGINE={}", real(real_exe.parent().unwrap_or(&real_exe)));
+                let exe = self.exe.to_string_lossy();
+                let wrapped = [
+                    &["-D", &doc, "-D", &engine, "-p", OFFICE_SANDBOX, &exe][..],
+                    args,
+                ]
+                .concat();
+                run_engine(sandbox, &wrapped, self.dir, self.home, ENGINE_TIMEOUT).await
+            }
+            None => run_engine(self.exe, args, self.dir, self.home, ENGINE_TIMEOUT).await,
+        };
+        let output = output.map_err(|error| {
+            log::warn!("[Assistant] {} could not run: {error}", self.name);
+            refuse(
+                FAILED,
+                format!("{} could not run on this computer", self.name),
+            )
+        })?;
         if output.timed_out {
             return Err(refuse(
                 FAILED,
@@ -1086,6 +1214,33 @@ impl AssistantHost {
         made
     }
 
+    /// The `sandbox-exec` officecli runs under: tried once, with
+    /// `--version`. Without it (not macOS, or the probe failed) the batch
+    /// checks alone keep officecli to the document.
+    async fn office_sandbox(&self, work: &Work<'_>) -> Option<PathBuf> {
+        self.office_sandbox
+            .get_or_init(|| async {
+                let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
+                let Some(sandbox) = sandbox else {
+                    log::warn!("[Assistant] sandbox-exec is unavailable; officecli runs without it");
+                    return None;
+                };
+                let probe = Work {
+                    sandbox: Some(&sandbox),
+                    ..*work
+                };
+                match probe.run(&["--version"]).await {
+                    Ok(output) if output.status == Some(0) => Some(sandbox),
+                    _ => {
+                        log::warn!("[Assistant] officecli does not run under sandbox-exec; it runs without it");
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+
     async fn make_document(
         &self,
         run: &Arc<RunControl>,
@@ -1105,12 +1260,15 @@ impl AssistantHost {
         let format = document.format;
         let made = match (format.engine(), engine.as_deref(), &document.content) {
             (Engine::Office, Some(exe), _) => {
-                let work = Work {
+                let mut work = Work {
                     exe,
                     dir: &dir,
                     home: &home,
                     name: "officecli",
+                    sandbox: None,
                 };
+                let sandbox = self.office_sandbox(&work).await;
+                work.sandbox = sandbox.as_deref();
                 make_office(&work, format).await?
             }
             (Engine::Typst, Some(exe), Content::Text(body)) => {
@@ -1119,6 +1277,7 @@ impl AssistantHost {
                     dir: &dir,
                     home: &home,
                     name: "Typst",
+                    sandbox: None,
                 };
                 make_pdf(&work, body).await?
             }
@@ -1211,10 +1370,14 @@ mod tests {
     struct Env {
         root: PathBuf,
         runtime: PathBuf,
+        sandbox: Option<PathBuf>,
         events: Mutex<Vec<Event>>,
     }
 
     impl Environment for Env {
+        fn sandbox_exec(&self) -> Option<PathBuf> {
+            self.sandbox.clone()
+        }
         fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
             Box::pin(async { Ok(identity()) })
         }
@@ -1267,17 +1430,34 @@ mod tests {
         sid: String,
     }
 
+    /// A stand-in engine with the shell body `script`, or `link:<path>` to
+    /// a real one.
     fn engine(dir: &Path, name: &str, script: &str) -> String {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("engines").join(name).join(name);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if let Some(target) = script.strip_prefix("link:") {
+            std::os::unix::fs::symlink(target, &path).unwrap();
+        } else {
+            std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
         format!("engines/{name}/{name}")
     }
 
     fn fixture(officecli: Option<&str>, typst: Option<&str>) -> Fixture {
+        fixture_in(officecli, typst, |_| None)
+    }
+
+    /// [`fixture`] with the `sandbox-exec` that `sandbox` gives for the
+    /// fixture's folder.
+    fn fixture_in(
+        officecli: Option<&str>,
+        typst: Option<&str>,
+        sandbox: impl FnOnce(&Path) -> Option<PathBuf>,
+    ) -> Fixture {
         let root = tempfile::tempdir().unwrap();
+        let sandbox = sandbox(root.path());
         let runtime = root.path().join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         let mut engines = serde_json::Map::new();
@@ -1294,6 +1474,7 @@ mod tests {
         let env = Arc::new(Env {
             root: root.path().join("config"),
             runtime,
+            sandbox,
             events: Mutex::default(),
         });
         let host = AssistantHost::new(env.clone());
@@ -1421,6 +1602,7 @@ esac"#
     }
 
     const TYPST_OK: &str = r#"for a; do last=$a; done
+echo "$*" >> typst-args
 [ -w "$TYPST_PACKAGE_PATH" ] && echo writable > packages-writable
 case " $* " in
 *" --format png "*) printf '\211PNG\r\n\032\n' > preview-1.png ;;
@@ -1641,8 +1823,13 @@ esac"#;
         let preview = PathBuf::from(result["previewPath"].as_str().unwrap());
         assert_eq!(preview.file_name().unwrap(), "preview-1.png");
         assert!(preview.is_file());
-        // Packages cannot be fetched into the engine's folder.
+        // Packages cannot be fetched into the engine's folder, and the body
+        // reads nothing outside the document's folder.
         assert!(!file.with_file_name("packages-writable").exists());
+        let args = std::fs::read_to_string(file.with_file_name("typst-args")).unwrap();
+        assert!(args
+            .lines()
+            .all(|line| line.starts_with("compile --root . --diagnostic-format short")));
         // The card counts the page dictionaries, not the page tree.
         let record = f.record();
         let generation = record.messages[0].media_for(Some("call-1")).unwrap();
@@ -1863,22 +2050,11 @@ esac"#,
         assert!(f.outputs().is_empty());
     }
 
-    #[tokio::test]
-    async fn batch_items_cannot_reach_outside_the_document() {
-        let f = fixture(Some("echo ran > ran; exit 9"), None);
-        for src in [
-            "/Users/me/.ssh/id_rsa",
-            "~/Pictures/me.png",
-            "../../../secret.png",
-            "C:\\Users\\me\\photo.jpg",
-            "\\\\server\\share\\x.png",
-            "https://example.com/x.png",
-            "file:///etc/passwd",
-        ] {
-            let content = json!([
-                {"command": "add", "parent": "/", "type": "slide"},
-                {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": src}},
-            ]);
+    /// Each of `items` alone as a pptx batch: its refusal.
+    async fn refused(f: &Fixture, items: &[Value]) -> Vec<String> {
+        let mut errors = vec![];
+        for item in items {
+            let content = json!([{"command": "add", "parent": "/", "type": "slide"}, item]);
             let error = f
                 .call(
                     &id(),
@@ -1886,28 +2062,48 @@ esac"#,
                 )
                 .await
                 .unwrap_err();
-            assert_eq!(code(&error), FAILED, "{src}");
-            assert!(error.contains("item 1"), "{error}");
-        }
-        for item in [
-            json!({"command": "add", "parent": "/slide[1]", "type": "ole", "props": {"path": "/etc/hosts"}}),
-            json!({"command": "set", "path": "/slide[1]/shape[1]", "props": {"image": "/tmp/x.png"}}),
-            json!({"command": "view", "mode": "screenshot"}),
-        ] {
-            let error = f
-                .call(
-                    &id(),
-                    json!({"name": "a", "format": "pptx", "content": [item]}),
-                )
-                .await
-                .unwrap_err();
             assert_eq!(code(&error), FAILED, "{item}");
+            assert!(error.contains("item 1:"), "{error}");
+            errors.push(error);
         }
-        assert!(f.outputs().iter().all(|dir| !dir.join("ran").exists()));
+        errors
     }
 
     #[tokio::test]
-    async fn data_uris_links_and_native_diagrams_are_fine() {
+    async fn batches_hold_only_commands_that_change_the_document() {
+        let f = fixture(Some("echo ran > ran; exit 9"), None);
+        let errors = refused(
+            &f,
+            &[
+                json!({"command": "raw-set", "part": "/document", "xpath": "//w:body", "action": "append", "xml": "<x/>"}),
+                json!({"command": "add-part", "parent": "/"}),
+                json!({"command": "raw", "part": "/document"}),
+                json!({"command": "dump", "path": "/"}),
+                json!({"command": "view", "mode": "screenshot"}),
+                json!({"command": "validate"}),
+                json!({"command": "get", "path": "/"}),
+                json!({"command": "query", "selector": "shape"}),
+                json!({"command": "import", "parent": "/Sheet1", "text": "a,b"}),
+                json!({"op": "VIEW", "mode": "html"}),
+                json!({"command": "add", "op": "remove", "parent": "/"}),
+            ],
+        )
+        .await;
+        assert!(
+            errors[0].contains("\"raw-set\" is not available"),
+            "{}",
+            errors[0]
+        );
+        let errors = refused(
+            &f,
+            &[
+                json!({"command": "add", "parent": "/", "type": "slide", "xml": "<p:sld/>"}),
+                json!({"command": "set", "path": "/slide[1]", "text": "x"}),
+            ],
+        )
+        .await;
+        assert!(errors[0].contains("unknown field \"xml\""), "{}", errors[0]);
+        // officecli's alias and each command's own fields are fine.
         let f = fixture(
             Some(&officecli(
                 r#"{"results":[{"index":0,"success":true}]}"#,
@@ -1917,9 +2113,81 @@ esac"#,
             None,
         );
         let content = json!([
-            {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "link": "https://example.com"}},
+            {"op": "add", "parent": "/", "type": "slide", "index": 0},
+            {"command": "move", "path": "/slide[1]/shape[1]", "to": "/slide[2]", "after": "/slide[2]/shape[1]"},
+            {"command": "swap", "path": "/slide[1]", "path2": "/slide[2]"},
+            {"command": "remove", "path": "/slide[3]"},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "from": "/slide[1]/shape[2]", "before": "p[@paraId=1A2B3C4D]"},
+            {"command": "set", "path": "/Sheet1/A1", "props": {"value": "1"}},
+        ]);
+        f.call(
+            "call-1",
+            json!({"name": "a", "format": "pptx", "content": content}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn batch_items_cannot_reach_outside_the_document() {
+        let f = fixture(Some("echo ran > ran; exit 9"), None);
+        let mut items: Vec<Value> = [
+            "/Users/me/.ssh/id_rsa",
+            "~/Pictures/me.png",
+            "~",
+            "../../../secret.png",
+            "pictures/../../secret.png",
+            "C:\\Users\\me\\photo.jpg",
+            "C:photo.jpg",
+            "\\\\server\\share\\x.png",
+            "https://example.com/x.png",
+            "HTTP://example.com/x.png",
+            "ftp://example.com/x.png",
+            "file:///etc/passwd",
+            "file:etc/passwd",
+            "mailto:someone@example.com",
+            "ms-msdt:/id PCWDiagnostic",
+        ]
+        .iter()
+        .map(|src| json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": src}}))
+        .collect();
+        items.extend([
+            // Any property, at any depth, and any field.
+            json!({"command": "add", "parent": "/slide[1]", "type": "ole", "props": {"path": "/etc/hosts"}}),
+            json!({"command": "set", "path": "/slide[1]/shape[1]", "props": {"fill": {"image": {"src": "/tmp/x.png"}}}}),
+            json!({"command": "set", "path": "/slide[1]/shape[1]", "props": {"styles": ["plain", "/Volumes/USB/x.png"]}}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"link": "https://example.com"}}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "from": "/Users/x"}),
+            json!({"command": "move", "path": "/slide[1]/shape[1]", "to": "../../x"}),
+            json!({"command": "add", "parent": "//server/share", "type": "shape"}),
+            json!({"command": "add", "parent": "C:\\x", "type": "shape"}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "file:///etc/hosts"}),
+        ]);
+        let errors = refused(&f, &items).await;
+        assert!(errors[0].contains("\"props.src\""), "{}", errors[0]);
+        let nested = &errors[errors.len() - 8];
+        assert!(nested.contains("\"props.fill.image.src\""), "{nested}");
+        assert!(errors[errors.len() - 7].contains("\"props.styles[1]\""));
+        let from = &errors[errors.len() - 5];
+        assert!(from.contains("\"from\" must name an element"), "{from}");
+        assert!(f.outputs().iter().all(|dir| !dir.join("ran").exists()));
+    }
+
+    #[tokio::test]
+    async fn data_uris_text_and_native_diagrams_are_fine() {
+        let f = fixture(
+            Some(&officecli(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                "{}",
+                "{}",
+            )),
+            None,
+        );
+        let content = json!([
+            {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "alt": "Logo"}},
             {"command": "add", "parent": "/slide[1]", "type": "diagram", "props": {"text": "graph TD; A-->B"}},
-            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "/usr/bin is a folder"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "Folders such as /usr/bin; see https://ofox.ai. Q: why? A: because", "title": "MS-DOS history"}},
+            {"command": "set", "path": "/Sheet1/B2", "props": {"formula": "=SUM(A1:A3)", "numberformat": "hh:mm", "merge": "A1:C1", "value": "12:30"}},
         ]);
         let result = f
             .call(
@@ -1935,6 +2203,115 @@ esac"#,
         // A diagram is drawn with shapes, never by a browser.
         assert_eq!(seen[1]["props"]["render"], "native");
         assert_eq!(seen[0], content[0]);
+        assert_eq!(seen[3], content[3]);
+    }
+
+    /// A stand-in `sandbox-exec` that logs its arguments, and fails its
+    /// probe when `works` is false; otherwise it runs the engine.
+    fn stub_sandbox(dir: &Path, works: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("sandbox-exec");
+        let log = dir.join("sandbox.log").display().to_string();
+        let probe = if works {
+            ""
+        } else {
+            "case \"$*\" in *--version*) exit 1 ;; esac"
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$*\" | tr '\\n' ' ' >> '{log}'\necho >> '{log}'\n{probe}\nwhile [ \"$1\" = -D ]; do shift 2; done\n[ \"$1\" = -p ] && shift 2\nexec \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    fn sandbox_log(f: &Fixture) -> Vec<String> {
+        std::fs::read_to_string(f.root.path().join("sandbox.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn officecli_runs_in_the_sandbox_once_its_probe_passes() {
+        let script = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            "{}",
+            r#"{"slides":1}"#,
+        );
+        let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, true)));
+        let first = f
+            .call(
+                "call-1",
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        f.call(
+            "call-2",
+            json!({"name": "b", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap();
+        let log = sandbox_log(&f);
+        // One probe, then every officecli run of both documents.
+        assert_eq!(
+            log.iter()
+                .filter(|line| line.ends_with("--version"))
+                .count(),
+            1
+        );
+        assert!(log
+            .iter()
+            .any(|line| line.contains(" batch out.pptx --input batch.json --json")));
+        assert_eq!(
+            log.iter()
+                .filter(|line| line.contains(" create out.pptx"))
+                .count(),
+            2
+        );
+        assert!(log.iter().all(|line| line.contains("(deny network*)")));
+        let dir = PathBuf::from(first["filePath"].as_str().unwrap())
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        assert!(log
+            .iter()
+            .any(|line| line.contains(&format!("DOC={}", dir.display()))));
+        assert_eq!(first["file"]["slides"], 1);
+    }
+
+    #[tokio::test]
+    async fn officecli_runs_without_the_sandbox_when_it_does_not_work() {
+        let script = officecli(r#"{"results":[{"index":0,"success":true}]}"#, "{}", "{}");
+        let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, false)));
+        for call in ["call-1", "call-2"] {
+            f.call(
+                call,
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        }
+        // Probed once; the documents were made without it.
+        let log = sandbox_log(&f);
+        assert_eq!(log.len(), 1, "{log:?}");
+        assert!(log[0].ends_with("--version"));
+
+        // No sandbox-exec at all: the same.
+        let f = fixture_in(Some(&script), None, |dir| Some(dir.join("missing")));
+        f.call(
+            "call-1",
+            json!({"name": "a", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap();
+        assert!(sandbox_log(&f).is_empty());
     }
 
     #[tokio::test]
@@ -2040,8 +2417,12 @@ exit 1"#
         let (Some(officecli), Some(typst)) = (engines.officecli, engines.typst) else {
             panic!("run `pnpm assistant:prepare` first");
         };
-        let link = |target: &Path| format!("exec '{}' \"$@\"", target.display());
-        let f = fixture(Some(&link(&officecli)), Some(&link(&typst)));
+        let link = |target: &Path| format!("link:{}", target.display());
+        // On macOS officecli runs in the real sandbox: its own folder is
+        // readable there, the user's other files are not.
+        let sandbox =
+            |_: &Path| cfg!(target_os = "macos").then(|| PathBuf::from("/usr/bin/sandbox-exec"));
+        let f = fixture_in(Some(&link(&officecli)), Some(&link(&typst)), sandbox);
         let deck = json!([
             {"command": "add", "parent": "/", "type": "slide", "props": {"title": "Quarterly plan"}},
             {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "Grow\nHire", "x": "2cm", "y": "5cm", "wobble": "1"}},
@@ -2091,6 +2472,26 @@ exit 1"#
             .unwrap_err();
         eprintln!("typst error: {error}");
         assert!(error.contains("line 2, column"), "{error}");
+        // The body reads nothing outside the document's folder.
+        for body in [
+            "#image(\"../x.png\")",
+            "#read(\"/etc/hosts\")",
+            "#read(\"../../../../../../../../etc/hosts\")",
+        ] {
+            let error = f
+                .call(
+                    &id(),
+                    json!({"name": "r", "format": "pdf", "content": body}),
+                )
+                .await
+                .unwrap_err();
+            eprintln!("typst outside: {error}");
+            assert_eq!(code(&error), FAILED);
+            assert!(
+                error.contains("escape the project root") || error.contains("file not found"),
+                "{error}"
+            );
+        }
 
         // Ordinary paragraphs of a Latin docx all lack a first-line indent;
         // the built-in heading style officecli adds is no issue.
@@ -2112,8 +2513,14 @@ exit 1"#
             docx["issues"],
             json!([{"severity": "warning", "message": "Body paragraph missing first-line indent (3 places)"}])
         );
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                f.host.office_sandbox.get(),
+                Some(&Some(PathBuf::from("/usr/bin/sandbox-exec")))
+            );
+        }
         // A reply makes three documents: another run for the rest.
-        let f = fixture(Some(&link(&officecli)), Some(&link(&typst)));
+        let f = fixture_in(Some(&link(&officecli)), Some(&link(&typst)), sandbox);
         let error = f
             .call(
                 "bad-deck",
