@@ -3578,3 +3578,109 @@ test("models without tools receive neither use_skill nor an instruction to call 
     /use_skill|Available skills/,
   );
 });
+
+test("system prompt tells the model to produce files with create_document", async (t) => {
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return stream("done");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md", "pdf"] },
+  });
+  assert.equal(result.status, "completed");
+  const [body] = requests;
+  const tool = body.tools.find(
+    (entry) => entry.function.name === "create_document",
+  );
+  assert.ok(tool);
+  const formats = JSON.stringify(tool.function.parameters.properties.format);
+  assert.match(formats, /"md"/);
+  assert.match(formats, /"pdf"/);
+  assert.doesNotMatch(formats, /pptx/);
+  assert.match(
+    body.messages[0].content,
+    /produce the file with create_document/,
+  );
+  assert.match(body.messages[0].content, /never say you cannot attach/);
+});
+
+test("no create_document without the documents param", async (t) => {
+  const requests = [];
+  for (const extra of [
+    {},
+    { documents: { formats: ["md"] }, model: { ...model, tools: false } },
+  ]) {
+    const runtime = new AssistantRuntime({
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return stream("done");
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({ ...(await sandbox(t)), ...extra });
+    assert.equal(result.status, "completed");
+  }
+  for (const body of requests) {
+    assert.equal(body.tools, undefined);
+    assert.doesNotMatch(
+      body.messages[0].content,
+      /create_document|cannot attach/,
+    );
+  }
+});
+
+test("only a vision model sees the document's preview after create_document", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ofox-preview-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const previewPath = path.join(directory, "preview-1.png");
+  await writeFile(previewPath, Buffer.from(onePixelPng, "base64"));
+  const args = { name: "notes.md", format: "md", content: "# Notes" };
+  for (const supportsImages of [true, false]) {
+    const calls = [];
+    const requests = [];
+    const runtime = new AssistantRuntime({
+      hostCall: async (call) => {
+        calls.push(call);
+        return {
+          status: "completed",
+          file: {
+            id: "att-notes",
+            name: "notes.md",
+            mimeType: "text/markdown",
+            bytes: 7,
+          },
+          issues: [],
+          filePath: path.join(directory, "notes.md"),
+          previewPath,
+        };
+      },
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return requests.length === 1
+          ? toolStream("create_document", args)
+          : stream("done");
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({
+      ...(await sandbox(t)),
+      model: { ...model, supportsImages },
+      documents: { formats: ["md"] },
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(
+      calls.map((call) => [call.name, call.args]),
+      [["create_document", args]],
+    );
+    const followUp = JSON.stringify(requests[1].messages);
+    assert.match(followUp, /attachment att-notes/);
+    assert.doesNotMatch(followUp, new RegExp(directory));
+    if (supportsImages) assert.match(followUp, /image\/jpeg;base64/);
+    else assert.doesNotMatch(followUp, /image\/jpeg/);
+  }
+});

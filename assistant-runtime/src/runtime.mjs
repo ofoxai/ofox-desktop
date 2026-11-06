@@ -6,6 +6,7 @@ import { LocalTask } from "./local-task.mjs";
 import { localTools } from "./local-tools.mjs";
 import { skillTools, skillPrompt } from "./skills.mjs";
 import { mediaTools } from "./media-tools.mjs";
+import { documentTools } from "./document-tools.mjs";
 import {
   AttachmentStore,
   MAX_MESSAGE_IMAGES,
@@ -1259,7 +1260,8 @@ export class AssistantRuntime {
 
   // Model tools for this run, built with wrapTool so they share the call
   // budget and the unknown-outcome gate. Attachments are readable only when
-  // the conversation has some; the web only when the run enables web search
+  // the conversation has some; documents only in the formats the host can
+  // make; the web only when the run enables web search
   // (its server starts on the first call and stops with the run). A model
   // the catalog says takes no tools gets none.
   tools(context, model) {
@@ -1275,6 +1277,12 @@ export class AssistantRuntime {
       tools.push(...skillTools(this, context));
     if (context.params.localConfig) tools.push(...localTools(this, context));
     if (context.params.media) tools.push(...mediaTools(this, context));
+    if (context.params.documents)
+      tools.push(
+        ...documentTools(this, context, {
+          vision: model.input.includes("image"),
+        }),
+      );
     if (context.params.webSearch === true) {
       context.search = new SearchServer({
         script: this.searchServer,
