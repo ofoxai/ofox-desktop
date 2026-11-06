@@ -7,6 +7,7 @@ mod catalog_refresh;
 pub mod local;
 use super::{
     catalog,
+    documents::engines::{engines_at, Engines},
     drops::DropSlot,
     process,
     projection::{
@@ -24,7 +25,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -342,6 +343,9 @@ pub struct AssistantHost {
     background: Arc<AtomicU64>,
     /// When shutdown aborts what is still at work, once it began.
     shutdown_deadline: Mutex<Option<tokio::time::Instant>>,
+    /// The bundled document engines; found once, as they never change while
+    /// the app runs.
+    engines: OnceLock<Engines>,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -753,6 +757,7 @@ impl AssistantHost {
             local_approvals: super::tools::approval::Broker::default(),
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
+            engines: OnceLock::new(),
         })
     }
 
@@ -940,6 +945,18 @@ impl AssistantHost {
 
     pub(super) fn runtime(&self) -> Result<Runtime, String> {
         runtime_at(&self.env.runtime_dir()?)
+    }
+
+    /// Where the bundled document engines are. Without a runtime folder
+    /// there are none, and that is not remembered.
+    pub(super) fn engines(&self) -> Engines {
+        if let Some(engines) = self.engines.get() {
+            return engines.clone();
+        }
+        match self.env.runtime_dir() {
+            Ok(base) => self.engines.get_or_init(|| engines_at(&base)).clone(),
+            Err(_) => Engines::default(),
+        }
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
@@ -6628,6 +6645,31 @@ while read line; do :; done"#,
             host.create_session(create).await.unwrap_err(),
             MODEL_UNAVAILABLE
         );
+    }
+    #[tokio::test]
+    async fn bootstrap_reports_document_formats() {
+        let (_config, host) = fixture();
+        let boot = host.bootstrap().await.unwrap();
+        // No runtime folder: only the formats that need no engine.
+        assert_eq!(
+            boot["runtime"]["documents"]["formats"],
+            json!(["md", "txt", "csv", "html", "json"])
+        );
+
+        let (config, env, host) = fixture_with_env();
+        let base = config.path().join("runtime-with-engines");
+        std::fs::create_dir_all(base.join("engines/typst")).unwrap();
+        std::fs::write(base.join("engines/typst/typst"), "").unwrap();
+        std::fs::write(
+            base.join("manifest.json"),
+            json!({"engines": {"typst": {"path": "engines/typst/typst"}}}).to_string(),
+        )
+        .unwrap();
+        *env.runtime.lock().unwrap() = Some(base);
+        let boot = host.bootstrap().await.unwrap();
+        let formats = boot["runtime"]["documents"]["formats"].as_array().unwrap();
+        assert!(formats.contains(&json!("pdf")));
+        assert!(!formats.contains(&json!("docx")));
     }
     fn audio_target(host: &AssistantHost, sid: &str) -> DeleteRequest {
         DeleteRequest {
