@@ -206,47 +206,97 @@ const FIELDS: &[&str] = &[
     "command", "op", "parent", "path", "path2", "type", "props", "after", "before", "index",
     "from", "to", "selector",
 ];
-/// The fields that name an element of the document (`/slide[1]/shape[2]`),
-/// never a file.
+/// The fields that name an element of the document, never a file.
 const ELEMENT_FIELDS: &[&str] = &[
     "parent", "path", "path2", "after", "before", "from", "to", "selector",
 ];
-/// First folders of an absolute path that is a file's, not an element's.
-const SYSTEM_FOLDERS: &[&str] = &[
-    "applications",
-    "bin",
-    "cores",
-    "dev",
-    "etc",
-    "home",
-    "library",
-    "mnt",
-    "network",
-    "opt",
-    "private",
-    "proc",
-    "root",
-    "sbin",
-    "system",
-    "tmp",
-    "users",
-    "usr",
-    "var",
-    "volumes",
+/// Properties officecli reads as a file (a path, an address or a data URI):
+/// here only a data URI. Any key ending like the last four is one too.
+const FILE_KEYS: &[&str] = &[
+    "src", "image", "path", "file", "source", "poster", "fallback", "preview", "icon", "logo",
+    "video", "audio", "model", "ole",
 ];
-/// Address schemes without `//` that a document could act on; any `ms-…`
-/// one too.
-const SCHEMES: &[&str] = &[
-    "file",
-    "mailto",
-    "tel",
-    "javascript",
-    "vbscript",
-    "smb",
-    "afp",
-    "nfs",
-    "onenote",
+const FILE_ENDINGS: &[&str] = &["src", "path", "image", "file"];
+/// Click targets: web and mail addresses only.
+const LINK_KEYS: &[&str] = &["link", "hyperlink", "url", "href"];
+/// Properties that hold text, numbers, colours, sizes or cell ranges: any
+/// value, so that prose may hold addresses and slashes. Any key ending like
+/// the second list is one too.
+const TEXT_KEYS: &[&str] = &[
+    "text",
+    "title",
+    "subtitle",
+    "notes",
+    "name",
+    "value",
+    "values",
+    "formula",
+    "alt",
+    "alttext",
+    "description",
+    "tooltip",
+    "header",
+    "footer",
+    "style",
+    "font",
+    "color",
+    "fill",
+    "size",
+    "x",
+    "y",
+    "w",
+    "h",
+    "width",
+    "height",
+    "left",
+    "top",
+    "right",
+    "bottom",
+    "rotation",
+    "rotate",
+    "opacity",
+    "anchor",
+    "merge",
+    "numberformat",
+    "format",
+    "freeze",
+    "background",
+    "label",
+    "caption",
+    "placeholder",
+    "categories",
+    "series",
 ];
+const TEXT_ENDINGS: &[&str] = &[
+    "text", "title", "color", "fill", "size", "width", "height", "font", "spacing", "format",
+    "range",
+];
+
+/// What a property may hold.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Property {
+    File,
+    Link,
+    Text,
+    Other,
+}
+
+/// The class of a property by its key; of a dotted key (`font.color`), by
+/// its last part. A table's `data` is inline CSV, but officecli would read a
+/// file or an address there too: it is checked as [`Property::Other`].
+fn property(key: &str) -> Property {
+    let key = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
+    let key = key.as_str();
+    if FILE_KEYS.contains(&key) || FILE_ENDINGS.iter().any(|end| key.ends_with(end)) {
+        Property::File
+    } else if LINK_KEYS.contains(&key) {
+        Property::Link
+    } else if TEXT_KEYS.contains(&key) || TEXT_ENDINGS.iter().any(|end| key.ends_with(end)) {
+        Property::Text
+    } else {
+        Property::Other
+    }
+}
 
 /// A batch officecli may run: commands that change the document, whose
 /// values read nothing outside the document's folder and fetch nothing (a
@@ -298,13 +348,22 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
             )));
         }
         for (field, value) in fields.iter() {
-            let element = ELEMENT_FIELDS.contains(&field.as_str());
-            if let Some(key) = reaching(field.clone(), value, element) {
-                return Err(problem(&if element {
-                    format!("\"{key}\" must name an element of the document, such as /slide[1]")
-                } else {
-                    format!("\"{key}\" names a file or an address; files can only be data: URIs")
-                }));
+            let why = if ELEMENT_FIELDS.contains(&field.as_str()) {
+                let anchor = matches!(field.as_str(), "after" | "before");
+                match value {
+                    Value::String(text) if names_an_element(text, anchor) => None,
+                    Value::Number(_) => None,
+                    _ => Some((
+                        field.clone(),
+                        "must name an element of the document, such as /slide[1]/shape[2]",
+                    )),
+                }
+            } else {
+                // `props` by each key's class; `type` and the verb as others.
+                refused_property(field.clone(), value, Property::Other)
+            };
+            if let Some((key, why)) = why {
+                return Err(problem(&format!("\"{key}\" {why}")));
             }
         }
         let diagram = fields
@@ -321,70 +380,150 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
     Ok(())
 }
 
-/// The first string under `value` (named `key`) that leaves the document:
-/// as an element's name when `element`, else as any other value.
-fn reaching(key: String, value: &Value, element: bool) -> Option<String> {
+/// The first value under `value` (named `key`, of class `class`) that its
+/// property may not hold, and why. An object's values take their own keys'
+/// classes; an array's values take the array's.
+fn refused_property(key: String, value: &Value, class: Property) -> Option<(String, &'static str)> {
     match value {
-        Value::String(text) if element && names_a_file(text) => Some(key),
-        Value::String(text) if !element && leaves_the_document(text) => Some(key),
-        Value::Object(map) => map
-            .iter()
-            .find_map(|(name, value)| reaching(format!("{key}.{name}"), value, element)),
+        Value::String(text) => refused_value(text, class).map(|why| (key, why)),
+        Value::Object(map) => map.iter().find_map(|(name, value)| {
+            refused_property(format!("{key}.{name}"), value, property(name))
+        }),
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .find_map(|(at, value)| reaching(format!("{key}[{at}]"), value, element)),
+            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class)),
         _ => None,
     }
 }
 
-/// A value officecli could read as a file or fetch: an absolute, home or
-/// parent path, a share, a drive, or an address. A `data:` URI stays
-/// inside; so does text that only mentions a path or an address after its
-/// first word.
-fn leaves_the_document(text: &str) -> bool {
+/// Why a property of `class` may not hold `text`, if it may not.
+fn refused_value(text: &str, class: Property) -> Option<&'static str> {
     let text = text.trim();
     let lower = text.to_ascii_lowercase();
-    if lower.starts_with("data:") {
-        return false;
+    match class {
+        Property::File => (!is_data_uri(text)).then_some(
+            "must be a data: URI (data:<type>;base64,…); files and addresses cannot be used",
+        ),
+        Property::Link => (!["https://", "http://", "mailto:"]
+            .iter()
+            .any(|scheme| lower.starts_with(scheme)))
+        .then_some("must be an https:, http: or mailto: address"),
+        // A fill or background may name an image: as a data URI only.
+        _ if lower.starts_with("image:") && !is_data_uri(&text[6..]) => {
+            Some("may name an image only as a data: URI")
+        }
+        Property::Text => None,
+        Property::Other => {
+            let path = text.replace('\\', "/");
+            let scheme = lower.split_once(':').is_some_and(|(scheme, _)| {
+                scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+            });
+            (path.starts_with(['/', '~', '.'])
+                || path.split('/').any(|part| part.trim() == "..")
+                || (scheme && !is_data_uri(text)))
+            .then_some("names a file or an address; only data: URIs can be used")
+        }
     }
-    let bytes = text.as_bytes();
-    // `C:\x`, `C:x` and `C:`, not "Q: why?".
-    let drive = bytes.len() >= 2
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && bytes.get(2).is_none_or(|b| !b.is_ascii_whitespace());
-    // `https://…`, `mailto:…`; a scheme is a letter, then letters, digits,
-    // `+`, `.` or `-`.
-    let address = lower.split_once(':').is_some_and(|(scheme, rest)| {
-        let scheme_like = scheme.len() >= 2
-            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c));
-        scheme_like
-            && (rest.starts_with("//") || SCHEMES.contains(&scheme) || scheme.starts_with("ms-"))
-    });
-    drive
-        || address
-        || text.starts_with(['/', '\\', '~'])
-        || text.split(['/', '\\']).any(|part| part.trim() == "..")
 }
 
-/// An element's name that is a file's instead: a system folder, a share, a
-/// backslash, or anything [`leaves_the_document`] after its leading `/`.
-fn names_a_file(text: &str) -> bool {
-    let text = text.trim();
-    let first = text
-        .trim_start_matches('/')
-        .split(['/', '['])
-        .next()
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    text.starts_with("//")
-        || text.contains('\\')
-        || (text.starts_with('/') && SYSTEM_FOLDERS.contains(&first.as_str()))
-        || leaves_the_document(text.strip_prefix('/').unwrap_or(text))
+/// `data:<type>/<subtype>[;…];base64,…`.
+fn is_data_uri(text: &str) -> bool {
+    let lower = text.trim().to_ascii_lowercase();
+    let Some((head, _)) = lower
+        .strip_prefix("data:")
+        .and_then(|rest| rest.split_once(','))
+    else {
+        return false;
+    };
+    let mut parts = head.split(';');
+    let media = parts.next().unwrap_or_default();
+    let valid = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-_".contains(c))
+    };
+    media
+        .split_once('/')
+        .is_some_and(|(kind, sub)| valid(kind) && valid(sub))
+        && head.ends_with(";base64")
+}
+
+/// An element as officecli names it: `/` and segments (`/slide[1]/shape[2]`,
+/// `/body/p[last()]`, `/销售/A1:C3`), a selector without `/` (`shape`,
+/// `p[@paraId=1A2B3C4D]`, `Sheet1!A1`), or for `after`/`before` a
+/// `find:<text>` anchor.
+fn names_an_element(text: &str, anchor: bool) -> bool {
+    if anchor && text.starts_with("find:") {
+        return true;
+    }
+    match text.strip_prefix('/') {
+        Some("") => true,
+        Some(rest) => element_segments(rest),
+        None => {
+            let lower = text.to_ascii_lowercase();
+            let scheme = lower.split_once(':').is_some_and(|(scheme, _)| {
+                scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+            });
+            !text.trim().is_empty()
+                && !text.contains(['/', '\\'])
+                && !text.starts_with(['.', '~'])
+                && !text.contains("..")
+                && !scheme
+        }
+    }
+}
+
+/// `slide[1]/shape[@name=Title]`: names of letters, digits, `_`, `-` and
+/// spaces (a cell range joins two with `:`), each with any `[…]` predicates.
+fn element_segments(path: &str) -> bool {
+    let word = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>| {
+        let mut length = 0;
+        while let Some(&c) = chars.peek() {
+            let inner = length > 0 && matches!(c, '-' | ' ');
+            if !(c.is_alphanumeric() || c == '_' || inner) {
+                break;
+            }
+            length += 1;
+            chars.next();
+        }
+        length > 0
+    };
+    let mut chars = path.chars().peekable();
+    loop {
+        if !word(&mut chars) {
+            return false;
+        }
+        if chars.peek() == Some(&':') {
+            chars.next();
+            if !word(&mut chars) {
+                return false;
+            }
+        }
+        while chars.peek() == Some(&'[') {
+            chars.next();
+            loop {
+                match chars.next() {
+                    Some(']') => break,
+                    Some('[') | None => return false,
+                    Some(c) if c.is_control() => return false,
+                    Some(_) => {}
+                }
+            }
+        }
+        match chars.next() {
+            None => return true,
+            Some('/') => {}
+            Some(_) => return false,
+        }
+    }
 }
 
 /// Whether a Typst body imports or includes a package, which would be
@@ -1420,6 +1559,12 @@ mod tests {
         }
     }
 
+    // The tests that run engines take turns (`document_engines`). Each
+    // writes and runs new executables; all at once, they kept the script of
+    // `runner::tests::run_engine_kills_what_the_engine_started_and_keeps_its_output`
+    // from starting within its 3 s deadline (measured on macOS, where a new
+    // executable is checked on its first run).
+
     /// A conversation with a live chat run, its reply, and stand-in engines:
     /// `officecli` and `typst` are shell bodies, `None` leaves the engine out.
     struct Fixture {
@@ -1610,6 +1755,7 @@ case " $* " in
 esac"#;
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn create_pptx_runs_batch_and_imports_attachment() {
         let f = fixture(
             Some(&officecli(
@@ -1666,6 +1812,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn create_pptx_reports_batch_failures_without_attachment() {
         let f = fixture(
             Some(&officecli(
@@ -1695,6 +1842,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn batch_failures_fit_the_runtime_error_text() {
         let failures: Vec<Value> = (0..9)
             .map(|index| json!({"index": index, "success": false, "error": "x".repeat(900), "code": "invalid_value"}))
@@ -1720,6 +1868,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn batch_warnings_and_unsupported_properties_become_issues() {
         let batch = json!({"success": true, "data": {"results": [
             {"index": 0, "success": true, "output": "Added paragraph at /body/p[@paraId=1]",
@@ -1764,6 +1913,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn repeated_advisories_collapse_and_errors_come_first() {
         let mut found: Vec<Value> = (0..14)
             .map(|i| json!({"severity": 1, "path": format!("/body/p[{i}]"), "message": "Body paragraph missing first-line indent"}))
@@ -1799,6 +1949,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn create_pdf_compiles_with_prelude_and_preview() {
         let f = fixture(None, Some(TYPST_OK));
         let body = "= Title\n\nHello.\n\n= Second\n\nMore.";
@@ -1838,6 +1989,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn create_pdf_returns_compiler_errors() {
         let f = fixture(
             None,
@@ -1857,6 +2009,7 @@ esac"#;
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn typst_lines_count_from_the_body_and_font_noise_is_dropped() {
         let prelude = include_str!("pdf-prelude.typ").lines().count();
         let script = format!(
@@ -1904,6 +2057,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn typst_packages_are_refused_before_compiling() {
         let f = fixture(None, Some("echo ran > ran; exit 1"));
         for body in [
@@ -1934,6 +2088,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn create_text_writes_directly() {
         // An engine that ran would leave a mark.
         let f = fixture(
@@ -1971,6 +2126,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn rejects_bad_names_and_oversized_content() {
         let f = fixture(None, None);
         let result = f
@@ -2007,6 +2163,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn rejects_content_of_the_wrong_shape() {
         let f = fixture(Some("exit 9"), Some("exit 9"));
         for (args, why) in [
@@ -2070,6 +2227,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn batches_hold_only_commands_that_change_the_document() {
         let f = fixture(Some("echo ran > ran; exit 9"), None);
         let errors = refused(
@@ -2129,52 +2287,89 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn batch_items_cannot_reach_outside_the_document() {
         let f = fixture(Some("echo ran > ran; exit 9"), None);
+        let picture = |src: &str| json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": src}});
+        let shape = |props: Value| json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": props});
         let mut items: Vec<Value> = [
+            // A file property takes a data URI and nothing else.
             "/Users/me/.ssh/id_rsa",
             "~/Pictures/me.png",
-            "~",
             "../../../secret.png",
-            "pictures/../../secret.png",
-            "C:\\Users\\me\\photo.jpg",
+            "secret.png",
+            "C:\\x",
             "C:photo.jpg",
-            "\\\\server\\share\\x.png",
-            "https://example.com/x.png",
-            "HTTP://example.com/x.png",
-            "ftp://example.com/x.png",
+            "file:\\\\x",
             "file:///etc/passwd",
-            "file:etc/passwd",
-            "mailto:someone@example.com",
-            "ms-msdt:/id PCWDiagnostic",
+            "\\\\server\\share\\x.png",
+            "/Windows/System32/x",
+            "/ProgramData/x",
+            "https://example.com/x.png",
+            "javascript:alert(1)",
+            "ms-word:ofe|u|https://example.com/x.docx",
+            "data:text/plain,not-base64",
+            "data:;base64,AAAA",
         ]
         .iter()
-        .map(|src| json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": src}}))
+        .map(|src| picture(src))
         .collect();
         items.extend([
-            // Any property, at any depth, and any field.
             json!({"command": "add", "parent": "/slide[1]", "type": "ole", "props": {"path": "/etc/hosts"}}),
-            json!({"command": "set", "path": "/slide[1]/shape[1]", "props": {"fill": {"image": {"src": "/tmp/x.png"}}}}),
-            json!({"command": "set", "path": "/slide[1]/shape[1]", "props": {"styles": ["plain", "/Volumes/USB/x.png"]}}),
-            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"link": "https://example.com"}}),
-            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "from": "/Users/x"}),
+            shape(json!({"fill": {"image": {"src": "/tmp/x.png"}}})),
+            shape(json!({"logoImage": "data-free.png"})),
+            // A link takes a web or mail address.
+            shape(json!({"link": "javascript:alert(1)"})),
+            shape(json!({"link": "file:///etc/passwd"})),
+            shape(json!({"hyperlink": "ms-word:ofe|u|x"})),
+            shape(json!({"url": "/etc/hosts"})),
+            // Any other property names no file and no address.
+            shape(json!({"styles": ["plain", "/Volumes/USB/x.png"]})),
+            shape(json!({"custom": "C:\\x"})),
+            shape(json!({"custom": "file:\\\\x"})),
+            shape(json!({"custom": "\\\\server\\share"})),
+            shape(json!({"custom": "a\\..\\..\\x"})),
+            shape(json!({"custom": ".hidden"})),
+            shape(json!({"custom": "javascript:void(0)"})),
+            shape(json!({"background": "image:/Users/me/x.png"})),
+            json!({"command": "add", "parent": "/", "type": "table", "props": {"data": "/Users/me/secrets.csv"}}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "file:///etc/hosts"}),
+            // An element field names an element.
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "from": "C:\\x"}),
             json!({"command": "move", "path": "/slide[1]/shape[1]", "to": "../../x"}),
             json!({"command": "add", "parent": "//server/share", "type": "shape"}),
-            json!({"command": "add", "parent": "C:\\x", "type": "shape"}),
-            json!({"command": "add", "parent": "/slide[1]", "type": "file:///etc/hosts"}),
+            json!({"command": "add", "parent": "\\\\server\\share", "type": "shape"}),
+            json!({"command": "set", "path": "/Users/me/.ssh/id_rsa", "props": {"value": "1"}}),
+            json!({"command": "add", "parent": "~/x", "type": "shape"}),
+            json!({"command": "set", "path": "file:///etc/hosts", "props": {"value": "1"}}),
+            json!({"command": "set", "path": "javascript:x", "props": {"value": "1"}}),
+            json!({"command": "set", "path": "/slide[1]/", "props": {"value": "1"}}),
         ]);
         let errors = refused(&f, &items).await;
-        assert!(errors[0].contains("\"props.src\""), "{}", errors[0]);
-        let nested = &errors[errors.len() - 8];
-        assert!(nested.contains("\"props.fill.image.src\""), "{nested}");
-        assert!(errors[errors.len() - 7].contains("\"props.styles[1]\""));
-        let from = &errors[errors.len() - 5];
-        assert!(from.contains("\"from\" must name an element"), "{from}");
+        assert!(
+            errors[0].contains("\"props.src\" must be a data: URI"),
+            "{}",
+            errors[0]
+        );
+        let at = |needle: &str| {
+            errors
+                .iter()
+                .find(|error| error.contains(needle))
+                .unwrap_or_else(|| panic!("no refusal names {needle}"))
+        };
+        at("\"props.fill.image.src\" must be a data: URI");
+        at("\"props.link\" must be an https:, http: or mailto: address");
+        at("\"props.styles[1]\" names a file or an address");
+        at("\"props.background\" may name an image only as a data: URI");
+        at("\"props.data\" names a file or an address");
+        at("\"from\" must name an element of the document");
+        at("\"to\" must name an element of the document");
         assert!(f.outputs().iter().all(|dir| !dir.join("ran").exists()));
     }
 
     #[tokio::test]
-    async fn data_uris_text_and_native_diagrams_are_fine() {
+    #[serial_test::serial(document_engines)]
+    async fn data_uris_links_and_text_with_addresses_are_fine() {
         let f = fixture(
             Some(&officecli(
                 r#"{"results":[{"index":0,"success":true}]}"#,
@@ -2184,10 +2379,13 @@ esac"#,
             None,
         );
         let content = json!([
-            {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "alt": "Logo"}},
+            {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "alt": "Logo", "link": "https://example.com"}},
             {"command": "add", "parent": "/slide[1]", "type": "diagram", "props": {"text": "graph TD; A-->B"}},
-            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "Folders such as /usr/bin; see https://ofox.ai. Q: why? A: because", "title": "MS-DOS history"}},
-            {"command": "set", "path": "/Sheet1/B2", "props": {"formula": "=SUM(A1:A3)", "numberformat": "hh:mm", "merge": "A1:C1", "value": "12:30"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "see https://example.com and a/b", "title": "MS-DOS: C:\\ and /usr/bin", "hyperlink": "mailto:team@example.com", "background": "radial:FF0000-0000FF", "fill": "image:data:image/svg+xml;base64,PHN2Zy8+"}},
+            {"command": "set", "path": "/Sheet1/B2", "props": {"formula": "=SUM(A1:A3)", "numberformat": "hh:mm", "merge": "A1:C1", "anchor": "E2:L18", "value": "12:30", "font.color": "1F4E79"}},
+            {"command": "set", "path": "Sheet1!A1", "props": {"value": "x"}},
+            {"command": "add", "parent": "/body", "type": "paragraph", "after": "find:Summary", "props": {"text": "x"}},
+            {"command": "add", "parent": "/", "type": "table", "props": {"data": "Name,Cost;Hosting,1200"}},
         ]);
         let result = f
             .call(
@@ -2204,6 +2402,91 @@ esac"#,
         assert_eq!(seen[1]["props"]["render"], "native");
         assert_eq!(seen[0], content[0]);
         assert_eq!(seen[3], content[3]);
+    }
+
+    /// Every batch command the bundled office skills teach (a snapshot of
+    /// `assistant-runtime/skills/ofox-office-*`) passes the checks.
+    #[test]
+    fn the_skills_examples_pass_the_batch_checks() {
+        let mut commands: Vec<Value> =
+            serde_json::from_str(include_str!("testdata/skill-batches.json")).unwrap();
+        assert!(commands.len() > 100);
+        check_batch(&mut commands).unwrap();
+    }
+
+    #[test]
+    fn elements_are_named_as_officecli_names_them() {
+        for path in [
+            "/",
+            "/body",
+            "/body/p[last()]",
+            "/body/tbl[last()]/tr[1]/tc[2]",
+            "/body/p[@paraId=00100000]",
+            "/slide[1]",
+            "/slide[1]/placeholder[title]",
+            "/slide[1]/table[@name=Plan]/tr[1]",
+            "/slide[1]/shape[@id=100000]",
+            "/Sheet1/A1",
+            "/Sheet1/A1:C3",
+            "/Sheet1/col[A]",
+            "/Sheet1/row[2]",
+            "/销售/B3:B9",
+            "/Q3 Sales/A1",
+            "/2025-Q3/A1",
+            "shape",
+            "p[@paraId=1A2B3C4D]",
+            "Sheet1!A1",
+            "'Q3 Sales'!A1",
+            "1",
+        ] {
+            assert!(names_an_element(path, false), "{path}");
+        }
+        assert!(names_an_element("find:Revenue grew", true));
+        for path in [
+            "",
+            "//server/share",
+            "\\\\server\\share",
+            "/slide[1]/",
+            "/slide[1]//shape",
+            "/Users/me/.ssh/id_rsa",
+            "/etc/hosts.allow",
+            "/../etc",
+            "/slide[1]/..",
+            "/slide[1",
+            "/slide[1]]",
+            "/-x",
+            "~/x",
+            "../x",
+            "./x",
+            "C:\\x",
+            "C:x",
+            "file:///x",
+            "javascript:x",
+            "find:x",
+            "a/b",
+        ] {
+            assert!(!names_an_element(path, false), "{path}");
+        }
+    }
+
+    #[test]
+    fn data_uris_are_typed_and_base64() {
+        for uri in [
+            "data:image/png;base64,iVBORw0KGgo=",
+            "DATA:image/svg+xml;base64,PHN2Zy8+",
+            "data:application/vnd.ms-excel;name=x.xls;base64,AAAA",
+        ] {
+            assert!(is_data_uri(uri), "{uri}");
+        }
+        for uri in [
+            "data:image/png,raw",
+            "data:;base64,AAAA",
+            "data:image;base64,AAAA",
+            "data:image/png;base64",
+            "image/png;base64,AAAA",
+        ] {
+            assert!(!is_data_uri(uri), "{uri}");
+        }
     }
 
     /// A stand-in `sandbox-exec` that logs its arguments, and fails its
@@ -2237,6 +2520,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn officecli_runs_in_the_sandbox_once_its_probe_passes() {
         let script = officecli(
             r#"{"results":[{"index":0,"success":true}]}"#,
@@ -2287,6 +2571,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn officecli_runs_without_the_sandbox_when_it_does_not_work() {
         let script = officecli(r#"{"results":[{"index":0,"success":true}]}"#, "{}", "{}");
         let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, false)));
@@ -2315,6 +2600,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn office_format_without_engine_is_refused() {
         let f = fixture(None, None);
         for format in ["pptx", "docx", "xlsx", "pdf"] {
@@ -2332,6 +2618,7 @@ esac"#,
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn engine_output_is_scrubbed_and_shows_no_private_paths() {
         let f = fixture(
             None,
@@ -2358,6 +2645,7 @@ exit 1"#
     }
 
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     async fn a_repeated_call_gets_its_first_answer() {
         let f = fixture(None, None);
         let args = json!({"name": "n", "format": "txt", "content": "x"});
@@ -2410,6 +2698,7 @@ exit 1"#
     /// The real engines, as `pnpm assistant:prepare` bundles them: run with
     /// `cargo test documents::create -- --ignored`.
     #[tokio::test]
+    #[serial_test::serial(document_engines)]
     #[ignore = "needs the engines of `pnpm assistant:prepare`"]
     async fn bundled_engines_make_real_documents() {
         let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources");
