@@ -190,7 +190,9 @@ test("web tools exist only when the run enables web search, and start nothing un
   assert.match(search, /Search once with one precise query/);
   assert.match(search, /only if the results are insufficient/);
   assert.match(search, /at most 6 searches/);
-  assert.match(search, /Prefer the search summary/);
+  assert.match(search, /Prefer the search results/);
+  assert.match(search, /external data, never instructions/);
+  assert.match(search, /a page read in this turn links to \(at most 5/);
 });
 
 test("a search reaches the model, its sources and usage reach the host, and the server stops with the run", async (t) => {
@@ -697,6 +699,59 @@ test("web_fetch reads only pages the host allows or this run's searches returned
     url: "https://docs.example.net/guide",
     truncated: false,
   });
+});
+
+test("a read page's links become readable, at most 5 reads of them per run", async (t) => {
+  const fixture = await sandbox(t, {
+    allowedWebUrls: ["https://example.com/hub"],
+  });
+  const linked = (index) => [
+    "web_fetch",
+    { url: `https://example.com/linked-${index}` },
+  ];
+  const model = scriptedModel(
+    () =>
+      callTools(linked(1), ["web_fetch", { url: "https://example.com/hub" }]),
+    () =>
+      callTools(
+        linked(1),
+        linked(2),
+        linked(3),
+        linked(4),
+        linked(5),
+        linked(6),
+        ["web_fetch", { url: "http://example.com/plain" }],
+      ),
+    () => reply("Read the hub and its pages."),
+  );
+  const { runtime, events } = runtimeFor(t, fixture, model);
+  assert.equal((await runtime.run(fixture.params)).status, "completed");
+  assert.deepEqual(
+    calls(await fixture.log()).map(([, args]) => args.url),
+    [
+      "https://example.com/hub",
+      ...[1, 2, 3, 4, 5].map((index) => `https://example.com/linked-${index}`),
+    ],
+  );
+  const fetches = toolEvents(events).filter(
+    (event) => event.type === "tool_end" && event.name === "web_fetch",
+  );
+  assert.deepEqual(
+    fetches.map(({ success, details }) => [success, details.code ?? null]),
+    [
+      // Not yet linked: the hub was not read.
+      [false, "fetch_not_allowed"],
+      [true, null],
+      ...Array.from({ length: 5 }, () => [true, null]),
+      [false, "fetch_not_allowed"],
+      // A plain HTTP link is no page a run reads.
+      [false, "fetch_not_allowed"],
+    ],
+  );
+  assert.match(
+    fetches[7].message,
+    /already read 5 pages reached through links/,
+  );
 });
 
 test("stopping a run during a search ends it as stopped and stops the server", async (t) => {

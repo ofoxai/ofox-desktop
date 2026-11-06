@@ -1,4 +1,5 @@
-// Read one public web page as text. Ported from the reference runtime's
+// Read one public web page as Markdown (HTML) or text, with the HTTPS pages it
+// links to. Ported from the reference runtime's
 // web.mjs: HTTPS on 443 only, every DNS answer must be public, the connection
 // is pinned to the checked address, every redirect is re-checked, and the
 // 15 s / 2 MiB / 20,000-character limits hold. Only static HTML or plain text
@@ -320,22 +321,126 @@ function decodePage(body, contentType, html) {
   return decoder.decode(body);
 }
 
-// Elements whose content is never page text, and those that start a line.
-const HIDDEN_ELEMENTS = new Set(["script", "style", "noscript", "template"]);
-const LINE_ELEMENTS = new Set([
-  ..."p div h1 h2 h3 h4 h5 h6 li tr br section article".split(" "),
+// Elements whose content is never page text, and those that stand apart as
+// paragraphs.
+const HIDDEN_ELEMENTS = new Set([
+  ..."script style noscript template svg iframe".split(" "),
+]);
+const BLOCK_ELEMENTS = new Set([
+  ..."p div section article header footer nav main aside form fieldset figure figcaption address details summary dl dt dd blockquote title".split(
+    " ",
+  ),
 ]);
 const TAG_NAME = /[a-z][a-z0-9-]*/y;
+const HREF = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/i;
+// The page links a read hands back, at most this many and this long.
+export const MAX_PAGE_LINKS = 500;
+const MAX_LINK_CHARS = 2048;
+const MAX_LIST_INDENT = 6;
+const MAX_TABLE_COLUMNS = 64;
+// A list item's indentation, which collapsing the page's own spaces must
+// keep. Page text never contains NUL: it is dropped as the text is read.
+const INDENT = "\0";
+// Heading and list marks, and spaces, a link's text starts with: they stay
+// in front of the link.
+const LINK_LEAD = /^(?:[\s\0]|#{1,6} |- |1\. )+/;
+
+const NAMED_ENTITIES = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+  mdash: "—",
+  ndash: "–",
+  hellip: "…",
+  copy: "©",
+  reg: "®",
+  trade: "™",
+  lsquo: "‘",
+  rsquo: "’",
+  ldquo: "“",
+  rdquo: "”",
+  laquo: "«",
+  raquo: "»",
+  middot: "·",
+  bull: "•",
+  times: "×",
+};
+const ENTITY = new RegExp(
+  `&(?:#(?:x([0-9a-f]+)|(\\d+))|(${Object.keys(NAMED_ENTITIES).join("|")}));`,
+  "gi",
+);
+
+function decodeEntities(text) {
+  return text.replace(ENTITY, (match, hex, decimal, name) => {
+    if (name)
+      return (
+        NAMED_ENTITIES[name] ?? NAMED_ENTITIES[name.toLowerCase()] ?? match
+      );
+    const code = Number.parseInt(hex || decimal, hex ? 16 : 10);
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
+  });
+}
+
+// A link's page as the Markdown shows it: absolute, HTTP(S), without its
+// fragment, and not the page itself. Parentheses are percent-encoded so the
+// URL cannot end the Markdown link early.
+function linkTarget(tag, base) {
+  const match = HREF.exec(tag);
+  const raw = match && decodeEntities(match[1] ?? match[2] ?? match[3]).trim();
+  if (!raw || raw.startsWith("#") || raw.length > MAX_LINK_CHARS) return null;
+  let url;
+  try {
+    url = new URL(raw, base);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  url.hash = "";
+  if (url.href === base) return null;
+  const href = url.href.replace(/\(/g, "%28").replace(/\)/g, "%29");
+  return href.length > MAX_LINK_CHARS ? null : href;
+}
+
+function fence(code) {
+  const body = code.replace(/^\n/, "").trimEnd();
+  if (!body.trim()) return "";
+  const marks = body.includes("```") ? "````" : "```";
+  return `${marks}\n${body}\n${marks}`;
+}
+
+const normalize = (text) =>
+  text
+    .replace(/ {2,}/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .replaceAll(INDENT, "  ");
 
 /**
- * Markup out of an HTML page, in one pass. A tag ends at its first ">"; a
- * "<" that starts no tag, comment or declaration is text. As in a browser,
- * an unclosed comment, tag or hidden element hides the rest of the page.
- * Every search for an end resumes past the last one's start, so each costs
- * one scan of the page in all: a page of unclosed tags cannot stall the
- * event loop (and with it the read's deadline).
+ * An HTML page as Markdown, in one pass: headings, paragraphs, links
+ * (resolved against `baseUrl`), lists, tables, code blocks and inline code;
+ * images and hidden elements are dropped. `links` are the HTTPS pages the
+ * Markdown links to, in order, each once, at most MAX_PAGE_LINKS.
+ *
+ * A tag ends at its first ">"; a "<" that starts no tag, comment or
+ * declaration is text. As in a browser, an unclosed comment, tag or hidden
+ * element hides the rest of the page. Every search for an end resumes past
+ * the last one's start, so each costs one scan of the page in all, and no
+ * work depends on how deeply elements nest: a page of unclosed or nested
+ * tags cannot stall the event loop (and with it the read's deadline).
  */
-function stripMarkup(html) {
+export function htmlMarkdown(html, baseUrl) {
+  let base;
+  try {
+    const url = new URL(baseUrl);
+    url.hash = "";
+    base = url.href;
+  } catch {
+    base = undefined;
+  }
   // ASCII only, so every index is the same in both strings.
   const lower = html.replace(/[A-Z]+/g, (letters) => letters.toLowerCase());
   const searches = new Map();
@@ -354,19 +459,184 @@ function stripMarkup(html) {
       at = next(`</${name}`, at + 1);
     return at;
   };
-  const parts = [];
+
+  const pieces = []; // finished blocks: Markdown text and code blocks
+  let chunks = []; // the Markdown text since the last code block
+  let code = null; // the open <pre>'s text, verbatim
+  let preDepth = 0;
+  const lists = [];
+  let link = null;
+  let table = null;
+  let cell = false;
+  const links = [];
+  const linked = new Set();
+
+  const text = (raw) => {
+    const decoded = decodeEntities(raw.replace(/\0/g, ""));
+    if (code) code.push(decoded.replace(/\r\n?/g, "\n"));
+    else chunks.push(decoded.replace(/\s+/g, " "));
+  };
+  // A table cell stays on its row.
+  const lineBreak = (blank) => {
+    if (!code) chunks.push(cell ? " " : blank ? "\n\n" : "\n");
+  };
+  const closeLink = () => {
+    if (!link) return;
+    const { href, start } = link;
+    link = null;
+    const inner = chunks.splice(start).join("");
+    const lead = LINK_LEAD.exec(inner)?.[0] ?? "";
+    const label = inner
+      .slice(lead.length)
+      .replace(/[\s\0]+/g, " ")
+      .trim();
+    chunks.push(lead);
+    if (label) chunks.push(`[${label.replace(/[[\]]/g, "\\$&")}](${href})`);
+    chunks.push(inner.slice(inner.trimEnd().length));
+  };
+  const openLink = (tag) => {
+    closeLink();
+    const href = linkTarget(tag, base);
+    if (!href) return;
+    link = { href, start: chunks.length };
+    if (
+      href.startsWith("https:") &&
+      links.length < MAX_PAGE_LINKS &&
+      !linked.has(href)
+    ) {
+      linked.add(href);
+      links.push(href);
+    }
+  };
+  const flush = () => {
+    closeLink();
+    const block = normalize(chunks.join(""));
+    if (block) pieces.push(block);
+    chunks = [];
+  };
+  const closeCell = () => {
+    if (!cell) return;
+    cell = false;
+    chunks.push(" |");
+    table.cells++;
+  };
+  // The row of a table's first row is its header.
+  const closeRow = () => {
+    closeCell();
+    if (!table?.inRow) return;
+    table.inRow = false;
+    if (table.rows++ === 0 && table.cells)
+      chunks.push(
+        `\n|${" --- |".repeat(Math.min(table.cells, MAX_TABLE_COLUMNS))}`,
+      );
+    table.cells = 0;
+  };
+  const openRow = () => {
+    table ??= { rows: 0, cells: 0, inRow: false };
+    closeRow();
+    lineBreak(false);
+    chunks.push("|");
+    table.inRow = true;
+  };
+
+  const onTag = (name, closing, tag) => {
+    if (name === "pre") {
+      if (!closing) {
+        if (!code) {
+          flush();
+          code = [];
+        }
+        preDepth++;
+      } else if (code && --preDepth === 0) {
+        const block = fence(code.join(""));
+        if (block) pieces.push(block);
+        code = null;
+      }
+      return;
+    }
+    if (code) {
+      if (name === "br") code.push("\n");
+      return;
+    }
+    if (name && /^h[1-6]$/.test(name)) {
+      lineBreak(true);
+      if (!closing && !cell) chunks.push(`${"#".repeat(Number(name[1]))} `);
+      return;
+    }
+    switch (name) {
+      case "a":
+        if (closing) closeLink();
+        else openLink(tag);
+        return;
+      case "br":
+        lineBreak(false);
+        return;
+      case "hr":
+        lineBreak(true);
+        if (!cell) chunks.push("---");
+        lineBreak(true);
+        return;
+      case "code":
+        chunks.push("`");
+        return;
+      case "ul":
+      case "ol":
+        if (closing) {
+          lists.pop();
+          if (!lists.length) lineBreak(true);
+        } else {
+          lists.push(name);
+          if (lists.length === 1) lineBreak(true);
+        }
+        return;
+      case "li":
+        if (closing) return;
+        lineBreak(false);
+        if (!cell)
+          chunks.push(
+            INDENT.repeat(
+              Math.min(Math.max(lists.length - 1, 0), MAX_LIST_INDENT),
+            ) + (lists.at(-1) === "ol" ? "1. " : "- "),
+          );
+        return;
+      case "table":
+        if (table) closeRow();
+        table = closing ? null : { rows: 0, cells: 0, inRow: false };
+        lineBreak(true);
+        return;
+      case "tr":
+        if (closing) {
+          if (table) closeRow();
+        } else openRow();
+        return;
+      case "td":
+      case "th":
+        if (closing) {
+          if (table) closeCell();
+          return;
+        }
+        if (!table?.inRow) openRow();
+        closeCell();
+        cell = true;
+        chunks.push(" ");
+        return;
+    }
+    if (BLOCK_ELEMENTS.has(name)) lineBreak(true);
+    else chunks.push(" ");
+  };
+
   let at = 0;
   while (at < html.length) {
     const open = html.indexOf("<", at);
     if (open === -1) {
-      parts.push(html.slice(at));
+      text(html.slice(at));
       break;
     }
-    parts.push(html.slice(at, open));
+    text(html.slice(at, open));
     if (lower.startsWith("<!--", open)) {
       const end = next("-->", open + 4);
       if (end === -1) break;
-      parts.push(" ");
+      if (!code) chunks.push(" ");
       at = end + 3;
       continue;
     }
@@ -375,7 +645,7 @@ function stripMarkup(html) {
     const name = TAG_NAME.exec(lower)?.[0];
     // `<!DOCTYPE …>`, `<?…>` and `</…>` without a name end at ">" too.
     if (!name && after !== "!" && after !== "?" && after !== "/") {
-      parts.push("<");
+      text("<");
       at = open + 1;
       continue;
     }
@@ -387,33 +657,23 @@ function stripMarkup(html) {
       const closeEnd = close === -1 ? -1 : next(">", close);
       if (closeEnd === -1) break;
       at = closeEnd + 1;
+      if (!code) chunks.push(" ");
+      continue;
     }
-    parts.push(LINE_ELEMENTS.has(name) ? "\n" : " ");
+    onTag(
+      name,
+      after === "/",
+      name === "a" && after !== "/" ? html.slice(open, end + 1) : "",
+    );
   }
-  return parts.join("");
-}
-
-export function htmlText(html) {
-  return stripMarkup(html)
-    .replace(/&#(?:x([0-9a-f]+)|(\d+));/gi, (_match, hex, decimal) => {
-      const code = Number.parseInt(hex || decimal, hex ? 16 : 10);
-      return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : " ";
-    })
-    .replace(
-      /&(?:amp|lt|gt|quot|apos|nbsp);/g,
-      (entity) =>
-        ({
-          "&amp;": "&",
-          "&lt;": "<",
-          "&gt;": ">",
-          "&quot;": '"',
-          "&apos;": "'",
-          "&nbsp;": " ",
-        })[entity],
-    )
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n\s*\n+/g, "\n\n")
-    .trim();
+  if (code) {
+    const block = fence(code.join(""));
+    if (block) pieces.push(block);
+    code = null;
+  }
+  if (table) closeRow();
+  flush();
+  return { text: pieces.join("\n\n"), links };
 }
 
 // One record type's addresses from a DNS JSON answer; null when the query
@@ -553,15 +813,17 @@ async function follow(start, { signal, secrets, lookup, request, proxy, doh }) {
       String(response.headers["content-type"] ?? ""),
       mime !== "text/plain",
     );
+    const read =
+      mime === "text/plain"
+        ? { text: decoded.trim(), links: [] }
+        : htmlMarkdown(decoded, url.href);
     // Mask the key before the text is cut, so no fragment of it survives.
-    const text = scrubSecrets(
-      mime === "text/plain" ? decoded.trim() : htmlText(decoded),
-      secrets,
-    );
+    const text = scrubSecrets(read.text, secrets);
     return {
       url: url.href,
       text: text.slice(0, MAX_PAGE_CHARS),
       truncated: text.length > MAX_PAGE_CHARS,
+      links: read.links,
     };
   }
 }

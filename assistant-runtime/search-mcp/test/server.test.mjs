@@ -115,7 +115,10 @@ test("the bundle serves web_search and web_fetch over stdio", async (t) => {
   });
   const text = search.content[0].text;
   assert.ok(Buffer.byteLength(text) <= 20 * 1024);
-  assert.match(text, /^Here are the most relevant/);
+  assert.match(
+    text,
+    /^External web content follows\.[^\n]*\n\nHere are the most relevant/,
+  );
   assert.match(text, /\nSources:\n1\. GitHub - earendil-works\/pi/);
   assert.equal(gateway.requests.length, 1);
   const [request] = gateway.requests;

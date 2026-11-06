@@ -70,9 +70,21 @@ function search(query) {
 function fetchPage(url) {
   if (url.includes("missing"))
     return failure("fetch_failed", "Web page returned HTTP 404", 404);
+  // A hub page links to seven pages, plus links no read may follow.
+  const links = url.includes("hub")
+    ? [
+        ...Array.from(
+          { length: 7 },
+          (_, index) => `https://example.com/linked-${index + 1}#top`,
+        ),
+        "http://example.com/plain",
+        "not a url",
+        42,
+      ]
+    : [];
   return {
     content: text(`Page: ${url}\n\nText of ${url}`),
-    structuredContent: { url, text: `Text of ${url}`, truncated: false },
+    structuredContent: { url, text: `Text of ${url}`, truncated: false, links },
   };
 }
 
