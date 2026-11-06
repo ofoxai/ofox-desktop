@@ -6659,16 +6659,16 @@ while read line; do :; done"#,
     async fn bootstrap_reports_document_formats() {
         let (_config, host) = fixture();
         let boot = host.bootstrap().await.unwrap();
-        // No runtime folder: only the formats that need no engine.
-        assert_eq!(
-            boot["runtime"]["documents"]["formats"],
-            json!(["md", "txt", "csv", "html", "json"])
-        );
+        // No runtime: nothing could register the tool, so no formats.
+        assert_eq!(boot["runtime"]["available"], false);
+        assert!(boot["runtime"].get("documents").is_none());
 
         let (config, env, host) = fixture_with_env();
         let base = config.path().join("runtime-with-engines");
-        std::fs::create_dir_all(base.join("engines/typst")).unwrap();
-        std::fs::write(base.join("engines/typst/typst"), "").unwrap();
+        for file in ["node/node", "runtime/src/main.mjs", "engines/typst/typst"] {
+            std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
+            std::fs::write(base.join(file), "").unwrap();
+        }
         std::fs::write(
             base.join("manifest.json"),
             json!({"engines": {"typst": {"path": "engines/typst/typst"}}}).to_string(),
@@ -6676,8 +6676,10 @@ while read line; do :; done"#,
         .unwrap();
         *env.runtime.lock().unwrap() = Some(base);
         let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["runtime"]["available"], true);
         let formats = boot["runtime"]["documents"]["formats"].as_array().unwrap();
         assert!(formats.contains(&json!("pdf")));
+        assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
     }
     fn audio_target(host: &AssistantHost, sid: &str) -> DeleteRequest {

@@ -94,11 +94,12 @@ impl AssistantHost {
         })
         .await
         .unwrap_or_default();
-        let mut runtime = match self.runtime() {
-            Ok(r) => json!({"available":true,"reason":null,"version":r.version}),
+        // Documents only with the runtime that registers their tool.
+        let runtime = match self.runtime() {
+            Ok(r) => json!({"available":true,"reason":null,"version":r.version,
+                "documents":{"formats":self.engines().formats()}}),
             Err(reason) => json!({"available":false,"reason":reason,"version":null}),
         };
-        runtime["documents"] = json!({"formats": self.engines().formats()});
         let key = if self.env.key_ready(&identity).await {
             "ready"
         } else {
@@ -808,6 +809,11 @@ impl AssistantHost {
                 params.insert("thinkingLevel".into(), json!(level));
             }
             params.extend(instruction_params(&preferences.instructions));
+            params.extend(document_params(
+                model.tools,
+                self.runtime().is_ok(),
+                &self.engines(),
+            ));
         }
         self.emit_start(
             &control,
@@ -1522,6 +1528,21 @@ fn web_params(
 /// The custom instructions part of a run's parameters: `instructions` only
 /// when there are some, so that without them a run's parameters stay as they
 /// were before the setting existed.
+/// The document formats a run can make with `create_document`: for a model
+/// that takes tools while the runtime is there to register the tool. Text
+/// formats need no engine, so they are always among them.
+fn document_params(
+    tools: bool,
+    runtime: bool,
+    engines: &super::documents::engines::Engines,
+) -> Map<String, Value> {
+    let mut params = Map::new();
+    if tools && runtime {
+        params.insert("documents".into(), json!({"formats": engines.formats()}));
+    }
+    params
+}
+
 fn instruction_params(instructions: &str) -> Map<String, Value> {
     let mut params = Map::new();
     if !instructions.trim().is_empty() {
@@ -2210,6 +2231,44 @@ mod tests {
             Value::Object(instruction_params("Be brief.\n")),
             json!({"instructions": "Be brief.\n"})
         );
+    }
+
+    fn engines(officecli: bool, typst: bool) -> super::super::documents::engines::Engines {
+        super::super::documents::engines::Engines {
+            officecli: officecli.then(|| "engines/officecli/officecli".into()),
+            typst: typst.then(|| "engines/typst/typst".into()),
+        }
+    }
+
+    #[test]
+    fn run_params_include_document_formats() {
+        let params = Value::Object(document_params(true, true, &engines(true, true)));
+        let formats = params["documents"]["formats"].as_array().unwrap();
+        for format in [
+            "pdf", "pptx", "docx", "xlsx", "md", "txt", "csv", "html", "json",
+        ] {
+            assert!(formats.contains(&json!(format)), "{format}");
+        }
+        let typst_only = Value::Object(document_params(true, true, &engines(false, true)));
+        let formats = typst_only["documents"]["formats"].as_array().unwrap();
+        assert!(formats.contains(&json!("pdf")));
+        assert!(!formats.contains(&json!("pptx")));
+    }
+
+    #[test]
+    fn run_params_document_formats_without_engines() {
+        // Text needs no engine: the tool is still there.
+        assert_eq!(
+            Value::Object(document_params(true, true, &engines(false, false))),
+            json!({"documents": {"formats": ["md", "txt", "csv", "html", "json"]}})
+        );
+    }
+
+    #[test]
+    fn run_params_omit_documents_for_models_without_tools() {
+        assert!(document_params(false, true, &engines(true, true)).is_empty());
+        // Without the runtime nothing registers the tool.
+        assert!(document_params(true, false, &engines(true, true)).is_empty());
     }
 
     #[test]
