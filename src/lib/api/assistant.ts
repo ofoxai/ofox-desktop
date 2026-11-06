@@ -256,6 +256,8 @@ export interface AssistantBootstrap {
     available: boolean;
     reason: string | null;
     version: string | null;
+    /** Deliverable formats the assistant can make on this machine. */
+    documents?: { formats: string[] };
   };
   models: AssistantModel[];
   /** Dedicated tool models, separate from the conversation model picker. */

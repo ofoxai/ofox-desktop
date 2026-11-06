@@ -94,10 +94,11 @@ impl AssistantHost {
         })
         .await
         .unwrap_or_default();
-        let runtime = match self.runtime() {
+        let mut runtime = match self.runtime() {
             Ok(r) => json!({"available":true,"reason":null,"version":r.version}),
             Err(reason) => json!({"available":false,"reason":reason,"version":null}),
         };
+        runtime["documents"] = json!({"formats": self.engines().formats()});
         let key = if self.env.key_ready(&identity).await {
             "ready"
         } else {
