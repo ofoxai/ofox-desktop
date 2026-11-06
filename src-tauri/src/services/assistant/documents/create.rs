@@ -220,8 +220,8 @@ const FILE_KEYS: &[&str] = &[
 ];
 /// Click targets: a web or mail address, or an element of the document.
 const LINK_KEYS: &[&str] = &["link", "hyperlink", "url", "href"];
-/// Prose and table data: any value, so that text may hold addresses and
-/// slashes. Only these exact keys.
+/// Prose: any value, so that text may hold addresses and slashes. Only
+/// these exact keys.
 const PROSE_KEYS: &[&str] = &[
     "text",
     "title",
@@ -231,7 +231,35 @@ const PROSE_KEYS: &[&str] = &[
     "tooltip",
     "value",
     "formula",
-    "data",
+];
+/// Names a sheet may not root an element path with: file systems' first
+/// folders.
+const FOLDER_NAMES: &[&str] = &[
+    "users",
+    "volumes",
+    "windows",
+    "program files",
+    "programdata",
+    "applications",
+    "library",
+    "system",
+    "private",
+    "etc",
+    "var",
+    "tmp",
+    "usr",
+    "bin",
+    "opt",
+    "home",
+    "root",
+    "mnt",
+    "media",
+    "dev",
+    "proc",
+    "sys",
+    "boot",
+    "srv",
+    "run",
 ];
 /// The first segment of an element path, besides a sheet's name.
 const ROOTS: &[&str] = &[
@@ -257,19 +285,31 @@ const ROOTS: &[&str] = &[
 enum Property {
     File,
     Link,
+    /// A table's inline CSV.
+    Data,
     Prose,
+    /// A fill, gradient or background: colours, a gradient, or an image.
+    Fill,
+    NumberFormat,
     Other,
 }
 
 /// The class of a property by its key.
 fn property(key: &str) -> Property {
     let key = key.to_ascii_lowercase();
+    let last = key.rsplit('.').next().unwrap_or(&key);
     if key.split('.').any(|part| FILE_KEYS.contains(&part)) {
         Property::File
-    } else if LINK_KEYS.contains(&key.rsplit('.').next().unwrap_or(&key)) {
+    } else if LINK_KEYS.contains(&last) {
         Property::Link
+    } else if key == "data" {
+        Property::Data
     } else if PROSE_KEYS.contains(&key.as_str()) {
         Property::Prose
+    } else if matches!(last, "gradient" | "background") || last.ends_with("fill") {
+        Property::Fill
+    } else if matches!(last, "numberformat" | "format" | "numfmt") {
+        Property::NumberFormat
     } else {
         Property::Other
     }
@@ -340,7 +380,7 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 }
             } else {
                 // `props` by each key's class; `type` and the verb as others.
-                refused_property(field.clone(), value, Property::Other, &sheets)
+                refused_property(field.clone(), value, Property::Other)
             };
             if let Some((key, why)) = why {
                 return Err(problem(&format!("\"{key}\" {why}")));
@@ -361,7 +401,7 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 .and_then(|path| path.strip_prefix('/'))
                 .is_some_and(|sheet| sheets.contains(&sheet.to_lowercase()));
         let added = verb == "add" && kind.eq_ignore_ascii_case("sheet");
-        if let Some(name) = name.filter(|_| renamed || added) {
+        if let Some(name) = name.filter(|name| (renamed || added) && may_root(name)) {
             sheets.push(name.to_lowercase());
         }
         let diagram = kind.eq_ignore_ascii_case("diagram");
@@ -378,29 +418,25 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
 /// The first value under `value` (named `key`, of class `class`) that its
 /// property may not hold, and why. An object's values take their own keys'
 /// classes; an array's values take the array's.
-fn refused_property(
-    key: String,
-    value: &Value,
-    class: Property,
-    sheets: &[String],
-) -> Option<(String, &'static str)> {
+fn refused_property(key: String, value: &Value, class: Property) -> Option<(String, &'static str)> {
     match value {
-        Value::String(text) => refused_value(text, class, sheets).map(|why| (key, why)),
+        Value::String(text) => refused_value(text, class).map(|why| (key, why)),
         Value::Object(map) => map.iter().find_map(|(name, value)| {
-            refused_property(format!("{key}.{name}"), value, property(name), sheets)
+            refused_property(format!("{key}.{name}"), value, property(name))
         }),
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class, sheets)),
+            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class)),
         _ => None,
     }
 }
 
 /// Why a property of `class` may not hold `text`, if it may not.
-fn refused_value(text: &str, class: Property, sheets: &[String]) -> Option<&'static str> {
+fn refused_value(text: &str, class: Property) -> Option<&'static str> {
     let text = text.trim();
     let lower = text.to_ascii_lowercase();
+    let elsewhere = "names a file or an address; only data: URIs can be used";
     match class {
         Property::File => (!is_data_uri(text)).then_some(
             "must be a data: URI (data:<type>;base64,…); files and addresses cannot be used",
@@ -408,42 +444,123 @@ fn refused_value(text: &str, class: Property, sheets: &[String]) -> Option<&'sta
         Property::Link => (!["https://", "http://", "mailto:"]
             .iter()
             .any(|scheme| lower.starts_with(scheme))
-            && !names_an_element(text, false, sheets))
-        .then_some("must be an https:, http: or mailto: address, or an element of the document"),
+            && !links_a_slide(text))
+        .then_some("must be an https:, http: or mailto: address, or slide[n]"),
+        Property::Data => data_reaches_out(text)
+            .then_some("must be the table's rows inline (CSV); files and addresses cannot be used"),
         Property::Prose => None,
-        Property::Other => names_a_location(text)
-            .then_some("names a file or an address; only data: URIs can be used"),
+        Property::Fill if lower.starts_with("image:") => {
+            (!is_data_uri(&text[6..])).then_some("may name an image only as a data: URI")
+        }
+        Property::Fill if lower.starts_with("linear:") || lower.starts_with("radial:") => {
+            let colours = &text[7..];
+            (colours.is_empty()
+                || !colours
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "#,;-. ".contains(c)))
+            .then_some("a gradient takes colours only")
+        }
+        Property::NumberFormat => {
+            (text.starts_with(['/', '~']) || lower.contains("://") || lower.starts_with("file:"))
+                .then_some(elsewhere)
+        }
+        Property::Fill | Property::Other => names_a_location(text).then_some(elsewhere),
     }
 }
 
+/// A scheme's name: a letter, then letters, digits, `+`, `.` or `-`.
+fn is_scheme(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+}
+
 /// A value that names a place outside the document: once `\` reads as `/`,
-/// it starts with `/`, `~` or `.`, has a `..` segment, or starts with a
-/// drive or a scheme other than `data:`. A cell range (`E2:L18`) is none.
+/// it starts with `/` or `~`, or with `.` unless it is a number (`.5in`),
+/// has a `..` segment, or starts with a drive or a scheme other than
+/// `data:`. A cell range (`E2:L18`) is none.
 fn names_a_location(text: &str) -> bool {
     let path = text.trim().replace('\\', "/");
     let lower = path.to_ascii_lowercase();
-    let scheme = lower.split_once(':').is_some_and(|(scheme, _)| {
-        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-            && scheme
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
-    });
-    path.starts_with(['/', '~', '.'])
+    let unsigned = path.strip_prefix('-').unwrap_or(&path);
+    let number = unsigned
+        .strip_prefix('.')
+        .unwrap_or(unsigned)
+        .starts_with(|c: char| c.is_ascii_digit());
+    let scheme = lower
+        .split_once(':')
+        .is_some_and(|(name, _)| is_scheme(name));
+    path.starts_with(['/', '~'])
+        || (path.starts_with('.') && !number)
         || path.split('/').any(|part| part.trim() == "..")
         || (scheme && !is_data_uri(&path) && !is_cell_range(&path))
 }
 
-/// `A1:C3`: two cells, each one to three letters and a row number.
+/// Whether a table's `data` would be read as a file or an address rather
+/// than as inline CSV: it starts like a path (`/`, `\`, `~`, `.`, `@`, a
+/// drive), it is an address, or, without a comma, semicolon or line break,
+/// it is a single path or scheme. `a:b,c` is a row.
+fn data_reaches_out(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'/' | b'\\');
+    let single = !text.contains([',', ';', '\n']);
+    text.starts_with(['/', '\\', '~', '.', '@'])
+        || drive
+        || lower
+            .split_once("://")
+            .is_some_and(|(name, _)| is_scheme(name))
+        || lower.starts_with("file:")
+        || (single
+            && (lower
+                .split_once(':')
+                .is_some_and(|(name, _)| is_scheme(name))
+                || text.replace('\\', "/").split('/').any(|part| part == "..")))
+}
+
+/// One cell: one to three letters and a row number (`B12`).
+fn is_cell(text: &str) -> bool {
+    let letters = text.chars().take_while(char::is_ascii_alphabetic).count();
+    let digits = &text[letters..];
+    (1..=3).contains(&letters)
+        && (1..=7).contains(&digits.len())
+        && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// `A1:C3`: two cells.
 fn is_cell_range(text: &str) -> bool {
-    let cell = |cell: &str| {
-        let letters = cell.chars().take_while(char::is_ascii_alphabetic).count();
-        let digits = &cell[letters..];
-        (1..=3).contains(&letters)
-            && (1..=7).contains(&digits.len())
-            && digits.chars().all(|c| c.is_ascii_digit())
-    };
     text.split_once(':')
-        .is_some_and(|(start, end)| cell(start) && cell(end))
+        .is_some_and(|(start, end)| is_cell(start) && is_cell(end))
+}
+
+/// An in-deck link target: `slide[n]` or `/slide[n]`, optionally followed
+/// by `/shape[…]`.
+fn links_a_slide(text: &str) -> bool {
+    let text = text.strip_prefix('/').unwrap_or(text);
+    let (slide, shape) = match text.split_once('/') {
+        Some((slide, shape)) => (slide, Some(shape)),
+        None => (text, None),
+    };
+    let inner = |segment: &'_ str, name: &str| -> Option<String> {
+        segment
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix('['))
+            .and_then(|rest| rest.strip_suffix(']'))
+            .filter(|inner| !inner.contains(['[', ']']))
+            .map(str::to_owned)
+    };
+    inner(slide, "slide").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        && shape.is_none_or(|shape| inner(shape, "shape").is_some_and(|p| predicate(&p)))
+}
+
+/// Whether a sheet the batch makes may start an element path: not a file
+/// system's first folder, and nothing that separates a path.
+fn may_root(name: &str) -> bool {
+    !name.contains(['/', '\\', ':']) && !FOLDER_NAMES.contains(&name.to_lowercase().as_str())
 }
 
 /// `data:<type>/<subtype>[;…];base64,…`.
@@ -527,9 +644,10 @@ fn predicate(inner: &str) -> bool {
     }) && quote.is_none()
 }
 
-/// `slide[1]/shape[@name=Title]`: a known root (or a sheet of `sheets`),
-/// then names of letters, digits, `_`, `-` and spaces (a cell range joins
-/// two with `:`), each with any predicates. A predicate holds no `/`.
+/// `slide[1]/shape[@name=Title]`: a known root, or a sheet of `sheets`
+/// followed by nothing or by a cell, a range, a row, a column, a table or a
+/// chart; then names of letters, digits, `_`, `-` and spaces (a cell range
+/// joins two with `:`), each with any predicates. A predicate holds no `/`.
 fn element_segments(path: &str, sheets: &[String]) -> bool {
     let word = |word: &str| {
         word.starts_with(|c: char| c.is_alphanumeric() || c == '_')
@@ -537,18 +655,26 @@ fn element_segments(path: &str, sheets: &[String]) -> bool {
                 .chars()
                 .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ' '))
     };
-    path.split('/').enumerate().all(|(at, segment)| {
-        let (name, rest) = segment.split_at(segment.find('[').unwrap_or(segment.len()));
+    let segments: Vec<(&str, &str)> = path
+        .split('/')
+        .map(|segment| segment.split_at(segment.find('[').unwrap_or(segment.len())))
+        .collect();
+    let valid = segments.iter().all(|(name, rest)| {
         let named = match name.split_once(':') {
             Some((start, end)) => word(start) && word(end),
             None => word(name),
         };
-        let known = at > 0 || {
-            let name = name.to_lowercase();
-            ROOTS.contains(&name.as_str()) || sheets.contains(&name)
-        };
-        named && known && bracketed(rest).is_some_and(|found| found.into_iter().all(predicate))
-    })
+        named && bracketed(rest).is_some_and(|found| found.into_iter().all(predicate))
+    });
+    let root = segments[0].0.to_lowercase();
+    let sheet_part = |(name, rest): &(&str, &str)| {
+        let part = name.to_lowercase();
+        (rest.is_empty() && (is_cell(name) || is_cell_range(name)))
+            || (!rest.is_empty() && matches!(part.as_str(), "row" | "col" | "tbl" | "chart"))
+    };
+    let rooted = ROOTS.contains(&root.as_str())
+        || (sheets.contains(&root) && segments.get(1).is_none_or(sheet_part));
+    valid && rooted
 }
 
 /// `[a][b]` as `a` and `b`; `None` unless `text` is only such groups.
@@ -2364,6 +2490,8 @@ esac"#,
             shape(json!({"font.color": "~/x"})),
             shape(json!({"numberformat": "file:x"})),
             shape(json!({"x": "C:x"})),
+            shape(json!({"link": "notes.txt"})),
+            json!({"command": "add", "parent": "/", "type": "table", "props": {"data": "/Users/x/t.csv"}}),
             // A link takes a web or mail address.
             shape(json!({"link": "javascript:alert(1)"})),
             shape(json!({"link": "file:///etc/passwd"})),
@@ -2409,11 +2537,12 @@ esac"#,
                 .unwrap_or_else(|| panic!("no refusal names {needle}"))
         };
         at("\"props.fill.image.src\" must be a data: URI");
-        at("\"props.link\" must be an https:, http: or mailto: address, or an element");
+        at("\"props.link\" must be an https:, http: or mailto: address, or slide[n]");
         at("\"props.fill.image\" must be a data: URI");
         at("\"props.subtitle\" names a file or an address");
         at("\"props.styles[1]\" names a file or an address");
-        at("\"props.background\" names a file or an address");
+        at("\"props.background\" may name an image only as a data: URI");
+        at("\"props.data\" must be the table's rows inline");
         at("\"from\" must name an element of the document");
         at("\"to\" must name an element of the document");
         assert!(f.outputs().iter().all(|dir| !dir.join("ran").exists()));
@@ -2443,8 +2572,12 @@ esac"#,
             {"command": "set", "path": "Sheet1!A1", "props": {"value": "x"}},
             {"command": "add", "parent": "/body", "type": "paragraph", "after": "find:Summary", "props": {"text": "x"}},
             {"command": "add", "parent": "/", "type": "table", "props": {"data": "Name,Cost;Hosting,1200"}},
-            // Table data is prose (R36), even when it looks like a path.
-            {"command": "add", "parent": "/", "type": "table", "props": {"data": "/a,/b;1,2"}},
+            {"command": "add", "parent": "/", "type": "table", "props": {"data": "Name,Score\nAlice,90"}},
+            {"command": "add", "parent": "/", "type": "table", "props": {"data": "a:b,c"}},
+            // Gradients, image fills, number formats and lengths in their
+            // own syntax.
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"fill": "linear:FF0000-0000FF-90", "gradient": "radial:FF0000-0000FF", "background": "image:data:image/png;base64,iVBORw0KGgo=", "x": ".5in", "y": "-2pt", "width": "0.5cm", "link": "/slide[3]/shape[@name=Title]"}},
+            {"command": "set", "path": "/Sheet1/C1", "props": {"numberformat": "hh:mm", "font.numFmt": "[h]:mm:ss", "format": "yyyy-mm-dd hh:mm"}},
         ]);
         let result = f
             .call(
@@ -2501,6 +2634,9 @@ esac"#,
             "/Sheet1/A1:C3",
             "/Sheet1/col[A]",
             "/Sheet1/row[2]",
+            "/Sheet1/chart[1]",
+            "/Sheet1/tbl[1]",
+            "/Sheet1",
             "/sheet[2]/A1",
             "/销售/B3:B9",
             "/Q3 Sales/A1",
@@ -2548,8 +2684,131 @@ esac"#,
             "/slide[1]/shape[@name=\"open]",
             "/slide[1]/shape[a/b]",
             "p[#x]",
+            "/Sheet1/x",
+            "/Sheet1/secret",
+            "/q3 sales/x",
         ] {
             assert!(!names_an_element(path, false, &sheets), "{path}");
+        }
+    }
+
+    #[test]
+    fn sheets_made_by_the_batch_root_only_cells_and_ranges() {
+        let batch = |name: &str, path: &str| {
+            let mut commands = vec![
+                json!({"command": "add", "parent": "/", "type": "sheet", "props": {"name": name}}),
+                json!({"command": "set", "path": path, "props": {"value": "1"}}),
+            ];
+            check_batch(&mut commands)
+        };
+        assert!(batch("Users", "/Users/x/secret.txt").is_err());
+        // A file system's folder name roots nothing, even as a sheet.
+        assert!(batch("Users", "/Users/A1").is_err());
+        assert!(batch("Program Files", "/Program Files/A1").is_err());
+        assert!(batch("Sales", "/Sales/A1:C3").is_ok());
+        assert!(batch("Sales", "/Sales/row[2]").is_ok());
+        assert!(batch("Sales", "/Sales/chart[1]").is_ok());
+        assert!(batch("Sales", "/Sales").is_ok());
+        assert!(batch("Sales", "/Sales/x").is_err());
+        assert!(batch("Sales", "/Sales/secret.txt").is_err());
+        // A rename makes a sheet too.
+        let mut commands = vec![
+            json!({"command": "set", "path": "/Sheet1", "props": {"name": "Data"}}),
+            json!({"command": "set", "path": "/Data/B2", "props": {"value": "1"}}),
+        ];
+        check_batch(&mut commands).unwrap();
+    }
+
+    #[test]
+    fn each_property_takes_its_own_syntax() {
+        let refused = |key: &str, text: &str| refused_value(text, property(key)).is_some();
+        // Links: web and mail addresses, or a slide.
+        for target in [
+            "https://example.com",
+            "mailto:a@example.com",
+            "slide[3]",
+            "/slide[3]",
+            "/slide[2]/shape[@name=Title]",
+        ] {
+            assert!(!refused("link", target), "{target}");
+        }
+        for target in [
+            "notes.txt",
+            "body",
+            "nextslide",
+            "/body/p[1]",
+            "slide[x]",
+            "javascript:x",
+            "file:///x",
+        ] {
+            assert!(refused("hyperlink", target), "{target}");
+        }
+        // Table data: rows inline, never a file or an address.
+        for data in [
+            "Name,Score\nAlice,90",
+            "a:b,c",
+            "H1,H2;R1C1,R1C2",
+            "Total",
+            "https,x",
+        ] {
+            assert!(!refused("data", data), "{data}");
+        }
+        for data in [
+            "/Users/x/t.csv",
+            "https://x/t.csv",
+            "https://x/t.csv,extra",
+            "@t.csv",
+            "C:\\t.csv",
+            "C:t.csv",
+            "~/t.csv",
+            ".t.csv",
+            "\\\\server\\t.csv",
+            "file:t.csv",
+            "x/../../t.csv",
+        ] {
+            assert!(refused("data", data), "{data}");
+        }
+        // Fills: colours, gradients, an image as a data URI.
+        for fill in [
+            "FF0000",
+            "accent1",
+            "linear:FF0000-0000FF-90",
+            "radial:FF0000-0000FF",
+            "image:data:image/png;base64,iVBORw0KGgo=",
+        ] {
+            assert!(!refused("fill", fill), "{fill}");
+            assert!(!refused("background", fill), "{fill}");
+            assert!(!refused("shape.fill", fill), "{fill}");
+        }
+        for fill in [
+            "image:/Users/x.png",
+            "image:https://x/y.png",
+            "linear:/Users/x",
+            "radial:",
+            "path:/x",
+            "/x.png",
+        ] {
+            assert!(refused("fill", fill), "{fill}");
+        }
+        // Number formats keep their colons.
+        for format in [
+            "hh:mm",
+            "[h]:mm:ss",
+            "yyyy-mm-dd hh:mm",
+            "\\$#,##0",
+            "0.00%",
+        ] {
+            assert!(!refused("numberformat", format), "{format}");
+            assert!(!refused("numFmt", format), "{format}");
+        }
+        assert!(refused("format", "file:///x"));
+        // Lengths and numbers may start with a dot or a minus; a hidden
+        // file may not.
+        for length in [".5in", "-2pt", "0.5cm", "-.25", "E2:L18"] {
+            assert!(!refused("x", length), "{length}");
+        }
+        for value in [".hidden", "./x", "/x", "~x", "C:x", "smb:x"] {
+            assert!(refused("x", value), "{value}");
         }
     }
 
