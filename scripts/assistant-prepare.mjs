@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { entitlementsFor } from "./assistant-entitlements.mjs";
 import {
   clearInstallStamp,
   installIsCurrent,
@@ -232,11 +233,13 @@ async function signMacFiles(directory) {
         const args = ["--force", "--sign", identity];
         // Notarization needs a secure timestamp on every signed Mach-O.
         if (identity !== "-") args.push("--options", "runtime", "--timestamp");
-        if (filename === node)
-          args.push(
-            "--entitlements",
-            path.join(runtime, "node-entitlements.plist"),
-          );
+        // Throws for an engine executable with no entry (assistant-entitlements.mjs).
+        const entitlements = entitlementsFor(
+          filename,
+          path.join(resources, "engines"),
+        );
+        if (entitlements)
+          args.push("--entitlements", path.join(runtime, entitlements));
         execFileSync("codesign", [...args, filename], { stdio: "inherit" });
       }
     }
