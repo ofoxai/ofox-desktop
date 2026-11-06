@@ -6,7 +6,21 @@ const skillsDir = new URL("../skills/", import.meta.url);
 // The body of each SKILL.md is what use_skill returns to the model.
 const bodyLimit = (name) => (name === "ofox-office-pdf" ? 8000 : 12000);
 // Skills teach create_document batch arrays, never command-line calls.
-const cliCall = /\bofficecli\s+(create|add|set|batch|view|get|query|remove)\b/i;
+const cliCall = /\bofficecli\s+[a-z]/i;
+// CLI-only workflows that do not exist behind create_document.
+const cliOnly = [/\bresidents?\b/i, /\bwatch(es|ing)?\b/i, /\bMCP\b/];
+// The host reads frontmatter with a YAML parser: a plain scalar must not
+// contain ": " or " #" or start with an indicator; quoted values are fine.
+const yamlValue = (value) =>
+  /^"(?:[^"\\]|\\.)*"$/.test(value) ||
+  /^'(?:[^']|'')*'$/.test(value) ||
+  !/^[-?:,[\]{}#&*!|>'"%@`]|: |:$| #/.test(value);
+const unquote = (value) =>
+  value.startsWith('"')
+    ? JSON.parse(value)
+    : value.startsWith("'")
+      ? value.slice(1, -1).replaceAll("''", "'")
+      : value;
 
 const length = (text) => [...text].length;
 
@@ -22,12 +36,17 @@ const bundledSkills = async () => {
     );
     const front = /^---\n([\s\S]*?)\n---\n/.exec(text);
     assert.ok(front, `${entry.name}: frontmatter`);
-    const field = (key) =>
-      new RegExp(`^${key}:[ \\t]*(.*)$`, "m").exec(front[1])?.[1].trim();
+    const fields = new Map();
+    for (const line of front[1].split("\n")) {
+      const match = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(line);
+      assert.ok(match, `${entry.name}: frontmatter line ${line}`);
+      fields.set(match[1], match[2].trim());
+    }
     skills.push({
       dir: entry.name,
-      name: field("name"),
-      description: field("description") ?? "",
+      fields,
+      name: unquote(fields.get("name") ?? ""),
+      description: unquote(fields.get("description") ?? ""),
       body: text.slice(front[0].length),
     });
   }
@@ -38,6 +57,12 @@ test("the four office authoring skills are bundled", async () => {
   const dirs = (await bundledSkills()).map((skill) => skill.dir);
   for (const format of ["docx", "pdf", "pptx", "xlsx"])
     assert.ok(dirs.includes(`ofox-office-${format}`), format);
+});
+
+test("bundled skill frontmatter is valid YAML", async () => {
+  for (const skill of await bundledSkills())
+    for (const [key, value] of skill.fields)
+      assert.ok(yamlValue(value), `${skill.dir}: ${key}: ${value}`);
 });
 
 test("bundled skills are named after their directory with the ofox- prefix", async () => {
@@ -63,8 +88,10 @@ test("bundled skill bodies stay within their size limits", async () => {
 
 test("bundled skills describe batch arrays, not command-line calls", async () => {
   for (const skill of await bundledSkills())
-    for (const line of skill.body.split("\n"))
+    for (const line of skill.body.split("\n")) {
       assert.doesNotMatch(line, cliCall, skill.dir);
+      for (const word of cliOnly) assert.doesNotMatch(line, word, skill.dir);
+    }
 });
 
 test("office skill examples have the create_document content shape", async () => {

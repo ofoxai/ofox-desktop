@@ -1,6 +1,6 @@
 ---
 name: ofox-office-pdf
-description: Read before writing a PDF with create_document. How to write the Typst body: headings, lists, tables, emphasis, page breaks, CJK text.
+description: Read before writing a PDF with create_document. How to write the Typst body — headings, lists, tables, emphasis, page breaks, CJK text.
 ---
 
 # PDF documents
@@ -11,7 +11,7 @@ description: Read before writing a PDF with create_document. How to write the Ty
 
 - One document = one `create_document` call with the complete text. Never send a partial draft.
 - Write the body only. Never write `#set page`, `#set text`, `#import`, `#include` or package names (`@preview/…`); do not pick fonts or redefine headings. The one allowed `#set` is the paragraph indent below.
-- Images are not available: the body cannot reference files, and `#image(...)` fails to compile. Use text and tables.
+- Do not use images in this version: the body cannot reference your files. Use text and tables.
 - All text in the user's language; no placeholders (`TODO`, `xxxx`).
 - A compile error returns the message and quotes the offending source line (line numbers also count the prelude). Fix that spot and resend the whole body (at most 2 retries).
 
@@ -79,7 +79,7 @@ A sentence with a note.#footnote[The note text.]
 
 Code goes in a fenced raw block: three backticks with a language name, the code, three backticks.
 
-**Page break.** `#pagebreak()` on its own line, at the top level only (never inside a table, `#align` or another block).
+**Page break.** `#pagebreak()` on its own line in the main text; inside `#block[...]`, `#box[...]` or a table cell it is a compile error.
 
 **Special characters.** `#` `$` `*` `_` `@` `<` `` ` `` `\` `~` have meaning in markup; write them literally with a backslash: `\$15`, `user\@example.com`, `\#1`, `a \* b`. A line that starts with `=`, `-`, `+` or `1.` becomes a heading or list item; escape the first character (`\-`) when you mean plain text. Inside `[...]` brackets must balance; write a lone bracket as `\]`. `--` prints an en dash and `---` an em dash.
 
@@ -148,6 +148,6 @@ Code goes in a fenced raw block: three backticks with a language name, the code,
 | The title written as `= Title` | The centered title block |
 | `$100` or `a@b.com` unescaped | `\$100`, `a\@b.com` |
 | 7 cells in a 3-column table (ragged last row) | Fill every row, `[]` for an empty cell |
-| `#pagebreak()` inside `#align[...]` | Only at the top level |
+| `#pagebreak()` inside `#block[...]` or a table cell | On its own line in the main text |
 | `#image("photo.jpg")` | Describe it, or use a table |
 | Typed numbers plus heading numbering | Numbers go into the heading text |

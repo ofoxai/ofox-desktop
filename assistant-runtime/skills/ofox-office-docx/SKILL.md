@@ -18,7 +18,7 @@ description: Read before writing a Word document (.docx) with create_document. R
 
 ## Layout rules
 
-**Hierarchy.** Title → Heading1 → Heading2 → Heading3 → body. Never skip a level. Headings are real heading styles (`"style":"Heading1"`), never bold Normal text — Word's navigation pane and outline read them.
+**Hierarchy.** Title → Heading1 → Heading2 → Heading3 → body. Never skip a level. Headings are real heading styles (`"style":"Heading1"`), never bold Normal text — Word's navigation pane reads them.
 
 **Sizes**, set explicitly because template defaults drift:
 
@@ -35,13 +35,13 @@ description: Read before writing a Word document (.docx) with create_document. R
 
 **Chinese documents.** Font "Microsoft YaHei" (or "SimSun" for formal print). Body paragraphs get `"firstLineChars":"200"` (two-character indent), `"align":"justify"` and line spacing 1.5×. Use full-width punctuation; the issue "Mixed CJK/Latin punctuation" points at half-width marks (decimals like 2.1 are fine).
 
-**Spacing** comes from `spaceBefore` and `spaceAfter`, never from empty paragraphs.
+**Spacing** comes from `spaceBefore`/`spaceAfter`, never empty paragraphs.
 
 **Pages.** Start a major section on a new page with `pageBreakBefore` on its heading, or a `pagebreak` command — never both for the same break. Reports longer than about three pages get a cover: title, subtitle, prepared for or by, date, one line of key themes. Any document longer than a page gets a footer with a live page number; never type "Page 1".
 
-**Tables.** Header row in the accent color with white bold text, marked `header` so it repeats on every page; light gray borders; numbers right-aligned; totals bold. At most about 6 columns on a portrait page.
+**Tables.** Header row in the accent color with white bold text, marked `header` so it repeats on every page; light gray borders; numbers right-aligned; totals bold. At most about 6 columns in portrait.
 
-**Lists.** 3–7 items with parallel phrasing; bullets for unordered points, numbers for steps or ranking.
+**Lists.** 3–7 parallel items; bullets for points, numbers for steps or ranking.
 
 **Typography.** Curly quotes (“ ” ‘ ’), en dash for ranges (2024–2026), em dash for breaks.
 
@@ -151,7 +151,7 @@ description: Read before writing a Word document (.docx) with create_document. R
 ]
 ```
 
-For a Chinese report, set `docDefaults.font` and every heading `font` to "Microsoft YaHei", give body paragraphs `"firstLineChars":"200"`, `"align":"justify"`, `"lineSpacing":"1.5x"`, and write the footer as `"text":"第 "` with `"field":"page"`, then a run `" 页"` on `/footer[1]/p[1]`.
+For a Chinese report, set `docDefaults.font` and every heading `font` to "Microsoft YaHei", give body paragraphs `"firstLineChars":"200"`, `"align":"justify"`, `"lineSpacing":"1.5x"`, and write the footer as `"text":"第 "` with `"field":"page"`, then add a run `{"text":" 页","size":"9pt","color":"7F7F7F"}` to `/footer[1]/p[1]`.
 
 ## Common mistakes
 
@@ -166,4 +166,4 @@ For a Chinese report, set `docDefaults.font` and every heading `font` to "Micros
 | `pageBreakBefore` plus a `pagebreak` | One of them |
 | Typed "Page 1" in the footer | `"field":"page"` |
 
-<!-- Adapted with changes from OfficeCLI v1.0.160 skills/officecli-docx (Apache-2.0); see notices/officecli-skills.txt -->
+<!-- Adapted with changes from OfficeCLI (skills/officecli-docx, v1.0.160, Apache-2.0); see notices/officecli-skills.txt -->

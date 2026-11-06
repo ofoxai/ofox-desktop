@@ -142,4 +142,4 @@ Rows 1–2 stay frozen; the chart reads months 1–6 only, not the total row.
 | A sheet renamed after formulas used the old name | Rename first |
 | Division without a guard | `IFERROR(…,0)` |
 
-<!-- Adapted with changes from OfficeCLI v1.0.160 skills/officecli-xlsx (Apache-2.0); see notices/officecli-skills.txt -->
+<!-- Adapted with changes from OfficeCLI (skills/officecli-xlsx, v1.0.160, Apache-2.0); see notices/officecli-skills.txt -->

@@ -1,17 +1,18 @@
 OfficeCLI authoring skills
 ==========================
 
-The bundled skills ofox-office-docx, ofox-office-pptx, ofox-office-xlsx and
-ofox-office-pdf (runtime/skills/) are adapted from the skills in the OfficeCLI
-repository, https://github.com/iOfficeAI/OfficeCLI, tag v1.0.160
-(skills/officecli-docx, skills/officecli-pptx, skills/officecli-xlsx and the
-root SKILL.md), licensed under the Apache License, Version 2.0.
+The bundled skills ofox-office-docx, ofox-office-pptx and ofox-office-xlsx
+(runtime/skills/) are adapted from the skills in the OfficeCLI repository,
+https://github.com/iOfficeAI/OfficeCLI, tag v1.0.160 (skills/officecli-docx,
+skills/officecli-pptx, skills/officecli-xlsx and the root SKILL.md), licensed
+under the Apache License, Version 2.0. ofox-office-pdf is original work and
+contains no OfficeCLI material.
 
-Changes: the layout and design rules were condensed and rewritten in our own
-words; shell commands, installation steps and command-line workflows were
-replaced by batch command arrays for the create_document tool, limited to a
-subset of elements; examples and worked examples are new. ofox-office-pdf is
-original and only follows the structure of the other three.
+Changes to the three adapted skills: the layout and design rules were
+condensed and rewritten in our own words; shell commands, installation steps
+and command-line workflows were replaced by batch command arrays for the
+create_document tool, limited to a subset of elements; examples and worked
+examples are new.
 
 OfficeCLI NOTICE
 ----------------

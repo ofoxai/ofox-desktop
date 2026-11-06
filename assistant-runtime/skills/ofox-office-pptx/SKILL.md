@@ -21,7 +21,7 @@ description: Read before making a PowerPoint deck (.pptx) with create_document. 
 
 **One idea per slide.** 3–5 one-line bullets (≈ 12 words or 20 CJK characters); more means another slide. Notes on every content slide.
 
-**Type scale**: title 36–44pt bold (at least 2× body); subtitle and card heading 20–24pt; body 18–24pt, sentences never below 18; captions and labels 10–14pt, muted; KPI numbers 60–72pt bold, ≤ 5 characters.
+**Type scale**: title 36–44pt bold (at least 1.5× body); subtitle and card heading 20–24pt; body 18–24pt, sentences never below 18; captions and labels 10–14pt, muted; KPI numbers 60–72pt bold, ≤ 5 characters.
 
 Box height ≥ lines × size × 0.05 cm + 0.4 cm; a line holds about width_cm ÷ (size × 0.035) CJK characters, twice as many Latin ones. Cut or split text that does not fit; never shrink below the scale.
 
@@ -33,8 +33,8 @@ Box height ≥ lines × size × 0.05 cm + 0.4 cm; a line holds about width_cm ÷
 
 | Theme | Primary | Secondary | Accent | Text | Muted |
 |---|---|---|---|---|---|
-| Midnight Executive | 1E2761 | CADCFC | F96167 | 333333 | 8899BB |
-| Forest & Moss | 2C5F2D | 97BC62 | D4A843 | 2D2D2D | 6B8E6B |
+| Navy | 1E2761 | CADCFC | F96167 | 333333 | 8899BB |
+| Forest | 2C5F2D | 97BC62 | D4A843 | 2D2D2D | 6B8E6B |
 
 On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
 
@@ -61,14 +61,14 @@ On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
 **Shapes.** `preset`: rect, roundRect, ellipse, triangle, diamond, rightArrow, chevron; `fill` colors it, `line` adds an outline color; it can hold text. Later shapes draw on top.
 
 ```json
-[{"command":"add","parent":"/slide[1]","type":"shape","props":{"name":"Kpi","preset":"roundRect","fill":"1E2761","x":"21.83cm","y":"5.2cm","width":"9.71cm","height":"5cm","text":"118%","font":"Georgia","size":"60","bold":"true","color":"FFFFFF","align":"center","valign":"middle"}}]
+[{"command":"add","parent":"/slide[1]","type":"shape","props":{"name":"Kpi","preset":"roundRect","fill":"1E2761","x":"21.09cm","y":"5.2cm","width":"10.45cm","height":"5cm","text":"118%","font":"Georgia","size":"60","bold":"true","color":"FFFFFF","align":"center","valign":"middle"}}]
 ```
 
 **Table.** `data`: rows split by `;`, cells by `,` (quote a cell as `\"…\"` to keep a comma); then style the body on the table and the header on `tr[1]`. At most about 6 × 5 cells, body 14–18pt.
 
 ```json
 [
-  {"command":"add","parent":"/slide[1]","type":"table","props":{"name":"Plan","data":"Phase,Owner,Date;Pilot,Operations,Q1;Rollout,Sales,Q2","x":"2.33cm","y":"11cm","width":"29.21cm","height":"4cm","colWidths":"12cm,10cm,7.21cm","headerFill":"1E2761","bodyFill":"F5F7FA"}},
+  {"command":"add","parent":"/slide[1]","type":"table","props":{"name":"Plan","data":"Phase,Owner,Date;Pilot,Operations,Q1;Rollout,Sales,Q2","x":"2.33cm","y":"10.96cm","width":"29.21cm","height":"4cm","colWidths":"12cm,10cm,7.21cm","headerFill":"1E2761","bodyFill":"F5F7FA"}},
   {"command":"set","path":"/slide[1]/table[@name=Plan]","props":{"font":"Calibri","size":"16","color":"333333","valign":"middle"}},
   {"command":"set","path":"/slide[1]/table[@name=Plan]/tr[1]","props":{"bold":"true","color":"FFFFFF"}}
 ]
@@ -82,7 +82,7 @@ On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
 
 ## Worked example: 8-slide deck
 
-「做一个 Transformer 介绍的 PPT」, Midnight Executive palette.
+「做一个 Transformer 介绍的 PPT」, Navy palette.
 
 ```json
 [
@@ -95,7 +95,7 @@ On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
   {"command":"add","parent":"/","type":"slide","props":{"title":"为什么需要 Transformer"}},
   {"command":"set","path":"/slide[3]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
   {"command":"add","parent":"/slide[3]","type":"shape","props":{"font":"Microsoft YaHei","name":"Why","text":"RNN 逐词计算，难以并行\n长句里前后信息容易衰减\n2017 年：注意力取代循环","list":"bullet","x":"2.33cm","y":"5.2cm","width":"18cm","height":"7cm","size":"22","color":"333333"}},
-  {"command":"add","parent":"/slide[3]","type":"shape","props":{"font":"Microsoft YaHei","name":"Year","preset":"roundRect","fill":"1E2761","x":"21.83cm","y":"5.2cm","width":"9.71cm","height":"6cm","text":"2017","size":"60","bold":"true","color":"FFFFFF","align":"center","valign":"middle"}},
+  {"command":"add","parent":"/slide[3]","type":"shape","props":{"font":"Microsoft YaHei","name":"Year","preset":"roundRect","fill":"1E2761","x":"21.09cm","y":"5.2cm","width":"10.45cm","height":"6cm","text":"2017","size":"60","bold":"true","color":"FFFFFF","align":"center","valign":"middle"}},
   {"command":"add","parent":"/slide[3]","type":"notes","props":{"text":"瓶颈在顺序计算。"}},
   {"command":"add","parent":"/","type":"slide","props":{"title":"自注意力：每个词都看全句"}},
   {"command":"set","path":"/slide[4]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
@@ -129,4 +129,4 @@ On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
 | "•" or "1." typed into text | `"list":"bullet"` / `"numbered"` |
 | Title without `font`/`size` | Style the title placeholder |
 
-<!-- Adapted with changes from OfficeCLI v1.0.160 skills/officecli-pptx (Apache-2.0); see notices/officecli-skills.txt -->
+<!-- Adapted with changes from OfficeCLI (skills/officecli-pptx, v1.0.160, Apache-2.0); see notices/officecli-skills.txt -->
