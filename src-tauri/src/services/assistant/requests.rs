@@ -1525,9 +1525,6 @@ fn web_params(
     params
 }
 
-/// The custom instructions part of a run's parameters: `instructions` only
-/// when there are some, so that without them a run's parameters stay as they
-/// were before the setting existed.
 /// The document formats a run can make with `create_document`: for a model
 /// that takes tools while the runtime is there to register the tool. Text
 /// formats need no engine, so they are always among them.
@@ -1543,6 +1540,9 @@ fn document_params(
     params
 }
 
+/// The custom instructions part of a run's parameters: `instructions` only
+/// when there are some, so that without them a run's parameters stay as they
+/// were before the setting existed.
 fn instruction_params(instructions: &str) -> Map<String, Value> {
     let mut params = Map::new();
     if !instructions.trim().is_empty() {

@@ -14,6 +14,9 @@ pub const OUTPUT_LIMIT: usize = 256 * 1024;
 /// open (a process it left behind can hold them) before the output is given up.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
 
+/// Where an engine's web requests go: a port nothing listens on.
+pub const DEAD_PROXY: &str = "http://127.0.0.1:9";
+
 /// The folder of `home` where Typst looks for packages and caches them.
 pub const TYPST_PACKAGES: &str = "typst-packages";
 
@@ -28,8 +31,8 @@ pub struct EngineOutput {
 
 /// Run `exe` with `args` in `cwd`. The engine sees none of the app's
 /// environment: `home` is its home and temp folder, it neither updates itself
-/// nor leaves a resident process, and it finds Typst packages only in an empty
-/// folder of `home`.
+/// nor leaves a resident process, it finds Typst packages only in an empty
+/// folder of `home`, and its web requests go to [`DEAD_PROXY`].
 pub async fn run_engine(
     exe: &Path,
     args: &[&str],
@@ -53,6 +56,19 @@ pub async fn run_engine(
         .env("OFFICECLI_SKIP_UPDATE", "1")
         .env("TYPST_PACKAGE_PATH", &packages)
         .env("TYPST_PACKAGE_CACHE_PATH", &packages);
+    // No engine reaches the network: every request goes to a proxy that is
+    // not there.
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(name, DEAD_PROXY);
+    }
+    command.env("NO_PROXY", "").env("no_proxy", "");
     let mut child = Child::spawn(command)?;
     drop(child.take_stdin());
     let stdout = child
@@ -191,6 +207,20 @@ mod tests {
         assert!(lines.contains(&format!("TYPST_PACKAGE_CACHE_PATH={packages}").as_str()));
         assert!(home.join("typst-packages").is_dir());
         assert!(lines.contains(&"OFFICECLI_SKIP_UPDATE=1"));
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            assert!(
+                lines.contains(&format!("{name}=http://127.0.0.1:9").as_str()),
+                "{name}"
+            );
+        }
+        assert!(lines.contains(&"NO_PROXY=") && lines.contains(&"no_proxy="));
         assert!(lines.contains(&"OFFICECLI_NO_AUTO_RESIDENT=1"));
         assert!(!lines.iter().any(|line| line.starts_with("OFOX_")));
     }

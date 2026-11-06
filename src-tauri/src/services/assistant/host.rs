@@ -358,6 +358,8 @@ pub struct AssistantHost {
     /// The `sandbox-exec` officecli runs under, once its first run showed it
     /// works there; `None` when it does not (see `documents::create`).
     pub(super) office_sandbox: tokio::sync::OnceCell<Option<PathBuf>>,
+    /// The same for Typst.
+    pub(super) typst_sandbox: tokio::sync::OnceCell<Option<PathBuf>>,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -771,6 +773,7 @@ impl AssistantHost {
             shutdown_deadline: Mutex::default(),
             engines: OnceLock::new(),
             office_sandbox: tokio::sync::OnceCell::new(),
+            typst_sandbox: tokio::sync::OnceCell::new(),
         })
     }
 
