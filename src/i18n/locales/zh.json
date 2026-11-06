@@ -4513,6 +4513,7 @@
       "reviewed": "已审核",
       "unreviewed": "未审核",
       "assistantCreated": "助手创建",
+      "bundled": "内置",
       "originHint": "目录来源标记不代表内容安全保证。"
     },
     "assistantSkillStateInvalid": "助手技能设置无法读取，请检查后重试。",

@@ -4513,6 +4513,7 @@
       "reviewed": "確認済み",
       "unreviewed": "未確認",
       "assistantCreated": "アシスタントが作成",
+      "bundled": "内蔵",
       "originHint": "カタログの出典表示は内容の安全性を保証するものではありません。"
     },
     "assistantSkillStateInvalid": "アシスタントのスキル設定を読み取れません。確認して再試行してください。",

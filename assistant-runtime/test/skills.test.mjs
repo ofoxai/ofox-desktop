@@ -115,6 +115,25 @@ test("only exact auto names can load; host refresh replaces rather than accumula
   assert.equal(calls, 1);
 });
 
+test("replaceSkillIndex accepts ofox- names", () => {
+  const ctx = context([]);
+  const bundled = {
+    ...skill("ofox-office-pdf"),
+    description: "Read before writing a PDF",
+    reviewed: true,
+    bundled: true,
+  };
+  assert.equal(
+    replaceSkillIndex(ctx, { skills: [bundled], revision: 1 }),
+    true,
+  );
+  assert.deepEqual(ctx.skillIndex.get("ofox-office-pdf"), bundled);
+  assert.match(
+    skillPrompt(ctx),
+    /^- ofox-office-pdf: Read before writing a PDF$/m,
+  );
+});
+
 test("find install save use host callbacks, count calls and refresh before same-turn use", async () => {
   const calls = [];
   const ctx = context([]);

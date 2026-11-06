@@ -1,4 +1,6 @@
 //! Run-local skill authority. Names and paths from model arguments never grant access.
+pub mod bundled;
+
 use super::{
     host::{blocking, AssistantHost, RunControl},
     tools::{
@@ -34,12 +36,17 @@ pub fn read_verified(
 #[derive(Default)]
 pub struct SkillRunState {
     entries: BTreeMap<String, (AssistantSkill, AssistantSkillProof)>,
+    bundled: Vec<bundled::BundledSkill>,
     selected: BTreeMap<String, AssistantSkillProof>,
     denied: Vec<PathBuf>,
     revision: u64,
 }
 impl SkillRunState {
-    pub fn replace(&mut self, snapshot: AssistantSkillSnapshot) -> Value {
+    pub fn replace(
+        &mut self,
+        snapshot: AssistantSkillSnapshot,
+        bundled: Vec<bundled::BundledSkill>,
+    ) -> Value {
         let mut entries = BTreeMap::new();
         for skill in &snapshot.skills {
             if skill.broken.is_some() {
@@ -67,11 +74,29 @@ impl SkillRunState {
             false
         });
         self.entries = entries;
+        self.bundled = bundled;
         self.revision += 1;
         self.public()
     }
+    /// The user's skills, then each bundled skill none of them shadows.
     pub fn public(&self) -> Value {
-        json!({"revision":self.revision,"skills":self.entries.values().map(|(s,p)|json!({"name":s.name,"description":crate::redact::scrub(&s.description),"dir":p.lexical_target(),"mode":s.mode,"hasScripts":s.has_scripts,"reviewed":s.reviewed})).collect::<Vec<_>>()})
+        let user = self.entries.values().map(|(s,p)|json!({"name":s.name,"description":crate::redact::scrub(&s.description),"dir":p.lexical_target(),"mode":s.mode,"hasScripts":s.has_scripts,"reviewed":s.reviewed}));
+        let bundled = self
+            .bundled
+            .iter()
+            .filter(|skill| self.unshadowed(skill))
+            .map(|skill| json!({"name":skill.name,"description":crate::redact::scrub(&skill.description),"dir":skill.dir,"mode":SkillMode::Auto,"hasScripts":false,"reviewed":true,"bundled":true}));
+        json!({"revision":self.revision,"skills":user.chain(bundled).collect::<Vec<_>>()})
+    }
+    fn unshadowed(&self, skill: &bundled::BundledSkill) -> bool {
+        let free = !self.entries.contains_key(&skill.name);
+        if !free {
+            log::info!(
+                "[Assistant] the user's skill {} replaces the bundled one",
+                skill.name
+            );
+        }
+        free
     }
     fn proof(&self, name: &str, selected: bool) -> Result<AssistantSkillProof, String> {
         let (metadata, proof) = self
@@ -95,6 +120,13 @@ impl SkillRunState {
             )
             .collect()
     }
+    /// A bundled skill no user skill shadows.
+    pub fn bundled_skill(&self, name: &str) -> Option<&bundled::BundledSkill> {
+        if self.entries.contains_key(name) {
+            return None;
+        }
+        self.bundled.iter().find(|skill| skill.name == name)
+    }
     pub fn denied(&self) -> &[PathBuf] {
         &self.denied
     }
@@ -103,22 +135,46 @@ fn unavailable(e: String) -> AppError {
     AppError::Message(e)
 }
 fn load(access: &VerifiedSkillAccess<'_>) -> Result<Value, AppError> {
-    let root = scope::resolve(access.dir()).map_err(unavailable)?;
-    let scope = Scope::new(root.clone(), vec![root.clone()], vec![]).map_err(unavailable)?;
+    read_dir(access.dir(), access.target()).map_err(unavailable)
+}
+/// A skill folder's bounded body and relative file list; `shown` is the dir the model sees.
+fn read_dir(dir: &Path, shown: &Path) -> Result<Value, String> {
+    let root = scope::resolve(dir)?;
+    let scope = Scope::new(root.clone(), vec![root.clone()], vec![])?;
     // Task3 accepts 1 MiB SKILL files; the normal generic reader has a lower limit.
-    let body = files::read_skill(&scope, &root.join("SKILL.md")).map_err(unavailable)?;
-    let mut paths = files::skill_files(&scope, &root).map_err(unavailable)?;
+    let body = files::read_skill(&scope, &root.join("SKILL.md"))?;
+    let mut paths = files::skill_files(&scope, &root)?;
     let truncated = body.chars().count() > 60000 || paths.len() > 200;
     paths.truncate(200);
     Ok(
-        json!({"dir":access.target(),"body":body.chars().take(60000).collect::<String>(),"files":paths,"truncated":truncated}),
+        json!({"dir":shown,"body":body.chars().take(60000).collect::<String>(),"files":paths,"truncated":truncated}),
     )
+}
+/// The runtime's bundled skills; none when the runtime cannot be found.
+fn bundled_in(env: &dyn super::host::Environment) -> Vec<bundled::BundledSkill> {
+    match env.runtime_dir() {
+        Ok(dir) => bundled::bundled_skills(&dir),
+        Err(error) => {
+            log::warn!("[Assistant] bundled skills are unavailable: {error}");
+            Vec::new()
+        }
+    }
 }
 impl AssistantHost {
     pub async fn list_skills(&self) -> Result<Value, String> {
         let env = self.env.clone();
-        let snapshot = blocking(move || env.skill_snapshot()).await?;
-        Ok(json!(snapshot.skills.iter().filter(|s| s.broken.is_none() && snapshot.proof(&s.name).is_some()).map(|s| json!({"name":s.name,"description":crate::redact::scrub(&s.description),"mode":s.mode,"reviewed":s.reviewed,"origin":s.origin})).collect::<Vec<_>>()))
+        let (snapshot, bundled) =
+            blocking(move || Ok((env.skill_snapshot()?, bundled_in(env.as_ref())))).await?;
+        let user: Vec<_> = snapshot
+            .skills
+            .iter()
+            .filter(|s| s.broken.is_none() && snapshot.proof(&s.name).is_some())
+            .collect();
+        let bundled = bundled
+            .iter()
+            .filter(|b| !user.iter().any(|s| s.name == b.name))
+            .map(|b| json!({"name":b.name,"description":crate::redact::scrub(&b.description),"mode":SkillMode::Auto,"reviewed":true,"origin":"bundled"}));
+        Ok(json!(user.iter().map(|s| json!({"name":s.name,"description":crate::redact::scrub(&s.description),"mode":s.mode,"reviewed":s.reviewed,"origin":s.origin})).chain(bundled).collect::<Vec<_>>()))
     }
 
     pub async fn refresh_run_skills(&self, run: &Arc<RunControl>) -> Result<Value, String> {
@@ -134,6 +190,9 @@ impl AssistantHost {
         if self.identity().await? != run.identity {
             return Err("assistant_identity_changed".into());
         }
+        // Bundled skills come with the runtime: a damaged library keeps them.
+        let env = self.env.clone();
+        let bundled = blocking(move || Ok(bundled_in(env.as_ref()))).await?;
         let env = self.env.clone();
         let snapshot = match blocking(move || env.skill_snapshot()).await {
             Ok(snapshot) => snapshot,
@@ -151,7 +210,7 @@ impl AssistantHost {
             .skills
             .lock()
             .map_err(|_| "assistant_state_unavailable")?
-            .replace(snapshot))
+            .replace(snapshot, bundled))
     }
     /// Task5 only: call during admission, after resolving the user's effective selected name.
     pub async fn select_run_skill(
@@ -173,6 +232,15 @@ impl AssistantHost {
         self.validate_run(run)?;
         if self.identity().await? != run.identity {
             return Err("assistant_identity_changed".into());
+        }
+        let bundled = run
+            .skills
+            .lock()
+            .map_err(|_| "assistant_state_unavailable")?
+            .bundled_skill(name)
+            .cloned();
+        if let Some(skill) = bundled {
+            return self.load_bundled(run, skill).await;
         }
         let proof = run
             .skills
@@ -207,6 +275,27 @@ impl AssistantHost {
         }
         if selected {
             state.selected.insert(name.into(), expected);
+        }
+        result["name"] = json!(name);
+        result["scriptsUnavailable"] = json!(!run.local_enabled);
+        Ok(result)
+    }
+    /// A bundled skill is the app's own file: no proof, no library read.
+    async fn load_bundled(
+        &self,
+        run: &Arc<RunControl>,
+        skill: bundled::BundledSkill,
+    ) -> Result<Value, String> {
+        let name = skill.name.clone();
+        let mut result = blocking(move || bundled::read_bundled(&skill))
+            .await
+            .map_err(|error| {
+                log::warn!("[Assistant] bundled skill {name} cannot be read: {error}");
+                "not_available: skill cannot be read".to_string()
+            })?;
+        self.validate_run(run)?;
+        if self.identity().await? != run.identity {
+            return Err("assistant_identity_changed".into());
         }
         result["name"] = json!(name);
         result["scriptsUnavailable"] = json!(!run.local_enabled);
@@ -287,7 +376,7 @@ mod tests {
         .unwrap();
         assistant_target::set_skill_mode("sample", SkillMode::Manual).unwrap();
         let mut state = SkillRunState::default();
-        state.replace(snapshot(&db).unwrap());
+        state.replace(snapshot(&db).unwrap(), Vec::new());
         let proof = state.proof("sample", true).unwrap();
         assert!(state.proof("sample", false).is_err());
         state.selected.insert("sample".into(), proof.clone());
@@ -295,24 +384,61 @@ mod tests {
         let mut after = before.clone();
         after.machine.epoch += 1;
         db.library_commit(&before, &after).unwrap();
-        state.replace(snapshot(&db).unwrap());
+        state.replace(snapshot(&db).unwrap(), Vec::new());
         assert!(state.selected.contains_key("sample"));
         assert_ne!(state.selected["sample"], proof);
         assert!(state.selected["sample"].same_identity(&proof));
         std::fs::write(dir.join("reference.txt"), "changed").unwrap();
-        state.replace(snapshot(&db).unwrap());
+        state.replace(snapshot(&db).unwrap(), Vec::new());
         assert!(state.selected.is_empty());
         assert!(!state.denied.is_empty());
         let next = state.proof("sample", true).unwrap();
         state.selected.insert("sample".into(), next);
         assistant_target::set_skill_mode("sample", SkillMode::Auto).unwrap();
-        state.replace(snapshot(&db).unwrap());
+        state.replace(snapshot(&db).unwrap(), Vec::new());
         assert!(state.selected.is_empty());
         let before = state.denied.clone();
         std::fs::remove_dir_all(dir).unwrap();
-        state.replace(snapshot(&db).unwrap());
+        state.replace(snapshot(&db).unwrap(), Vec::new());
         assert!(state.entries.is_empty());
         assert_eq!(state.denied, before);
+    }
+    #[test]
+    #[serial_test::serial]
+    fn public_puts_user_skills_first_and_drops_colliding_bundled() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let db = Database::memory().unwrap();
+        let dir = assistant_target::skills_dir().join("ofox-office-pdf");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: ofox-office-pdf\ndescription: Mine\n---\nBody",
+        )
+        .unwrap();
+        let bundled = |name: &str| bundled::BundledSkill {
+            name: name.into(),
+            description: format!("Bundled {name}"),
+            dir: PathBuf::from("/runtime/skills").join(name),
+        };
+        let mut state = SkillRunState::default();
+        let public = state.replace(
+            snapshot(&db).unwrap(),
+            vec![bundled("ofox-office-docx"), bundled("ofox-office-pdf")],
+        );
+        let skills = public["skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 2);
+        assert_eq!(skills[0]["name"], "ofox-office-pdf");
+        assert_eq!(skills[0]["description"], "Mine");
+        assert!(skills[0].get("bundled").is_none());
+        assert_eq!(
+            skills[1],
+            json!({"name":"ofox-office-docx","description":"Bundled ofox-office-docx","dir":bundled("ofox-office-docx").dir,"mode":"auto","hasScripts":false,"reviewed":true,"bundled":true})
+        );
+        assert!(state.bundled_skill("ofox-office-pdf").is_none());
+        assert_eq!(
+            state.bundled_skill("ofox-office-docx"),
+            Some(&bundled("ofox-office-docx"))
+        );
     }
     #[test]
     #[serial_test::serial]

@@ -3372,6 +3372,102 @@ mod tests {
         host.release_run(&run);
     }
 
+    /// A runtime dir holding one bundled `ofox-office-pdf` skill.
+    fn bundled_runtime(env: &FixedEnvironment, body: &str) -> tempfile::TempDir {
+        let runtime = tempfile::tempdir().unwrap();
+        super::super::skills::bundled::write_skill(
+            runtime.path(),
+            "ofox-office-pdf",
+            "ofox-office-pdf",
+            body,
+        );
+        *env.runtime.lock().unwrap() = Some(runtime.path().into());
+        runtime
+    }
+
+    /// A plain chat session, without local configuration, with one registered run.
+    fn chat_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let run = control(&sid);
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        (sid, run)
+    }
+
+    #[tokio::test]
+    async fn load_run_skill_reads_bundled_without_proof() {
+        let (_tmp, env, host) = fixture_with_env();
+        let _runtime = bundled_runtime(&env, "Write the Typst body.");
+        let (sid, run) = chat_run(&host);
+        let admitted = host.admit_run_skills(&run).await.unwrap();
+        assert_eq!(admitted["skills"][0]["name"], "ofox-office-pdf");
+        assert_eq!(admitted["skills"][0]["bundled"], true);
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"bundled","name":"use_skill","args":{"name":"ofox-office-pdf"}});
+        let result = host.dispatch_tool(&run, &call).await.unwrap();
+        assert!(result["body"]
+            .as_str()
+            .unwrap()
+            .contains("Write the Typst body."));
+        assert_eq!(result["name"], "ofox-office-pdf");
+        assert_eq!(result["files"], json!(["SKILL.md"]));
+        assert_eq!(result["scriptsUnavailable"], true);
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn admitted_runs_keep_bundled_skills_when_the_library_is_unavailable() {
+        let (_tmp, env, host) = fixture_with_env();
+        let _runtime = bundled_runtime(&env, "Body");
+        env.skill_refresh_fail.store(true, Ordering::SeqCst);
+        let (_sid, run) = chat_run(&host);
+        let admitted = host.admit_run_skills(&run).await.unwrap();
+        assert_eq!(admitted["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(admitted["skills"][0]["name"], "ofox-office-pdf");
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn list_skills_marks_bundled_origin() {
+        let (_tmp, env, host) = fixture_with_env();
+        let _runtime = bundled_runtime(&env, "Body");
+        assert_eq!(
+            host.list_skills().await.unwrap(),
+            json!([{"name":"ofox-office-pdf","description":"Use for ofox-office-pdf","mode":"auto","reviewed":true,"origin":"bundled"}])
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_user_skill_shadows_the_bundled_one_of_the_same_name() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        *env.skill_db.lock().unwrap() = Some(Arc::new(crate::Database::memory().unwrap()));
+        let _runtime = bundled_runtime(&env, "Bundled body");
+        let dir = crate::assistant_target::skills_dir().join("ofox-office-pdf");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: ofox-office-pdf\ndescription: Mine\n---\nUser body",
+        )
+        .unwrap();
+        let listed = host.list_skills().await.unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["description"], "Mine");
+        let (sid, run) = chat_run(&host);
+        host.admit_run_skills(&run).await.unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"shadowed","name":"use_skill","args":{"name":"ofox-office-pdf"}});
+        let body = host.dispatch_tool(&run, &call).await.unwrap()["body"].clone();
+        assert!(body.as_str().unwrap().contains("User body"));
+        assert!(!body.as_str().unwrap().contains("Bundled body"));
+        host.release_run(&run);
+    }
+
     /// A local-config session with one registered run in the default mode.
     fn local_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
         let sid = host
