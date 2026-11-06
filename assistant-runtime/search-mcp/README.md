@@ -3,7 +3,8 @@
 A small stdio MCP server, built on the official `@modelcontextprotocol/sdk`,
 that gives the Ofox assistant two tools: `web_search` (a paid search through
 the Ofox Responses API, billed as one or two search calls, see
-[Billing](#billing)) and `web_fetch` (read one public web page).
+[Billing](#billing); or a free one through Exa, see
+[Exa](#exa-free-search)) and `web_fetch` (read one public web page).
 `npm run build` bundles `src/server.mjs` into the single file
 `dist/ofox-search-mcp.mjs`, which runs on the bundled Node 22 with no
 `node_modules`. Only the stdio transport is bundled; the build fails if the
@@ -29,6 +30,8 @@ contains the key.
 | `OFOX_ASSISTANT_KEY`       | yes      | The assistant's own Ofox API key: one printable token, 16-512 chars. |
 | `OFOX_BASE_URL`            | yes      | Exactly `https://api.ofox.ai` or `https://api.ofox.io`.              |
 | `OFOX_SEARCH_MODEL`        | no       | Search model id; default `openai/gpt-5-nano`.                        |
+| `OFOX_SEARCH_PROVIDER`     | no       | `ofox` (default, paid) or `exa` (free); anything else is an error.   |
+| `OFOX_EXA_URL`             | no       | Tests only, with the local flag: a `http://localhost:<port>/<path>`. |
 | `OFOX_ALLOW_LOCAL_GATEWAY` | no       | `1` also allows `http://localhost:<port>` as the base URL (tests).   |
 | `OFOX_PROXY_URL`           | no       | The app's `http`, `https` or `socks5` proxy, credentials included.   |
 | `OFOX_NO_PROXY`            | no       | Hosts that bypass the proxy (`NO_PROXY` syntax).                     |
@@ -207,6 +210,37 @@ rules above. The runtime only lets the model fetch URLs that the host allows
 `web_search` of the same run returned, or that a page it read links to on
 the same host (at most 3 of those reads per run).
 
+## Exa (free search)
+
+With `OFOX_SEARCH_PROVIDER=exa`, `web_search` sends one JSON-RPC
+`tools/call` of `web_search_exa {query, numResults: 8}` to Exa's hosted MCP
+server, `POST https://mcp.exa.ai/mcp`, without a key and without a session
+(`Accept: application/json, text/event-stream`; the answer is read from JSON
+or the last SSE `data:` line). The header `x-exa-source: ofox-desktop` only
+names the integration. The Ofox key never goes there. It goes through the
+app's proxy like a search, times out after 25 s and is never retried.
+
+`https://mcp.exa.ai/mcp` is a fixed third-party infrastructure URL, an
+explicit exception to deriving every URL from the Ofox apex: queries, and the
+URLs `web_fetch` reads with Exa, go to Exa, outside Ofox. Exa's keyless tier
+needs a direct IPv4 connection (a proxy or IPv6 gets 403) and is limited per
+IP (429). The URL check on queries is the same as Ofox's.
+
+Exa answers with text blocks (`Title:`, `URL:`, `Published:`, then the
+page's highlights), separated by a `---` line before the next `Title:`. Each
+becomes a result with the highlights on one line as `snippet` (at most 1,000
+characters), `published` when it is a date, and the host name as title when
+there is none; HTTP(S) URLs only, each once. `summary` is empty and usage is
+`{searchCalls: 0, inputTokens: 0, outputTokens: 0, model: "exa"}`: nothing is
+billed. Failures are `search_rate_limited` (429), `search_blocked` (403) or
+`search_failed` (anything else, with `status` when Exa sent one), never an
+unknown outcome, since nothing is billed.
+
+`web_fetch` with Exa first validates the URL by the rules below, then asks
+`web_fetch_exa {urls: [url], maxCharacters: 20000}` (10 s), whose Markdown
+comes back as the page with its HTTPS Markdown links. When Exa cannot read it,
+the page is read here as usual, within the runtime's 30 s.
+
 ## Billing
 
 The Ofox gateway bills every `web_search_call` output item, `open_page`
@@ -243,6 +277,8 @@ cut to its limit.
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `search_outcome_unknown`      | The search may have run and been billed: timeout, cancellation, any network error other than a connect()/DNS failure (TLS errors included), HTTP 5xx or 3xx, a body over 1 MiB, unreadable or malformed success. Do not repeat it automatically. |
 | `search_unauthorized`         | HTTP 401/403: the key was rejected.                                                                                                                                                                                                              |
+| `search_rate_limited`         | Exa only: HTTP 429, its free tier's limit for this network; nothing was searched.                                                                                                                                                                |
+| `search_blocked`              | Exa only: HTTP 403, Exa refused a keyless search from this network (a proxy or IPv6); nothing was searched.                                                                                                                                      |
 | `search_insufficient_balance` | HTTP 402, or a 4xx (never 429) with Ofox's own error shape `error.type: "insufficient_credits"` or `error.code: 402`. An upstream `insufficient_quota` is not the user's balance.                                                                |
 | `search_failed`               | Another 4xx (with `status`; 429 means rate-limited, try later), or connect()/DNS or the proxy failed before its tunnel (no `status`; nothing was sent). There is no separate rate-limit code: use `status` 429.                                  |
 | `search_rejected`             | The query contains a URL, a `www.` host or a host with a path or query string; nothing was sent.                                                                                                                                                 |

@@ -24,7 +24,7 @@ const MAX_EXCERPT_CHARS = 600;
 const MAX_LISTED = 10;
 const MAX_URL_CHARS = 2048;
 const MAX_SUMMARY_CHARS = 8000;
-const PUBLISHED = /\b\d{4}-\d{2}-\d{2}\b/;
+const PUBLISHED = /\b\d{4}-\d{2}-\d{2}(?!\d)/;
 
 const INSTRUCTION =
   "Search the web once for the query below. Do not answer it and do not " +

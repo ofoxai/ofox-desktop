@@ -70,6 +70,43 @@ function run(copy, env) {
   });
 }
 
+test("the bundle searches with Exa for free when told to, never sending the key there", async (t) => {
+  const exa = await startGateway((_req, res) =>
+    replyJson(res, 200, {
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "Title: Pi\nURL: https://pi.dev/\nPublished: N/A\nHighlights:\nAn agent toolkit.",
+          },
+        ],
+      },
+    }),
+  );
+  t.after(exa.close);
+  const { client } = await connect(t, {
+    OFOX_ASSISTANT_KEY: KEY,
+    OFOX_BASE_URL: "https://api.ofox.ai",
+    OFOX_ALLOW_LOCAL_GATEWAY: "1",
+    OFOX_SEARCH_PROVIDER: "exa",
+    OFOX_EXA_URL: `${exa.baseUrl}/mcp`,
+  });
+  const search = await client.callTool({
+    name: "web_search",
+    arguments: { query: "Pi agent" },
+  });
+  assert.equal(search.isError, undefined);
+  assert.deepEqual(search.structuredContent.results, [
+    { title: "Pi", url: "https://pi.dev/", snippet: "An agent toolkit." },
+  ]);
+  assert.equal(search.structuredContent.usage.model, "exa");
+  assert.equal(exa.requests.length, 1);
+  assert.equal(exa.requests[0].url, "/mcp");
+  assert.equal(JSON.stringify(exa.requests[0]).includes(KEY), false);
+});
+
 test("the bundle has no HTTP server transports in it", async () => {
   const source = await readFile(BUNDLE, "utf8");
   assert.doesNotMatch(source, /express|hono/i);

@@ -39,6 +39,7 @@ const ALLOWED_ENV = new Set([
   "OFOX_ALLOW_LOCAL_GATEWAY",
   "OFOX_PROXY_URL",
   "OFOX_NO_PROXY",
+  "OFOX_SEARCH_PROVIDER",
   "SystemRoot",
   "TEMP",
   "TMP",
@@ -280,6 +281,7 @@ test("the server gets the key and gateway only through its own environment", asy
       allowLocalGateway: true,
       apex: "ofox.ai",
       proxy,
+      searchProvider: "exa",
     },
   ]) {
     const fixture = await sandbox(t, extra);
@@ -301,6 +303,10 @@ test("the server gets the key and gateway only through its own environment", asy
       );
     if (process.env.PATH) assert.equal(start.env.PATH, process.env.PATH);
     assert.equal(start.env.OFOX_ASSISTANT_KEY, token);
+    assert.equal(
+      start.env.OFOX_SEARCH_PROVIDER,
+      extra.searchProvider ?? "ofox",
+    );
     if (extra.baseUrl) {
       assert.equal(start.env.OFOX_BASE_URL, "http://localhost:8088");
       assert.equal(start.env.OFOX_ALLOW_LOCAL_GATEWAY, "1");
@@ -868,6 +874,27 @@ setInterval(() => {}, 1000);`,
     }
   }
   assert.equal(alive, false, "the server was stopped");
+});
+
+test("with Exa the model is told searches are free; an unknown provider rejects the run", async (t) => {
+  const fixture = await sandbox(t, { searchProvider: "exa" });
+  const model = scriptedModel(() => reply("No search needed."));
+  const { runtime } = runtimeFor(t, fixture, model);
+  assert.equal((await runtime.run(fixture.params)).status, "completed");
+  const [request] = model.requests;
+  const system = request.messages[0].content;
+  assert.match(system, /web_search searches the web for free through Exa/);
+  assert.doesNotMatch(system, /paid search/);
+  const search = request.tools.find(
+    (tool) => tool.function.name === "web_search",
+  );
+  assert.match(search.function.description, /for free through Exa/);
+
+  const bad = await sandbox(t, { searchProvider: "bing" });
+  const unused = scriptedModel();
+  const { runtime: refusing } = runtimeFor(t, bad, unused);
+  await assert.rejects(refusing.run(bad.params), /Invalid web search provider/);
+  assert.equal(unused.requests.length, 0);
 });
 
 test("a malformed web URL allowlist rejects the run before any request", async (t) => {

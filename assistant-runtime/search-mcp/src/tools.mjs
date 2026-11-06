@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z from "zod";
 import { proxiedFetch } from "./proxy.mjs";
 import { redact, scrubSecrets } from "./redact.mjs";
+import { exaReadPage, exaSearch } from "./exa.mjs";
 import { SearchError, webSearch } from "./search.mjs";
 import { FetchError, readWebPage, tunneledRequest } from "./web.mjs";
 
@@ -21,7 +22,21 @@ const FALLBACK_MESSAGES = {
   search_outcome_unknown:
     "The web search may or may not have run and been billed: it failed " +
     "unexpectedly. Do not repeat it automatically.",
+  search_failed: "The free web search failed unexpectedly.",
   fetch_failed: "Web request failed",
+};
+
+const SEARCH_DESCRIPTIONS = {
+  ofox:
+    "Search the web through Ofox and get the most relevant results, each " +
+    "with its title, link and an excerpt from the page. Each call is paid, " +
+    "one or two billed search calls (a search, sometimes an opened page): " +
+    "search only when current or outside information is needed, and never " +
+    "repeat a search that returned search_outcome_unknown.",
+  exa:
+    "Search the web for free through Exa and get the most relevant " +
+    "results, each with its title, link and an excerpt from the page. " +
+    "Search only when current or outside information is needed.",
 };
 
 const byteLength = (text) => Buffer.byteLength(text, "utf8");
@@ -141,11 +156,24 @@ function stderrLog(line) {
   process.stderr.write(`ofox-search-mcp: ${line}\n`);
 }
 
+/**
+ * The two tools for `config.provider`: Ofox searches through its paid
+ * gateway; Exa searches for free and reads pages through Exa first, then
+ * here when Exa cannot. Either way a page is read here under the same rules.
+ */
 export function createSearchServer(
   config,
-  { search = webSearch, fetchPage = readWebPage, log = stderrLog } = {},
+  {
+    search = config.provider === "exa" ? exaSearch : webSearch,
+    fetchPage = readWebPage,
+    exaRead = config.provider === "exa" ? exaReadPage : null,
+    log = stderrLog,
+  } = {},
 ) {
   const secrets = [config.apiKey];
+  // An Exa search costs nothing, so an unexpected failure is a plain one.
+  const searchFallback =
+    config.provider === "exa" ? "search_failed" : "search_outcome_unknown";
   const unexpected = (tool, error) =>
     log(
       `unexpected ${tool} failure: ${redact(
@@ -166,13 +194,7 @@ export function createSearchServer(
     "web_search",
     {
       title: "Web search",
-      description:
-        "Search the web through Ofox and get the most relevant results, " +
-        "each with its title, link and an excerpt from the page. Each call " +
-        "is paid, one or two billed search calls (a " +
-        "search, sometimes an opened page): search only when current or " +
-        "outside information is needed, and never repeat a search that " +
-        "returned search_outcome_unknown.",
+      description: SEARCH_DESCRIPTIONS[config.provider ?? "ofox"],
       inputSchema: z.strictObject({
         query: z
           .string()
@@ -195,7 +217,7 @@ export function createSearchServer(
         return searchToolResult(scrubSecrets(result, secrets));
       } catch (error) {
         if (!(error instanceof SearchError)) unexpected("web_search", error);
-        return toolError(error, "search_outcome_unknown", secrets);
+        return toolError(error, searchFallback, secrets);
       }
     },
   );
@@ -214,6 +236,21 @@ export function createSearchServer(
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ url }, extra) => {
+      if (exaRead) {
+        try {
+          const page = await exaRead(url, {
+            signal: extra.signal,
+            secrets,
+            fetchImpl,
+            url: config.exaUrl,
+          });
+          return fetchToolResult(scrubSecrets(page, secrets));
+        } catch (error) {
+          // A refused URL is refused here too; anything else is read here.
+          if (error instanceof FetchError)
+            return toolError(error, "fetch_failed", secrets);
+        }
+      }
       try {
         const page = await fetchPage(url, {
           signal: extra.signal,

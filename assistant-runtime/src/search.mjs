@@ -37,8 +37,17 @@ const MAX_LINKED_READS = 3;
 // What Node itself may need on Windows and macOS; nothing else is inherited.
 const INHERITED_ENV = ["SystemRoot", "TEMP", "TMP", "PATH"];
 
+// Where a run's web_search searches: Ofox (paid, the default) or Exa (free).
+const SEARCH_PROVIDERS = ["ofox", "exa"];
+const SEARCH_INTRO = {
+  ofox: "web_search searches the web through Ofox and returns numbered results, each with its title, link and an excerpt from the page. Each call is a paid search: search only when the answer needs current or outside information.",
+  exa: "web_search searches the web for free through Exa and returns numbered results, each with its title, link and an excerpt from the page. Search only when the answer needs current or outside information.",
+};
+const SEARCH_DESCRIPTION = {
+  ofox: "Search the web through Ofox for current or outside information. Returns numbered results, each with its title, link and an excerpt from the page. Each call is a paid search.",
+  exa: "Search the web for free through Exa for current or outside information. Returns numbered results, each with its title, link and an excerpt from the page.",
+};
 const SEARCH_GUIDELINES = [
-  "web_search searches the web through Ofox and returns numbered results, each with its title, link and an excerpt from the page. Each call is a paid search: search only when the answer needs current or outside information.",
   `Search once with one precise query. Search again only if the results are insufficient, with a different query, and make at most ${MAX_SEARCHES} searches per turn.`,
   "A query is words, never a URL or a web address with a path; to search one site, add site:example.com.",
   "When an answer uses search or page results, cite the sources you relied on as Markdown links to their URLs.",
@@ -97,16 +106,25 @@ export function allowedWebUrls(value = []) {
   return new Set(value.map(webUrlKey).filter(Boolean));
 }
 
+/** The run's search provider, Ofox when absent; anything else throws. */
+export function searchProvider(value) {
+  if (value === undefined || value === null) return "ofox";
+  if (!SEARCH_PROVIDERS.includes(value))
+    throw new Error("Invalid web search provider");
+  return value;
+}
+
 /**
- * The server's whole environment: the run's own key and gateway, the app's
- * proxy, and what Node needs from the sidecar's environment. The key never
- * appears in the command line.
+ * The server's whole environment: the run's own key, gateway and search
+ * provider, the app's proxy, and what Node needs from the sidecar's
+ * environment. The key never appears in the command line.
  */
 export function searchServerEnvironment(params, env = process.env) {
   const result = {};
   for (const name of INHERITED_ENV) if (env[name]) result[name] = env[name];
   result.OFOX_ASSISTANT_KEY = params.apiKey;
   result.OFOX_BASE_URL = params.baseUrl ?? `https://api.${params.apex}`;
+  result.OFOX_SEARCH_PROVIDER = searchProvider(params.searchProvider);
   if (params.allowLocalGateway === true) result.OFOX_ALLOW_LOCAL_GATEWAY = "1";
   if (typeof params.proxy?.url === "string") {
     result.OFOX_PROXY_URL = params.proxy.url;
@@ -402,6 +420,7 @@ function searchNotSent(error) {
  * search of this run returned and the links of every page it read.
  */
 export function webTools(runtime, context, { searchTimeoutMs }) {
+  const provider = searchProvider(context.params?.searchProvider);
   const searches = new Map();
   let searchCount = 0;
   let fetchFailures = 0;
@@ -413,7 +432,7 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
   const search = runtime.wrapTool(
     context,
     "web_search",
-    "Search the web through Ofox for current or outside information. Returns numbered results, each with its title, link and an excerpt from the page. Each call is a paid search.",
+    SEARCH_DESCRIPTION[provider],
     Type.Object({
       query: Type.String({ minLength: 1, maxLength: 2000, pattern: "\\S" }),
     }),
@@ -508,7 +527,10 @@ export function webTools(runtime, context, { searchTimeoutMs }) {
     { publishDetails: true },
   );
   return [
-    { ...search, promptGuidelines: SEARCH_GUIDELINES },
+    {
+      ...search,
+      promptGuidelines: [SEARCH_INTRO[provider], ...SEARCH_GUIDELINES],
+    },
     { ...fetch, promptGuidelines: FETCH_GUIDELINES },
   ];
 }

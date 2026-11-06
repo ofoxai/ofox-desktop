@@ -22,10 +22,43 @@ test("both production apexes are accepted with the default search model", () => 
       apiKey: KEY,
       baseUrl,
       model: DEFAULT_SEARCH_MODEL,
+      provider: "ofox",
       proxy: null,
     });
   }
   assert.equal(DEFAULT_SEARCH_MODEL, "openai/gpt-5-nano");
+});
+
+test("the search provider is Ofox unless Exa is named; Exa's URL moves only in tests", () => {
+  assert.equal(
+    loadConfig(env({ OFOX_SEARCH_PROVIDER: "exa" })).provider,
+    "exa",
+  );
+  assert.equal(loadConfig(env({ OFOX_SEARCH_PROVIDER: "" })).provider, "ofox");
+  assert.equal(loadConfig(env()).exaUrl, undefined);
+  assert.throws(
+    () => loadConfig(env({ OFOX_SEARCH_PROVIDER: "bing" })),
+    (error) =>
+      error instanceof ConfigError && /must be ofox or exa/.test(error.message),
+  );
+  const local = { OFOX_ALLOW_LOCAL_GATEWAY: "1" };
+  assert.equal(
+    loadConfig(env({ ...local, OFOX_EXA_URL: "http://localhost:4321/mcp" }))
+      .exaUrl,
+    "http://localhost:4321/mcp",
+  );
+  for (const overrides of [
+    { OFOX_EXA_URL: "http://localhost:4321/mcp" },
+    { ...local, OFOX_EXA_URL: "https://evil.example/mcp" },
+    { ...local, OFOX_EXA_URL: "http://localhost:4321" },
+    { ...local, OFOX_EXA_URL: "http://user@localhost:4321/mcp" },
+  ])
+    assert.throws(
+      () => loadConfig(env(overrides)),
+      (error) =>
+        error instanceof ConfigError && /only for tests/.test(error.message),
+      JSON.stringify(overrides),
+    );
 });
 
 test("the search model can be overridden but must look like a model id", () => {

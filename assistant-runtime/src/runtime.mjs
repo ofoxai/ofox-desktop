@@ -17,6 +17,7 @@ import {
   SEARCH_TIMEOUT_MS,
   SearchServer,
   allowedWebUrls,
+  searchProvider,
   searchServerEnvironment,
   webTools,
 } from "./search.mjs";
@@ -1484,6 +1485,7 @@ export class AssistantRuntime {
     )
       throw new Error("Invalid attachment selection");
     const webUrls = allowedWebUrls(params.allowedWebUrls);
+    searchProvider(params.searchProvider);
     const instructions = checkInstructions(params.instructions);
     const compactionInstructions = checkInstructions(
       params.compactionInstructions,
