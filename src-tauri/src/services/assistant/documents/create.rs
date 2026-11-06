@@ -210,66 +210,46 @@ const FIELDS: &[&str] = &[
 const ELEMENT_FIELDS: &[&str] = &[
     "parent", "path", "path2", "after", "before", "from", "to", "selector",
 ];
-/// Properties officecli reads as a file (a path, an address or a data URI):
-/// here only a data URI. Any key ending like the last four is one too.
+/// Properties officecli reads as a file (`officecli help`: `src` and its
+/// alias `path`, a fill or cell `image`, an OLE `preview`, a picture
+/// `fallback`, a media `poster`), and names a file could go by: a data URI
+/// only. A dotted key is a file's when any part of it is.
 const FILE_KEYS: &[&str] = &[
-    "src", "image", "path", "file", "source", "poster", "fallback", "preview", "icon", "logo",
+    "src", "path", "image", "preview", "fallback", "poster", "file", "source", "icon", "logo",
     "video", "audio", "model", "ole",
 ];
-const FILE_ENDINGS: &[&str] = &["src", "path", "image", "file"];
-/// Click targets: web and mail addresses only.
+/// Click targets: a web or mail address, or an element of the document.
 const LINK_KEYS: &[&str] = &["link", "hyperlink", "url", "href"];
-/// Properties that hold text, numbers, colours, sizes or cell ranges: any
-/// value, so that prose may hold addresses and slashes. Any key ending like
-/// the second list is one too.
-const TEXT_KEYS: &[&str] = &[
+/// Prose and table data: any value, so that text may hold addresses and
+/// slashes. Only these exact keys.
+const PROSE_KEYS: &[&str] = &[
     "text",
     "title",
-    "subtitle",
     "notes",
-    "name",
-    "value",
-    "values",
-    "formula",
     "alt",
-    "alttext",
     "description",
     "tooltip",
+    "value",
+    "formula",
+    "data",
+];
+/// The first segment of an element path, besides a sheet's name.
+const ROOTS: &[&str] = &[
+    "body",
     "header",
     "footer",
-    "style",
-    "font",
-    "color",
-    "fill",
-    "size",
-    "x",
-    "y",
-    "w",
-    "h",
-    "width",
-    "height",
-    "left",
-    "top",
-    "right",
-    "bottom",
-    "rotation",
-    "rotate",
-    "opacity",
-    "anchor",
-    "merge",
-    "numberformat",
-    "format",
-    "freeze",
-    "background",
-    "label",
-    "caption",
-    "placeholder",
-    "categories",
-    "series",
-];
-const TEXT_ENDINGS: &[&str] = &[
-    "text", "title", "color", "fill", "size", "width", "height", "font", "spacing", "format",
-    "range",
+    "comments",
+    "footnotes",
+    "endnotes",
+    "styles",
+    "settings",
+    "numbering",
+    "theme",
+    "slide",
+    "slidemaster",
+    "slidelayout",
+    "notes",
+    "sheet",
 ];
 
 /// What a property may hold.
@@ -277,22 +257,19 @@ const TEXT_ENDINGS: &[&str] = &[
 enum Property {
     File,
     Link,
-    Text,
+    Prose,
     Other,
 }
 
-/// The class of a property by its key; of a dotted key (`font.color`), by
-/// its last part. A table's `data` is inline CSV, but officecli would read a
-/// file or an address there too: it is checked as [`Property::Other`].
+/// The class of a property by its key.
 fn property(key: &str) -> Property {
-    let key = key.rsplit('.').next().unwrap_or(key).to_ascii_lowercase();
-    let key = key.as_str();
-    if FILE_KEYS.contains(&key) || FILE_ENDINGS.iter().any(|end| key.ends_with(end)) {
+    let key = key.to_ascii_lowercase();
+    if key.split('.').any(|part| FILE_KEYS.contains(&part)) {
         Property::File
-    } else if LINK_KEYS.contains(&key) {
+    } else if LINK_KEYS.contains(&key.rsplit('.').next().unwrap_or(&key)) {
         Property::Link
-    } else if TEXT_KEYS.contains(&key) || TEXT_ENDINGS.iter().any(|end| key.ends_with(end)) {
-        Property::Text
+    } else if PROSE_KEYS.contains(&key.as_str()) {
+        Property::Prose
     } else {
         Property::Other
     }
@@ -316,6 +293,9 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
             format!("at most {MAX_COMMANDS} commands per document"),
         ));
     }
+    // The sheets an xlsx path may start with: the first one, and those the
+    // batch adds or renames.
+    let mut sheets = vec!["sheet1".to_owned()];
     for (index, item) in commands.iter_mut().enumerate() {
         let problem = |why: &str| refuse(FAILED, format!("item {index}: {why}"));
         let Some(fields) = item.as_object_mut() else {
@@ -351,7 +331,7 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
             let why = if ELEMENT_FIELDS.contains(&field.as_str()) {
                 let anchor = matches!(field.as_str(), "after" | "before");
                 match value {
-                    Value::String(text) if names_an_element(text, anchor) => None,
+                    Value::String(text) if names_an_element(text, anchor, &sheets) => None,
                     Value::Number(_) => None,
                     _ => Some((
                         field.clone(),
@@ -360,16 +340,31 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 }
             } else {
                 // `props` by each key's class; `type` and the verb as others.
-                refused_property(field.clone(), value, Property::Other)
+                refused_property(field.clone(), value, Property::Other, &sheets)
             };
             if let Some((key, why)) = why {
                 return Err(problem(&format!("\"{key}\" {why}")));
             }
         }
-        let diagram = fields
+        let kind = fields
             .get("type")
             .and_then(Value::as_str)
-            .is_some_and(|kind| kind.eq_ignore_ascii_case("diagram"));
+            .unwrap_or_default();
+        let name = fields
+            .get("props")
+            .and_then(|props| props.get("name"))
+            .and_then(Value::as_str);
+        let renamed = verb == "set"
+            && fields
+                .get("path")
+                .and_then(Value::as_str)
+                .and_then(|path| path.strip_prefix('/'))
+                .is_some_and(|sheet| sheets.contains(&sheet.to_lowercase()));
+        let added = verb == "add" && kind.eq_ignore_ascii_case("sheet");
+        if let Some(name) = name.filter(|_| renamed || added) {
+            sheets.push(name.to_lowercase());
+        }
+        let diagram = kind.eq_ignore_ascii_case("diagram");
         if verb == "add" && diagram {
             let props = fields.entry("props").or_insert_with(|| json!({}));
             if let Some(props) = props.as_object_mut() {
@@ -383,22 +378,27 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
 /// The first value under `value` (named `key`, of class `class`) that its
 /// property may not hold, and why. An object's values take their own keys'
 /// classes; an array's values take the array's.
-fn refused_property(key: String, value: &Value, class: Property) -> Option<(String, &'static str)> {
+fn refused_property(
+    key: String,
+    value: &Value,
+    class: Property,
+    sheets: &[String],
+) -> Option<(String, &'static str)> {
     match value {
-        Value::String(text) => refused_value(text, class).map(|why| (key, why)),
+        Value::String(text) => refused_value(text, class, sheets).map(|why| (key, why)),
         Value::Object(map) => map.iter().find_map(|(name, value)| {
-            refused_property(format!("{key}.{name}"), value, property(name))
+            refused_property(format!("{key}.{name}"), value, property(name), sheets)
         }),
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class)),
+            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class, sheets)),
         _ => None,
     }
 }
 
 /// Why a property of `class` may not hold `text`, if it may not.
-fn refused_value(text: &str, class: Property) -> Option<&'static str> {
+fn refused_value(text: &str, class: Property, sheets: &[String]) -> Option<&'static str> {
     let text = text.trim();
     let lower = text.to_ascii_lowercase();
     match class {
@@ -407,27 +407,43 @@ fn refused_value(text: &str, class: Property) -> Option<&'static str> {
         ),
         Property::Link => (!["https://", "http://", "mailto:"]
             .iter()
-            .any(|scheme| lower.starts_with(scheme)))
-        .then_some("must be an https:, http: or mailto: address"),
-        // A fill or background may name an image: as a data URI only.
-        _ if lower.starts_with("image:") && !is_data_uri(&text[6..]) => {
-            Some("may name an image only as a data: URI")
-        }
-        Property::Text => None,
-        Property::Other => {
-            let path = text.replace('\\', "/");
-            let scheme = lower.split_once(':').is_some_and(|(scheme, _)| {
-                scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-                    && scheme
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
-            });
-            (path.starts_with(['/', '~', '.'])
-                || path.split('/').any(|part| part.trim() == "..")
-                || (scheme && !is_data_uri(text)))
-            .then_some("names a file or an address; only data: URIs can be used")
-        }
+            .any(|scheme| lower.starts_with(scheme))
+            && !names_an_element(text, false, sheets))
+        .then_some("must be an https:, http: or mailto: address, or an element of the document"),
+        Property::Prose => None,
+        Property::Other => names_a_location(text)
+            .then_some("names a file or an address; only data: URIs can be used"),
     }
+}
+
+/// A value that names a place outside the document: once `\` reads as `/`,
+/// it starts with `/`, `~` or `.`, has a `..` segment, or starts with a
+/// drive or a scheme other than `data:`. A cell range (`E2:L18`) is none.
+fn names_a_location(text: &str) -> bool {
+    let path = text.trim().replace('\\', "/");
+    let lower = path.to_ascii_lowercase();
+    let scheme = lower.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    });
+    path.starts_with(['/', '~', '.'])
+        || path.split('/').any(|part| part.trim() == "..")
+        || (scheme && !is_data_uri(&path) && !is_cell_range(&path))
+}
+
+/// `A1:C3`: two cells, each one to three letters and a row number.
+fn is_cell_range(text: &str) -> bool {
+    let cell = |cell: &str| {
+        let letters = cell.chars().take_while(char::is_ascii_alphabetic).count();
+        let digits = &cell[letters..];
+        (1..=3).contains(&letters)
+            && (1..=7).contains(&digits.len())
+            && digits.chars().all(|c| c.is_ascii_digit())
+    };
+    text.split_once(':')
+        .is_some_and(|(start, end)| cell(start) && cell(end))
 }
 
 /// `data:<type>/<subtype>[;…];base64,…`.
@@ -453,77 +469,102 @@ fn is_data_uri(text: &str) -> bool {
         && head.ends_with(";base64")
 }
 
-/// An element as officecli names it: `/` and segments (`/slide[1]/shape[2]`,
-/// `/body/p[last()]`, `/销售/A1:C3`), a selector without `/` (`shape`,
-/// `p[@paraId=1A2B3C4D]`, `Sheet1!A1`), or for `after`/`before` a
-/// `find:<text>` anchor.
-fn names_an_element(text: &str, anchor: bool) -> bool {
+/// An element as officecli names it: `/`, or a known root and segments
+/// (`/slide[1]/shape[2]`, `/body/p[last()]`, `/销售/A1:C3` for a sheet in
+/// `sheets`); a selector without `/` (`shape`, `p[@paraId=1A2B3C4D]`,
+/// `Sheet1!A1`); or for `after`/`before` a `find:<text>` anchor.
+fn names_an_element(text: &str, anchor: bool, sheets: &[String]) -> bool {
     if anchor && text.starts_with("find:") {
         return true;
     }
     match text.strip_prefix('/') {
         Some("") => true,
-        Some(rest) => element_segments(rest),
+        Some(rest) => element_segments(rest, sheets),
         None => {
-            let lower = text.to_ascii_lowercase();
-            let scheme = lower.split_once(':').is_some_and(|(scheme, _)| {
-                scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-                    && scheme
-                        .chars()
-                        .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
-            });
             !text.trim().is_empty()
                 && !text.contains(['/', '\\'])
                 && !text.starts_with(['.', '~'])
                 && !text.contains("..")
-                && !scheme
+                && !names_a_location(text)
+                && predicates(text).is_some_and(|found| found.into_iter().all(predicate))
         }
     }
 }
 
-/// `slide[1]/shape[@name=Title]`: names of letters, digits, `_`, `-` and
-/// spaces (a cell range joins two with `:`), each with any `[…]` predicates.
-fn element_segments(path: &str) -> bool {
-    let word = |chars: &mut std::iter::Peekable<std::str::Chars<'_>>| {
-        let mut length = 0;
-        while let Some(&c) = chars.peek() {
-            let inner = length > 0 && matches!(c, '-' | ' ');
-            if !(c.is_alphanumeric() || c == '_' || inner) {
-                break;
-            }
-            length += 1;
-            chars.next();
+/// The contents of `text`'s `[…]` predicates; `None` when one is not closed
+/// or holds another.
+fn predicates(text: &str) -> Option<Vec<&str>> {
+    let mut found = vec![];
+    let mut rest = text;
+    while let Some(open) = rest.find('[') {
+        let close = rest[open..].find(']')? + open;
+        let inner = &rest[open + 1..close];
+        if inner.contains('[') {
+            return None;
         }
-        length > 0
-    };
-    let mut chars = path.chars().peekable();
-    loop {
-        if !word(&mut chars) {
-            return false;
-        }
-        if chars.peek() == Some(&':') {
-            chars.next();
-            if !word(&mut chars) {
-                return false;
-            }
-        }
-        while chars.peek() == Some(&'[') {
-            chars.next();
-            loop {
-                match chars.next() {
-                    Some(']') => break,
-                    Some('[') | None => return false,
-                    Some(c) if c.is_control() => return false,
-                    Some(_) => {}
-                }
-            }
-        }
-        match chars.next() {
-            None => return true,
-            Some('/') => {}
-            Some(_) => return false,
-        }
+        found.push(inner);
+        rest = &rest[close + 1..];
     }
+    (!rest.contains(']')).then_some(found)
+}
+
+/// A predicate officecli takes (`1`, `last()`, `@name=Plan`, `@paraId=…`):
+/// letters, digits, `_@=()-.` and spaces, and quoted strings without `/`,
+/// `\` or `:`.
+fn predicate(inner: &str) -> bool {
+    let mut quote = None;
+    inner.chars().all(|c| match quote {
+        Some(open) if c == open => {
+            quote = None;
+            true
+        }
+        Some(_) => !matches!(c, '/' | '\\' | ':') && !c.is_control(),
+        None if c == '"' || c == '\'' => {
+            quote = Some(c);
+            true
+        }
+        None => c.is_ascii_alphanumeric() || "_@=()-. ".contains(c),
+    }) && quote.is_none()
+}
+
+/// `slide[1]/shape[@name=Title]`: a known root (or a sheet of `sheets`),
+/// then names of letters, digits, `_`, `-` and spaces (a cell range joins
+/// two with `:`), each with any predicates. A predicate holds no `/`.
+fn element_segments(path: &str, sheets: &[String]) -> bool {
+    let word = |word: &str| {
+        word.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+            && word
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | ' '))
+    };
+    path.split('/').enumerate().all(|(at, segment)| {
+        let (name, rest) = segment.split_at(segment.find('[').unwrap_or(segment.len()));
+        let named = match name.split_once(':') {
+            Some((start, end)) => word(start) && word(end),
+            None => word(name),
+        };
+        let known = at > 0 || {
+            let name = name.to_lowercase();
+            ROOTS.contains(&name.as_str()) || sheets.contains(&name)
+        };
+        named && known && bracketed(rest).is_some_and(|found| found.into_iter().all(predicate))
+    })
+}
+
+/// `[a][b]` as `a` and `b`; `None` unless `text` is only such groups.
+fn bracketed(text: &str) -> Option<Vec<&str>> {
+    let mut found = vec![];
+    let mut rest = text;
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('[')?;
+        let close = inner.find(']')?;
+        if inner[..close].contains('[') {
+            return None;
+        }
+        found.push(&inner[..close]);
+        rest = &inner[close + 1..];
+    }
+    Some(found)
 }
 
 /// Whether a Typst body imports or includes a package, which would be
@@ -2317,7 +2358,12 @@ esac"#,
         items.extend([
             json!({"command": "add", "parent": "/slide[1]", "type": "ole", "props": {"path": "/etc/hosts"}}),
             shape(json!({"fill": {"image": {"src": "/tmp/x.png"}}})),
-            shape(json!({"logoImage": "data-free.png"})),
+            shape(json!({"logo": "data-free.png"})),
+            shape(json!({"fill.image": "/Users/me/x.png"})),
+            shape(json!({"subtitle": "/Users/me/x"})),
+            shape(json!({"font.color": "~/x"})),
+            shape(json!({"numberformat": "file:x"})),
+            shape(json!({"x": "C:x"})),
             // A link takes a web or mail address.
             shape(json!({"link": "javascript:alert(1)"})),
             shape(json!({"link": "file:///etc/passwd"})),
@@ -2332,7 +2378,6 @@ esac"#,
             shape(json!({"custom": ".hidden"})),
             shape(json!({"custom": "javascript:void(0)"})),
             shape(json!({"background": "image:/Users/me/x.png"})),
-            json!({"command": "add", "parent": "/", "type": "table", "props": {"data": "/Users/me/secrets.csv"}}),
             json!({"command": "add", "parent": "/slide[1]", "type": "file:///etc/hosts"}),
             // An element field names an element.
             json!({"command": "add", "parent": "/slide[1]", "type": "shape", "from": "C:\\x"}),
@@ -2341,6 +2386,12 @@ esac"#,
             json!({"command": "add", "parent": "\\\\server\\share", "type": "shape"}),
             json!({"command": "set", "path": "/Users/me/.ssh/id_rsa", "props": {"value": "1"}}),
             json!({"command": "add", "parent": "~/x", "type": "shape"}),
+            json!({"command": "add", "parent": "/slide[1]", "type": "shape", "from": "/Windows/System32/x"}),
+            json!({"command": "add", "parent": "/ProgramData/x", "type": "shape"}),
+            json!({"command": "set", "path": "/Users/x", "props": {"value": "1"}}),
+            json!({"command": "set", "path": "/Q3 Sales/A1", "props": {"value": "1"}}),
+            json!({"command": "set", "path": "/slide[1]/shape[@name=C:x]", "props": {"bold": "true"}}),
+            json!({"command": "set", "path": "/slide[1]/shape[@name=\"a/b\"]", "props": {"bold": "true"}}),
             json!({"command": "set", "path": "file:///etc/hosts", "props": {"value": "1"}}),
             json!({"command": "set", "path": "javascript:x", "props": {"value": "1"}}),
             json!({"command": "set", "path": "/slide[1]/", "props": {"value": "1"}}),
@@ -2358,10 +2409,11 @@ esac"#,
                 .unwrap_or_else(|| panic!("no refusal names {needle}"))
         };
         at("\"props.fill.image.src\" must be a data: URI");
-        at("\"props.link\" must be an https:, http: or mailto: address");
+        at("\"props.link\" must be an https:, http: or mailto: address, or an element");
+        at("\"props.fill.image\" must be a data: URI");
+        at("\"props.subtitle\" names a file or an address");
         at("\"props.styles[1]\" names a file or an address");
-        at("\"props.background\" may name an image only as a data: URI");
-        at("\"props.data\" names a file or an address");
+        at("\"props.background\" names a file or an address");
         at("\"from\" must name an element of the document");
         at("\"to\" must name an element of the document");
         assert!(f.outputs().iter().all(|dir| !dir.join("ran").exists()));
@@ -2381,11 +2433,18 @@ esac"#,
         let content = json!([
             {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "alt": "Logo", "link": "https://example.com"}},
             {"command": "add", "parent": "/slide[1]", "type": "diagram", "props": {"text": "graph TD; A-->B"}},
-            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "see https://example.com and a/b", "title": "MS-DOS: C:\\ and /usr/bin", "hyperlink": "mailto:team@example.com", "background": "radial:FF0000-0000FF", "fill": "image:data:image/svg+xml;base64,PHN2Zy8+"}},
-            {"command": "set", "path": "/Sheet1/B2", "props": {"formula": "=SUM(A1:A3)", "numberformat": "hh:mm", "merge": "A1:C1", "anchor": "E2:L18", "value": "12:30", "font.color": "1F4E79"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "see https://example.com and a/b", "title": "MS-DOS: C:\\ and /usr/bin", "notes": "~/draft, ../old", "hyperlink": "mailto:team@example.com", "background": "FF0000-0000FF-90", "fill": "accent1"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"link": "slide[3]", "text": "Next"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"link": "/slide[3]", "text": "Next"}},
+            {"command": "set", "path": "/Sheet1/B2", "props": {"formula": "=SUM(A1:A3)", "numberformat": "0.00%", "merge": "A1:C1", "anchor": "E2:L18", "value": "12:30", "font.color": "1F4E79"}},
+            {"command": "add", "parent": "/", "type": "sheet", "props": {"name": "Q3 Sales"}},
+            {"command": "set", "path": "/Q3 Sales/A1", "props": {"value": "1"}},
+            {"command": "set", "path": "/slide[1]/shape[@name=\"My Title\"]", "props": {"bold": "true"}},
             {"command": "set", "path": "Sheet1!A1", "props": {"value": "x"}},
             {"command": "add", "parent": "/body", "type": "paragraph", "after": "find:Summary", "props": {"text": "x"}},
             {"command": "add", "parent": "/", "type": "table", "props": {"data": "Name,Cost;Hosting,1200"}},
+            // Table data is prose (R36), even when it looks like a path.
+            {"command": "add", "parent": "/", "type": "table", "props": {"data": "/a,/b;1,2"}},
         ]);
         let result = f
             .call(
@@ -2416,32 +2475,45 @@ esac"#,
 
     #[test]
     fn elements_are_named_as_officecli_names_them() {
+        let sheets = [
+            "sheet1".to_owned(),
+            "销售".to_owned(),
+            "q3 sales".to_owned(),
+        ];
         for path in [
             "/",
             "/body",
             "/body/p[last()]",
             "/body/tbl[last()]/tr[1]/tc[2]",
             "/body/p[@paraId=00100000]",
+            "/header[1]",
+            "/styles",
+            "/theme",
+            "/notes",
             "/slide[1]",
             "/slide[1]/placeholder[title]",
+            "/slideMaster[1]/slideLayout[2]",
             "/slide[1]/table[@name=Plan]/tr[1]",
             "/slide[1]/shape[@id=100000]",
+            "/slide[1]/shape[@name=\"My Title\"]",
+            "/slide[1]/shape[@name='Q3 plan']",
             "/Sheet1/A1",
             "/Sheet1/A1:C3",
             "/Sheet1/col[A]",
             "/Sheet1/row[2]",
+            "/sheet[2]/A1",
             "/销售/B3:B9",
             "/Q3 Sales/A1",
-            "/2025-Q3/A1",
             "shape",
             "p[@paraId=1A2B3C4D]",
             "Sheet1!A1",
-            "'Q3 Sales'!A1",
             "1",
+            "slide[3]",
+            "nextslide",
         ] {
-            assert!(names_an_element(path, false), "{path}");
+            assert!(names_an_element(path, false, &sheets), "{path}");
         }
-        assert!(names_an_element("find:Revenue grew", true));
+        assert!(names_an_element("find:Revenue grew", true, &sheets));
         for path in [
             "",
             "//server/share",
@@ -2449,11 +2521,17 @@ esac"#,
             "/slide[1]/",
             "/slide[1]//shape",
             "/Users/me/.ssh/id_rsa",
-            "/etc/hosts.allow",
+            "/Users/x",
+            "/etc/hosts",
+            "/Windows/System32/x",
+            "/ProgramData/x",
+            "/Data/A1",
             "/../etc",
             "/slide[1]/..",
             "/slide[1",
             "/slide[1]]",
+            "/slide[1]x",
+            "/slide[1]x[2]",
             "/-x",
             "~/x",
             "../x",
@@ -2464,8 +2542,14 @@ esac"#,
             "javascript:x",
             "find:x",
             "a/b",
+            "/slide[1]/shape[@name=C:x]",
+            "/slide[1]/shape[@name=\"a/b\"]",
+            "/slide[1]/shape[@name=\"a:b\"]",
+            "/slide[1]/shape[@name=\"open]",
+            "/slide[1]/shape[a/b]",
+            "p[#x]",
         ] {
-            assert!(!names_an_element(path, false), "{path}");
+            assert!(!names_an_element(path, false, &sheets), "{path}");
         }
     }
 
@@ -2568,6 +2652,49 @@ esac"#,
             .iter()
             .any(|line| line.contains(&format!("DOC={}", dir.display()))));
         assert_eq!(first["file"]["slides"], 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_data_image_works_under_the_profile_that_hides_the_users_files() {
+        let script = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            "{}",
+            r#"{"slides":1}"#,
+        );
+        let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, true)));
+        let content = json!([
+            {"command": "add", "parent": "/", "type": "slide"},
+            {"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "alt": "Dot"}},
+        ]);
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "a", "format": "pptx", "content": content}),
+            )
+            .await
+            .unwrap();
+        let dir = PathBuf::from(result["filePath"].as_str().unwrap())
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let batch = sandbox_log(&f)
+            .into_iter()
+            .find(|line| line.contains(" batch out.pptx "))
+            .unwrap();
+        // Of the user's folders only the document's own is readable.
+        for rule in [
+            "(deny network*)",
+            r#"(deny file-read-data file-write* (subpath "/Users") (subpath "/Volumes"))"#,
+            r#"(allow file-read-data file-write* (subpath (param "DOC")))"#,
+            &format!("-D DOC={}", dir.display()),
+        ] {
+            assert!(batch.contains(rule), "{rule}: {batch}");
+        }
+        let seen: Value =
+            serde_json::from_slice(&std::fs::read(dir.join("batch-seen.json")).unwrap()).unwrap();
+        assert_eq!(seen, content);
     }
 
     #[tokio::test]
@@ -2716,7 +2843,27 @@ exit 1"#
             {"command": "add", "parent": "/", "type": "slide", "props": {"title": "Quarterly plan"}},
             {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"text": "Grow\nHire", "x": "2cm", "y": "5cm", "wobble": "1"}},
             {"command": "add", "parent": "/", "type": "slide", "props": {"title": "Next"}},
+            {"command": "add", "parent": "/slide[2]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "alt": "Dot"}},
         ]);
+        // The profile keeps the user's other files out of reach.
+        let outside = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        if cfg!(target_os = "macos") && outside.starts_with("/Users") {
+            let denied = std::process::Command::new("/usr/bin/sandbox-exec")
+                .args([
+                    "-D",
+                    "DOC=/nonexistent",
+                    "-D",
+                    "ENGINE=/nonexistent",
+                    "-p",
+                    OFFICE_SANDBOX,
+                    "/bin/cat",
+                ])
+                .arg(&outside)
+                .output()
+                .unwrap();
+            assert!(!denied.status.success());
+            assert!(String::from_utf8_lossy(&denied.stderr).contains("Operation not permitted"));
+        }
         let pptx = f
             .call(
                 "pptx",
