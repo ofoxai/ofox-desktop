@@ -237,22 +237,26 @@ const EXA_CONFIG = {
   provider: "exa",
 };
 
-test("with Exa, pages are read through Exa first and here when Exa cannot", async (t) => {
+test("with Exa, pages are read here first and through Exa only when that failed", async (t) => {
   const read = [];
-  const exaFailures = new Set(["https://a.example/fails"]);
   const client = await connect(t, EXA_CONFIG, {
     search: async () => {
       throw new Error("unexpected");
     },
     exaRead: async (url) => {
       read.push(`exa ${url}`);
-      if (url === "https://localhost/")
-        throw new FetchError("fetch_not_allowed", "no");
-      if (exaFailures.has(url)) throw new Error("CRAWL_NOT_FOUND");
+      if (url.includes("exa-fails")) throw new Error("CRAWL_NOT_FOUND");
       return { url, text: "from Exa", truncated: false, links: [] };
     },
     fetchPage: async (url) => {
       read.push(`here ${url}`);
+      if (url.includes("blocked"))
+        throw new FetchError("fetch_failed", "Web page returned HTTP 403", 403);
+      if (url.includes("private"))
+        throw new FetchError(
+          "fetch_not_allowed",
+          "Web DNS contains a non-public address",
+        );
       return { url, text: "from here", truncated: false, links: [] };
     },
     log: () => {},
@@ -266,20 +270,31 @@ test("with Exa, pages are read through Exa first and here when Exa cannot", asyn
     client.callTool({ name: "web_fetch", arguments: { url } });
   assert.equal(
     (await fetchTool("https://a.example/ok")).structuredContent.text,
-    "from Exa",
-  );
-  assert.equal(
-    (await fetchTool("https://a.example/fails")).structuredContent.text,
     "from here",
   );
-  const refused = await fetchTool("https://localhost/");
-  assert.equal(refused.isError, true);
+  assert.equal(
+    (await fetchTool("https://a.example/blocked")).structuredContent.text,
+    "from Exa",
+  );
+  // Never to Exa: a URL with a query string (a token may be in it), and one
+  // the rules here refused.
+  const shared = await fetchTool("https://a.example/blocked?token=private");
+  assert.equal(shared.structuredContent.error.code, "fetch_failed");
+  assert.equal(shared.structuredContent.error.status, 403);
+  const refused = await fetchTool("https://private.example/");
   assert.equal(refused.structuredContent.error.code, "fetch_not_allowed");
+  // When Exa cannot read it either, the model reads why it failed here.
+  const both = await fetchTool("https://a.example/blocked/exa-fails");
+  assert.equal(both.structuredContent.error.code, "fetch_failed");
+  assert.equal(both.structuredContent.error.status, 403);
   assert.deepEqual(read, [
-    "exa https://a.example/ok",
-    "exa https://a.example/fails",
-    "here https://a.example/fails",
-    "exa https://localhost/",
+    "here https://a.example/ok",
+    "here https://a.example/blocked",
+    "exa https://a.example/blocked",
+    "here https://a.example/blocked?token=private",
+    "here https://private.example/",
+    "here https://a.example/blocked/exa-fails",
+    "exa https://a.example/blocked/exa-fails",
   ]);
   // An Exa search costs nothing: an unexpected failure is a plain one.
   const search = await client.callTool({

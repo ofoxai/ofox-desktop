@@ -10,8 +10,8 @@ import { validateWebUrl } from "./web.mjs";
 
 export const EXA_URL = "https://mcp.exa.ai/mcp";
 export const EXA_SEARCH_TIMEOUT_MS = 25_000;
-// A failed read falls back to reading the page here, within the runtime's
-// 30 s for one web_fetch.
+// Exa reads a page only after reading it here failed (at most 15 s), within
+// the runtime's 30 s for one web_fetch.
 export const EXA_READ_TIMEOUT_MS = 10_000;
 export const EXA_MODEL = "exa";
 const MAX_RESPONSE_BYTES = 1024 * 1024;
@@ -235,9 +235,9 @@ function markdownLinks(text) {
 }
 
 /**
- * One page through Exa, as readWebPage returns it. The URL must pass the
- * same rules as a read here (HTTPS, public host, no credentials) before it is
- * sent. Throws on any failure, so the caller can read the page itself.
+ * One page through Exa, as readWebPage returns it, for a page that could not
+ * be read here. The URL must pass the same rules as a read here (HTTPS,
+ * public host, no credentials) before it is sent. Throws on any failure.
  */
 export async function exaReadPage(
   value,

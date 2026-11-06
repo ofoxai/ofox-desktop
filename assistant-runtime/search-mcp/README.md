@@ -236,10 +236,15 @@ billed. Failures are `search_rate_limited` (429), `search_blocked` (403) or
 `search_failed` (anything else, with `status` when Exa sent one), never an
 unknown outcome, since nothing is billed.
 
-`web_fetch` with Exa first validates the URL by the rules below, then asks
-`web_fetch_exa {urls: [url], maxCharacters: 20000}` (10 s), whose Markdown
-comes back as the page with its HTTPS Markdown links. When Exa cannot read it,
-the page is read here as usual, within the runtime's 30 s.
+`web_fetch` with Exa still reads every page here first, so a URL the user
+gave (a share link with a token) does not leave the machine and the page's
+links stay. Only when that read failed (`fetch_failed`, `fetch_too_large` or
+`fetch_unsupported_content`: a site that blocks the app, is unreachable from
+this network, or is no HTML) does it ask Exa, `web_fetch_exa {urls: [url],
+maxCharacters: 20000}` (10 s), whose Markdown comes back as the page with its
+HTTPS Markdown links, within the runtime's 30 s. A URL with a query string,
+or one the rules below refused (`fetch_not_allowed`), never goes to Exa; when
+Exa cannot read the page either, the model gets the failure from here.
 
 ## Billing
 

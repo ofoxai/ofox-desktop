@@ -152,14 +152,30 @@ export function toolError(error, fallbackCode, secrets) {
   };
 }
 
+// Whether a page that failed here may go to Exa: not one the rules here
+// refused (a local or private host), and not one with a query string, where
+// tokens and other private values usually are.
+function exaMayRead(url, error) {
+  if (!(error instanceof FetchError) || error.code === "fetch_not_allowed")
+    return false;
+  try {
+    return new URL(url).search === "";
+  } catch {
+    return false;
+  }
+}
+
 function stderrLog(line) {
   process.stderr.write(`ofox-search-mcp: ${line}\n`);
 }
 
 /**
  * The two tools for `config.provider`: Ofox searches through its paid
- * gateway; Exa searches for free and reads pages through Exa first, then
- * here when Exa cannot. Either way a page is read here under the same rules.
+ * gateway; Exa searches for free. Pages are always read here first, so a
+ * URL the user gave (a share link with a token) does not leave the machine;
+ * with Exa a page that could not be read here (blocked, unreachable, not
+ * HTML) is read through Exa, unless its URL has a query string or the rules
+ * here refused it.
  */
 export function createSearchServer(
   config,
@@ -236,21 +252,6 @@ export function createSearchServer(
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
     async ({ url }, extra) => {
-      if (exaRead) {
-        try {
-          const page = await exaRead(url, {
-            signal: extra.signal,
-            secrets,
-            fetchImpl,
-            url: config.exaUrl,
-          });
-          return fetchToolResult(scrubSecrets(page, secrets));
-        } catch (error) {
-          // A refused URL is refused here too; anything else is read here.
-          if (error instanceof FetchError)
-            return toolError(error, "fetch_failed", secrets);
-        }
-      }
       try {
         const page = await fetchPage(url, {
           signal: extra.signal,
@@ -261,6 +262,18 @@ export function createSearchServer(
         return fetchToolResult(scrubSecrets(page, secrets));
       } catch (error) {
         if (!(error instanceof FetchError)) unexpected("web_fetch", error);
+        if (exaRead && exaMayRead(url, error))
+          try {
+            const page = await exaRead(url, {
+              signal: extra.signal,
+              secrets,
+              fetchImpl,
+              url: config.exaUrl,
+            });
+            return fetchToolResult(scrubSecrets(page, secrets));
+          } catch {
+            // The model reads why it failed here.
+          }
         return toolError(error, "fetch_failed", secrets);
       }
     },
