@@ -279,7 +279,7 @@ test("an SVG slide preview is attached when the canvas reads SVG", async (t) => 
     previewPath,
     '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#fff"/><text x="40" y="100" font-size="60">Quarterly results</text></svg>',
   );
-  t.mock.method(process.stderr, "write", () => true);
+  const warn = t.mock.method(console, "warn", () => {});
   const { tool } = createDocument({
     reply: () => completed({ previewPath }),
   });
@@ -291,19 +291,21 @@ test("an SVG slide preview is attached when the canvas reads SVG", async (t) => 
   assert.match(result.content[0].text, /attachment att-deck/);
   // Without SVG support in this canvas build the preview is skipped.
   if (result.content.length === 1) {
-    assert.equal(process.stderr.write.mock.callCount(), 1);
+    assert.equal(warn.mock.callCount(), 1);
     return;
   }
   assert.equal(result.content[1].type, "image");
   assert.equal(result.content[1].mimeType, "image/jpeg");
 });
 
-test("an unreadable preview is skipped with one line on stderr", async (t) => {
+// Warnings go through console, which main.mjs sends to stderr without the
+// run's credentials.
+test("an unreadable preview is skipped with one warning", async (t) => {
   const directory = await folder(t);
   const broken = path.join(directory, "preview-1.svg");
   await writeFile(broken, "this is not an svg");
   for (const previewPath of [broken, path.join(directory, "missing.png")]) {
-    const write = t.mock.method(process.stderr, "write", () => true);
+    const warn = t.mock.method(console, "warn", () => {});
     const { tool } = createDocument({
       reply: () => completed({ previewPath }),
     });
@@ -312,14 +314,14 @@ test("an unreadable preview is skipped with one line on stderr", async (t) => {
       format: "pptx",
       content: DECK,
     });
-    write.mock.restore();
+    warn.mock.restore();
     assert.deepEqual(
       result.content.map((part) => part.type),
       ["text"],
     );
     assert.equal(result.details.previewPath, undefined);
-    assert.equal(write.mock.callCount(), 1);
-    assert.match(String(write.mock.calls[0].arguments[0]), /preview/i);
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(String(warn.mock.calls[0].arguments[0]), /preview/i);
   }
 });
 
@@ -350,6 +352,24 @@ test("the host's issues are listed for the model to mention", async () => {
     /warning at \/slide\[2\]\/shape\[1\]: Text overflows its box/,
   );
   assert.match(text, /error: Missing title/);
+});
+
+test("malformed issues from the host never fail a created file", async () => {
+  const { calls, tool } = createDocument({
+    vision: false,
+    reply: () => completed({ issues: [null, "text", { message: "x" }, 7] }),
+  });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: DECK,
+  });
+  assert.notEqual(result.isError, true);
+  assert.equal(calls.length, 1);
+  const text = result.content[0].text;
+  assert.match(text, /attachment att-deck/);
+  assert.match(text, /Issues: 2\./);
+  assert.match(text, /- issue: text\n- issue: x\n/);
 });
 
 test("a reply that is not a completed document fails the call", async () => {

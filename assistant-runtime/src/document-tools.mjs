@@ -60,14 +60,26 @@ function size(bytes) {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function issueLine({ severity, message, path: where } = {}) {
-  const place = where ? ` at ${where}` : "";
-  return `- ${severity ?? "issue"}${place}: ${String(message ?? "").slice(0, MAX_ISSUE_TEXT)}`;
+// The host's issues as objects: a bare string is its message, and anything
+// else is left out. The file exists by now, so no issue may fail the call.
+function issueList(issues) {
+  if (!Array.isArray(issues)) return [];
+  return issues.flatMap((issue) => {
+    if (typeof issue === "string") return [{ message: issue }];
+    if (issue && typeof issue === "object" && !Array.isArray(issue))
+      return [issue];
+    return [];
+  });
+}
+
+function issueLine({ severity, message, path: where }) {
+  const place = where ? ` at ${String(where)}` : "";
+  return `- ${String(severity ?? "issue")}${place}: ${String(message ?? "").slice(0, MAX_ISSUE_TEXT)}`;
 }
 
 function describe(result, format) {
   const { file } = result;
-  const issues = Array.isArray(result.issues) ? result.issues : [];
+  const issues = issueList(result.issues);
   const facts = [
     format,
     size(file.bytes),
@@ -82,10 +94,9 @@ function describe(result, format) {
   ].join("\n");
 }
 
+// Through console: main.mjs writes it to stderr without the run's credentials.
 const skipped = (what, error) =>
-  process.stderr.write(
-    `create_document ${what} skipped: ${errorMessage(error)}\n`,
-  );
+  console.warn(`create_document ${what} skipped: ${errorMessage(error)}`);
 
 async function pageCount(filePath) {
   try {

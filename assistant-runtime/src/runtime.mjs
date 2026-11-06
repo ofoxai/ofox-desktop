@@ -1314,6 +1314,8 @@ export class AssistantRuntime {
   }
 
   // `publishDetails` adds a result's details, or a failure's, to tool_end.
+  // A result returned with `isError` (the model is told the call failed) ends
+  // as unsuccessful too, like a thrown error.
   wrapTool(
     context,
     name,
@@ -1408,7 +1410,7 @@ export class AssistantRuntime {
             this.notify(context, "tool_end", {
               name,
               toolCallId,
-              success: true,
+              success: safe?.isError !== true,
               ...(mcp ? { mcp } : {}),
               ...(publishDetails && safe?.details !== undefined
                 ? { details: safe.details }

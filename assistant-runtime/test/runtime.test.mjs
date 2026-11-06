@@ -3684,3 +3684,62 @@ test("only a vision model sees the document's preview after create_document", as
     else assert.doesNotMatch(followUp, /image\/jpeg/);
   }
 });
+
+test("a create_document call the runtime rejects ends unsuccessful, a created file successful", async (t) => {
+  const events = [];
+  const calls = [];
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        status: "completed",
+        file: {
+          id: "att-notes",
+          name: "notes.md",
+          mimeType: "text/markdown",
+          bytes: 7,
+        },
+        issues: [],
+      };
+    },
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? toolStream(
+            "create_document",
+            { name: "deck.pptx", format: "pptx", content: "Slide 1" },
+            {
+              name: "create_document",
+              args: { name: "notes.md", format: "md", content: "# Notes" },
+            },
+          )
+        : stream("done");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md", "pptx"] },
+  });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    calls.map((call) => call.args.format),
+    ["md"],
+  );
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "tool_end")
+      .map(({ data }) => [data.toolCallId, data.success]),
+    [
+      ["call-one", false],
+      ["call-two", true],
+    ],
+  );
+  const results = requests[1].messages.filter(
+    (message) => message.role === "tool",
+  );
+  assert.match(JSON.stringify(results[0]), /must be an array/);
+  assert.match(JSON.stringify(results[1]), /attachment att-notes/);
+});
