@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 助手能把 PDF、DOCX、PPTX、XLSX（以及 md/txt/csv/html/json）作为真实文件交付：officecli 和 Typst 随包分发，运行时新增 `create_document` 工具，宿主生成并校验文件，对话里出现文档卡片，能保存并打开；四个随包办公技能教模型怎么写内容。
+**Goal:** 助手能把 PDF、DOCX、PPTX、XLSX（以及 md/txt/csv/html/json）作为真实文件交付：officecli 和 Typst 随包分发，运行时新增 `create_document` 工具，宿主生成并校验文件，对话里出现文档卡片，能保存并打开；四个随包办公技能教模型怎么写内容（docx / pptx / xlsx 三个改编自 OfficeCLI 的技能，pdf 是自写的）。
 
 **Architecture:**
 - 引擎二进制由 `scripts/assistant-prepare.mjs` 按 `engine-downloads.json` 下载、SHA-256 校验、放进 `assistant-runtime/resources/engines/`，和 Node 一起签名，路径写进 `resources/manifest.json`。
@@ -21,7 +21,7 @@
 - **开源边界**：officecli、Typst 的 LICENSE/NOTICE 进 `assistant-runtime/notices/`；OfficeCLI 技能改编要注明来源（Apache-2.0）；不拿 Anthropic 的 pdf/docx/pptx/xlsx 技能；提交信息和注释不提闭源产品。
 - **sidecar 限制**：运行时只有自带 Node 22，没有 npm/Python；生产依赖 `npm ci --omit=dev --ignore-scripts`。运行时→宿主每帧 ≤ 8 MiB（`host.rs:67 FRAME_LIMIT`），宿主→运行时每行 ≤ 1 MiB（`ipc.mjs:4 LINE_LIMIT`，宿主侧 `host.rs:2260`）。工具调用上限：本机配置默认开启时 60 步 / 900 s / $1（`capabilities.rs:39-56`），无本机工具时 20（`runtime.mjs:42`）。
 - **附件上限**：单文件 25 MiB（`attachments.rs:26 MAX_FILE_BYTES`），会话 500 MiB。
-- **签名**：macOS 上每个 Mach-O 都签（hardened runtime + 时间戳）；officecli 需要 JIT 类 entitlements（Task 2）。发布平台 macOS arm64 和 Windows x64。
+- **签名**：macOS 上每个 Mach-O 都签（hardened runtime + 时间戳）；officecli 只需要 `allow-jit` 一项 entitlement（Task 2，spec 的 R16 修订）。发布平台 macOS arm64 和 Windows x64。
 - **界面文字三语**（`src/i18n/locales/{zh,en,ja}.json`），不写死在代码里。
 - **Ofox 地址**用 `src/lib/ofoxUrls.ts` + `useOfoxApex`。
 - **Windows/macOS 行为一致**，路径用平台 API 拼接；子进程环境经 `process::clean_environment`。
@@ -148,7 +148,7 @@ git commit -m "feat(assistant): bundle officecli and typst as document engines"
 - Create: `docs/assistant-engines.md`（引擎的来源、版本、签名要求、spike 结果、退路）
 
 **Interfaces:**
-- Produces: `officecli-entitlements.plist` 含 `com.apple.security.cs.allow-jit`、`com.apple.security.cs.allow-unsigned-executable-memory`、`com.apple.security.cs.disable-library-validation`（三项都 `true`）。typst 不带 entitlements。
+- Produces: `officecli-entitlements.plist` 只含 `com.apple.security.cs.allow-jit`（`true`）。原计划还有 `allow-unsigned-executable-memory` 和 `disable-library-validation`，spike 实测不需要，收窄为一项（R16，见 spec 最容易出问题 8 和 `docs/assistant-engines.md`）。typst 不带 entitlements。
 - Produces: `signMacFiles` 里 `const ENTITLEMENTS = { node: "node-entitlements.plist", officecli: "officecli-entitlements.plist" }`，按 `path.basename(filename)` 查表（Windows 可执行文件名不出现在 darwin 上，不用管 `.exe`）。
 
 - [ ] **Step 1: 改 `signMacFiles`，写 plist**
@@ -157,13 +157,13 @@ git commit -m "feat(assistant): bundle officecli and typst as document engines"
 
 - [ ] **Step 2: 本地签名并运行（门槛）**
 
-Run: `APPLE_SIGNING_IDENTITY="Developer ID Application: NICE TALK PTE. LTD. (R65NVCLBMY)" pnpm assistant:prepare && codesign -dv --entitlements - assistant-runtime/resources/engines/officecli/officecli 2>&1 | grep -E "runtime|allow-jit|disable-library-validation"`
-Expected: 输出含 `flags=0x10000(runtime)` 和三项 entitlements。
+Run: `APPLE_SIGNING_IDENTITY="Developer ID Application: NICE TALK PTE. LTD. (R65NVCLBMY)" pnpm assistant:prepare && codesign -dv --entitlements - assistant-runtime/resources/engines/officecli/officecli 2>&1 | grep -E "runtime|allow-jit"`
+Expected: 输出含 `flags=0x10000(runtime)` 和 `com.apple.security.cs.allow-jit`，没有别的 entitlement。
 
 Run: `APPLE_SIGNING_IDENTITY="Developer ID Application: NICE TALK PTE. LTD. (R65NVCLBMY)" pnpm assistant:smoke 2>&1 | tail -8`
 Expected: 两个引擎在签名后仍正常运行（这是 spike 的判定）。
 
-如果 officecli 被 killed 或报 `code signature invalid` / `library validation` 类错误：先试去掉 `disable-library-validation`，再试加 `com.apple.security.cs.allow-dyld-environment-variables`；都不行就停下，按 spec "已决定" 第 2 条改为按需安装，并向用户报告。
+如果 officecli 被 killed 或报 `code signature invalid` / `library validation` 类错误：从 `allow-jit` 起逐项加，一次一项并记下是哪一项修好的：先 `com.apple.security.cs.allow-unsigned-executable-memory`，再 `com.apple.security.cs.disable-library-validation`，再 `com.apple.security.cs.allow-dyld-environment-variables`；都不行就停下，按 spec "已决定" 第 2 条改为按需安装，并向用户报告。（实际结果：只要 `allow-jit`，不需要往上加。）
 
 - [ ] **Step 3: 写 `docs/assistant-engines.md`**
 
@@ -533,8 +533,8 @@ git commit -m "feat(assistant): show generated documents with save and open"
 ### Task 11: 随包办公技能与随包技能通道
 
 **Files:**
-- Create: `assistant-runtime/skills/ofox-office-docx/SKILL.md`、`ofox-office-pptx/SKILL.md`、`ofox-office-xlsx/SKILL.md`、`ofox-office-pdf/SKILL.md`
-- Create: `assistant-runtime/notices/officecli-skills.txt`（来源与 Apache-2.0 说明）
+- Create: `assistant-runtime/skills/ofox-office-docx/SKILL.md`、`ofox-office-pptx/SKILL.md`、`ofox-office-xlsx/SKILL.md`（这三个改编自 OfficeCLI 的技能）和 `ofox-office-pdf/SKILL.md`（自写，不含 OfficeCLI 的内容）
+- Create: `assistant-runtime/notices/officecli-skills.txt`（来源与 Apache-2.0 说明；只涉及改编的三个，pdf 是原创）
 - Modify: `src-tauri/src/services/assistant/skills.rs`（`SkillRunState` :35 加 `bundled: Vec<BundledSkill>`；`public()` :73 合并；`load_run_skill` :164 先查 bundled；`list_skills` :118 合并）
 - Create: `src-tauri/src/services/assistant/skills/bundled.rs`（扫描与 frontmatter 解析）
 - Modify: `src-tauri/src/services/assistant/requests.rs`（`admit_run_skills` :691 处把 bundled 并进去）
@@ -549,9 +549,9 @@ git commit -m "feat(assistant): show generated documents with save and open"
 - Produces（`SkillRunState::public()`）：用户条目在前；bundled 条目只在名字不冲突时追加，形状 `{name, description, dir, mode:"auto", hasScripts:false, reviewed:true, bundled:true}`；冲突时 `log::info!` 并跳过 bundled。
 - Produces（`list_skills`）：bundled 条目 `origin:"bundled"`。
 - Produces（`load_run_skill(run, name, selected)`）：名字在 bundled 且不在用户条目里 → `read_bundled`。
-- 技能内容：
-  - `ofox-office-pptx`：改编 OfficeCLI 仓库 `skills/pptx`（用 `gh api repos/iOfficeAI/OfficeCLI/contents/skills` 找到实际目录名）：保留版式规则，命令改为 `create_document` 的 batch 数组示例（新建幻灯片、标题、要点文本框、图片、表格、备注、背景），明确 spec A2 的子集；≤ 12000 字。
-  - `ofox-office-docx`、`ofox-office-xlsx`：同理改编 `word`、`excel`。
+- 技能内容（四个里三个是改编，pdf 是原创）：
+  - `ofox-office-pptx`：改编 OfficeCLI 仓库 `skills/officecli-pptx`（v1.0.160 的实际目录名）：保留版式规则，命令改为 `create_document` 的 batch 数组示例（新建幻灯片、标题、要点文本框、图片、表格、备注、背景），明确 spec A2 的子集；≤ 12000 字。
+  - `ofox-office-docx`、`ofox-office-xlsx`：同理改编 `officecli-docx`、`officecli-xlsx`。
   - `ofox-office-pdf`：自写的 Typst 正文规范：只写正文，`=`/`==` 标题，列表、表格（`#table(columns: 3, [..], ..)`）、强调、分页 `#pagebreak()`、不用 `#import` 和外部包、中文排版注意事项、一个完整示例；≤ 8000 字。
   - 每个 SKILL.md 的 frontmatter：`name: ofox-office-pptx`、`description:`（≤ 150 字，说明什么时候用）。
 

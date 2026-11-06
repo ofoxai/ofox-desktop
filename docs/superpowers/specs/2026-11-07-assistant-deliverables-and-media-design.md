@@ -29,7 +29,7 @@
 - 接上已经写好但没接的"用作输入"和"重新生成"，重新生成时可以换参考图。
 
 **内置技能**
-- 办公：docx / pptx / xlsx / pdf 各一个撰写规范技能，改编自 OfficeCLI 仓库的技能（Apache-2.0）。
+- 办公：docx / pptx / xlsx / pdf 各一个撰写规范技能；前三个改编自 OfficeCLI 仓库的技能（Apache-2.0），pdf 是自写的 Typst 规范。
 - 媒体：改编自 ofoxai/skills（MIT）的场景技能：广告片、产品视频、短剧、产品图、改图、首尾帧动画，共用一份提示词结构和创意简报参考。
 - 随包技能由宿主并入 1.5.1 的技能清单，`use_skill` 能读，只读。
 
@@ -110,6 +110,7 @@
   - pptx：新建幻灯片、标题、文本框（要点列表）、图片、表格、备注、背景色、简单形状。
   - xlsx：单元格值与公式、粗体/颜色/对齐、列宽、合并、冻结首行、简单图表（柱/折线/饼）。
   - 使用某格式前必须先 `use_skill` 对应的办公技能（技能清单在系统提示里，模型知道它们存在）；假模型 e2e 要包含这次 `use_skill` 调用。
+- **Office 内容由宿主按白名单校验，通过才交给 officecli**（"超出的命令 officecli 照样能执行"只对白名单内成立）：命令只有 `add`、`set`、`remove`、`move`、`swap`，字段只认 officecli 批处理的那几个；元素路径必须从已知根开始（`/body`、`/slide[n]`、本批次自己加的工作表等），图示（diagram、flowchart）、OLE 和嵌入对象不能加（图表仍可）；属性值按键的类别逐项规则校验——文件类属性（`src`、`image` 等）只接受 `data:` URI（本地路径和远程地址一律拒绝，所以图片只能内嵌），链接只接受 `http(s):`、`mailto:` 或幻灯片，正文类属性（`text`、`notes` 等）不限，其余属性值不得指向文件或地址；Word 域只允许页码和日期类（PAGE、NUMPAGES、DATE、TIME、TOC）。拒绝时给出哪一项、怎么改，不产出任何文件。实现与取舍见 `docs/assistant-engines.md` 和 `documents/create.rs` 的 `check_batch`。
 - 返回给模型：
 
 ```
@@ -158,7 +159,7 @@
                               │ hostTool
                               ▼
 宿主 dispatch_document_tool
-  1. 产出目录 <sid>/outputs/<docId>/（0700；不放进运行时自己推导的 workspace/，宿主用 store 的 private_subdir 创建）
+  1. 产出目录 `<sid>/outputs/<docId>/`（0700；不放进运行时自己推导的 workspace/，宿主用 `AssistantStore::outputs_dir`（内部是 `private_subdir`）创建；运行时在同一次工具调用里读预览，所以目录跨过这次调用；run 结束时宿主按 `<docId>` 逐个删除，尽力而为，失败只记日志，不让 run 失败）
   2. 写入 content（batch.json 或 main.typ）
   3. spawn 引擎：清洗后的环境变量，HOME 和 TMPDIR 指向 outputs/<docId>/.home（officecli
      会写 ~/.officecli/config.json，batch 输出超过 8 KB 会落临时文件）；
@@ -267,7 +268,7 @@
 5. **缩略图撑爆帧**：缩略图编码后超过预算就降质到 ≤ 200 KB，再超就不附；整帧 < 1 MiB 有测试。
 6. **"保存并打开"打开的必须是用户保存的那份**：测试断言打开的路径等于保存对话框返回的路径，且不在会话目录内。
 7. **多参考图网关不支持**：探测失败时 `image_ids` 保持上限 1，技能文案一致。
-8. **officecli 在 hardened runtime 下跑不起来**：它是自包含、trimmed 的 .NET 10（非 NativeAOT），上游只做 ad-hoc 签名。.NET JIT 在 hardened runtime 下通常需要 `com.apple.security.cs.allow-jit`、`allow-unsigned-executable-memory`、`disable-library-validation`。M1 的第一项任务是签名 spike：用 Developer ID + 这组 entitlements 签 officecli 和 typst，跑 `assistant:smoke`，并走一次公证。Node 已经带 JIT entitlement，给 officecli 同类 entitlements 是一致的做法（我的决定）；spike 失败时停下来找用户决定（见"待确认"）。
+8. **officecli 在 hardened runtime 下跑不起来**：它是自包含、trimmed 的 .NET 10（非 NativeAOT）。.NET JIT 在 hardened runtime 下需要 `com.apple.security.cs.allow-jit`。M1 的第一项任务是签名 spike：用 Developer ID 签 officecli 和 typst，跑 `assistant:smoke`，并走一次公证。**修订（R16）：entitlements 收窄为 `allow-jit` 一项。** 原计划按 Node 的做法给 officecli 同样三项（`allow-jit`、`allow-unsigned-executable-memory`、`disable-library-validation`），spike 的实测不支持：上游用 Developer ID 签的 v1.0.160 macOS arm64 版本就只带 `allow-jit` 并能运行；单文件包里是 59 个托管程序集、没有原生二进制，运行时不解压，`otool -L` 只列出 Apple 系统库，没有别的团队的库需要库验证放行；只带 `allow-jit` 签名后，所有 officecli 操作都通过。`disable-library-validation` 会拿掉"进程能加载哪些库"的检查，而这个进程读的是别人给助手的文档，所以不给。只在签名后的二进制出现被杀、`Code Signature Invalid`、库加载被拒等实际失败时，才按 `docs/assistant-engines.md` 的"When the signed engine fails"逐步加（先 `allow-unsigned-executable-memory`，再 `disable-library-validation`，再 `allow-dyld-environment-variables`）。公证还没有跑（需要发布负责人的 Apple 凭据），见同一文档。
 9. **引擎偷偷联网或写用户目录**：`OFFICECLI_SKIP_UPDATE=1`、HOME/TMPDIR 指向产出目录；测试断言子进程环境里有这两项且 HOME 不是用户主目录。
 
 ## 已决定（用户授权后由本文作者决定）

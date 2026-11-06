@@ -429,7 +429,9 @@ const REFUSED_TYPES: &[&str] = &[
 /// run nothing.
 const FIELD_NAMES: &[&str] = &["page", "numpages", "date", "time", "toc"];
 /// officecli's field types: each is also an element type `add` takes, and
-/// then reads its `code` as the raw field instruction.
+/// then reads its `code` as the raw field instruction. `section` is not one:
+/// as an element it is a section break (`type: nextPage`, `orientation`…);
+/// as a `fieldType` it is still refused, like any name but [`FIELD_NAMES`].
 const FIELD_TYPES: &[&str] = &[
     "field",
     "page",
@@ -441,7 +443,6 @@ const FIELD_TYPES: &[&str] = &[
     "title",
     "time",
     "filename",
-    "section",
     "sectionpages",
     "mergefield",
     "ref",
@@ -1091,16 +1092,17 @@ fn engine_for(format: DocumentFormat, engines: &Engines) -> Result<Option<PathBu
     })
 }
 
-/// A new private folder for one document, its engines' home, and the
-/// content where the engine reads it (or, for text, the file itself).
-/// Blocking file IO.
+/// A new private folder `outputs/<doc_id>` for one document, its engines'
+/// home, and the content where the engine reads it (or, for text, the file
+/// itself). Blocking file IO.
 fn prepare(
     store: &AssistantStore,
     sid: &str,
+    doc_id: &str,
     document: &Document,
     language: &str,
 ) -> Result<(PathBuf, PathBuf), String> {
-    let dir = store.outputs_dir(sid, &id())?;
+    let dir = store.outputs_dir(sid, doc_id)?;
     let home = dir.join(HOME);
     crate::config::create_private_dir_all(&home).map_err(|_| unwritable())?;
     match (&document.content, document.format.engine()) {
@@ -1800,6 +1802,40 @@ impl AssistantHost {
         made
     }
 
+    /// Remove the folders the run's documents were made in: their files are
+    /// kept as attachments and the runtime has read what it needed. Best
+    /// effort: a folder that stays is logged, and the run does not fail.
+    pub(in crate::services::assistant) async fn remove_document_folders(&self, run: &RunControl) {
+        let folders = run
+            .media
+            .as_ref()
+            .map(MediaRun::take_document_folders)
+            .unwrap_or_default();
+        if folders.is_empty() {
+            return;
+        }
+        let store = match self.store(&run.identity.owner) {
+            Ok(store) => store,
+            Err(error) => {
+                log::warn!("[Assistant] could not remove the documents' folders: {error}");
+                return;
+            }
+        };
+        let sid = run.session_id.clone();
+        let removed = blocking(move || {
+            for doc_id in &folders {
+                if let Err(error) = store.remove_outputs_dir(&sid, doc_id) {
+                    log::warn!("[Assistant] could not remove a document's folder: {error}");
+                }
+            }
+            Ok(())
+        })
+        .await;
+        if let Err(error) = removed {
+            log::warn!("[Assistant] could not remove the documents' folders: {error}");
+        }
+    }
+
     /// The `sandbox-exec` an engine runs under: tried once per engine, with
     /// `--version` under its profile. Without it (not macOS, or the probe
     /// failed) the batch checks and the dead proxy alone hold the engine.
@@ -1846,10 +1882,16 @@ impl AssistantHost {
         let mid = run.reply_id();
         attachments::tool_room(&self.load(run).await?, 1, 0)?;
         let store = self.store(&run.identity.owner)?;
+        // The folder outlives this call: the runtime reads the preview from
+        // it once the call has answered. The end of the run removes it.
+        let doc_id = id();
+        if let Some(media) = &run.media {
+            media.track_document_folder(&doc_id);
+        }
         let (dir, home) = blocking({
             let (store, sid) = (store.clone(), run.session_id.clone());
             let (document, language) = (document.clone(), run.ui_language.clone());
-            move || prepare(&store, &sid, &document, &language)
+            move || prepare(&store, &sid, &doc_id, &document, &language)
         })
         .await?;
         let format = document.format;
@@ -1961,7 +2003,7 @@ mod tests {
     use super::*;
     use crate::services::assistant::{
         catalog,
-        host::{Admit, BoxFuture, Environment, Identity},
+        host::{Admit, BoxFuture, Environment, Finish, Identity},
         media_tools::host::MediaRun,
         types::{id, now, Event, RunRef, SendRequest},
     };
@@ -2452,6 +2494,101 @@ esac"#;
         let generation = record.messages[0].media_for(Some("call-1")).unwrap();
         assert_eq!(generation.params["pages"], 2);
         assert_eq!(record.attachments[0].details.as_ref().unwrap()["pages"], 2);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_documents_folder_stays_for_the_call_and_goes_when_the_run_ends() {
+        let f = fixture(None, Some(TYPST_OK));
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "report", "format": "pdf", "content": "= Hi"}),
+            )
+            .await
+            .unwrap();
+        // The runtime reads the preview once the call has answered.
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        let preview = PathBuf::from(result["previewPath"].as_str().unwrap());
+        assert!(file.is_file() && preview.is_file());
+        assert_eq!(f.outputs().len(), 1);
+
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        assert!(f.outputs().is_empty());
+        assert!(!file.exists() && !preview.exists());
+        // The reply keeps the document: its copy is an attachment.
+        let record = f.record();
+        let attachment = &record.attachments[0];
+        assert_eq!(attachment.origin.as_deref(), Some("generated"));
+        let kept = f
+            .host
+            .store(&identity().owner)
+            .unwrap()
+            .attachment_root(&f.sid)
+            .unwrap()
+            .join(&attachment.id);
+        assert!(kept.is_file());
+        assert_eq!(f.events("run_end").len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn the_folders_of_failed_and_text_documents_go_when_a_run_stops() {
+        let f = fixture(
+            None,
+            Some("echo 'error: expected closing bracket' >&2; exit 1"),
+        );
+        f.call(
+            "call-1",
+            json!({"name": "report", "format": "pdf", "content": "#text("}),
+        )
+        .await
+        .unwrap_err();
+        f.call(
+            "call-2",
+            json!({"name": "notes", "format": "md", "content": "# Hi"}),
+        )
+        .await
+        .unwrap();
+        // A call refused before it made a folder leaves none.
+        f.call(
+            "call-3",
+            json!({"name": "a", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(f.outputs().len(), 2);
+
+        f.host.finish(&f.run, Ok(Finish::Stopped)).await;
+        assert!(f.outputs().is_empty());
+        assert_eq!(f.events("run_end").len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_folder_that_cannot_be_removed_does_not_fail_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture(None, Some(TYPST_OK));
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "report", "format": "pdf", "content": "= Hi"}),
+            )
+            .await
+            .unwrap();
+        // A locked folder cannot be emptied.
+        let dir = PathBuf::from(result["filePath"].as_str().unwrap())
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        // (Gone already when the tests run as root.)
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        // The run still ended, with its reply saved.
+        assert_eq!(f.events("run_end").len(), 1);
+        assert_eq!(f.record().messages[0].status, "completed");
     }
 
     #[tokio::test]
@@ -3432,6 +3569,27 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             ),
         ] {
             assert!(checked(std::slice::from_ref(&item)).is_ok(), "{item}");
+        }
+    }
+
+    #[test]
+    fn a_section_break_is_not_a_field() {
+        let section = |props: Value| json!({"command": "add", "parent": "/body", "type": "section", "props": props});
+        for props in [
+            json!({"type": "nextPage", "orientation": "landscape"}),
+            json!({"type": "continuous"}),
+            json!({}),
+        ] {
+            let item = section(props);
+            assert!(checked(std::slice::from_ref(&item)).is_ok(), "{item}");
+        }
+        for item in [
+            json!({"command": "add", "parent": "/body/p[1]", "type": "field", "props": {"fieldType": "section"}}),
+            json!({"command": "add", "parent": "/body", "type": "paragraph", "props": {"text": "x", "fieldType": "section"}}),
+            section(json!({"type": "nextPage", "fieldType": "section"})),
+            section(json!({"type": "nextPage", "code": " SECTION "})),
+        ] {
+            assert!(checked(std::slice::from_ref(&item)).is_err(), "{item}");
         }
     }
 

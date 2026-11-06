@@ -2176,6 +2176,7 @@ impl AssistantHost {
             Err(_) => control.cancelled(),
         };
         let completed = matches!(outcome, Ok(Finish::Completed));
+        self.remove_document_folders(control).await;
         // A failure that cost nothing leaves the session's cost known.
         let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);
         let error_code = outcome.as_ref().err().map(|failure| failure.code.clone());

@@ -185,3 +185,171 @@ hardened runtime or the entitlements. The release workflow signs the engines
 (`pnpm tauri build` runs `assistant:prepare` with the Developer ID) but has no
 signed smoke step. Until one exists, the signed run above, repeated on the
 signed tree after any engine or entitlement change, is the only check.
+
+## Using the engines: `create_document`
+
+The model makes a file with one tool, `create_document({ name, format, content })`.
+The runtime registers it from the run's `documents` parameter, which lists the
+formats this computer can make: the text formats always, the Office formats when
+officecli is present and `pdf` when typst is. The system prompt tells the model
+to use the tool when the user asks for a file and never to say it cannot attach
+one.
+
+Before the first document of a format in a conversation the model reads the
+matching bundled skill with `use_skill`: `ofox-office-docx`, `ofox-office-pptx`,
+`ofox-office-xlsx` or `ofox-office-pdf`. The skills hold the command reference
+and layout rules; the three Office skills are adapted from the OfficeCLI
+repository and the PDF skill is original (see
+`assistant-runtime/notices/officecli-skills.txt`).
+
+### Formats and content
+
+| `format`                           | `content`                                 | What the host does                                                                                                 |
+| ---------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pptx`, `docx`, `xlsx`             | an array of officecli batch commands      | `officecli create`, then `batch --input --json` (atomic: one failure rolls it all back), `validate`, `view issues` |
+| `pdf`                              | the Typst markup of the body, as a string | joins the host's prelude and the body into `main.typ`, `typst compile`, then renders page 1 as a preview           |
+| `md`, `txt`, `csv`, `html`, `json` | the file's text, as a string              | writes the file as given                                                                                           |
+
+An Office batch is a list of `add`, `set`, `remove`, `move` and `swap` commands
+(officecli's `op` is accepted as an alias of `command`). One batch makes one
+file; a deck starts like this:
+
+```json
+[
+  {
+    "command": "add",
+    "parent": "/",
+    "type": "slide",
+    "props": { "title": "Plan" }
+  }
+]
+```
+
+and a Word document can start a landscape section with a break:
+
+```json
+[
+  {
+    "command": "add",
+    "parent": "/body",
+    "type": "section",
+    "props": { "type": "nextPage", "orientation": "landscape" }
+  }
+]
+```
+
+A PDF body starts at the text: the prelude already sets A4 pages with
+margins and page numbers, a font chain that covers Chinese, Japanese and Latin
+text, heading styles and the document language (the interface language).
+Compile errors come back with their line and column in the body the model wrote
+(the prelude's lines are not counted) and the quoted source line.
+
+### Where the files live
+
+- The finished file is kept as a generated attachment of the reply, under the
+  conversation's private folder in the application's config directory:
+  `assistant/<owner>/<session id>/attachments/<attachment id>`.
+- The reply shows a document card with the file's name, size, page, slide or
+  sheet count and a badge for issues. **Save and open** asks where to save, then
+  opens the copy the user saved (never the stored one); **Save…** only saves.
+- While a document is made the host works in `<session id>/outputs/<docId>/`
+  (mode 0700): the content (`batch.json` or `main.typ`), the engine's private
+  `.home` (its home and temporary folder) and the output and preview files. The
+  folder stays for the tool call, because the runtime reads the preview from it
+  after the host has answered, and is removed when the run ends, whether the run
+  completed, was stopped or failed. A folder that cannot be removed is logged and
+  never fails the run.
+
+### Limits
+
+| What                         | Limit                                                                  |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| Documents per reply          | 3 (a refused or failed document does not count)                        |
+| `content`, serialized        | 2 MiB                                                                  |
+| Commands in one Office batch | 2000                                                                   |
+| File name                    | 120 characters; folders are dropped and the format's extension is kept |
+| One generated file           | 25 MiB; a conversation's files together 500 MiB                        |
+| One engine run               | 60 s, then it and everything it started are killed                     |
+| Engine output                | 256 KiB each of stdout and stderr                                      |
+| Issues in a result and card  | 20, errors first, repeated ones counted together                       |
+| Retries                      | the model retries a failed document at most twice, then explains       |
+
+### What the host refuses to run
+
+Office content is checked against an allowlist before officecli starts; a
+refusal names the item and what to change, and nothing is made.
+
+- Commands: only `add`, `set`, `remove`, `move` and `swap`. Every other
+  officecli command (`raw`, `raw-set`, `add-part`, `view`, `get`, `query`,
+  `import`, `dump`, `validate`) and any field a command does not take is refused.
+- Elements: a path starts at a known root (`/body`, `/header`, `/footer`,
+  `/slide[n]`, `/notes`, a sheet the batch itself adds, and so on). Diagrams, OLE
+  objects, embedded objects and packages cannot be added.
+- Values, by the property's key: a file property (`src`, `path`, `image`,
+  `preview`, `poster`, ...) takes a `data:` URI and nothing else, so local and
+  remote pictures are out; a link takes `https:`, `http:`, `mailto:` or a slide;
+  a table's `data` is inline CSV; fills take colours, gradients or a `data:`
+  image; prose (`text`, `title`, `notes`, `alt`, `description`, `tooltip`,
+  `value`, `formula`) may hold anything, including addresses; every other value
+  may not name a file or an address (an absolute or `..` path, `~`, a drive, a
+  scheme).
+- Word fields only show a page number or a date: `page`, `numpages`, `date`,
+  `time` and `toc`, with no instruction that runs, fetches or links.
+
+The engines then run as isolated children: a clean environment, `HOME`, `TMPDIR`,
+`TEMP` and `TMP` pointing into the document's `.home`, `OFFICECLI_NO_AUTO_RESIDENT=1`,
+`OFFICECLI_SKIP_UPDATE=1`, a Typst package folder that is empty and read-only,
+every proxy variable pointing at a port nothing listens on, and no inherited
+credentials. On macOS each engine also runs under `sandbox-exec` (probed once per
+engine; if the probe fails the engine runs without it and the host logs it): no
+network for either engine; officecli writes only the document's folder and its own
+temporary folder, and reads nothing under `/Users` and `/Volumes` except the
+document's folder and its own. Windows
+and Linux have the validator and the dead proxy only (see
+[known limitations](known-limitations.md#assistant-document-engines-2026-11-07)).
+
+### Previews
+
+The model sees a preview of the first page only if it can see images. A PDF's
+preview is Typst's PNG of page 1; a PowerPoint's is officecli's SVG of slide 1,
+which the runtime draws with `@napi-rs/canvas`. Both become a JPEG of at most 768
+px on the long edge and 200 KB, at a lower quality if needed and left out if it is
+still too large, so a tool result stays well under the 1 MiB line limit. Word and
+Excel files have no preview. The model also gets the file's id, name, type,
+size, page, slide or sheet count and the issues; it never gets a file path.
+
+### Not in this round
+
+Editing or inspecting an existing Office file (`inspect_document` and
+`edit_document` in the design) is not built: the model can only make new files.
+
+## Acceptance on a real key
+
+This is the user's step, with a real Ofox key; the development lane never ran it.
+
+1. `pnpm assistant:prepare`, then `pnpm tauri dev`. Open the assistant with your
+   Ofox key set and a model that supports tools (and, to check the previews,
+   images).
+2. Ask each of these in a new conversation and wait for the reply to end:
+   1. "写一个 pdf，介绍四川"
+   2. "做一个 8 页的 Transformer 介绍 ppt"
+   3. "做一张三科成绩表"
+   4. "写一份 Word 版的周报"
+3. For each: a document card appears under the reply with the right name,
+   type, size and count (pages, 8 slides, sheets); an issues badge, if any, opens
+   a readable list; the model's text describes the file without saying it cannot
+   attach one.
+4. Press **Save and open** and choose a folder. The file opens in the system app
+   (Preview or a PDF reader, PowerPoint or Keynote, Excel or Numbers, Word or
+   Pages) with no repair prompt, warning or blank page, and the content is what
+   the card said. Open the saved copy twice to be sure it is not the stored file.
+5. After each reply ends, the conversation's `outputs/` folder is empty (no
+   `<docId>` folders are left).
+6. Optional: ask for a document with a picture, a chart, and a Word section
+   break to see how the model uses the skills.
+
+Record the result here, one line per prompt, with the date, build and macOS version.
+
+| Date        | Build | macOS | pdf | pptx | xlsx | docx | Notes |
+| ----------- | ----- | ----- | --- | ---- | ---- | ---- | ----- |
+| not yet run |       |       |     |      |      |      |       |
