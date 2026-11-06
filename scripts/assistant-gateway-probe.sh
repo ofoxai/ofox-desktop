@@ -23,8 +23,10 @@
 # 以及 summary.md；同一张表（支持 / 不支持 / 异常）也打印到 stdout。
 # 退出码：0 全部有结论；1 至少一项异常；2 用法或环境错误。
 #
-# key 只经 curl 的 -K - 从 stdin 传入：不进命令行参数（ps 看不到）、不回显、
-# 不写入任何输出文件；脚本不用 -i/-v，也不会打印响应头。
+# key 只经 curl 的 -K - 从 stdin 传入：不进命令行参数（ps 看不到）；curl 带 -q，
+# 不读 ~/.curlrc；脚本不用 -i/-v，不打印响应头。stdout 和 summary.md 里的说明会把
+# key 与 "Bearer ..." 遮成 ***；<id>.body / <id>.curl-err 是网关和 curl 的原样输出，
+# 网关若在错误响应里回显 key，它会留在这两类文件里，分享前请先检查。
 #
 set -euo pipefail
 umask 077
@@ -39,11 +41,12 @@ IMAGE_PROMPT="Blend the two reference images into one simple abstract picture."
 # 子命令：
 #   png <path> <r> <g> <b>     写一张 64x64 纯色 PNG
 #   payload <chat|chat-off|responses> <model>   打印请求 JSON
-#   analyze <kind> <body> <status> <errfile>    打印 "OK|NO|BAD<TAB>detail"
+#   analyze <kind> <body> <status> <errfile> [curl_rc]   打印 "OK|NO|BAD<TAB>detail"
 #   check-gen                  自检 PNG 与请求体的生成
 # 源码保持纯 ASCII：中文标签由 bash 侧映射，避免依赖 locale。
 IFS= read -r -d '' PY <<'PYEOF' || true
 import json
+import os
 import re
 import struct
 import sys
@@ -93,8 +96,16 @@ def payload(which, model):
     return body
 
 
+def scrub(text):
+    """Mask the API key and any Bearer token a gateway may echo back (before truncation)."""
+    key = os.environ.get("OFOX_API_KEY", "")
+    if key:
+        text = text.replace(key, "***")
+    return re.sub(r"(?i)\b(bearer)\s+[^\s\"',;]+", r"\1 ***", text)
+
+
 def clean(value, limit=160):
-    text = re.sub(r"\s+", " ", str(value)).strip().replace("|", "/")
+    text = re.sub(r"\s+", " ", scrub(str(value))).strip().replace("|", "/")
     return text[:limit]
 
 
@@ -169,8 +180,26 @@ def analyze_images(status, text):
     return "BAD", "HTTP %d but no data[]: %s" % (status, error_text(obj) or text)
 
 
+def has_done(text):
+    return re.search(r"^data:\s*\[DONE\]\s*$", text, re.M) is not None
+
+
+def truncation(status, text, errfile, curl_rc):
+    """A 2xx status with a curl error means the body was cut off (timeout, reset)."""
+    err = read_text(errfile)
+    try:
+        code = int(curl_rc)
+    except ValueError:
+        code = 0
+    if code == 0 and not err:
+        return None
+    return "truncated response: curl exit %d%s; HTTP %d, %d chars received" % (
+        code, " (%s)" % err if err else "", status, len(text))
+
+
 def analyze_chat(text, single):
     events, errors, ids, first_index, indexes = 0, [], [], {}, set()
+    finished = False
     for _event, obj in sse_events(text):
         events += 1
         if not isinstance(obj, dict):
@@ -178,6 +207,8 @@ def analyze_chat(text, single):
         if error_text(obj):
             errors.append(error_text(obj))
         for choice in dicts(obj.get("choices")):
+            if choice.get("finish_reason"):
+                finished = True
             delta = choice.get("delta")
             if not isinstance(delta, dict):
                 continue
@@ -198,6 +229,8 @@ def analyze_chat(text, single):
         return "BAD", "no tool call id in stream (model may not have called the tool)"
     if single:
         if len(ids) == 1:
+            if not (finished or has_done(text)):
+                return "BAD", "stream ended without [DONE] or finish_reason (cut off?), inconclusive; " + shown
             return "OK", "exactly one tool call; " + shown
         return "NO", "%d tool calls despite parallel_tool_calls=false; %s" % (len(ids), shown)
     if len(ids) < 2:
@@ -239,13 +272,17 @@ def analyze_responses(text):
     return "NO", "output_index collides; " + shown
 
 
-def analyze(kind, body_path, status_arg, errfile):
+def analyze(kind, body_path, status_arg, errfile, curl_rc="0"):
     text = read_text(body_path)
     try:
         status = int(status_arg)
     except ValueError:
         status = 0
     success = 200 <= status < 300
+    if success:
+        cut = truncation(status, text, errfile, curl_rc)
+        if cut:
+            return "BAD", cut
     if kind == "images":
         if success:
             return analyze_images(status, text)
@@ -290,7 +327,7 @@ def main(argv):
         print(json.dumps(payload(argv[1], argv[2])))
     elif command == "analyze":
         try:
-            emit(*analyze(*argv[1:5]))
+            emit(*analyze(*argv[1:6]))
         except Exception as exc:  # parser must never crash the probe run
             emit("BAD", "parser error: %r" % (exc,))
     elif command == "check-gen":
@@ -308,11 +345,12 @@ py() { python3 -I -c "$PY" "$@"; }
 die() { printf '%s\n' "$1" >&2; exit 2; }
 
 # key 经 stdin 交给 curl 读配置（printf 是内建命令，key 不会出现在 argv）。
+# -q 必须是第一个参数：不读 ~/.curlrc，免得里面的 -v/-i/write-out 改变输出或打印请求头。
 curl_auth() {
-  printf 'header = "Authorization: Bearer %s"\n' "$OFOX_API_KEY" | curl -K - "$@"
+  printf 'header = "Authorization: Bearer %s"\n' "$OFOX_API_KEY" | curl -q -K - "$@"
 }
 
-# classify <kind> <body> <status> <errfile> → 打印 "支持|不支持|异常<TAB>说明"
+# classify <kind> <body> <status> <errfile> [curl_rc] → 打印 "支持|不支持|异常<TAB>说明"
 classify() {
   local out label
   out=$(py analyze "$@" 2>&1) || out=$'BAD\t解析脚本失败: '"$out"
@@ -337,14 +375,14 @@ record() { # label verdict detail
 probe() {
   local id=$1 label=$2 kind=$3
   shift 3
-  local body="$OUTDIR/$id.body" errf="$OUTDIR/$id.curl-err" status result
+  local body="$OUTDIR/$id.body" errf="$OUTDIR/$id.curl-err" status result curl_rc=0
   : >"$body"
   : >"$errf"
   printf '[%s] %s ...\n' "$id" "$label" >&2
-  status=$(curl_auth -sS --max-time 90 -o "$body" -w '%{http_code}' "$@" 2>"$errf") || true
+  status=$(curl_auth -sS --max-time 90 -o "$body" -w '%{http_code}' "$@" 2>"$errf") || curl_rc=$?
   [[ $status =~ ^[0-9]{3}$ ]] || status=000
   printf '%s\n' "$status" >"$OUTDIR/$id.status"
-  result=$(classify "$kind" "$body" "$status" "$errf")
+  result=$(classify "$kind" "$body" "$status" "$errf" "$curl_rc")
   PROBE_VERDICT=${result%%$'\t'*}
   record "$label" "$PROBE_VERDICT" "${result#*$'\t'}"
 }
@@ -408,6 +446,11 @@ self_test() {
   mkdir -p "$fx" "$tmp/bin" "$tmp/log"
 
   write_fixtures "$fx"
+  local secret="sk-selftest-SECRET-0123456789" out rc
+  # 网关把 key 原样回显（含恰好跨过 160 字符截断点的情况）和回显别的 Bearer token
+  printf '{"error":{"message":"Incorrect API key provided: %s"}}\n' "$secret" >"$fx/images-401-echo.json"
+  printf '%s %s\n' "$(printf 'x%.0s' $(seq 1 130))" "$secret" >"$fx/key-at-truncation-edge.txt"
+  printf '{"error":{"message":"bad header Authorization: Bearer sk-other-token-XYZ123"}}\n' >"$fx/bearer-echo.json"
 
   check() { # name cmd...
     local name=$1
@@ -415,10 +458,10 @@ self_test() {
     if "$@"; then pass=$((pass + 1)); printf 'PASS  %s\n' "$name"
     else fail=$((fail + 1)); printf 'FAIL  %s\n' "$name"; fi
   }
-  # expect <name> <期望结论> <kind> <fixture> <status> [说明里应包含的子串]
+  # expect <name> <期望结论> <kind> <fixture> <status> [说明里应包含的子串] [curl-err 夹具] [curl 退出码]
   expect() {
-    local name=$1 want=$2 kind=$3 file=$4 status=$5 needle=${6:-} out got detail
-    out=$(classify "$kind" "$fx/$file" "$status" "$fx/curl-err.txt")
+    local name=$1 want=$2 kind=$3 file=$4 status=$5 needle=${6:-} errfile=${7:-empty.txt} rc=${8:-0} out got detail
+    out=$(classify "$kind" "$fx/$file" "$status" "$fx/$errfile" "$rc")
     got=${out%%$'\t'*}
     detail=${out#*$'\t'}
     if [[ $got == "$want" && $detail == *"$needle"* ]]; then
@@ -428,13 +471,20 @@ self_test() {
     fi
   }
 
+  # scrubbed <fixture> <status> <不得出现> <应出现>：网关回显的 key / Bearer token 在说明里被遮掉
+  scrubbed() {
+    local result
+    result=$(OFOX_API_KEY=$secret classify images "$fx/$1" "$2" "$fx/empty.txt" 0)
+    [[ $result != *"$3"* && $result == *"$4"* ]]
+  }
+
   echo "== 解析器 =="
   expect "images 200 with data[]"              支持   images images-ok.json 200
   expect "images 400 (second image rejected)"  不支持 images images-400.json 400 "single file"
   expect "images 401 is not a verdict"         异常   images images-401.json 401 "401"
   expect "images 200 but html body"            异常   images html-502.html 200 "not JSON"
   expect "images 502 html"                     异常   images html-502.html 502 "502"
-  expect "images curl failure (status 000)"    异常   images empty.txt 000 "timed out"
+  expect "images curl failure (status 000)"    异常   images empty.txt 000 "timed out" curl-err.txt 28
   expect "chat index=0 on distinct ids (bug)"  不支持 chat-parallel chat-buggy.sse 200 "[0]"
   expect "chat distinct index per id"          支持   chat-parallel chat-ok.sse 200 "[0, 1]"
   expect "chat distinct index, CRLF stream"    支持   chat-parallel chat-ok-crlf.sse 200
@@ -448,24 +498,38 @@ self_test() {
   expect "chat off rejected by gateway"        不支持 chat-single param-400.json 400 "parallel_tool_calls"
   expect "chat off 400 unrelated is abnormal"  异常   chat-single images-400.json 400 "400"
   expect "chat off no tool call"               异常   chat-single chat-text.sse 200
+  expect "chat off: one call, finish_reason only" 支持 chat-single chat-single-finish.sse 200
+  expect "chat off: one call, [DONE] only"     支持   chat-single chat-single-done.sse 200
+  expect "chat off: one call, no end marker"   异常   chat-single chat-truncated.sse 200 "without [DONE]"
+  expect "chat off: cut off, curl exit 28"     异常   chat-single chat-truncated.sse 200 "truncated" curl-err.txt 28
+  expect "chat off: cut off, only .curl-err"   异常   chat-single chat-truncated.sse 200 "truncated" curl-err.txt 0
+  expect "chat parallel: cut off, curl exit 28" 异常  chat-parallel chat-ok.sse 200 "truncated" curl-err.txt 28
+  expect "responses: cut off, curl exit 28"    异常   responses responses-ok.sse 200 "truncated" curl-err.txt 28
+  expect "images: cut off, curl exit 28"       异常   images images-ok.json 200 "truncated" curl-err.txt 28
   expect "responses distinct output_index"     支持   responses responses-ok.sse 200 "[1, 2]"
   expect "responses same output_index"         不支持 responses responses-bug.sse 200 "collides"
   expect "responses one function_call"         异常   responses responses-one.sse 200 "inconclusive"
   expect "responses response.failed event"     异常   responses responses-failed.sse 200 "quota"
   expect "responses 502 html"                  异常   responses html-502.html 502 "502"
 
+  echo "== 密钥遮蔽 =="
+  check "echoed key is masked in the detail"     scrubbed images-401-echo.json 401 "$secret" '***'
+  check "echoed key is masked before truncation" scrubbed key-at-truncation-edge.txt 502 "sk-selft" '***'
+  check "echoed Bearer token is masked"          scrubbed bearer-echo.json 401 "sk-other-token-XYZ123" 'Bearer ***'
+
   echo "== 生成 =="
   check "png and request payloads are valid" test "$(py check-gen)" = ok
 
   echo "== 端到端（替身 curl） =="
   write_fake_curl "$tmp/bin/curl"
-  local secret="sk-selftest-SECRET-0123456789" out rc
   local summary="$tmp/out/summary.md"
   has() { grep -qF -- "$1" "$2"; }
   argv_has_no_secret() { [[ -s $tmp/log/argv.log ]] && ! grep -qF -- "$secret" "$tmp/log/argv.log"; }
   outputs_have_no_secret() { [[ $1 != *"$secret"* ]] && ! grep -rqF -- "$secret" "$tmp/out"; }
   no_header_flags() { ! grep -qE '(^| )(-i|-v|--include|--verbose|-D|--dump-header)( |$)' "$tmp/log/argv.log"; }
   exits_with() { [[ $1 == "$2" ]]; }
+  not_in_file() { ! grep -qF -- "$1" "$2"; }
+  argv_all_start_with_q() { [[ -s $tmp/log/argv.log ]] && ! grep -qv '^-q -K - ' "$tmp/log/argv.log"; }
 
   rc=0
   out=$(env -u OFOX_API_KEY bash "$SELF" "$tmp/out-nokey" 2>&1) || rc=$?
@@ -488,12 +552,28 @@ self_test() {
   check "key is delivered via -K - on stdin"   has "Authorization: Bearer $secret" "$tmp/log/stdin-config.log"
   check "key is not echoed or written to disk" outputs_have_no_secret "$out"
   check "no response headers requested"        no_header_flags
+  check "curl runs with -q first (no ~/.curlrc)" argv_all_start_with_q
 
   rc=0
   out=$(PATH="$tmp/bin:$PATH" FAKE_FIXTURES="$fx" FAKE_LOG="$tmp/log" FAKE_MODE=down OFOX_API_KEY="$secret" \
     bash "$SELF" "$tmp/out-down" 2>&1) || rc=$?
   check "gateway down: exits 1" exits_with "$rc" 1
   check "gateway down: all four rows 异常 with HTTP 502" exits_with "$(grep -c '| 异常 | HTTP 502' "$tmp/out-down/summary.md")" 4
+
+  rc=0
+  out=$(PATH="$tmp/bin:$PATH" FAKE_FIXTURES="$fx" FAKE_LOG="$tmp/log" FAKE_MODE=cut OFOX_API_KEY="$secret" \
+    bash "$SELF" "$tmp/out-cut" 2>&1) || rc=$?
+  check "cut-off chat streams: exits 1" exits_with "$rc" 1
+  check "cut-off probe 3 is 异常, not 支持" has 'parallel_tool_calls:false | 异常 | truncated response: curl exit 28' "$tmp/out-cut/summary.md"
+  check "cut-off probe 2 is 异常" has 'chat/completions 流式并行工具调用 | 异常 | truncated response' "$tmp/out-cut/summary.md"
+  check "cut-off chat leaves responses intact" has 'responses 流式并行工具调用 | 支持 |' "$tmp/out-cut/summary.md"
+
+  rc=0
+  out=$(PATH="$tmp/bin:$PATH" FAKE_FIXTURES="$fx" FAKE_LOG="$tmp/log" FAKE_MODE=echo OFOX_API_KEY="$secret" \
+    bash "$SELF" "$tmp/out-echo" 2>&1) || rc=$?
+  check "gateway echoes key: summary shows HTTP 401" has 'HTTP 401: Incorrect API key provided: ***' "$tmp/out-echo/summary.md"
+  check "gateway echoes key: summary has no key" not_in_file "$secret" "$tmp/out-echo/summary.md"
+  check "gateway echoes key: stdout has no key" test "${out#*"$secret"}" = "$out"
 
   printf '\nself-test: %d passed, %d failed\n' "$pass" "$fail"
   [[ $fail -eq 0 ]]
@@ -519,6 +599,10 @@ write_fixtures() {
     'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}' '' 'data: [DONE]' '' >"$d/chat-single.sse"
   printf '%s\n' \
     'data: {"choices":[{"index":0,"delta":{"content":"It is sunny."},"finish_reason":null}]}' '' 'data: [DONE]' '' >"$d/chat-text.sse"
+  grep -v 'DONE' "$d/chat-single.sse" >"$d/chat-single-finish.sse"
+  grep -v 'finish_reason' "$d/chat-single.sse" >"$d/chat-single-done.sse"
+  printf '%s\n' \
+    'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_tokyo","type":"function","function":{"name":"get_weather","arguments":"{\"city\""}}]}}]}' '' >"$d/chat-truncated.sse"
   printf '%s\n' 'data: {"error":{"message":"upstream overloaded","type":"server_error"}}' '' >"$d/chat-error.sse"
   printf '%s\n' \
     'event: response.created' \
@@ -546,11 +630,12 @@ write_fixtures() {
   printf '%s\n' '{"error":{"message":"unknown parameter: parallel_tool_calls","type":"invalid_request_error"}}' >"$d/param-400.json"
   printf '%s\n' '<html><head><title>502 Bad Gateway</title></head><body>bad gateway</body></html>' >"$d/html-502.html"
   : >"$d/empty.txt"
-  printf '%s\n' 'Operation timed out after 90001 milliseconds' >"$d/curl-err.txt"
+  printf '%s\n' 'curl: (28) Operation timed out after 90001 milliseconds with 141 bytes received' >"$d/curl-err.txt"
 }
 
 # 替身 curl：记录 argv 与 stdin 配置，按 URL 返回夹具，行为模拟"image 字段被拒、
 # image[] 被接受、chat 有 index=0 bug、parallel_tool_calls:false 被遵守、responses 正常"。
+# FAKE_MODE：down（全部 502）、echo（401 并回显 key）、cut（chat 流被截断，curl 退出 28）。
 write_fake_curl() {
   cat >"$1" <<'FAKE_END'
 #!/usr/bin/env bash
@@ -566,19 +651,26 @@ while (($#)); do
   esac
   shift
 done
-status=200
-if [[ ${FAKE_MODE:-} == down ]]; then
-  src=html-502.html status=502
-else
-  case $url in
-    */images/edits) if [[ $field == array ]]; then src=images-ok.json; else src=images-400.json status=400; fi ;;
-    */chat/completions) if grep -q parallel_tool_calls "$data"; then src=chat-single.sse; else src=chat-buggy.sse; fi ;;
-    */responses) src=responses-ok.sse ;;
-    *) src=empty.txt status=404 ;;
-  esac
-fi
+status=200 rc=0
+case ${FAKE_MODE:-} in
+  down) src=html-502.html status=502 ;;
+  echo) printf '{"error":{"message":"Incorrect API key provided: %s"}}\n' "$OFOX_API_KEY" >"$out"; printf '401'; exit 0 ;;
+  *)
+    case $url in
+      */images/edits) if [[ $field == array ]]; then src=images-ok.json; else src=images-400.json status=400; fi ;;
+      */chat/completions)
+        if [[ ${FAKE_MODE:-} == cut ]]; then
+          src=chat-truncated.sse rc=28
+          echo "curl: (28) Operation timed out after 90001 milliseconds with 141 bytes received" >&2
+        elif grep -q parallel_tool_calls "$data"; then src=chat-single.sse
+        else src=chat-buggy.sse; fi ;;
+      */responses) src=responses-ok.sse ;;
+      *) src=empty.txt status=404 ;;
+    esac ;;
+esac
 cp "$FAKE_FIXTURES/$src" "$out"
 printf '%s' "$status"
+exit "$rc"
 FAKE_END
   chmod +x "$1"
 }
