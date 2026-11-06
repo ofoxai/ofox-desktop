@@ -39,6 +39,22 @@ const MAX_DOCUMENT_BYTES: u64 = 25 * 1024 * 1024;
 fn is_document(mime: &str) -> bool {
     DOCUMENT_MIMES.contains(&mime)
 }
+/// What "save and open" may launch: the file types this protocol serves. The
+/// dialog's name can be changed, and a name the model chose must never start
+/// a script or program, so any other extension is saved but not opened.
+const OPENABLE_EXTENSIONS: [&str; 18] = [
+    "pdf", "docx", "pptx", "xlsx", "md", "txt", "csv", "html", "json", "png", "jpg", "jpeg",
+    "webp", "gif", "mp4", "wav", "mp3", "ogg",
+];
+fn is_openable(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            OPENABLE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+}
 fn empty(status: u16) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
@@ -283,8 +299,9 @@ impl AssistantHost {
         .await
     }
     /// Save, then hand the saved path (never another) to `open` when the
-    /// request asks for it. `false` means the dialog was cancelled. A failed
-    /// open is reported without its OS detail: the copy is already saved.
+    /// request asks for it and its extension is a known document or media
+    /// type. `false` means the dialog was cancelled. A refused or failed open
+    /// is reported without its OS detail: the copy is already saved.
     pub async fn save_and_open(
         self: &Arc<Self>,
         request: SaveMediaRequest,
@@ -296,6 +313,9 @@ impl AssistantHost {
             return Ok(false);
         };
         if wants_open {
+            if !is_openable(&path) {
+                return Err(OPEN_FAILED.into());
+            }
             blocking(move || open(&path).map_err(|_| OPEN_FAILED.to_string())).await?;
         }
         Ok(true)
@@ -842,5 +862,56 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, "assistant_open_failed");
         assert_eq!(std::fs::read(&target).unwrap(), doc.bytes);
+    }
+    #[tokio::test]
+    async fn only_documents_and_media_are_opened_whatever_name_was_chosen() {
+        let doc = pdf_attachment();
+        let output = tempfile::tempdir().unwrap();
+        let opened = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let attempt = async |name: String| {
+            let target = output.path().join(&name);
+            let chosen = target.clone();
+            let seen = opened.clone();
+            let result = doc
+                .host
+                .save_and_open(
+                    doc.request(true),
+                    move |_| Ok(Some(chosen)),
+                    move |path| {
+                        seen.lock().unwrap().push(path.to_path_buf());
+                        Ok(())
+                    },
+                )
+                .await;
+            // Saved either way: only the opening is withheld.
+            assert_eq!(std::fs::read(&target).unwrap(), doc.bytes, "{name}");
+            (result, target)
+        };
+        for extension in [
+            "pdf", "docx", "pptx", "xlsx", "md", "txt", "csv", "html", "json", "png", "jpg",
+            "jpeg", "webp", "gif", "mp4", "wav", "mp3", "ogg", "PPTX", "Pdf",
+        ] {
+            let (result, target) = attempt(format!("deliverable.{extension}")).await;
+            assert!(result.unwrap(), "{extension}");
+            assert_eq!(opened.lock().unwrap().pop(), Some(target), "{extension}");
+        }
+        for name in [
+            "run.bat",
+            "run.BAT",
+            "run.ps1",
+            "run.cmd",
+            "run.command",
+            "run.sh",
+            "run.exe",
+            "run.app",
+            "run.lnk",
+            "run.js",
+            "report.pdf.bat",
+            "no-extension",
+        ] {
+            let (result, _) = attempt(name.into()).await;
+            assert_eq!(result.unwrap_err(), "assistant_open_failed", "{name}");
+            assert!(opened.lock().unwrap().is_empty(), "{name} was opened");
+        }
     }
 }
