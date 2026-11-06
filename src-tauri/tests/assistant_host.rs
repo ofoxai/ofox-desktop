@@ -7320,6 +7320,45 @@ mod documents {
     }
 
     #[test]
+    fn rolls_back_a_batch_that_officecli_refuses() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        // Valid to the host, but the deck has one slide, not nine.
+        let rollback = json!([
+            {"command":"add","parent":"/","type":"slide","props":{"title":"Plan"}},
+            {"command":"set","path":"/slide[9]/shape[1]","props":{"text":"x"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": rollback}),
+        );
+        let sent = outcome.refused();
+        let report = sent
+            .strip_prefix("assistant_document_failed: ")
+            .unwrap_or_else(|| panic!("{sent}"));
+        let report: Value = serde_json::from_str(report).unwrap_or_else(|e| panic!("{e}: {sent}"));
+        let message = report["message"].as_str().unwrap();
+        assert!(message.contains("1 of 2 commands failed"), "{sent}");
+        assert!(message.contains("rolled back"), "{sent}");
+        let [item] = report["items"].as_array().unwrap().as_slice() else {
+            panic!("one failed command: {sent}");
+        };
+        assert_eq!(item["index"], 1, "{sent}");
+        let said = item["output"].as_str().unwrap();
+        // officecli's own words, e.g. "Slide 9 not found (total: 1)".
+        assert!(said.contains("not found"), "{sent}");
+        let folder = outcome.config.path().to_string_lossy().into_owned();
+        assert!(
+            !sent.contains(&folder),
+            "the document folder is scrubbed: {sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
     fn rejects_a_typst_syntax_error() {
         let Some(bundle) = engines_runtime() else {
             return;
