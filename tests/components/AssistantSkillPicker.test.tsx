@@ -251,6 +251,29 @@ it("does not call a local or assistant-created skill unreviewed", async () => {
   expect(within(made).queryByText("Unreviewed")).toBeNull();
   expect(within(made).getByText("Assistant created")).toBeVisible();
 });
+it("labels a bundled skill Built-in", async () => {
+  const original = ipc.invoke.getMockImplementation()!;
+  ipc.invoke.mockImplementation(async (name, args) =>
+    name === "assistant_list_skills"
+      ? [
+          ...skills,
+          {
+            name: "ofox-office-pdf",
+            description: "Read before writing a PDF",
+            mode: "auto",
+            reviewed: true,
+            origin: "bundled",
+          },
+        ]
+      : original(name, args),
+  );
+  const input = await open();
+  await userEvent.type(input, "/");
+  const bundled = await screen.findByRole("option", {
+    name: /ofox-office-pdf/,
+  });
+  expect(within(bundled).getByText("Built-in")).toBeVisible();
+});
 it("deletes text before removing the chip and keeps ordinary Shift+Enter", async () => {
   const input = await open();
   await userEvent.type(input, "/man");

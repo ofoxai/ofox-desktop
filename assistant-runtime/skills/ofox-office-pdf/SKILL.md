@@ -1,6 +1,6 @@
 ---
 name: ofox-office-pdf
-description: Read before writing a PDF with create_document. How to write the Typst body: headings, lists, tables, emphasis, page breaks, CJK text.
+description: Read before writing a PDF with create_document. How to write the Typst body with headings, lists, tables, emphasis, page breaks and CJK text.
 ---
 
 # PDF documents

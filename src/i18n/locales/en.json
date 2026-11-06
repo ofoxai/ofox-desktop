@@ -4513,6 +4513,7 @@
       "reviewed": "Reviewed",
       "unreviewed": "Unreviewed",
       "assistantCreated": "Assistant created",
+      "bundled": "Built-in",
       "originHint": "Catalog origin does not guarantee content safety."
     },
     "assistantSkillStateInvalid": "Assistant skill settings cannot be read. Check them and retry.",

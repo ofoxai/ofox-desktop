@@ -1177,7 +1177,8 @@ export interface AssistantSkillChoice {
   description: string;
   mode: SkillMode;
   reviewed: boolean;
-  origin?: SkillOrigin | null;
+  /** `bundled`: shipped with the app, listed after the user's own skills. */
+  origin?: SkillOrigin | "bundled" | null;
 }
 
 export const assistantApi = {
