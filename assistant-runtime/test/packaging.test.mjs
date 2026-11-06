@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -268,4 +269,71 @@ test("the Office notice covers exactly the shipped Office packages, with their l
     "2014 Andrew Kelley", // fd-slicer, vendored in yauzl
   ])
     assert.ok(notice.includes(marker), marker);
+});
+
+const engineNames = ["officecli", "typst"];
+const platform = `${process.platform}-${process.arch}`;
+const readJson = async (url) => JSON.parse(await readFile(url, "utf8"));
+
+test("manifest lists both engines with the pinned versions", async () => {
+  const resources = new URL("../resources/", import.meta.url);
+  const manifest = await readJson(new URL("manifest.json", resources));
+  const downloads = await readJson(
+    new URL("../engine-downloads.json", import.meta.url),
+  );
+  for (const name of engineNames) {
+    // An engine with no build for this platform is left out of the manifest.
+    if (!downloads[name][platform]) {
+      assert.equal(manifest.engines?.[name], undefined, name);
+      continue;
+    }
+    const engine = manifest.engines[name];
+    assert.equal(engine.version, downloads[name].version, name);
+    const file = new URL(engine.path, resources);
+    assert.equal(
+      path.basename(engine.path),
+      downloads[name][platform].executable.split("/").at(-1),
+    );
+    assert.ok(await exists(file), `${engine.path} must ship`);
+    if (process.platform !== "win32")
+      assert.ok((await stat(file)).mode & 0o111, `${engine.path} executable`);
+    assert.ok(
+      await exists(new URL(`${path.dirname(engine.path)}/LICENSE`, resources)),
+      `${name} LICENSE must ship beside its executable`,
+    );
+  }
+});
+
+test("officecli and typst notices name the version and the Apache license", async () => {
+  const notices = new URL("../notices/", import.meta.url);
+  for (const [name, version] of [
+    ["officecli", /officecli 1\.0\.160/],
+    ["typst", /typst 0\.15\.1/],
+  ]) {
+    const notice = await readFile(new URL(`${name}.txt`, notices), "utf8");
+    assert.match(notice, version, name);
+    assert.match(notice, /Apache License\s+Version 2\.0/, name);
+  }
+});
+
+test("engine stamp matches the pinned digests", async () => {
+  const downloads = await readJson(
+    new URL("../engine-downloads.json", import.meta.url),
+  );
+  const stamp = await readJson(
+    new URL("../resources/engines/source.json", import.meta.url),
+  );
+  for (const name of engineNames) {
+    const pinned = downloads[name][platform];
+    if (!pinned) {
+      assert.equal(stamp[name], undefined, name);
+      continue;
+    }
+    assert.match(pinned.sha256, /^[0-9a-f]{64}$/, name);
+    assert.deepEqual(stamp[name], {
+      version: downloads[name].version,
+      platform,
+      sha256: pinned.sha256,
+    });
+  }
 });

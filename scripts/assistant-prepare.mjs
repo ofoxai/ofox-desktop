@@ -6,6 +6,7 @@ import {
   copyFile,
   cp,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   rename,
@@ -14,6 +15,7 @@ import {
   writeFile,
   realpath,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -43,30 +45,44 @@ const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const cache = path.join(runtime, ".cache");
 await mkdir(cache, { recursive: true });
 
-async function cachedDownload() {
-  const archive = path.join(cache, download.archive);
+async function cachedDownload({ url, archive: name, sha256 }) {
+  const archive = path.join(cache, name);
   let bytes;
   try {
     bytes = await readFile(archive);
   } catch {
     /* download a missing cache entry */
   }
-  if (!bytes || digest(bytes) !== download.sha256) {
-    const response = await fetch(
-      `https://nodejs.org/dist/v${manifest.version}/${download.archive}`,
-    );
+  if (!bytes || digest(bytes) !== sha256) {
+    const response = await fetch(url);
     if (!response.ok)
-      throw new Error(`Node download failed (${response.status})`);
+      throw new Error(`Download of ${url} failed (${response.status})`);
     bytes = Buffer.from(await response.arrayBuffer());
-    if (digest(bytes) !== download.sha256)
+    if (digest(bytes) !== sha256)
       throw new Error(
-        "Downloaded Node SHA-256 differs from the pinned manifest",
+        `Downloaded ${name} SHA-256 differs from the pinned manifest`,
       );
     const temporary = `${archive}.partial`;
     await writeFile(temporary, bytes, { mode: 0o600 });
     await rename(temporary, archive);
   }
   return archive;
+}
+
+function extractArchive(archive, directory) {
+  let tar = "tar";
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+    if (!systemRoot || !path.win32.isAbsolute(systemRoot))
+      throw new Error(
+        "An absolute Windows SystemRoot is required to extract bundled archives",
+      );
+    // Git Bash prepends GNU tar, which treats drive-letter paths as remote
+    // hosts and cannot unpack ZIPs. Windows' bsdtar supports the Node and
+    // engine archives.
+    tar = path.win32.join(systemRoot, "System32", "tar.exe");
+  }
+  execFileSync(tar, ["-xf", archive, "-C", directory], { stdio: "inherit" });
 }
 
 async function prepareNode() {
@@ -87,22 +103,15 @@ async function prepareNode() {
   } catch {
     /* replace only our generated runtime */
   }
-  const archive = await cachedDownload();
+  const archive = await cachedDownload({
+    url: `https://nodejs.org/dist/v${manifest.version}/${download.archive}`,
+    archive: download.archive,
+    sha256: download.sha256,
+  });
   const extraction = path.join(cache, `extract-${target}`);
   await rm(extraction, { recursive: true, force: true });
   await mkdir(extraction, { recursive: true });
-  let tar = "tar";
-  if (process.platform === "win32") {
-    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
-    if (!systemRoot || !path.win32.isAbsolute(systemRoot))
-      throw new Error(
-        "An absolute Windows SystemRoot is required to extract bundled Node",
-      );
-    // Git Bash prepends GNU tar, which treats drive-letter paths as remote
-    // hosts and cannot unpack ZIPs. Windows' bsdtar supports the Node archive.
-    tar = path.win32.join(systemRoot, "System32", "tar.exe");
-  }
-  execFileSync(tar, ["-xf", archive, "-C", extraction], { stdio: "inherit" });
+  extractArchive(archive, extraction);
   const prefix = `node-v${manifest.version}-${process.platform === "win32" ? "win" : process.platform}-${process.arch}`;
   await mkdir(nodeDirectory, { recursive: true });
   await copyFile(path.join(extraction, prefix, download.executable), node);
@@ -282,6 +291,131 @@ async function prepareSearchServer() {
   await writeInstallStamp(stampFile, wanted);
 }
 
+// The document engines are builds pinned by engine-downloads.json. Both
+// officecli and typst keep state under HOME and officecli may start a resident
+// process or update itself, so they only ever run here and in the smoke test
+// with a throwaway HOME and those behaviors turned off.
+async function engineVersion(executable) {
+  const home = await mkdtemp(path.join(tmpdir(), "ofox-engine-"));
+  const env = {
+    OFFICECLI_NO_AUTO_RESIDENT: "1",
+    OFFICECLI_SKIP_UPDATE: "1",
+    HOME: home,
+    USERPROFILE: home,
+    TMPDIR: home,
+    TEMP: home,
+    TMP: home,
+  };
+  for (const key of ["PATH", "SystemRoot"])
+    if (process.env[key]) env[key] = process.env[key];
+  try {
+    return execFileSync(executable, ["--version"], { encoding: "utf8", env });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+async function engineIsCurrent(executable, version) {
+  try {
+    await access(path.join(path.dirname(executable), "LICENSE"));
+    return (await engineVersion(executable)).includes(version);
+  } catch {
+    return false;
+  }
+}
+
+async function installEngine(name, engine, pinned, directory, executable) {
+  const downloaded = await cachedDownload({
+    url: pinned.url,
+    archive: `${name}-${engine.version}-${pinned.archive ?? path.basename(pinned.url)}`,
+    sha256: pinned.sha256,
+  });
+  const extraction = path.join(cache, `extract-${name}-${target}`);
+  await rm(extraction, { recursive: true, force: true });
+  let source = downloaded;
+  const licenses = [];
+  if (pinned.archive) {
+    // The release archive carries its own LICENSE and NOTICE next to the binary.
+    await mkdir(extraction, { recursive: true });
+    extractArchive(downloaded, extraction);
+    source = path.join(extraction, pinned.executable);
+    for (const file of ["LICENSE", "NOTICE"])
+      licenses.push([file, path.join(path.dirname(source), file)]);
+  } else {
+    // A bare binary has none; they come from the repository at the release tag.
+    for (const [file, license] of Object.entries(engine.licenses))
+      licenses.push([
+        file,
+        await cachedDownload({
+          url: license.url,
+          archive: `${name}-${engine.version}-${file}`,
+          sha256: license.sha256,
+        }),
+      ]);
+  }
+  await rm(directory, { recursive: true, force: true });
+  await mkdir(directory, { recursive: true });
+  await copyFile(source, executable);
+  await chmod(executable, 0o755);
+  for (const [file, from] of licenses) {
+    const license = path.join(directory, file);
+    await copyFile(from, license);
+    await chmod(license, 0o644);
+  }
+  await rm(extraction, { recursive: true, force: true });
+}
+
+// resources/engines/source.json records what is installed. While it matches
+// the pins and the engine reports its version, the next prepare skips the
+// engine. Returns the manifest entry of each engine with a build for this
+// platform.
+async function prepareEngines() {
+  const downloads = JSON.parse(
+    await readFile(path.join(runtime, "engine-downloads.json"), "utf8"),
+  );
+  const stampFile = path.join(resources, "engines", "source.json");
+  let installed = {};
+  try {
+    installed = JSON.parse(await readFile(stampFile, "utf8"));
+  } catch {
+    /* replace only our generated engines */
+  }
+  const stamps = {};
+  const entries = {};
+  for (const name of ["officecli", "typst"]) {
+    const engine = downloads[name];
+    const pinned = engine[target];
+    if (!pinned) {
+      process.stdout.write(
+        `${name} ${engine.version} has no ${target} build\n`,
+      );
+      continue;
+    }
+    const directory = path.join(resources, "engines", name);
+    const executable = path.join(directory, path.basename(pinned.executable));
+    const stamp = {
+      version: engine.version,
+      platform: target,
+      sha256: pinned.sha256,
+    };
+    if (
+      JSON.stringify(installed[name]) !== JSON.stringify(stamp) ||
+      !(await engineIsCurrent(executable, engine.version))
+    ) {
+      await installEngine(name, engine, pinned, directory, executable);
+      if (!(await engineIsCurrent(executable, engine.version)))
+        throw new Error(`Bundled ${name} does not report ${engine.version}`);
+    }
+    stamps[name] = stamp;
+    await writeFile(stampFile, JSON.stringify(stamps, null, 2) + "\n");
+    entries[name] = {
+      path: path.posix.join("engines", name, path.basename(pinned.executable)),
+      version: engine.version,
+    };
+  }
+  return entries;
+}
+
 await prepareNode();
 if (process.argv.includes("--node-only")) {
   process.stdout.write(`${node}\n`);
@@ -336,6 +470,8 @@ if (process.argv.includes("--node-only")) {
   await rm(notices, { recursive: true, force: true });
   await cp(path.join(runtime, "notices"), notices, { recursive: true });
   await prepareSearchServer();
+  // Before signing, so the engines' Mach-O files are signed with the rest.
+  const engines = await prepareEngines();
   await signMacFiles(resources);
   const stamp = path.join(nodeDirectory, "source.json");
   const source = JSON.parse(await readFile(stamp, "utf8"));
@@ -367,6 +503,7 @@ if (process.argv.includes("--node-only")) {
         node: `node/${path.basename(node)}`,
         entry: "runtime/src/main.mjs",
         searchServer: "search-mcp/ofox-search-mcp.mjs",
+        engines,
         minimumMacOS: await applicationMinimumMacOS(),
       },
       null,
