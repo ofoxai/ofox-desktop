@@ -407,6 +407,38 @@ impl Default for Preferences {
     }
 }
 
+/// Where a run's web search searches: Ofox's paid search through the gateway
+/// (the default), or Exa's free one. One choice per account, kept in
+/// `prefs.json` beside the settings; the conversation's switch says whether
+/// a run searches at all.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchProvider {
+    #[default]
+    Ofox,
+    Exa,
+}
+
+impl SearchProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ofox => "ofox",
+            Self::Exa => "exa",
+        }
+    }
+}
+
+/// Save the account's search provider, and nothing else.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSearchProviderRequest {
+    /// Checked by the host against the signed-in owner, not by the store.
+    pub expected_owner: Option<String>,
+    /// Checked by the host against its authority generation, not by the store.
+    pub expected_generation: Option<u64>,
+    pub provider: SearchProvider,
+}
+
 /// Save all of the assistant settings at once.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

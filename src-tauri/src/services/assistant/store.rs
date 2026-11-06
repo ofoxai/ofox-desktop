@@ -3,7 +3,7 @@
 //! This module is the only place that knows the layout:
 //!
 //! ```text
-//! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…,"instructions":…,"autoTitle":…,"notifyOnFinish":…}
+//! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…,"instructions":…,"autoTitle":…,"notifyOnFinish":…,"searchProvider":…}
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.json   SessionRecord + "version"
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.jsonl  native runtime history
 //! <app_config_dir>/assistant/<owner>/<session_id>/attachments/<attachment_id>  imported files
@@ -145,6 +145,10 @@ struct Prefs {
     /// leniently: a value this version cannot use is ignored, not damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     media_defaults: Option<Value>,
+    /// Where web search searches (`"ofox"` or `"exa"`). Read leniently like
+    /// `media_defaults`: any other value means the default, not damage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_provider: Option<Value>,
 }
 
 impl Prefs {
@@ -243,6 +247,14 @@ impl Prefs {
             | fill(&mut self.instructions, &other.instructions)
             | fill(&mut self.auto_title, &other.auto_title)
             | fill(&mut self.notify_on_finish, &other.notify_on_finish)
+            | fill(&mut self.search_provider, &other.search_provider)
+    }
+
+    fn search_provider(&self) -> SearchProvider {
+        match self.search_provider.as_ref().and_then(Value::as_str) {
+            Some("exa") => SearchProvider::Exa,
+            _ => SearchProvider::Ofox,
+        }
     }
 
     fn resolved(&self) -> Preferences {
@@ -746,6 +758,27 @@ impl AssistantStore {
             prefs.notify_on_finish = Some(preferences.notify_on_finish);
         })?;
         Ok(preferences.clone())
+    }
+
+    /// Where this account's web searches go; the default when it never
+    /// chose or the preferences file is damaged (the file is preserved).
+    pub fn search_provider(&self) -> SearchProvider {
+        match self.read_prefs() {
+            Ok(prefs) => prefs.unwrap_or_default().search_provider(),
+            Err(error) => {
+                log::warn!("[Assistant] using the default search provider: {error}");
+                SearchProvider::default()
+            }
+        }
+    }
+
+    /// Save where web searches go; every other setting stays. A damaged or
+    /// unsupported preferences file is preserved and reported.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn save_search_provider(&self, provider: SearchProvider) -> Result<SearchProvider, String> {
+        self.update_prefs(|prefs| prefs.search_provider = Some(json!(provider.as_str())))?;
+        Ok(provider)
     }
 
     /// Whether a conversation's first answer gets it a generated title.

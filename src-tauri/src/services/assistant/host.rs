@@ -1457,17 +1457,20 @@ impl AssistantHost {
         });
     }
 
-    /// `web_search`: whether the run was given web search (the session's
-    /// switch may be on while the catalog cannot price it or the model takes
-    /// no tools). `thinking_level`: the level the run was sent, `None` for
-    /// the default.
+    /// `search`: the provider the run was given web search through, `None`
+    /// when it was not (the session's switch may be on while the catalog
+    /// cannot price Ofox search or the model takes no tools).
+    /// `thinking_level`: the level the run was sent, `None` for the default.
     pub(super) fn emit_start(
         &self,
         run: &RunControl,
-        web_search: bool,
+        search: Option<SearchProvider>,
         thinking_level: Option<&str>,
     ) {
-        let mut data = json!({"messageId":run.message_id,"webSearch":web_search,"thinkingLevel":thinking_level});
+        let mut data = json!({"messageId":run.message_id,"webSearch":search.is_some(),"thinkingLevel":thinking_level});
+        if let Some(provider) = search {
+            data["searchProvider"] = json!(provider.as_str());
+        }
         if run.compact_only {
             data["compactOnly"] = json!(true);
         }

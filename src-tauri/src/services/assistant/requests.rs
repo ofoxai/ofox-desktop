@@ -70,9 +70,14 @@ impl AssistantHost {
         snapshot: CatalogSnapshot,
     ) -> Result<Value, String> {
         let default = self.default_model(owner, &snapshot.catalog).await?;
+        let provider = blocking({
+            let store = self.store(owner)?;
+            move || Ok(store.search_provider())
+        })
+        .await?;
         Ok(
             json!({"models":snapshot.catalog.conversation_models(),"audioModels":snapshot.catalog.audio_models(),"defaultModelId":default,
-            "modelUnavailableReason":snapshot.error,"partial":snapshot.catalog.partial,"search":search_status(&snapshot.catalog.models),
+            "modelUnavailableReason":snapshot.error,"partial":snapshot.catalog.partial,"search":search_status(&snapshot.catalog.models, provider),
             "catalogRevision":snapshot.revision,"catalogRefreshing":snapshot.refreshing,"catalogRefreshFailed":snapshot.failed}),
         )
     }
@@ -195,6 +200,29 @@ impl AssistantHost {
         let store = self.store(&identity.owner)?;
         self.ensure_current(&identity, generation).await?;
         blocking(move || store.save_preferences(&preferences)).await
+    }
+
+    /// Save where this account's web searches go, for the account and
+    /// authority the page shows; it applies from the next message on.
+    pub async fn set_search_provider(
+        &self,
+        request: SetSearchProviderRequest,
+    ) -> Result<SearchProvider, String> {
+        let identity = self.identity().await?;
+        let generation = self.generation();
+        if request
+            .expected_owner
+            .as_ref()
+            .is_some_and(|owner| *owner != identity.owner)
+            || request
+                .expected_generation
+                .is_some_and(|expected| expected != generation)
+        {
+            return Err(super::host::IDENTITY_CHANGED.into());
+        }
+        let store = self.store(&identity.owner)?;
+        self.ensure_current(&identity, generation).await?;
+        blocking(move || store.save_search_provider(request.provider)).await
     }
 
     /// The model a new conversation of `owner` starts with in `merged` (see
@@ -534,7 +562,7 @@ impl AssistantHost {
         if request.retry_message_id.is_some() {
             self.sync_native(&identity, &request.session_id).await?;
         }
-        let (record, native_file, attachment_root, preferences) = blocking({
+        let (record, native_file, attachment_root, preferences, provider) = blocking({
             let store = self.store(&identity.owner)?;
             let sid = request.session_id.clone();
             move || {
@@ -543,6 +571,7 @@ impl AssistantHost {
                     store.native_history_path(&sid)?,
                     store.attachment_root(&sid)?,
                     store.preferences_or_default(),
+                    store.search_provider(),
                 ))
             }
         })
@@ -575,12 +604,14 @@ impl AssistantHost {
         // the runtime, its history must still be there.
         let branch = Branch::resolve(&record, &request)?;
         let selected = selection(&record, &request, &branch)?;
-        // Search only at a price the catalog gives, for a model that takes
-        // tools; the run keeps the price.
-        let search_price = if record.session.web_search && model.tools {
-            catalog::search_price(&self.models(&identity.apex).await?.models)
-        } else {
+        // Search only for a model that takes tools: through Exa for free, or
+        // through Ofox at a price the catalog gives; the run keeps the price.
+        let search_price = if !(record.session.web_search && model.tools) {
             None
+        } else if provider == SearchProvider::Exa {
+            Some(catalog::SearchPrice::free_exa())
+        } else {
+            catalog::search_price(&self.models(&identity.apex).await?.models)
         };
         // A model that takes tools can generate images, videos and speech.
         let media_params = if model.tools {
@@ -763,7 +794,12 @@ impl AssistantHost {
                 params.insert("originalPrompt".into(), json!(model_prompt));
             }
             let prompt = branch.resent_text.as_deref().unwrap_or(&text);
-            params.extend(web_params(&record, &branch, prompt, search_price.as_ref()));
+            params.extend(web_params(
+                &record,
+                &branch,
+                prompt,
+                search_price.as_ref().map(|price| (price, provider)),
+            ));
             // At the default a run's parameters stay as they were before
             // thinking levels existed.
             if let Some(level) = thinking_level {
@@ -771,7 +807,11 @@ impl AssistantHost {
             }
             params.extend(instruction_params(&preferences.instructions));
         }
-        self.emit_start(&control, search_price.is_some(), thinking_level);
+        self.emit_start(
+            &control,
+            search_price.is_some().then_some(provider),
+            thinking_level,
+        );
         self.spawn_run(control, params);
         Ok(RunRef {
             run_id: request.run_id,
@@ -1441,19 +1481,24 @@ fn attachment_params(
 }
 
 /// The web search part of a run's parameters: `webSearch` only with a search
-/// price (the session's switch is on and the catalog prices the search
-/// model), and then `allowedWebUrls` (see [`web::allowed_web_urls`]) from
-/// the prompt and the turns before it on the conversation's current branch.
+/// price (the session's switch is on, and the provider is Exa or the catalog
+/// prices the search model), and then the provider (`searchProvider`, for
+/// Exa only, so an Ofox run's parameters stay as they were) and
+/// `allowedWebUrls` (see [`web::allowed_web_urls`]) from the prompt and the
+/// turns before it on the conversation's current branch.
 fn web_params(
     record: &SessionRecord,
     branch: &Branch,
     prompt: &str,
-    search: Option<&catalog::SearchPrice>,
+    search: Option<(&catalog::SearchPrice, SearchProvider)>,
 ) -> Map<String, Value> {
     let mut params = Map::new();
     params.insert("webSearch".into(), json!(search.is_some()));
-    if search.is_none() {
+    let Some((_, provider)) = search else {
         return params;
+    };
+    if provider == SearchProvider::Exa {
+        params.insert("searchProvider".into(), json!(provider.as_str()));
     }
     // A send that branches native history starts again from the turn it
     // replaces; any other goes on from the end.
@@ -1496,14 +1541,16 @@ pub(super) fn run_thinking_level<'a>(
         .filter(|level| model.offers_thinking_level(level))
 }
 
-/// Bootstrap's `search`: whether runs can search, and the price of one
-/// search (the search model's tokens come on top).
-fn search_status(models: &[catalog::Model]) -> Value {
+/// Bootstrap's `search`: whether runs can search through Ofox and the price
+/// of one such search (the search model's tokens come on top), and the
+/// account's provider. Exa's free search is always offered.
+fn search_status(models: &[catalog::Model], provider: SearchProvider) -> Value {
     let price = catalog::search_price(models);
     json!({
         "available": price.is_some(),
         "unitPriceUsd": price.map(|p| p.per_search.normalize().to_string()),
         "model": catalog::SEARCH_MODEL,
+        "provider": provider.as_str(),
     })
 }
 
@@ -2002,7 +2049,7 @@ mod tests {
             &record,
             &branch,
             "Now https://new.example.com/?q=1",
-            Some(&price()),
+            Some((&price(), SearchProvider::Ofox)),
         );
         assert_eq!(params["webSearch"], true);
         assert_eq!(
@@ -2021,12 +2068,24 @@ mod tests {
             &record,
             &branch,
             "https://edited.example.com/",
-            Some(&price()),
+            Some((&price(), SearchProvider::Ofox)),
         );
         assert_eq!(
             params["allowedWebUrls"],
             json!(["https://edited.example.com/"])
         );
+
+        // An Ofox run's parameters name no provider; an Exa run's do.
+        assert!(params.get("searchProvider").is_none());
+        let free = catalog::SearchPrice::free_exa();
+        let exa = web_params(
+            &record,
+            &branch,
+            "https://edited.example.com/",
+            Some((&free, SearchProvider::Exa)),
+        );
+        assert_eq!(exa["searchProvider"], "exa");
+        assert_eq!(exa["allowedWebUrls"], params["allowedWebUrls"]);
 
         // Without search the run gets neither the tools nor the list.
         let off = web_params(&record, &branch, "https://edited.example.com/", None);
@@ -2053,7 +2112,7 @@ mod tests {
             &record,
             &branch,
             "https://zz-prompt.example.com/",
-            Some(&price()),
+            Some((&price(), SearchProvider::Ofox)),
         );
         let urls: Vec<&str> = params["allowedWebUrls"]
             .as_array()
@@ -2110,15 +2169,15 @@ mod tests {
         let priced =
             row(json!({"prompt": "0.00000005", "completion": "0.0000004", "web_search": "0.0140"}));
         assert_eq!(
-            search_status(&[priced]),
-            json!({"available": true, "unitPriceUsd": "0.014", "model": "openai/gpt-5-nano"})
+            search_status(&[priced], SearchProvider::Ofox),
+            json!({"available": true, "unitPriceUsd": "0.014", "model": "openai/gpt-5-nano", "provider": "ofox"})
         );
         let unpriced = row(json!({"prompt": "0.00000005", "completion": "0.0000004"}));
         assert_eq!(
-            search_status(&[unpriced]),
-            json!({"available": false, "unitPriceUsd": null, "model": "openai/gpt-5-nano"})
+            search_status(&[unpriced], SearchProvider::Exa),
+            json!({"available": false, "unitPriceUsd": null, "model": "openai/gpt-5-nano", "provider": "exa"})
         );
-        assert_eq!(search_status(&[])["available"], false);
+        assert_eq!(search_status(&[], SearchProvider::Ofox)["available"], false);
     }
 
     #[test]
@@ -2245,7 +2304,12 @@ mod tests {
         assert!(branch.edit_entry.is_none() && branch.regenerate_entry.is_none());
         assert!(branch.resent_text.is_none());
         // The turns after the retried one stay in its context, pages too.
-        let params = web_params(&record, &branch, "Again", Some(&price()));
+        let params = web_params(
+            &record,
+            &branch,
+            "Again",
+            Some((&price(), SearchProvider::Ofox)),
+        );
         assert_eq!(
             params["allowedWebUrls"],
             json!(["https://later.example.com/"])
@@ -2347,7 +2411,12 @@ mod tests {
         assert_eq!(branch.edit_entry.as_deref(), Some(native.as_str()));
         assert!(branch.regenerate_entry.is_none() && branch.resent_text.is_none());
         // Its context ends before the question: the later turn's page too.
-        let params = web_params(&record, &branch, "Again", Some(&price()));
+        let params = web_params(
+            &record,
+            &branch,
+            "Again",
+            Some((&price(), SearchProvider::Ofox)),
+        );
         assert_eq!(params["allowedWebUrls"], json!([]));
 
         let control = publish(&mut record, &request, "m").unwrap();
@@ -2418,8 +2487,12 @@ mod tests {
                     "regenerate={regenerate}, attempt={attempt}"
                 );
                 assert_eq!(
-                    web_params(&record, &branch, "Replacement question", Some(&price()))
-                        ["allowedWebUrls"],
+                    web_params(
+                        &record,
+                        &branch,
+                        "Replacement question",
+                        Some((&price(), SearchProvider::Ofox))
+                    )["allowedWebUrls"],
                     json!([])
                 );
                 failed = publish(&mut record, &retry, "m").unwrap();

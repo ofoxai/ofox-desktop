@@ -3232,7 +3232,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let boot = host.bootstrap().await.unwrap();
         assert_eq!(
             boot["search"],
-            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL})
+            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL, "provider": "ofox"})
         );
         let sid = create(&host).await;
         let on = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
@@ -3252,7 +3252,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let boot = AssistantHost::new(env.clone()).bootstrap().await.unwrap();
         assert_eq!(
             boot["search"],
-            json!({"available": true, "unitPriceUsd": "0.014", "model": SEARCH_MODEL})
+            json!({"available": true, "unitPriceUsd": "0.014", "model": SEARCH_MODEL, "provider": "ofox"})
         );
         let host = AssistantHost::new(env.clone());
         let request_off: types::CreateRequest =
@@ -3285,6 +3285,104 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(detail.usage["searchCount"], 0);
         assert_eq!(detail.usage["searchCostUsd"], "0");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn exa_search_is_offered_without_a_price_and_the_choice_is_kept_per_account() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let provider = |value: &str, generation: u64| -> types::SetSearchProviderRequest {
+            serde_json::from_value(json!({
+                "provider": value, "expectedOwner": owner(), "expectedGeneration": generation,
+            }))
+            .unwrap()
+        };
+        host.set_preferences(
+            serde_json::from_value(json!({
+                "instructions": "Answer briefly.", "autoTitle": false, "notifyOnFinish": true,
+                "expectedOwner": owner(), "expectedGeneration": host.generation(),
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        // A stale page cannot change it.
+        assert_eq!(
+            host.set_search_provider(provider("exa", host.generation() + 1))
+                .await
+                .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert_eq!(host.bootstrap().await.unwrap()["search"]["provider"], "ofox");
+        assert_eq!(
+            host.set_search_provider(provider("exa", host.generation()))
+                .await
+                .unwrap(),
+            types::SearchProvider::Exa
+        );
+        // Kept beside the settings, which stay as they were.
+        let prefs_file = config.path().join("assistant").join(owner()).join("prefs.json");
+        let prefs: Value = serde_json::from_slice(&std::fs::read(&prefs_file).unwrap()).unwrap();
+        assert_eq!(prefs["searchProvider"], "exa");
+        assert_eq!(prefs["instructions"], "Answer briefly.");
+        assert_eq!(host.get_preferences().await.unwrap().instructions, "Answer briefly.");
+        let boot = AssistantHost::new(env.clone()).bootstrap().await.unwrap();
+        // The catalog still has no search model: Ofox search is not offered.
+        assert_eq!(
+            boot["search"],
+            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL, "provider": "exa"})
+        );
+
+        // Exa needs no price: a conversation with search on gets both tools,
+        // and the model is told the searches are free.
+        let sid = create(&host).await;
+        let on = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
+        host.update_session(on).await.unwrap();
+        gateway.reply(Reply::Stream("No search needed".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        assert_eq!(
+            tool_names(&requests[0]),
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "web_search",
+                "web_fetch"
+            ]
+        );
+        let prompt = requests[0].body["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("web_search searches the web for free through Exa"));
+        assert!(!prompt.contains("paid search"));
+        let start = &of_type(&env, &run, "run_start")[0];
+        assert_eq!(
+            (&start["webSearch"], &start["searchProvider"]),
+            (&json!(true), &json!("exa"))
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["searchCostUsd"], "0");
+
+        // A value this version does not know is the default, not damage.
+        let mut prefs = prefs;
+        prefs["searchProvider"] = json!("bing");
+        std::fs::write(&prefs_file, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        let host = AssistantHost::new(env.clone());
+        assert_eq!(host.bootstrap().await.unwrap()["search"]["provider"], "ofox");
+        assert_eq!(host.get_preferences().await.unwrap().instructions, "Answer briefly.");
+        gateway.reply(Reply::Stream("Without search".into()));
+        let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
+        assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
+        assert!(of_type(&env, &run, "run_start")[0].get("searchProvider").is_none());
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
 }

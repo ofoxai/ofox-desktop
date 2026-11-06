@@ -12,8 +12,9 @@ use crate::services::assistant::{
     types::{
         Attachment, CompactRequest, CreateRequest, DeleteRequest, Detail, EmptyTrashReport,
         EmptyTrashRequest, Event, ExportMarkdownRequest, ForkRequest, ImportDropRequest,
-        Preferences, RunProxy, RunRef, SendRequest, Session, SetPreferencesRequest, SteerRequest,
-        SwitchVersionRequest, TransferRequest, UpdateRequest,
+        Preferences, RunProxy, RunRef, SearchProvider, SendRequest, Session, SetPreferencesRequest,
+        SetSearchProviderRequest, SteerRequest, SwitchVersionRequest, TransferRequest,
+        UpdateRequest,
     },
     AssistantHost,
 };
@@ -91,6 +92,15 @@ pub async fn assistant_set_preferences(
     request: SetPreferencesRequest,
 ) -> Result<Preferences, String> {
     host.set_preferences(request).await
+}
+
+/// Where the account's web searches go: Ofox (paid) or Exa (free).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_set_search_provider(
+    host: Host<'_>,
+    request: SetSearchProviderRequest,
+) -> Result<SearchProvider, String> {
+    host.set_search_provider(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]

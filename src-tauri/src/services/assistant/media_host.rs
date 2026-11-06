@@ -217,7 +217,7 @@ impl AssistantHost {
             }
         })
         .await?;
-        self.emit_start(&control, false, None);
+        self.emit_start(&control, None, None);
         let host = self.clone();
         let run = control.clone();
         self.track(control.run_id.clone(),async move {
