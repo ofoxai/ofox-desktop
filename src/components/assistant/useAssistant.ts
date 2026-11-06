@@ -23,6 +23,7 @@ import {
   type AssistantPreferences,
   type AssistantRunRef,
   type AssistantRestoreReport,
+  type AssistantSearchProvider,
   type AssistantSession,
   type AssistantSessionDetail,
   type AssistantThinkingLevel,
@@ -273,6 +274,11 @@ export function useAssistant(enabled: boolean) {
   const [searchSkipped, setSearchSkipped] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // Replies whose free (Exa) search was refused, by message id: rate-limited
+  // for this network, or blocked (a proxy or IPv6).
+  const [searchLimited, setSearchLimited] = useState<
+    ReadonlyMap<string, "search_rate_limited" | "search_blocked">
+  >(() => new Map());
   const [compacting, setCompacting] = useState(false);
   const [retryAttempt, setRetryAttempt] = useState<1 | 2 | null>(null);
   const listenerReady = useRef<ReturnType<typeof subscriptionReadiness> | null>(
@@ -977,6 +983,7 @@ export function useAssistant(enabled: boolean) {
       setNewThinking(null);
       setRunSearch(null);
       setSearchSkipped(new Set());
+      setSearchLimited(new Map());
       setPreferences(null);
       setError(null);
     };
@@ -1711,10 +1718,16 @@ export function useAssistant(enabled: boolean) {
             return;
           }
           case "tool_end": {
-            const { toolCallId } = event.data;
+            const { toolCallId, name, code, messageId } = event.data;
             setTools((running) =>
               running.filter((tool) => tool.id !== toolCallId),
             );
+            if (
+              name === "web_search" &&
+              typeof messageId === "string" &&
+              (code === "search_rate_limited" || code === "search_blocked")
+            )
+              setSearchLimited((old) => new Map(old).set(messageId, code));
             return;
           }
           case "sources": {
@@ -2560,6 +2573,62 @@ export function useAssistant(enabled: boolean) {
       });
     },
     [update, setNewWebSearch],
+  );
+
+  /**
+   * Where the account's web searches go, from the next message on. Saved on
+   * its own, so the settings editor cannot overwrite it; resolves with the
+   * saved provider, or null when it could not be saved.
+   */
+  const setSearchProvider = useCallback(
+    async (provider: AssistantSearchProvider) => {
+      const generation = epoch.current;
+      try {
+        const saved = await assistantApi.setSearchProvider({
+          provider,
+          ...expectedIdentity(bootstrapRef.current),
+        });
+        const current = bootstrapRef.current;
+        if (mounted.current && generation === epoch.current && current) {
+          const next = {
+            ...current,
+            search: current.search && { ...current.search, provider: saved },
+          };
+          bootstrapRef.current = next;
+          setBootstrap(next);
+        }
+        return saved;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        if (assistantErrorCode(reason) === IDENTITY_CHANGED)
+          reloadAuthority.current();
+        return null;
+      }
+    },
+    [showError],
+  );
+
+  /**
+   * The composer's search menu: off, or on through one provider. The
+   * provider is the account's; the switch is the conversation's.
+   */
+  const chooseWebSearch = useCallback(
+    async (choice: "off" | AssistantSearchProvider) => {
+      if (choice === "off") {
+        setWebSearch(false);
+        return;
+      }
+      if (choice !== (bootstrapRef.current?.search?.provider ?? "ofox")) {
+        if (!(await setSearchProvider(choice))) return;
+      }
+      const sessionId = selectedRef.current;
+      const on = sessionId
+        ? detailRef.current?.session.id === sessionId &&
+          detailRef.current.session.webSearch
+        : newWebSearchRef.current;
+      if (!on) setWebSearch(true);
+    },
+    [setSearchProvider, setWebSearch],
   );
 
   const setLocalConfig = useCallback(
@@ -3714,6 +3783,8 @@ export function useAssistant(enabled: boolean) {
   // what it got: the change waits for the next message.
   const followedSearch =
     runSearch && runSearch.runId === run?.runId ? runSearch : null;
+  const searchProvider: AssistantSearchProvider =
+    bootstrap?.search?.provider ?? "ofox";
   const webSearchWaits = Boolean(
     followedSearch &&
       webSearch !== followedSearch.requested &&
@@ -3744,6 +3815,9 @@ export function useAssistant(enabled: boolean) {
     thinking: liveThinking,
     webSearch,
     setWebSearch,
+    searchProvider,
+    setSearchProvider,
+    chooseWebSearch,
     localConfig,
     setLocalConfig,
     startLocalConfig,
@@ -3759,6 +3833,7 @@ export function useAssistant(enabled: boolean) {
     restoreLocalChanges,
     webSearchWaits,
     searchSkipped,
+    searchLimited,
     search,
     setSearch,
     showTrash,

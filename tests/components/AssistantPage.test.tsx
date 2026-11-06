@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => ({
   compact: vi.fn(),
   getPreferences: vi.fn(),
   setPreferences: vi.fn(),
+  setSearchProvider: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
   onDrag: vi.fn(),
@@ -497,6 +498,7 @@ beforeEach(async () => {
     autoTitle: true,
     notifyOnFinish: true,
   });
+  mocks.setSearchProvider.mockImplementation(async (r) => r.provider);
   mocks.listSessions.mockImplementation(async () => listOf([current.session]));
   mocks.createSession.mockImplementation(async () => current.session);
   mocks.getSession.mockImplementation(async () => current);
@@ -2169,7 +2171,12 @@ describe("attachments", () => {
     it("leaves no empty conversation behind when the dialog is cancelled", async () => {
       render(page());
       await waitFor(() => expect(plusButton()).toBeEnabled());
-      await userEvent.click(screen.getByRole("button", { name: "Web search" }));
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Web search" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /^Ofox search/ }),
+      );
       await userEvent.type(composer(), "Compare these");
       await attach();
       await waitFor(trashed);
@@ -2180,8 +2187,8 @@ describe("attachments", () => {
       );
       expect(composer()).toHaveValue("Compare these");
       expect(
-        screen.getByRole("button", { name: "Web search" }),
-      ).toHaveAttribute("aria-pressed", "true");
+        screen.getByRole("combobox", { name: "Web search" }),
+      ).toHaveTextContent("Ofox search");
       expect(screen.queryByRole("alert")).toBeNull();
       expect(mocks.listSessions.mock.calls.length).toBeGreaterThan(1);
     });
@@ -3609,25 +3616,35 @@ describe("conversation cost", () => {
 });
 
 describe("web search", () => {
-  const toggle = () => screen.getByRole("button", { name: "Web search" });
+  // The composer's search menu: "Web search" while off, the provider's name
+  // while on.
+  const toggle = () => screen.getByRole("combobox", { name: "Web search" });
+  const isOn = (on: boolean) =>
+    expect(toggle()).toHaveTextContent(on ? "Ofox search" : "Web search");
+  // Turn search on (through Ofox) or off, from whatever it is now.
+  const flip = async () => {
+    const on = !toggle().textContent?.includes("Web search");
+    await userEvent.click(toggle());
+    await userEvent.click(
+      await screen.findByRole("option", {
+        name: on ? /^Off/ : /^Ofox search/,
+      }),
+    );
+  };
 
   it("turns web search on and off for the open conversation", async () => {
     await openConversation();
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
-    await userEvent.click(toggle());
-    await waitFor(() =>
-      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-    );
+    isOn(false);
+    await flip();
+    await waitFor(() => isOn(true));
     expect(mocks.updateSession).toHaveBeenLastCalledWith({
       sessionId: "session-a",
       webSearch: true,
       expectedOwner: capabilities.owner,
       expectedGeneration: capabilities.authorityGeneration,
     });
-    await userEvent.click(toggle());
-    await waitFor(() =>
-      expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-    );
+    await flip();
+    await waitFor(() => isOn(false));
     expect(mocks.updateSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ sessionId: "session-a", webSearch: false }),
     );
@@ -3636,7 +3653,7 @@ describe("web search", () => {
   it("shows a conversation's saved setting", async () => {
     current.session.webSearch = true;
     await openConversation();
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    isOn(true);
   });
 
   it.each([
@@ -3662,21 +3679,22 @@ describe("web search", () => {
       await userEvent.click(
         await screen.findByRole("button", { name: /My conversation/ }),
       );
-      const button = await screen.findByRole("button", {
+      const menu = await screen.findByRole("combobox", {
         name: language === "en" ? "Web search" : /Web|联网/,
       });
-      await waitFor(() => expect(button).toBeEnabled());
+      await waitFor(() => expect(menu).toBeEnabled());
       // Described to assistive tech by text that is not shown...
-      expect(button).toHaveAccessibleDescription(price);
+      expect(menu).toHaveAccessibleDescription(price);
       expect(screen.queryByRole("tooltip")).toBeNull();
       // ...and shown in a tooltip that focus opens.
-      act(() => button.focus());
+      act(() => menu.focus());
       expect(await screen.findByRole("tooltip")).toHaveTextContent(price);
-      await userEvent.click(button);
-      await waitFor(() =>
-        expect(button).toHaveAttribute("aria-pressed", "true"),
+      await userEvent.click(menu);
+      await userEvent.click(
+        await screen.findByRole("option", { name: /^Ofox/ }),
       );
-      expect(button).toHaveAccessibleDescription(price);
+      await waitFor(() => expect(menu).toHaveTextContent("Ofox"));
+      expect(menu).toHaveAccessibleDescription(price);
     },
   );
 
@@ -3686,7 +3704,7 @@ describe("web search", () => {
     // Its words are there for assistive tech only.
     expect(within(footer).getByText(/per search/)).toHaveClass("sr-only");
     expect(
-      within(footer).getByRole("button", { name: "Web search" }),
+      within(footer).getByRole("combobox", { name: "Web search" }),
     ).toHaveAccessibleDescription(/per search/);
   });
 
@@ -3707,8 +3725,8 @@ describe("web search", () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
     await waitFor(() => expect(toggle()).toBeEnabled());
-    await userEvent.click(toggle());
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    await flip();
+    isOn(true);
     expect(mocks.createSession).not.toHaveBeenCalled();
     expect(mocks.updateSession).not.toHaveBeenCalled();
     mocks.createSession.mockImplementation(async (request) => ({
@@ -3724,7 +3742,7 @@ describe("web search", () => {
       }),
     );
     await waitFor(() => expect(mocks.send).toHaveBeenCalled());
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    isOn(true);
   });
 
   it("leaves web search off in a new conversation until the switch is used", async () => {
@@ -3744,7 +3762,7 @@ describe("web search", () => {
         webSearch: false,
       }),
     );
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    isOn(false);
   });
 
   describe("for a new conversation", () => {
@@ -3764,10 +3782,8 @@ describe("web search", () => {
       async (on) => {
         current.session.webSearch = !on;
         await openConversation();
-        await userEvent.click(toggle());
-        await waitFor(() =>
-          expect(toggle()).toHaveAttribute("aria-pressed", String(on)),
-        );
+        await flip();
+        await waitFor(() => isOn(on));
         await newConversation();
         await waitFor(() =>
           expect(mocks.createSession).toHaveBeenCalledWith({
@@ -3775,7 +3791,7 @@ describe("web search", () => {
             webSearch: on,
           }),
         );
-        expect(toggle()).toHaveAttribute("aria-pressed", String(on));
+        isOn(on);
       },
     );
 
@@ -3784,9 +3800,9 @@ describe("web search", () => {
       mocks.updateSession.mockRejectedValueOnce(
         "assistant_storage_unavailable",
       );
-      await userEvent.click(toggle());
+      await flip();
       await screen.findByRole("alert");
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      isOn(false);
       await newConversation();
       await waitFor(() =>
         expect(mocks.createSession).toHaveBeenCalledWith({
@@ -3794,20 +3810,18 @@ describe("web search", () => {
           webSearch: false,
         }),
       );
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      isOn(false);
     });
 
     it("starts with search off again once the account changed", async () => {
       await openConversation();
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-      );
+      await flip();
+      await waitFor(() => isOn(true));
       act(() => mocks.auth?.("expired"));
       act(() => mocks.auth?.("restored"));
       await screen.findByRole("button", { name: /My conversation/ });
       await waitFor(() => expect(toggle()).toBeEnabled());
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      isOn(false);
       // Leaving a conversation for a new one starts from the last choice:
       // the old account's must be gone, not only the switch's state.
       await userEvent.click(
@@ -3830,10 +3844,8 @@ describe("web search", () => {
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await screen.findByRole("button", { name: "Stop" });
     expect(toggle()).toBeEnabled();
-    await userEvent.click(toggle());
-    await waitFor(() =>
-      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-    );
+    await flip();
+    await waitFor(() => isOn(true));
     expect(mocks.stop).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
   });
@@ -3925,11 +3937,11 @@ describe("web search", () => {
       "says turning search %s while it runs applies to the next message",
       async (_, on, got) => {
         const sent = await sendWithSearch(on, got);
-        await userEvent.click(toggle());
+        await flip();
         expect(await screen.findByText(nextMessage)).toBeVisible();
-        await userEvent.click(toggle());
+        await flip();
         await waitFor(() => expect(screen.queryByText(nextMessage)).toBeNull());
-        await userEvent.click(toggle());
+        await flip();
         expect(await screen.findByText(nextMessage)).toBeVisible();
         end(sent);
         await waitFor(() =>
@@ -3941,10 +3953,8 @@ describe("web search", () => {
 
     it("needs no next-message note for turning off search the reply never got", async () => {
       await sendWithSearch(true, false);
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-      );
+      await flip();
+      await waitFor(() => isOn(false));
       expect(screen.queryByText(nextMessage)).toBeNull();
     });
 
@@ -4172,11 +4182,11 @@ describe("web search", () => {
   it("says why a change was refused and keeps the saved setting", async () => {
     await openConversation();
     mocks.updateSession.mockRejectedValueOnce("assistant_storage_unavailable");
-    await userEvent.click(toggle());
+    await flip();
     expect(await screen.findByRole("alert")).not.toHaveTextContent(
       "assistant_",
     );
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    isOn(false);
   });
 
   it("ignores the progress, sources and search flag of a run this view does not follow", async () => {
@@ -4259,12 +4269,10 @@ describe("web search", () => {
       mocks.bootstrap.mockResolvedValue({ ...capabilities, search });
       current.session.webSearch = true;
       await openConversation();
-      expect(toggle()).toHaveAttribute("aria-pressed", "true");
+      isOn(true);
       expect(toggle()).toBeEnabled();
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-      );
+      await flip();
+      await waitFor(() => isOn(false));
       expect(mocks.updateSession).toHaveBeenLastCalledWith(
         expect.objectContaining({ sessionId: "session-a", webSearch: false }),
       );
@@ -4279,10 +4287,8 @@ describe("web search", () => {
     it("is lit while search is on and offered, and plain while it is off", async () => {
       await openConversation();
       unlit();
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-      );
+      await flip();
+      await waitFor(() => isOn(true));
       lit();
     });
 
@@ -4298,13 +4304,11 @@ describe("web search", () => {
         mocks.bootstrap.mockResolvedValue({ ...capabilities, search });
         current.session.webSearch = true;
         await openConversation();
-        expect(toggle()).toHaveAttribute("aria-pressed", "true");
+        isOn(true);
         expect(toggle()).toBeEnabled();
         unlit();
-        await userEvent.click(toggle());
-        await waitFor(() =>
-          expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-        );
+        await flip();
+        await waitFor(() => isOn(false));
         expect(mocks.updateSession).toHaveBeenLastCalledWith(
           expect.objectContaining({ webSearch: false }),
         );
@@ -4340,8 +4344,8 @@ describe("web search", () => {
       </ShellProvider>,
     );
     await waitFor(() => expect(toggle()).toBeEnabled());
-    await userEvent.click(toggle());
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    await flip();
+    isOn(true);
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
       search: {
@@ -4360,8 +4364,8 @@ describe("web search", () => {
       expect(screen.getByText(/Web search is unavailable/)).toBeVisible(),
     );
     expect(mocks.bootstrap).toHaveBeenLastCalledWith(true);
-    await userEvent.click(toggle());
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    await flip();
+    isOn(false);
     expect(toggle()).toBeDisabled();
   });
 
@@ -4389,6 +4393,164 @@ describe("web search", () => {
     await userEvent.type(composer(), "Hello");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+  });
+
+  describe("with Exa's free search", () => {
+    const withProvider = (
+      provider: "ofox" | "exa",
+      search: Partial<NonNullable<typeof capabilities.search>> = {},
+    ) =>
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        search: { ...capabilities.search, ...search, provider },
+      });
+    const choose = async (name: RegExp) => {
+      await userEvent.click(toggle());
+      await userEvent.click(await screen.findByRole("option", { name }));
+    };
+    const identity = {
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    };
+
+    it("is not offered by a backend that reports no provider", async () => {
+      await openConversation();
+      await userEvent.click(toggle());
+      await screen.findByRole("option", { name: /^Ofox search/ });
+      expect(screen.queryByRole("option", { name: /Exa/ })).toBeNull();
+    });
+
+    it("saves the account's provider and turns search on, then off", async () => {
+      withProvider("ofox");
+      await openConversation();
+      await choose(/^Exa free search/);
+      await waitFor(() => expect(toggle()).toHaveTextContent("Exa search"));
+      expect(mocks.setSearchProvider).toHaveBeenCalledWith({
+        provider: "exa",
+        ...identity,
+      });
+      expect(mocks.updateSession).toHaveBeenLastCalledWith({
+        sessionId: "session-a",
+        webSearch: true,
+        ...identity,
+      });
+      expect(toggle()).toHaveClass("bg-brand-soft");
+      // Exa's terms are said where it is chosen.
+      expect(toggle()).toHaveAccessibleDescription(/queries go to Exa/);
+      await choose(/^Off/);
+      await waitFor(() => expect(toggle()).toHaveTextContent("Web search"));
+      expect(mocks.setSearchProvider).toHaveBeenCalledTimes(1);
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({ webSearch: false }),
+      );
+    });
+
+    it("changes only the provider while search is already on", async () => {
+      withProvider("exa");
+      current.session.webSearch = true;
+      await openConversation();
+      expect(toggle()).toHaveTextContent("Exa search");
+      await choose(/^Ofox search/);
+      await waitFor(() => expect(toggle()).toHaveTextContent("Ofox search"));
+      expect(mocks.setSearchProvider).toHaveBeenCalledWith({
+        provider: "ofox",
+        ...identity,
+      });
+      expect(mocks.updateSession).not.toHaveBeenCalled();
+    });
+
+    it("stays offered while Ofox search is unavailable, which says why", async () => {
+      withProvider("ofox", { available: false, unitPriceUsd: null });
+      await openConversation();
+      expect(toggle()).toBeEnabled();
+      expect(toggle()).toHaveAccessibleDescription(
+        "Ofox search is unavailable right now; Exa's free search still works.",
+      );
+      await userEvent.click(toggle());
+      expect(
+        await screen.findByRole("option", { name: /^Ofox search/ }),
+      ).toHaveAttribute("aria-disabled", "true");
+      expect(
+        screen.getByRole("option", { name: /^Ofox search/ }),
+      ).toHaveTextContent("Unavailable right now");
+      await userEvent.click(
+        screen.getByRole("option", { name: /^Exa free search/ }),
+      );
+      await waitFor(() => expect(toggle()).toHaveTextContent("Exa search"));
+    });
+
+    it("leaves search off when the provider could not be saved", async () => {
+      withProvider("ofox");
+      mocks.setSearchProvider.mockRejectedValueOnce(
+        "assistant_storage_unavailable",
+      );
+      await openConversation();
+      await choose(/^Exa free search/);
+      expect(await screen.findByRole("alert")).not.toHaveTextContent(
+        "assistant_",
+      );
+      expect(toggle()).toHaveTextContent("Web search");
+      expect(mocks.updateSession).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "search_rate_limited",
+        "Exa's free search reached its limit for this network, so this reply did not search the web.",
+      ],
+      [
+        "search_blocked",
+        "Exa refused a free search from this network (it needs a direct IPv4 connection, not a proxy or IPv6), so this reply did not search the web.",
+      ],
+    ])(
+      "says under a reply when Exa refused its search (%s), with a way to Ofox search",
+      async (code, note) => {
+        withProvider("exa");
+        current.session.webSearch = true;
+        await openConversation();
+        await userEvent.type(composer(), "What's new?");
+        await userEvent.click(screen.getByRole("button", { name: "Send" }));
+        await screen.findByRole("button", { name: "Stop" });
+        const sent = mocks.send.mock.calls[0][0];
+        act(() => {
+          mocks.listener?.({
+            ...sent,
+            type: "run_start",
+            data: {
+              messageId: "reply",
+              webSearch: true,
+              searchProvider: "exa",
+            },
+          });
+          mocks.listener?.({
+            ...sent,
+            type: "tool_end",
+            data: {
+              messageId: "reply",
+              name: "web_search",
+              toolCallId: "c1",
+              success: false,
+              code,
+            },
+          });
+        });
+        expect(await screen.findByText(note)).toBeVisible();
+        await userEvent.click(
+          screen.getByRole("button", { name: "Use Ofox search" }),
+        );
+        expect(mocks.setSearchProvider).toHaveBeenCalledWith({
+          provider: "ofox",
+          ...identity,
+        });
+        await waitFor(() =>
+          expect(
+            screen.queryByRole("button", { name: "Use Ofox search" }),
+          ).toBeNull(),
+        );
+        expect(toggle()).toHaveTextContent("Ofox search");
+        expect(screen.getByText(note)).toBeVisible();
+      },
+    );
   });
 });
 

@@ -5257,6 +5257,26 @@
     "webSearchUnavailable": "联网搜索暂不可用，回复将基于模型自身的知识。",
     "webSearchNextMessage": "联网搜索的更改将从你的下一条消息开始生效。",
     "searchSkipped": "此回复无法使用联网搜索，因此基于模型自身的知识作答。",
+    "webSearchMenu": {
+      "head": "回复时通过 Ofox 或 Exa 联网搜索。",
+      "off": "关闭",
+      "ofox": "Ofox 搜索",
+      "ofoxNote": "按次计费：每次约 {{low}}–{{high}}，另加少量 Token",
+      "ofoxUnavailable": "暂不可用",
+      "ofoxUnavailableNote": "Ofox 搜索暂不可用，可以改用 Exa 免费搜索。",
+      "exa": "Exa 免费搜索",
+      "exaShort": "免费，搜索词会发送给 Exa",
+      "exaNote": "由 Exa 提供的免费搜索。搜索词会发送给 Exa；本机读取失败的网页，其地址也会发送给 Exa。",
+      "trigger": {
+        "ofox": "Ofox 搜索",
+        "exa": "Exa 搜索"
+      }
+    },
+    "searchLimited": {
+      "search_rate_limited": "Exa 免费搜索在当前网络已达到限额，这条回复没有联网搜索。",
+      "search_blocked": "Exa 不接受来自当前网络的免费搜索（需要直连的 IPv4，不能经过代理或 IPv6），这条回复没有联网搜索。",
+      "useOfox": "改用 Ofox 搜索"
+    },
     "editKeepsFiles": "所选附件会随编辑后的消息重新发送，你可以移除其中任意附件。",
     "editDropsFiles": "无法读取的文件不会发送。",
     "attachmentOutcome": {

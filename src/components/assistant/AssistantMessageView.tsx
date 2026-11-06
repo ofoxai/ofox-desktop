@@ -205,7 +205,9 @@ function SourceList({
  * reply is doing while one of its tools runs; `thinking` times the reasoning
  * it is streaming; `taskProgress`, what its local configuration run is at,
  * shows under it while it streams. `searchUnavailable` marks a reply whose
- * run went without the web search its conversation asked for. `highlight`
+ * run went without the web search its conversation asked for;
+ * `searchLimited`, one whose free (Exa) search was refused, with
+ * `onUseOfoxSearch` to switch the account to Ofox search. `highlight`
  * marks what a conversation search looks for in the text. `latest` marks the
  * newest reply, whose actions stay in view; the others show theirs while the
  * pointer or keyboard focus is on the message.
@@ -216,6 +218,8 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   retryAttempt = null,
   thinking = null,
   searchUnavailable = false,
+  searchLimited = null,
+  onUseOfoxSearch,
   latest = false,
   highlight = "",
   models = NO_MODELS,
@@ -248,6 +252,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   /** A streaming reply's thinking so far, for its live timer. */
   thinking?: AssistantThinking | null;
   searchUnavailable?: boolean;
+  searchLimited?: "search_rate_limited" | "search_blocked" | null;
+  /** Absent while Ofox search is unavailable or already the provider. */
+  onUseOfoxSearch?: () => void;
   latest?: boolean;
   /** What the sidebar's search looks for: marked wherever the text has it. */
   highlight?: string;
@@ -539,6 +546,20 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       {searchUnavailable && !isUser && (
         <p className="mt-2 text-note text-ink-muted">
           {t("assistant.searchSkipped")}
+        </p>
+      )}
+      {searchLimited && !isUser && (
+        <p className="mt-2 flex flex-wrap items-center gap-x-2 text-note text-ink-muted">
+          <span>{t(`assistant.searchLimited.${searchLimited}`)}</span>
+          {onUseOfoxSearch && (
+            <button
+              type="button"
+              className="font-medium text-brand-ink underline-offset-2 hover:underline"
+              onClick={onUseOfoxSearch}
+            >
+              {t("assistant.searchLimited.useOfox")}
+            </button>
+          )}
         </p>
       )}
       {sources.length > 0 && (

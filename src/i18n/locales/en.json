@@ -5257,6 +5257,26 @@
     "webSearchUnavailable": "Web search is unavailable right now. Replies use the model's own knowledge.",
     "webSearchNextMessage": "Your web search change applies to your next message.",
     "searchSkipped": "Web search was unavailable for this reply, so it uses the model's own knowledge.",
+    "webSearchMenu": {
+      "head": "Search the web for replies through Ofox or Exa.",
+      "off": "Off",
+      "ofox": "Ofox search",
+      "ofoxNote": "Paid: about {{low}}–{{high}} per search, plus a few tokens",
+      "ofoxUnavailable": "Unavailable right now",
+      "ofoxUnavailableNote": "Ofox search is unavailable right now; Exa's free search still works.",
+      "exa": "Exa free search",
+      "exaShort": "Free. Search queries go to Exa",
+      "exaNote": "Free search by Exa. Your search queries go to Exa, and so do the addresses of pages this computer could not read.",
+      "trigger": {
+        "ofox": "Ofox search",
+        "exa": "Exa search"
+      }
+    },
+    "searchLimited": {
+      "search_rate_limited": "Exa's free search reached its limit for this network, so this reply did not search the web.",
+      "search_blocked": "Exa refused a free search from this network (it needs a direct IPv4 connection, not a proxy or IPv6), so this reply did not search the web.",
+      "useOfox": "Use Ofox search"
+    },
     "editKeepsFiles": "The selected files will be sent again. You can remove any of them.",
     "editDropsFiles": "Files that can't be read are left out.",
     "attachmentOutcome": {

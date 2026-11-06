@@ -5257,6 +5257,26 @@
     "webSearchUnavailable": "現在 Web 検索は利用できません。返信はモデル自身の知識で作成されます。",
     "webSearchNextMessage": "Web 検索の変更は次のメッセージから適用されます。",
     "searchSkipped": "この返信では Web 検索を利用できなかったため、モデル自身の知識で作成されています。",
+    "webSearchMenu": {
+      "head": "返信時に Ofox または Exa で Web 検索します。",
+      "off": "オフ",
+      "ofox": "Ofox 検索",
+      "ofoxNote": "従量課金：1 回あたり約 {{low}}〜{{high}}（別途わずかなトークン料金）",
+      "ofoxUnavailable": "現在利用できません",
+      "ofoxUnavailableNote": "現在 Ofox 検索は利用できません。Exa の無料検索は引き続き使えます。",
+      "exa": "Exa 無料検索",
+      "exaShort": "無料。検索語は Exa に送信されます",
+      "exaNote": "Exa による無料検索です。検索語は Exa に送信され、このコンピューターで読み込めなかったページのアドレスも Exa に送信されます。",
+      "trigger": {
+        "ofox": "Ofox 検索",
+        "exa": "Exa 検索"
+      }
+    },
+    "searchLimited": {
+      "search_rate_limited": "このネットワークでは Exa の無料検索が上限に達したため、この返信では Web 検索を行いませんでした。",
+      "search_blocked": "Exa はこのネットワークからの無料検索を受け付けませんでした（プロキシや IPv6 ではなく、直接の IPv4 接続が必要です）。この返信では Web 検索を行いませんでした。",
+      "useOfox": "Ofox 検索に切り替える"
+    },
     "editKeepsFiles": "選択した添付ファイルを再送信します。不要なファイルは削除できます。",
     "editDropsFiles": "読み取れないファイルは除外されます。",
     "attachmentOutcome": {

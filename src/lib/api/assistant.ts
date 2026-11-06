@@ -286,8 +286,17 @@ export type AssistantCatalogSnapshot = Pick<
 };
 
 /**
- * Whether runs can search the web: only while the catalog prices the search
- * model. A conversation with `webSearch` on runs without web tools otherwise.
+ * Where the account's web searches go: Ofox's paid search through the
+ * gateway, or Exa's free one (queries, and pages that could not be read
+ * locally, go to Exa).
+ */
+export type AssistantSearchProvider = "ofox" | "exa";
+
+/**
+ * Whether runs can search the web through Ofox: only while the catalog
+ * prices the search model. Exa's free search is always offered. A
+ * conversation with `webSearch` on runs without web tools when its account's
+ * provider is unavailable.
  */
 export interface AssistantSearchStatus {
   available: boolean;
@@ -297,6 +306,8 @@ export interface AssistantSearchStatus {
    */
   unitPriceUsd: string | null;
   model: string;
+  /** The account's provider; absent from an older backend (Ofox). */
+  provider?: AssistantSearchProvider;
 }
 
 /** A page a reply's web searches found: always HTTPS on a public host. */
@@ -974,7 +985,8 @@ export type AssistantRunEvent =
   /**
    * `messageId` is the run's reply. `webSearch` is whether the run got web
    * search: false with the conversation's switch on means search was
-   * unavailable when it was sent (or the model takes no tools).
+   * unavailable when it was sent (or the model takes no tools);
+   * `searchProvider` is where its searches go when it did.
    * `thinkingLevel` is the level the host sent the run, null for the
    * default. It is one the model's `thinkingLevels` lists, which are Pi's
    * own levels for it, so Pi runs it as sent rather than clamping it.
@@ -984,6 +996,7 @@ export type AssistantRunEvent =
       data: {
         messageId: string;
         webSearch: boolean;
+        searchProvider?: AssistantSearchProvider;
         thinkingLevel?: AssistantThinkingLevel | null;
         compactOnly?: boolean;
       };
@@ -1201,6 +1214,18 @@ export const assistantApi = {
       expectedGeneration?: number;
     },
   ) => invoke<AssistantPreferences>("assistant_set_preferences", { request }),
+  /**
+   * Saves where the account's web searches go, for the account and authority
+   * the page shows, from the next message on; returns it as saved.
+   */
+  setSearchProvider: (request: {
+    provider: AssistantSearchProvider;
+    expectedOwner?: string;
+    expectedGeneration?: number;
+  }) =>
+    invoke<AssistantSearchProvider>("assistant_set_search_provider", {
+      request,
+    }),
   createSession: (request: {
     assistantId?: string;
     capabilities?: AssistantCapabilityRef[];
