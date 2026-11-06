@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { Type } from "typebox";
 import { OfficeError, readOffice as readOfficeText } from "./office.mjs";
+import { encodeWithin } from "./thumbnails.mjs";
 
 const MAX_FILE = 25 * 1024 * 1024;
 const MAX_IMAGE = 10 * 1024 * 1024;
@@ -167,7 +168,12 @@ const pageLimit = (document) => {
 // the messages of the evaluation errors PDF.js stopped at; otherwise it is
 // null. Aborting the signal destroys the loading task, which is also
 // destroyed when opening fails.
-async function withPdf(bytes, read, signal, { stopAtErrors = false } = {}) {
+export async function withPdf(
+  bytes,
+  read,
+  signal,
+  { stopAtErrors = false } = {},
+) {
   signal?.throwIfAborted();
   const { getDocument, PDFWorker } = await import(
     "pdfjs-dist/legacy/build/pdf.mjs"
@@ -744,11 +750,12 @@ export class AttachmentStore {
     await page.render({ canvasContext: canvas.getContext("2d"), viewport })
       .promise;
     page.cleanup();
-    for (const [mimeType, quality] of [["image/png"], ["image/jpeg", 85]]) {
-      const image = canvas.toBuffer(mimeType, quality);
-      if (image.length <= this.maxRenderedPage)
-        return { type: "image", data: image.toString("base64"), mimeType };
-    }
+    const image = encodeWithin(
+      canvas,
+      [["image/png"], ["image/jpeg", 85]],
+      this.maxRenderedPage,
+    );
+    if (image) return { type: "image", ...image };
     throw tooLarge("A rendered PDF page exceeds the image size limit", {
       format: "pdf",
       limit: "rendered_page",
