@@ -6967,3 +6967,376 @@ fn final_mcp_approval_previews_show_distinct_safe_arguments_and_limits() {
         assert!(!serde_json::to_string(&detail).unwrap().contains("argumentsPreview"),"previews are ephemeral approval DTOs, not chat metadata");
     });
 }
+
+// ── documents ────────────────────────────────────────────────────────────
+
+/// `create_document` end to end: the model reads the bundled skill, then the
+/// real engines make the file and the host keeps it as a generated
+/// attachment of the reply. `cargo test --test assistant_host documents`.
+mod documents {
+    use super::*;
+
+    const PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+    /// The prepared runtime with both document engines, or `None` (with a
+    /// message) on a developer machine without them. In CI a missing engine
+    /// is a failure.
+    fn engines_runtime() -> Option<PathBuf> {
+        let bundle = runtime_dir()?;
+        let engines = cc_switch_lib::assistant::documents::engines::engines_at(&bundle);
+        if engines.officecli.is_some() && engines.typst.is_some() {
+            return Some(bundle);
+        }
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "the document engines are not prepared at {}; CI must run `pnpm assistant:prepare` before cargo test",
+            bundle.display()
+        );
+        eprintln!(
+            "skipping: the document engines are not prepared at {} (run `pnpm assistant:prepare`)",
+            bundle.display()
+        );
+        None
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/assistant-documents")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn batch(name: &str) -> Value {
+        serde_json::from_str(&fixture(name)).unwrap()
+    }
+
+    /// What one turn that read a skill and called `create_document` left.
+    struct Outcome {
+        config: tempfile::TempDir,
+        sid: String,
+        generations: Vec<Value>,
+        tool_ends: Vec<Value>,
+        requests: Vec<Request>,
+        detail: Detail,
+        /// The `create_document` result as the runtime keeps it in its history.
+        result: Value,
+    }
+
+    impl Outcome {
+        /// The `create_document` result's text as the model was sent it.
+        fn sent(&self) -> String {
+            let id = &self.result["toolCallId"];
+            self.requests[1].body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|m| m["role"] == "tool" && &m["tool_call_id"] == id)
+                .map(|m| text_of(&m["content"]))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no create_document result was sent: {:?}",
+                        self.requests[1].body
+                    )
+                })
+        }
+
+        /// The images the model was sent after the tool calls.
+        fn images_sent(&self) -> Vec<String> {
+            self.requests[1].body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["content"].as_array())
+                .flatten()
+                .filter(|part| part["type"] == "image_url")
+                .filter_map(|part| part["image_url"]["url"].as_str().map(str::to_owned))
+                .collect()
+        }
+
+        fn stored(&self) -> PathBuf {
+            session_dir(self.config.path(), &self.sid).join("attachments")
+        }
+
+        /// The one generated document: checked as every format's, and its
+        /// generation record and bytes.
+        fn made(&self, mime: &str) -> (Value, Vec<u8>) {
+            let [event] = &self.generations[..] else {
+                panic!("one generation event: {:?}", self.generations);
+            };
+            let generation = &event["generation"];
+            assert_eq!(generation["kind"], "document");
+            assert_eq!(generation["status"], "completed");
+            assert_eq!(generation["cost"], "0", "made on this computer");
+            let [attachment] = &self.detail.attachments[..] else {
+                panic!("one attachment: {:?}", self.detail.attachments);
+            };
+            assert_eq!(attachment.origin.as_deref(), Some("generated"));
+            assert_eq!(attachment.mime_type, mime);
+            assert_eq!(event["attachments"][0]["id"], attachment.id.as_str());
+            assert_eq!(event["attachments"][0]["origin"], "generated");
+            assert_eq!(generation["outputs"], json!([attachment.id]));
+            let reply = self
+                .detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && !m.generations.is_empty())
+                .expect("the reply keeps the document");
+            assert_eq!(reply.generations[0].kind, "document");
+            assert_eq!(reply.attachments.len(), 1);
+            assert_eq!(reply.attachments[0].id, attachment.id);
+            assert_ne!(self.result["isError"], true, "{}", self.result);
+            let sent = self.sent();
+            assert!(
+                sent.contains(&format!("as attachment {}", attachment.id)),
+                "{sent}"
+            );
+            let bytes = std::fs::read(self.stored().join(&attachment.id)).unwrap();
+            assert_eq!(bytes.len() as u64, attachment.size_bytes);
+            (generation.clone(), bytes)
+        }
+
+        /// A refused document: the model hears why, and nothing is kept.
+        fn refused(&self) -> String {
+            assert_eq!(self.result["isError"], true, "{}", self.result);
+            let end = self
+                .tool_ends
+                .iter()
+                .find(|e| e["name"] == "create_document")
+                .expect("create_document ended");
+            assert_eq!(end["success"], false);
+            assert!(self.generations.is_empty(), "{:?}", self.generations);
+            assert!(self.detail.attachments.is_empty());
+            assert!(self
+                .detail
+                .messages
+                .iter()
+                .all(|m| m.attachments.is_empty() && m.generations.is_empty()));
+            let kept = std::fs::read_dir(self.stored()).map_or(0, |dir| dir.count());
+            assert_eq!(kept, 0, "no attachment file is kept");
+            self.sent()
+        }
+    }
+
+    /// One turn: the model reads `skill`, calls `create_document` with
+    /// `args`, then answers.
+    fn create_document(bundle: &Path, model: Model, skill: &str, args: Value) -> Outcome {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), bundle, &[("ofox.ai", &gateway)]);
+        *env.catalog.lock().unwrap() = vec![model];
+        let host = AssistantHost::new(env.clone());
+        let (sid, run, end, detail) = runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![
+                ("use_skill", json!({"name": skill})),
+                ("create_document", args),
+            ]));
+            gateway.reply(Reply::Stream("The document is ready.".into()));
+            let (run, end) = turn(&host, &env, request(&sid, "Make the document", json!({}))).await;
+            let detail = host.get_session(&sid).await.unwrap();
+            host.shutdown().await;
+            (sid, run, end, detail)
+        });
+        let requests = gateway.requests();
+        assert_eq!(
+            end.data["status"],
+            "completed",
+            "{:?} {:?}",
+            of_type(&env, &run, "error"),
+            requests.iter().map(tool_results).collect::<Vec<_>>()
+        );
+        assert_eq!(requests.len(), 2, "the tool calls, then the answer");
+        assert!(tool_names(&requests[0]).contains(&"create_document".to_string()));
+        let tool_ends = of_type(&env, &run, "tool_end");
+        let skill_end = tool_ends
+            .iter()
+            .find(|e| e["name"] == "use_skill")
+            .expect("use_skill ended");
+        assert_eq!(skill_end["success"], true, "{skill_end}");
+        // Every office skill opens with the call it teaches.
+        assert!(
+            tool_results(&requests[1])
+                .iter()
+                .any(|text| text.contains(skill) && text.contains("create_document({ name: ")),
+            "the bundled skill reached the model"
+        );
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap();
+        let result = native
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|entry| entry["type"] == "message")
+            .map(|entry| entry["message"].clone())
+            .find(|m| m["role"] == "toolResult" && m["toolName"] == "create_document")
+            .expect("the create_document result is in the history");
+        assert_no_secret_in_events(&env, &[KEY, NEW_KEY]);
+        Outcome {
+            config,
+            sid,
+            generations: of_type(&env, &run, "generation"),
+            tool_ends,
+            requests,
+            detail,
+            result,
+        }
+    }
+
+    #[test]
+    fn creates_a_pptx_from_a_batch() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let deck = batch("deck.json");
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": deck}),
+        );
+        let (generation, bytes) = outcome.made(PPTX);
+        assert_eq!(generation["params"]["format"], "pptx");
+        assert_eq!(generation["params"]["slides"], 8);
+        assert_eq!(outcome.result["details"]["file"]["slides"], 8);
+        assert!(bytes.starts_with(b"PK"));
+        let sent = outcome.sent();
+        assert!(sent.contains("Created deck.pptx (pptx, "), "{sent}");
+        assert!(
+            sent.contains("8 slides") && sent.contains("attachment"),
+            "{sent}"
+        );
+        assert!(
+            outcome.images_sent().is_empty(),
+            "a text model gets no preview"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn creates_a_pdf_and_reports_pages() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pdf",
+            json!({"name": "essay.pdf", "format": "pdf", "content": fixture("essay.typ")}),
+        );
+        let (generation, bytes) = outcome.made("application/pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+        let pages = outcome.result["details"]["file"]["pages"]
+            .as_u64()
+            .expect("the runtime counts the pages");
+        assert!(pages >= 1);
+        assert_eq!(
+            generation["params"]["pages"], pages,
+            "host and runtime agree"
+        );
+        let sent = outcome.sent();
+        assert!(sent.contains(&format!(" {pages} page")), "{sent}");
+        assert!(
+            outcome.images_sent().is_empty(),
+            "a text model gets no preview"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn creates_a_pdf_and_shows_a_vision_model_its_first_page() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            vision_model(),
+            "ofox-office-pdf",
+            json!({"name": "essay.pdf", "format": "pdf", "content": fixture("essay.typ")}),
+        );
+        let (_, bytes) = outcome.made("application/pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+        let images = outcome.images_sent();
+        assert_eq!(images.len(), 1, "the first page's thumbnail");
+        assert!(
+            images[0].starts_with("data:image/"),
+            "{}",
+            &images[0][..40.min(images[0].len())]
+        );
+        let pixels = outcome.result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|part| part["type"] == "image")
+            .count();
+        assert_eq!(pixels, 1, "the history keeps the thumbnail with the result");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn creates_an_xlsx() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let cell = |at: &str, value: &str| json!({"command":"set","path":format!("/Sheet1/{at}"),"props":{"value":value}});
+        let table = json!([
+            cell("A1", "Item"), cell("B1", "Q1"), cell("C1", "Q2"),
+            cell("A2", "Apples"), cell("B2", "120"), cell("C2", "135"),
+            cell("A3", "Pears"), cell("B3", "98"), cell("C3", "104"),
+            {"command":"set","path":"/Sheet1/A1:C1","props":{"font.bold":"true"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-xlsx",
+            json!({"name": "fruit.xlsx", "format": "xlsx", "content": table}),
+        );
+        let (generation, bytes) = outcome.made(XLSX);
+        assert!(bytes.starts_with(b"PK"));
+        assert_eq!(generation["params"]["format"], "xlsx");
+        assert_eq!(generation["params"]["sheets"], 1);
+        assert_eq!(outcome.result["details"]["file"]["sheets"], 1);
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_an_invalid_batch_without_a_file() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("bad-batch.json")}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("assistant_document_failed"), "{sent}");
+        assert!(
+            sent.contains("item 1") && sent.contains("\"explode\""),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_a_typst_syntax_error() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let body = "= 一、开头\n\n这是一段正文。\n\n#table(\n  columns: 2,\n  [甲], [乙],\n";
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pdf",
+            json!({"name": "broken.pdf", "format": "pdf", "content": body}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("assistant_document_failed"), "{sent}");
+        assert!(
+            sent.contains("Typst could not compile") && sent.contains("error"),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+}
