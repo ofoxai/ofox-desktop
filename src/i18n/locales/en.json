@@ -5110,6 +5110,7 @@
       "deletePending": "The conversation was removed, but some files could not be deleted. Restart the app to retry cleanup.",
       "exportFailed": "Could not save the export. Check the destination and try again.",
       "exportDestinationInvalid": "Choose a regular file outside the application data folder.",
+      "openFailed": "The file was saved, but its default app couldn't open it. Open it from where you saved it.",
       "exportTooLarge": "This conversation is too large for a Markdown export (64 MiB maximum).",
       "backupInvalid": "The backup is damaged or uses an unsupported format. No conflicting conversation was replaced.",
       "backupTooLarge": "The backup exceeds the size or file-count limit (512 MiB ZIP, 2 GiB expanded, 20,000 files).",
@@ -5377,6 +5378,10 @@
       "speech": {
         "label": "Record a voice-over",
         "prompt": "Read this as a voice-over in a calm, warm voice:\n\nWelcome to Ofox: one account for the leading AI models."
+      },
+      "deck": {
+        "label": "Make a deck",
+        "prompt": "Make a presentation: a 6-slide introduction to remote-work habits for new teammates, clean layout, one key idea per slide."
       },
       "localCheck": {
         "label": "Check Claude Code setup",
@@ -5712,7 +5717,8 @@
       "kinds": {
         "image": "Generate image",
         "video": "Generate video",
-        "speech": "Generate speech"
+        "speech": "Generate speech",
+        "document": "Document"
       },
       "chipLabel": "{{name}}: model and parameters",
       "remove": "Remove {{name}}",
@@ -5754,6 +5760,23 @@
       "overLimit": "A video can use at most 9 reference images, 3 audio clips (15 seconds each at most) and 1 video. Remove the extra files.",
       "needsTools": "This model cannot use tools, so it cannot generate images, videos or speech. Choose another model.",
       "readAloudFailed": "Reading aloud failed. Try again later."
+    },
+    "document": {
+      "saveAndOpen": "Save and open",
+      "making": "Generating document…",
+      "issues_one": "{{count}} issue",
+      "issues_other": "{{count}} issues",
+      "pages_one": "{{count}} page",
+      "pages_other": "{{count}} pages",
+      "slides_one": "{{count}} slide",
+      "slides_other": "{{count}} slides",
+      "sheets_one": "{{count}} sheet",
+      "sheets_other": "{{count}} sheets",
+      "severity": {
+        "error": "Error",
+        "warning": "Warning",
+        "info": "Note"
+      }
     },
     "skills": {
       "choose": "Choose a skill",

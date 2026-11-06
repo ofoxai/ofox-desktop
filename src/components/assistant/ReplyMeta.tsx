@@ -52,6 +52,11 @@ export function ReplyMeta({
   const duration = replyDuration(message);
   // A reply that has ended: its cost is settled.
   const breakdown = message.usage ? usageBreakdown(message.usage) : null;
+  // A document is made here and costs nothing: it counts, it has no amount.
+  const documents =
+    breakdown?.generations.filter((line) => line.kind === "document") ?? [];
+  const media =
+    breakdown?.generations.filter((line) => line.kind !== "document") ?? [];
   const costShown =
     breakdown !== null &&
     (breakdown.lines.length > 0 ||
@@ -157,7 +162,7 @@ export function ReplyMeta({
                 )}
                 {breakdown.generations.length > 0 && (
                   <div className="space-y-1 border-t border-line px-3 py-2">
-                    {breakdown.generations.map((line) => (
+                    {media.map((line) => (
                       <div
                         key={line.key}
                         data-usage-line
@@ -180,9 +185,17 @@ export function ReplyMeta({
                         </span>
                       </div>
                     ))}
-                    {breakdown.generations.some(
-                      (line) => line.usd === null,
-                    ) && (
+                    {documents.length > 0 && (
+                      <div
+                        data-usage-line
+                        className="flex items-baseline gap-3"
+                      >
+                        <span className="min-w-0 flex-1 truncate">
+                          {`${t("assistant.generation.kinds.document")} ×${documents.length}`}
+                        </span>
+                      </div>
+                    )}
+                    {media.some((line) => line.usd === null) && (
                       <p className="pt-0.5 leading-snug text-ink-muted">
                         {t("assistant.usageLines.generationUnpriced")}
                       </p>

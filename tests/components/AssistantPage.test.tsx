@@ -7386,6 +7386,120 @@ describe("generation tools", () => {
     expect(screen.queryByRole("button", { name: "Polish writing" })).toBeNull();
   });
 
+  it("shows the deck starter only when pptx is available", async () => {
+    const withFormats = (formats?: string[]) =>
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        models: [...capabilities.models, imageModel, videoModel],
+        runtime: {
+          ...capabilities.runtime,
+          ...(formats ? { documents: { formats } } : {}),
+        },
+      });
+    const deck = () => screen.queryByRole("button", { name: "Make a deck" });
+    for (const formats of [undefined, [], ["pdf", "docx", "xlsx"]]) {
+      withFormats(formats);
+      mocks.listSessions.mockResolvedValue(listOf([]));
+      const rendered = render(page());
+      await screen.findByRole("button", { name: "Make an image" });
+      expect(deck(), JSON.stringify(formats)).toBeNull();
+      rendered.unmount();
+    }
+    withFormats(["pdf", "pptx"]);
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    expect(composer()).toHaveValue(
+      "Make a presentation: a 6-slide introduction to remote-work habits for new teammates, clean layout, one key idea per slide.",
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps three starters when the deck is the only scenario on offer", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await screen.findByRole("button", { name: "Make a deck" });
+    const offered = screen
+      .getAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((name) =>
+        [
+          "Make a deck",
+          "Summarize content",
+          "Polish writing",
+          "Explain a question",
+        ].includes(name ?? ""),
+      );
+    // The deck first, then the text starters in their own order.
+    expect(offered).toEqual([
+      "Make a deck",
+      "Summarize content",
+      "Polish writing",
+    ]);
+  });
+
+  it("saves a generated document and opens it from its card", async () => {
+    mocks.saveMedia.mockReset().mockResolvedValue(true);
+    current.messages = [
+      {
+        id: "reply",
+        role: "assistant",
+        content: "Your deck is ready.",
+        status: "completed",
+        createdAt: 2,
+        runId: "r",
+        attachments: [
+          {
+            id: "deck-1",
+            name: "q3-review.pptx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            sizeBytes: 482_000,
+            status: "ready",
+            reason: null,
+            details: null,
+            origin: "generated",
+            sourceMessageId: "reply",
+          },
+        ],
+        generations: [
+          {
+            toolCallId: "call-doc",
+            kind: "document",
+            model: "",
+            params: { name: "q3-review", format: "pptx", slides: 8 },
+            inputIds: [],
+            status: "completed",
+            outputs: ["deck-1"],
+            cost: "0",
+          } as never,
+        ],
+      },
+    ];
+    await openConversation();
+    const card = screen.getByRole("region", { name: "Document" });
+    const request = {
+      sessionId: "session-a",
+      attachmentId: "deck-1",
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    };
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Save and open" }),
+    );
+    expect(mocks.saveMedia).toHaveBeenLastCalledWith({
+      ...request,
+      open: true,
+    });
+    await userEvent.click(within(card).getByRole("button", { name: "Save…" }));
+    expect(mocks.saveMedia).toHaveBeenLastCalledWith(request);
+  });
+
   it("keeps the writing starters for a chat model without tools", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,

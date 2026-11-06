@@ -5110,6 +5110,7 @@
       "deletePending": "对话已移除，但部分文件尚未删除。重启应用后将重试清理。",
       "exportFailed": "无法保存导出文件，请检查保存位置后重试。",
       "exportDestinationInvalid": "请选择应用数据目录以外的普通文件。",
+      "openFailed": "文件已保存，但无法用默认应用打开。请到保存位置手动打开。",
       "exportTooLarge": "此对话超出 Markdown 导出的 64 MiB 大小上限。",
       "backupInvalid": "备份文件已损坏，或格式不受支持。没有替换任何已有的对话。",
       "backupTooLarge": "备份超过大小或文件数限制：ZIP 最大 512 MiB，解压后最大 2 GiB，最多 20,000 个文件。",
@@ -5377,6 +5378,10 @@
       "speech": {
         "label": "配段旁白",
         "prompt": "用沉稳、温和的声音把这段话读成旁白：\n\n欢迎来到 Ofox，一个账号就能用上主流的 AI 模型。"
+      },
+      "deck": {
+        "label": "做个 PPT",
+        "prompt": "做一份 PPT：向新同事介绍远程办公的好习惯，共 6 页，版面简洁，每页只讲一个重点。"
       },
       "localCheck": {
         "label": "检查 Claude Code 配置",
@@ -5712,7 +5717,8 @@
       "kinds": {
         "image": "生成图片",
         "video": "生成视频",
-        "speech": "生成语音"
+        "speech": "生成语音",
+        "document": "文档"
       },
       "chipLabel": "{{name}}：模型和参数",
       "remove": "去掉{{name}}",
@@ -5754,6 +5760,23 @@
       "overLimit": "生成视频最多使用 9 张参考图、3 段音频（每段不超过 15 秒）和 1 个视频，请删掉多余的附件。",
       "needsTools": "当前模型不能调用工具，无法生成图片、视频或语音。请换一个模型。",
       "readAloudFailed": "朗读失败，请稍后再试。"
+    },
+    "document": {
+      "saveAndOpen": "保存并打开",
+      "making": "正在生成文档…",
+      "issues_one": "{{count}} 个问题",
+      "issues_other": "{{count}} 个问题",
+      "pages_one": "{{count}} 页",
+      "pages_other": "{{count}} 页",
+      "slides_one": "{{count}} 张幻灯片",
+      "slides_other": "{{count}} 张幻灯片",
+      "sheets_one": "{{count}} 张工作表",
+      "sheets_other": "{{count}} 张工作表",
+      "severity": {
+        "error": "错误",
+        "warning": "警告",
+        "info": "提示"
+      }
     },
     "skills": {
       "choose": "选择技能",

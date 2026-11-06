@@ -111,6 +111,8 @@ interface Starter {
   id: string;
   /** The generation chip it turns on. */
   kind?: AssistantGenerationKind;
+  /** Offered only where the runtime can make documents (a deck needs pptx). */
+  requires?: "documents";
 }
 
 /**
@@ -121,6 +123,7 @@ const SCENARIO_STARTERS: Starter[] = [
   { id: "image", kind: "image" },
   { id: "video", kind: "video" },
   { id: "speech", kind: "speech" },
+  { id: "deck", kind: undefined, requires: "documents" },
   { id: "localCheck" },
 ];
 /** For a model without tools, or an account with none of the above. */
@@ -129,6 +132,8 @@ const TEXT_STARTERS: Starter[] = [
   { id: "writing" },
   { id: "explain" },
 ];
+/** A short scenario list is filled up from the text starters. */
+const MIN_STARTERS = 3;
 
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
@@ -443,19 +448,28 @@ function AssistantWorkspace() {
     [bootstrap?.models, bootstrap?.audioModels],
   );
   const localDefinition = Boolean(bootstrap?.localConfigDefinition);
+  const deckAvailable = Boolean(
+    bootstrap?.runtime.documents?.formats.includes("pptx"),
+  );
   const starters = useMemo(() => {
+    const offered = (starter: Starter) =>
+      starter.kind
+        ? generationModels(generationCatalog, starter.kind).length > 0
+        : starter.requires === "documents"
+          ? deckAvailable
+          : localDefinition;
     const scenario =
-      composerModel?.tools === false
-        ? []
-        : SCENARIO_STARTERS.filter((starter) =>
-            starter.kind
-              ? generationModels(generationCatalog, starter.kind).length > 0
-              : localDefinition,
-          );
-    return scenario.length > 0
-      ? [...scenario, { id: "summary" }]
-      : TEXT_STARTERS;
-  }, [composerModel?.tools, generationCatalog, localDefinition]);
+      composerModel?.tools === false ? [] : SCENARIO_STARTERS.filter(offered);
+    if (scenario.length === 0) return TEXT_STARTERS;
+    const offeredStarters: Starter[] = [...scenario, { id: "summary" }];
+    for (const starter of TEXT_STARTERS)
+      if (
+        offeredStarters.length < MIN_STARTERS &&
+        !offeredStarters.some(({ id }) => id === starter.id)
+      )
+        offeredStarters.push(starter);
+    return offeredStarters;
+  }, [composerModel?.tools, generationCatalog, localDefinition, deckAvailable]);
   const queueCount = assistant.queue?.messages.length ?? 0;
   const queueMode = !session?.audioOnly && Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
@@ -678,6 +692,15 @@ function AssistantWorkspace() {
             attachmentId: file.id,
             expectedOwner: bootstrap.owner!,
             expectedGeneration: bootstrap.authorityGeneration,
+          })
+        }
+        onSaveAndOpen={(file) =>
+          assistantApi.saveMedia({
+            sessionId: session.id,
+            attachmentId: file.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+            open: true,
           })
         }
         onCancelVideo={(item) =>

@@ -5241,7 +5241,7 @@ fn media_save_checks_file_and_owner_before_dialog_and_rechecks_after_it() {
         store.mutate(&sid,|record| {record.attachments.push(serde_json::from_value(json!({"id":aid,"name":"result.png","mimeType":"image/png","sizeBytes":bytes.len(),"status":"ready","origin":"generated"})).unwrap());Ok(())}).unwrap();
         std::fs::write(store.attachment_dir(&sid).unwrap().join(&aid),bytes).unwrap();
         let dest=output.path().join("saved.png");let picked=dest.clone();
-        assert!(host.save_media(request(aid.clone()),move |_name|Ok(Some(picked))).await.unwrap());assert_eq!(std::fs::read(&dest).unwrap(),bytes);
+        assert_eq!(host.save_media(request(aid.clone()),move |_name|Ok(Some(picked))).await.unwrap(),Some(dest.clone()));assert_eq!(std::fs::read(&dest).unwrap(),bytes);
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600); }
         let private=output.path().join("must-not-exist.png");let picked=private.clone();let auth=env.clone();
         assert!(host.save_media(request(aid),move |_name|{auth.set_identity(Err("assistant_sign_in_required".into()));Ok(Some(picked))}).await.is_err());

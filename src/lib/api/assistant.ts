@@ -256,7 +256,7 @@ export interface AssistantBootstrap {
     available: boolean;
     reason: string | null;
     version: string | null;
-    /** Deliverable formats the assistant can make on this machine. */
+    /** Document formats the runtime can make; absent when it makes none. */
     documents?: { formats: string[] };
   };
   models: AssistantModel[];
@@ -856,6 +856,13 @@ export interface AssistantGenerationApproval {
   estimatedCostUsd?: string | null;
 }
 
+/** One problem a document's checks found, as its record keeps it. */
+export interface AssistantDocumentIssue {
+  severity: string;
+  message: string;
+  path?: string;
+}
+
 /** A generation tool's result on a reply. */
 export type AssistantGeneration = AssistantMediaBase & {
   toolCallId: string;
@@ -876,6 +883,18 @@ export type AssistantGeneration = AssistantMediaBase & {
           instructions?: string | null;
         };
         audio?: { output?: { durationMs?: number; mimeType?: string } };
+      }
+    | {
+        kind: "document";
+        /** Free: made on this computer, so it has no model and no price. */
+        params: {
+          name?: string;
+          format: string;
+          pages?: number;
+          slides?: number;
+          sheets?: number;
+          issues?: AssistantDocumentIssue[];
+        };
       }
   );
 
@@ -1302,6 +1321,8 @@ export const assistantApi = {
     attachmentId: string;
     expectedOwner: string;
     expectedGeneration: number;
+    /** Also open the saved copy with the default app. */
+    open?: boolean;
   }) => invoke<boolean>("assistant_save_media", { request }),
   exportMarkdown: (request: {
     sessionId: string;
@@ -1546,6 +1567,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_backup_owner_mismatch: "backupOwnerMismatch",
   assistant_export_failed: "exportFailed",
   assistant_export_destination_invalid: "exportDestinationInvalid",
+  assistant_open_failed: "openFailed",
   assistant_export_too_large: "exportTooLarge",
   assistant_invalid_identifier: "sessionMissing",
   assistant_invalid_session: "sessionUnreadable",
