@@ -214,6 +214,9 @@ pub struct RunControl {
     pub(super) media: Option<super::media_tools::host::MediaRun>,
     /// For a background job of a generation tool: its tool call.
     pub(super) artifact: Option<String>,
+    /// The interface language (`zh`, `en` or `ja`) a chat run was sent in:
+    /// the language its documents are set in.
+    pub(super) ui_language: String,
     pub(super) local_enabled: bool,
     pub identity: Identity,
     pub session_id: String,
@@ -243,6 +246,7 @@ impl RunControl {
             skill_tools: Mutex::new(Default::default()),
             media: None,
             artifact: None,
+            ui_language: "zh".into(),
             local_enabled: false,
             identity,
             session_id: request.session_id.clone(),
@@ -1782,6 +1786,11 @@ impl AssistantHost {
                 attempt.progressed = true;
                 let result = if value["params"]["name"] == "authorize_mcp" {
                     self.authorize_mcp(control, &value["params"]).await
+                } else if value["params"]["name"]
+                    .as_str()
+                    .is_some_and(super::documents::is_document_tool)
+                {
+                    self.dispatch_document_tool(control, &value["params"]).await
                 } else if value["params"]["name"]
                     .as_str()
                     .is_some_and(super::media_tools::is_media_tool)

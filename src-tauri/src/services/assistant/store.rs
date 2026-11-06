@@ -37,6 +37,7 @@ const SESSION_FILE: &str = "session.json";
 const NATIVE_HISTORY_FILE: &str = "session.jsonl";
 const PREFS_FILE: &str = "prefs.json";
 const ATTACHMENTS_DIR: &str = "attachments";
+const OUTPUTS_DIR: &str = "outputs";
 
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_DRAFT_BYTES: usize = 128_000;
@@ -926,6 +927,20 @@ impl AssistantStore {
             return Err(NOT_FOUND.into());
         }
         private_subdir(&self.root.join(sid), ATTACHMENTS_DIR)
+    }
+
+    /// `<sid>/outputs/<doc_id>`, the private (0o700) folder where the host
+    /// makes one generated document; a link anywhere on the way is refused.
+    /// The finished file is imported into [`Self::attachment_dir`] from here.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn outputs_dir(&self, sid: &str, doc_id: &str) -> Result<PathBuf, String> {
+        validate_id(sid)?;
+        validate_id(doc_id)?;
+        if !real_dir(&self.root)? || !real_dir(&self.root.join(sid))? {
+            return Err(NOT_FOUND.into());
+        }
+        private_subdir(&private_subdir(&self.root.join(sid), OUTPUTS_DIR)?, doc_id)
     }
 
     fn ensure_root(&self) -> Result<PathBuf, String> {
@@ -3146,6 +3161,33 @@ mod tests {
         assert_eq!(
             store.attachment_root("../x").unwrap_err(),
             "assistant_invalid_identifier"
+        );
+    }
+
+    #[test]
+    fn documents_are_made_in_a_private_folder_of_their_session() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let doc = id();
+        let dir = store.outputs_dir(&sid, &doc).unwrap();
+        assert_eq!(
+            dir,
+            session_file(config.path(), &store, &sid)
+                .with_file_name("outputs")
+                .join(&doc)
+        );
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        for folder in [&dir, &dir.parent().unwrap().to_path_buf()] {
+            assert_eq!(crate::config::file_mode(folder), Some(0o700));
+        }
+        assert_eq!(
+            store.outputs_dir(&sid, "../x").unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+        assert_eq!(
+            store.outputs_dir(&id(), &doc).unwrap_err(),
+            "assistant_session_not_found"
         );
     }
 

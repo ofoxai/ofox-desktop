@@ -627,6 +627,95 @@ pub(super) fn generated_video(
     })
 }
 
+/// Publish a document the host made (see `documents::create`) with its
+/// generation record, as a generated attachment of reply `mid`. Its type is
+/// its name's extension, and the bytes must be what that says: a PDF starts
+/// with `%PDF`, an Office file is a zip; text is taken as it is.
+/// `media.params` (format, counts, issues) also become the attachment's
+/// details. A failed record write rolls the copy back.
+pub(super) fn generated_file(
+    store: &AssistantStore,
+    sid: &str,
+    mid: &str,
+    file: &mut std::fs::File,
+    name: &str,
+    mut media: MediaRecord,
+    precondition: impl FnOnce(&SessionRecord) -> Result<(), String>,
+) -> Result<Attachment, String> {
+    use std::io::{Seek, SeekFrom};
+    let mime = name
+        .rsplit_once('.')
+        .and_then(|(_, extension)| mime_type(&extension.to_ascii_lowercase()))
+        .ok_or(UNSUPPORTED)?;
+    let size = file.metadata().map_err(|_| UNREADABLE)?.len();
+    if size > MAX_FILE_BYTES {
+        return Err(TOO_LARGE.into());
+    }
+    let magic: &[u8] = match mime {
+        "application/pdf" => b"%PDF",
+        m if m.starts_with("application/vnd.openxmlformats-officedocument.") => b"PK\x03\x04",
+        _ => b"",
+    };
+    file.seek(SeekFrom::Start(0)).map_err(|_| UNREADABLE)?;
+    let mut head = vec![0_u8; magic.len()];
+    if file.read_exact(&mut head).is_err() || head != magic {
+        return Err(UNSUPPORTED.into());
+    }
+    file.seek(SeekFrom::Start(0)).map_err(|_| UNREADABLE)?;
+    let mut details = media.params.clone();
+    if let Some(details) = details.as_object_mut() {
+        details.remove("name");
+    }
+    store.with_attachment_lock(sid, || {
+        let mut txn = FileTxn::new();
+        let item = Attachment {
+            id: id(),
+            name: name.into(),
+            mime_type: mime.into(),
+            size_bytes: size,
+            status: "ready".into(),
+            reason: None,
+            preview_url: None,
+            details: Some(details),
+            origin: Some("generated".into()),
+            source_message_id: Some(mid.into()),
+        };
+        let target = store.attachment_dir(sid)?.join(&item.id);
+        if fs::symlink_metadata(&target).is_ok() {
+            return Err(WRITE_FAILED.into());
+        }
+        check_capacity(&store.load_record(sid)?, 1, size)?;
+        media.outputs = vec![item.id.clone()];
+        let copied = (|| {
+            txn.copy_with_mode(&target, &mut file.take(size + 1), 0o600)
+                .map_err(|_| WRITE_FAILED)?;
+            if fs::metadata(&target).map_err(|_| WRITE_FAILED)?.len() != size {
+                return Err(UNREADABLE.into());
+            }
+            store.mutate(sid, |record| {
+                precondition(record)?;
+                check_capacity(record, 1, size)?;
+                let message = record
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == mid)
+                    .ok_or("assistant_message_not_found")?;
+                message.attachments.push(item.clone());
+                message.put_generation(media.clone());
+                record.attachments.push(item.clone());
+                Ok(())
+            })
+        })();
+        match copied {
+            Ok(()) => Ok(item),
+            Err(error) => {
+                let _ = txn.rollback();
+                Err(error)
+            }
+        }
+    })
+}
+
 /// The MIME type of `source`, by its extension.
 fn source_type(source: &Path) -> Result<&'static str, String> {
     source
@@ -1556,6 +1645,134 @@ mod tests {
             generated_video(&store, &sid, &mid, None, &mut file, media, |_| Ok(())).unwrap_err(),
             TOO_LARGE
         );
+    }
+    #[test]
+    fn generated_file_checks_the_bytes_and_keeps_the_record_and_details() {
+        use std::io::Write;
+        const PPTX: &str =
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        let (_config, store, sid) = fixture();
+        let mid = id();
+        let call = id();
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"streaming"})).unwrap());
+                Ok(())
+            })
+            .unwrap();
+        let media = MediaRecord {
+            tool_call_id: Some(call.clone()),
+            kind: "document".into(),
+            params: json!({"name": "deck.pptx", "format": "pptx", "slides": 3, "issues": []}),
+            status: "completed".into(),
+            cost: Some("0".into()),
+            ..Default::default()
+        };
+        let with = |bytes: &[u8]| {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(bytes).unwrap();
+            file
+        };
+        // A file that is not what its type says is refused, and so is one
+        // over the size limit.
+        for (bytes, name) in [
+            (&b"not a zip"[..], "x.pptx"),
+            (b"PK\x03", "x.pptx"),
+            (b"PK\x03\x04", "x.pdf"),
+            (b"PK\x03\x04", "x"),
+            (b"PK\x03\x04", "x.exe"),
+        ] {
+            assert_eq!(
+                generated_file(
+                    &store,
+                    &sid,
+                    &mid,
+                    &mut with(bytes),
+                    name,
+                    media.clone(),
+                    |_| Ok(())
+                )
+                .unwrap_err(),
+                UNSUPPORTED
+            );
+        }
+        let mut large = with(b"%PDF-1.7");
+        large.set_len(MAX_FILE_BYTES + 1).unwrap();
+        assert_eq!(
+            generated_file(
+                &store,
+                &sid,
+                &mid,
+                &mut large,
+                "x.pdf",
+                media.clone(),
+                |_| Ok(())
+            )
+            .unwrap_err(),
+            TOO_LARGE
+        );
+        // Refused under the lock: nothing is kept.
+        assert_eq!(
+            generated_file(
+                &store,
+                &sid,
+                &mid,
+                &mut with(b"PK\x03\x04 deck"),
+                "deck.pptx",
+                media.clone(),
+                |_| { Err("assistant_identity_changed".into()) }
+            )
+            .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert!(copies(&store, &sid).is_empty());
+
+        let attachment = generated_file(
+            &store,
+            &sid,
+            &mid,
+            &mut with(b"PK\x03\x04 deck"),
+            "deck.pptx",
+            media.clone(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(attachment.name, "deck.pptx");
+        assert_eq!(attachment.mime_type, PPTX);
+        assert_eq!(attachment.size_bytes, 9);
+        assert_eq!(attachment.origin.as_deref(), Some("generated"));
+        assert_eq!(attachment.source_message_id.as_deref(), Some(mid.as_str()));
+        assert_eq!(
+            attachment.details,
+            Some(json!({"format": "pptx", "slides": 3, "issues": []}))
+        );
+        let path = store.attachment_root(&sid).unwrap().join(&attachment.id);
+        assert_eq!(fs::read(&path).unwrap(), b"PK\x03\x04 deck");
+        #[cfg(unix)]
+        assert_eq!(crate::config::file_mode(&path), Some(0o600));
+        let record = store.load_record(&sid).unwrap();
+        let ids = |items: &[Attachment]| items.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&record.attachments), vec![attachment.id.clone()]);
+        let reply = &record.messages[0];
+        assert_eq!(ids(&reply.attachments), vec![attachment.id.clone()]);
+        let saved = reply.media_for(Some(&call)).unwrap();
+        assert_eq!(saved.outputs, vec![attachment.id.clone()]);
+        assert_eq!(saved.kind, "document");
+        // Text has no signature to check.
+        let notes = generated_file(
+            &store,
+            &sid,
+            &mid,
+            &mut with(b"# Notes"),
+            "notes.md",
+            MediaRecord {
+                tool_call_id: Some(id()),
+                ..media
+            },
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(notes.mime_type, "text/markdown");
     }
     #[test]
     fn speech_publication_rolls_back_failed_metadata_and_retains_committed_ledger_files() {

@@ -8,11 +8,14 @@ use tokio::task::JoinHandle;
 pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Each of stdout and stderr keeps at most this many bytes.
-const OUTPUT_LIMIT: usize = 256 * 1024;
+pub const OUTPUT_LIMIT: usize = 256 * 1024;
 
 /// Once the engine has exited or been killed, how long its pipes may stay
 /// open (a process it left behind can hold them) before the output is given up.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
+
+/// The folder of `home` where Typst looks for packages and caches them.
+pub const TYPST_PACKAGES: &str = "typst-packages";
 
 #[derive(Debug)]
 pub struct EngineOutput {
@@ -34,7 +37,7 @@ pub async fn run_engine(
     home: &Path,
     timeout: Duration,
 ) -> Result<EngineOutput, String> {
-    let packages = home.join("typst-packages");
+    let packages = home.join(TYPST_PACKAGES);
     std::fs::create_dir_all(&packages).map_err(|_| "assistant_process_start_failed")?;
     let mut command = tokio::process::Command::new(exe);
     command.args(args);

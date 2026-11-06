@@ -653,7 +653,12 @@ impl AssistantHost {
             json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
         });
         self.remember_key(&key);
+        let ui_language = request_ui_language(
+            request.ui_language.as_deref(),
+            crate::settings::get_settings().language.as_deref(),
+        );
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
+        control.ui_language = ui_language.clone();
         control.local_enabled = local_config.is_some();
         control.mcp = super::mcp::current(self.env.config_dir())
             .await
@@ -742,10 +747,6 @@ impl AssistantHost {
         .await?;
 
         let thinking_level = run_thinking_level(&record.session, &model);
-        let ui_language = request_ui_language(
-            request.ui_language.as_deref(),
-            crate::settings::get_settings().language.as_deref(),
-        );
         let mut params = json!({
             "uiLanguage": ui_language,
             "sessionId": request.session_id,
