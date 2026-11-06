@@ -34,6 +34,7 @@ async function prepareFixture(platform: string, systemRoot: string | null) {
   await mkdir(cache, { recursive: true });
   for (const name of [
     "assistant-prepare.mjs",
+    "assistant-entitlements.mjs",
     "assistant-install-stamp.mjs",
     "assistant-prune.mjs",
   ])

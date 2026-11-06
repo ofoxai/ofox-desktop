@@ -18,6 +18,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { entitlementsFor } from "./assistant-entitlements.mjs";
 import {
   clearInstallStamp,
   installIsCurrent,
@@ -216,15 +217,6 @@ async function applicationMinimumMacOS() {
   return minimum;
 }
 
-// Entitlements by executable name; every other Mach-O is signed with none.
-// Node and officecli (a .NET single-file app) run JIT-compiled code under the
-// hardened runtime. officecli also gets the .NET runtime's usual extra pair,
-// executable memory and no library validation (docs/assistant-engines.md).
-const ENTITLEMENTS = {
-  node: "node-entitlements.plist",
-  officecli: "officecli-entitlements.plist",
-};
-
 async function signMacFiles(directory) {
   const identity = process.env.APPLE_SIGNING_IDENTITY;
   if (process.platform !== "darwin" || !identity) return;
@@ -241,9 +233,13 @@ async function signMacFiles(directory) {
         const args = ["--force", "--sign", identity];
         // Notarization needs a secure timestamp on every signed Mach-O.
         if (identity !== "-") args.push("--options", "runtime", "--timestamp");
-        const name = path.basename(filename);
-        if (Object.hasOwn(ENTITLEMENTS, name))
-          args.push("--entitlements", path.join(runtime, ENTITLEMENTS[name]));
+        // Throws for an engine executable with no entry (assistant-entitlements.mjs).
+        const entitlements = entitlementsFor(
+          filename,
+          path.join(resources, "engines"),
+        );
+        if (entitlements)
+          args.push("--entitlements", path.join(runtime, entitlements));
         execFileSync("codesign", [...args, filename], { stdio: "inherit" });
       }
     }
