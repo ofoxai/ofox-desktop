@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="360" viewBox="0 0 1200 360" role="img" aria-labelledby="title desc">
+<title id="title">From first launch to connected tools</title><desc id="desc">Explanatory schematic: sign in once, discover installed tools, choose supported tools, bind selected tools, then start using them. This is not a recording or a guarantee that all tools need no additional setup.</desc>
+<defs><linearGradient id="canvas" x2="1" y2="1"><stop stop-color="#10131b"/><stop offset="1" stop-color="#151924"/></linearGradient></defs>
+<style>
+text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#eef1f7}
+.muted{fill:#a5aec0}
+.phase{animation:phase 15s ease-in-out infinite}
+.packet{animation:travel 1.8s linear infinite}
+@keyframes phase{0%,16%{fill:#33271f;stroke:#ffab72}22%,100%{fill:#1a1f2c;stroke:#343b4d}}
+@keyframes travel{to{stroke-dashoffset:-64}}
+@media(prefers-reduced-motion:reduce){.phase,.packet{animation:none}}
+</style>
+<rect width="1200" height="360" rx="24" fill="url(#canvas)"/>
+<rect x=".5" y=".5" width="1199" height="359" rx="23.5" fill="none" stroke="#343b4d"/>
+<text x="42" y="42" font-size="12" font-weight="650" letter-spacing="2" style="fill:#ffb684">LESS SETUP. MORE MOMENTUM.</text>
+<text x="42" y="86" font-size="29" font-weight="650" letter-spacing="-.5">From first launch to connected tools</text>
+<path d="M242 210H272" fill="none" stroke="#343b4d" stroke-width="2"/>
+<path class="packet" d="M242 210H272" fill="none" stroke="#ffab72" stroke-width="3" stroke-dasharray="7 25" style="animation-delay:-0.0s"/>
+<path d="m266 205 6 5-6 5" fill="none" stroke="#ffab72" stroke-width="1.5"/><path d="M472 210H502" fill="none" stroke="#343b4d" stroke-width="2"/>
+<path class="packet" d="M472 210H502" fill="none" stroke="#ffab72" stroke-width="3" stroke-dasharray="7 25" style="animation-delay:-0.7s"/>
+<path d="m496 205 6 5-6 5" fill="none" stroke="#ffab72" stroke-width="1.5"/><path d="M702 210H732" fill="none" stroke="#343b4d" stroke-width="2"/>
+<path class="packet" d="M702 210H732" fill="none" stroke="#ffab72" stroke-width="3" stroke-dasharray="7 25" style="animation-delay:-1.4s"/>
+<path d="m726 205 6 5-6 5" fill="none" stroke="#ffab72" stroke-width="1.5"/><path d="M932 210H962" fill="none" stroke="#343b4d" stroke-width="2"/>
+<path class="packet" d="M932 210H962" fill="none" stroke="#ffab72" stroke-width="3" stroke-dasharray="7 25" style="animation-delay:-2.0999999999999996s"/>
+<path d="m956 205 6 5-6 5" fill="none" stroke="#ffab72" stroke-width="1.5"/><g>
+<rect class="phase" x="42" y="137" width="200" height="147" rx="17" fill="#1a1f2c" stroke="#343b4d" stroke-width="1.2" style="animation-delay:0s"/>
+<circle cx="211" cy="161" r="11" fill="#10131b" stroke="#343b4d"/>
+<text x="211" y="165" font-size="11" text-anchor="middle" class="muted">1</text>
+<g transform="translate(62 157)" fill="none" stroke="#ffab72" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5H5v14h4m3-11 4 4-4 4m-4-4h12"/></g>
+<text x="62" y="221" font-size="20" font-weight="630">Sign in once</text>
+<text x="62" y="252" font-size="12.5" class="muted">Use your Ofox account</text>
+</g><g>
+<rect class="phase" x="272" y="137" width="200" height="147" rx="17" fill="#1a1f2c" stroke="#343b4d" stroke-width="1.2" style="animation-delay:-12s"/>
+<circle cx="441" cy="161" r="11" fill="#10131b" stroke="#343b4d"/>
+<text x="441" y="165" font-size="11" text-anchor="middle" class="muted">2</text>
+<g transform="translate(292 157)" fill="none" stroke="#ffab72" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5M10.5 7v7M7 10.5h7"/></g>
+<text x="292" y="221" font-size="20" font-weight="630">Discover tools</text>
+<text x="292" y="252" font-size="12.5" class="muted">See what is installed</text>
+</g><g>
+<rect class="phase" x="502" y="137" width="200" height="147" rx="17" fill="#1a1f2c" stroke="#343b4d" stroke-width="1.2" style="animation-delay:-9s"/>
+<circle cx="671" cy="161" r="11" fill="#10131b" stroke="#343b4d"/>
+<text x="671" y="165" font-size="11" text-anchor="middle" class="muted">3</text>
+<g transform="translate(522 157)" fill="none" stroke="#ffab72" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="3"/><path d="m8 12 3 3 5-6"/></g>
+<text x="522" y="221" font-size="20" font-weight="630">Choose tools</text>
+<text x="522" y="252" font-size="12.5" class="muted">Pick supported clients</text>
+</g><g>
+<rect class="phase" x="732" y="137" width="200" height="147" rx="17" fill="#1a1f2c" stroke="#343b4d" stroke-width="1.2" style="animation-delay:-6s"/>
+<circle cx="901" cy="161" r="11" fill="#10131b" stroke="#343b4d"/>
+<text x="901" y="165" font-size="11" text-anchor="middle" class="muted">4</text>
+<g transform="translate(752 157)" fill="none" stroke="#ffab72" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m9 15 6-6m-8 8-1 1a4 4 0 0 1-5-5l5-5a4 4 0 0 1 5 0m2-1 1-1a4 4 0 1 1 5 5l-5 5a4 4 0 0 1-5 0"/></g>
+<text x="752" y="221" font-size="20" font-weight="630">Bind selected</text>
+<text x="752" y="252" font-size="12.5" class="muted">Write native configuration</text>
+</g><g>
+<rect class="phase" x="962" y="137" width="200" height="147" rx="17" fill="#1a1f2c" stroke="#343b4d" stroke-width="1.2" style="animation-delay:-3s"/>
+<circle cx="1131" cy="161" r="11" fill="#10131b" stroke="#343b4d"/>
+<text x="1131" y="165" font-size="11" text-anchor="middle" class="muted">5</text>
+<g transform="translate(982 157)" fill="none" stroke="#ffab72" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m8 4 12 8-12 8Z"/></g>
+<text x="982" y="221" font-size="20" font-weight="630">Start using</text>
+<text x="982" y="252" font-size="12.5" class="muted">Open your connected tools</text>
+</g>
+<text x="42" y="327" font-size="12.5" class="muted">Explanatory schematic · Ofox sign-in is required for binding; available actions depend on the tool and platform.</text>
+</svg>

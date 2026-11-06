@@ -1,0 +1,10 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": { "composite": false },
+  "include": [
+    "../src/**/*",
+    "readme-showcase*.ts",
+    "readme-showcase*.tsx",
+    "readme-pages*.tsx"
+  ]
+}

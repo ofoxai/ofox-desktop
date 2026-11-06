@@ -4,24 +4,25 @@ Ofox follows [cc-switch's lifecycle implementation](https://github.com/farion123
 
 ## Supported behavior
 
-- macOS: Claude Code, Codex CLI, Gemini, OpenCode, OpenClaw and Hermes version checks; single or sequential batch updates.
+- macOS and Windows: Claude Code, Codex CLI, Gemini CLI, OpenCode, OpenClaw, Hermes, DeepSeek Harness (dsh), and Pi version checks; single or sequential batch updates for recognized installations.
 - npm installations: use the owning prefix's npm and Node.js, with an explicit `--prefix`. This also supports fnm/nvm installations whose shell entry points change between sessions.
 - pnpm 11 installations: match the shim target against the manager's global bin and package root. Locally cached managers are considered when PATH points to an older manager. Reinstall only the selected package using `add --global <package>@latest --allow-build=<package>` and explicit global directories. This permits that tool's required postinstall, not arbitrary dependency scripts. Older layouts and mismatches fall back to manual guidance. Release-age and other safety policies remain enabled: registry latest may be newer than the version pnpm currently permits.
-- Homebrew: update the owning formula/cask. Supported native installations use the CLI's own update command.
-- Unknown installation sources (including Bun and Volta wrappers in this release): show a visible manual-update action instead of installing another copy.
+- Homebrew on macOS: update the owning formula/cask. Supported native installations use the CLI's own update command.
+- Windows: recognized npm, pnpm, and Bun installations use their original package manager; supported vendor installations use the CLI's own updater.
+- Unknown installation sources (for example, Volta and Yarn wrappers): show a visible manual-update action instead of installing another copy.
 - ChatGPT desktop app (bundle `com.openai.codex`, MSIX `OpenAI.Codex`): the latest version comes from OpenAI's own update feeds (see [Fixed URL exceptions](#fixed-url-exceptions)). Versions are compared as dotted numbers within one platform, never as semver and never across platforms (MSIX versions have four parts and a different third part).
   - macOS: status only. When an update is available the card's "Update in ChatGPT" button opens (or activates) ChatGPT, whose built-in Sparkle updater installs it from ChatGPT → "Check for Updates…". Ofox never quits ChatGPT or sends it Apple Events, which would trigger a macOS Automation permission prompt.
   - Windows: one-click upgrade from the ChatGPT card. If ChatGPT is running, Ofox asks first, closes it (`CloseMainWindow`, then `Stop-Process` after 10 s), runs `winget upgrade --id 9PLM9XGG6VKS --source msstore`, and falls back to the Microsoft Store page when winget has no applicable update (`0x8A15002B`), is missing, or fails. It then waits for the installed version to increase (90 s after winget, 5 minutes via the Store) and reopens ChatGPT if it had been running.
   - ChatGPT is never part of "Update all"; it upgrades only from its own card.
   - OpenAI rolls releases out gradually. The public feeds can be ahead of what a given installation is offered, so ChatGPT may still report itself up to date; the card and `update_reason` say so.
 - WorkBuddy and desktop-only Codex: use in-app updates or official download pages. App versions are not compared with CLI versions.
-- Windows/Linux: version checks only; no automatic updates in this release, except the ChatGPT desktop app on Windows.
+- Linux: CLI version checks only; no automatic updates.
 
 The settings panel and console share update state. Tools with updates appear first, highlighted in orange, with an update count and an automatic or manual action. Checks are cached for five minutes between mounts. Refreshing the console, completing an installation repair, or returning to the window also rechecks updates, including upgrades performed outside Ofox. Console update badges apply only to the same installed version and installation kind as the local tool row. A failed query never means “up to date.” Updates do not change Ofox bindings, API keys or model settings.
 
 ## API
 
-`get_tool_versions` retains its existing arguments and adds `update_status`, `update_source`, `update_supported`, `update_reason` and `executable_path`. `includeLatest: false` still skips network queries; for ChatGPT it reports `unchecked`. `update_source` is `homebrew`, `npm`, `native` or `pnpm` for CLIs and `sparkle` (macOS) or `msstore` (Windows) for ChatGPT. If ChatGPT's latest-version lookup fails, the status stays `appManaged` and `update_reason` carries the error. ChatGPT on Linux reports `unsupported`.
+`get_tool_versions` retains its existing arguments and adds `update_status`, `update_source`, `update_supported`, `update_reason` and `executable_path`. `includeLatest: false` still skips network queries; for ChatGPT it reports `unchecked`. CLI `update_source` values are `homebrew`, `npm`, `native`, `pnpm`, and `bun` (Windows); ChatGPT uses `sparkle` (macOS) or `msstore` (Windows). If ChatGPT's latest-version lookup fails, the status stays `appManaged` and `update_reason` carries the error. ChatGPT on Linux reports `unsupported`.
 
 `is_tool_app_running({ tool })` (ChatGPT only) tells the renderer whether an upgrade would have to close the app; it returns `false` outside Windows. The renderer asks for confirmation when it is running or when the check fails.
 
