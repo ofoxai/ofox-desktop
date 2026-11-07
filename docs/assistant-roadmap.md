@@ -35,8 +35,8 @@
 | 5 | M3c 度量 | 回归脚本补修改用例 + token/时间统计 + 验收表，18 次最多失败 1 次 | todo |
 | 6 | M3d 后半段 | Word / Excel 渲染器与主题、基于内容重做精美版 | todo，另立计划 |
 
-2026-11-08：M3a-1 的实现分两条分支（运行时在 `feat/assistant-deliverables`，宿主在 `sdd/m3a1-host`，
-合并后统一到前者），待用户验收与真实模型回归（`pnpm assistant:real-eval`，结果填进
+2026-11-08：M3a-1 的运行时在 `feat/assistant-deliverables`，宿主部分已合并到 `feat/assistant-deliverables`；
+待用户验收与真实模型回归（`pnpm assistant:real-eval`，结果填进
 `docs/assistant-engines.md`）；验收通过后再改上表状态。
 
 下面的“生成 / 修改 / 验收”是整段 M3 的总目标，不是单个切片的范围。
@@ -68,7 +68,7 @@
 
 参考 ChatGPT 画布和 Codex 右侧预览：生成的文档在右侧面板直接翻页查看，不必先保存再打开。
 
-- PPT 每页 SVG（宿主已能产出首页 SVG，扩展到全部页面）；PDF 用现有 pdf.js 渲染；
+- PPT 每页 SVG（宿主已产出全部页面的 SVG（`<id>.pages/`），预览面板只需读取）；PDF 用现有 pdf.js 渲染；
   Word、Excel 用 officecli `view html` 快照转图，或严格隔离后展示。
 - 安全约束沿用：app 本身永不加载文档文件（媒体协议拒绝提供文档），预览只用宿主在沙箱里渲染出的图片或 SVG。
 - 被新版本替代的旧卡片折叠显示为“已重做”；与第 1 项配合后同一请求只留一份。

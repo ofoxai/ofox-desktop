@@ -14,8 +14,8 @@ and command-line workflows were replaced by batch command arrays for the
 create_document tool, limited to a subset of elements; examples and worked
 examples are new.
 
-The deck object that create_document renders for PowerPoint (runtime/src/deck/
-and the page-type table of the ofox-office-pptx skill) takes its ten page types
+The deck object that create_document renders for PowerPoint
+(assistant-runtime/src/deck/ and the page-type table of the ofox-office-pptx skill) takes its ten page types
 (hero, statement, pillars, evidence, timeline, comparison, grid, quote, cta,
 showcase), its narrative structures and its palette values from the morph-ppt
 skill of the same repository (skills/morph-ppt, in particular

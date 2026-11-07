@@ -270,6 +270,13 @@ one the model wrote: the allowlist check, the sandboxed engine run, `validate`,
 `view issues` and the layout fixes. `theme` can be left out (`navy` is the only
 one) and `language` is `zh`, `en` or `ja`, which picks the font chain.
 A successful call says `Rendered N slides from the deck with theme navy.`
+The runtime also takes the deck as a JSON string, without `kind` when it has a
+`slides` list, or with `kind` in any case, and reads a literal `\n`, `\r` or
+`\r\n` in any of its text as a line break before it checks the limits (as the
+host does in `text` and `notes`). When the host refuses a batch the runtime
+rendered, the model is told `The rendered batch was refused by the host (this is
+a renderer problem, not your deck): ` before the host's words, so it does not
+rewrite a deck that was fine.
 
 A deck has 3 to 30 slides, each of one of ten page types, and any slide may
 carry speaker `notes`:
@@ -331,7 +338,8 @@ and slide pages as a rendered deck.
 After `batch`, `validate` and `view issues`, a PowerPoint gets up to 2 rounds of
 automatic layout repair before its card is made, so a text box that is a little
 too small does not send the model back to redo the whole file. For the issues
-officecli reports, the host writes `set` commands:
+officecli reports, the host writes `set` commands (a round looks up where at
+most 40 shapes are; the issues of shapes beyond those stay warnings):
 
 | Issue         | Fix                                                                                                                                 |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
@@ -377,7 +385,9 @@ refusal names the item and what to change, and nothing is made.
 - Values, by the property's key: a file property (`src`, `path`, `image`,
   `preview`, `poster`, ...) takes a `data:` URI and nothing else, so local and
   remote pictures are out; a link takes `https:`, `http:`, `mailto:` or a slide;
-  a table's `data` is inline CSV; fills take colours, gradients or a `data:`
+  a table's `data` is inline CSV (in a deck the whole value is checked, since
+  officecli reads a file only when the whole value names one, and chart
+  `categories` are prose; in Word and Excel each cell is checked too); fills take colours, gradients or a `data:`
   image; prose (`text`, `title`, `notes`, `alt`, `description`, `tooltip`,
   `value`, `formula`) may hold anything, including addresses; every other value
   may not name a file or an address (an absolute or `..` path, `~`, a drive, a
@@ -423,15 +433,19 @@ Excel files have no preview. The model also gets the file's id, name, type,
 size, page, slide or sheet count and the issues; it never gets a file path.
 
 Besides that first page, the host exports every slide of a PowerPoint as SVG
-(`view svg --start n --end n`, one run per slide) and keeps the pages beside the
-attachment, at `<session id>/attachments/<attachment id>.pages/<n>.svg`: the
-folder is 0700, the files 0600, and the folder is removed with the attachment.
-A page whose SVG is over the 256 KiB output limit is skipped with the warning
+(`view svg --start n --end n`, one run per slide, for at most 60 slides) and
+keeps the pages beside the attachment, at
+`<session id>/attachments/<attachment id>.pages/<n>.svg` (the attachment takes
+the id of the `outputs/<docId>/` folder it was made in): the folder is 0700, the
+files 0600, and the folder is removed with the attachment. A page whose SVG is
+over the 256 KiB output limit is skipped with the warning
 `slide n has no preview`, and the others are kept; if the engine fails in the
 middle of the export, the slides not exported get one warning,
-`slides a-b have no preview`. The generation record carries `svgPages`, the
-number of slide pictures kept beside the attachment (a skipped slide is not
-counted); a reader should still check that the `.pages` folder exists, since
+`slides a-b have no preview`, and so do slides 61 and on of a longer deck. The
+generation record, the attachment's details and the result carry `svgPages`,
+the number of slide pictures kept beside the attachment (a skipped slide is not
+counted, and none are when the pages cannot be copied there); a reader should
+still check that the `.pages` folder exists, since
 backups, restores and forks copy only the attachment file. Nothing in the app
 shows these pages yet; they are the input of the page-by-page preview in the
 [roadmap](assistant-roadmap.md).
