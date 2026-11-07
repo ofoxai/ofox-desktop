@@ -37,6 +37,8 @@ description: Read before building an Excel workbook (.xlsx) with create_document
 
 **Cells and formulas.** `value` for data, `formula` without a leading `=`. Formatting props: `font.bold`, `font.italic`, `font.color`, `font.size`, `fill`, `alignment.horizontal` (left, center, right), `alignment.wrapText`, `numberformat`, `type` (`"string"`).
 
+A `value` starting with `=`, `+`, `-` or `@` is treated as a formula and checked like one; to keep text such as `+1 555 0100` or `- Item`, start it with an apostrophe (`'+1 555 0100`), which Excel does not show.
+
 ```json
 [
   {"command":"set","path":"/Sheet1/A1","props":{"value":"Month"}},
