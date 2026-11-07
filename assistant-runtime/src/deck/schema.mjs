@@ -9,6 +9,8 @@
 // problem naming the slide, field and limit, so the model can shorten it and
 // send the whole deck again. Nothing is truncated, substituted or reworded.
 
+import { DEFAULT_THEME, THEME_NAMES } from "./theme.mjs";
+
 export const PAGE_TYPES = [
   "hero",
   "statement",
@@ -52,9 +54,6 @@ export const LIMITS = {
 };
 
 const LANGUAGES = ["zh", "en", "ja"];
-// Only the themes the renderer ships; a name it lacks gets a warning.
-const THEMES = ["navy"];
-const DEFAULT_THEME = "navy";
 const CHART_KINDS = ["bar", "line", "pie"];
 const MEDIA = ["image", "chart", "table"];
 const IMAGE_URI = /^data:image\/(png|jpeg|svg\+xml);base64,/;
@@ -586,7 +585,7 @@ export function parseDeck(value, { fallbackLanguage = "zh" } = {}) {
       ? value.theme.trim().toLowerCase()
       : value.theme;
   let theme = DEFAULT_THEME;
-  if (THEMES.includes(named)) theme = named;
+  if (THEME_NAMES.includes(named)) theme = named;
   else if (named !== undefined && named !== null && named !== "")
     warn(
       ctx,
