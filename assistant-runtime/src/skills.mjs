@@ -95,7 +95,7 @@ export function skillTools(runtime, context) {
           signal,
           id,
         );
-        return {
+        const details = {
           ...result,
           body: cut(result.body, 60000),
           files: result.files.slice(0, 200),
@@ -104,6 +104,29 @@ export function skillTools(runtime, context) {
             [...result.body].length > 60000 ||
             result.files.length > 200,
           scriptsUnavailable: !context.params.localConfig,
+        };
+        // The body as written, never inside JSON: encoded, a JSON example
+        // in a skill shows the model doubled escapes (`\\n`), which it then
+        // copies into its own tool calls.
+        const head = [
+          `Skill ${name} (dir: ${details.dir})`,
+          `Files: ${
+            details.files
+              .map((file) =>
+                typeof file === "string" ? file : JSON.stringify(file),
+              )
+              .join(", ") || "none"
+          }`,
+          details.truncated
+            ? "Truncated: the body or the file list was cut."
+            : "",
+          details.scriptsUnavailable ? "Scripts cannot run here." : "",
+        ].filter(Boolean);
+        return {
+          content: [
+            { type: "text", text: `${head.join("\n")}\n\n${details.body}` },
+          ],
+          details,
         };
       },
     ),

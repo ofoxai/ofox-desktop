@@ -23,7 +23,7 @@ description: Read before making a PowerPoint deck (.pptx) with create_document. 
 
 **Type scale**: title 36–44pt bold (at least 1.5× body); subtitle and card heading 20–24pt; body 18–24pt, sentences never below 18; captions and labels 10–14pt, muted; KPI numbers 60–72pt bold, ≤ 5 characters.
 
-Box height ≥ lines × size × 0.05 cm + 0.4 cm; a line holds about width_cm ÷ (size × 0.035) CJK characters, twice as many Latin ones. Cut or split text that does not fit; never shrink below the scale.
+Box height ≥ lines × size × 0.05 cm + 0.4 cm (one line: 14pt → 1.1 cm, 18pt → 1.3 cm, 24pt → 1.6 cm; two lines of 18pt → 2.2 cm); a line holds about width_cm ÷ (size × 0.035) CJK characters, twice as many Latin ones. Cut or split text that does not fit; never shrink below the scale.
 
 **Grid.** Align content to the title edge (x 2.33 cm, width 29.21 cm); one 0.76 cm gap between blocks; ≥ 20% empty space. N cards in a row: width = (29.21 − (N − 1) × 0.76) ÷ N. Left-align body; center only cover titles and big numbers.
 

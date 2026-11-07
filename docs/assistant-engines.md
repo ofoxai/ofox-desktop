@@ -234,6 +234,10 @@ file; a deck starts like this:
 ]
 ```
 
+In the prose props `text` and `notes`, a literal `\n` (a backslash and an
+n, as a model writes one when it escapes twice) is read as a newline, the way
+officecli's own command line reads it; `batch` alone would keep it as written.
+
 and a Word document can start a landscape section with a break:
 
 ```json

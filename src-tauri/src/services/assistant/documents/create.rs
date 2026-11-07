@@ -169,6 +169,7 @@ impl Document {
         let content = match (format.engine(), args.content) {
             (Engine::Office, Value::Array(mut commands)) => {
                 check_batch(&mut commands)?;
+                unescape_newlines(&mut commands);
                 if format == DocumentFormat::Xlsx {
                     check_formulas(&commands)?;
                 }
@@ -335,6 +336,32 @@ fn property(key: &str) -> Property {
         Property::NumberFormat
     } else {
         Property::Other
+    }
+}
+
+/// The props a batch writes prose with line breaks into. A literal `\n` (a
+/// backslash and an n, as a model writes one when it escapes twice) is a
+/// newline in them, as officecli's own command line reads it; `batch`
+/// would keep it as written.
+const NEWLINE_KEYS: &[&str] = &["text", "notes"];
+
+/// Literal `\n` and `\r\n` sequences in the prose of `commands`, as newlines.
+fn unescape_newlines(commands: &mut [Value]) {
+    for command in commands.iter_mut() {
+        let Some(props) = command.get_mut("props").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for (key, value) in props.iter_mut() {
+            let key = key.to_ascii_lowercase();
+            if !NEWLINE_KEYS.contains(&key.as_str()) {
+                continue;
+            }
+            if let Value::String(text) = value {
+                if text.contains("\\n") {
+                    *text = text.replace("\\r\\n", "\n").replace("\\n", "\n");
+                }
+            }
+        }
     }
 }
 
@@ -3115,6 +3142,40 @@ esac"#;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["generation"]["kind"], "document");
         assert_eq!(events[0]["attachments"][0]["id"], attachment.id);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_literal_backslash_n_in_text_is_a_newline() {
+        let f = fixture(
+            Some(&officecli(
+                r#"{"results":[{"index":0,"success":true},{"index":1,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":1}"#,
+            )),
+            None,
+        );
+        let content = json!([
+            {"command": "add", "parent": "/", "type": "slide", "props": {"title": "Hi"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {
+                "text": "A\\nB\\r\\nC", "notes": "x\\ny", "alt": "Keep\\nAlt"
+            }}
+        ]);
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": content}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        let seen: Value =
+            serde_json::from_slice(&std::fs::read(file.with_file_name("batch-seen.json")).unwrap())
+                .unwrap();
+        assert_eq!(seen[1]["props"]["text"], "A\nB\nC");
+        assert_eq!(seen[1]["props"]["notes"], "x\ny");
+        assert_eq!(seen[1]["props"]["alt"], "Keep\\nAlt");
     }
 
     #[tokio::test]

@@ -409,6 +409,19 @@ What the files and previews are:
   default browser from `file://`, where the model-written page and its scripts
   run. The app itself never loads a document: its media protocol refuses to
   serve one.
+- In an Office batch, a literal `\n` (backslash, n) in the `text` and `notes`
+  props is read as a newline, as officecli's command line reads it, because
+  models escape it twice (`use_skill` now hands the skill body over as plain
+  text, which was the trigger: inside JSON its examples showed `\\n`). Those
+  two props cannot hold a literal backslash-n.
+- A signed local build (`pnpm tauri build` with `APPLE_SIGNING_IDENTITY`) signs
+  the prepared runtime in place: `assistant-runtime/resources/node/node` and
+  the runtime's native addons keep the Developer ID signature with the hardened
+  runtime, and `pnpm assistant:test`, which runs with that Node, then fails to
+  load the development `node_modules` addons ("different Team IDs"). The
+  preparation's currency check does not notice the identity change; run
+  `rm -rf assistant-runtime/resources/node && pnpm assistant:prepare` without
+  the identity before the tests.
 
 Features of the engines that are deliberately unavailable, because making a
 document must read nothing outside it and run nothing. An Excel workbook's

@@ -3551,6 +3551,48 @@ test("assistant use_skill reaches the host without local tools", async (t) => {
   assert.equal(calls[0].name, "use_skill");
 });
 
+test("use_skill hands the model the skill body as written, not as JSON", async (t) => {
+  const params = await sandbox(t);
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+  ];
+  // A JSON example with an escape and quotes, as the office skills hold.
+  const body = 'Example: {"text":"one\\ntwo"} and a "quoted" word';
+  let count = 0;
+  let request;
+  const runtime = new AssistantRuntime({
+    hostCall: async () => ({
+      name: "drawing",
+      dir: "/skills/drawing",
+      body,
+      files: ["SKILL.md", "references/a.md"],
+      truncated: false,
+    }),
+    fetch: async (_url, init) => {
+      request = JSON.parse(init.body);
+      return count++ === 0
+        ? toolStream("use_skill", { name: "drawing" })
+        : stream("done");
+    },
+  });
+  await runtime.run(params);
+  const tool = request.messages.find((message) => message.role === "tool");
+  assert.ok(tool.content.includes(body), tool.content);
+  assert.match(
+    tool.content,
+    /^Skill drawing \(dir: \/skills\/drawing\)\nFiles: SKILL\.md, references\/a\.md\n/,
+  );
+  // No doubled escape or escaped quote reaches the model.
+  assert.doesNotMatch(tool.content, /\\\\n|\\"/);
+});
+
 test("models without tools receive neither use_skill nor an instruction to call it", async (t) => {
   const params = await sandbox(t);
   params.model = { ...params.model, tools: false };

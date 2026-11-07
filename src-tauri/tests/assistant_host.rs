@@ -6286,7 +6286,7 @@ fn requests_pass_assistant_skills_without_broken_ones() {
         assert!(prompt.contains("drawing: Draw safely"), "{prompt}");
         assert!(!prompt.contains("broken"));
         assert!(requests[1].text().contains("skill-body-marker"));
-        assert!(requests[1].text().contains("scriptsUnavailable"));
+        assert!(requests[1].text().contains("Scripts cannot run here."));
     });
 }
 
@@ -6664,7 +6664,7 @@ fn skill_tools_real_bridge_save_click_refresh_then_same_turn_use_on_both_apexes(
             let end=wait_for(&env,&run.run_id,"run_end").await;assert_eq!(end.data["status"],"completed","{end:?}");let calls=gateway.requests();assert_eq!(calls.len(),3);
             let tool=calls[1].body["messages"].as_array().unwrap().iter().find(|m|m["role"]=="tool").expect("save result reaches the next model turn");
             let result:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();assert_eq!(result["saved"],true);assert_eq!(result["usable"],true);assert!(result.get("refresh").is_none(),"host-only refresh must not be model content");
-            assert!(calls[2].text().contains(prefix.trim()),"same-turn use must return the saved body");assert!(calls[2].text().contains("scriptsUnavailable"));
+            assert!(calls[2].text().contains(prefix.trim()),"same-turn use must return the saved body");assert!(calls[2].text().contains("Scripts cannot run here."));
             assert_eq!(db.get_all_installed_skills().unwrap().len(),1);assert_eq!(cc_switch_lib::assistant_target::list_assistant_skills(&db,&Default::default()).unwrap()[0].origin,Some(cc_switch_lib::assistant_target::SkillOrigin::AssistantCreated));
             let detail=host.get_session(&sid).await.unwrap();assert_eq!(detail.messages.last().unwrap().content,"Saved and used in this turn");
         });
