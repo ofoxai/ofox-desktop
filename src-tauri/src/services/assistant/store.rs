@@ -37,6 +37,9 @@ const SESSION_FILE: &str = "session.json";
 const NATIVE_HISTORY_FILE: &str = "session.jsonl";
 const PREFS_FILE: &str = "prefs.json";
 const ATTACHMENTS_DIR: &str = "attachments";
+/// What a generated deck's slide pictures are kept in beside its attachment
+/// `<id>`: the folder `<id>.pages` (see `attachments::keep_pages`).
+pub(super) const PAGES_SUFFIX: &str = ".pages";
 const OUTPUTS_DIR: &str = "outputs";
 
 const MAX_TITLE_BYTES: usize = 512;
@@ -522,8 +525,10 @@ impl AssistantStore {
         action()
     }
 
-    /// Remove copies a crashed import never published. Unknown filenames and
-    /// directories are left alone; symlinks are removed, never followed.
+    /// Remove copies a crashed import never published or no record uses,
+    /// with the slide pictures (`<id>.pages`) of such a copy. Unknown
+    /// filenames and directories are left alone; symlinks are removed, never
+    /// followed.
     pub fn cleanup_orphan_attachments(&self, sid: &str) -> Result<usize, String> {
         self.with_attachment_lock(sid, || self.cleanup_orphans_locked(sid))
     }
@@ -581,22 +586,29 @@ impl AssistantStore {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if validate_id(name).is_err() || known.contains(name) {
+            let (owner, pages) = match name.strip_suffix(PAGES_SUFFIX) {
+                Some(owner) => (owner, true),
+                None => (name, false),
+            };
+            if validate_id(owner).is_err() || known.contains(owner) {
                 continue;
             }
             let kind = entry
                 .file_type()
                 .map_err(|_| "assistant_attachment_cleanup_failed")?;
-            if kind.is_file() || kind.is_symlink() {
-                // One copy that cannot go must not keep the others.
-                match fs::remove_file(entry.path()) {
-                    Ok(()) => removed += 1,
-                    Err(error) => {
-                        log::warn!(
-                            "[Assistant] could not remove an unused attachment copy: {error}"
-                        );
-                        failed = true;
-                    }
+            let removal = if pages && kind.is_dir() {
+                fs::remove_dir_all(entry.path())
+            } else if kind.is_file() || kind.is_symlink() {
+                fs::remove_file(entry.path())
+            } else {
+                continue;
+            };
+            // One copy that cannot go must not keep the others.
+            match removal {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    log::warn!("[Assistant] could not remove an unused attachment copy: {error}");
+                    failed = true;
                 }
             }
         }
@@ -1437,7 +1449,7 @@ fn real_dir(path: &Path) -> Result<bool, String> {
 }
 
 /// `parent/name` as a private (0o700 on Unix) real directory, created if needed.
-fn private_subdir(parent: &Path, name: &str) -> Result<PathBuf, String> {
+pub(super) fn private_subdir(parent: &Path, name: &str) -> Result<PathBuf, String> {
     let path = parent.join(name);
     if !real_dir(&path)? {
         crate::config::create_private_dir_all(&path).map_err(|_| UNAVAILABLE)?;

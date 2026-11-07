@@ -1967,7 +1967,11 @@ fn seal_packages(home: &Path) -> Result<(), String> {
 /// What an engine made.
 struct Made {
     file: PathBuf,
+    /// The first page's picture, for the runtime's thumbnail.
     preview: Option<PathBuf>,
+    /// A deck's slides as SVG (see [`svg_pages`]), kept beside its
+    /// attachment.
+    pages: Vec<PathBuf>,
     /// Slides, sheets or pages, when the engine reports them.
     count: Option<u64>,
     issues: Vec<Issue>,
@@ -2210,14 +2214,19 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
             .and_then(|report| data(&report)[key].as_u64()),
         None => None,
     };
-    let preview = if format == DocumentFormat::Pptx {
-        svg_preview(work, file).await
+    let (preview, pages) = if format == DocumentFormat::Pptx {
+        // Without a count, the first slide still makes the thumbnail.
+        let (pages, found) = svg_pages(work, file, count.unwrap_or(1)).await;
+        issues.extend(found);
+        let first = work.dir.join(PAGES).join("1.svg");
+        (pages.contains(&first).then_some(first), pages)
     } else {
-        None
+        (None, vec![])
     };
     Ok(Made {
         file: work.dir.join(file),
         preview,
+        pages,
         count,
         issues: finished(issues),
         fixed,
@@ -2549,13 +2558,55 @@ fn view_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
         .collect()
 }
 
-/// The first slide as SVG, kept as `preview-1.svg` for the runtime's
-/// thumbnail; `None` when officecli drew none, or more than the runner keeps.
-async fn svg_preview(work: &Work<'_>, file: &str) -> Option<PathBuf> {
-    let output = work
-        .run(&["view", file, "svg", "--start", "1"])
-        .await
-        .ok()?;
+/// The folder of a deck's slide pictures, in the document's folder.
+const PAGES: &str = "pages";
+
+/// Each of a deck's `count` slides as SVG, `pages/<n>.svg`: the first is
+/// the runtime's thumbnail, and all are kept beside the attachment. A slide
+/// officecli drew none of, or more of than the runner keeps, is skipped with
+/// a warning; once officecli cannot run or finish, no further slide is drawn.
+async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Vec<Issue>) {
+    if count == 0 {
+        return (vec![], vec![]);
+    }
+    let folder = work.dir.join(PAGES);
+    let made = blocking({
+        let folder = folder.clone();
+        move || crate::config::create_private_dir_all(&folder).map_err(|_| unwritable())
+    })
+    .await;
+    if made.is_err() {
+        log::warn!("[Assistant] could not make the folder of the slide pictures");
+        return (vec![], vec![no_preview(1, count)]);
+    }
+    let (mut pages, mut issues) = (vec![], vec![]);
+    for n in 1..=count {
+        let at = n.to_string();
+        let view = ["view", file, "svg", "--start", &at, "--end", &at];
+        let Ok(output) = work.run(&view).await else {
+            issues.push(no_preview(n, count));
+            break;
+        };
+        let path = folder.join(format!("{n}.svg"));
+        let written = match whole_svg(&output) {
+            Some(svg) => {
+                let (target, bytes) = (path.clone(), svg.as_bytes().to_vec());
+                blocking(move || write_new(&target, &bytes)).await.is_ok()
+            }
+            None => false,
+        };
+        if written {
+            pages.push(path);
+        } else {
+            log::warn!("[Assistant] officecli drew no usable picture of slide {n}");
+            issues.push(no_preview(n, n));
+        }
+    }
+    (pages, issues)
+}
+
+/// The SVG a `view svg` run printed, when it printed one whole.
+fn whole_svg(output: &EngineOutput) -> Option<&str> {
     let svg = output.stdout.trim();
     // The runner keeps at most OUTPUT_LIMIT bytes: a longer one was cut.
     let whole = output.status == Some(0)
@@ -2563,14 +2614,19 @@ async fn svg_preview(work: &Work<'_>, file: &str) -> Option<PathBuf> {
         && svg.starts_with('<')
         && svg.contains("<svg")
         && svg.ends_with('>');
-    if !whole {
-        log::warn!("[Assistant] officecli drew no usable slide preview");
-        return None;
+    whole.then_some(svg)
+}
+
+/// The warning for slides `from..=to`, which have no picture.
+fn no_preview(from: u64, to: u64) -> Issue {
+    if from == to {
+        Issue::warning(
+            format!("slide {from} has no preview"),
+            Some(format!("/slide[{from}]")),
+        )
+    } else {
+        Issue::warning(format!("slides {from}-{to} have no preview"), None)
     }
-    let path = work.dir.join("preview-1.svg");
-    let (target, bytes) = (path.clone(), svg.as_bytes().to_vec());
-    blocking(move || write_new(&target, &bytes)).await.ok()?;
-    Some(path)
 }
 
 /// A PDF: compile the prelude and the body, then render the first page as
@@ -2609,6 +2665,7 @@ async fn make_pdf(work: &Work<'_>, body: &str) -> Result<Made, String> {
     Ok(Made {
         file: path,
         preview,
+        pages: vec![],
         count: pages,
         issues: finished(issues),
         fixed: 0,
@@ -2891,6 +2948,7 @@ impl AssistantHost {
             (Engine::Text, _, _) => Made {
                 file: dir.join(format.file()),
                 preview: None,
+                pages: vec![],
                 count: None,
                 issues: vec![],
                 fixed: 0,
@@ -2905,6 +2963,9 @@ impl AssistantHost {
         }
         if format.engine() == Engine::Office {
             params["fixed"] = json!(made.fixed);
+        }
+        if format == DocumentFormat::Pptx {
+            params["svgPages"] = json!(made.pages.len());
         }
         scrub_secrets_in(&mut params, &self.known_keys());
         let mut record = MediaRecord {
@@ -2921,12 +2982,19 @@ impl AssistantHost {
         let attachment = blocking({
             let (sid, mid, run) = (run.session_id.clone(), mid.clone(), run.clone());
             let (path, name, record) = (made.file.clone(), document.name.clone(), record.clone());
+            let pages = made.pages.clone();
             move || {
                 let mut file = std::fs::File::open(&path)
                     .map_err(|_| refuse(FAILED, "the engine finished without writing the file"))?;
-                attachments::generated_file(&store, &sid, &mid, &mut file, &name, record, |saved| {
-                    still_running(saved, &run)
-                })
+                let attachment = attachments::generated_file(
+                    &store,
+                    &sid,
+                    &mid,
+                    &mut file,
+                    &name,
+                    record,
+                    |saved| still_running(saved, &run),
+                )
                 .map_err(|error| {
                     if error == attachments::UNSUPPORTED {
                         refuse(
@@ -2936,7 +3004,16 @@ impl AssistantHost {
                     } else {
                         error
                     }
-                })
+                })?;
+                // The document stands without its slide pictures.
+                if !pages.is_empty() {
+                    if let Err(error) =
+                        attachments::keep_pages(&store, &sid, &attachment.id, &pages)
+                    {
+                        log::warn!("[Assistant] could not keep the slide pictures: {error}");
+                    }
+                }
+                Ok(attachment)
             }
         })
         .await?;
@@ -2961,6 +3038,9 @@ impl AssistantHost {
         });
         if let Some(fixed) = record.params.get("fixed") {
             result["fixed"] = fixed.clone();
+        }
+        if let Some(pages) = record.params.get("svgPages") {
+            result["svgPages"] = pages.clone();
         }
         Ok(result)
     }
@@ -3194,13 +3274,19 @@ mod tests {
         serde_json::from_str(error.split_once(": ").unwrap().1).unwrap()
     }
 
-    /// A stand-in officecli: `create` writes a zip header, `batch` saves
-    /// the batch it got and prints `batch`, the views print `issues`,
-    /// `stats` and an SVG.
     /// officecli's `view issues --json` report of a document without any.
     const NO_ISSUES: &str = r#"{"success":true,"data":{"count":0,"issues":[]}}"#;
 
+    /// A stand-in officecli: `create` writes a zip header, `batch` saves
+    /// the batch it got and prints `batch`, the views print `issues`,
+    /// `stats` and an SVG.
     fn officecli(batch: &str, issues: &str, stats: &str) -> String {
+        officecli_drawing(batch, issues, stats, "echo '<svg/>'")
+    }
+
+    /// [`officecli`] whose `view <file> svg --start n --end n` runs the
+    /// shell `svg` (n is `$5`).
+    fn officecli_drawing(batch: &str, issues: &str, stats: &str, svg: &str) -> String {
         format!(
             r#"case "$1" in
 create) printf 'PK\003\004stub' > "$2" ;;
@@ -3215,7 +3301,7 @@ view) case "$3" in
 JSON
 ;;
   stats) echo '{stats}' ;;
-  svg) echo '<svg/>' ;;
+  svg) {svg} ;;
   esac ;;
 esac"#
         )
@@ -3666,7 +3752,7 @@ esac"#;
         let file = PathBuf::from(result["filePath"].as_str().unwrap());
         assert!(file.is_absolute() && file.is_file());
         let preview = PathBuf::from(result["previewPath"].as_str().unwrap());
-        assert_eq!(preview.file_name().unwrap(), "preview-1.svg");
+        assert_eq!(preview, file.with_file_name("pages").join("1.svg"));
         assert!(preview.is_file());
         // officecli got the batch as the model wrote it.
         let seen: Value =
@@ -3695,6 +3781,111 @@ esac"#;
         assert_eq!(events.len(), 1);
         assert_eq!(events[0]["generation"]["kind"], "document");
         assert_eq!(events[0]["attachments"][0]["id"], attachment.id);
+    }
+
+    /// The slide pictures kept beside the generated attachment, by name,
+    /// with their text.
+    fn kept_pages(f: &Fixture, result: &Value) -> Vec<(String, String)> {
+        let id = result["file"]["id"].as_str().unwrap();
+        let dir = f
+            .host
+            .store(&identity().owner)
+            .unwrap()
+            .attachment_root(&f.sid)
+            .unwrap()
+            .join(format!("{id}.pages"));
+        let mut pages: Vec<(String, String)> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                (name, std::fs::read_to_string(&path).unwrap())
+            })
+            .collect();
+        pages.sort();
+        pages
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn every_slide_gets_an_svg_page() {
+        let f = fixture(
+            Some(&officecli_drawing(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":3}"#,
+                r#"echo "<svg>$4 $5 $6 $7</svg>""#,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["issues"], json!([]));
+        assert_eq!(result["svgPages"], 3);
+        let pages = PathBuf::from(result["filePath"].as_str().unwrap()).with_file_name("pages");
+        for n in 1..=3 {
+            assert_eq!(
+                std::fs::read_to_string(pages.join(format!("{n}.svg"))).unwrap(),
+                format!("<svg>--start {n} --end {n}</svg>")
+            );
+        }
+        // The runtime's thumbnail is the first page.
+        assert_eq!(result["previewPath"], json!(pages.join("1.svg")));
+        let record = f.record();
+        let generation = record.messages[0].media_for(Some("call-1")).unwrap();
+        assert_eq!(generation.params["svgPages"], 3);
+        let kept = kept_pages(&f, &result);
+        assert_eq!(
+            kept.iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["1.svg", "2.svg", "3.svg"]
+        );
+        assert_eq!(kept[1].1, "<svg>--start 2 --end 2</svg>");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn an_oversized_page_is_skipped_with_a_warning() {
+        // Slide 2 is 300 KiB: more than the runner keeps of an engine's output.
+        let svg = r#"if [ "$5" = 2 ]; then printf '<svg>'; head -c 307200 /dev/zero | tr '\0' x; echo '</svg>'; else echo "<svg>$5</svg>"; fi"#;
+        let f = fixture(
+            Some(&officecli_drawing(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":3}"#,
+                svg,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed");
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": "slide 2 has no preview", "path": "/slide[2]"}])
+        );
+        assert_eq!(result["svgPages"], 2);
+        let pages = PathBuf::from(result["filePath"].as_str().unwrap()).with_file_name("pages");
+        assert!(pages.join("1.svg").is_file() && pages.join("3.svg").is_file());
+        assert!(!pages.join("2.svg").exists());
+        assert_eq!(
+            kept_pages(&f, &result),
+            [
+                ("1.svg".to_owned(), "<svg>1</svg>".to_owned()),
+                ("3.svg".to_owned(), "<svg>3</svg>".to_owned()),
+            ]
+        );
     }
 
     #[tokio::test]

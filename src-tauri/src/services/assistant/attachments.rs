@@ -3,7 +3,7 @@
 //! the all-or-nothing copy into the session's private attachments folder
 //! (see [`AssistantStore::attachment_dir`]).
 use super::{
-    store::{AssistantStore, SessionRecord},
+    store::{private_subdir, AssistantStore, SessionRecord, PAGES_SUFFIX},
     types::*,
 };
 use crate::config::FileTxn;
@@ -710,6 +710,37 @@ pub(super) fn generated_file(
             Ok(()) => Ok(item),
             Err(error) => {
                 let _ = txn.rollback();
+                Err(error)
+            }
+        }
+    })
+}
+
+/// Keep a generated deck's slide pictures (each `<n>.svg`, see
+/// `documents::create`) beside its attachment `id`: private copies in the
+/// private folder `<id>.pages`, all or none. How many were kept. The folder
+/// goes with the attachment (see [`AssistantStore::cleanup_orphan_attachments`]).
+pub(super) fn keep_pages(
+    store: &AssistantStore,
+    sid: &str,
+    id: &str,
+    pages: &[PathBuf],
+) -> Result<usize, String> {
+    validate_id(id)?;
+    store.with_attachment_lock(sid, || {
+        let dir = private_subdir(&store.attachment_dir(sid)?, &format!("{id}{PAGES_SUFFIX}"))?;
+        let mut txn = FileTxn::new();
+        let copied = pages.iter().try_for_each(|page| {
+            let name = page.file_name().ok_or(UNREADABLE)?;
+            let mut source = fs::File::open(page).map_err(|_| UNREADABLE)?;
+            txn.copy_with_mode(&dir.join(name), &mut source, 0o600)
+                .map_err(|_| WRITE_FAILED.to_string())
+        });
+        match copied {
+            Ok(()) => Ok(pages.len()),
+            Err(error) => {
+                let _ = txn.rollback();
+                let _ = fs::remove_dir(&dir);
                 Err(error)
             }
         }
@@ -1774,6 +1805,74 @@ mod tests {
         .unwrap();
         assert_eq!(notes.mime_type, "text/markdown");
     }
+    #[test]
+    fn pages_are_kept_beside_the_attachment_and_removed_with_it() {
+        use std::io::Write;
+        let (_config, store, sid) = fixture();
+        let mid = id();
+        store
+            .mutate(&sid, |record| {
+                record.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"completed"})).unwrap());
+                Ok(())
+            })
+            .unwrap();
+        let media = MediaRecord {
+            tool_call_id: Some(id()),
+            kind: "document".into(),
+            params: json!({"name": "deck.pptx", "format": "pptx", "slides": 3, "svgPages": 2}),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        let mut deck = tempfile::tempfile().unwrap();
+        deck.write_all(b"PK\x03\x04 deck").unwrap();
+        let attachment =
+            generated_file(
+                &store,
+                &sid,
+                &mid,
+                &mut deck,
+                "deck.pptx",
+                media,
+                |_| Ok(()),
+            )
+            .unwrap();
+        let made = tempfile::tempdir().unwrap();
+        let pages = [
+            file(made.path(), "1.svg", b"<svg>1</svg>"),
+            file(made.path(), "3.svg", b"<svg>3</svg>"),
+        ];
+        assert_eq!(keep_pages(&store, &sid, &attachment.id, &pages).unwrap(), 2);
+        let kept = store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{}.pages", attachment.id));
+        assert_eq!(fs::read(kept.join("1.svg")).unwrap(), b"<svg>1</svg>");
+        assert_eq!(fs::read(kept.join("3.svg")).unwrap(), b"<svg>3</svg>");
+        #[cfg(unix)]
+        {
+            assert_eq!(crate::config::file_mode(&kept), Some(0o700));
+            assert_eq!(crate::config::file_mode(&kept.join("1.svg")), Some(0o600));
+        }
+        // Kept while its attachment is.
+        store.cleanup_orphan_attachments(&sid).unwrap();
+        assert!(kept.join("1.svg").is_file());
+        // The reply goes, its attachment with it, and the pages too.
+        store
+            .mutate(&sid, |record| {
+                record.messages.clear();
+                Ok(())
+            })
+            .unwrap();
+        store.cleanup_orphan_attachments(&sid).unwrap();
+        assert!(copies(&store, &sid).is_empty());
+        assert!(!kept.exists());
+        // An unknown folder is still left alone.
+        let unknown = store.attachment_root(&sid).unwrap().join("notes.pages");
+        fs::create_dir(&unknown).unwrap();
+        store.cleanup_orphan_attachments(&sid).unwrap();
+        assert!(unknown.is_dir());
+    }
+
     #[test]
     fn speech_publication_rolls_back_failed_metadata_and_retains_committed_ledger_files() {
         let (_root, store, sid) = fixture();
