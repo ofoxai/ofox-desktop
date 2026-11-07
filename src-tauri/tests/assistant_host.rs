@@ -504,6 +504,15 @@ impl TestEnv {
             .insert(apex.into(), base_url);
     }
 
+    /// Hand out `key` instead of [`KEY`]. A refused key is not replaced: the
+    /// run fails, as it does when the gateway refuses a real key.
+    fn set_key(&self, key: String) {
+        let mut state = self.state.lock().unwrap();
+        state.key = key;
+        state.replacement = None;
+        state.refuse_refresh = true;
+    }
+
     fn events(&self, run_id: &str) -> Vec<Event> {
         self.events
             .lock()
@@ -7474,5 +7483,388 @@ mod documents {
             "{sent}"
         );
         assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+}
+
+// ── real models ──────────────────────────────────────────────────────────
+
+/// The four acceptance prompts on real models through the real gateway: one
+/// JSON line per case on stdout, and the files each case made copied out for
+/// a person to open. It spends real money, so it is ignored; run it with
+/// `pnpm assistant:real-eval`, which finds the key and the models, runs this
+/// and writes the report.
+mod real_eval {
+    use super::*;
+    use cc_switch_lib::assistant::catalog::Kind;
+    use cc_switch_lib::assistant::documents::{engines::engines_at, runner};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// The case (it names the folder its files go to) and what the user asks.
+    const CASES: [(&str, &str); 4] = [
+        ("pdf-sichuan", "写一个 pdf，介绍四川"),
+        ("pptx-transformer", "做一个 8 页的 Transformer 介绍 ppt"),
+        ("xlsx-grades", "做一张三科成绩表"),
+        ("docx-weekly", "写一份 Word 版的周报"),
+    ];
+
+    /// A real model writing an eight-slide deck takes minutes, not the 45
+    /// seconds a mock turn gets.
+    const TURN_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+    /// What one case left, as its JSON line reports it.
+    #[derive(Default)]
+    struct Tally {
+        files: usize,
+        warnings: usize,
+        fixed: u64,
+        svg_pages: u64,
+        calls: usize,
+        input: u64,
+        output: u64,
+        /// Every Office file was read, and none has a literal `\n` in its text.
+        clean_text: bool,
+        notes: Vec<String>,
+    }
+
+    impl Tally {
+        fn failed(note: String) -> Self {
+            Self {
+                notes: vec![note],
+                ..Self::default()
+            }
+        }
+
+        fn ok(&self) -> bool {
+            self.files == 1 && self.warnings == 0 && self.calls == 1 && self.clean_text
+        }
+    }
+
+    #[test]
+    #[ignore = "spends real money on the real gateway; run `pnpm assistant:real-eval`"]
+    fn four_prompts_on_the_listed_models() {
+        let Some(key) = std::env::var("OFOX_REAL_EVAL_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+        else {
+            eprintln!("skipping: OFOX_REAL_EVAL_KEY is not set (run `pnpm assistant:real-eval`)");
+            return;
+        };
+        let apex = std::env::var("OFOX_REAL_EVAL_APEX").unwrap_or_else(|_| "ofox.ai".into());
+        // The key goes to an Ofox gateway and nowhere else.
+        assert!(
+            matches!(apex.as_str(), "ofox.ai" | "ofox.io"),
+            "OFOX_REAL_EVAL_APEX is ofox.ai or ofox.io, not {apex}"
+        );
+        let models: Vec<Value> = std::env::var("OFOX_REAL_EVAL_MODELS")
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .expect("OFOX_REAL_EVAL_MODELS is a JSON array of models");
+        let out = std::env::var_os("OFOX_REAL_EVAL_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.real-eval/manual"));
+        let bundle = runtime_dir().expect("the assistant runtime is prepared");
+        let officecli = engines_at(&bundle)
+            .officecli
+            .expect("the document engines are prepared (run `pnpm assistant:prepare`)");
+        for item in &models {
+            let model = model_of(item);
+            let id = match &model {
+                Ok(model) => model.id.clone(),
+                Err(_) => item["id"].as_str().unwrap_or("?").to_owned(),
+            };
+            for (case, prompt) in CASES {
+                let started = Instant::now();
+                let tally = match &model {
+                    Err(error) => Tally::failed(error.clone()),
+                    Ok(model) => {
+                        let folder = out.join(slug(&model.id)).join(case);
+                        catch_unwind(AssertUnwindSafe(|| {
+                            run_case(&bundle, &officecli, &apex, &key, model, prompt, &folder)
+                        }))
+                        .unwrap_or_else(|panic| {
+                            Tally::failed(format!("panicked: {}", panic_text(&*panic)))
+                        })
+                    }
+                };
+                let mut note = tally.notes.join("; ");
+                if note.chars().count() > 500 {
+                    note = note.chars().take(500).collect::<String>() + "…";
+                }
+                let line = json!({
+                    "case": case,
+                    "model": id,
+                    "ok": tally.ok(),
+                    "files": tally.files,
+                    "warnings": tally.warnings,
+                    "fixed": tally.fixed,
+                    "svgPages": tally.svg_pages,
+                    "calls": tally.calls,
+                    "seconds": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+                    "tokens": {"input": tally.input, "output": tally.output},
+                    "note": note,
+                });
+                println!("{}", line.to_string().replace(&key, "***"));
+            }
+        }
+    }
+
+    /// One prompt in a new conversation with `model` on the real gateway.
+    fn run_case(
+        bundle: &Path,
+        officecli: &Path,
+        apex: &str,
+        key: &str,
+        model: &Model,
+        prompt: &str,
+        folder: &Path,
+    ) -> Tally {
+        let config = tempfile::tempdir().unwrap();
+        // Never asked: the apex's requests go to the real gateway instead.
+        let placeholder = Gateway::start();
+        let env = TestEnv::new(config.path(), bundle, &[(apex, &placeholder)]);
+        env.route(apex, format!("https://api.{apex}"));
+        env.set_key(key.to_owned());
+        *env.catalog.lock().unwrap() = vec![model.clone()];
+        let host = AssistantHost::new(env.clone());
+        let tokio = runtime();
+        let (sid, run, end, detail) = tokio.block_on(async {
+            // No title request: it is not what is measured, and it costs.
+            host.set_preferences(
+                serde_json::from_value(json!({
+                    "instructions": "", "autoTitle": false, "notifyOnFinish": false,
+                    "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let sid = create(&host).await;
+            let run = host
+                .send(request(&sid, prompt, json!({})))
+                .await
+                .unwrap()
+                .run_id;
+            let end = finished(&env, &run).await;
+            if end.is_none() {
+                host.cancel_all();
+            }
+            let detail = host.get_session(&sid).await.unwrap();
+            host.shutdown().await;
+            (sid, run, end, detail)
+        });
+
+        let mut tally = Tally::default();
+        match end {
+            None => tally
+                .notes
+                .push(format!("no run_end within {} s", TURN_LIMIT.as_secs())),
+            Some(end) if end.data["status"] != "completed" => {
+                tally.notes.push(format!("run {}", end.data["status"]));
+            }
+            Some(_) => {}
+        }
+        for error in of_type(&env, &run, "error") {
+            tally.notes.push(format!(
+                "error {}: {}",
+                error["code"].as_str().unwrap_or("?"),
+                error["message"].as_str().unwrap_or("")
+            ));
+        }
+        tally.files = detail.attachments.len();
+        let documents: Vec<_> = detail
+            .messages
+            .iter()
+            .flat_map(|message| &message.generations)
+            .filter(|generation| generation.kind == "document")
+            .collect();
+        if let Some(last) = documents.last() {
+            tally.warnings = last.params["issues"].as_array().map_or(0, Vec::len);
+            tally.fixed = last.params["fixed"].as_u64().unwrap_or(0);
+            tally.svg_pages = last.params["svgPages"].as_u64().unwrap_or(0);
+        }
+        let calls: Vec<Value> = of_type(&env, &run, "tool_end")
+            .into_iter()
+            .filter(|end| end["name"] == "create_document")
+            .collect();
+        tally.calls = calls.len();
+        let refused = calls.iter().filter(|end| end["success"] != true).count();
+        if refused > 0 {
+            tally
+                .notes
+                .push(format!("{refused} create_document call(s) failed"));
+        }
+        // Chat requests count Pi's `input`/`output`; searches count tokens.
+        for request in detail.usage["requests"].as_array().into_iter().flatten() {
+            let usage = &request["usage"];
+            let count = |pi: &str, search: &str| {
+                usage[pi]
+                    .as_u64()
+                    .or_else(|| usage[search].as_u64())
+                    .unwrap_or(0)
+            };
+            tally.input += count("input", "inputTokens");
+            tally.output += count("output", "outputTokens");
+        }
+
+        std::fs::create_dir_all(folder).unwrap();
+        let reply = detail
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant");
+        if let Some(reply) = reply {
+            if reply.model_id.as_deref().is_some_and(|id| id != model.id) {
+                tally
+                    .notes
+                    .push(format!("answered by {:?}", reply.model_id));
+            }
+            std::fs::write(folder.join("reply.md"), &reply.content).unwrap();
+        }
+        let stored = session_dir(config.path(), &sid).join("attachments");
+        let home = tempfile::tempdir().unwrap();
+        tally.clean_text = true;
+        let several = detail.attachments.len() > 1;
+        for (index, attachment) in detail.attachments.iter().enumerate() {
+            let name = Path::new(&attachment.name).file_name().map_or_else(
+                || attachment.id.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let name = if several {
+                format!("{}-{name}", index + 1)
+            } else {
+                name
+            };
+            let copy = folder.join(&name);
+            if let Err(error) = std::fs::copy(stored.join(&attachment.id), &copy) {
+                tally.clean_text = false;
+                tally.notes.push(format!("could not copy {name}: {error}"));
+                continue;
+            }
+            // Kept by a host that saves the rendered pages; skipped before it.
+            let pages = stored.join(format!("{}.pages", attachment.id));
+            if pages.is_dir() {
+                if let Err(error) = copy_folder(&pages, &folder.join(format!("{name}.pages"))) {
+                    tally
+                        .notes
+                        .push(format!("could not copy {name}.pages: {error}"));
+                }
+            }
+            let extension = Path::new(&name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase());
+            if !matches!(extension.as_deref(), Some("pptx" | "docx" | "xlsx")) {
+                continue;
+            }
+            match tokio.block_on(office_text(officecli, &copy, home.path())) {
+                Ok(text) => {
+                    std::fs::write(folder.join(format!("{name}.txt")), &text).unwrap();
+                    if text.contains("\\n") {
+                        tally.clean_text = false;
+                        tally.notes.push(format!("{name} has a literal \\n"));
+                    }
+                }
+                Err(error) => {
+                    tally.clean_text = false;
+                    tally
+                        .notes
+                        .push(format!("officecli could not read {name}: {error}"));
+                }
+            }
+        }
+        tally
+    }
+
+    /// The run's end, or `None` once [`TURN_LIMIT`] has passed.
+    async fn finished(env: &TestEnv, run_id: &str) -> Option<Event> {
+        let deadline = Instant::now() + TURN_LIMIT;
+        while Instant::now() < deadline {
+            if let Some(end) = env
+                .events(run_id)
+                .into_iter()
+                .find(|event| event.r#type == "run_end")
+            {
+                return Some(end);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        None
+    }
+
+    /// What officecli reads as the file's text, run the way the app runs it:
+    /// with none of this process's environment (the key is in it).
+    async fn office_text(officecli: &Path, file: &Path, home: &Path) -> Result<String, String> {
+        let file = file.to_string_lossy();
+        let output = runner::run_engine(
+            officecli,
+            &["view", &file, "text"],
+            home,
+            home,
+            runner::ENGINE_TIMEOUT,
+        )
+        .await?;
+        if output.status != Some(0) {
+            return Err(format!(
+                "exit {:?}: {}",
+                output.status,
+                output.stderr.trim()
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    /// A `/v1/models` row goes through the app's own parser, so the model
+    /// runs with the protocol, tools and output limit the app gives it. A
+    /// model object (as [`test_model`] writes one) takes what it leaves out
+    /// from there.
+    fn model_of(item: &Value) -> Result<Model, String> {
+        let model = if item.get("supported_endpoints").is_some() {
+            parse_models(json!({ "data": [item] }), Source::V1)
+                .pop()
+                .ok_or_else(|| format!("{} is no model the app lists", item["id"]))?
+        } else {
+            let fields = item.as_object().ok_or("a model is a JSON object")?;
+            let mut model = serde_json::to_value(test_model()).unwrap();
+            model.as_object_mut().unwrap().extend(fields.clone());
+            serde_json::from_value(model).map_err(|error| format!("{}: {error}", item["id"]))?
+        };
+        if model.kind != Kind::Chat {
+            return Err(format!(
+                "{} is a {:?} model, not a chat model",
+                model.id, model.kind
+            ));
+        }
+        Ok(model)
+    }
+
+    /// `openai/gpt-6.1-terra` → `openai-gpt-6.1-terra`.
+    fn slug(id: &str) -> String {
+        id.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+
+    fn copy_folder(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+        panic
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".into())
     }
 }
