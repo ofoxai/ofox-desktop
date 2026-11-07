@@ -107,7 +107,7 @@ Expected: `test result: ok`（8 个文档 e2e 通过）。
 - [ ] **Step 1: 写失败的测试**
 
 `test/deck-schema.test.mjs`（node:test，仿 `test/document-tools.test.mjs` 的写法）：
-- `textLength counts CJK as one and Latin as half`：`textLength("Transformer 入门")` 等于 `ceil(11×0.5 + 1 + 2) = 9`；`textLength("")` 为 0。
+- `textLength counts CJK as one and Latin as half`：`textLength("Transformer 入门")` 等于 `ceil(11×0.5 + 0.5 + 2) = 8`（空格也按 0.5 计）；`textLength("")` 为 0。
 - `deckOf finds a deck object and its one-element wrapper`：对象、`[对象]` 都返回对象；`[cmd]`、字符串、两元素数组返回 `null`。
 - `parseDeck accepts every page type at its limits`：十种页型各一页、每个字段填到上限（用 `"字".repeat(n)`），断言返回 `deck.slides.length === 10`、`warnings` 为空。
 - `parseDeck tolerates loose input`：`type: "Pillars"`、`pillars` 给成 `"感知: 多模态\n推理: 思维链"`（拆成两条，`heading` 为冒号前、`body` 为冒号后）、`metrics[0].value: 118`、`series[0].values: "12, 15"`、多余字段 `color` → 解析成功，`warnings` 含 `ignored field "color"`。
@@ -156,8 +156,8 @@ git commit -m "feat(assistant): parse deck objects for pptx with per-type limits
 - [ ] **Step 1: 写失败的测试**
 
 - `a full-width line at 20pt holds about 40 CJK characters`：`lineCapacity(29.21, 20)` 在 40.5–41 之间。
-- `six one-line bullets at 20pt need about 6.5 cm`：`heightCm(6, 20, { paragraphs: 6, spaceAfterPt: 6 })` 在 6.4–6.6。
-- `mixed text counts Latin as half`：`lineCount("Transformer 入门", 10, 36)` 为 1；`lineCount("字".repeat(41), 29.21, 20)` 为 2。
+- `six one-line bullets at 20pt need about 6.5 cm`：`heightCm(6, 20, { paragraphs: 6, spaceAfterPt: 6 })` 在 6.8–7.0（5.592 + 0.254 + 1.059）。
+- `mixed text counts Latin as half`：`lineCount("Transformer 入门", 12, 36)` 为 1（容量 9.04，长度 8）；`lineCount("字".repeat(41), 29.21, 20)` 为 2。
 - `fitSize steps down and reports when nothing fits`：`fitSize("字".repeat(240), 14.22, 11.7, [24, 22, 20, 18])` 返回 `size: 18, fits: true`；`maxHeightCm: 3` 时 `fits: false, size: 18`。
 
 - [ ] **Step 2: 运行，确认失败** — `node --test test/deck-text.test.mjs`，模块不存在。
