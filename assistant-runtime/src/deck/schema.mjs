@@ -8,6 +8,9 @@
 // whose text is too long is refused as a whole, with one sentence per
 // problem naming the slide, field and limit, so the model can shorten it and
 // send the whole deck again. Nothing is truncated, substituted or reworded.
+// A line break takes no room in the length count but a line on the slide,
+// so a short field (a title, heading or label) must be one line and a
+// body-like field holds at most two line breaks (LIMITS.lineBreaks).
 
 import { DEFAULT_THEME, THEME_NAMES } from "./theme.mjs";
 
@@ -27,9 +30,12 @@ export const PAGE_TYPES = [
 // Limits are in Chinese-character units (see textLength) except where noted.
 // `count: [min, max]` bounds a list; `detail` and `points` read as
 // `[at most this many, each at most this long]`. A table's `rows` counts
-// the header row too.
+// the header row too. `lineBreaks` bounds the line breaks inside one
+// text field, `short` for one-line fields and `body` for body-like ones
+// (see LINE_BREAKS).
 export const LIMITS = {
   deck: { slides: [3, 30], notes: 300, title: 22 },
+  lineBreaks: { short: 0, body: 2 },
   hero: { title: 18, subtitle: 30, meta: 30 },
   statement: { statement: 40, note: 60 },
   pillars: { count: [2, 4], heading: 12, body: 60 },
@@ -123,8 +129,29 @@ function ignore(ctx, object, known, path = "") {
 
 const characters = (text) => [...text].length;
 
-// A text field: a string or a number, trimmed, within the limit. A blank
-// optional field is absent.
+// Which LIMITS.lineBreaks bound a text field by its name (the last part of
+// its path). Speaker notes, list items, table cells and chart labels are
+// not bounded here: a list written as one string is split at its breaks.
+const LINE_BREAKS = {
+  title: "short",
+  subtitle: "short",
+  meta: "short",
+  heading: "short",
+  statement: "short",
+  quote: "short",
+  source: "short",
+  contact: "short",
+  label: "short",
+  value: "short",
+  caption: "short",
+  body: "body",
+  note: "body",
+};
+
+const lineBreaks = (text) => text.match(/\r\n|\r|\n/g)?.length ?? 0;
+
+// A text field: a string or a number, trimmed, within the limit and its
+// line-break bound. A blank optional field is absent.
 function str(
   ctx,
   value,
@@ -148,6 +175,13 @@ function str(
   const size = measure(text);
   if (size > limit)
     problem(ctx, `${field} is ${size} characters; the limit is ${limit}`);
+  const allowed = LIMITS.lineBreaks[LINE_BREAKS[field.split(".").at(-1)]];
+  const breaks = lineBreaks(text);
+  if (allowed !== undefined && breaks > allowed)
+    problem(
+      ctx,
+      `${field} has ${breaks} line break${breaks === 1 ? "" : "s"}; the limit is ${allowed}`,
+    );
   return text;
 }
 

@@ -349,3 +349,27 @@ test("renderDeck refuses a batch over 2000 commands", () => {
     /^Error: deck too large: \d+ commands$/,
   );
 });
+
+test("renderDeck fails fast on content that does not fit the page", () => {
+  // Hand-built pages parseDeck would refuse (too many line breaks): row 2
+  // of the grid would end past 19.05 cm, and the quote would start above 0.
+  const lines = (count) => Array(count).fill("项目").join("\n");
+  const grid = {
+    type: "grid",
+    title: "今天讲什么",
+    items: Array.from({ length: 8 }, () => ({
+      heading: "背景",
+      body: lines(8),
+    })),
+  };
+  const quote = { type: "quote", quote: lines(20) };
+  const hero = { type: "hero", title: "封面" };
+  assert.throws(
+    () => renderDeck({ ...sixPages(), slides: [hero, grid] }, navy),
+    /^Error: slide 2 \(grid\): content does not fit the page$/,
+  );
+  assert.throws(
+    () => renderDeck({ ...sixPages(), slides: [hero, hero, quote] }, navy),
+    /^Error: slide 3 \(quote\): content does not fit the page$/,
+  );
+});

@@ -444,6 +444,36 @@ test("parseDeck rejects a deck without slides, title or an object", () => {
   assert.deepEqual(problemsOf(null), ["deck must be an object"]);
 });
 
+const grid = (bodies) => ({
+  type: "grid",
+  title: "今天讲什么",
+  items: bodies.map((body, index) => ({ heading: `第 ${index + 1} 项`, body })),
+});
+
+test("parseDeck rejects a line break in a one-line field", () => {
+  assert.deepEqual(
+    problemsOf(deckWith(STATEMENT, { ...HERO, subtitle: "第一行\n第二行" })),
+    ["slide 2 (hero): subtitle has 1 line break; the limit is 0"],
+  );
+});
+
+test("parseDeck rejects a body with more than two line breaks", () => {
+  const bodies = ["背景", "机制", "一\n二\n三\n四\n五\n六"];
+  assert.deepEqual(problemsOf(deckWith(HERO, STATEMENT, grid(bodies))), [
+    "slide 3 (grid): items[2].body has 5 line breaks; the limit is 2",
+  ]);
+});
+
+test("parseDeck accepts a body with two line breaks and notes with more", () => {
+  const bodies = ["背景", "机制", "第一行\r\n第二行\n第三行"];
+  const { deck } = parsed(
+    deckWith({ ...grid(bodies), notes: "一\n二\n三\n四\n五" }),
+  );
+  assert.equal(deck.slides[0].items[2].body, "第一行\r\n第二行\n第三行");
+  assert.equal(LIMITS.lineBreaks.body, 2);
+  assert.equal(LIMITS.lineBreaks.short, 0);
+});
+
 test("parseDeck rejects overlong speaker notes", () => {
   assert.deepEqual(problemsOf(deckWith({ ...HERO, notes: zh(301) })), [
     "slide 1 (hero): notes is 301 characters; the limit is 300",
@@ -627,17 +657,19 @@ test("parseDeck accepts only base64 png, jpeg or svg images", () => {
 });
 
 test("parseDeck never rewrites text", () => {
-  const input = deckWith({
-    ...HERO,
-    title: "  Transformer  入门  ",
-    subtitle: "第一行\n第二行 ",
-    notes: "\n 讲稿  内容 ",
-  });
+  const input = deckWith(
+    {
+      ...HERO,
+      title: "  Transformer  入门  ",
+      notes: "\n 讲稿  内容 ",
+    },
+    { ...STATEMENT, note: "第一行\n第二行 " },
+  );
   const snapshot = structuredClone(input);
   const { deck } = parsed(input);
   assert.equal(deck.slides[0].title, "Transformer  入门");
-  assert.equal(deck.slides[0].subtitle, "第一行\n第二行");
   assert.equal(deck.slides[0].notes, "讲稿  内容");
+  assert.equal(deck.slides[1].note, "第一行\n第二行");
   assert.deepEqual(input, snapshot);
 });
 

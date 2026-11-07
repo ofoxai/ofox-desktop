@@ -229,6 +229,41 @@ const FOCUS_ROOM_CM = 6;
 // Between a statement or quote and the line under it.
 const FOCUS_GAP_CM = 0.4;
 
+// A breathing page: one block of text fitted to `sizes` within
+// FOCUS_ROOM_CM and an optional smaller line under it (`line`: role, text,
+// size, color), both centered across the content width and stacked in the
+// middle of the slide. `style` colors and weights the block.
+function focusPage(ctx, { role, text, sizes, style, line }) {
+  const { n, theme } = ctx;
+  const block = fitBox(text, CONTENT.w, FOCUS_ROOM_CM, sizes);
+  const under =
+    line.text === undefined
+      ? undefined
+      : fitBox(line.text, CONTENT.w, Infinity, [line.size]);
+  const [y, lineY] = stackCentered([block.h, under?.h], FOCUS_GAP_CM);
+  const commands = [
+    slideCommand(n, { background: theme.colors.background }),
+    textBox(
+      ctx,
+      role,
+      text,
+      { x: CONTENT.x, y, w: CONTENT.w, h: block.h },
+      { size: block.size, align: "center", valign: "middle", ...style },
+    ),
+  ];
+  if (under)
+    commands.push(
+      textBox(
+        ctx,
+        line.role,
+        line.text,
+        { x: CONTENT.x, y: lineY, w: CONTENT.w, h: under.h },
+        { size: under.size, color: line.color, align: "center" },
+      ),
+    );
+  return commands;
+}
+
 // A thin primary bar down the slide's left edge marks a statement page.
 const STATEMENT_RULE = { x: 0, y: 0, w: 0.3, h: CANVAS.hCm };
 // Spec: the note under a statement is 20pt.
@@ -237,48 +272,24 @@ const STATEMENT_NOTE_PT = 20;
 export function renderStatement(ctx, slide) {
   const { n, theme } = ctx;
   const { colors, sizes } = theme;
-  const main = fitBox(
-    slide.statement,
-    CONTENT.w,
-    FOCUS_ROOM_CM,
-    sizes.statement,
-  );
-  const note =
-    slide.note === undefined
-      ? undefined
-      : fitBox(slide.note, CONTENT.w, Infinity, [STATEMENT_NOTE_PT]);
-  const [y, noteY] = stackCentered([main.h, note?.h], FOCUS_GAP_CM);
-  const commands = [
-    slideCommand(n, { background: colors.background }),
+  return [
+    ...focusPage(ctx, {
+      role: "statement",
+      text: slide.statement,
+      sizes: sizes.statement,
+      style: { color: colors.primary, bold: true },
+      line: {
+        role: "note",
+        text: slide.note,
+        size: STATEMENT_NOTE_PT,
+        color: colors.textSecondary,
+      },
+    }),
     textboxCommand(n, `s${n}-rule`, undefined, {
       ...STATEMENT_RULE,
       fill: colors.primary,
     }),
-    textBox(
-      ctx,
-      "statement",
-      slide.statement,
-      { x: CONTENT.x, y, w: CONTENT.w, h: main.h },
-      {
-        size: main.size,
-        color: colors.primary,
-        bold: true,
-        align: "center",
-        valign: "middle",
-      },
-    ),
   ];
-  if (note)
-    commands.push(
-      textBox(
-        ctx,
-        "note",
-        slide.note,
-        { x: CONTENT.x, y: noteY, w: CONTENT.w, h: note.h },
-        { size: note.size, color: colors.textSecondary, align: "center" },
-      ),
-    );
-  return commands;
 }
 
 // Spec: a quote is 28–32pt, its source 16pt.
@@ -286,40 +297,19 @@ const QUOTE_SIZES = [32, 28];
 const QUOTE_SOURCE_PT = 16;
 
 export function renderQuote(ctx, slide) {
-  const { n, theme } = ctx;
-  const { colors } = theme;
-  const main = fitBox(slide.quote, CONTENT.w, FOCUS_ROOM_CM, QUOTE_SIZES);
-  const source =
-    slide.source === undefined
-      ? undefined
-      : fitBox(slide.source, CONTENT.w, Infinity, [QUOTE_SOURCE_PT]);
-  const [y, sourceY] = stackCentered([main.h, source?.h], FOCUS_GAP_CM);
-  const commands = [
-    slideCommand(n, { background: colors.background }),
-    textBox(
-      ctx,
-      "quote",
-      slide.quote,
-      { x: CONTENT.x, y, w: CONTENT.w, h: main.h },
-      {
-        size: main.size,
-        color: colors.primary,
-        align: "center",
-        valign: "middle",
-      },
-    ),
-  ];
-  if (source)
-    commands.push(
-      textBox(
-        ctx,
-        "source",
-        slide.source,
-        { x: CONTENT.x, y: sourceY, w: CONTENT.w, h: source.h },
-        { size: source.size, color: colors.textMuted, align: "center" },
-      ),
-    );
-  return commands;
+  const { colors } = ctx.theme;
+  return focusPage(ctx, {
+    role: "quote",
+    text: slide.quote,
+    sizes: QUOTE_SIZES,
+    style: { color: colors.primary },
+    line: {
+      role: "source",
+      text: slide.source,
+      size: QUOTE_SOURCE_PT,
+      color: colors.textMuted,
+    },
+  });
 }
 
 // --- Card pages: pillars and grid -----------------------------------------
@@ -404,6 +394,20 @@ export const RENDERERS = {
 // Covers and breathing pages carry no page number (nor a title rule).
 const UNNUMBERED = new Set(["hero", "statement", "quote", "cta"]);
 
+// Every box a page placed lies on the canvas. Schema limits keep in-limit
+// content on the page; a deck that slips past them fails here rather than
+// sending shapes off the slide.
+function assertOnPage(ctx, type, page) {
+  const cm = (value) => Number.parseFloat(value);
+  const off = page.some(({ props }) => {
+    if (props?.y === undefined || props.height === undefined) return false;
+    const [x, y, w, h] = [props.x, props.y, props.width, props.height].map(cm);
+    return x < 0 || y < 0 || x + w > CANVAS.wCm || y + h > CANVAS.hCm;
+  });
+  if (off)
+    throw new Error(`slide ${ctx.n} (${type}): content does not fit the page`);
+}
+
 // The batch for a deck parseDeck has read, in `theme`: every page in order,
 // each followed by its speaker notes and, on content pages, its number.
 export function renderDeck(deck, theme) {
@@ -412,6 +416,7 @@ export function renderDeck(deck, theme) {
   const commands = deck.slides.flatMap((slide, index) => {
     const ctx = { n: index + 1, total, theme, fonts, language: deck.language };
     const page = RENDERERS[slide.type](ctx, slide);
+    assertOnPage(ctx, slide.type, page);
     if (slide.notes !== undefined) page.push(notesCommand(ctx.n, slide.notes));
     if (theme.decor.pageNumber && !UNNUMBERED.has(slide.type))
       page.push(pageNumberCommand(ctx.n, total, theme, fonts));
