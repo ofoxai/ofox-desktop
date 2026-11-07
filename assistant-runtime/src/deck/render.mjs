@@ -133,7 +133,9 @@ function fitCards(items, w, { headingSizes, bodySizes, bodyRoom }) {
 }
 
 // Card `i` at { x, y, w }: a rounded `card`-colored panel, its heading on
-// top and its body under it.
+// top and its body under it. The panel is a roundRect at its default corner
+// with no `adj`: the host refuses `adj:val 16667` as an address, so a deck
+// with a card on it made no file at all.
 function cardCommands(ctx, i, item, { x, y, w }, fitted) {
   const { colors } = ctx.theme;
   const inner = { x: x + CARD_PAD_CM, w: w - 2 * CARD_PAD_CM };

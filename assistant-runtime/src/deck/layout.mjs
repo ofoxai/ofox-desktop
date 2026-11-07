@@ -11,9 +11,6 @@ export const CONTENT = { x: 2.33, w: 29.21, top: 5.0, bottom: 17.78 };
 export const TITLE_BOX = { x: 2.33, y: 1.0, w: 29.21, h: 3.67 };
 export const GAP_CM = 0.76;
 
-// roundRect's own default corner, one sixth of the short side.
-const ROUND_CORNER = "adj:val 16667";
-
 // The page number sits just under the content area, flush with its right
 // edge: one line of 13pt needs 0.86 cm.
 const PAGE_NUMBER = { w: 3, h: 0.9, y: 17.9, size: 13 };
@@ -119,6 +116,10 @@ export function titleCommands(
 // text. `radius` rounds the corners (roundRect at its default corner, not by
 // the number given); `preset` picks another shape, such as "rect" or
 // "ellipse". Names should be unique on the slide, as paths address by name.
+// No `adj` is written for the corner: without one officecli writes an empty
+// a:avLst, which is roundRect's own default (one sixth of the short side),
+// and the host refuses officecli's `adj:val 16667` form as an address
+// (create.rs names_a_location reads `adj:` as a scheme).
 export function textboxCommand(
   n,
   name,
@@ -165,7 +166,6 @@ export function textboxCommand(
       spaceAfter: spacing(spaceAfter),
       fill,
       preset: shape,
-      adj: radius && shape === "roundRect" ? ROUND_CORNER : undefined,
     }),
   };
 }

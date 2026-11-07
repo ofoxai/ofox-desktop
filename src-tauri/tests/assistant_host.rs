@@ -7085,7 +7085,10 @@ mod documents {
         /// generation record and bytes.
         fn made(&self, mime: &str) -> (Value, Vec<u8>) {
             let [event] = &self.generations[..] else {
-                panic!("one generation event: {:?}", self.generations);
+                panic!(
+                    "one generation event: {:?}; the result: {}",
+                    self.generations, self.result
+                );
             };
             let generation = &event["generation"];
             assert_eq!(generation["kind"], "document");
@@ -7243,6 +7246,98 @@ mod documents {
             outcome.images_sent().is_empty(),
             "a text model gets no preview"
         );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// The deck object end to end: the runtime renders it into a batch, the
+    /// real officecli runs it, and the host validates it, fixes nothing, and
+    /// exports every slide as an SVG page beside the attachment.
+    #[test]
+    fn renders_a_deck_into_a_pptx_with_no_issues() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-object.json")}),
+        );
+        let (generation, bytes) = outcome.made(PPTX);
+        assert!(bytes.starts_with(b"PK"));
+        let params = &generation["params"];
+        assert_eq!(params["format"], "pptx");
+        assert_eq!(params["slides"], 8);
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["fixed"], 0, "{params}");
+        assert_eq!(params["svgPages"], 8, "{params}");
+        let id = &outcome.detail.attachments[0].id;
+        let pages = outcome.stored().join(format!("{id}.pages"));
+        for page in 1..=8 {
+            let path = pages.join(format!("{page}.svg"));
+            let svg = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(svg.trim_start().starts_with("<svg"), "{}", path.display());
+        }
+        let sent = outcome.sent();
+        assert!(
+            sent.contains("Rendered 8 slides from the deck with theme navy"),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// The showcase page's chart, table (with signed cells) and image pass
+    /// the host and validate without an issue.
+    #[test]
+    fn renders_showcase_media_without_issues() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "showcase.pptx", "format": "pptx", "content": batch("deck-showcase.json")}),
+        );
+        let (generation, _) = outcome.made(PPTX);
+        let params = &generation["params"];
+        assert_eq!(params["slides"], 5);
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["fixed"], 0, "{params}");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_a_deck_with_an_unknown_page_type() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-unknown-type.json")}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("unknown type \"bullets\""), "{sent}");
+        assert!(sent.contains("hero, statement"), "the page types: {sent}");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_an_overlong_deck_without_a_file() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-too-long.json")}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("is 61 characters; the limit is 60"), "{sent}");
         assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
     }
 

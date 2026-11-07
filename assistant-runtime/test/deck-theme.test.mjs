@@ -245,7 +245,6 @@ test("textboxCommand writes units and names", () => {
       spaceAfter: "6pt",
       fill: "E8EEF4",
       preset: "roundRect",
-      adj: "adj:val 16667",
     },
   });
 });
