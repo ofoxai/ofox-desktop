@@ -622,6 +622,7 @@ const TEXT_KEYS: &[&str] = &[
     "error",
     "errortitle",
     "inputtitle",
+    "prompttitle",
     "inputmessage",
     "errormessage",
     "header",
@@ -4318,6 +4319,12 @@ esac"#,
                 json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "See \\\\server\\share"}}),
                 "file share",
             ),
+            // R60: a validation's prompt title is text, unless it starts like
+            // a formula.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "B2:B9", "type": "list", "formula1": "Yes,No", "promptTitle": "=WEBSERVICE(\"https://x.example/\")"}}),
+                "calls WEBSERVICE",
+            ),
             // R56: a chart's text that starts like a formula is one.
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "=WEBSERVICE(\"https://x.example/\")"}}),
@@ -4389,7 +4396,7 @@ esac"#,
             json!({"command": "set", "path": "/Sheet1/chart[1]", "props": {"title": "销售额 (万元)"}}),
             json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"name": "Sales (2026)", "values": "Sheet1!B2:B5"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "name": "Ledger", "columns": "Name,Amount (USD),Date"}}),
-            json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "B2:B9", "type": "list", "formula1": "Yes,No", "prompt": "Pick one (required)", "errorTitle": "Wrong value (see list)", "error": "Call support (ext. 12)"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "B2:B9", "type": "list", "formula1": "Yes,No", "prompt": "Pick one (required)", "promptTitle": "Pick (one)", "errorTitle": "Wrong value (see list)", "error": "Call support (ext. 12)"}}),
             // R57: inline lists keep their words, and one reference passes.
             json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales (k):1,2,3", "categories": "North (EU),South (US)"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name,Amount (USD)\nAlice,5"}}),

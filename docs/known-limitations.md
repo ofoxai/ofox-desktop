@@ -449,8 +449,8 @@ formulas run later, when it is opened: they are filtered, not sandboxed.
   a title with an address in it does not. A cell value that starts with `=`,
   `+`, `-` or `@` (`+1 555 0100`, `- Item`) is refused as a formula; a leading
   apostrophe keeps it text. A text key is matched by the last part of its name,
-  so a key officecli has that the list does not (a validation's `promptTitle`)
-  is read as a formula.
+  so a key officecli has that the list does not (a table's `totalLabel`, a
+  chart's `referenceLine`) is read as a formula.
 
 Tool behavior changed in this round:
 
