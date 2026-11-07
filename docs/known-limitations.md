@@ -423,22 +423,27 @@ formulas run later, when it is opened: they are filtered, not sandboxed.
 - number formats that escape a character with a backslash, such as `\$`: a
   backslash reads as a path separator to the check. `$#,##0` is accepted;
 - Typst packages (`#import "@…"`);
-- Excel formulas outside an allowlist. A formula (a `formula`, `formula1`,
-  `formula2`, `ref` or `refersTo` value, any value of a conditional format,
-  validation, named range, chart, sparkline or table, and any value that starts
-  with `=`, `+`, `-` or `@` and is not a number) may call only maths and
-  rounding, statistics, logic, text, lookup and reference, date and time,
-  finance, information and dynamic-array functions (SUM, IF, IFERROR, VLOOKUP,
-  XLOOKUP, INDEX, MATCH, TEXT, DATE, PMT, ISNUMBER, UNIQUE, FILTER and the like),
-  and HYPERLINK only with one quoted https:, http:, mailto: or # address as its
-  first argument. Refused even inside quoted text: functions that fetch, run code
-  or build a reference from text (WEBSERVICE, IMAGE, RTD, FILTERXML,
-  STOCKHISTORY, CUBE…, IMPORT…, CALL, REGISTER, EXEC, PY, DDE, INDIRECT and
-  others), a DDE `|`, another workbook (`[book]Sheet!A1`, a quoted path before
-  `!`), `\\`, `//` and `file:`. So a formula with such a word or character in
-  its text (`"Call us"`, `"a|b"`, an address outside HYPERLINK) is refused too.
-  A table's inline rows hold values only: no cell may start with `=`, `+`, `-`
-  or `@` unless it is a number.
+- Excel formulas outside an allowlist. A formula (any key with `formula` in its
+  name, such as `arrayFormula`, and `ref`, `refersTo` or `calculatedField`; the
+  references, ranges, values, categories, sources and data of a conditional
+  format, validation, named range, chart, sparkline, table or pivot table; and
+  any value that starts with `=`, `+`, `-` or `@` and is not a number) may call
+  only maths and rounding, statistics, logic, text, lookup and reference, date
+  and time, finance, information and dynamic-array functions (SUM, IF, IFERROR,
+  VLOOKUP, XLOOKUP, INDEX, MATCH, TEXT, DATE, PMT, ISNUMBER, UNIQUE, FILTER and
+  the like), and HYPERLINK only with one quoted https:, http:, mailto: or #
+  address as its first argument. Refused even inside quoted text: functions that
+  fetch, run code or build a reference from text (WEBSERVICE, IMAGE, RTD,
+  FILTERXML, STOCKHISTORY, CUBE…, IMPORT…, CALL, REGISTER, EXEC, PY, DDE,
+  INDIRECT and others), a DDE `|`, another workbook (`[book]Sheet!A1`, a quoted
+  path before `!`), `\\`, `//` and `file:`. So a formula with such a word or
+  character in its text (`"Call us"`, `"a|b"`, an address outside HYPERLINK) is
+  refused too. A table's inline rows hold values only: no cell may start with
+  `=`, `+`, `-` or `@` unless it is a number. Text that starts with one of those
+  (`+1 555 0100`, `- Item`) is refused as a formula; a leading apostrophe keeps
+  it text. Inline chart `categories` and `data` are read as formulas, so a label
+  with a word before a parenthesis (`North (EU)`) is refused there; a chart's
+  title, axis titles and series names are text.
 
 Tool behavior changed in this round:
 

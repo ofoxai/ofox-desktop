@@ -199,8 +199,9 @@ The runtime registers it from the run's `documents` parameter, which lists the
 formats this computer can make: the text formats always, the Office formats when
 officecli is present and `pdf` when typst is. The system prompt is written from
 that list: it tells the model to use the tool when the user asks for a file or
-names a PDF, Word, PowerPoint or Excel document, and never to say it cannot
-attach one; a format whose engine is missing is named as one this machine cannot
+names one of the PDF, Word, PowerPoint and Excel formats this computer can make.
+Only when all four are available does it add that the model must never say it
+cannot attach a file; otherwise it names the formats this machine cannot
 produce, which the model says if asked.
 
 Before the first document of a format in a conversation the model reads the
@@ -303,9 +304,12 @@ refusal names the item and what to change, and nothing is made.
   scheme).
 - Word fields only show a page number or a date: `page`, `numpages`, `date`,
   `time` and `toc`, with no instruction that runs, fetches or links.
-- Excel formulas (a `formula` key, a value that starts with `=`, `+`, `-` or
-  `@` and is not a number, and every value of a conditional format, validation,
-  named range, chart, sparkline or table) call only allowlisted functions, refuse
+- Excel formulas (any key with `formula` in its name, `ref`, `refersTo` and
+  `calculatedField`; a value that starts with `=`, `+`, `-` or `@` and is not a
+  number; and the references, ranges, values, categories, sources and data of a
+  conditional format, validation, named range, chart, sparkline, table or pivot
+  table, whose titles, names and prompts are text) call only allowlisted
+  functions, refuse
   WEBSERVICE, IMAGE, INDIRECT, DDE and the like even in quoted text, and refer
   to no other workbook, file share or address (HYPERLINK may link to one quoted
   `https:`, `http:`, `mailto:` or `#` address). A table's inline rows hold
