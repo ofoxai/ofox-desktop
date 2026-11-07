@@ -423,27 +423,34 @@ formulas run later, when it is opened: they are filtered, not sandboxed.
 - number formats that escape a character with a backslash, such as `\$`: a
   backslash reads as a path separator to the check. `$#,##0` is accepted;
 - Typst packages (`#import "@…"`);
-- Excel formulas outside an allowlist. A formula (any key with `formula` in its
-  name, such as `arrayFormula`, and `ref`, `refersTo` or `calculatedField`; the
-  references, ranges, values, categories, sources and data of a conditional
-  format, validation, named range, chart, sparkline, table or pivot table; and
-  any value that starts with `=`, `+`, `-` or `@` and is not a number) may call
-  only maths and rounding, statistics, logic, text, lookup and reference, date
-  and time, finance, information and dynamic-array functions (SUM, IF, IFERROR,
-  VLOOKUP, XLOOKUP, INDEX, MATCH, TEXT, DATE, PMT, ISNUMBER, UNIQUE, FILTER and
-  the like), and HYPERLINK only with one quoted https:, http:, mailto: or #
-  address as its first argument. Refused even inside quoted text: functions that
-  fetch, run code or build a reference from text (WEBSERVICE, IMAGE, RTD,
-  FILTERXML, STOCKHISTORY, CUBE…, IMPORT…, CALL, REGISTER, EXEC, PY, DDE,
-  INDIRECT and others), a DDE `|`, another workbook (`[book]Sheet!A1`, a quoted
-  path before `!`), `\\`, `//` and `file:`. So a formula with such a word or
-  character in its text (`"Call us"`, `"a|b"`, an address outside HYPERLINK) is
-  refused too. A table's inline rows hold values only: no cell may start with
-  `=`, `+`, `-` or `@` unless it is a number. Text that starts with one of those
-  (`+1 555 0100`, `- Item`) is refused as a formula; a leading apostrophe keeps
-  it text. Inline chart `categories` and `data` are read as formulas, so a label
-  with a word before a parenthesis (`North (EU)`) is refused there; a chart's
-  title, axis titles and series names are text.
+- Excel formulas outside an allowlist. A formula is any key with `formula` in
+  its name (such as `arrayFormula`), `ref`, `refersTo` or `calculatedField`;
+  every key of a conditional format, validation, named range, chart,
+  sparkline, table or pivot table except its text keys (titles, names, labels,
+  legends, prompts, messages, captions, formats and fonts) and its inline lists;
+  and any other value that starts with `=`, `+`, `-` or `@` and is not a
+  number. A formula may call only maths and rounding, statistics, logic, text,
+  lookup and reference, date and time, finance, information and dynamic-array
+  functions (SUM, IF, IFERROR, VLOOKUP, XLOOKUP, INDEX, MATCH, TEXT, DATE, PMT,
+  ISNUMBER, UNIQUE, FILTER and the like), and HYPERLINK only with one quoted
+  https:, http:, mailto: or # address as its first argument. Refused even inside
+  quoted text: functions that fetch, run code or build a reference from text
+  (WEBSERVICE, IMAGE, RTD, FILTERXML, STOCKHISTORY, CUBE…, IMPORT…, CALL,
+  REGISTER, EXEC, PY, DDE, INDIRECT and others), a DDE `|`, another workbook
+  (`[book]Sheet!A1`, a quoted path before `!`), `\\`, `//` and `file:`. So a
+  formula with such a word or character in its text (`"Call us"`, `"a|b"`, an
+  address outside HYPERLINK) is refused too. An inline list (chart `data` and
+  `categories`, series `values`, table `columns`, pivot fields) is one
+  reference, read as a formula, or is checked cell by cell: a cell may not name
+  another workbook, a share, an address or a file, and a cell that starts like a
+  formula is checked as one; a table's `data` rows hold values only, so no cell
+  there may start with `=`, `+`, `-` or `@` unless it is a number. Text keys are
+  checked the same way as a whole, so `North (EU)` or "Call volume" passes and
+  a title with an address in it does not. A cell value that starts with `=`,
+  `+`, `-` or `@` (`+1 555 0100`, `- Item`) is refused as a formula; a leading
+  apostrophe keeps it text. A text key is matched by the last part of its name,
+  so a key officecli has that the list does not (a validation's `promptTitle`)
+  is read as a formula.
 
 Tool behavior changed in this round:
 

@@ -306,10 +306,10 @@ refusal names the item and what to change, and nothing is made.
   `time` and `toc`, with no instruction that runs, fetches or links.
 - Excel formulas (any key with `formula` in its name, `ref`, `refersTo` and
   `calculatedField`; a value that starts with `=`, `+`, `-` or `@` and is not a
-  number; and the references, ranges, values, categories, sources and data of a
-  conditional format, validation, named range, chart, sparkline, table or pivot
-  table, whose titles, names and prompts are text) call only allowlisted
-  functions, refuse
+  number; and every key of a conditional format, validation, named range,
+  chart, sparkline, table or pivot table but its text keys, such as titles,
+  names and prompts, and its inline lists, which are checked cell by cell) call
+  only allowlisted functions, refuse
   WEBSERVICE, IMAGE, INDIRECT, DDE and the like even in quoted text, and refer
   to no other workbook, file share or address (HYPERLINK may link to one quoted
   `https:`, `http:`, `mailto:` or `#` address). A table's inline rows hold
