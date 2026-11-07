@@ -2244,8 +2244,13 @@ async fn view_report(work: &Work<'_>, file: &str) -> Option<Value> {
 /// [`fix::MAX_ROUNDS`] rounds; `first` is the checks' first report. The
 /// issues of the last report, and how many fixes were applied. Each round's
 /// `set` commands pass the model's batch checks and run as one batch
-/// (`fix-<round>.json`); one that is refused or fails ends the fixing with
-/// the issues as they are. Other formats are not fixed.
+/// (`fix-<round>.json`). Fix commands the batch checks refuse end the
+/// fixing with the issues as they are. A fix batch that cannot be written,
+/// does not run or finish, or that officecli does not apply also ends it
+/// (see [`after_failed_fix`]): the document stands when `validate` then
+/// runs and reports no error, with the issues of a new `view issues` (or
+/// [`ISSUES_UNAVAILABLE`] when that view gives none); otherwise the fix
+/// batch's failure is the document's. Other formats are not fixed.
 async fn fix_layout(
     work: &Work<'_>,
     file: &str,
@@ -2294,18 +2299,9 @@ async fn fix_layout(
             break;
         }
         let input = format!("fix-{round}.json");
-        let (target, bytes) = (
-            work.dir.join(&input),
-            serde_json::to_vec(&commands).map_err(|_| PROTOCOL)?,
-        );
-        blocking(move || write_new(&target, &bytes)).await?;
-        let output = work
-            .run(&["batch", file, "--input", &input, "--json"])
-            .await?;
-        if batch_issues(work, &output).is_err() {
-            // Atomic: the file is as the last report saw it.
-            log::warn!("[Assistant] officecli did not apply the layout fixes");
-            break;
+        if let Err(error) = apply_fixes(work, file, &input, &commands).await {
+            log::warn!("[Assistant] the layout fixes did not apply");
+            return after_failed_fix(work, file, error, fixed).await;
         }
         fixed += commands.len();
         match view_report(work, file).await {
@@ -2314,6 +2310,54 @@ async fn fix_layout(
         }
     }
     Ok((view_issues(work, &report), fixed))
+}
+
+/// Write one round's fix batch as `input` and run it; the error says why it
+/// was not applied.
+async fn apply_fixes(
+    work: &Work<'_>,
+    file: &str,
+    input: &str,
+    commands: &[Value],
+) -> Result<(), String> {
+    let (target, bytes) = (
+        work.dir.join(input),
+        serde_json::to_vec(commands).map_err(|_| PROTOCOL)?,
+    );
+    blocking(move || write_new(&target, &bytes)).await?;
+    let output = work
+        .run(&["batch", file, "--input", input, "--json"])
+        .await?;
+    batch_issues(work, &output).map(drop)
+}
+
+/// After a fix batch that was not applied (`error` says why): the document
+/// is kept only when `validate` runs and reports no error, since a batch
+/// that was stopped may have left the file unusable. Its issues are then
+/// those of a new `view issues`, and `fixed` the fixes of earlier rounds.
+async fn after_failed_fix(
+    work: &Work<'_>,
+    file: &str,
+    error: String,
+    fixed: usize,
+) -> Result<(Vec<Issue>, usize), String> {
+    // officecli 1.0.160 reports validation errors as `"success": false`.
+    let valid = work
+        .report(&["validate", file, "--json"])
+        .await
+        .is_some_and(|report| {
+            report["success"] != false
+                && data(&report)["valid"] != false
+                && validation_issues(work, &report).is_empty()
+        });
+    if !valid {
+        return Err(error);
+    }
+    let issues = match view_report(work, file).await {
+        Some(report) => view_issues(work, &report),
+        None => vec![Issue::warning(ISSUES_UNAVAILABLE.into(), None)],
+    };
+    Ok((issues, fixed))
 }
 
 /// The warnings of a batch that ran, or the failure of one that did not.
@@ -3181,37 +3225,72 @@ esac"#
         json!([{"command": "add", "parent": "/", "type": "slide", "props": {"title": "Hi"}}])
     }
 
+    /// Shell that prints `outputs[n]` on its n-th run (the last one after
+    /// that), counting the runs in the file `counter`.
+    fn by_call(counter: &str, outputs: &[&str]) -> String {
+        let mut cases = String::new();
+        for (k, output) in outputs.iter().enumerate() {
+            let pattern = if k + 1 == outputs.len() {
+                "*".to_owned()
+            } else {
+                k.to_string()
+            };
+            cases.push_str(&format!(
+                "    {pattern}) cat <<'JSON'\n{output}\nJSON\n    ;;\n"
+            ));
+        }
+        format!(
+            "n=$(cat {counter} 2>/dev/null || echo 0); echo $((n + 1)) > {counter}\n    case \"$n\" in\n{cases}    esac"
+        )
+    }
+
+    /// A fix batch officecli applied, as the rounds stub prints it.
+    const FIX_APPLIED: &str =
+        r#"echo '{"success":true,"data":{"results":[{"index":0,"success":true}]}}'"#;
+    /// A fix batch that crashed: no report, a failed exit.
+    const FIX_CRASHED: &str = "echo 'officecli crashed' >&2; exit 3";
+    /// officecli 1.0.160's `validate --json` of a valid file, and of one
+    /// with a schema error.
+    const VALID: &str = r#"{"success":true,"data":"Validation passed: no errors found.","message":"Validation passed: no errors found."}"#;
+    const INVALID: &str = r#"{"success":false,"message":"","warnings":[{"message":"Found 1 validation error(s):","code":"warning"}]}"#;
+
     /// A stand-in officecli whose `view … issues` prints `rounds[k]` on its
     /// k-th call (the last one after that), counted in `issues.calls`;
     /// `get` prints `geometry`, and each `batch` adds its input file's name
     /// to `batches.log`.
     fn officecli_rounds(rounds: &[&str], stats: &str, geometry: &str) -> String {
-        let mut reports = String::new();
-        for (k, report) in rounds.iter().enumerate() {
-            let pattern = if k + 1 == rounds.len() {
-                "*".to_owned()
-            } else {
-                k.to_string()
-            };
-            reports.push_str(&format!(
-                "    {pattern}) cat <<'JSON'\n{report}\nJSON\n    ;;\n"
-            ));
-        }
+        officecli_fixing(rounds, stats, geometry, FIX_APPLIED, &[VALID])
+    }
+
+    /// [`officecli_rounds`] whose fix batches run the shell `fix_batch`, and
+    /// whose `validate` prints `validates[k]` on its k-th call, counted in
+    /// `validate.calls`.
+    fn officecli_fixing(
+        rounds: &[&str],
+        stats: &str,
+        geometry: &str,
+        fix_batch: &str,
+        validates: &[&str],
+    ) -> String {
+        let issues = by_call("issues.calls", rounds);
+        let validate = by_call("validate.calls", validates);
         format!(
             r#"case "$1" in
 create) printf 'PK\003\004stub' > "$2" ;;
 batch) echo "$4" >> batches.log
-  [ "$4" = batch.json ] && cp "$4" batch-seen.json
-  echo '{{"success":true,"data":{{"results":[{{"index":0,"success":true}}]}}}}' ;;
-validate) echo '{{"valid":true}}' ;;
+  if [ "$4" = batch.json ]; then
+    cp "$4" batch-seen.json
+    echo '{{"success":true,"data":{{"results":[{{"index":0,"success":true}}]}}}}'
+  else
+    {fix_batch}
+  fi ;;
+validate) {validate} ;;
 get) cat <<'JSON'
 {geometry}
 JSON
 ;;
 view) case "$3" in
-  issues) n=$(cat issues.calls 2>/dev/null || echo 0); echo $((n + 1)) > issues.calls
-    case "$n" in
-{reports}    esac ;;
+  issues) {issues} ;;
   stats) echo '{stats}' ;;
   svg) echo '<svg/>' ;;
   esac ;;
@@ -3412,6 +3491,144 @@ esac"#
             );
             let file = PathBuf::from(result["filePath"].as_str().unwrap());
             assert_eq!(batches(&file), ["batch.json"], "{path}");
+        }
+    }
+
+    /// The calls the stub counted in `name` beside `file`.
+    fn calls(file: &Path, name: &str) -> String {
+        std::fs::read_to_string(file.with_file_name(name))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn overflow_warning() -> Value {
+        json!([{"severity": "warning", "message": OVERFLOW_MESSAGE, "path": "/slide[1]/shape[@id=100000]"}])
+    }
+
+    /// A deck made by `officecli`: its fixture (which keeps the folder) and
+    /// the result.
+    async fn made_deck(officecli: &str) -> (Fixture, Value) {
+        let f = fixture(Some(officecli), None);
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "deck", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        (f, result)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_fix_batch_that_does_not_run_keeps_the_document() {
+        let overflow = overflow_issues();
+        let stats = r#"{"slides":1}"#;
+        // The file still validates: viewed again, it has the same issue.
+        let stub = officecli_fixing(&[&overflow], stats, GEOMETRY, FIX_CRASHED, &[VALID]);
+        let (_f, result) = made_deck(&stub).await;
+        assert_eq!(result["fixed"], 0);
+        assert_eq!(result["issues"], overflow_warning());
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(batches(&file), ["batch.json", "fix-1.json"]);
+        assert_eq!(calls(&file, "validate.calls"), "2", "validated again");
+        assert_eq!(calls(&file, "issues.calls"), "2", "viewed again");
+
+        // A view that gives no report says so.
+        let stub = officecli_fixing(
+            &[&overflow, "not json"],
+            stats,
+            GEOMETRY,
+            FIX_CRASHED,
+            &[VALID],
+        );
+        let (_f, result) = made_deck(&stub).await;
+        assert_eq!(result["fixed"], 0);
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": ISSUES_UNAVAILABLE}])
+        );
+
+        // The fixes of a round that was applied count.
+        let only_first = r#"case "$4" in
+    fix-1.json) echo '{"success":true,"data":{"results":[{"index":0,"success":true}]}}' ;;
+    *) exit 3 ;;
+    esac"#;
+        let stub = officecli_fixing(&[&overflow], stats, GEOMETRY, only_first, &[VALID]);
+        let (_f, result) = made_deck(&stub).await;
+        assert_eq!(result["fixed"], 1);
+        assert_eq!(result["issues"], overflow_warning());
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(batches(&file), ["batch.json", "fix-1.json", "fix-2.json"]);
+        assert_eq!(calls(&file, "validate.calls"), "2");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_fix_batch_officecli_rejects_keeps_the_document() {
+        let overflow = overflow_issues();
+        for rejected in [
+            r#"echo '{"success":false,"error":{"error":"Shape not found","code":"not_found"}}'; exit 1"#,
+            r#"echo '{"success":true,"data":{"results":[{"index":0,"success":false,"output":"Shape not found"}],"summary":{"atomicRolledBack":true}}}'"#,
+        ] {
+            let f = fixture(
+                Some(&officecli_fixing(
+                    &[&overflow],
+                    r#"{"slides":1}"#,
+                    GEOMETRY,
+                    rejected,
+                    &[VALID],
+                )),
+                None,
+            );
+            let result = f
+                .call(
+                    "call-1",
+                    json!({"name": "deck", "format": "pptx", "content": deck()}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["status"], "completed", "{rejected}");
+            assert_eq!(result["fixed"], 0, "{rejected}");
+            assert_eq!(result["issues"], overflow_warning(), "{rejected}");
+            let file = PathBuf::from(result["filePath"].as_str().unwrap());
+            assert_eq!(batches(&file), ["batch.json", "fix-1.json"]);
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_failed_fix_batch_that_leaves_the_file_unusable_refuses_the_document() {
+        let overflow = overflow_issues();
+        // Validated again, the file has an error, or gives no report.
+        for after in [INVALID, "not json"] {
+            let f = fixture(
+                Some(&officecli_fixing(
+                    &[&overflow],
+                    r#"{"slides":1}"#,
+                    GEOMETRY,
+                    FIX_CRASHED,
+                    &[VALID, after],
+                )),
+                None,
+            );
+            let error = f
+                .call(
+                    "call-1",
+                    json!({"name": "deck", "format": "pptx", "content": deck()}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), FAILED, "{error}");
+            assert!(
+                error.contains("officecli did not report on the batch: officecli crashed"),
+                "{error}"
+            );
+            let record = f.record();
+            assert!(record.attachments.is_empty(), "no file is kept");
+            assert!(record.messages[0].media_for(Some("call-1")).is_none());
         }
     }
 
@@ -5952,7 +6169,6 @@ exit 1"#
         assert_eq!(pdf_pages(b"%PDF-1.7 nothing"), None);
     }
 
-    /// The real engines, as `pnpm assistant:prepare` bundles them: run with
     /// The bundled officecli, in its sandbox, fixes a deck's overflowing
     /// text, a shape past the right edge and dim text on a dark fill in one
     /// round. `cargo test documents::create -- --ignored`.
@@ -5999,6 +6215,7 @@ exit 1"#
         assert!(!file.with_file_name("fix-2.json").exists());
     }
 
+    /// The real engines, as `pnpm assistant:prepare` bundles them: run with
     /// `cargo test documents::create -- --ignored`.
     #[tokio::test]
     #[serial_test::serial(document_engines)]

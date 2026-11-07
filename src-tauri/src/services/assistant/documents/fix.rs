@@ -155,8 +155,9 @@ pub(super) struct Fix {
 
 /// The change that fixes `issue`, if one does: an overflowing box grows to
 /// the suggested height when that stays on the page, or else its text
-/// shrinks a step (not below [`MIN_SIZE_PT`]); a shape past an edge moves
-/// back inside it; dim text turns white. `geometry` is the shape's place.
+/// shrinks a step, to [`MIN_SIZE_PT`] at the least (none when it is there
+/// already); a shape past an edge moves back inside it; dim text turns
+/// white. `geometry` is the shape's place.
 pub(super) fn fix_for(issue: &ViewIssue, geometry: Option<&Geometry>) -> Option<Fix> {
     let (key, value) = match issue.kind {
         Kind::Overflow {
@@ -165,8 +166,8 @@ pub(super) fn fix_for(issue: &ViewIssue, geometry: Option<&Geometry>) -> Option<
         } => {
             if geometry.is_some_and(|at| at.y + suggest_cm <= SLIDE_H_CM - EDGE_CM) {
                 ("height", cm(suggest_cm))
-            } else if size_pt - SIZE_STEP_PT >= MIN_SIZE_PT {
-                ("size", number(size_pt - SIZE_STEP_PT))
+            } else if size_pt > MIN_SIZE_PT {
+                ("size", number((size_pt - SIZE_STEP_PT).max(MIN_SIZE_PT)))
             } else {
                 return None;
             }
@@ -355,7 +356,12 @@ mod tests {
             props(fix_for(&overflow(15.0, 7.0), Some(&low))),
             json!({"size": "13"})
         );
+        assert_eq!(
+            props(fix_for(&overflow(14.0, 7.0), Some(&low))),
+            json!({"size": "13"})
+        );
         assert!(fix_for(&overflow(13.0, 7.0), Some(&low)).is_none());
+        assert!(fix_for(&overflow(12.0, 7.0), Some(&low)).is_none());
         // Where the box is unknown, only the size can change.
         assert_eq!(
             props(fix_for(&overflow(20.0, 6.2), None)),
