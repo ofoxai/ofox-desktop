@@ -9,8 +9,9 @@
 // problem naming the slide, field and limit, so the model can shorten it and
 // send the whole deck again. Nothing is truncated, substituted or reworded.
 // A line break takes no room in the length count but a line on the slide,
-// so a short field (a title, heading or label) must be one line and a
-// body-like field holds at most two line breaks (LIMITS.lineBreaks).
+// so a short field (a title, heading, label, list item, table cell or chart
+// label) must be one line and a body-like field holds at most two line
+// breaks (LIMITS.lineBreaks).
 
 import { DEFAULT_THEME, THEME_NAMES } from "./theme.mjs";
 
@@ -130,8 +131,9 @@ function ignore(ctx, object, known, path = "") {
 const characters = (text) => [...text].length;
 
 // Which LIMITS.lineBreaks bound a text field by its name (the last part of
-// its path). Speaker notes, list items, table cells and chart labels are
-// not bounded here: a list written as one string is split at its breaks.
+// its path). List items, table cells and chart labels are short too, but
+// their paths end in an index, so they say so with str's `breaks`. Speaker
+// notes are not bounded.
 const LINE_BREAKS = {
   title: "short",
   subtitle: "short",
@@ -151,11 +153,12 @@ const LINE_BREAKS = {
 const lineBreaks = (text) => text.match(/\r\n|\r|\n/g)?.length ?? 0;
 
 // A text field: a string or a number, trimmed, within the limit and its
-// line-break bound. A blank optional field is absent.
+// line-break bound, which `breaks` names when the field's name does not
+// (see LINE_BREAKS). A blank optional field is absent.
 function str(
   ctx,
   value,
-  { field, limit, required = false, measure = textLength },
+  { field, limit, required = false, measure = textLength, breaks },
 ) {
   if (value === undefined || value === null) {
     if (required) problem(ctx, `${field} is missing`);
@@ -175,12 +178,13 @@ function str(
   const size = measure(text);
   if (size > limit)
     problem(ctx, `${field} is ${size} characters; the limit is ${limit}`);
-  const allowed = LIMITS.lineBreaks[LINE_BREAKS[field.split(".").at(-1)]];
-  const breaks = lineBreaks(text);
-  if (allowed !== undefined && breaks > allowed)
+  const bound = breaks ?? LINE_BREAKS[field.split(".").at(-1)];
+  const allowed = LIMITS.lineBreaks[bound];
+  const count = lineBreaks(text);
+  if (allowed !== undefined && count > allowed)
     problem(
       ctx,
-      `${field} has ${breaks} line break${breaks === 1 ? "" : "s"}; the limit is ${allowed}`,
+      `${field} has ${count} line break${count === 1 ? "" : "s"}; the limit is ${allowed}`,
     );
   return text;
 }
@@ -218,16 +222,19 @@ function list(ctx, value, { field, count: [min, max], each }) {
   return elements.map((element, index) => each(element, `${field}[${index}]`));
 }
 
-// A list of short lines; an element may be { text } instead of a string.
+// A list of one-line items; an element may be { text } instead of a string.
 function bullets(ctx, value, { field, count, limit }) {
   return list(ctx, value, {
     field,
     count,
     each: (element, path) => {
-      if (!isObject(element))
-        return str(ctx, element, { field: path, limit, required: true });
-      ignore(ctx, element, ["text"], path);
-      return required(ctx, element, "text", limit, path);
+      if (isObject(element)) ignore(ctx, element, ["text"], path);
+      return str(ctx, isObject(element) ? element.text : element, {
+        field: path,
+        limit,
+        required: true,
+        breaks: "short",
+      });
     },
   });
 }
@@ -399,6 +406,7 @@ function label(ctx, value, path) {
     field: path,
     limit: LIMITS.showcase.chart.label,
     required: true,
+    breaks: "short",
   });
   if (text !== undefined && CHART_SEPARATORS.test(text))
     problem(ctx, `${path} is "${text}"; it must not contain , ; or :`);
@@ -480,6 +488,9 @@ function normalizeChart(ctx, value) {
       };
     },
   });
+  // A pie draws one series; the others would be dropped, so it is refused.
+  if (kind === "pie" && series !== undefined && series.length > 1)
+    problem(ctx, `a pie chart takes one series; got ${series.length}`);
   return { kind, categories, series };
 }
 
@@ -496,7 +507,12 @@ function normalizeTable(ctx, value) {
     field: `${field}.columns`,
     count: [1, limits.columns],
     each: (element, path) =>
-      str(ctx, element, { field: path, limit: limits.header, required: true }),
+      str(ctx, element, {
+        field: path,
+        limit: limits.header,
+        required: true,
+        breaks: "short",
+      }),
   });
   // The limit on rows counts the header, which is `columns` here.
   const rows = list(ctx, value.rows, {
@@ -514,8 +530,11 @@ function normalizeTable(ctx, value) {
         );
       return row.map(
         (cell, index) =>
-          str(ctx, cell, { field: `${path}[${index}]`, limit: limits.cell }) ??
-          "",
+          str(ctx, cell, {
+            field: `${path}[${index}]`,
+            limit: limits.cell,
+            breaks: "short",
+          }) ?? "",
       );
     },
   });

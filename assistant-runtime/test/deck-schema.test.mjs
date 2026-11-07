@@ -474,6 +474,69 @@ test("parseDeck accepts a body with two line breaks and notes with more", () => 
   assert.equal(LIMITS.lineBreaks.short, 0);
 });
 
+test("parseDeck rejects a line break in a list item", () => {
+  const comparison = {
+    type: "comparison",
+    title: "RNN 与 Transformer",
+    left: { heading: "RNN", points: ["逐词计算", "长句\n衰减"] },
+    right: { heading: "Transformer", points: [{ text: "并行\r\n计算" }] },
+  };
+  const evidence = {
+    type: "evidence",
+    title: "数据",
+    metrics: [{ value: "118%", label: "NRR" }],
+    detail: ["EMEA\n三月\n上线"],
+  };
+  assert.deepEqual(problemsOf(deckWith(HERO, STATEMENT, comparison)), [
+    "slide 3 (comparison): left.points[1] has 1 line break; the limit is 0",
+    "slide 3 (comparison): right.points[0] has 1 line break; the limit is 0",
+  ]);
+  assert.deepEqual(problemsOf(deckWith(evidence)), [
+    "slide 1 (evidence): detail[0] has 2 line breaks; the limit is 0",
+  ]);
+});
+
+test("parseDeck rejects a line break in a table cell or a chart label", () => {
+  const table = {
+    columns: ["年份", "收\n入"],
+    rows: [
+      ["2024", "12"],
+      ["2025", "15"],
+      ["2026", "1\n8"],
+    ],
+  };
+  assert.deepEqual(problemsOf(deckWith(showcase({ table }))), [
+    "slide 1 (showcase): media.table.columns[1] has 1 line break; the limit is 0",
+    "slide 1 (showcase): media.table.rows[2][1] has 1 line break; the limit is 0",
+  ]);
+  const labels = chart({
+    categories: ["Q\n1", "Q2"],
+    series: [
+      { name: "收入", values: [1, 2] },
+      { name: "利\n润", values: [1, 2] },
+    ],
+  });
+  assert.deepEqual(problemsOf(deckWith(showcase({ chart: labels }))), [
+    "slide 1 (showcase): media.chart.categories[0] has 1 line break; the limit is 0",
+    "slide 1 (showcase): media.chart.series[1].name has 1 line break; the limit is 0",
+  ]);
+});
+
+test("parseDeck rejects a pie chart with more than one series", () => {
+  const pie = chart({
+    kind: "pie",
+    categories: ["华东", "华南"],
+    series: [
+      { name: "2025", values: [60, 40] },
+      { name: "2026", values: [55, 45] },
+    ],
+  });
+  assert.deepEqual(
+    problemsOf(deckWith(HERO, STATEMENT, showcase({ chart: pie }))),
+    ["slide 3 (showcase): a pie chart takes one series; got 2"],
+  );
+});
+
 test("parseDeck rejects overlong speaker notes", () => {
   assert.deepEqual(problemsOf(deckWith({ ...HERO, notes: zh(301) })), [
     "slide 1 (hero): notes is 301 characters; the limit is 300",

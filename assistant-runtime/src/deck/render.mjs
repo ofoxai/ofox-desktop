@@ -9,14 +9,16 @@ import {
   CONTENT,
   GAP_CM,
   TITLE_BOX,
+  cm,
   columns,
   notesCommand,
   pageNumberCommand,
   slideCommand,
+  slidePath,
   textboxCommand,
   titleCommands,
 } from "./layout.mjs";
-import { fitSize, lineCount } from "./text.mjs";
+import { fitSize, heightCm, lineCount } from "./text.mjs";
 import { fontsFor } from "./theme.mjs";
 
 // The host refuses a longer batch (create.rs MAX_COMMANDS).
@@ -372,23 +374,444 @@ export function renderGrid(ctx, slide) {
   ];
 }
 
-// --- The deck ---------------------------------------------------------------
+// --- Data pages: evidence, timeline, comparison, showcase -----------------
 
-const notImplemented = () => {
-  throw new Error("not implemented");
+// Spec: a metric's label is 16pt bold over a 14pt note; the detail list
+// under the metrics is 18pt.
+const METRIC_LABEL_PT = 16;
+const METRIC_NOTE_PT = 14;
+const DETAIL_PT = 18;
+// With detail, the metrics take at least this much of the content area's
+// top, and the list starts a gap below.
+const METRICS_ROOM_CM = 6;
+
+// The KPI ladder from the size the spec gives `count` metrics down: the
+// largest (72pt) for one or two, the next (60) for three, 48 for four.
+const kpiSizes = (kpi, count) => kpi.slice(Math.max(0, count - 2));
+
+// Figures are set in the theme's data font. In a CJK deck that font takes
+// the Latin slot, so any CJK in a figure stays in the body font.
+const dataFonts = (fonts) =>
+  fonts.latinBody === undefined ? { font: fonts.data } : { latin: fonts.data };
+
+export function renderEvidence(ctx, slide) {
+  const { colors, sizes } = ctx.theme;
+  const { metrics, detail } = slide;
+  const slots = columns(metrics.length);
+  const { w } = slots[0];
+  const ladder = kpiSizes(sizes.kpi, metrics.length);
+  const value = fitRow(
+    metrics.map((metric) => metric.value),
+    w,
+    (text) => oneLineSize(text, w, ladder),
+  );
+  const label = fitRow(
+    metrics.map((metric) => metric.label),
+    w,
+    () => METRIC_LABEL_PT,
+  );
+  const notes = metrics
+    .map((metric) => metric.note)
+    .filter((text) => text !== undefined);
+  const note =
+    notes.length > 0 ? fitRow(notes, w, () => METRIC_NOTE_PT) : undefined;
+  const h = value.h + label.h + (note?.h ?? 0);
+
+  // Without detail the metrics sit in the middle of the content area; with
+  // it, in the middle of its top METRICS_ROOM_CM, the list under them.
+  const list = detail?.join("\n");
+  const room =
+    list === undefined
+      ? CONTENT.bottom - CONTENT.top
+      : Math.max(METRICS_ROOM_CM, h);
+  const top = CONTENT.top + (room - h) / 2;
+
+  const commands = contentPage(ctx, slide.title);
+  metrics.forEach((metric, index) => {
+    const i = index + 1;
+    const { x } = slots[index];
+    commands.push(
+      textBox(
+        ctx,
+        `value-${i}`,
+        metric.value,
+        { x, y: top, w, h: value.h },
+        {
+          size: value.size,
+          color: colors.primary,
+          bold: true,
+          align: "center",
+          ...dataFonts(ctx.fonts),
+        },
+      ),
+      textBox(
+        ctx,
+        `label-${i}`,
+        metric.label,
+        { x, y: top + value.h, w, h: label.h },
+        { size: label.size, color: colors.text, bold: true, align: "center" },
+      ),
+    );
+    if (metric.note !== undefined)
+      commands.push(
+        textBox(
+          ctx,
+          `note-${i}`,
+          metric.note,
+          { x, y: top + value.h + label.h, w, h: note.h },
+          { size: note.size, color: colors.textSecondary, align: "center" },
+        ),
+      );
+  });
+  if (list !== undefined) {
+    const { h: listH } = fitBox(list, CONTENT.w, Infinity, [DETAIL_PT]);
+    commands.push(
+      textBox(
+        ctx,
+        "detail",
+        list,
+        {
+          x: CONTENT.x,
+          y: CONTENT.top + room + GAP_CM,
+          w: CONTENT.w,
+          h: listH,
+        },
+        { size: DETAIL_PT, color: colors.text, list: "bullet" },
+      ),
+    );
+  }
+  return commands;
+}
+
+// Spec: a step's number is white 20pt bold in a 1.5 cm circle over a card
+// with a 16pt bold heading and a 14pt body; a 0.12 cm track joins the
+// circles.
+const STEP_MARK_CM = 1.5;
+const STEP_NUMBER_PT = 20;
+const STEP_HEADING_PT = 16;
+const STEP_BODY_PT = 14;
+const TRACK_CM = 0.12;
+// Between a step's circle and its card.
+const STEP_GAP_CM = 0.3;
+
+export function renderTimeline(ctx, slide) {
+  const { n, theme } = ctx;
+  const { colors } = theme;
+  const { steps } = slide;
+  const slots = columns(steps.length);
+  const fitted = fitCards(steps, slots[0].w, {
+    headingSizes: [STEP_HEADING_PT],
+    bodySizes: [STEP_BODY_PT],
+    bodyRoom: Infinity,
+  });
+  const centers = slots.map(({ x, w }) => x + w / 2);
+  const middle = CONTENT.top + STEP_MARK_CM / 2;
+  const cardY = CONTENT.top + STEP_MARK_CM + STEP_GAP_CM;
+  return [
+    ...contentPage(ctx, slide.title),
+    // Added before the circles, so they are drawn over it.
+    textboxCommand(n, `s${n}-track`, undefined, {
+      x: centers[0],
+      y: middle - TRACK_CM / 2,
+      w: centers.at(-1) - centers[0],
+      h: TRACK_CM,
+      fill: colors.secondary,
+    }),
+    ...steps.flatMap((step, index) => {
+      const i = index + 1;
+      return [
+        textBox(
+          ctx,
+          `step-${i}-no`,
+          String(i),
+          {
+            x: centers[index] - STEP_MARK_CM / 2,
+            y: CONTENT.top,
+            w: STEP_MARK_CM,
+            h: STEP_MARK_CM,
+          },
+          {
+            size: STEP_NUMBER_PT,
+            color: colors.onDark,
+            bold: true,
+            align: "center",
+            valign: "middle",
+            fill: colors.primary,
+            preset: "ellipse",
+          },
+        ),
+        ...cardCommands(ctx, i, step, { ...slots[index], y: cardY }, fitted),
+      ];
+    }),
+  ];
+}
+
+// Spec: each side's heading is 20pt bold on a 1.4 cm color bar, its points
+// an 18pt list under it; a 2 cm circle with a 20pt bold "VS" sits between
+// the bars.
+const SIDE_BAR_CM = 1.4;
+const SIDE_HEADING_PT = 20;
+const POINTS_PT = 18;
+const VS_CM = 2;
+const VS_PT = 20;
+// Between a side's bar and its points.
+const SIDE_GAP_CM = 0.3;
+
+export function renderComparison(ctx, slide) {
+  const { colors } = ctx.theme;
+  const slots = columns(2);
+  const { w } = slots[0];
+  const sides = [
+    { role: "left", ...slide.left, fill: colors.primary, color: colors.onDark },
+    {
+      role: "right",
+      ...slide.right,
+      fill: colors.secondary,
+      color: colors.text,
+    },
+  ];
+  // A heading the bar cannot hold on one line makes both bars taller.
+  const bar = Math.max(
+    SIDE_BAR_CM,
+    fitRow(
+      sides.map((side) => side.heading),
+      w,
+      () => SIDE_HEADING_PT,
+    ).h,
+  );
+  const points = fitRow(
+    sides.map((side) => side.points.join("\n")),
+    w,
+    () => POINTS_PT,
+  );
+  return [
+    ...contentPage(ctx, slide.title),
+    ...sides.flatMap((side, index) => {
+      const { x } = slots[index];
+      return [
+        textBox(
+          ctx,
+          `${side.role}-heading`,
+          side.heading,
+          { x, y: CONTENT.top, w, h: bar },
+          {
+            size: SIDE_HEADING_PT,
+            color: side.color,
+            bold: true,
+            align: "center",
+            valign: "middle",
+            fill: side.fill,
+          },
+        ),
+        textBox(
+          ctx,
+          `${side.role}-points`,
+          side.points.join("\n"),
+          { x, y: CONTENT.top + bar + SIDE_GAP_CM, w, h: points.h },
+          { size: POINTS_PT, color: colors.text, list: "bullet" },
+        ),
+      ];
+    }),
+    // Added after the bars, so it is drawn over their inner ends.
+    textBox(
+      ctx,
+      "vs",
+      "VS",
+      {
+        x: CONTENT.x + (CONTENT.w - VS_CM) / 2,
+        y: CONTENT.top + (bar - VS_CM) / 2,
+        w: VS_CM,
+        h: VS_CM,
+      },
+      {
+        size: VS_PT,
+        color: colors.primary,
+        bold: true,
+        align: "center",
+        valign: "middle",
+        fill: colors.card,
+        preset: "ellipse",
+      },
+    ),
+  ];
+}
+
+// Spec: the media fills 20 × 11 cm at the content area's top left, the
+// body (18pt or larger) takes the rest of the content width beside it, and
+// the 14pt caption sits under it. Without a body the media and caption
+// move to the middle.
+const MEDIA = { y: CONTENT.top, w: 20, h: 11 };
+const SHOWCASE_BODY = {
+  x: CONTENT.x + MEDIA.w + GAP_CM,
+  w: CONTENT.w - MEDIA.w - GAP_CM,
 };
+const CAPTION = { y: 16.3, size: 14 };
+
+// officecli's chart type for each chart kind.
+const CHART_TYPES = { bar: "column", line: "line", pie: "pie" };
+
+// Spec: table text is 16pt up to four columns, 14 at five, 12 at six.
+const tableSize = (count) => (count <= 4 ? 16 : count === 5 ? 14 : 12);
+
+// A cell as officecli's inline table data reads it: a cell that holds a
+// separator or a quote is quoted, its own quotes doubled.
+const tableCell = (text) =>
+  /[,;"]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+
+// A box as officecli's placement props.
+const placement = ({ x, y, w, h }) => ({
+  x: cm(x),
+  y: cm(y),
+  width: cm(w),
+  height: cm(h),
+});
+
+function chartCommand(ctx, chart, box) {
+  const { n, theme } = ctx;
+  const pie = chart.kind === "pie";
+  // A pie colors each slice; bars and lines color each series.
+  const colored = pie ? chart.categories.length : chart.series.length;
+  return {
+    command: "add",
+    parent: slidePath(n),
+    type: "chart",
+    props: {
+      name: `s${n}-chart`,
+      chartType: CHART_TYPES[chart.kind],
+      categories: chart.categories.join(","),
+      data: chart.series
+        .map(({ name, values }) => `${name}:${values.join(",")}`)
+        .join(";"),
+      colors: theme.colors.chart.slice(0, colored).join(","),
+      // A legend names a pie's slices, or tells two or more series apart.
+      legend: pie || chart.series.length > 1 ? "bottom" : "none",
+      title: "none",
+      ...(pie && { dataLabels: "value" }),
+      ...placement(box),
+    },
+  };
+}
+
+// The table, its text style, and its header row in white bold. Every row
+// is as tall as the cell with the most lines needs, so the table is as
+// tall as its rows.
+function tableCommands(ctx, table, box) {
+  const { n, theme, fonts } = ctx;
+  const { colors } = theme;
+  const name = `s${n}-table`;
+  const path = `${slidePath(n)}/table[@name=${name}]`;
+  const rows = [table.columns, ...table.rows];
+  const count = table.columns.length;
+  const size = tableSize(count);
+  const width = box.w / count;
+  const lines = Math.max(
+    ...rows.flat().map((cell) => lineCount(cell, width, size)),
+  );
+  const rowH = boxHeight({ height: heightCm(lines, size) });
+  return [
+    {
+      command: "add",
+      parent: slidePath(n),
+      type: "table",
+      props: {
+        name,
+        data: rows.map((row) => row.map(tableCell).join(",")).join(";"),
+        colWidths: Array(count).fill(cm(width)).join(","),
+        headerFill: colors.primary,
+        bodyFill: colors.card,
+        ...placement({ ...box, h: rowH * rows.length }),
+      },
+    },
+    {
+      command: "set",
+      path,
+      props: {
+        font: fonts.body,
+        ...(fonts.latinBody && { "font.latin": fonts.latinBody }),
+        size: String(size),
+        color: colors.text,
+        valign: "middle",
+      },
+    },
+    {
+      command: "set",
+      path: `${path}/tr[1]`,
+      props: { bold: "true", color: colors.onDark },
+    },
+  ];
+}
+
+function pictureCommand(ctx, slide, box) {
+  const { n } = ctx;
+  return {
+    command: "add",
+    parent: slidePath(n),
+    type: "picture",
+    props: {
+      name: `s${n}-image`,
+      src: slide.media.image,
+      alt: slide.caption ?? slide.title,
+      ...placement(box),
+    },
+  };
+}
+
+function mediaCommands(ctx, slide, box) {
+  const { chart, table } = slide.media;
+  if (chart !== undefined) return [chartCommand(ctx, chart, box)];
+  if (table !== undefined) return tableCommands(ctx, table, box);
+  return [pictureCommand(ctx, slide, box)];
+}
+
+export function renderShowcase(ctx, slide) {
+  const { colors, sizes } = ctx.theme;
+  const { caption, body } = slide;
+  const x =
+    body === undefined ? CONTENT.x + (CONTENT.w - MEDIA.w) / 2 : CONTENT.x;
+  const commands = [
+    ...contentPage(ctx, slide.title),
+    ...mediaCommands(ctx, slide, { ...MEDIA, x }),
+  ];
+  if (body !== undefined) {
+    const fit = fitBox(body, SHOWCASE_BODY.w, MEDIA.h, sizes.body);
+    commands.push(
+      textBox(
+        ctx,
+        "body",
+        body,
+        { ...SHOWCASE_BODY, y: MEDIA.y, h: fit.h },
+        { size: fit.size, color: colors.text },
+      ),
+    );
+  }
+  if (caption !== undefined) {
+    const { h } = fitBox(caption, MEDIA.w, Infinity, [CAPTION.size]);
+    commands.push(
+      textBox(
+        ctx,
+        "caption",
+        caption,
+        { x, y: CAPTION.y, w: MEDIA.w, h },
+        { size: CAPTION.size, color: colors.textMuted, align: "center" },
+      ),
+    );
+  }
+  return commands;
+}
+
+// --- The deck ---------------------------------------------------------------
 
 export const RENDERERS = {
   hero: renderHero,
   statement: renderStatement,
   pillars: renderPillars,
-  evidence: notImplemented,
-  timeline: notImplemented,
-  comparison: notImplemented,
+  evidence: renderEvidence,
+  timeline: renderTimeline,
+  comparison: renderComparison,
   grid: renderGrid,
   quote: renderQuote,
   cta: renderCta,
-  showcase: notImplemented,
+  showcase: renderShowcase,
 };
 
 // Covers and breathing pages carry no page number (nor a title rule).
@@ -398,10 +821,11 @@ const UNNUMBERED = new Set(["hero", "statement", "quote", "cta"]);
 // content on the page; a deck that slips past them fails here rather than
 // sending shapes off the slide.
 function assertOnPage(ctx, type, page) {
-  const cm = (value) => Number.parseFloat(value);
   const off = page.some(({ props }) => {
     if (props?.y === undefined || props.height === undefined) return false;
-    const [x, y, w, h] = [props.x, props.y, props.width, props.height].map(cm);
+    const [x, y, w, h] = [props.x, props.y, props.width, props.height].map(
+      (length) => Number.parseFloat(length),
+    );
     return x < 0 || y < 0 || x + w > CANVAS.wCm || y + h > CANVAS.hCm;
   });
   if (off)

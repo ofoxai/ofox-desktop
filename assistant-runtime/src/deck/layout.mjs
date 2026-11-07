@@ -34,7 +34,7 @@ export function columns(
 
 // officecli numbers slides in the order they are added; a slide is addressed
 // as /slide[N].
-function slidePath(n) {
+export function slidePath(n) {
   if (!Number.isInteger(n) || n < 1)
     throw new RangeError(
       `a slide number is a whole number of 1 or more, got ${n}`,
@@ -44,7 +44,7 @@ function slidePath(n) {
 
 // A length as officecli reads it: cm, at most three decimals, never in
 // scientific notation.
-function cm(value) {
+export function cm(value) {
   if (!Number.isFinite(value))
     throw new RangeError(`a length is a finite number of cm, got ${value}`);
   return `${Number(value.toFixed(3))}cm`;

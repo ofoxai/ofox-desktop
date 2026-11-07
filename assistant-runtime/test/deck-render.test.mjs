@@ -68,11 +68,87 @@ const sixPages = () =>
     },
   ]);
 
-const headed = (count, heading, body) =>
+// `count` CJK units of English text (two Latin characters to a unit, with
+// spaces), so a Latin text sits exactly at a limit.
+const en = (count) =>
+  Array.from({ length: 2 * count }, (_, index) => "Slide text "[index % 11])
+    .join("")
+    .replace(/ $/, "x");
+
+const headed = (count, heading, body, text = zh) =>
   Array.from({ length: count }, () => ({
-    heading: zh(heading),
-    body: zh(body),
+    heading: text(heading),
+    body: text(body),
   }));
+
+const PIXEL =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+// The three showcase media, each at its limits, in `text`.
+const MEDIA_AT_LIMITS = {
+  table: (text) => ({
+    table: {
+      columns: Array(6).fill(text(8)),
+      rows: Array.from({ length: 5 }, () => Array(6).fill(text(12))),
+    },
+  }),
+  chart: (text) => ({
+    chart: {
+      kind: "bar",
+      categories: Array.from({ length: 8 }, () => text(12)),
+      series: Array.from({ length: 3 }, () => ({
+        name: text(12),
+        values: [1, 2, 3, 4, 5, 6, 7, 8],
+      })),
+    },
+  }),
+  image: () => ({ image: PIXEL }),
+};
+
+// One page of each of the ten types, every field at its limit, in `text`
+// (zh or en); the showcase holds `media`.
+const tenAtLimits = (text, media = "table") => [
+  { type: "hero", title: text(18), subtitle: text(30), meta: text(30) },
+  { type: "statement", statement: text(40), note: text(60) },
+  { type: "pillars", title: text(22), pillars: headed(4, 12, 60, text) },
+  {
+    type: "evidence",
+    title: text(22),
+    metrics: Array.from({ length: 4 }, () => ({
+      value: "118.5%",
+      label: text(12),
+      note: text(30),
+    })),
+    detail: [text(40), text(40), text(40)],
+  },
+  { type: "timeline", title: text(22), steps: headed(6, 10, 30, text) },
+  {
+    type: "comparison",
+    title: text(22),
+    left: { heading: text(12), points: Array(4).fill(text(30)) },
+    right: { heading: text(12), points: Array(4).fill(text(30)) },
+  },
+  { type: "grid", title: text(22), items: headed(8, 10, 30, text) },
+  { type: "quote", quote: text(60), source: text(20) },
+  { type: "cta", title: text(18), subtitle: text(40), contact: text(30) },
+  {
+    type: "showcase",
+    title: text(22),
+    media: MEDIA_AT_LIMITS[media](text),
+    caption: text(30),
+    body: text(100),
+  },
+];
+
+const zhTen = () => deck(tenAtLimits(zh));
+const enTen = () => deck(tenAtLimits(en), "en");
+
+// A three-page deck around one page under test, which is slide 2.
+const around = (page, language = "zh") =>
+  deck(
+    [{ type: "hero", title: "封面" }, page, { type: "cta", title: "谢谢" }],
+    language,
+  );
 
 // Every field of the six text page types at its limit.
 const atLimits = () =>
@@ -97,9 +173,15 @@ const cm = (value) => {
   return Number.parseFloat(value);
 };
 
-const shapes = (commands) =>
+const added = (commands, type) =>
   commands.filter(
-    (command) => command.command === "add" && command.type === "shape",
+    (command) => command.command === "add" && command.type === type,
+  );
+const shapes = (commands) => added(commands, "shape");
+// Every added element that sits at a place on the slide.
+const placed = (commands) =>
+  commands.filter(
+    (command) => command.command === "add" && command.props?.x !== undefined,
   );
 const textShapes = (commands) =>
   shapes(commands).filter((command) => command.props.text !== undefined);
@@ -162,7 +244,7 @@ test("renderDeck makes one slide per page in order", () => {
 });
 
 test("every text shape carries explicit font, size and color", () => {
-  for (const make of [sixPages, atLimits]) {
+  for (const make of [sixPages, atLimits, zhTen]) {
     const { commands } = renderDeck(make(), navy);
     const texts = textShapes(commands);
     assert.ok(texts.length > 0);
@@ -196,22 +278,26 @@ test("an English deck sets text in Arial with no separate Latin font", () => {
     ],
     "en",
   );
-  for (const shape of textShapes(renderDeck(english, navy).commands)) {
-    assert.equal(shape.props.font, "Arial", shape.props.name);
-    assert.equal(shape.props["font.latin"], undefined, shape.props.name);
+  for (const commands of [english, enTen()].map(
+    (made) => renderDeck(made, navy).commands,
+  )) {
+    for (const shape of textShapes(commands)) {
+      assert.equal(shape.props.font, "Arial", shape.props.name);
+      assert.equal(shape.props["font.latin"], undefined, shape.props.name);
+    }
   }
 });
 
 test("every shape stays inside the canvas", () => {
-  for (const make of [sixPages, atLimits]) {
+  for (const make of [sixPages, atLimits, zhTen, enTen]) {
     const { commands } = renderDeck(make(), navy);
-    const placed = [
-      ...shapes(commands),
+    const boxes = [
+      ...placed(commands),
       ...commands.filter(
         (command) => command.command === "set" && command.props.x !== undefined,
       ),
     ];
-    for (const command of placed) {
+    for (const command of boxes) {
       const { x, y, width, height } = command.props;
       const where = command.props.name ?? command.path;
       assert.ok(cm(x) >= 0, `${where} x`);
@@ -223,15 +309,18 @@ test("every shape stays inside the canvas", () => {
 });
 
 test("names are unique within a slide", () => {
-  for (const make of [sixPages, atLimits]) {
+  for (const make of [sixPages, atLimits, zhTen]) {
     const { commands, slides } = renderDeck(make(), navy);
     for (let n = 1; n <= slides; n += 1) {
-      const names = shapes(onSlide(commands, n)).map(
+      const names = placed(onSlide(commands, n)).map(
         (command) => command.props.name,
       );
       assert.equal(new Set(names).size, names.length, `slide ${n}: ${names}`);
       for (const name of names)
-        assert.match(name, new RegExp(`^s${n}-[a-z]+(-[a-z]+)*(-\\d+)?$`));
+        assert.match(
+          name,
+          new RegExp(`^s${n}-[a-z]+(-[a-z]+)*(-\\d+(-[a-z]+)?)?$`),
+        );
     }
   }
 });
@@ -372,4 +461,385 @@ test("renderDeck fails fast on content that does not fit the page", () => {
     () => renderDeck({ ...sixPages(), slides: [hero, hero, quote] }, navy),
     /^Error: slide 3 \(quote\): content does not fit the page$/,
   );
+});
+
+// --- Data pages: evidence, timeline, comparison, showcase -------------------
+
+const near = (actual, expected, message) =>
+  assert.ok(
+    Math.abs(actual - expected) < 0.002,
+    `${message}: ${actual} is not ${expected}`,
+  );
+const bottomOf = (props) => cm(props.y) + cm(props.height);
+
+const evidence = (count, value = "118.5%") =>
+  around({
+    type: "evidence",
+    title: "关键数据",
+    metrics: Array.from({ length: count }, (_, index) => ({
+      value,
+      label: `指标 ${index + 1}`,
+    })),
+  });
+
+test("evidence picks the KPI size by count and fits the value", () => {
+  const size = (count, value) =>
+    named(renderDeck(evidence(count, value), navy).commands, "s2-value-1").props
+      .size;
+  assert.equal(size(4), "48");
+  assert.equal(size(3), "60");
+  assert.equal(size(2), "72");
+  assert.equal(size(1), "72");
+  // Six CJK characters need 6 × 72 × 0.0353 = 15.2 cm, more than a 14.2 cm
+  // column holds, so the value steps down the KPI ladder to stay one line.
+  assert.equal(size(2, "一百一十八万"), "60");
+});
+
+test("evidence stacks value, label and note and lists the detail under them", () => {
+  const page = {
+    type: "evidence",
+    title: "关键数据",
+    metrics: [
+      { value: "118%", label: "净收入留存", note: "同比" },
+      { value: "3.2亿", label: "年度收入" },
+    ],
+  };
+  const alone = renderDeck(around(page), navy).commands;
+  const value = named(alone, "s2-value-1").props;
+  const label = named(alone, "s2-label-1").props;
+  const note = named(alone, "s2-note-1").props;
+  assert.equal(value.color, navy.colors.primary);
+  assert.deepEqual([label.size, label.bold], ["16", "true"]);
+  assert.deepEqual([note.size, note.color], ["14", navy.colors.textSecondary]);
+  near(cm(label.y), bottomOf(value), "label under value");
+  near(cm(note.y), bottomOf(label), "note under label");
+  assert.ok(!shapes(alone).some((shape) => shape.props.name === "s2-note-2"));
+  // Without detail the metrics sit in the middle of the content area.
+  near(
+    (cm(value.y) + bottomOf(note)) / 2,
+    (CONTENT.top + CONTENT.bottom) / 2,
+    "metrics centered",
+  );
+
+  const detailed = renderDeck(
+    around({ ...page, detail: ["EMEA 三月上线", "续约率 +12%"] }),
+    navy,
+  ).commands;
+  const detail = named(detailed, "s2-detail").props;
+  assert.deepEqual(
+    [detail.text, detail.list, detail.size, detail.spaceAfter],
+    ["EMEA 三月上线\n续约率 +12%", "bullet", "18", "6pt"],
+  );
+  // With detail the metrics take the top 6 cm and the list sits below.
+  const top = named(detailed, "s2-value-1").props;
+  const under = named(detailed, "s2-note-1").props;
+  assert.ok(cm(top.y) >= CONTENT.top, "metrics start in the content area");
+  assert.ok(bottomOf(under) <= CONTENT.top + 6 + 1e-9, "metrics in 6 cm");
+  assert.ok(cm(detail.y) >= CONTENT.top + 6, "detail under the metrics");
+});
+
+test("timeline draws one numbered card per step on a track", () => {
+  const steps = Array.from({ length: 6 }, (_, index) => ({
+    heading: `第 ${index + 1} 步`,
+    body: "运营牵头",
+  }));
+  const { commands } = renderDeck(
+    around({ type: "timeline", title: "推进节奏", steps }),
+    navy,
+  );
+  const page = shapes(onSlide(commands, 2));
+  const numbers = [1, 2, 3, 4, 5, 6];
+  const marks = page.filter((shape) => shape.props.preset === "ellipse");
+  assert.deepEqual(
+    marks.map((mark) => [mark.props.name, mark.props.text]),
+    numbers.map((i) => [`s2-step-${i}-no`, String(i)]),
+  );
+  for (const { props } of marks)
+    assert.deepEqual(
+      [props.fill, props.color, props.size, props.bold, props.width],
+      [navy.colors.primary, "FFFFFF", "20", "true", "1.5cm"],
+    );
+  const headings = numbers.map((i) => named(commands, `s2-heading-${i}`));
+  for (const { props } of headings)
+    assert.deepEqual([props.size, props.bold], ["16", "true"]);
+  assert.equal(named(commands, "s2-body-1").props.size, "14");
+
+  const cards = numbers.map((i) => named(commands, `s2-card-${i}`).props);
+  cards.forEach((card, index) => {
+    const mark = marks[index].props;
+    if (index > 0) assert.ok(cm(card.x) > cm(cards[index - 1].x), "x grows");
+    near(
+      cm(mark.x) + cm(mark.width) / 2,
+      cm(card.x) + cm(card.width) / 2,
+      `mark ${index + 1} centered over its card`,
+    );
+    assert.ok(bottomOf(mark) <= cm(card.y), `mark ${index + 1} above card`);
+  });
+
+  const tracks = page.filter((shape) => shape.props.name === "s2-track");
+  assert.equal(tracks.length, 1);
+  const track = tracks[0].props;
+  const [first, last] = [marks[0].props, marks[5].props];
+  assert.deepEqual(
+    [track.fill, track.height],
+    [navy.colors.secondary, "0.12cm"],
+  );
+  near(
+    cm(track.y) + cm(track.height) / 2,
+    cm(first.y) + cm(first.height) / 2,
+    "track at the mark centers",
+  );
+  near(cm(track.x), cm(first.x) + 0.75, "track starts at the first center");
+  near(
+    cm(track.x) + cm(track.width),
+    cm(last.x) + 0.75,
+    "track ends at the last center",
+  );
+  // Added first, so the marks are drawn over it.
+  assert.ok(page.indexOf(tracks[0]) < page.indexOf(marks[0]));
+});
+
+test("comparison puts left and right headings on contrasting bars", () => {
+  const { commands } = renderDeck(
+    around({
+      type: "comparison",
+      title: "RNN 与 Transformer",
+      left: { heading: "RNN", points: ["逐词计算", "长句衰减"] },
+      right: { heading: "Transformer", points: ["并行计算", "全句可见"] },
+    }),
+    navy,
+  );
+  const { colors } = navy;
+  const left = named(commands, "s2-left-heading").props;
+  const right = named(commands, "s2-right-heading").props;
+  assert.deepEqual(
+    [left.text, left.fill, left.color],
+    ["RNN", colors.primary, colors.onDark],
+  );
+  assert.deepEqual(
+    [right.text, right.fill, right.color],
+    ["Transformer", colors.secondary, colors.text],
+  );
+  for (const bar of [left, right])
+    assert.deepEqual([bar.size, bar.bold, bar.height], ["20", "true", "1.4cm"]);
+  assert.ok(cm(right.x) > cm(left.x) + cm(left.width), "two columns");
+
+  const points = named(commands, "s2-left-points").props;
+  assert.deepEqual(
+    [points.text, points.list, points.size],
+    ["逐词计算\n长句衰减", "bullet", "18"],
+  );
+  assert.ok(cm(points.y) >= bottomOf(left), "points under the bar");
+  assert.equal(named(commands, "s2-right-points").props.x, right.x);
+
+  const vs = named(commands, "s2-vs");
+  assert.deepEqual(
+    [vs.props.text, vs.props.preset, vs.props.fill, vs.props.color],
+    ["VS", "ellipse", colors.card, colors.primary],
+  );
+  assert.deepEqual(
+    [vs.props.size, vs.props.bold, vs.props.width, vs.props.height],
+    ["20", "true", "2cm", "2cm"],
+  );
+  near(
+    cm(vs.props.x) + 1,
+    CONTENT.x + CONTENT.w / 2,
+    "VS centered between the columns",
+  );
+  near(
+    cm(vs.props.y) + 1,
+    cm(left.y) + cm(left.height) / 2,
+    "VS at the heading height",
+  );
+  // Added after both bars, so it is drawn over their inner ends.
+  const order = shapes(commands);
+  assert.ok(
+    order.indexOf(vs) > order.indexOf(named(commands, "s2-right-heading")),
+  );
+});
+
+const showcasePage = (media, extra = {}) =>
+  around({ type: "showcase", title: "收入", media, ...extra });
+
+test("showcase chart maps kinds, colors and data", () => {
+  const chartOf = (chart) =>
+    added(renderDeck(showcasePage({ chart }), navy).commands, "chart")[0].props;
+  const bar = chartOf({
+    kind: "bar",
+    categories: ["Q1", "Q2"],
+    series: [{ name: "收入", values: [12, 15] }],
+  });
+  assert.deepEqual(
+    [bar.name, bar.chartType, bar.categories, bar.data, bar.colors],
+    ["s2-chart", "column", "Q1,Q2", "收入:12,15", "1E3A5F"],
+  );
+  assert.deepEqual(
+    [bar.legend, bar.title, bar.dataLabels],
+    ["none", "none", undefined],
+  );
+
+  const line = chartOf({
+    kind: "line",
+    categories: ["Q1", "Q2"],
+    series: [
+      { name: "收入", values: [12, 15] },
+      { name: "成本", values: [8, 9.5] },
+    ],
+  });
+  assert.deepEqual(
+    [line.chartType, line.data, line.colors, line.legend],
+    ["line", "收入:12,15;成本:8,9.5", "1E3A5F,D4A84B", "bottom"],
+  );
+
+  // A pie colors its slices, names them in the legend and labels values.
+  const pie = chartOf({
+    kind: "pie",
+    categories: ["华东", "华南", "华北", "西部"],
+    series: [{ name: "份额", values: [40, 30, 20, 10] }],
+  });
+  assert.deepEqual(
+    [pie.chartType, pie.colors, pie.legend, pie.dataLabels],
+    ["pie", "1E3A5F,D4A84B,3498DB,7F9CC0", "bottom", "value"],
+  );
+});
+
+test("showcase table quotes cells with separators and sizes by column count", () => {
+  const tableOf = (columns, rows) => {
+    const { commands } = renderDeck(
+      showcasePage({ table: { columns, rows } }),
+      navy,
+    );
+    const path = "/slide[2]/table[@name=s2-table]";
+    const set = (target) =>
+      commands.find(
+        (command) => command.command === "set" && command.path === target,
+      );
+    return {
+      table: added(commands, "table")[0].props,
+      style: set(path)?.props,
+      header: set(`${path}/tr[1]`)?.props,
+    };
+  };
+  const six = ["A", "B", "C", "D", "E", "F"];
+  const { table, style, header } = tableOf(six, [
+    ["a,b", 'say "hi"', "x;y", "1", "2", "3"],
+  ]);
+  assert.equal(table.name, "s2-table");
+  assert.equal(table.data, 'A,B,C,D,E,F;"a,b","say ""hi""","x;y",1,2,3');
+  assert.equal(table.colWidths, Array(6).fill("3.333cm").join(","));
+  assert.deepEqual(
+    [table.headerFill, table.bodyFill],
+    [navy.colors.primary, navy.colors.card],
+  );
+  assert.deepEqual(style, {
+    font: "Microsoft YaHei",
+    "font.latin": "Arial",
+    size: "12",
+    color: navy.colors.text,
+    valign: "middle",
+  });
+  assert.deepEqual(header, { bold: "true", color: "FFFFFF" });
+
+  const sizeAt = (count) =>
+    tableOf(six.slice(0, count), [six.slice(0, count)]).style.size;
+  assert.equal(sizeAt(1), "16");
+  assert.equal(sizeAt(4), "16");
+  assert.equal(sizeAt(5), "14");
+});
+
+test("showcase table rows are tall enough for the longest cell", () => {
+  const { commands } = renderDeck(
+    showcasePage(MEDIA_AT_LIMITS.table(zh)),
+    navy,
+  );
+  const table = added(commands, "table")[0].props;
+  // A 12-character cell takes two lines of 12pt in a 3.33 cm column:
+  // 2 × 12 × 0.0466 + 0.254 = 1.372 cm, so six rows of 1.4 cm.
+  assert.equal(lineCount(zh(12), 20 / 6, 12), 2);
+  assert.equal(table.height, "8.4cm");
+  assert.ok(bottomOf(table) <= CONTENT.top + 11);
+});
+
+test("showcase image passes the data URI and an alt", () => {
+  const imageOf = (extra) =>
+    added(
+      renderDeck(showcasePage({ image: PIXEL }, extra), navy).commands,
+      "picture",
+    )[0].props;
+  const captioned = imageOf({ caption: "新版首页" });
+  assert.deepEqual(
+    [captioned.name, captioned.src, captioned.alt],
+    ["s2-image", PIXEL, "新版首页"],
+  );
+  assert.deepEqual([captioned.width, captioned.height], ["20cm", "11cm"]);
+  assert.equal(imageOf({}).alt, "收入");
+});
+
+test("showcase puts the body beside the media and the caption under it", () => {
+  const chart = {
+    kind: "bar",
+    categories: ["Q1", "Q2"],
+    series: [{ name: "收入", values: [12, 15] }],
+  };
+  const extra = { caption: "单位：百万", body: zh(100) };
+  const { commands } = renderDeck(showcasePage({ chart }, extra), navy);
+  const media = added(commands, "chart")[0].props;
+  assert.deepEqual(
+    [media.x, media.y, media.width, media.height],
+    ["2.33cm", "5cm", "20cm", "11cm"],
+  );
+  const body = named(commands, "s2-body").props;
+  assert.deepEqual([body.x, body.y, body.width], ["23.09cm", "5cm", "8.45cm"]);
+  assert.ok(navy.sizes.body.includes(Number(body.size)), body.size);
+  assert.ok(cm(body.height) <= 11, body.height);
+  const caption = named(commands, "s2-caption").props;
+  assert.deepEqual(
+    [caption.x, caption.y, caption.width, caption.size, caption.color],
+    ["2.33cm", "16.3cm", "20cm", "14", navy.colors.textMuted],
+  );
+
+  // Without a body the media and its caption move to the middle.
+  const alone = renderDeck(
+    showcasePage({ chart }, { caption: "单位：百万" }),
+    navy,
+  ).commands;
+  const middle = CONTENT.x + (CONTENT.w - 20) / 2;
+  near(cm(added(alone, "chart")[0].props.x), middle, "media centered");
+  near(cm(named(alone, "s2-caption").props.x), middle, "caption follows");
+});
+
+test("thirty full slides stay within the batch limits", () => {
+  const pages = ["table", "chart", "image"].flatMap((media) =>
+    tenAtLimits(zh, media).map((page) => ({ ...page, notes: zh(300) })),
+  );
+  const { commands, slides } = renderDeck(deck(pages), navy);
+  assert.equal(slides, 30);
+  assert.ok(commands.length <= 2000, `${commands.length} commands`);
+  const bytes = Buffer.byteLength(JSON.stringify(commands));
+  assert.ok(bytes <= 2 * 1024 * 1024, `${bytes} bytes`);
+});
+
+test("every renderer fits its content at the limits", () => {
+  const decks = [
+    zhTen(),
+    enTen(),
+    deck(tenAtLimits(zh, "chart")),
+    deck(tenAtLimits(en, "image"), "en"),
+  ];
+  for (const made of decks) {
+    const { commands } = renderDeck(made, navy);
+    for (const shape of textShapes(commands))
+      assert.ok(
+        estimate(shape) <= cm(shape.props.height),
+        `${shape.props.name}: ${estimate(shape)} > ${shape.props.height}`,
+      );
+    // The data pages (4, 5, 6 and 10) end above the content area's foot.
+    for (const n of [4, 5, 6, 10])
+      for (const { props } of placed(onSlide(commands, n)))
+        if (props.name !== `s${n}-page`)
+          assert.ok(
+            bottomOf(props) <= CONTENT.bottom,
+            `${props.name} ends at ${bottomOf(props)}`,
+          );
+  }
 });
