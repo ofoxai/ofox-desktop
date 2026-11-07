@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PAGE_TYPES, parseDeck } from "../src/deck/schema.mjs";
 import { themeFor } from "../src/deck/theme.mjs";
-import { CANVAS, CONTENT } from "../src/deck/layout.mjs";
+import { CANVAS, CONTENT, GAP_CM } from "../src/deck/layout.mjs";
 import { heightCm, lineCount } from "../src/deck/text.mjs";
 import { RENDERERS, renderDeck } from "../src/deck/render.mjs";
 
@@ -83,13 +83,19 @@ const headed = (count, heading, body, text = zh) =>
 
 const PIXEL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+const PNG_4_BY_3 =
+  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAQAAAADCAIAAAA7ljmRAAAAEElEQVR4nGOQs4qHIwacHACkYQiVfa22owAAAABJRU5ErkJggg==";
+const svgUri = (attributes) =>
+  `data:image/svg+xml;base64,${Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" ${attributes}/>`,
+  ).toString("base64")}`;
 
 // The three showcase media, each at its limits, in `text`.
 const MEDIA_AT_LIMITS = {
   table: (text) => ({
     table: {
       columns: Array(6).fill(text(8)),
-      rows: Array.from({ length: 5 }, () => Array(6).fill(text(12))),
+      rows: Array.from({ length: 5 }, () => Array(6).fill(text(10))),
     },
   }),
   chart: (text) => ({
@@ -115,7 +121,7 @@ const tenAtLimits = (text, media = "table") => [
     type: "evidence",
     title: text(22),
     metrics: Array.from({ length: 4 }, () => ({
-      value: "118.5%",
+      value: text(3),
       label: text(12),
       note: text(30),
     })),
@@ -472,27 +478,45 @@ const near = (actual, expected, message) =>
   );
 const bottomOf = (props) => cm(props.y) + cm(props.height);
 
-const evidence = (count, value = "118.5%") =>
+const evidence = (count) =>
   around({
     type: "evidence",
     title: "关键数据",
     metrics: Array.from({ length: count }, (_, index) => ({
-      value,
+      value: "118.5%",
       label: `指标 ${index + 1}`,
     })),
   });
 
 test("evidence picks the KPI size by count and fits the value", () => {
-  const size = (count, value) =>
-    named(renderDeck(evidence(count, value), navy).commands, "s2-value-1").props
-      .size;
-  assert.equal(size(4), "48");
-  assert.equal(size(3), "60");
-  assert.equal(size(2), "72");
-  assert.equal(size(1), "72");
-  // Six CJK characters need 6 × 72 × 0.0353 = 15.2 cm, more than a 14.2 cm
-  // column holds, so the value steps down the KPI ladder to stay one line.
-  assert.equal(size(2, "一百一十八万"), "60");
+  const valueOf = (made) =>
+    named(renderDeck(made, navy).commands, "s2-value-1").props;
+  assert.equal(valueOf(evidence(4)).size, "48");
+  assert.equal(valueOf(evidence(3)).size, "60");
+  assert.equal(valueOf(evidence(2)).size, "72");
+  assert.equal(valueOf(evidence(1)).size, "72");
+  // Past the schema's limit (3 units), six CJK characters need
+  // 6 × 72 × 0.0353 = 15.2 cm, more than a 14.2 cm column holds, so the
+  // value steps down the KPI ladder to stay on one line.
+  const wide = evidence(2);
+  wide.slides[1].metrics[0].value = "一百一十八万";
+  assert.equal(valueOf(wide).size, "60");
+});
+
+test("evidence at every limit keeps its values on one line above the content foot", () => {
+  // Four metrics: 3-unit values (3 CJK, or 6 Latin), 12-unit labels,
+  // 30-unit notes and three 40-unit detail lines.
+  for (const made of [zhTen(), enTen()]) {
+    const { commands } = renderDeck(made, navy);
+    const value = named(commands, "s4-value-1").props;
+    assert.equal(value.size, "48");
+    assert.equal(lineCount(value.text, cm(value.width), 48), 1, value.text);
+    const detail = named(commands, "s4-detail").props;
+    assert.ok(
+      bottomOf(detail) <= CONTENT.bottom,
+      `ends at ${bottomOf(detail)}`,
+    );
+  }
 });
 
 test("evidence stacks value, label and note and lists the detail under them", () => {
@@ -530,12 +554,16 @@ test("evidence stacks value, label and note and lists the detail under them", ()
     [detail.text, detail.list, detail.size, detail.spaceAfter],
     ["EMEA 三月上线\n续约率 +12%", "bullet", "18", "6pt"],
   );
-  // With detail the metrics take the top 6 cm and the list sits below.
+  // With detail the list sits a gap under the metrics, and the two are
+  // centered together in the content area.
   const top = named(detailed, "s2-value-1").props;
   const under = named(detailed, "s2-note-1").props;
-  assert.ok(cm(top.y) >= CONTENT.top, "metrics start in the content area");
-  assert.ok(bottomOf(under) <= CONTENT.top + 6 + 1e-9, "metrics in 6 cm");
-  assert.ok(cm(detail.y) >= CONTENT.top + 6, "detail under the metrics");
+  near(cm(detail.y), bottomOf(under) + GAP_CM, "detail a gap under them");
+  near(
+    (cm(top.y) + bottomOf(detail)) / 2,
+    (CONTENT.top + CONTENT.bottom) / 2,
+    "metrics and detail centered",
+  );
 });
 
 test("timeline draws one numbered card per step on a track", () => {
@@ -734,7 +762,7 @@ test("showcase table quotes cells with separators and sizes by column count", ()
   assert.deepEqual(style, {
     font: "Microsoft YaHei",
     "font.latin": "Arial",
-    size: "12",
+    size: "13",
     color: navy.colors.text,
     valign: "middle",
   });
@@ -753,10 +781,10 @@ test("showcase table rows are tall enough for the longest cell", () => {
     navy,
   );
   const table = added(commands, "table")[0].props;
-  // A 12-character cell takes two lines of 12pt in a 3.33 cm column:
-  // 2 × 12 × 0.0466 + 0.254 = 1.372 cm, so six rows of 1.4 cm.
-  assert.equal(lineCount(zh(12), 20 / 6, 12), 2);
-  assert.equal(table.height, "8.4cm");
+  // A 10-character cell takes two lines of 13pt in a 3.33 cm column:
+  // 2 × 13 × 0.0466 + 0.254 = 1.466 cm, so six rows of 1.5 cm.
+  assert.equal(lineCount(zh(10), 20 / 6, 13), 2);
+  assert.equal(table.height, "9cm");
   assert.ok(bottomOf(table) <= CONTENT.top + 11);
 });
 
@@ -771,8 +799,42 @@ test("showcase image passes the data URI and an alt", () => {
     [captioned.name, captioned.src, captioned.alt],
     ["s2-image", PIXEL, "新版首页"],
   );
-  assert.deepEqual([captioned.width, captioned.height], ["20cm", "11cm"]);
   assert.equal(imageOf({}).alt, "收入");
+});
+
+test("showcase fits a picture in the media box by its proportions", () => {
+  const boxOf = (image, extra) => {
+    const { props } = added(
+      renderDeck(showcasePage({ image }, extra), navy).commands,
+      "picture",
+    )[0];
+    return [props.x, props.y, props.width, props.height];
+  };
+  const beside = { body: "说明" };
+  // 4:3 beside a body: 11 cm tall, 11 × 4 / 3 = 14.667 cm wide, centered
+  // across the 20 cm box at x 2.33.
+  assert.deepEqual(boxOf(PNG_4_BY_3, beside), [
+    "4.997cm",
+    "5cm",
+    "14.667cm",
+    "11cm",
+  ]);
+  // 3:1: 20 cm wide, 6.667 cm tall, centered down the 11 cm box.
+  assert.deepEqual(boxOf(svgUri('viewBox="0 0 300 100"'), beside), [
+    "2.33cm",
+    "7.167cm",
+    "20cm",
+    "6.667cm",
+  ]);
+  // 1:1 without a body: an 11 cm square in the middle of the centered box.
+  assert.deepEqual(boxOf(PIXEL), ["11.435cm", "5cm", "11cm", "11cm"]);
+  // A picture whose size cannot be read fills the box.
+  assert.deepEqual(boxOf(svgUri(""), beside), [
+    "2.33cm",
+    "5cm",
+    "20cm",
+    "11cm",
+  ]);
 });
 
 test("showcase puts the body beside the media and the caption under it", () => {

@@ -19,6 +19,7 @@ import {
   titleCommands,
 } from "./layout.mjs";
 import { fitSize, heightCm, lineCount } from "./text.mjs";
+import { imageSize } from "./image.mjs";
 import { fontsFor } from "./theme.mjs";
 
 // The host refuses a longer batch (create.rs MAX_COMMANDS).
@@ -381,9 +382,6 @@ export function renderGrid(ctx, slide) {
 const METRIC_LABEL_PT = 16;
 const METRIC_NOTE_PT = 14;
 const DETAIL_PT = 18;
-// With detail, the metrics take at least this much of the content area's
-// top, and the list starts a gap below.
-const METRICS_ROOM_CM = 6;
 
 // The KPI ladder from the size the spec gives `count` metrics down: the
 // largest (72pt) for one or two, the next (60) for three, 48 for four.
@@ -415,16 +413,20 @@ export function renderEvidence(ctx, slide) {
     .filter((text) => text !== undefined);
   const note =
     notes.length > 0 ? fitRow(notes, w, () => METRIC_NOTE_PT) : undefined;
+  // Each row (values, labels, notes) is as tall as its tallest text, so the
+  // block is at least the tallest metric's stack and the rows line up.
+  // Metrics have no card, so there is no padding to add.
   const h = value.h + label.h + (note?.h ?? 0);
 
-  // Without detail the metrics sit in the middle of the content area; with
-  // it, in the middle of its top METRICS_ROOM_CM, the list under them.
+  // The metrics, and the detail list a gap under them, sit together in the
+  // middle of the content area.
   const list = detail?.join("\n");
-  const room =
+  const listH =
     list === undefined
-      ? CONTENT.bottom - CONTENT.top
-      : Math.max(METRICS_ROOM_CM, h);
-  const top = CONTENT.top + (room - h) / 2;
+      ? undefined
+      : fitBox(list, CONTENT.w, Infinity, [DETAIL_PT]).h;
+  const total = h + (listH === undefined ? 0 : GAP_CM + listH);
+  const top = CONTENT.top + (CONTENT.bottom - CONTENT.top - total) / 2;
 
   const commands = contentPage(ctx, slide.title);
   metrics.forEach((metric, index) => {
@@ -463,23 +465,16 @@ export function renderEvidence(ctx, slide) {
         ),
       );
   });
-  if (list !== undefined) {
-    const { h: listH } = fitBox(list, CONTENT.w, Infinity, [DETAIL_PT]);
+  if (list !== undefined)
     commands.push(
       textBox(
         ctx,
         "detail",
         list,
-        {
-          x: CONTENT.x,
-          y: CONTENT.top + room + GAP_CM,
-          w: CONTENT.w,
-          h: listH,
-        },
+        { x: CONTENT.x, y: top + h + GAP_CM, w: CONTENT.w, h: listH },
         { size: DETAIL_PT, color: colors.text, list: "bullet" },
       ),
     );
-  }
   return commands;
 }
 
@@ -650,8 +645,9 @@ const CAPTION = { y: 16.3, size: 14 };
 // officecli's chart type for each chart kind.
 const CHART_TYPES = { bar: "column", line: "line", pie: "pie" };
 
-// Spec: table text is 16pt up to four columns, 14 at five, 12 at six.
-const tableSize = (count) => (count <= 4 ? 16 : count === 5 ? 14 : 12);
+// Spec: table text is 16pt up to four columns, 14 at five and 13 (the
+// floor for any text) at six.
+const tableSize = (count) => (count <= 4 ? 16 : count === 5 ? 14 : 13);
 
 // A cell as officecli's inline table data reads it: a cell that holds a
 // separator or a quote is quoted, its own quotes doubled.
@@ -741,6 +737,18 @@ function tableCommands(ctx, table, box) {
   ];
 }
 
+// The largest box with the picture's proportions that fits `box`, centered
+// in it, so the picture is not stretched; the whole box when its size
+// cannot be read.
+function pictureBox(image, box) {
+  const size = imageSize(image);
+  if (size === null) return box;
+  const scale = Math.min(box.w / size.width, box.h / size.height);
+  const w = size.width * scale;
+  const h = size.height * scale;
+  return { x: box.x + (box.w - w) / 2, y: box.y + (box.h - h) / 2, w, h };
+}
+
 function pictureCommand(ctx, slide, box) {
   const { n } = ctx;
   return {
@@ -751,7 +759,7 @@ function pictureCommand(ctx, slide, box) {
       name: `s${n}-image`,
       src: slide.media.image,
       alt: slide.caption ?? slide.title,
-      ...placement(box),
+      ...placement(pictureBox(slide.media.image, box)),
     },
   };
 }

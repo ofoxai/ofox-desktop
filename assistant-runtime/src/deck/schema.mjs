@@ -9,9 +9,9 @@
 // problem naming the slide, field and limit, so the model can shorten it and
 // send the whole deck again. Nothing is truncated, substituted or reworded.
 // A line break takes no room in the length count but a line on the slide,
-// so a short field (a title, heading, label, list item, table cell or chart
-// label) must be one line and a body-like field holds at most two line
-// breaks (LIMITS.lineBreaks).
+// so a short field (a title, heading, label, metric note, list item, table
+// cell or chart label) must be one line and a body-like field holds at most
+// two line breaks (LIMITS.lineBreaks).
 
 import { DEFAULT_THEME, THEME_NAMES } from "./theme.mjs";
 
@@ -28,8 +28,9 @@ export const PAGE_TYPES = [
   "showcase",
 ];
 
-// Limits are in Chinese-character units (see textLength) except where noted.
-// `count: [min, max]` bounds a list; `detail` and `points` read as
+// Limits are in Chinese-character units (see textLength): a KPI value of 3
+// is 6 Latin characters or 3 CJK, which keeps it on one line of 48pt in a
+// quarter of the content width. `count: [min, max]` bounds a list; `detail` and `points` read as
 // `[at most this many, each at most this long]`. A table's `rows` counts
 // the header row too. `lineBreaks` bounds the line breaks inside one
 // text field, `short` for one-line fields and `body` for body-like ones
@@ -42,7 +43,7 @@ export const LIMITS = {
   pillars: { count: [2, 4], heading: 12, body: 60 },
   evidence: {
     count: [1, 4],
-    value: 6,
+    value: 3,
     label: 12,
     note: 30,
     detail: [3, 40],
@@ -56,7 +57,7 @@ export const LIMITS = {
     caption: 30,
     body: 100,
     chart: { categories: 8, series: 3, pie: [2, 6], label: 12 },
-    table: { columns: 6, rows: 6, header: 8, cell: 12 },
+    table: { columns: 6, rows: 6, header: 8, cell: 10 },
   },
 };
 
@@ -128,12 +129,10 @@ function ignore(ctx, object, known, path = "") {
   }
 }
 
-const characters = (text) => [...text].length;
-
 // Which LIMITS.lineBreaks bound a text field by its name (the last part of
-// its path). List items, table cells and chart labels are short too, but
-// their paths end in an index, so they say so with str's `breaks`. Speaker
-// notes are not bounded.
+// its path). List items, table cells and chart labels, whose paths end in
+// an index, and a metric's note, named like a statement's, are short too:
+// they say so with str's `breaks`. Speaker notes are not bounded.
 const LINE_BREAKS = {
   title: "short",
   subtitle: "short",
@@ -155,11 +154,7 @@ const lineBreaks = (text) => text.match(/\r\n|\r|\n/g)?.length ?? 0;
 // A text field: a string or a number, trimmed, within the limit and its
 // line-break bound, which `breaks` names when the field's name does not
 // (see LINE_BREAKS). A blank optional field is absent.
-function str(
-  ctx,
-  value,
-  { field, limit, required = false, measure = textLength, breaks },
-) {
+function str(ctx, value, { field, limit, required = false, breaks }) {
   if (value === undefined || value === null) {
     if (required) problem(ctx, `${field} is missing`);
     return undefined;
@@ -175,7 +170,7 @@ function str(
     if (required) problem(ctx, `${field} is empty`);
     return undefined;
   }
-  const size = measure(text);
+  const size = textLength(text);
   if (size > limit)
     problem(ctx, `${field} is ${size} characters; the limit is ${limit}`);
   const bound = breaks ?? LINE_BREAKS[field.split(".").at(-1)];
@@ -311,16 +306,15 @@ function normalizeEvidence(slide, ctx) {
           return undefined;
         }
         ignore(ctx, element, ["value", "label", "note"], path);
-        // The value is a few characters wide on the slide whatever the script.
+        // A metric's note is a one-line annotation, unlike a statement's.
         return compact({
-          value: str(ctx, element.value, {
-            field: `${path}.value`,
-            limit: limits.value,
-            required: true,
-            measure: characters,
-          }),
+          value: required(ctx, element, "value", limits.value, `${path}.value`),
           label: required(ctx, element, "label", limits.label, `${path}.label`),
-          note: optional(ctx, element, "note", limits.note, `${path}.note`),
+          note: str(ctx, element.note, {
+            field: `${path}.note`,
+            limit: limits.note,
+            breaks: "short",
+          }),
         });
       },
     }),

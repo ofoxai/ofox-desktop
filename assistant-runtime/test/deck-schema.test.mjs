@@ -92,6 +92,19 @@ test("the page types and limits are the documented ones", () => {
     heading: 12,
     body: 60,
   });
+  assert.deepEqual(LIMITS.evidence, {
+    count: [1, 4],
+    value: 3,
+    label: 12,
+    note: 30,
+    detail: [3, 40],
+  });
+  assert.deepEqual(LIMITS.showcase.table, {
+    columns: 6,
+    rows: 6,
+    header: 8,
+    cell: 10,
+  });
 });
 
 test("deckOf finds a deck object and its one-element wrapper", () => {
@@ -160,7 +173,7 @@ function fullDeck() {
         {
           table: {
             columns: Array(6).fill(zh(8)),
-            rows: Array.from({ length: 5 }, () => Array(6).fill(zh(12))),
+            rows: Array.from({ length: 5 }, () => Array(6).fill(zh(10))),
           },
         },
         { caption: zh(30), body: zh(100) },
@@ -348,15 +361,19 @@ test("parseDeck counts Latin text at half width when it checks the limit", () =>
   ]);
 });
 
-test("parseDeck counts an evidence value in characters, not CJK units", () => {
+test("parseDeck limits an evidence value to 6 Latin characters or 3 CJK", () => {
   const evidence = (value) => ({
     type: "evidence",
     title: "数据",
     metrics: [{ value, label: "NRR" }],
   });
-  parsed(deckWith(evidence("118.5%")));
+  for (const value of ["118.5%", "$1.2M", "10万+", "三千万"])
+    parsed(deckWith(evidence(value)));
+  assert.deepEqual(problemsOf(deckWith(evidence("一百一十"))), [
+    "slide 1 (evidence): metrics[0].value is 4 characters; the limit is 3",
+  ]);
   assert.deepEqual(problemsOf(deckWith(evidence("1,118.5%"))), [
-    "slide 1 (evidence): metrics[0].value is 8 characters; the limit is 6",
+    "slide 1 (evidence): metrics[0].value is 4 characters; the limit is 3",
   ]);
 });
 
@@ -494,6 +511,18 @@ test("parseDeck rejects a line break in a list item", () => {
   assert.deepEqual(problemsOf(deckWith(evidence)), [
     "slide 1 (evidence): detail[0] has 2 line breaks; the limit is 0",
   ]);
+});
+
+test("parseDeck keeps a metric's note to one line, unlike a statement's", () => {
+  const evidence = {
+    type: "evidence",
+    title: "数据",
+    metrics: [{ value: "118%", label: "NRR", note: "同比\n环比" }],
+  };
+  assert.deepEqual(problemsOf(deckWith(evidence)), [
+    "slide 1 (evidence): metrics[0].note has 1 line break; the limit is 0",
+  ]);
+  parsed(deckWith({ ...STATEMENT, note: "第一行\n第二行" }));
 });
 
 test("parseDeck rejects a line break in a table cell or a chart label", () => {
@@ -676,13 +705,13 @@ test("parseDeck rejects a table that is too big", () => {
     problemsOf(
       deckWith(
         showcase({
-          table: { columns: [zh(9)], rows: [[zh(13)]] },
+          table: { columns: [zh(9)], rows: [[zh(11)]] },
         }),
       ),
     ),
     [
       "slide 1 (showcase): media.table.columns[0] is 9 characters; the limit is 8",
-      "slide 1 (showcase): media.table.rows[0][0] is 13 characters; the limit is 12",
+      "slide 1 (showcase): media.table.rows[0][0] is 11 characters; the limit is 10",
     ],
   );
 });
