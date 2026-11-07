@@ -31,6 +31,14 @@ test("imageSize walks a JPEG's markers to its frame header", () => {
     width: 640,
     height: 480,
   });
+  // An extended sequential (SOF1) frame of 300 × 200 right after SOI.
+  const extended = [
+    0xff, 0xd8, 0xff, 0xc1, 0x00, 0x11, 0x08, 0x00, 0xc8, 0x01, 0x2c, 0x03,
+  ];
+  assert.deepEqual(imageSize(uri("jpeg", extended)), {
+    width: 300,
+    height: 200,
+  });
 });
 
 test("imageSize reads an SVG's width and height, else its viewBox", () => {

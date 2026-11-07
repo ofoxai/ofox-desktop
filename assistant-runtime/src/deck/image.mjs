@@ -15,8 +15,9 @@ function pngSize(bytes) {
 }
 
 // JPEG: segments follow the SOI marker, each FF <marker> <2-byte length>;
-// the first baseline (SOF0) or progressive (SOF2) frame header holds the
-// height and then the width. Scan data (SOS) or the end means there is none.
+// the first baseline (SOF0), extended (SOF1) or progressive (SOF2) frame
+// header holds the height and then the width. Scan data (SOS) or the end
+// means there is none.
 function jpegSize(bytes) {
   if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
   let at = 2;
@@ -25,7 +26,7 @@ function jpegSize(bytes) {
     const marker = bytes[at + 1];
     if (marker === 0xff) {
       at += 1; // a fill byte
-    } else if (marker === 0xc0 || marker === 0xc2) {
+    } else if (marker >= 0xc0 && marker <= 0xc2) {
       if (at + 9 > bytes.length) return null;
       return {
         width: bytes.readUInt16BE(at + 7),

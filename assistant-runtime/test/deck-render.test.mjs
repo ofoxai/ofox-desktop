@@ -895,13 +895,20 @@ test("every renderer fits its content at the limits", () => {
         estimate(shape) <= cm(shape.props.height),
         `${shape.props.name}: ${estimate(shape)} > ${shape.props.height}`,
       );
-    // The data pages (4, 5, 6 and 10) end above the content area's foot.
-    for (const n of [4, 5, 6, 10])
-      for (const { props } of placed(onSlide(commands, n)))
-        if (props.name !== `s${n}-page`)
-          assert.ok(
-            bottomOf(props) <= CONTENT.bottom,
-            `${props.name} ends at ${bottomOf(props)}`,
-          );
+    // On the content pages (pillars, evidence, timeline, comparison, grid
+    // and showcase) every box but the title rule and the page number lies
+    // within the content area.
+    for (const n of [3, 4, 5, 6, 7, 10])
+      for (const { props } of placed(onSlide(commands, n))) {
+        if ([`s${n}-title-rule`, `s${n}-page`].includes(props.name)) continue;
+        assert.ok(
+          cm(props.y) >= CONTENT.top,
+          `${props.name} starts at ${props.y}`,
+        );
+        assert.ok(
+          bottomOf(props) <= CONTENT.bottom,
+          `${props.name} ends at ${bottomOf(props)}`,
+        );
+      }
   }
 });

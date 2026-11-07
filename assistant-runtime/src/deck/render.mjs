@@ -574,6 +574,9 @@ export function renderComparison(ctx, slide) {
       () => SIDE_HEADING_PT,
     ).h,
   );
+  // The bars sit low enough that the VS circle centered on them starts
+  // inside the content area.
+  const barY = CONTENT.top + Math.max(0, (VS_CM - bar) / 2);
   const points = fitRow(
     sides.map((side) => side.points.join("\n")),
     w,
@@ -588,7 +591,7 @@ export function renderComparison(ctx, slide) {
           ctx,
           `${side.role}-heading`,
           side.heading,
-          { x, y: CONTENT.top, w, h: bar },
+          { x, y: barY, w, h: bar },
           {
             size: SIDE_HEADING_PT,
             color: side.color,
@@ -602,7 +605,7 @@ export function renderComparison(ctx, slide) {
           ctx,
           `${side.role}-points`,
           side.points.join("\n"),
-          { x, y: CONTENT.top + bar + SIDE_GAP_CM, w, h: points.h },
+          { x, y: barY + bar + SIDE_GAP_CM, w, h: points.h },
           { size: POINTS_PT, color: colors.text, list: "bullet" },
         ),
       ];
@@ -614,7 +617,7 @@ export function renderComparison(ctx, slide) {
       "VS",
       {
         x: CONTENT.x + (CONTENT.w - VS_CM) / 2,
-        y: CONTENT.top + (bar - VS_CM) / 2,
+        y: barY + (bar - VS_CM) / 2,
         w: VS_CM,
         h: VS_CM,
       },
