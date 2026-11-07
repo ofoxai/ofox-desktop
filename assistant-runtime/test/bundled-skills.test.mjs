@@ -6,7 +6,8 @@ import { parseDeck } from "../src/deck/schema.mjs";
 const skillsDir = new URL("../skills/", import.meta.url);
 // The body of each SKILL.md is what use_skill returns to the model.
 const bodyLimit = (name) => (name === "ofox-office-pdf" ? 8000 : 12000);
-// Skills teach create_document batch arrays, never command-line calls.
+// Skills teach create_document content (batch arrays, deck objects), never
+// command-line calls.
 const cliCall = /\bofficecli\s+[a-z]/i;
 // CLI-only workflows that do not exist behind create_document.
 const cliOnly = [/\bresidents?\b/i, /\bwatch(es|ing)?\b/i, /\bMCP\b/];
@@ -87,7 +88,7 @@ test("bundled skill bodies stay within their size limits", async () => {
   }
 });
 
-test("bundled skills describe batch arrays, not command-line calls", async () => {
+test("bundled skills describe batch arrays and deck objects, not command-line calls", async () => {
   for (const skill of await bundledSkills())
     for (const line of skill.body.split("\n")) {
       assert.doesNotMatch(line, cliCall, skill.dir);
@@ -113,4 +114,24 @@ test("office skill examples have the create_document content shape", async () =>
     for (const [, block] of skill.body.matchAll(/```typst\n([\s\S]*?)\n```/g))
       assert.doesNotMatch(block, /#(import|include)\b|#set (page|text)\b/);
   }
+});
+
+test("the pptx skill's worked example is the deck the host tests render", async () => {
+  const skill = (await bundledSkills()).find(
+    (item) => item.dir === "ofox-office-pptx",
+  );
+  const decks = [...skill.body.matchAll(/```json\n([\s\S]*?)\n```/g)]
+    .map(([, block]) => JSON.parse(block))
+    .filter((block) => block?.kind === "deck");
+  assert.ok(decks.length >= 1, "a deck example");
+  const fixture = JSON.parse(
+    await readFile(
+      new URL(
+        "../../src-tauri/tests/fixtures/assistant-documents/deck-object.json",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+  );
+  assert.deepEqual(decks[0], fixture);
 });

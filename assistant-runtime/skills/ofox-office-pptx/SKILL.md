@@ -7,7 +7,7 @@ description: Read before making a PowerPoint deck (.pptx) with create_document. 
 
 ## Ground rules
 
-- You write content only: never coordinates, font sizes, colors or shapes.
+- In a deck object you write content only: never coordinates, font sizes, colors or shapes.
 - One deck = one `create_document` call with every slide. Plan the whole deck first; never patch it with a second call.
 - Titles first: list the slide titles before writing anything; read in order, they should tell the story.
 - One idea per slide. A list goes to `pillars` (2–4 items) or `grid` (3–8 items); there is no `bullets` page type.
@@ -44,9 +44,9 @@ Limits count Chinese characters; a Latin letter, digit or space counts half, rou
 | `cta` | Closing: thanks, next step | `title`, `subtitle?`, `contact?` | title 18, subtitle 40, contact 30 |
 | `showcase` | One picture, chart or table | `title`, `media`, `caption?`, `body?` | caption 30, body 100 |
 
-The `title` of a pillars, evidence, timeline, comparison, grid or showcase page is at most 22. Any slide may add `notes`, at most 300.
+The `title` of a pillars, evidence, timeline, comparison, grid or showcase page is at most 22. Any slide may add `notes`, at most 300. Do not mix them up: `note` is a line of text on the statement page (and under a metric), while `notes` are the speaker notes, which the slide never shows.
 
-Line breaks: titles, headings, labels, values, captions, the statement, the quote, the source, the contact, list items, table cells, chart labels and metric notes allow none. Pillar, grid and step bodies, a statement's `note` and a showcase `body` allow at most 2. `notes` are free.
+Line breaks: titles, subtitles, meta, headings, labels, values, captions, the statement, the quote, the source, the contact, list items, table cells, chart labels and metric notes allow none. Pillar, grid and step bodies, a statement's `note` and a showcase `body` allow at most 2. `notes` are free.
 
 `showcase.media` holds exactly one of:
 
@@ -54,7 +54,7 @@ Line breaks: titles, headings, labels, values, captions, the statement, the quot
 - `"chart"`: `{ "kind": "bar", "categories": ["Q1", "Q2"], "series": [{ "name": "2026", "values": [142, 158] }] }`. Kinds: `bar`, `line`, `pie`; at most 8 categories and 3 series, one value per category. A pie takes exactly one series with 2–6 slices. Labels (categories, series names) are at most 12 and never contain `,` `;` or `:`.
 - `"table"`: `{ "columns": ["Item", "Share"], "rows": [["A", "+18%"]] }`. At most 6 columns and 6 rows counting the header, so 5 body rows; header cells at most 8, body cells at most 10; every row has one cell per column.
 
-A pillar, grid item or step may be a `"heading: body"` string, which splits at the first colon. Use the object form whenever a heading contains a colon.
+A pillar, grid item or step may be a `"heading: body"` string, which splits at the first colon (`:` or `：`). Use the object form whenever a heading contains a colon.
 
 ## Deck fields
 
