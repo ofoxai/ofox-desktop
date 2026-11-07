@@ -208,18 +208,18 @@ Before the first document of a format in a conversation the model reads the
 matching bundled skill with `use_skill`: `ofox-office-docx`, `ofox-office-pptx`,
 `ofox-office-xlsx` or `ofox-office-pdf`. The skills hold the command reference
 and layout rules; the three Office skills are adapted from the OfficeCLI
-repository (the PowerPoint skill's page types and palette also from its
-`morph-ppt` skill) and the PDF skill is original (see
+repository (the PowerPoint skill and the deck renderer take their page types
+and palette from its `morph-ppt` skill) and the PDF skill is original (see
 `assistant-runtime/notices/officecli-skills.txt`).
 
 ### Formats and content
 
-| `format`                           | `content`                                              | What the host does                                                                                                                                              |
-| ---------------------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pptx`                             | a deck object, or an array of officecli batch commands | renders a deck object into a batch ([below](#the-deck-object-pptx)); then as for docx and xlsx, plus [layout fixes](#layout-fixes) and one `view svg` per slide |
-| `docx`, `xlsx`                     | an array of officecli batch commands                   | `officecli create`, then `batch --input --json` (atomic: one failure rolls it all back), `validate`, `view issues`                                              |
-| `pdf`                              | the Typst markup of the body, as a string              | joins the host's prelude and the body into `main.typ`, `typst compile`, then renders page 1 as a preview                                                        |
-| `md`, `txt`, `csv`, `html`, `json` | the file's text, as a string                           | writes the file as given                                                                                                                                        |
+| `format`                           | `content`                                              | What the host does                                                                                                                                                                                         |
+| ---------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pptx`                             | a deck object, or an array of officecli batch commands | runs the batch the model wrote, or the one the runtime rendered from a deck object ([below](#the-deck-object-pptx)): as for docx and xlsx, plus [layout fixes](#layout-fixes) and one `view svg` per slide |
+| `docx`, `xlsx`                     | an array of officecli batch commands                   | `officecli create`, then `batch --input --json` (atomic: one failure rolls it all back), `validate`, `view issues`                                                                                         |
+| `pdf`                              | the Typst markup of the body, as a string              | joins the host's prelude and the body into `main.typ`, `typst compile`, then renders page 1 as a preview                                                                                                   |
+| `md`, `txt`, `csv`, `html`, `json` | the file's text, as a string                           | writes the file as given                                                                                                                                                                                   |
 
 An Office batch is a list of `add`, `set`, `remove`, `move` and `swap` commands
 (officecli's `op` is accepted as an alias of `command`). One batch makes one
@@ -333,20 +333,21 @@ automatic layout repair before its card is made, so a text box that is a little
 too small does not send the model back to redo the whole file. For the issues
 officecli reports, the host writes `set` commands:
 
-| Issue         | Fix                                                                                           |
-| ------------- | --------------------------------------------------------------------------------------------- |
-| text overflow | the box grows to the height officecli suggests, or the font steps down 2 pt, to a 13 pt floor |
-| off the slide | the shape moves back to 1.27 cm inside the slide's edge                                       |
-| low contrast  | the text turns white                                                                          |
+| Issue         | Fix                                                                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| text overflow | the box grows to the height officecli suggests while it stays inside the page; otherwise the font steps down 2 pt, to a 13 pt floor |
+| off the slide | the shape moves back to 1.27 cm inside the slide's edge                                                                             |
+| low contrast  | the text turns white                                                                                                                |
 
 Each fix batch goes through the same allowlist check and the same sandbox as a
-batch the model wrote. A fix batch that fails changes nothing (batches are
-atomic) and does not stop a document that is already made; only a failed
-re-validate after a fix fails the call. The issues that remain are reported as before. The host's
-result and the generation record carry `fixed`, the number of `set` commands
-applied, and the runtime tells the model `Auto-fixed N layout issue(s).` when it
-is more than 0. A rendered deck normally has none to fix, because the renderer
-fits its own text.
+batch the model wrote. A fix batch that officecli rejects is rolled back; one
+that crashes or times out may leave the file half-changed. Either way the host
+runs `validate` again: if it reports nothing, the document stands with the
+issues of a fresh `view issues`; if it reports an error or gives no report, the
+call fails. The host's result and the generation record carry `fixed`, the
+number of `set` commands applied, and the runtime tells the model
+`Auto-fixed N layout issue(s).` when it is more than 0. A rendered deck normally
+has none to fix, because the renderer fits its own text.
 
 ### Limits
 
@@ -426,11 +427,13 @@ Besides that first page, the host exports every slide of a PowerPoint as SVG
 attachment, at `<session id>/attachments/<attachment id>.pages/<n>.svg`: the
 folder is 0700, the files 0600, and the folder is removed with the attachment.
 A page whose SVG is over the 256 KiB output limit is skipped with the warning
-`slide n has no preview`, and the others are kept. The generation record
-carries `svgPages`, the number of pages kept. It is a hint only: backups,
-restores and forks copy the attachment file and not its `.pages` folder, so a
-reader must check that the folder exists. Nothing in the app shows these pages
-yet; they are the input of the page-by-page preview in the
+`slide n has no preview`, and the others are kept; if the engine fails in the
+middle of the export, the slides not exported get one warning,
+`slides a-b have no preview`. The generation record carries `svgPages`, the
+number of slide pictures kept beside the attachment (a skipped slide is not
+counted); a reader should still check that the `.pages` folder exists, since
+backups, restores and forks copy only the attachment file. Nothing in the app
+shows these pages yet; they are the input of the page-by-page preview in the
 [roadmap](assistant-roadmap.md).
 
 ### Not in this round
@@ -497,14 +500,15 @@ pnpm assistant:real-eval [--apex ofox.ai|ofox.io] [--account assistant-key] \
   `OUT/<model>/<case>/`, to open by hand.
 - A case passes when the reply made exactly one file, with zero warnings, in
   exactly one `create_document` call, and no Office file's text holds a literal
-  `\n`. The report ends with `通过 N / 12`. The exit code is 0 for at most one
-  failure and 1 for more; 2 is a usage or environment error.
+  `\n`. The report ends with `通过 N / (模型数 × 4)`, 12 for the default three
+  models. The exit code is 0 for at most one failure and 1 for more; 2 is a
+  usage or environment error.
 - `--self-test` checks the script itself with no key, no network and no cargo,
   and `--help` lists the options.
 
 The report's table is pasted into the table below, one row per case, with the
-build and the tally `通过 N / 12` under it. The columns are the date, the model,
-the case, the number of files, the warnings, the layout fixes applied
+build and the tally `通过 N / (模型数 × 4)` under it. The columns are the date,
+the model, the case, the number of files, the warnings, the layout fixes applied
 (`fixed`), the `create_document` calls, the seconds, the tokens (input /
 output) and the result.
 

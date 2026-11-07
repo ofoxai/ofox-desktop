@@ -143,4 +143,4 @@ Table (`data`: rows split by `;`, cells by `,`):
 [{"command":"add","parent":"/slide[1]","type":"table","props":{"name":"Plan","data":"Phase,Owner;Pilot,Operations;Rollout,Sales","x":"2.33cm","y":"10.96cm","width":"29.21cm","height":"4cm","headerFill":"1E2761","bodyFill":"F5F7FA"}}]
 ```
 
-<!-- Adapted with changes from OfficeCLI (skills/officecli-pptx, v1.0.160, Apache-2.0); see notices/officecli-skills.txt -->
+<!-- Adapted with changes from OfficeCLI (skills/officecli-pptx, v1.0.160; page types and palette from skills/morph-ppt; Apache-2.0); see notices/officecli-skills.txt -->
