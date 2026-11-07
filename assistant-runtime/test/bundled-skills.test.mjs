@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
+import { parseDeck } from "../src/deck/schema.mjs";
 
 const skillsDir = new URL("../skills/", import.meta.url);
 // The body of each SKILL.md is what use_skill returns to the model.
@@ -98,6 +99,13 @@ test("office skill examples have the create_document content shape", async () =>
   for (const skill of await bundledSkills()) {
     for (const [, block] of skill.body.matchAll(/```json\n([\s\S]*?)\n```/g)) {
       const items = JSON.parse(block);
+      // A deck object must be one create_document accepts as it is.
+      if (items?.kind === "deck") {
+        const { problems = [], warnings = [] } = parseDeck(items);
+        assert.deepEqual(problems, [], skill.dir);
+        assert.deepEqual(warnings, [], skill.dir);
+        continue;
+      }
       assert.ok(Array.isArray(items) && items.length > 0, skill.dir);
       for (const item of items)
         assert.equal(typeof item.command, "string", skill.dir);

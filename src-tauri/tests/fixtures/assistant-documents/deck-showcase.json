@@ -1,0 +1,12 @@
+{
+  "kind": "deck",
+  "title": "季度业绩回顾",
+  "language": "zh",
+  "slides": [
+    {"type": "hero", "title": "季度业绩回顾", "subtitle": "Q1 收入 +18%，利润略有回落", "meta": "财务团队 · 2026 年 11 月"},
+    {"type": "showcase", "title": "收入逐季增长", "media": {"chart": {"kind": "bar", "categories": ["Q1", "Q2", "Q3", "Q4"], "series": [{"name": "2025 年", "values": [120, 135, 150, 170]}, {"name": "2026 年", "values": [142, 158, 171, 190]}]}}, "caption": "单位：百万元", "body": "Q1 收入同比 +18%，Q2 起增速放缓，Q4 预计回到两位数增长。", "notes": "先讲 Q1 的 +18%，再说明 Q2 之后增速放缓的原因。"},
+    {"type": "showcase", "title": "各业务线表现", "media": {"table": {"columns": ["业务", "收入", "同比", "利润率"], "rows": [["云服务", "82", "+18%", "31%"], ["GPU 算力", "64", "+25%", "28%"], ["软件授权", "41", "-5%", "45%"], ["咨询服务", "23", "+3%", "19%"]]}}, "caption": "收入单位：百万元", "notes": "GPU 算力增长最快，软件授权 -5% 需要单独解释。"},
+    {"type": "showcase", "title": "品牌色参考", "media": {"image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGOQs4oHAAExALh6BwjnAAAAAElFTkSuQmCC"}, "caption": "1×1 像素的示例图片", "body": "示例图片只是占位，真实图片需要用户提供。", "notes": "这张图只是占位示例，正式演示时换成真实图片。"},
+    {"type": "cta", "title": "谢谢", "subtitle": "欢迎提问与讨论", "contact": "finance@example.com"}
+  ]
+}

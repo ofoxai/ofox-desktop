@@ -1,132 +1,146 @@
 ---
 name: ofox-office-pptx
-description: Read before making a PowerPoint deck (.pptx) with create_document. Slide design rules and the batch commands for slides, text, shapes, tables.
+description: Read before making a PowerPoint deck (.pptx) with create_document. Page types, limits and a worked deck object; raw batch commands for experts.
 ---
 
-# PowerPoint decks
-
-`create_document({ name: "deck.pptx", format: "pptx", content: [...] })` starts from an empty 16:9 deck (33.87 × 19.05 cm). `content` is a JSON array of commands run in order as one atomic batch: if one fails, nothing is saved and the result names its `index` and error; fix it and resend the whole array (at most 2 retries).
+`create_document({ name: "deck.pptx", format: "pptx", content: { "kind": "deck", … } })` builds a finished 16:9 deck from a deck object. You choose a page type for each slide and write its text; the host sets fonts, sizes, colors and positions, draws the slides and checks them. A deck that breaks a rule is rejected with one message per problem, naming the slide, the field and the limit, and nothing is saved: fix exactly those and resend the whole deck (at most 2 retries). The result says how many slides were rendered and reports any issues it found; mention them.
 
 ## Ground rules
 
-- One deck = one `create_document` call with the whole batch. Plan every slide first; never patch it with a second call.
-- Stable paths: slides are numbered in the order you add them (the first `add slide` is `/slide[1]`). Give each shape and table a `name` unique on its slide and address it as `/slide[2]/shape[@name=Card1]` or `/slide[2]/table[@name=Plan]`, never `shape[N]`.
-- Prop values are strings: sizes in points (`"20"`), lengths with a unit (`"2cm"`), `"true"`, colors as hex without `#`. A newline in `text` (`\n` in JSON) starts a new paragraph.
-- All slide text and notes in the user's language. No placeholders (`TODO`, `xxxx`).
-- Use only the commands and props below (unknown props are dropped). If `issues` flag overflow or shapes past the edge, fix and recreate the deck.
+- You write content only: never coordinates, font sizes, colors or shapes.
+- One deck = one `create_document` call with every slide. Plan the whole deck first; never patch it with a second call.
+- Titles first: list the slide titles before writing anything; read in order, they should tell the story.
+- One idea per slide. A list goes to `pillars` (2–4 items) or `grid` (3–8 items); there is no `bullets` page type.
+- Adjacent slides use different page types.
+- Every content slide (everything but the cover and the closing) carries `notes`: what the speaker says.
+- All text and notes in the user's language, with `language` set to match. No placeholders (`TODO`, `xxxx`) and no invented statistics: use the user's numbers, or leave `evidence` out.
+- Over a limit means rejection, never truncation. Split the slide or shorten the wording; do not abbreviate until the meaning is lost.
 
-## Design rules
+## Narrative
 
-**Titles first.** List the titles before building; they alone should tell the story, in one style.
+Pick the structure that fits the occasion, then adapt it to the content.
 
-**One idea per slide.** 3–5 one-line bullets (≈ 12 words or 20 CJK characters); more means another slide. Notes on every content slide.
+- Fundraising, sales, bids (problem_solution): hero → statement → pillars → evidence → cta
+- Reports, analysis (insight_driven): hero → statement → evidence → pillars → cta
+- Promotion, speeches (vision_driven): hero → quote → pillars → evidence → cta
+- Teaching, training (educational): hero → statement → pillars → grid → showcase → cta
 
-**Type scale**: title 36–44pt bold (at least 1.5× body); subtitle and card heading 20–24pt; body 18–24pt, sentences never below 18; captions and labels 10–14pt, muted; KPI numbers 60–72pt bold, ≤ 5 characters.
+Length: 3–5 slides for a short pitch, 5–8 for a normal talk, 10–15 for a long one; 3–30 is the limit, so avoid more than 20.
 
-Box height ≥ lines × size × 0.05 cm + 0.4 cm (one line: 14pt → 1.1 cm, 18pt → 1.3 cm, 24pt → 1.6 cm; two lines of 18pt → 2.2 cm); a line holds about width_cm ÷ (size × 0.035) CJK characters, twice as many Latin ones. Cut or split text that does not fit; never shrink below the scale.
+## Page types
 
-**Grid.** Align content to the title edge (x 2.33 cm, width 29.21 cm); one 0.76 cm gap between blocks; ≥ 20% empty space. N cards in a row: width = (29.21 − (N − 1) × 0.76) ÷ N. Left-align body; center only cover titles and big numbers.
+Limits count Chinese characters; a Latin letter, digit or space counts half, rounded up (6 Latin characters = 3). `?` marks an optional field.
 
-**Fonts.** Two at most, set with `font` on every title and box: Georgia + Calibri (formal), Arial Black + Arial (launch), Calibri Light + Calibri (clean). Chinese: "Microsoft YaHei"; Japanese: "Yu Gothic".
+| Type | Use for | Fields | Limits |
+|---|---|---|---|
+| `hero` | Cover | `title`, `subtitle?`, `meta?` (presenter, date) | title 18, subtitle 30, meta 30 |
+| `statement` | One sentence to remember | `statement`, `note?` | statement 40, note 60 |
+| `pillars` | 2–4 parallel points | `title`, `pillars`: 2–4 × `{ heading, body }` | heading 12, body 60 |
+| `evidence` | Key numbers | `title`, `metrics`: 1–4 × `{ value, label, note? }`, `detail?`: up to 3 lines | value 3 (about 6 Latin characters, like `+18%`), label 12, note 30, detail line 40 |
+| `timeline` | Steps in order | `title`, `steps`: 3–6 × `{ heading, body }` | heading 10, body 30 |
+| `comparison` | Two sides | `title`, `left`, `right`: each `{ heading, points }` with 1–4 points | heading 12, point 30 |
+| `grid` | 3–8 short parallel items | `title`, `items`: 3–8 × `{ heading, body }` | heading 10, body 30 |
+| `quote` | A quotation | `quote`, `source?` | quote 60, source 20 |
+| `cta` | Closing: thanks, next step | `title`, `subtitle?`, `contact?` | title 18, subtitle 40, contact 30 |
+| `showcase` | One picture, chart or table | `title`, `media`, `caption?`, `body?` | caption 30, body 100 |
 
-**Color.** One palette — primary (60–70% of the color), secondary, sparing accent, text, muted: the user's brand colors, a seed below, or a blend.
+The `title` of a pillars, evidence, timeline, comparison, grid or showcase page is at most 22. Any slide may add `notes`, at most 300.
 
-| Theme | Primary | Secondary | Accent | Text | Muted |
-|---|---|---|---|---|---|
-| Navy | 1E2761 | CADCFC | F96167 | 333333 | 8899BB |
-| Forest | 2C5F2D | 97BC62 | D4A843 | 2D2D2D | 6B8E6B |
+Line breaks: titles, headings, labels, values, captions, the statement, the quote, the source, the contact, list items, table cells, chart labels and metric notes allow none. Pillar, grid and step bodies, a statement's `note` and a showcase `body` allow at most 2. `notes` are free.
 
-On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
+`showcase.media` holds exactly one of:
 
-**Structure.** Cover (title, subtitle, organization or presenter, date), agenda, content, closing with takeaways. Vary layouts (columns, card row, big number, table); most slides carry an informative non-text element. Avoid lines under titles, cards with a colored left stripe, emoji icons, hype words, invented statistics.
+- `"image"`: a `data:image/png|jpeg|svg+xml;base64,…` URI of image data you really have; prefer PNG or JPEG, since the check may report an SVG as distorted. Attachments and web URLs cannot be used.
+- `"chart"`: `{ "kind": "bar", "categories": ["Q1", "Q2"], "series": [{ "name": "2026", "values": [142, 158] }] }`. Kinds: `bar`, `line`, `pie`; at most 8 categories and 3 series, one value per category. A pie takes exactly one series with 2–6 slices. Labels (categories, series names) are at most 12 and never contain `,` `;` or `:`.
+- `"table"`: `{ "columns": ["Item", "Share"], "rows": [["A", "+18%"]] }`. At most 6 columns and 6 rows counting the header, so 5 body rows; header cells at most 8, body cells at most 10; every row has one cell per column.
 
-## Commands
+A pillar, grid item or step may be a `"heading: body"` string, which splits at the first colon. Use the object form whenever a heading contains a colon.
 
-**Slide, title, notes.** Slides are blank; `background` is a color. `title` makes the slide's real title; style it right after on `/slide[N]/placeholder[title]` (font and size are not inherited). Its box is x 2.33, y 1, 29.21 × 3.67 cm (content starts at y ≈ 5 cm); `x`, `y`, `width`, `height` move it.
+## Deck fields
+
+| Field | Value |
+|---|---|
+| `kind` | `"deck"`, required |
+| `title` | The deck's name, at most 22, required |
+| `language` | `zh`, `en` or `ja`, the language of the text; it picks the fonts, and a missing one means `zh` |
+| `theme` | `navy`; leave it out |
+| `slides` | 3–30 slide objects: `{ "type": …, the page's fields, "notes": … }` |
+
+## Worked example
+
+「做一个 Transformer 介绍的 PPT」: eight slides, none of the same type next to another. Its evidence figures are made up for the example; never copy them into a real deck.
+
+```json
+{
+  "kind": "deck",
+  "title": "Transformer 入门",
+  "language": "zh",
+  "slides": [
+    {"type": "hero", "title": "Transformer 入门", "subtitle": "注意力机制如何改变深度学习", "meta": "团队技术分享 · 2026 年 11 月"},
+    {"type": "statement", "statement": "让每个词都能直接看到整句话", "note": "2017 年 Transformer 取代 RNN，成为今天大模型的共同基础", "notes": "先抛结论：注意力让模型一步看到全句，后面几页解释为什么这很重要。"},
+    {"type": "pillars", "title": "为什么需要 Transformer", "pillars": [
+      {"heading": "RNN 逐词计算", "body": "必须按顺序处理每个词，GPU 无法并行，训练很慢"},
+      {"heading": "长句信息衰减", "body": "距离越远的词，信息在逐步传递中越容易丢失"},
+      {"heading": "注意力取代循环", "body": "每个词一步直接关注全句，既能并行，也不怕距离"}
+    ], "notes": "三个痛点对应三个收益：并行、长距离依赖、训练规模。"},
+    {"type": "timeline", "title": "从注意力到大模型", "steps": [
+      {"heading": "2014 年", "body": "注意力首次用于 RNN 翻译"},
+      {"heading": "2017 年", "body": "Transformer 论文发表"},
+      {"heading": "2018 年", "body": "BERT 与 GPT 相继出现"},
+      {"heading": "2022 年", "body": "大模型走向公众"}
+    ], "notes": "四个节点只讲一句话，重点放在 2017 年。"},
+    {"type": "comparison", "title": "RNN 与 Transformer", "left": {"heading": "RNN", "points": ["逐词顺序计算", "长距离依赖容易丢失", "训练难以并行", "结构简单，参数较少"]}, "right": {"heading": "Transformer", "points": ["整句并行计算", "任意两词直接关联", "充分利用 GPU", "计算量随句长平方增长"]}, "notes": "先讲 RNN 的局限，再讲 Transformer 的优势，最后坦率提到它的计算成本。"},
+    {"type": "evidence", "title": "落地效果：Q1 收入 +18%", "metrics": [
+      {"value": "+18%", "label": "Q1 收入", "note": "相对上季度"},
+      {"value": "3×", "label": "GPU 训练速度", "note": "对比 RNN 基线"},
+      {"value": "-40%", "label": "推理延迟", "note": "同等精度下"}
+    ], "detail": ["数据来自内部 A/B 测试，样本为 2026 年 Q1"], "notes": "三个指标都来自内部 A/B 测试：先讲收入，再讲训练速度和延迟。"},
+    {"type": "grid", "title": "Transformer 的应用", "items": [
+      {"heading": "文本", "body": "翻译、摘要与对话"},
+      {"heading": "图像", "body": "ViT 把图片切成小块处理"},
+      {"heading": "语音", "body": "识别与合成同样适用"},
+      {"heading": "代码", "body": "补全、解释与审查"},
+      {"heading": "视频", "body": "按时空小块建模与生成"},
+      {"heading": "多模态", "body": "图文音统一在一个模型里"}
+    ], "notes": "六个场景共用同一套结构，这正是它流行的原因。"},
+    {"type": "cta", "title": "谢谢，欢迎提问", "subtitle": "下一步：用 PyTorch 实现一个小型 Transformer", "contact": "ai-club@example.com"}
+  ]
+}
+```
+
+## Expert mode: raw commands
+
+Use this only when no page type can do the job (a custom layout, a picture at a chosen spot); a deck object is the first choice. `content` is then a JSON array of commands run in order as one atomic batch on an empty 33.87 × 19.05 cm deck. If one fails, nothing is saved and the result names its `index` and error; fix it and resend the whole array (at most 2 retries).
+
+- Slides are numbered in the order added (the first `add slide` is `/slide[1]`). Give each shape and table a `name` unique on its slide and address it as `/slide[2]/shape[@name=Card1]` or `/slide[2]/table[@name=Plan]`, never `shape[N]`.
+- Prop values are strings: sizes in points (`"20"`), lengths with a unit (`"2cm"`), colors as hex without `#`. A newline in `text` starts a new paragraph; unknown props are dropped.
+- Title 36–44pt bold, body at least 18pt, content from x 2.33 cm, width 29.21 cm, below y 5 cm, at least 20% empty. Chinese font "Microsoft YaHei", Japanese "Yu Gothic". A box is at least lines × size × 0.05 cm + 0.4 cm tall; a line holds about width_cm ÷ (size × 0.035) CJK characters, twice as many Latin ones.
+
+Slide with a background and a real title, plus notes:
 
 ```json
 [
   {"command":"add","parent":"/","type":"slide","props":{"background":"FFFFFF","title":"Revenue grew 18%"}},
-  {"command":"set","path":"/slide[1]/placeholder[title]","props":{"font":"Georgia","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[1]","type":"notes","props":{"text":"Lead with the 18% beat; EMEA explains most of it."}}
+  {"command":"add","parent":"/slide[1]","type":"notes","props":{"text":"Lead with the 18% beat."}}
 ]
 ```
 
-**Text box and bullets.** `list`: `"bullet"` or `"numbered"`, one item per paragraph. Props: `text`, `x`, `y`, `width`, `height`, `font`, `size`, `bold`, `italic`, `color`, `align` (left/center/right), `valign` (top/middle/bottom), `fill`, `spaceAfter`.
+Title style (font and size are not inherited, so set them right after):
 
 ```json
-[{"command":"add","parent":"/slide[1]","type":"shape","props":{"name":"Points","text":"Renewals up 12%\nEMEA launched in March\nNRR held at 118%","list":"bullet","x":"2.33cm","y":"5.2cm","width":"18cm","height":"5cm","font":"Calibri","size":"20","color":"333333","spaceAfter":"6pt"}}]
+[{"command":"set","path":"/slide[1]/placeholder[title]","props":{"font":"Georgia","size":"36","bold":"true","color":"1E2761"}}]
 ```
 
-**Shapes.** `preset`: rect, roundRect, ellipse, triangle, diamond, rightArrow, chevron; `fill` colors it, `line` adds an outline color; it can hold text. Later shapes draw on top.
+Text box, one item per paragraph (`list`: `"bullet"` or `"numbered"`; `preset` such as `roundRect` with `fill` makes it a shape):
 
 ```json
-[{"command":"add","parent":"/slide[1]","type":"shape","props":{"name":"Kpi","preset":"roundRect","fill":"1E2761","x":"21.09cm","y":"5.2cm","width":"10.45cm","height":"5cm","text":"118%","font":"Georgia","size":"60","bold":"true","color":"FFFFFF","align":"center","valign":"middle"}}]
+[{"command":"add","parent":"/slide[1]","type":"shape","props":{"name":"Points","text":"Renewals up 12%\nEMEA launched in March","list":"bullet","x":"2.33cm","y":"5.2cm","width":"18cm","height":"5cm","font":"Calibri","size":"20","color":"333333"}}]
 ```
 
-**Table.** `data`: rows split by `;`, cells by `,` (quote a cell as `\"…\"` to keep a comma); then style the body on the table and the header on `tr[1]`. At most about 6 × 5 cells, body 14–18pt.
+Table (`data`: rows split by `;`, cells by `,`):
 
 ```json
-[
-  {"command":"add","parent":"/slide[1]","type":"table","props":{"name":"Plan","data":"Phase,Owner,Date;Pilot,Operations,Q1;Rollout,Sales,Q2","x":"2.33cm","y":"10.96cm","width":"29.21cm","height":"4cm","colWidths":"12cm,10cm,7.21cm","headerFill":"1E2761","bodyFill":"F5F7FA"}},
-  {"command":"set","path":"/slide[1]/table[@name=Plan]","props":{"font":"Calibri","size":"16","color":"333333","valign":"middle"}},
-  {"command":"set","path":"/slide[1]/table[@name=Plan]/tr[1]","props":{"bold":"true","color":"FFFFFF"}}
-]
+[{"command":"add","parent":"/slide[1]","type":"table","props":{"name":"Plan","data":"Phase,Owner;Pilot,Operations;Rollout,Sales","x":"2.33cm","y":"10.96cm","width":"29.21cm","height":"4cm","headerFill":"1E2761","bodyFill":"F5F7FA"}}]
 ```
-
-**Picture.** `src` is a base64 `data:` URI of image data you really have (PNG, JPEG, or a small SVG you wrote; SVG needs a recent PowerPoint). Attachments cannot be referenced; web URLs are refused. Set `alt`, or use shapes.
-
-```json
-[{"command":"add","parent":"/slide[1]","type":"picture","props":{"name":"Dot","src":"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMCAxMCI+PGNpcmNsZSBjeD0iNSIgY3k9IjUiIHI9IjUiIGZpbGw9IiMxRTI3NjEiLz48L3N2Zz4=","x":"30.54cm","y":"16.3cm","width":"1cm","height":"1cm","alt":"Brand dot"}}]
-```
-
-## Worked example: 8-slide deck
-
-「做一个 Transformer 介绍的 PPT」, Navy palette.
-
-```json
-[
-  {"command":"add","parent":"/","type":"slide","props":{"background":"1E2761","title":"Transformer 入门"}},
-  {"command":"set","path":"/slide[1]/placeholder[title]","props":{"font":"Microsoft YaHei","x":"2.33cm","y":"6cm","width":"29.21cm","height":"3cm","size":"44","bold":"true","color":"FFFFFF","align":"center"}},
-  {"command":"add","parent":"/slide[1]","type":"shape","props":{"font":"Microsoft YaHei","name":"Sub","text":"注意力机制如何改变了深度学习\n团队技术分享 · 2026 年 11 月","x":"2.33cm","y":"9.5cm","width":"29.21cm","height":"2.6cm","size":"20","color":"CADCFC","align":"center"}},
-  {"command":"add","parent":"/","type":"slide","props":{"title":"今天讲什么"}},
-  {"command":"set","path":"/slide[2]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[2]","type":"shape","props":{"font":"Microsoft YaHei","name":"Agenda","text":"为什么需要 Transformer\n自注意力机制\n整体结构\n应用与局限","list":"numbered","x":"2.33cm","y":"5.2cm","width":"20cm","height":"7cm","size":"24","color":"333333"}},
-  {"command":"add","parent":"/","type":"slide","props":{"title":"为什么需要 Transformer"}},
-  {"command":"set","path":"/slide[3]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[3]","type":"shape","props":{"font":"Microsoft YaHei","name":"Why","text":"RNN 逐词计算，难以并行\n长句里前后信息容易衰减\n2017 年：注意力取代循环","list":"bullet","x":"2.33cm","y":"5.2cm","width":"18cm","height":"7cm","size":"22","color":"333333"}},
-  {"command":"add","parent":"/slide[3]","type":"shape","props":{"font":"Microsoft YaHei","name":"Year","preset":"roundRect","fill":"1E2761","x":"21.09cm","y":"5.2cm","width":"10.45cm","height":"6cm","text":"2017","size":"60","bold":"true","color":"FFFFFF","align":"center","valign":"middle"}},
-  {"command":"add","parent":"/slide[3]","type":"notes","props":{"text":"瓶颈在顺序计算。"}},
-  {"command":"add","parent":"/","type":"slide","props":{"title":"自注意力：每个词都看全句"}},
-  {"command":"set","path":"/slide[4]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[4]","type":"shape","props":{"font":"Microsoft YaHei","name":"Q","preset":"roundRect","fill":"CADCFC","x":"2.33cm","y":"5.5cm","width":"9.23cm","height":"6cm","text":"Query\n想找什么","size":"24","color":"1E2761","align":"center","valign":"middle"}},
-  {"command":"add","parent":"/slide[4]","type":"shape","props":{"font":"Microsoft YaHei","name":"K","preset":"roundRect","fill":"CADCFC","x":"12.32cm","y":"5.5cm","width":"9.23cm","height":"6cm","text":"Key\n能被谁找到","size":"24","color":"1E2761","align":"center","valign":"middle"}},
-  {"command":"add","parent":"/slide[4]","type":"shape","props":{"font":"Microsoft YaHei","name":"V","preset":"roundRect","fill":"1E2761","x":"22.31cm","y":"5.5cm","width":"9.23cm","height":"6cm","text":"Value\n被取走的内容","size":"24","color":"FFFFFF","align":"center","valign":"middle"}},
-  {"command":"add","parent":"/slide[4]","type":"notes","props":{"text":"Query 与每个 Key 比相似度，再汇总 Value。"}},
-  {"command":"add","parent":"/","type":"slide","props":{"title":"整体结构"}},
-  {"command":"set","path":"/slide[5]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[5]","type":"table","props":{"name":"Parts","data":"模块,作用;位置编码,标记词的先后顺序;多头注意力,从多个角度关注上下文;编码器 / 解码器,理解输入 / 逐词生成","x":"2.33cm","y":"5.2cm","width":"29.21cm","height":"7.2cm","colWidths":"9cm,20.21cm","headerFill":"1E2761","bodyFill":"F5F7FA"}},
-  {"command":"set","path":"/slide[5]/table[@name=Parts]","props":{"font":"Microsoft YaHei","size":"18","color":"333333","valign":"middle"}},
-  {"command":"set","path":"/slide[5]/table[@name=Parts]/tr[1]","props":{"bold":"true","color":"FFFFFF"}},
-  {"command":"add","parent":"/slide[5]","type":"notes","props":{"text":"编码器读懂输入，解码器逐词写出结果。"}},
-  {"command":"add","parent":"/","type":"slide","props":{"title":"代价也不小"}},
-  {"command":"set","path":"/slide[6]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[6]","type":"shape","props":{"font":"Microsoft YaHei","name":"Costs","fill":"1E2761","text":"计算量随句长平方增长\n依赖海量训练数据\n内部决策难以解释","list":"bullet","x":"2.33cm","y":"5.2cm","width":"29.21cm","height":"6cm","size":"24","color":"FFFFFF"}},
-  {"command":"add","parent":"/slide[6]","type":"notes","props":{"text":"长文本的成本是主要短板。"}},
-  {"command":"add","parent":"/","type":"slide","props":{"title":"要点回顾"}},
-  {"command":"set","path":"/slide[7]/placeholder[title]","props":{"font":"Microsoft YaHei","size":"36","bold":"true","color":"1E2761"}},
-  {"command":"add","parent":"/slide[7]","type":"shape","props":{"font":"Microsoft YaHei","name":"Recap","text":"每个词直接看到全句\n并行计算，训练更快\n文本、图像、语音通用","list":"bullet","x":"2.33cm","y":"5.2cm","width":"29.21cm","height":"5cm","size":"24","color":"333333"}},
-  {"command":"add","parent":"/slide[7]","type":"notes","props":{"text":"三句话带走。"}},
-  {"command":"add","parent":"/","type":"slide","props":{"background":"1E2761","title":"谢谢！欢迎提问"}},
-  {"command":"set","path":"/slide[8]/placeholder[title]","props":{"font":"Microsoft YaHei","x":"2.33cm","y":"7cm","width":"29.21cm","height":"3cm","size":"40","bold":"true","color":"FFFFFF","align":"center"}}
-]
-```
-
-## Common mistakes
-
-| Mistake | Instead |
-|---|---|
-| "•" or "1." typed into text | `"list":"bullet"` / `"numbered"` |
-| Title without `font`/`size` | Style the title placeholder |
 
 <!-- Adapted with changes from OfficeCLI (skills/officecli-pptx, v1.0.160, Apache-2.0); see notices/officecli-skills.txt -->
