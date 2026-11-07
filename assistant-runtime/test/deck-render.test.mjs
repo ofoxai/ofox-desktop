@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { PAGE_TYPES, parseDeck } from "../src/deck/schema.mjs";
 import { themeFor } from "../src/deck/theme.mjs";
-import { CANVAS, CONTENT, GAP_CM } from "../src/deck/layout.mjs";
-import { heightCm, lineCount } from "../src/deck/text.mjs";
+import { CANVAS, CONTENT, GAP_CM, TITLE_BOX } from "../src/deck/layout.mjs";
+import { FIT, heightCm, lineCount } from "../src/deck/text.mjs";
 import { RENDERERS, renderDeck } from "../src/deck/render.mjs";
 
 const navy = themeFor("navy");
@@ -438,6 +438,38 @@ test("text boxes are tall enough for their text at the limits", () => {
       estimate(shape) <= cm(shape.props.height),
       `${shape.props.name}: ${estimate(shape)} > ${shape.props.height}`,
     );
+});
+
+test("the title rule drops under a title that needs two lines", () => {
+  // 40 Latin characters: 24.8 units in Arial Black, past the 22.59 a line
+  // holds at 36pt, the smallest title size.
+  const long = "Why Attention Replaced Recurrence in NLP";
+  assert.equal(long.length, 40);
+  const ruleOf = (title) => {
+    const { commands } = renderDeck(
+      around({ type: "pillars", title, pillars: headed(3, 4, 10) }, "en"),
+      navy,
+    );
+    return {
+      size: Number(titleOf(commands, 2).props.size),
+      rule: named(commands, "s2-title-rule").props,
+    };
+  };
+  const { size, rule } = ruleOf(long);
+  assert.equal(size, 36);
+  const lines = lineCount(long, TITLE_BOX.w, size, {
+    latinRatio: FIT.titleLatinRatio,
+  });
+  assert.equal(lines, 2);
+  // The title sits at the top of its box: two lines of 36pt end at 4.6 cm.
+  const foot = TITLE_BOX.y + heightCm(lines, size);
+  assert.ok(foot <= cm(rule.y), `title ends at ${foot}, the rule at ${rule.y}`);
+  assert.ok(foot <= CONTENT.top, `title ends at ${foot}`);
+  assert.equal(rule.y, "4.7cm");
+  assert.ok(cm(rule.y) + cm(rule.height) <= CONTENT.top);
+  // A one-line title keeps the rule at 4.4 cm.
+  assert.equal(ruleOf("Three things to know").rule.y, "4.4cm");
+  assert.equal(ruleOf("三项核心能力").rule.y, "4.4cm");
 });
 
 test("only content pages carry the title rule and the page number", () => {

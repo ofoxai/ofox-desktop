@@ -96,19 +96,36 @@ function stackCentered(heights, gap) {
 
 // The short bar under a content page's title (decor.titleRule "bar").
 const TITLE_RULE = { x: TITLE_BOX.x, y: 4.4, w: 2, h: 0.12 };
+// A title that needs two lines even at the smallest title size (a long
+// English one) ends lower: the bar goes this far under it, but no lower
+// than TITLE_RULE_LOWEST, so it stays above the content area at 5 cm.
+const TITLE_RULE_GAP_CM = 0.15;
+const TITLE_RULE_LOWEST = 4.7;
 
-// A content page opens with its title, sized to one line, and the theme's
-// rule under it. renderDeck adds the page number.
+// Where the title rule goes under a title set at `size`: at TITLE_RULE.y
+// under one line; under more, just below the title's measured foot. The
+// title sits at the top of its box (TITLE_BOX.y).
+function titleRuleY(title, size) {
+  const lines = lineCount(title, TITLE_BOX.w, size, TITLE_FONT);
+  if (lines <= 1) return TITLE_RULE.y;
+  const foot = TITLE_BOX.y + heightCm(lines, size);
+  return Math.min(TITLE_RULE_LOWEST, foot + TITLE_RULE_GAP_CM);
+}
+
+// A content page opens with its title, sized to one line when it can be,
+// and the theme's rule under it. renderDeck adds the page number.
 function contentPage(ctx, title) {
   const { n, theme, fonts } = ctx;
+  const heading = titleCommands(n, title, { theme, fonts });
   const commands = [
     slideCommand(n, { background: theme.colors.background, title }),
-    ...titleCommands(n, title, { theme, fonts }),
+    ...heading,
   ];
   if (theme.decor.titleRule === "bar")
     commands.push(
       textboxCommand(n, `s${n}-title-rule`, undefined, {
         ...TITLE_RULE,
+        y: titleRuleY(title, Number(heading[0].props.size)),
         fill: theme.colors.primary,
       }),
     );
