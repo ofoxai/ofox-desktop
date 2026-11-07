@@ -1498,34 +1498,41 @@ fn location(text: &str, scheme: impl Fn(&str, &str) -> bool) -> bool {
         || (scheme && !is_data_uri(&path) && !is_cell_range(&path))
 }
 
-/// Whether a table's `data` would be read as a file or an address rather
-/// than as inline CSV: it starts like a path (`/`, `\`, `~`, `.`, `@`, a
-/// drive), it is an address, or, without a comma, semicolon or line break,
-/// it is a single path or scheme. `a:b,c` is a row.
+/// What a `data` value, or one of its cells, starts with when officecli
+/// would read it as a file: a root, a folder (`./`, `../`, `~/`, either
+/// slash) or a mention (`@file`). A drive is checked apart (see
+/// [`data_reaches_out`]).
+const PATH_STARTS: &[&str] = &["/", "\\", "./", ".\\", "../", "..\\", "~/", "~\\", "@"];
+
+/// Whether a table's or chart's `data` would be read as a file or an
+/// address rather than as inline cells: it, or one of its cells (split at
+/// `,`, `;`, tabs and line breaks), starts like a path ([`PATH_STARTS`], or
+/// a drive: one letter, a colon and a slash); a `..` segment climbs out of
+/// the folder; or it is an address (`scheme://…`, `file:`). Anything else
+/// is prose: `.NET`, `~approx`, `Sales:5`, `v1.2`, `a:b`.
 fn data_reaches_out(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    let bytes = text.as_bytes();
-    let drive = bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'/' | b'\\');
-    let single = !text.contains([',', ';', '\n']);
+    let path_like = |cell: &str| {
+        let bytes = cell.as_bytes();
+        let drive = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'/' | b'\\');
+        drive || PATH_STARTS.iter().any(|start| cell.starts_with(start))
+    };
     // `a,b/../../x` climbs out of the folder too: .NET folds `b/..` away.
     let climbs = text
         .replace('\\', "/")
         .split(['/', ',', ';', '\n', '\r', '\t'])
         .any(|part| part.trim() == "..");
+    let lower = text.to_ascii_lowercase();
     climbs
-        || text.starts_with(['/', '\\', '~', '.', '@'])
-        || drive
+        || text
+            .split([',', ';', '\n', '\r', '\t'])
+            .any(|cell| path_like(cell.trim()))
         || lower
             .split_once("://")
             .is_some_and(|(name, _)| is_scheme(name))
         || lower.starts_with("file:")
-        || (single
-            && lower
-                .split_once(':')
-                .is_some_and(|(name, _)| is_scheme(name)))
 }
 
 /// One cell: one to three letters and a row number (`B12`).
@@ -4920,29 +4927,55 @@ esac"#,
     }
 
     /// A deck's table cells and chart series names are prose: PowerPoint
-    /// evaluates nothing, so a leading `+`, `-`, `=` or `@` is text there.
+    /// evaluates nothing, so a leading `+`, `-`, `=`, `.`, `~` or a colon is
+    /// text there. Only a path-like value or cell reaches out (see
+    /// [`data_reaches_out`]).
     #[test]
     fn deck_data_cells_are_prose() {
         let table = |data: &str| json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": {"data": data}});
-        for item in [
+        let chart = |data: &str| json!({"command": "add", "parent": "/slide[1]", "type": "chart", "props": {"chartType": "column", "data": data, "categories": "Q1,Q2"}});
+        let mut items = vec![
             table("指标,变化;收入,+18%;成本,-5%"),
             // officecli's quoted cell, a comma inside.
             table("指标,变化;\"含税, +18%\",=1"),
-            table("指标,变化;\"含税, +18%\",@x"),
-            json!({"command": "add", "parent": "/slide[1]", "type": "chart", "props": {"chartType": "column", "data": "-成本:1,2", "categories": "Q1,Q2"}}),
-        ] {
+            chart("-成本:1,2"),
+            chart("Sales:5"),
+        ];
+        for prose in [".NET", "~approx", "Sales:5", "含税, +18%", "v1.2", "a:b"] {
+            items.push(table(prose));
+            items.push(table(&format!("Name,Note;x,{prose}")));
+        }
+        for item in items {
             deck_batch(std::slice::from_ref(&item))
                 .unwrap_or_else(|error| panic!("{item}: {error}"));
         }
-        // Files and addresses are still refused.
-        for data in ["/Users/x/t.csv", "@t.csv", "https://x.example/t.csv"] {
-            assert!(deck_batch(&[table(data)]).is_err(), "{data}");
+        for path in PATH_LIKE_DATA {
+            for data in [path.to_string(), format!("Name,Note;x,{path}")] {
+                assert!(deck_batch(&[table(&data)]).is_err(), "{data}");
+                assert!(deck_batch(&[chart(&data)]).is_err(), "{data}");
+            }
         }
-        // A workbook's table rows still hold values only.
-        let sheet_table = json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B3", "data": "指标,变化;收入,+18%;成本,-5%"}});
-        assert!(workbook(&[sheet_table])
-            .unwrap_err()
-            .contains("table rows hold values only"));
+    }
+
+    /// `data` values and cells that read as a file in every format.
+    const PATH_LIKE_DATA: &[&str] = &["/x.csv", "@file", "C:\\x", "../x", "~/x", ".\\x"];
+
+    /// A workbook's table cells are prose too, unless they read as a file;
+    /// its formula checks still hold.
+    #[test]
+    fn workbook_data_cells_are_prose_unless_path_like() {
+        let table = |data: &str| json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": data}});
+        for prose in [".NET", "~approx", "Sales:5", "v1.2", "a:b"] {
+            let item = table(&format!("Name,{prose}"));
+            workbook(std::slice::from_ref(&item)).unwrap_or_else(|error| panic!("{item}: {error}"));
+        }
+        for path in PATH_LIKE_DATA {
+            for data in [path.to_string(), format!("Name,{path}")] {
+                assert!(workbook(&[table(&data)]).is_err(), "{data}");
+            }
+        }
+        let error = workbook(&[table("指标,变化;收入,+18%;成本,-5%")]).unwrap_err();
+        assert!(error.contains("table rows hold values only"), "{error}");
     }
 
     #[test]
@@ -5174,9 +5207,11 @@ esac"#,
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B3", "data": "Name,Value\nA,=WEBSERVICE(B2)"}}),
                 "calls WEBSERVICE",
             ),
+            // A leading `@` reads as a file (`@file`) before it reads as a
+            // formula.
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name;@x"}}),
-                "table rows hold values only",
+                "must be the table's rows inline",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name,\" +SUM(1)\""}}),
@@ -5593,6 +5628,10 @@ esac"#,
             "H1,H2;R1C1,R1C2",
             "Total",
             "https,x",
+            // Prose: a drive is a letter, a colon and a slash; a folder is
+            // `.` or `~` and a slash.
+            "C:t.csv",
+            ".t.csv",
         ] {
             assert!(!refused("data", data), "{data}");
         }
@@ -5602,9 +5641,7 @@ esac"#,
             "https://x/t.csv,extra",
             "@t.csv",
             "C:\\t.csv",
-            "C:t.csv",
             "~/t.csv",
-            ".t.csv",
             "\\\\server\\t.csv",
             "file:t.csv",
             "x/../../t.csv",
