@@ -22,9 +22,12 @@ export function lineCapacity(widthCm, sizePt) {
 }
 
 // Lines a text takes: each paragraph (split on \n) wraps on its own, and an
-// empty paragraph still takes one line.
+// empty paragraph still takes one line. A box with no room for a character
+// (width at or under the insets) cannot hold any text, so it is Infinity
+// lines rather than a confident one-line fit.
 export function lineCount(text, widthCm, sizePt) {
   const capacity = lineCapacity(widthCm, sizePt);
+  if (!(capacity > 0)) return Infinity;
   return text
     .split(/\r?\n/)
     .reduce(
@@ -51,15 +54,17 @@ export function heightCm(
 // The largest size in `sizes` (descending) whose text fits `maxHeightCm`.
 // When none fits, the smallest size is returned with `fits: false`.
 export function fitSize(text, widthCm, maxHeightCm, sizes, options = {}) {
-  const {
-    paragraphs = text.split(/\r?\n/).length,
-    spaceAfterPt,
-  } = options;
+  const { paragraphs = text.split(/\r?\n/).length, spaceAfterPt } = options;
   let result;
   for (const size of sizes) {
     const lines = lineCount(text, widthCm, size);
     const height = heightCm(lines, size, { paragraphs, spaceAfterPt });
-    result = { size, lines, height, fits: height <= maxHeightCm };
+    result = {
+      size,
+      lines,
+      height,
+      fits: Number.isFinite(height) && height <= maxHeightCm,
+    };
     if (result.fits) return result;
   }
   return result;
