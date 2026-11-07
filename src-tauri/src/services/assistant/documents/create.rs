@@ -9,6 +9,7 @@
 //! looks like a credential.
 use super::{
     engines::Engines,
+    fix,
     runner::{run_engine, EngineOutput, ENGINE_TIMEOUT, OUTPUT_LIMIT, TYPST_PACKAGES},
 };
 use crate::services::assistant::{
@@ -370,7 +371,7 @@ fn unescape_newlines(commands: &mut [Value]) {
 /// picture or any other file comes as a `data:` URI), with no diagram or
 /// embedded object, and Word fields that only show a page number or a date
 /// (see [`refused_shape`]).
-fn check_batch(commands: &mut [Value]) -> Result<(), String> {
+pub(super) fn check_batch(commands: &mut [Value]) -> Result<(), String> {
     if commands.is_empty() {
         return Err(refuse(
             FAILED,
@@ -1970,6 +1971,9 @@ struct Made {
     /// Slides, sheets or pages, when the engine reports them.
     count: Option<u64>,
     issues: Vec<Issue>,
+    /// The layout fixes the host applied after the checks (see
+    /// [`fix_layout`]).
+    fixed: usize,
 }
 
 /// One engine at work in one document's folder.
@@ -2168,7 +2172,8 @@ fn data(report: &Value) -> &Value {
 }
 
 /// An Office document: create the file, run the batch (atomic: one failed
-/// command and nothing is applied), then check it and count it.
+/// command and nothing is applied), then check it, fix a deck's layout (see
+/// [`fix_layout`]) and count it.
 async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, String> {
     let file = format.file();
     let file = file.as_str();
@@ -2189,19 +2194,14 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
     if let Some(report) = work.report(&["validate", file, "--json"]).await {
         issues.extend(validation_issues(work, &report));
     }
-    let view = [
-        "view",
-        file,
-        "issues",
-        "--limit",
-        VIEW_ISSUES_LIMIT,
-        "--json",
-    ];
-    match work.report(&view).await {
-        Some(report) if data(&report)["issues"].is_array() => {
-            issues.extend(view_issues(work, &report))
+    let mut fixed = 0;
+    match view_report(work, file).await {
+        Some(report) => {
+            let (found, applied) = fix_layout(work, file, format, &report).await?;
+            issues.extend(found);
+            fixed = applied;
         }
-        _ => issues.push(Issue::warning(ISSUES_UNAVAILABLE.into(), None)),
+        None => issues.push(Issue::warning(ISSUES_UNAVAILABLE.into(), None)),
     }
     let count = match format.count() {
         Some(key) => work
@@ -2220,7 +2220,100 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
         preview,
         count,
         issues: finished(issues),
+        fixed,
     })
+}
+
+/// `view issues --json`, when it gave a report with its list.
+async fn view_report(work: &Work<'_>, file: &str) -> Option<Value> {
+    let view = [
+        "view",
+        file,
+        "issues",
+        "--limit",
+        VIEW_ISSUES_LIMIT,
+        "--json",
+    ];
+    work.report(&view)
+        .await
+        .filter(|report| data(report)["issues"].is_array())
+}
+
+/// A deck's overflowing text, shapes past the slide's edge and dim text,
+/// fixed by the host (see [`fix`]) and checked again, for at most
+/// [`fix::MAX_ROUNDS`] rounds; `first` is the checks' first report. The
+/// issues of the last report, and how many fixes were applied. Each round's
+/// `set` commands pass the model's batch checks and run as one batch
+/// (`fix-<round>.json`); one that is refused or fails ends the fixing with
+/// the issues as they are. Other formats are not fixed.
+async fn fix_layout(
+    work: &Work<'_>,
+    file: &str,
+    format: DocumentFormat,
+    first: &Value,
+) -> Result<(Vec<Issue>, usize), String> {
+    if format != DocumentFormat::Pptx {
+        return Ok((view_issues(work, first), 0));
+    }
+    let mut report = first.clone();
+    let mut fixed = 0;
+    for round in 1..=fix::MAX_ROUNDS {
+        let found: Vec<fix::ViewIssue> = data(&report)["issues"]
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(fix::parse_issue)
+            .collect();
+        // One `get` a shape a round, and only of a path the batch checks
+        // would let a fix name.
+        let mut places: Vec<(&str, Option<fix::Geometry>)> = vec![];
+        let mut fixes = vec![];
+        for issue in &found {
+            let place = match places.iter().find(|(path, _)| *path == issue.path) {
+                Some((_, place)) => *place,
+                None if issue.needs_geometry() && names_an_element(&issue.path, false, &[]) => {
+                    let place = work
+                        .report(&["get", file, &issue.path, "--json"])
+                        .await
+                        .as_ref()
+                        .and_then(fix::geometry);
+                    places.push((&issue.path, place));
+                    place
+                }
+                None => None,
+            };
+            fixes.extend(fix::fix_for(issue, place.as_ref()));
+        }
+        if fixes.is_empty() {
+            break;
+        }
+        let mut commands = fix::fix_batch(&fixes);
+        if check_batch(&mut commands).is_err() {
+            log::warn!("[Assistant] the layout fixes did not pass the batch checks");
+            break;
+        }
+        let input = format!("fix-{round}.json");
+        let (target, bytes) = (
+            work.dir.join(&input),
+            serde_json::to_vec(&commands).map_err(|_| PROTOCOL)?,
+        );
+        blocking(move || write_new(&target, &bytes)).await?;
+        let output = work
+            .run(&["batch", file, "--input", &input, "--json"])
+            .await?;
+        if batch_issues(work, &output).is_err() {
+            // Atomic: the file is as the last report saw it.
+            log::warn!("[Assistant] officecli did not apply the layout fixes");
+            break;
+        }
+        fixed += commands.len();
+        match view_report(work, file).await {
+            Some(next) => report = next,
+            None => return Ok((vec![Issue::warning(ISSUES_UNAVAILABLE.into(), None)], fixed)),
+        }
+    }
+    Ok((view_issues(work, &report), fixed))
 }
 
 /// The warnings of a batch that ran, or the failure of one that did not.
@@ -2474,6 +2567,7 @@ async fn make_pdf(work: &Work<'_>, body: &str) -> Result<Made, String> {
         preview,
         count: pages,
         issues: finished(issues),
+        fixed: 0,
     })
 }
 
@@ -2755,6 +2849,7 @@ impl AssistantHost {
                 preview: None,
                 count: None,
                 issues: vec![],
+                fixed: 0,
             },
             _ => return Err(DISABLED.into()),
         };
@@ -2763,6 +2858,9 @@ impl AssistantHost {
             json!({"name": document.name, "format": format.extension(), "issues": issues});
         if let (Some(key), Some(count)) = (format.count(), made.count) {
             params[key] = json!(count);
+        }
+        if format.engine() == Engine::Office {
+            params["fixed"] = json!(made.fixed);
         }
         scrub_secrets_in(&mut params, &self.known_keys());
         let mut record = MediaRecord {
@@ -2810,13 +2908,17 @@ impl AssistantHost {
                 file[key] = json!(count);
             }
         }
-        Ok(json!({
+        let mut result = json!({
             "status": "completed",
             "file": file,
             "issues": record.params["issues"],
             "filePath": made.file.to_string_lossy(),
             "previewPath": made.preview.as_deref().map(Path::to_string_lossy),
-        }))
+        });
+        if let Some(fixed) = record.params.get("fixed") {
+            result["fixed"] = fixed.clone();
+        }
+        Ok(result)
     }
 }
 
@@ -3077,6 +3179,240 @@ esac"#
 
     fn deck() -> Value {
         json!([{"command": "add", "parent": "/", "type": "slide", "props": {"title": "Hi"}}])
+    }
+
+    /// A stand-in officecli whose `view … issues` prints `rounds[k]` on its
+    /// k-th call (the last one after that), counted in `issues.calls`;
+    /// `get` prints `geometry`, and each `batch` adds its input file's name
+    /// to `batches.log`.
+    fn officecli_rounds(rounds: &[&str], stats: &str, geometry: &str) -> String {
+        let mut reports = String::new();
+        for (k, report) in rounds.iter().enumerate() {
+            let pattern = if k + 1 == rounds.len() {
+                "*".to_owned()
+            } else {
+                k.to_string()
+            };
+            reports.push_str(&format!(
+                "    {pattern}) cat <<'JSON'\n{report}\nJSON\n    ;;\n"
+            ));
+        }
+        format!(
+            r#"case "$1" in
+create) printf 'PK\003\004stub' > "$2" ;;
+batch) echo "$4" >> batches.log
+  [ "$4" = batch.json ] && cp "$4" batch-seen.json
+  echo '{{"success":true,"data":{{"results":[{{"index":0,"success":true}}]}}}}' ;;
+validate) echo '{{"valid":true}}' ;;
+get) cat <<'JSON'
+{geometry}
+JSON
+;;
+view) case "$3" in
+  issues) n=$(cat issues.calls 2>/dev/null || echo 0); echo $((n + 1)) > issues.calls
+    case "$n" in
+{reports}    esac ;;
+  stats) echo '{stats}' ;;
+  svg) echo '<svg/>' ;;
+  esac ;;
+esac"#
+        )
+    }
+
+    const OVERFLOW_MESSAGE: &str =
+        "text overflow: 7 lines at 20.0pt need 168pt, usable 49pt. suggest.height=6.2cm";
+
+    /// officecli 1.0.160's `view issues --json` for one overflowing box.
+    fn overflow_issues() -> String {
+        json!({"success": true, "data": {"count": 1, "issues": [{
+            "id": "O1", "type": 0, "severity": 1,
+            "path": "/slide[1]/shape[@id=100000]", "message": OVERFLOW_MESSAGE,
+        }]}})
+        .to_string()
+    }
+
+    /// officecli 1.0.160's `get --json` of that box.
+    const GEOMETRY: &str = r#"{"success":true,"data":{"matches":1,"results":[{"path":"/slide[1]/shape[@id=100000]","type":"textbox","format":{"name":"Body","id":100000,"x":"2.33cm","y":"5.2cm","width":"14cm","height":"2cm","size":"20pt"}}]}}"#;
+
+    /// The input files of the batches officecli ran beside `file`.
+    fn batches(file: &Path) -> Vec<String> {
+        std::fs::read_to_string(file.with_file_name("batches.log"))
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The commands of the fix batch `name` beside `file`.
+    fn fix_commands(file: &Path, name: &str) -> Value {
+        serde_json::from_slice(&std::fs::read(file.with_file_name(name)).unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn overflow_is_fixed_in_one_round_and_reported_as_fixed() {
+        let rounds = [overflow_issues(), NO_ISSUES.to_owned()];
+        let rounds: Vec<&str> = rounds.iter().map(String::as_str).collect();
+        let f = fixture(
+            Some(&officecli_rounds(&rounds, r#"{"slides":1}"#, GEOMETRY)),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "deck", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["issues"], json!([]), "{result}");
+        assert_eq!(result["fixed"], 1);
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(batches(&file), ["batch.json", "fix-1.json"]);
+        assert_eq!(
+            fix_commands(&file, "fix-1.json"),
+            json!([{"command": "set", "path": "/slide[1]/shape[@id=100000]", "props": {"height": "6.2cm"}}])
+        );
+        // The model's batch was not touched by the fix.
+        let seen: Value =
+            serde_json::from_slice(&std::fs::read(file.with_file_name("batch-seen.json")).unwrap())
+                .unwrap();
+        assert_eq!(seen, deck());
+        let record = f.record();
+        let generation = record.messages[0].media_for(Some("call-1")).unwrap();
+        assert_eq!(generation.params["fixed"], 1);
+        assert_eq!(generation.params["issues"], json!([]));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn fixing_stops_after_two_rounds_and_keeps_the_rest() {
+        let overflow = overflow_issues();
+        let f = fixture(
+            Some(&officecli_rounds(
+                &[&overflow, &overflow, &overflow],
+                r#"{"slides":1}"#,
+                GEOMETRY,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "deck", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["fixed"], 2);
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": OVERFLOW_MESSAGE, "path": "/slide[1]/shape[@id=100000]"}])
+        );
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(batches(&file), ["batch.json", "fix-1.json", "fix-2.json"]);
+        let calls = std::fs::read_to_string(file.with_file_name("issues.calls")).unwrap();
+        assert_eq!(calls.trim(), "3", "the first view and one after each round");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn fix_commands_target_the_reported_path_only() {
+        let two = json!({"success": true, "data": {"count": 2, "issues": [
+            {"id": "O1", "type": 0, "severity": 1, "path": "/slide[1]/shape[@id=100000]", "message": OVERFLOW_MESSAGE},
+            {"id": "C3", "type": 0, "subtype": "low_contrast", "severity": 1, "path": "/slide[2]/shape[@id=100007]",
+             "message": "Low-contrast text #555555 on dark fill — unreadable on projection. Use FFFFFF or a color brighter than 80%."},
+        ]}})
+        .to_string();
+        let f = fixture(
+            Some(&officecli_rounds(
+                &[&two, NO_ISSUES],
+                r#"{"slides":2}"#,
+                GEOMETRY,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "deck", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["fixed"], 2);
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        let commands = fix_commands(&file, "fix-1.json");
+        let mut paths: Vec<&str> = commands
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|command| command["path"].as_str().unwrap())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            ["/slide[1]/shape[@id=100000]", "/slide[2]/shape[@id=100007]"]
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn non_pptx_formats_are_not_fixed() {
+        let overflow = overflow_issues();
+        let f = fixture(
+            Some(&officecli_rounds(&[&overflow, NO_ISSUES], "{}", GEOMETRY)),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "memo", "format": "docx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["fixed"], 0);
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": OVERFLOW_MESSAGE, "path": "/slide[1]/shape[@id=100000]"}])
+        );
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(batches(&file), ["batch.json"]);
+        let record = f.record();
+        let generation = record.messages[0].media_for(Some("call-1")).unwrap();
+        assert_eq!(generation.params["fixed"], 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_refused_fix_batch_leaves_the_issues_as_warnings() {
+        // A path the fix cannot name (none), and one the batch checks refuse.
+        for path in ["", "/nowhere[1]"] {
+            let dim = json!({"success": true, "data": {"count": 1, "issues": [
+                {"id": "C3", "type": 0, "subtype": "low_contrast", "severity": 1, "path": path, "message": "Low-contrast text #555555 on dark fill"},
+            ]}})
+            .to_string();
+            let f = fixture(
+                Some(&officecli_rounds(
+                    &[&dim, NO_ISSUES],
+                    r#"{"slides":1}"#,
+                    GEOMETRY,
+                )),
+                None,
+            );
+            let result = f
+                .call(
+                    "call-1",
+                    json!({"name": "deck", "format": "pptx", "content": deck()}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(result["fixed"], 0, "{path}");
+            assert_eq!(
+                result["issues"],
+                json!([{"severity": "warning", "message": "Low-contrast text #555555 on dark fill", "path": path}]),
+                "{path}"
+            );
+            let file = PathBuf::from(result["filePath"].as_str().unwrap());
+            assert_eq!(batches(&file), ["batch.json"], "{path}");
+        }
     }
 
     const TYPST_OK: &str = r#"for a; do last=$a; done
@@ -5617,6 +5953,52 @@ exit 1"#
     }
 
     /// The real engines, as `pnpm assistant:prepare` bundles them: run with
+    /// The bundled officecli, in its sandbox, fixes a deck's overflowing
+    /// text, a shape past the right edge and dim text on a dark fill in one
+    /// round. `cargo test documents::create -- --ignored`.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    #[ignore = "needs the engines of `pnpm assistant:prepare`"]
+    async fn bundled_officecli_fixes_a_decks_layout() {
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../assistant-runtime/resources");
+        let Some(officecli) = super::super::engines::engines_at(&bundled).officecli else {
+            panic!("run `pnpm assistant:prepare` first");
+        };
+        let sandbox =
+            |_: &Path| cfg!(target_os = "macos").then(|| PathBuf::from("/usr/bin/sandbox-exec"));
+        let f = fixture_in(
+            Some(&format!("link:{}", officecli.display())),
+            None,
+            sandbox,
+        );
+        let deck = json!([
+            {"command": "add", "parent": "/", "type": "slide", "props": {"title": "Hi"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"name": "Body", "text": "one\ntwo\nthree\nfour\nfive\nsix\nseven", "x": "2.33cm", "y": "5.2cm", "width": "14cm", "height": "2cm", "size": "20"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"name": "Out", "text": "出界", "x": "30cm", "y": "2cm", "width": "6cm", "height": "2cm"}},
+            {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"name": "Dark", "text": "dim", "x": "2cm", "y": "12cm", "width": "6cm", "height": "2cm", "fill": "222222", "color": "555555"}},
+        ]);
+        let result = f
+            .call(
+                "pptx",
+                json!({"name": "deck.pptx", "format": "pptx", "content": deck}),
+            )
+            .await
+            .unwrap();
+        eprintln!("pptx: {result:#}");
+        assert_eq!(result["fixed"], 3);
+        assert_eq!(result["issues"], json!([]));
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert_eq!(
+            fix_commands(&file, "fix-1.json"),
+            json!([
+                {"command": "set", "path": "/slide[1]/shape[@id=100000]", "props": {"height": "6.2cm"}},
+                {"command": "set", "path": "/slide[1]/shape[@id=100001]", "props": {"x": "26.597cm"}},
+                {"command": "set", "path": "/slide[1]/shape[@id=100002]", "props": {"color": "FFFFFF"}},
+            ])
+        );
+        assert!(!file.with_file_name("fix-2.json").exists());
+    }
+
     /// `cargo test documents::create -- --ignored`.
     #[tokio::test]
     #[serial_test::serial(document_engines)]
