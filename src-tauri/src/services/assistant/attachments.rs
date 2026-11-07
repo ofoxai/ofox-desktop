@@ -629,21 +629,25 @@ pub(super) fn generated_video(
 }
 
 /// Publish a document the host made (see `documents::create`) with its
-/// generation record, as a generated attachment of reply `mid`. Its type is
-/// its name's extension, and the bytes must be what that says: a PDF starts
-/// with `%PDF`, an Office file is a zip; text is taken as it is.
-/// `media.params` (format, counts, issues) also become the attachment's
-/// details. A failed record write rolls the copy back.
+/// generation record, as generated attachment `id` of reply `mid` (the id of
+/// the folder it was made in). Its type is its name's extension, and the
+/// bytes must be what that says: a PDF starts with `%PDF`, an Office file is
+/// a zip; text is taken as it is. `media.params` (format, counts, issues)
+/// also become the attachment's details. A failed record write rolls the
+/// copy back.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn generated_file(
     store: &AssistantStore,
     sid: &str,
     mid: &str,
+    id: &str,
     file: &mut std::fs::File,
     name: &str,
     mut media: MediaRecord,
     precondition: impl FnOnce(&SessionRecord) -> Result<(), String>,
 ) -> Result<Attachment, String> {
     use std::io::{Seek, SeekFrom};
+    validate_id(id)?;
     let mime = name
         .rsplit_once('.')
         .and_then(|(_, extension)| mime_type(&extension.to_ascii_lowercase()))
@@ -670,7 +674,7 @@ pub(super) fn generated_file(
     store.with_attachment_lock(sid, || {
         let mut txn = FileTxn::new();
         let item = Attachment {
-            id: id(),
+            id: id.into(),
             name: name.into(),
             mime_type: mime.into(),
             size_bytes: size,
@@ -746,6 +750,42 @@ pub(super) fn keep_pages(
                 Err(error)
             }
         }
+    })
+}
+
+/// Record `media`, the generation record of generated attachment `id` of
+/// reply `mid`, again with `svgPages` as its params now say (the slide
+/// pictures [`keep_pages`] kept), and that count in the attachment's
+/// details.
+pub(super) fn record_kept_pages(
+    store: &AssistantStore,
+    sid: &str,
+    mid: &str,
+    id: &str,
+    media: &MediaRecord,
+) -> Result<(), String> {
+    let count = media.params["svgPages"].clone();
+    store.mutate(sid, |record| {
+        let counted = |item: &mut Attachment| {
+            if item.id == id {
+                if let Some(details) = item
+                    .details
+                    .as_mut()
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    details.insert("svgPages".into(), count.clone());
+                }
+            }
+        };
+        record.attachments.iter_mut().for_each(counted);
+        let message = record
+            .messages
+            .iter_mut()
+            .find(|m| m.id == mid)
+            .ok_or("assistant_message_not_found")?;
+        message.attachments.iter_mut().for_each(counted);
+        message.put_generation(media.clone());
+        Ok(())
     })
 }
 
@@ -1757,6 +1797,7 @@ mod tests {
                     &store,
                     &sid,
                     &mid,
+                    &id(),
                     &mut with(bytes),
                     name,
                     media.clone(),
@@ -1773,6 +1814,7 @@ mod tests {
                 &store,
                 &sid,
                 &mid,
+                &id(),
                 &mut large,
                 "x.pdf",
                 media.clone(),
@@ -1787,6 +1829,7 @@ mod tests {
                 &store,
                 &sid,
                 &mid,
+                &id(),
                 &mut with(b"PK\x03\x04 deck"),
                 "deck.pptx",
                 media.clone(),
@@ -1796,17 +1839,37 @@ mod tests {
             "assistant_identity_changed"
         );
         assert!(copies(&store, &sid).is_empty());
+        // The id names a file: only one `id()` makes.
+        for odd in ["../x", "NOT-AN-ID"] {
+            assert_eq!(
+                generated_file(
+                    &store,
+                    &sid,
+                    &mid,
+                    odd,
+                    &mut with(b"PK\x03\x04 deck"),
+                    "deck.pptx",
+                    media.clone(),
+                    |_| Ok(())
+                )
+                .unwrap_err(),
+                "assistant_invalid_identifier"
+            );
+        }
 
+        let chosen = id();
         let attachment = generated_file(
             &store,
             &sid,
             &mid,
+            &chosen,
             &mut with(b"PK\x03\x04 deck"),
             "deck.pptx",
             media.clone(),
             |_| Ok(()),
         )
         .unwrap();
+        assert_eq!(attachment.id, chosen);
         assert_eq!(attachment.name, "deck.pptx");
         assert_eq!(attachment.mime_type, PPTX);
         assert_eq!(attachment.size_bytes, 9);
@@ -1833,6 +1896,7 @@ mod tests {
             &store,
             &sid,
             &mid,
+            &id(),
             &mut with(b"# Notes"),
             "notes.md",
             MediaRecord {
@@ -1864,17 +1928,17 @@ mod tests {
         };
         let mut deck = tempfile::tempfile().unwrap();
         deck.write_all(b"PK\x03\x04 deck").unwrap();
-        let attachment =
-            generated_file(
-                &store,
-                &sid,
-                &mid,
-                &mut deck,
-                "deck.pptx",
-                media,
-                |_| Ok(()),
-            )
-            .unwrap();
+        let attachment = generated_file(
+            &store,
+            &sid,
+            &mid,
+            &id(),
+            &mut deck,
+            "deck.pptx",
+            media,
+            |_| Ok(()),
+        )
+        .unwrap();
         let made = tempfile::tempdir().unwrap();
         let pages = [
             file(made.path(), "1.svg", b"<svg>1</svg>"),

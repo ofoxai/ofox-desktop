@@ -169,7 +169,7 @@ impl Document {
         let extension = format.extension();
         let content = match (format.engine(), args.content) {
             (Engine::Office, Value::Array(mut commands)) => {
-                check_batch(&mut commands)?;
+                check_batch(&mut commands, format)?;
                 unescape_newlines(&mut commands);
                 if format == DocumentFormat::Xlsx {
                     check_formulas(&commands)?;
@@ -310,8 +310,12 @@ const ROOTS: &[&str] = &[
 enum Property {
     File,
     Link,
-    /// A table's inline CSV.
+    /// A deck's table or chart data, inline, checked as a whole (see
+    /// [`data_reaches_out`]).
     Data,
+    /// A workbook's or document's table data, inline, checked cell by cell
+    /// too (see [`cells_reach_out`]).
+    Cells,
     Prose,
     /// A fill, gradient or background: colours, a gradient, or an image.
     Fill,
@@ -319,17 +323,23 @@ enum Property {
     Other,
 }
 
-/// The class of a property by its key.
-fn property(key: &str) -> Property {
+/// The class of a property by its key, in a document of `format`. A deck's
+/// `data` is checked as a whole and its chart `categories` are prose:
+/// officecli 1.0.160 reads a table's data as a file only when the whole
+/// value names one, and never reads categories as one.
+fn property(key: &str, format: DocumentFormat) -> Property {
     let key = key.to_ascii_lowercase();
     let last = key.rsplit('.').next().unwrap_or(&key);
+    let deck = format == DocumentFormat::Pptx;
     if key.split('.').any(|part| FILE_KEYS.contains(&part)) {
         Property::File
     } else if LINK_KEYS.contains(&last) {
         Property::Link
-    } else if key == "data" {
+    } else if key == "data" && deck {
         Property::Data
-    } else if PROSE_KEYS.contains(&key.as_str()) {
+    } else if key == "data" {
+        Property::Cells
+    } else if PROSE_KEYS.contains(&key.as_str()) || (deck && key == "categories") {
         Property::Prose
     } else if matches!(last, "gradient" | "background") || last.ends_with("fill") {
         Property::Fill
@@ -366,12 +376,12 @@ fn unescape_newlines(commands: &mut [Value]) {
     }
 }
 
-/// A batch officecli may run: commands that change the document, whose
-/// values read nothing outside the document's folder and fetch nothing (a
-/// picture or any other file comes as a `data:` URI), with no diagram or
-/// embedded object, and Word fields that only show a page number or a date
-/// (see [`refused_shape`]).
-pub(super) fn check_batch(commands: &mut [Value]) -> Result<(), String> {
+/// A batch officecli may run on a document of `format`: commands that
+/// change the document, whose values read nothing outside the document's
+/// folder and fetch nothing (a picture or any other file comes as a `data:`
+/// URI), with no diagram or embedded object, and Word fields that only show
+/// a page number or a date (see [`refused_shape`]).
+pub(super) fn check_batch(commands: &mut [Value], format: DocumentFormat) -> Result<(), String> {
     if commands.is_empty() {
         return Err(refuse(
             FAILED,
@@ -434,7 +444,7 @@ pub(super) fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 }
             } else {
                 // `props` by each key's class; `type` and the verb as others.
-                refused_property(field.clone(), value, Property::Other)
+                refused_property(field.clone(), value, Property::Other, format)
             };
             if let Some((key, why)) = why {
                 return Err(problem(&format!("\"{key}\" {why}")));
@@ -1404,18 +1414,28 @@ fn refused_shape(fields: &Map<String, Value>) -> Option<String> {
 }
 
 /// The first value under `value` (named `key`, of class `class`) that its
-/// property may not hold, and why. An object's values take their own keys'
-/// classes; an array's values take the array's.
-fn refused_property(key: String, value: &Value, class: Property) -> Option<(String, &'static str)> {
+/// property may not hold in a document of `format`, and why. An object's
+/// values take their own keys' classes; an array's values take the array's.
+fn refused_property(
+    key: String,
+    value: &Value,
+    class: Property,
+    format: DocumentFormat,
+) -> Option<(String, &'static str)> {
     match value {
         Value::String(text) => refused_value(text, class).map(|why| (key, why)),
         Value::Object(map) => map.iter().find_map(|(name, value)| {
-            refused_property(format!("{key}.{name}"), value, property(name))
+            refused_property(
+                format!("{key}.{name}"),
+                value,
+                property(name, format),
+                format,
+            )
         }),
         Value::Array(items) => items
             .iter()
             .enumerate()
-            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class)),
+            .find_map(|(at, value)| refused_property(format!("{key}[{at}]"), value, class, format)),
         _ => None,
     }
 }
@@ -1425,6 +1445,7 @@ fn refused_value(text: &str, class: Property) -> Option<&'static str> {
     let text = text.trim();
     let lower = text.to_ascii_lowercase();
     let elsewhere = "names a file or an address; only data: URIs can be used";
+    let inline = "must be the table's rows inline (CSV); files and addresses cannot be used";
     match class {
         Property::File => (!is_data_uri(text)).then_some(
             "must be a data: URI (data:<type>;base64,…); files and addresses cannot be used",
@@ -1434,8 +1455,8 @@ fn refused_value(text: &str, class: Property) -> Option<&'static str> {
             .any(|scheme| lower.starts_with(scheme))
             && !links_a_slide(text))
         .then_some("must be an https:, http: or mailto: address, or slide[n]"),
-        Property::Data => data_reaches_out(text)
-            .then_some("must be the table's rows inline (CSV); files and addresses cannot be used"),
+        Property::Data => data_reaches_out(text).then_some(inline),
+        Property::Cells => cells_reach_out(text).then_some(inline),
         Property::Prose => None,
         Property::Fill if lower.starts_with("image:") => {
             (!is_data_uri(&text[6..])).then_some("may name an image only as a data: URI")
@@ -1498,10 +1519,10 @@ fn location(text: &str, scheme: impl Fn(&str, &str) -> bool) -> bool {
         || (scheme && !is_data_uri(&path) && !is_cell_range(&path))
 }
 
-/// What a `data` value, or one of its cells, starts with when officecli
-/// would read it as a file: a root, a folder (`./`, `../`, `~/`, either
-/// slash) or a mention (`@file`). A drive is checked apart (see
-/// [`names_a_drive`]).
+/// What a `data` value (or, in a workbook or document, one of its cells)
+/// starts with when officecli could read it as a file: a root, a folder
+/// (`./`, `../`, `~/`, either slash) or a mention (`@file`). A drive is
+/// checked apart (see [`names_a_drive`]).
 const PATH_STARTS: &[&str] = &["/", "\\", "./", ".\\", "../", "..\\", "~/", "~\\", "@"];
 
 /// Whether a cell starts with a drive: one ASCII letter and a colon
@@ -1516,29 +1537,60 @@ fn names_a_drive(cell: &str) -> bool {
     }
 }
 
-/// Whether a table's or chart's `data` would be read as a file or an
-/// address rather than as inline cells: one of its cells (split at `,`,
-/// `;`, tabs and line breaks; the first starts the value) starts like a
-/// path ([`PATH_STARTS`], [`names_a_drive`]); a `..` segment climbs out of
-/// the folder; or it is an address (`scheme://…`, `file:`). Anything else
-/// is prose: `.NET`, `~approx`, `Sales:5`, `v1.2`, `A:1,2`.
+/// Whether `text` starts like a path: [`PATH_STARTS`] or a drive.
+fn path_like(text: &str) -> bool {
+    names_a_drive(text) || PATH_STARTS.iter().any(|start| text.starts_with(start))
+}
+
+/// Whether `text` is an address: `scheme://…` or `file:…`.
+fn names_an_address(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower
+        .split_once("://")
+        .is_some_and(|(name, _)| is_scheme(name))
+        || lower.starts_with("file:")
+}
+
+/// Whether a deck's table or chart `data` would be read as a file or an
+/// address rather than as inline cells. officecli 1.0.160 reads it as a file
+/// only when the whole value names one, so the whole value (trimmed) is
+/// checked: it starts with one of [`PATH_STARTS`] or a drive's root (`C:\`);
+/// a `..` segment climbs out of the folder (`a,b/../../x` too: .NET folds
+/// `a,b/..` away); it is one cell that names a drive (`C:t.csv`, see
+/// [`names_a_drive`]) or holds a slash (`dir/s.csv`); or it is an address.
+/// A bare file name (`s.csv`) names nothing outside the document's folder.
+/// The cells of a value of several are text, whatever they start with:
+/// `/`, `@x`, `A:优秀`, `.NET`, `~approx`, and a chart's `A:1,2;B:3,4`.
 fn data_reaches_out(text: &str) -> bool {
-    let path_like =
-        |cell: &str| names_a_drive(cell) || PATH_STARTS.iter().any(|start| cell.starts_with(start));
+    let value = text.trim();
+    let path = value.replace('\\', "/");
+    let one_cell = !value.contains([',', ';', '\n', '\r', '\t']);
+    let drive_root =
+        matches!(path.as_bytes(), [letter, b':', b'/', ..] if letter.is_ascii_alphabetic());
+    PATH_STARTS.iter().any(|start| value.starts_with(start))
+        || drive_root
+        || path.split('/').any(|part| part.trim() == "..")
+        || (one_cell && (names_a_drive(value) || path.contains('/')))
+        || names_an_address(value)
+}
+
+/// Whether a workbook's or document's table `data` would be read as a file
+/// or an address, by the stricter rule these formats keep: one of its cells
+/// (split at `,`, `;`, tabs and line breaks; the first starts the value)
+/// starts like a path ([`path_like`]); a `..` segment climbs out of the
+/// folder; or it is an address. Anything else is prose: `.NET`, `~approx`,
+/// `Sales:5`, `v1.2`, `A:1,2`.
+fn cells_reach_out(text: &str) -> bool {
     // `a,b/../../x` climbs out of the folder too: .NET folds `b/..` away.
     let climbs = text
         .replace('\\', "/")
         .split(['/', ',', ';', '\n', '\r', '\t'])
         .any(|part| part.trim() == "..");
-    let lower = text.to_ascii_lowercase();
     climbs
         || text
             .split([',', ';', '\n', '\r', '\t'])
             .any(|cell| path_like(cell.trim()))
-        || lower
-            .split_once("://")
-            .is_some_and(|(name, _)| is_scheme(name))
-        || lower.starts_with("file:")
+        || names_an_address(text)
 }
 
 /// One cell: one to three letters and a row number (`B12`).
@@ -2261,9 +2313,14 @@ async fn view_report(work: &Work<'_>, file: &str) -> Option<Value> {
         .filter(|report| data(report)["issues"].is_array())
 }
 
+/// The shapes a fix round looks up (one `get` each); see [`fix_layout`].
+const MAX_GEOMETRY_LOOKUPS: usize = 40;
+
 /// A deck's overflowing text, shapes past the slide's edge and dim text,
 /// fixed by the host (see [`fix`]) and checked again, for at most
-/// [`fix::MAX_ROUNDS`] rounds; `first` is the checks' first report. The
+/// [`fix::MAX_ROUNDS`] rounds; `first` is the checks' first report. A round
+/// looks up where at most [`MAX_GEOMETRY_LOOKUPS`] shapes are: an issue that
+/// needs a place beyond those is not fixed that round. The
 /// issues of the last report, and how many fixes were applied. Each round's
 /// `set` commands pass the model's batch checks and run as one batch
 /// (`fix-<round>.json`). Fix commands the batch checks refuse end the
@@ -2292,14 +2349,18 @@ async fn fix_layout(
             .iter()
             .filter_map(fix::parse_issue)
             .collect();
-        // One `get` a shape a round, and only of a path the batch checks
-        // would let a fix name.
+        // One `get` a shape a round, of at most MAX_GEOMETRY_LOOKUPS shapes,
+        // and only of a path the batch checks would let a fix name.
         let mut places: Vec<(&str, Option<fix::Geometry>)> = vec![];
         let mut fixes = vec![];
         for issue in &found {
             let place = match places.iter().find(|(path, _)| *path == issue.path) {
                 Some((_, place)) => *place,
                 None if issue.needs_geometry() && names_an_element(&issue.path, false, &[]) => {
+                    if places.len() == MAX_GEOMETRY_LOOKUPS {
+                        // Left as it is: it stays a warning.
+                        continue;
+                    }
                     let place = work
                         .report(&["get", file, &issue.path, "--json"])
                         .await
@@ -2316,7 +2377,7 @@ async fn fix_layout(
             break;
         }
         let mut commands = fix::fix_batch(&fixes);
-        if check_batch(&mut commands).is_err() {
+        if check_batch(&mut commands, format).is_err() {
             log::warn!("[Assistant] the layout fixes did not pass the batch checks");
             break;
         }
@@ -2538,8 +2599,8 @@ fn listed<'a>(place: &'a Value, key: &str) -> &'a [Value] {
 /// `validate --json`: schema errors, which may keep Office from opening it.
 /// A report that says the file is not valid (see [`validation_failed`])
 /// lists them as `errors` or `warnings`, under `data` or at its top
-/// (officecli 1.0.160: the top's `warnings`): each is an error. Otherwise
-/// only `data.errors` are.
+/// (officecli 1.0.160: the top's `warnings`): each is an error, and when
+/// none can be read, [`INVALID_FILE`] is. Otherwise only `data.errors` are.
 fn validation_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
     let errors: Vec<&Value> = if validation_failed(report) {
         let mut places = vec![report];
@@ -2554,7 +2615,7 @@ fn validation_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
     } else {
         listed(data(report), "errors").iter().collect()
     };
-    errors
+    let mut issues: Vec<Issue> = errors
         .into_iter()
         .filter_map(|error| {
             let description = error["description"]
@@ -2570,8 +2631,21 @@ fn validation_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
                 path: error["path"].as_str().map(|path| work.shown(path)),
             })
         })
-        .collect()
+        .collect();
+    // A report that says the file is not valid always reaches the model.
+    if issues.is_empty() && validation_failed(report) {
+        issues.push(Issue {
+            severity: "error",
+            message: INVALID_FILE.into(),
+            path: None,
+        });
+    }
+    issues
 }
+
+/// The error of a `validate` report that says the file is not valid and
+/// lists nothing readable.
+const INVALID_FILE: &str = "officecli reports the file as invalid";
 
 /// `view issues --json`: formatting and content problems.
 fn view_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
@@ -2594,9 +2668,13 @@ fn view_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
 
 /// The folder of a deck's slide pictures, in the document's folder.
 const PAGES: &str = "pages";
+/// At most this many slides are drawn as pictures (one engine run each); a
+/// longer deck's other slides have none, with one warning.
+const MAX_SVG_PAGES: u64 = 60;
 
-/// Each of a deck's `count` slides as SVG, `pages/<n>.svg`: the first is
-/// the runtime's thumbnail, and all are kept beside the attachment. A page
+/// Each of a deck's `count` slides as SVG, `pages/<n>.svg`, up to
+/// [`MAX_SVG_PAGES`]: the first is the runtime's thumbnail, and all are kept
+/// beside the attachment. A page
 /// officecli draws none of, or more of than the runner keeps, or that cannot
 /// be written, is skipped with a warning and the next slide is drawn; an
 /// engine that cannot start or does not finish ends the export, with one
@@ -2622,11 +2700,13 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
         return (vec![], vec![no_preview(1, count)]);
     }
     let (mut drawn, mut issues) = (vec![], vec![]);
-    for n in 1..=count {
+    let mut stopped = false;
+    for n in 1..=count.min(MAX_SVG_PAGES) {
         let at = n.to_string();
         let view = ["view", file, "svg", "--start", &at, "--end", &at];
         let Ok(output) = work.run(&view).await else {
             issues.push(no_preview(n, count));
+            stopped = true;
             break;
         };
         let path = folder.join(format!("{n}.svg"));
@@ -2652,6 +2732,9 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
             log::warn!("[Assistant] officecli drew no usable picture of slide {n}");
             issues.push(no_preview(n, n));
         }
+    }
+    if !stopped && count > MAX_SVG_PAGES {
+        issues.push(no_preview(MAX_SVG_PAGES + 1, count));
     }
     let paths: Vec<PathBuf> = drawn.iter().map(|(_, path)| path.clone()).collect();
     let regular = blocking(move || {
@@ -2980,7 +3063,7 @@ impl AssistantHost {
             media.track_document_folder(&doc_id);
         }
         let (dir, home) = blocking({
-            let (store, sid) = (store.clone(), run.session_id.clone());
+            let (store, sid, doc_id) = (store.clone(), run.session_id.clone(), doc_id.clone());
             let (document, language) = (document.clone(), run.ui_language.clone());
             move || prepare(&store, &sid, &doc_id, &document, &language)
         })
@@ -3053,7 +3136,8 @@ impl AssistantHost {
             cost: Some("0".into()),
             ..Default::default()
         };
-        let attachment = blocking({
+        // The attachment takes the id of the folder it was made in.
+        let (attachment, kept) = blocking({
             let (sid, mid, run) = (run.session_id.clone(), mid.clone(), run.clone());
             let (path, name, record) = (made.file.clone(), document.name.clone(), record.clone());
             let pages = made.pages.clone();
@@ -3064,9 +3148,10 @@ impl AssistantHost {
                     &store,
                     &sid,
                     &mid,
+                    &doc_id,
                     &mut file,
                     &name,
-                    record,
+                    record.clone(),
                     |saved| still_running(saved, &run),
                 )
                 .map_err(|error| {
@@ -3079,19 +3164,36 @@ impl AssistantHost {
                         error
                     }
                 })?;
-                // The document stands without its slide pictures.
-                if !pages.is_empty() {
+                // The document stands without its slide pictures; `svgPages`
+                // counts the ones kept.
+                let kept = if pages.is_empty() {
+                    0
+                } else {
+                    attachments::keep_pages(&store, &sid, &attachment.id, &pages).unwrap_or_else(
+                        |error| {
+                            log::warn!("[Assistant] could not keep the slide pictures: {error}");
+                            0
+                        },
+                    )
+                };
+                if kept != pages.len() {
+                    let mut record = record;
+                    record.params["svgPages"] = json!(kept);
+                    record.outputs = vec![attachment.id.clone()];
                     if let Err(error) =
-                        attachments::keep_pages(&store, &sid, &attachment.id, &pages)
+                        attachments::record_kept_pages(&store, &sid, &mid, &attachment.id, &record)
                     {
-                        log::warn!("[Assistant] could not keep the slide pictures: {error}");
+                        log::warn!("[Assistant] could not record the kept slide pictures: {error}");
                     }
                 }
-                Ok(attachment)
+                Ok((attachment, kept))
             }
         })
         .await?;
         record.outputs = vec![attachment.id.clone()];
+        if format == DocumentFormat::Pptx {
+            record.params["svgPages"] = json!(kept);
+        }
         self.publish_generation(run, &mid, &record, std::slice::from_ref(&attachment));
         let mut file = json!({
             "id": attachment.id, "name": attachment.name,
@@ -3416,8 +3518,8 @@ esac"#
 
     /// A stand-in officecli whose `view … issues` prints `rounds[k]` on its
     /// k-th call (the last one after that), counted in `issues.calls`;
-    /// `get` prints `geometry`, and each `batch` adds its input file's name
-    /// to `batches.log`.
+    /// `get` prints `geometry` and adds the path to `gets.log`, and each
+    /// `batch` adds its input file's name to `batches.log`.
     fn officecli_rounds(rounds: &[&str], stats: &str, geometry: &str) -> String {
         officecli_fixing(rounds, stats, geometry, FIX_APPLIED, &[VALID])
     }
@@ -3445,7 +3547,7 @@ batch) echo "$4" >> batches.log
     {fix_batch}
   fi ;;
 validate) {validate} ;;
-get) cat <<'JSON'
+get) echo "$3" >> gets.log; cat <<'JSON'
 {geometry}
 JSON
 ;;
@@ -3839,6 +3941,87 @@ esac"#
         );
     }
 
+    /// A `validate` report that says the file is not valid but lists
+    /// nothing readable still reaches the model as one error.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_failed_validation_with_no_findings_is_still_an_error() {
+        for invalid in [
+            r#"{"success":false}"#,
+            r#"{"success":false,"warnings":[{"code":"warning"}]}"#,
+            r#"{"success":true,"data":{"valid":false}}"#,
+        ] {
+            let (f, result) = made_deck(&officecli_fixing(
+                &[NO_ISSUES],
+                r#"{"slides":1}"#,
+                GEOMETRY,
+                FIX_APPLIED,
+                &[invalid],
+            ))
+            .await;
+            assert_eq!(
+                result["issues"],
+                json!([{"severity": "error", "message": "officecli reports the file as invalid"}]),
+                "{invalid}"
+            );
+            assert_eq!(f.record().attachments.len(), 1, "the document is kept");
+        }
+        // A valid report adds nothing.
+        let (_f, result) = made_deck(&officecli_fixing(
+            &[NO_ISSUES],
+            r#"{"slides":1}"#,
+            GEOMETRY,
+            FIX_APPLIED,
+            &[VALID],
+        ))
+        .await;
+        assert_eq!(result["issues"], json!([]));
+    }
+
+    /// A round looks up at most MAX_GEOMETRY_LOOKUPS shapes: the issues of
+    /// the shapes beyond them are not fixed that round and stay warnings.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_fix_round_looks_up_at_most_forty_shapes() {
+        let paths: Vec<String> = (0..45)
+            .map(|n| format!("/slide[1]/shape[@id={}]", 100_000 + n))
+            .collect();
+        let issues = json!({"success": true, "data": {"count": 45, "issues": paths
+            .iter()
+            .map(|path| json!({"id": "O1", "type": 0, "severity": 1, "path": path, "message": OVERFLOW_MESSAGE}))
+            .collect::<Vec<_>>()}})
+        .to_string();
+        let (_f, result) = made_deck(&officecli_rounds(
+            &[&issues, &issues, &issues],
+            r#"{"slides":1}"#,
+            GEOMETRY,
+        ))
+        .await;
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        let gets = std::fs::read_to_string(file.with_file_name("gets.log")).unwrap();
+        let gets: Vec<&str> = gets.lines().collect();
+        assert_eq!(
+            gets.len(),
+            2 * MAX_GEOMETRY_LOOKUPS,
+            "40 a round, two rounds"
+        );
+        assert_eq!(gets[..MAX_GEOMETRY_LOOKUPS], paths[..MAX_GEOMETRY_LOOKUPS]);
+        for name in ["fix-1.json", "fix-2.json"] {
+            let fixed: Vec<String> = fix_commands(&file, name)
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|command| command["path"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(fixed, paths[..MAX_GEOMETRY_LOOKUPS], "{name}");
+        }
+        assert_eq!(result["fixed"], 2 * MAX_GEOMETRY_LOOKUPS);
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": format!("{OVERFLOW_MESSAGE} (45 places)")}])
+        );
+    }
+
     const TYPST_OK: &str = r#"for a; do last=$a; done
 echo "$*" >> typst-args
 [ -w "$TYPST_PACKAGE_PATH" ] && echo writable > packages-writable
@@ -4122,6 +4305,76 @@ esac"#,
         assert!(result["previewPath"].is_null());
         assert!(kept_pages(&f, &result).is_empty());
         assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+    }
+
+    /// A deck of more than MAX_SVG_PAGES slides draws only that many, and
+    /// says once which slides have no picture.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn at_most_sixty_slides_are_drawn() {
+        let f = fixture(
+            Some(&officecli_drawing(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":70}"#,
+                r#"echo "$5" >> svg.calls; echo "<svg>$5</svg>""#,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(result["file"]["slides"], 70);
+        assert_eq!(result["svgPages"], 60);
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": "slides 61-70 have no preview"}])
+        );
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        let drawn = calls(&file, "svg.calls");
+        assert_eq!(drawn.lines().count(), 60);
+        assert_eq!(drawn.lines().last(), Some("60"));
+        assert_eq!(kept_pages(&f, &result).len(), 60);
+    }
+
+    /// Slide pictures that cannot be kept beside the attachment (here a
+    /// file already holds the place of its pages folder) are not counted:
+    /// the document stands, with `svgPages` 0 in the result, the record and
+    /// the attachment's details.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn pages_that_cannot_be_kept_are_not_counted() {
+        // The attachment takes the id of the folder the engine works in,
+        // so the stand-in can put a file where its pages folder goes.
+        let svg = r#"mkdir -p ../../attachments; : > "../../attachments/$(basename "$PWD").pages"; echo "<svg>$5</svg>""#;
+        let (f, result) = drawn_deck(svg).await;
+        assert_eq!(result["issues"], json!([]));
+        assert_eq!(result["svgPages"], 0);
+        // The runtime's thumbnail is drawn all the same.
+        let pages = PathBuf::from(result["filePath"].as_str().unwrap()).with_file_name("pages");
+        assert_eq!(result["previewPath"], json!(pages.join("1.svg")));
+        let id = result["file"]["id"].as_str().unwrap();
+        let store = f.host.store(&identity().owner).unwrap();
+        let blocked = store
+            .attachment_root(&f.sid)
+            .unwrap()
+            .join(format!("{id}.pages"));
+        assert!(blocked.is_file(), "nothing was written in its place");
+        let record = f.record();
+        let generation = record.messages[0].media_for(Some("call-1")).unwrap();
+        assert_eq!(generation.params["svgPages"], 0);
+        assert_eq!(generation.outputs, vec![id.to_owned()]);
+        for attachment in [&record.attachments[0], &record.messages[0].attachments[0]] {
+            assert_eq!(attachment.id, id);
+            assert_eq!(attachment.details.as_ref().unwrap()["svgPages"], 0);
+        }
+        let events = f.events("generation");
+        assert_eq!(events[0]["generation"]["params"]["svgPages"], 0);
     }
 
     #[tokio::test]
@@ -4923,7 +5176,8 @@ esac"#,
         let mut commands: Vec<Value> =
             serde_json::from_str(include_str!("testdata/skill-batches.json")).unwrap();
         assert!(commands.len() > 100);
-        check_batch(&mut commands).unwrap();
+        // As a document's batch: the strictest checks of the three formats.
+        check_batch(&mut commands, DocumentFormat::Docx).unwrap();
     }
 
     #[test]
@@ -5019,7 +5273,7 @@ esac"#,
                 json!({"command": "add", "parent": "/", "type": "sheet", "props": {"name": name}}),
                 json!({"command": "set", "path": path, "props": {"value": "1"}}),
             ];
-            check_batch(&mut commands)
+            check_batch(&mut commands, DocumentFormat::Xlsx)
         };
         assert!(batch("Users", "/Users/x/secret.txt").is_err());
         // The sheet's own item says why, for an added or a renamed sheet.
@@ -5029,9 +5283,12 @@ esac"#,
             ("a/b", batch("a/b", "/Sheet1/A1").unwrap_err()),
             (
                 "Library",
-                check_batch(&mut [
-                    json!({"command": "set", "path": "/Sheet1", "props": {"name": "Library"}}),
-                ])
+                check_batch(
+                    &mut [
+                        json!({"command": "set", "path": "/Sheet1", "props": {"name": "Library"}}),
+                    ],
+                    DocumentFormat::Xlsx,
+                )
                 .unwrap_err(),
             ),
         ] {
@@ -5059,7 +5316,7 @@ esac"#,
             json!({"command": "set", "path": "/Sheet1", "props": {"name": "Data"}}),
             json!({"command": "set", "path": "/Data/B2", "props": {"value": "1"}}),
         ];
-        check_batch(&mut commands).unwrap();
+        check_batch(&mut commands, DocumentFormat::Xlsx).unwrap();
     }
 
     /// `items` as an xlsx batch: the checks' answer, the formula checks
@@ -5087,24 +5344,30 @@ esac"#,
         .map(drop)
     }
 
-    /// A deck's table cells and chart series names are prose: PowerPoint
-    /// evaluates nothing, so a leading `+`, `-`, `=`, `.`, `~` or a colon is
-    /// text there. Only a path-like value or cell reaches out (see
-    /// [`data_reaches_out`]).
+    /// A deck's table and chart data is read as a whole (see
+    /// [`data_reaches_out`]): officecli 1.0.160 reads a file only when the
+    /// whole value names one, so each cell of a value of several is text,
+    /// and PowerPoint evaluates nothing, so a leading `+`, `-`, `=`, `.`,
+    /// `~`, `@`, `/` or a colon is text there. Chart categories are prose.
     #[test]
-    fn deck_data_cells_are_prose() {
+    fn deck_data_is_read_whole() {
         let table = |data: &str| json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": {"data": data}});
-        let chart = |data: &str| json!({"command": "add", "parent": "/slide[1]", "type": "chart", "props": {"chartType": "column", "data": data, "categories": "Q1,Q2"}});
+        let chart = |data: &str, categories: &str| json!({"command": "add", "parent": "/slide[1]", "type": "chart", "props": {"chartType": "column", "data": data, "categories": categories}});
         let mut items = vec![
             table("指标,变化;收入,+18%;成本,-5%"),
             // officecli's quoted cell, a comma inside.
             table("指标,变化;\"含税, +18%\",=1"),
-            chart("-成本:1,2"),
-            chart("Sales:5"),
+            chart("-成本:1,2", "Q1,Q2"),
+            chart("Sales:5", "Q1"),
             // A one-letter series of numbers names no drive.
-            chart("A:1,2"),
-            chart("B:3.5,-4"),
-            chart("A:1,2;B:3,4"),
+            chart("A:1,2", "Q1,Q2"),
+            chart("B:3.5,-4", "Q1,Q2"),
+            chart("A:1,2;B:3,4", "Q1,Q2"),
+            // Categories are prose, whatever they start with.
+            chart("Sales:1,2", ".NET,Java"),
+            chart("Sales:1,2", "~/x,/etc/hosts"),
+            // A bare file name names nothing outside the document's folder.
+            table("s.csv"),
         ];
         for prose in [
             ".NET",
@@ -5118,21 +5381,42 @@ esac"#,
             items.push(table(prose));
             items.push(table(&format!("Name,Note;x,{prose}")));
         }
+        // A cell like a root, a mention or a drive is text among others
+        // (`/` for 无, a handle, a grade).
+        for cell in ["/", "@x", "@ofox_ai", "A:优秀", ".NET", "C:t.csv", "/x.csv"] {
+            items.push(table(&format!("等级,说明;{cell},好")));
+            items.push(table(&format!("等级,说明;好,{cell}")));
+        }
         for item in items {
             deck_batch(std::slice::from_ref(&item))
                 .unwrap_or_else(|error| panic!("{item}: {error}"));
         }
-        for path in PATH_LIKE_DATA {
-            for data in [path.to_string(), format!("Name,Note;x,{path}")] {
-                assert!(deck_batch(&[table(&data)]).is_err(), "{data}");
-                assert!(deck_batch(&[chart(&data)]).is_err(), "{data}");
-            }
+        // A whole value that names a file or an address is refused.
+        let whole = [
+            "./s.csv",
+            "dir/s.csv",
+            "dir\\s.csv",
+            " /x.csv",
+            "https://x.example/t.csv",
+            "file:t.csv",
+            "a,b/../../secret.csv",
+            "x\n../../secret.csv",
+            "C:\\Users\\x\\a,b.csv",
+        ];
+        for data in PATH_LIKE_DATA.iter().chain(whole.iter()) {
+            let error = deck_batch(&[table(data)]).unwrap_err();
+            assert!(
+                error.contains("must be the table's rows inline"),
+                "{data}: {error}"
+            );
+            assert!(deck_batch(&[chart(data, "Q1,Q2")]).is_err(), "{data}");
         }
     }
 
-    /// `data` values and cells that read as a file in every format: a
-    /// drive is one letter and a colon (`C:t.csv` is relative to the drive's
-    /// current folder), unless only numbers follow.
+    /// `data` values that read as a file in every format, and cells that do
+    /// in a workbook or document: a drive is one letter and a colon
+    /// (`C:t.csv` is relative to the drive's current folder), unless only
+    /// numbers follow.
     const PATH_LIKE_DATA: &[&str] = &[
         "/x.csv", "@file", "C:\\x", "../x", "~/x", ".\\x", "C:t.csv", "C:x", "D:data", "a:b",
     ];
@@ -5776,7 +6060,9 @@ esac"#,
 
     #[test]
     fn each_property_takes_its_own_syntax() {
-        let refused = |key: &str, text: &str| refused_value(text, property(key)).is_some();
+        let refused = |key: &str, text: &str| {
+            refused_value(text, property(key, DocumentFormat::Docx)).is_some()
+        };
         // Links: web and mail addresses, or a slide.
         for target in [
             "https://example.com",
@@ -5891,11 +6177,13 @@ esac"#,
         }
     }
 
-    /// One batch of `items` after a slide: its checks' answer.
+    /// One batch of `items` after a slide: its checks' answer, as a
+    /// document's batch (the strictest; a deck's data has its own test, see
+    /// `deck_data_is_read_whole`).
     fn checked(items: &[Value]) -> Result<(), String> {
         let mut commands = vec![json!({"command": "add", "parent": "/", "type": "slide"})];
         commands.extend(items.iter().cloned());
-        check_batch(&mut commands)
+        check_batch(&mut commands, DocumentFormat::Docx)
     }
 
     /// The bypasses a review found against the real officecli (fix round 1):
@@ -6275,7 +6563,10 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
                 json!({"command": "add", "parent": "/", "type": "sheet", "props": {"name": name}}),
                 json!({"command": "set", "path": format!("/{name}/A1"), "props": {"value": "1"}}),
             ];
-            assert!(check_batch(&mut commands).is_err(), "{name:?}");
+            assert!(
+                check_batch(&mut commands, DocumentFormat::Xlsx).is_err(),
+                "{name:?}"
+            );
         }
     }
 

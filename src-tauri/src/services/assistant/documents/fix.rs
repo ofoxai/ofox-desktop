@@ -467,7 +467,10 @@ mod tests {
         for fix in fixes {
             let mut commands = fix_batch(&[fix.expect("a fix")]);
             assert_eq!(
-                super::super::create::check_batch(&mut commands),
+                super::super::create::check_batch(
+                    &mut commands,
+                    super::super::create::DocumentFormat::Pptx
+                ),
                 Ok(()),
                 "{commands:?}"
             );
