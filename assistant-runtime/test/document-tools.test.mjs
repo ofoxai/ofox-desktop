@@ -99,6 +99,30 @@ const DECK = [
   },
 ];
 
+// What the pptx skill teaches the model to send instead of a batch.
+const DECK_OBJECT = {
+  kind: "deck",
+  title: "Quarterly results",
+  language: "en",
+  slides: [
+    {
+      type: "hero",
+      title: "Quarterly results",
+      subtitle: "Revenue, margin and what comes next",
+    },
+    {
+      type: "pillars",
+      title: "Three things to know",
+      pillars: [
+        { heading: "Growth", body: "Revenue rose 20% on the quarter" },
+        { heading: "Margin", body: "Gross margin held at 62%" },
+        { heading: "Outlook", body: "Two launches are planned for Q4" },
+      ],
+    },
+    { type: "cta", title: "Questions?", subtitle: "team@example.com" },
+  ],
+};
+
 test("registers create_document with the host formats", () => {
   const { tools } = fixture({ formats: ["pdf", "md"] });
   assert.deepEqual(
@@ -162,6 +186,112 @@ test("forwards office content as a batch array", async () => {
   assert.match(result.content[0].text, /Issues: 0\./);
   assert.match(result.content[0].text, /Do not repeat the file contents/);
   assert.equal(result.details.file.id, "att-deck");
+});
+
+test("a deck object is rendered before it reaches the host", async () => {
+  const { calls, tool } = createDocument();
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: DECK_OBJECT,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "create_document");
+  assert.equal(calls[0].toolCallId, "c1");
+  assert.equal(calls[0].args.name, "deck.pptx");
+  assert.equal(calls[0].args.format, "pptx");
+  assert.ok(Array.isArray(calls[0].args.content));
+  assert.equal(calls[0].args.content[0].type, "slide");
+  assert.notEqual(result.isError, true);
+  const text = result.content[0].text;
+  assert.match(text, /^Rendered 3 slides from the deck with theme navy\.\n/);
+  assert.doesNotMatch(text, /Ignored:/);
+  assert.match(text, /Created deck\.pptx .* as attachment att-deck/);
+});
+
+test("a one-element array holding the deck is a deck too", async () => {
+  const { calls, tool } = createDocument();
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: [DECK_OBJECT],
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.content[0].type, "slide");
+  assert.match(result.content[0].text, /^Rendered 3 slides /);
+});
+
+test("what the deck ignored is told to the model", async () => {
+  const { tool } = createDocument();
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: { ...DECK_OBJECT, theme: "neon" },
+  });
+  const [rendered, ignored] = result.content[0].text.split("\n");
+  assert.equal(rendered, "Rendered 3 slides from the deck with theme navy.");
+  assert.match(ignored, /^Ignored: deck: unknown theme "neon"; using navy/);
+});
+
+test("an invalid deck is refused without calling the host", async () => {
+  const { calls, tool } = createDocument();
+  const slides = [...DECK_OBJECT.slides];
+  slides[1] = { type: "bullets", title: "Three things to know" };
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: { ...DECK_OBJECT, slides },
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "assistant_deck_invalid");
+  assert.match(
+    result.content[0].text,
+    /^The deck was not rendered; fix these and send the whole deck again:\n- /,
+  );
+  assert.match(result.content[0].text, /unknown type "bullets"/);
+  assert.deepEqual(calls, []);
+});
+
+test("a deck is only read for a pptx", async () => {
+  const { calls, tool } = createDocument();
+  const result = await tool.execute("c1", {
+    name: "deck.json",
+    format: "json",
+    content: [DECK_OBJECT],
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "assistant_document_content");
+  assert.deepEqual(calls, []);
+});
+
+test("a batch array still goes through unchanged", async () => {
+  const { calls, tool } = createDocument();
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: DECK,
+  });
+  assert.deepEqual(calls[0].args.content, DECK);
+  assert.doesNotMatch(result.content[0].text, /Rendered|Ignored/);
+  assert.match(result.content[0].text, /^Created deck\.pptx /);
+});
+
+test("the host's layout fixes are told to the model", async () => {
+  const text = async (extra) => {
+    const { tool } = createDocument({ reply: () => completed(extra) });
+    const result = await tool.execute("c1", {
+      name: "deck.pptx",
+      format: "pptx",
+      content: DECK,
+    });
+    return result.content[0].text;
+  };
+  assert.match(
+    await text({ fixed: 3 }),
+    /^Created .* Issues: 0\. Auto-fixed 3 layout issues\./,
+  );
+  for (const extra of [{}, { fixed: 0 }, { fixed: "3" }])
+    assert.doesNotMatch(await text(extra), /Auto-fixed/, JSON.stringify(extra));
 });
 
 test("rejects string content for office formats and arrays for pdf", async () => {
@@ -438,6 +568,18 @@ test("without the engines the guidelines say which files cannot be made", () => 
   assert.doesNotMatch(
     pdfOnly,
     /never say you cannot attach|ofox-office-(md|txt|docx)/,
+  );
+});
+
+test("the description and guidelines teach the deck object", () => {
+  const [tool] = fixture().tools;
+  assert.match(
+    tool.description,
+    /pptx: content is a deck object \(\{"kind":"deck",…\}, see the ofox-office-pptx skill\) or, for experts, an array of officecli batch commands/,
+  );
+  assert.match(
+    tool.promptGuidelines.join("\n"),
+    /For a pptx, send the deck object the skill describes; do not write slide coordinates yourself\./,
   );
 });
 

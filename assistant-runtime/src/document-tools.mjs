@@ -2,10 +2,14 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Type } from "typebox";
 import { withPdf } from "./attachments.mjs";
+import { deckOf, parseDeck } from "./deck/schema.mjs";
+import { renderDeck } from "./deck/render.mjs";
+import { themeFor } from "./deck/theme.mjs";
 import { errorMessage } from "./security.mjs";
 import { thumbnailFromPng, thumbnailFromSvg } from "./thumbnails.mjs";
 
-// create_document: the model writes the content, the host runs the engine,
+// create_document: the model writes the content (for a pptx, usually a deck
+// object this runtime renders into the batch), the host runs the engine,
 // checks the file and keeps it as a generated attachment. The host's reply
 // also names the file's path and its first page's preview for this runtime
 // alone: from them it adds a PDF's page count and, for a model that sees
@@ -42,6 +46,8 @@ function guidelines(formats) {
       `This machine cannot produce ${words(missing)} files; say so if asked.`,
     named.length &&
       `Before the first ${words(named)} document in a conversation, call use_skill on its skill (${either(named.map(([format]) => `ofox-office-${format}`))}) and follow it.`,
+    formats.includes("pptx") &&
+      "For a pptx, send the deck object the skill describes; do not write slide coordinates yourself.",
     "Reply with two or three sentences on the structure first, then call the tool; after the result, summarize the file and mention issues.",
     "At most 3 documents per reply; retry a failed document at most twice, then explain.",
   ].filter(Boolean);
@@ -52,9 +58,12 @@ function description(formats) {
   const text = formats.filter(
     (format) => !OFFICE_FORMATS.has(format) && format !== "pdf",
   );
+  const batch = office.filter((format) => format !== "pptx");
   const shapes = [
-    office.length &&
-      `${office.join(", ")}: content is an array of officecli batch commands`,
+    office.includes("pptx") &&
+      'pptx: content is a deck object ({"kind":"deck",…}, see the ofox-office-pptx skill) or, for experts, an array of officecli batch commands',
+    batch.length &&
+      `${batch.join(", ")}: content is an array of officecli batch commands`,
     formats.includes("pdf") && "pdf: content is the Typst markup of the body",
     text.length && `${text.join(", ")}: content is the file's text`,
   ].filter(Boolean);
@@ -71,6 +80,26 @@ function contentProblem({ format, content }) {
   return format === "pdf"
     ? "pdf content must be a string of Typst markup."
     : `${format} content must be a string with the file's text.`;
+}
+
+// A deck object becomes the batch that draws it, or the problems that stop
+// it. The renderer throws only for what parseDeck should have refused.
+function renderedDeck(content) {
+  const parsed = parseDeck(content);
+  if (parsed.problems) return { problems: parsed.problems };
+  const { deck, warnings } = parsed;
+  try {
+    const { commands, slides } = renderDeck(deck, themeFor(deck.theme));
+    return {
+      commands,
+      told: [
+        `Rendered ${slides} slides from the deck with theme ${deck.theme}.`,
+        warnings.length > 0 && `Ignored: ${warnings.join("; ")}.`,
+      ].filter(Boolean),
+    };
+  } catch (error) {
+    return { problems: [errorMessage(error)] };
+  }
 }
 
 const quantity = (count, unit) =>
@@ -112,8 +141,13 @@ function describe(result, format) {
     quantity(file.pages, "page"),
     quantity(file.sheets, "sheet"),
   ].filter(Boolean);
+  // The host adds `fixed` for Office files: layout problems it repaired.
+  const fixed =
+    Number.isSafeInteger(result.fixed) && result.fixed > 0
+      ? ` Auto-fixed ${result.fixed} layout issues.`
+      : "";
   return [
-    `Created ${file.name} (${facts.join(", ")}) as attachment ${file.id}. Issues: ${issues.length}.`,
+    `Created ${file.name} (${facts.join(", ")}) as attachment ${file.id}. Issues: ${issues.length}.${fixed}`,
     ...issues.map(issueLine),
     "Do not repeat the file contents; tell the user what the file contains.",
   ].join("\n");
@@ -168,7 +202,21 @@ export function documentTools(runtime, context, { vision }) {
       ]),
     }),
     async (args, signal, toolCallId) => {
-      const problem = contentProblem(args);
+      const deck = args.format === "pptx" ? deckOf(args.content) : null;
+      const rendered = deck ? renderedDeck(deck) : null;
+      if (rendered?.problems)
+        return {
+          content: [
+            {
+              type: "text",
+              text: `The deck was not rendered; fix these and send the whole deck again:\n- ${rendered.problems.join("\n- ")}`,
+            },
+          ],
+          details: { code: "assistant_deck_invalid" },
+          isError: true,
+        };
+      const request = rendered ? { ...args, content: rendered.commands } : args;
+      const problem = contentProblem(request);
       if (problem)
         return {
           content: [{ type: "text", text: problem }],
@@ -178,7 +226,7 @@ export function documentTools(runtime, context, { vision }) {
       const result = await runtime.hostTool(
         context,
         "create_document",
-        args,
+        request,
         signal,
         toolCallId,
       );
@@ -200,7 +248,13 @@ export function documentTools(runtime, context, { vision }) {
       const image = vision && previewPath ? await thumbnail(previewPath) : null;
       return {
         content: [
-          { type: "text", text: describe(details, args.format) },
+          {
+            type: "text",
+            text: [
+              ...(rendered?.told ?? []),
+              describe(details, args.format),
+            ].join("\n"),
+          },
           ...(image ? [{ type: "image", ...image }] : []),
         ],
         details,
