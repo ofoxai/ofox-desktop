@@ -2596,9 +2596,14 @@ fn view_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
 const PAGES: &str = "pages";
 
 /// Each of a deck's `count` slides as SVG, `pages/<n>.svg`: the first is
-/// the runtime's thumbnail, and all are kept beside the attachment. A slide
-/// officecli drew none of, or more of than the runner keeps, is skipped with
-/// a warning; once officecli cannot run or finish, no further slide is drawn.
+/// the runtime's thumbnail, and all are kept beside the attachment. A page
+/// officecli draws none of, or more of than the runner keeps, or that cannot
+/// be written, is skipped with a warning and the next slide is drawn; an
+/// engine that cannot start or does not finish ends the export, with one
+/// warning for the slides left (each would cost another wait). The engine
+/// can write the document's folder: a page is never written through a link
+/// in place of `pages`, and once the engine is done only the pages that are
+/// still regular files are returned (see `attachments::open_page`).
 async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Vec<Issue>) {
     if count == 0 {
         return (vec![], vec![]);
@@ -2606,14 +2611,17 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
     let folder = work.dir.join(PAGES);
     let made = blocking({
         let folder = folder.clone();
-        move || crate::config::create_private_dir_all(&folder).map_err(|_| unwritable())
+        move || {
+            crate::config::create_private_dir_all(&folder).map_err(|_| unwritable())?;
+            real_folder(&folder).then_some(()).ok_or_else(unwritable)
+        }
     })
     .await;
     if made.is_err() {
-        log::warn!("[Assistant] could not make the folder of the slide pictures");
+        log::warn!("[Assistant] the folder of the slide pictures is not a usable folder");
         return (vec![], vec![no_preview(1, count)]);
     }
-    let (mut pages, mut issues) = (vec![], vec![]);
+    let (mut drawn, mut issues) = (vec![], vec![]);
     for n in 1..=count {
         let at = n.to_string();
         let view = ["view", file, "svg", "--start", &at, "--end", &at];
@@ -2624,19 +2632,51 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
         let path = folder.join(format!("{n}.svg"));
         let written = match whole_svg(&output) {
             Some(svg) => {
-                let (target, bytes) = (path.clone(), svg.as_bytes().to_vec());
-                blocking(move || write_new(&target, &bytes)).await.is_ok()
+                let (folder, target) = (folder.clone(), path.clone());
+                let bytes = svg.as_bytes().to_vec();
+                blocking(move || {
+                    // The engine ran since the folder was made.
+                    if !real_folder(&folder) {
+                        return Err(unwritable());
+                    }
+                    write_new(&target, &bytes)
+                })
+                .await
+                .is_ok()
             }
             None => false,
         };
         if written {
-            pages.push(path);
+            drawn.push((n, path));
         } else {
             log::warn!("[Assistant] officecli drew no usable picture of slide {n}");
             issues.push(no_preview(n, n));
         }
     }
+    let paths: Vec<PathBuf> = drawn.iter().map(|(_, path)| path.clone()).collect();
+    let regular = blocking(move || {
+        Ok(paths
+            .iter()
+            .map(|path| attachments::open_page(path).is_ok())
+            .collect::<Vec<bool>>())
+    })
+    .await
+    .unwrap_or_default();
+    let mut pages = vec![];
+    for (at, (n, path)) in drawn.into_iter().enumerate() {
+        if regular.get(at) == Some(&true) {
+            pages.push(path);
+        } else {
+            log::warn!("[Assistant] the picture of slide {n} is no longer a regular file");
+            issues.push(no_preview(n, n));
+        }
+    }
     (pages, issues)
+}
+
+/// Whether `path` is a folder itself, not a link to one.
+fn real_folder(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir())
 }
 
 /// The SVG a `view svg` run printed, when it printed one whole.
@@ -3875,6 +3915,9 @@ esac"#;
             .attachment_root(&f.sid)
             .unwrap()
             .join(format!("{id}.pages"));
+        if !dir.exists() {
+            return vec![];
+        }
         let mut pages: Vec<(String, String)> = std::fs::read_dir(dir)
             .unwrap()
             .map(|entry| {
@@ -3967,6 +4010,118 @@ esac"#;
                 ("3.svg".to_owned(), "<svg>3</svg>".to_owned()),
             ]
         );
+    }
+
+    /// A deck of three slides made by `officecli` (see [`officecli_drawing`]
+    /// for `svg`): its fixture and the result.
+    async fn drawn_deck(svg: &str) -> (Fixture, Value) {
+        let f = fixture(
+            Some(&officecli_drawing(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":3}"#,
+                svg,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(f.record().attachments.len(), 1, "the document is kept");
+        (f, result)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn an_engine_that_cannot_run_ends_the_export() {
+        // Drawing slide 1, the engine removes itself: slide 2 cannot start,
+        // and slide 3 is not tried.
+        let svg = r#"[ "$5" = 1 ] && rm -- "$0"; echo "<svg>$5</svg>""#;
+        let (f, result) = drawn_deck(svg).await;
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": "slides 2-3 have no preview"}])
+        );
+        assert_eq!(result["svgPages"], 1);
+        let pages = PathBuf::from(result["filePath"].as_str().unwrap()).with_file_name("pages");
+        assert_eq!(result["previewPath"], json!(pages.join("1.svg")));
+        assert_eq!(
+            kept_pages(&f, &result),
+            [("1.svg".to_owned(), "<svg>1</svg>".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_page_the_engine_replaces_is_not_kept() {
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.svg");
+        std::fs::write(&secret, "<svg>secret</svg>").unwrap();
+        // Drawing slide 2, page 1 becomes a link to a file outside; drawing
+        // slide 3, page 2 becomes a pipe.
+        let svg = format!(
+            r#"case "$5" in
+    2) rm -f pages/1.svg; ln -s '{}' pages/1.svg ;;
+    3) rm -f pages/2.svg; mkfifo pages/2.svg ;;
+    esac; echo "<svg>$5</svg>""#,
+            secret.display()
+        );
+        let (f, result) = drawn_deck(&svg).await;
+        assert_eq!(
+            result["issues"],
+            json!([
+                {"severity": "warning", "message": "slide 1 has no preview", "path": "/slide[1]"},
+                {"severity": "warning", "message": "slide 2 has no preview", "path": "/slide[2]"},
+            ])
+        );
+        assert_eq!(result["svgPages"], 1);
+        assert!(result["previewPath"].is_null());
+        assert_eq!(
+            kept_pages(&f, &result),
+            [("3.svg".to_owned(), "<svg>3</svg>".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_pages_link_is_not_written_through() {
+        let outside = tempfile::tempdir().unwrap();
+        // The batch leaves `pages` as a link to a folder outside.
+        let stub = format!(
+            r#"case "$1" in
+create) printf 'PK\003\004stub' > "$2" ;;
+batch) ln -s '{}' pages; echo '{{"results":[{{"index":0,"success":true}}]}}' ;;
+validate) echo '{{"valid":true}}' ;;
+view) case "$3" in
+  issues) echo '{NO_ISSUES}' ;;
+  stats) echo '{{"slides":2}}' ;;
+  svg) echo "<svg>$5</svg>" ;;
+  esac ;;
+esac"#,
+            outside.path().display()
+        );
+        let f = fixture(Some(&stub), None);
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": "slides 1-2 have no preview"}])
+        );
+        assert_eq!(result["svgPages"], 0);
+        assert!(result["previewPath"].is_null());
+        assert!(kept_pages(&f, &result).is_empty());
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
     }
 
     #[tokio::test]

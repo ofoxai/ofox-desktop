@@ -2,6 +2,7 @@
 //! disk) or pasted (bytes): which formats can be imported, the limits, and
 //! the all-or-nothing copy into the session's private attachments folder
 //! (see [`AssistantStore::attachment_dir`]).
+use super::documents::runner::OUTPUT_LIMIT;
 use super::{
     store::{private_subdir, AssistantStore, SessionRecord, PAGES_SUFFIX},
     types::*,
@@ -718,8 +719,9 @@ pub(super) fn generated_file(
 
 /// Keep a generated deck's slide pictures (each `<n>.svg`, see
 /// `documents::create`) beside its attachment `id`: private copies in the
-/// private folder `<id>.pages`, all or none. How many were kept. The folder
-/// goes with the attachment (see [`AssistantStore::cleanup_orphan_attachments`]).
+/// private folder `<id>.pages`, all or none; a page that is not a regular
+/// file is refused (see [`open_page`]). How many were kept. The folder goes
+/// with the attachment (see [`AssistantStore::cleanup_orphan_attachments`]).
 pub(super) fn keep_pages(
     store: &AssistantStore,
     sid: &str,
@@ -732,8 +734,8 @@ pub(super) fn keep_pages(
         let mut txn = FileTxn::new();
         let copied = pages.iter().try_for_each(|page| {
             let name = page.file_name().ok_or(UNREADABLE)?;
-            let mut source = fs::File::open(page).map_err(|_| UNREADABLE)?;
-            txn.copy_with_mode(&dir.join(name), &mut source, 0o600)
+            let (source, size) = open_page(page)?;
+            txn.copy_with_mode(&dir.join(name), &mut source.take(size), 0o600)
                 .map_err(|_| WRITE_FAILED.to_string())
         });
         match copied {
@@ -745,6 +747,43 @@ pub(super) fn keep_pages(
             }
         }
     })
+}
+
+/// A slide picture the host wrote in a document's folder, opened for
+/// reading, with its size: a regular file within the runner's
+/// [`OUTPUT_LIMIT`], in a folder that is not a link. The engine can write
+/// that folder, so a link is never followed (on Unix it cannot be swapped in
+/// after the check either) and the file is opened without blocking: a link,
+/// pipe or device left in a page's place is refused instead of read or
+/// waited on.
+pub(super) fn open_page(page: &Path) -> Result<(fs::File, u64), String> {
+    let real = |path: &Path, dir: bool| {
+        fs::symlink_metadata(path).is_ok_and(
+            |meta| {
+                if dir {
+                    meta.is_dir()
+                } else {
+                    meta.is_file()
+                }
+            },
+        )
+    };
+    if !page.parent().is_some_and(|folder| real(folder, true)) || !real(page, false) {
+        return Err(UNREADABLE.into());
+    }
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(page).map_err(|_| UNREADABLE)?;
+    let meta = file.metadata().map_err(|_| UNREADABLE)?;
+    if !meta.is_file() || meta.len() > OUTPUT_LIMIT as u64 {
+        return Err(UNREADABLE.into());
+    }
+    Ok((file, meta.len()))
 }
 
 /// The MIME type of `source`, by its extension.
@@ -1852,6 +1891,31 @@ mod tests {
         {
             assert_eq!(crate::config::file_mode(&kept), Some(0o700));
             assert_eq!(crate::config::file_mode(&kept.join("1.svg")), Some(0o600));
+        }
+        // A page that is not a regular file (a link, a pipe) is refused, and
+        // nothing is kept.
+        #[cfg(unix)]
+        for odd in ["link.svg", "pipe.svg"] {
+            let path = made.path().join(odd);
+            if odd == "link.svg" {
+                std::os::unix::fs::symlink(&pages[0], &path).unwrap();
+            } else {
+                assert!(std::process::Command::new("mkfifo")
+                    .arg(&path)
+                    .status()
+                    .unwrap()
+                    .success());
+            }
+            let other = id();
+            assert_eq!(
+                keep_pages(&store, &sid, &other, &[pages[1].clone(), path]).unwrap_err(),
+                UNREADABLE
+            );
+            let refused = store
+                .attachment_root(&sid)
+                .unwrap()
+                .join(format!("{other}.pages"));
+            assert!(!refused.exists(), "{odd}");
         }
         // Kept while its attachment is.
         store.cleanup_orphan_attachments(&sid).unwrap();
