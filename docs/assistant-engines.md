@@ -308,8 +308,9 @@ refusal names the item and what to change, and nothing is made.
   `calculatedField`; a value that starts with `=`, `+`, `-` or `@` and is not a
   number; and every key of a conditional format, validation, named range,
   chart, sparkline, table or pivot table but its text keys, such as titles,
-  names and prompts, and its inline lists, which are checked cell by cell) call
-  only allowlisted functions, refuse
+  names and prompts, and its inline lists, which are checked cell by cell
+  unless they are one reference or hold `!` or `|`, when they are read whole
+  as a formula of references) call only allowlisted functions, refuse
   WEBSERVICE, IMAGE, INDIRECT, DDE and the like even in quoted text, and refer
   to no other workbook, file share or address (HYPERLINK may link to one quoted
   `https:`, `http:`, `mailto:` or `#` address). A table's inline rows hold

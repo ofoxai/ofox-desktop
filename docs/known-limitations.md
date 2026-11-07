@@ -437,20 +437,34 @@ formulas run later, when it is opened: they are filtered, not sandboxed.
   quoted text: functions that fetch, run code or build a reference from text
   (WEBSERVICE, IMAGE, RTD, FILTERXML, STOCKHISTORY, CUBE…, IMPORT…, CALL,
   REGISTER, EXEC, PY, DDE, INDIRECT and others), a DDE `|`, another workbook
-  (`[book]Sheet!A1`, a quoted path before `!`), `\\`, `//` and `file:`. So a
-  formula with such a word or character in its text (`"Call us"`, `"a|b"`, an
-  address outside HYPERLINK) is refused too. An inline list (chart `data` and
-  `categories`, series `values`, table `columns`, pivot fields) is one
-  reference, read as a formula, or is checked cell by cell: a cell may not name
-  another workbook, a share, an address or a file, and a cell that starts like a
-  formula is checked as one; a table's `data` rows hold values only, so no cell
-  there may start with `=`, `+`, `-` or `@` unless it is a number. Text keys are
-  checked the same way as a whole, so `North (EU)` or "Call volume" passes and
-  a title with an address in it does not. A cell value that starts with `=`,
-  `+`, `-` or `@` (`+1 555 0100`, `- Item`) is refused as a formula; a leading
-  apostrophe keeps it text. A text key is matched by the last part of its name,
-  so a key officecli has that the list does not (a table's `totalLabel`, a
-  chart's `referenceLine`) is read as a formula.
+  (`[book]Sheet!A1`, a quoted path before `!`), `\\`, `//` and `file:` where a
+  word starts (so "Risk profile: by region" passes and "see file:x" in a
+  formula does not). So a formula with such a word or character in its text
+  (`"Call us"`, `"a|b"`, an address outside HYPERLINK) is refused too. An
+  inline list (chart `data` and `categories`, series `values`, table
+  `columns`, pivot fields) that is one reference, or that holds a `!` or `|`
+  anywhere, is read whole as a formula: officecli writes a chart list with a
+  `!` as it is into the chart's formula (`Sheet1!A1,WEBSERVICE(B2)` would be
+  fetched when the workbook opens), so such a list may hold only references
+  separated by `,`. A list with `|` is refused, and so is a list of labels
+  where one holds a `!`: `categories: "Hello!,World"` is refused with "holds !, so
+  officecli writes it as a formula, and it is not a reference such as
+  Sheet1!A2:A5 or several separated by ,"; put such labels in cells and give
+  their range. Any other inline list is checked cell by cell, and officecli
+  writes its cells as literals: a cell may not name another workbook, a share,
+  an address or a file, and a cell that starts like a formula is checked as
+  one; a table's `data` rows hold values only, so no cell there may start with
+  `=`, `+`, `-` or `@` unless it is a number. A sparkline's `data` is a
+  reference, read as a formula like its `dataRange`. Text keys are checked the
+  same way as a whole, so `North (EU)` or "Call volume" passes and a title
+  with an address in it does not. A cell value that starts with `=`, `+`, `-`
+  or `@` (`+1 555 0100`, `- Item`) is refused as a formula; a leading
+  apostrophe keeps it text. A text key that starts that way is checked as a
+  formula too, and its refusal offers no apostrophe: officecli shows the
+  apostrophe of a chart title or a validation prompt, so the text has to be
+  reworded. A text key is matched by the last part of its name, so a key
+  officecli has that the list does not (a table's `totalLabel`, a chart's
+  `referenceLine`) is read as a formula.
 
 Tool behavior changed in this round:
 
