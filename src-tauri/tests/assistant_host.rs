@@ -7325,7 +7325,10 @@ mod documents {
 
     /// R61: a chart's inline categories and values that are not references
     /// are written as literals (`<c:strLit>`, `<c:numLit>`), never as a
-    /// formula, so the host lets them through as text.
+    /// formula, so the host lets them through as text. R62: a list with a
+    /// `!` in it is written whole as the chart's formula
+    /// (`<c:f>Sheet1!$A$1,WEBSERVICE(B2)</c:f>`), so the host reads it
+    /// whole as one and refuses it.
     #[test]
     fn a_chart_keeps_inline_list_cells_as_literals() {
         let Some(bundle) = engines_runtime() else {
@@ -7373,6 +7376,23 @@ mod documents {
                 }
             }
         }
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+        let content = json!([
+            {"command":"add","parent":"/Sheet1","type":"chart","props":{"chartType":"column","data":"Sales (k):1,2","categories":"Q1,Q2"}},
+            {"command":"add","parent":"/Sheet1/chart[1]","type":"series","props":{"name":"V1","values":"Sheet1!A1,WEBSERVICE(B2)"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-xlsx",
+            json!({"name": "chart.xlsx", "format": "xlsx", "content": content}),
+        );
+        let sent = outcome.refused();
+        assert!(
+            sent.contains("assistant_document_failed")
+                && sent.contains("item 1: \"props.values\" calls WEBSERVICE"),
+            "R62: {sent}"
+        );
         assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
     }
 

@@ -641,8 +641,10 @@ const TEXT_KEYS: &[&str] = &[
 ];
 /// The properties that hold an inline list, by the last part of their name
 /// (R57): chart data and categories, a series' values, a table's columns,
-/// a pivot table's fields. One reference is read as a formula; a list is
-/// checked cell by cell (see [`refused_list`]).
+/// a pivot table's fields (a sparkline's `data` is a reference). One
+/// reference is read as a formula; on a [`FORMULA_TARGETS`] element, so is
+/// a list that holds `!` or `|` (R62); any other list is checked cell by
+/// cell (see [`refused_list`]).
 const LIST_KEYS: &[&str] = &[
     "data",
     "categories",
@@ -693,10 +695,11 @@ const WORKBOOK_EXTENSIONS: &[&str] = &[
     ".xls", ".xlsx", ".xlsm", ".xlsb", ".xla", ".xlam", ".xlt", ".xltx", ".xltm", ".ods", ".csv",
 ];
 
-/// The formulas of an xlsx batch (R50, R53, R54, R56, R57, R59). A formula
-/// key (see [`is_formula_key`]) is a formula whatever it holds. On a
-/// [`FORMULA_TARGETS`] element, an inline list ([`LIST_KEYS`]) is checked
-/// cell by cell unless it is one reference, [`TEXT_KEYS`] are text, and any
+/// The formulas of an xlsx batch (R50, R53, R54, R56, R57, R59, R62). A
+/// formula key (see [`is_formula_key`]) is a formula whatever it holds. On
+/// a [`FORMULA_TARGETS`] element, an inline list ([`LIST_KEYS`]) is checked
+/// cell by cell unless it is one reference or holds `!` or `|` (then it is
+/// a formula, made of references only), [`TEXT_KEYS`] are text, and any
 /// other property is a formula. Anywhere else, a value that starts like a
 /// formula is one. A formula calls only [`FORMULA_ALLOWED`] functions, holds
 /// none of
@@ -710,6 +713,8 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
             continue;
         };
         let targeted = holds_formulas(fields);
+        // R62: a sparkline's `data` is officecli's alias of `dataRange`.
+        let sparkline = names_element(fields, &["sparkline"]);
         let Some(props) = fields.get("props").and_then(Value::as_object) else {
             continue;
         };
@@ -725,18 +730,27 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
             let parts: Vec<&str> = name.split('.').collect();
             let last = parts.last().copied().unwrap_or_default();
             let data = name == "data";
+            let list =
+                ((targeted && LIST_KEYS.contains(&last)) || data) && !(sparkline && last == "data");
             let why = if is_formula_key(&parts) {
                 refused_formula(text)
-            } else if (targeted && LIST_KEYS.contains(&last)) || data {
+            } else if list {
                 if is_single_reference(text) {
                     refused_formula(text)
+                } else if targeted && text.contains(['!', '|']) {
+                    // R62: officecli writes such a list whole as the
+                    // chart's formula.
+                    refused_formula(text).or_else(|| {
+                        (!text.split(',').all(is_single_reference))
+                            .then(|| LIST_REFERENCES.to_owned())
+                    })
                 } else {
                     refused_list(text, data)
                 }
             } else if targeted && !TEXT_KEYS.contains(&last) {
                 refused_formula(text)
             } else if starts_like_a_formula(text) {
-                refused_formula(text).map(|why| read_as_a_formula(text, &why))
+                refused_formula(text).map(|why| read_as_a_formula(text, &why, !targeted))
             } else if targeted {
                 refused_reference(text)
             } else {
@@ -762,14 +776,19 @@ fn is_formula_key(parts: &[&str]) -> bool {
         .any(|part| part.contains("formula") || FORMULA_KEYS.contains(part))
 }
 
-/// Why text that starts like a formula is refused: it is read as one, and
-/// a leading apostrophe keeps it text (officecli stores `'+1 555` as the
-/// text `+1 555`, marked for Excel to show as typed).
-fn read_as_a_formula(text: &str, why: &str) -> String {
+/// Why text that starts like a formula is refused: it is read as one. In a
+/// cell's value a leading apostrophe keeps it text (officecli stores
+/// `'+1 555` as the text `+1 555`, marked for Excel to show as typed); the
+/// text of a [`FORMULA_TARGETS`] element shows the apostrophe, so none is
+/// offered there (R63).
+fn read_as_a_formula(text: &str, why: &str, cell: bool) -> String {
     let first = text.trim_start().chars().next().unwrap_or('=');
-    format!(
-        "starts with {first}, so it is read as a formula, and it {why}. To keep it as text, start the value with an apostrophe (') — Excel shows the text without it"
-    )
+    let read = format!("starts with {first}, so it is read as a formula, and it {why}");
+    if cell {
+        format!("{read}. To keep it as text, start the value with an apostrophe (') — Excel shows the text without it")
+    } else {
+        format!("{read}. Reword it so that it does not start with {first}")
+    }
 }
 
 /// Whether Excel would read `text` as a formula: after any leading
@@ -779,18 +798,24 @@ fn starts_like_a_formula(text: &str) -> bool {
     text.trim_start().starts_with(FORMULA_STARTS) && text.trim().parse::<f64>().is_err()
 }
 
-/// Whether an item's values may be formulas without `=`: its `type`, or a
-/// segment of a path it names (past the sheet's name, when there are
-/// several), is one of [`FORMULA_TARGETS`]. A path is read as officecli
-/// takes one: `/Sheet1/cf[1]` and `Sheet1!cf[1]` alike.
+/// Whether an item's values may be formulas without `=`: it names one of
+/// [`FORMULA_TARGETS`] (see [`names_element`]).
 fn holds_formulas(fields: &Map<String, Value>) -> bool {
+    names_element(fields, FORMULA_TARGETS)
+}
+
+/// Whether an item's `type`, or a segment of a path it names (past the
+/// sheet's name, when there are several), is one of `names` (in lower case,
+/// without `-` and `_`). A path is read as officecli takes one:
+/// `/Sheet1/cf[1]` and `Sheet1!cf[1]` alike.
+fn names_element(fields: &Map<String, Value>, names: &[&str]) -> bool {
     let target = |name: &str| {
         let name: String = name
             .chars()
             .filter(|c| !matches!(c, '-' | '_'))
             .collect::<String>()
             .to_ascii_lowercase();
-        FORMULA_TARGETS.contains(&name.trim())
+        names.contains(&name.trim())
     };
     let named = ELEMENT_FIELDS
         .iter()
@@ -869,13 +894,31 @@ const OTHER_WORKBOOK: &str =
 const SHARE_OR_ADDRESS: &str = "names a file share or an address; only HYPERLINK's first argument may hold an https:, http: or mailto: address";
 /// Why text that names a `file:` address is refused.
 const FILE_ADDRESS: &str = "names a file: address; a formula cannot";
+/// Why an inline list on a [`FORMULA_TARGETS`] element that holds a `!`
+/// but is not references is refused (R62): officecli writes it whole as
+/// the chart's formula.
+const LIST_REFERENCES: &str = "holds !, so officecli writes it as a formula, and it is not a reference such as Sheet1!A2:A5 or several separated by ,: an inline list of labels or numbers cannot hold !";
+
+/// Whether `text` names a `file:` address: `file:`, in any case, where a
+/// word starts (R64): at the start, or after a character that is not an
+/// ASCII letter or digit. "Risk profile: by region" names none.
+fn names_a_file_address(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.match_indices("file:").any(|(at, _)| {
+        !lower[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+    })
+}
 
 /// Why text is refused for naming a place outside the workbook, if it is:
 /// another workbook (`[book]Sheet!A1`, a quoted path before `!`), a file
-/// share (`\\`), an address (`://`, a leading `//`) or a `file:` address.
-/// Text keeps its words and quotes: nothing else is read as a formula.
+/// share (`\\`), an address (`://`, a leading `//`) or a `file:` address
+/// (see [`names_a_file_address`]). Text keeps its words and quotes: nothing
+/// else is read as a formula.
 fn refused_reference(text: &str) -> Option<String> {
-    let why = if text.to_ascii_lowercase().contains("file:") {
+    let why = if names_a_file_address(text) {
         FILE_ADDRESS
     } else if refers_to_another_workbook(text) {
         OTHER_WORKBOOK
@@ -924,7 +967,7 @@ fn refused_formula(text: &str) -> Option<String> {
                 .into(),
         );
     }
-    if text.to_ascii_lowercase().contains("file:") {
+    if names_a_file_address(text) {
         return Some(FILE_ADDRESS.into());
     }
     let Some(addresses) = hyperlink_addresses(text) else {
@@ -4289,9 +4332,10 @@ esac"#,
                 "calls WEBSERVICE",
             ),
             // R57: an inline list, cell by cell; one reference as a formula.
+            // (R62: a list with `!` is read whole as one.)
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales:1,2,3", "categories": "[\\\\x\\y.xlsx]Sheet1!A1"}}),
-                "has a cell that",
+                "refers to another workbook",
             ),
             (
                 json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales:1,2", "categories": "Q1,=WEBSERVICE(A1)"}}),
@@ -4402,10 +4446,12 @@ esac"#,
             json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name,Amount (USD)\nAlice,5"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Name,Amount (USD)\nAlice,5", "categories": "'My Sheet'!A2:A5"}}),
             json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "Sheet1!$B$2:$B$5", "categories": "A2:A5"}}),
-            // R61: officecli writes a list cell that is no reference as a
-            // literal (`<c:numLit>`, `<c:strLit>`), never as a formula (see
+            // R61: officecli writes the cells of a list without `!` as
+            // literals (`<c:numLit>`, `<c:strLit>`), never as a formula (see
             // `a_chart_keeps_inline_list_cells_as_literals` in
-            // tests/assistant_host.rs).
+            // tests/assistant_host.rs). A list with `!` it writes whole as
+            // the chart's formula, so that one is read as a formula (R62,
+            // `a_list_with_a_reference_in_it_is_read_whole`).
             json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "WEBSERVICE(B2)"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"values": "INDIRECT(B2)"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "pivotTable", "props": {"position": "H1", "values": "IMAGE(B2)"}}),
@@ -4463,6 +4509,136 @@ esac"#,
         // A formula key is a formula: no apostrophe helps.
         let error = workbook(&[cell(json!({"formula": "WEBSERVICE(B2)"}))]).unwrap_err();
         assert!(!error.contains("apostrophe"), "{error}");
+        // R63: officecli keeps the apostrophe of a chart's or a validation's
+        // text visible, so none is offered there.
+        for (item, first) in [
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "- Review contract (legal)"}}),
+                '-',
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "B2:B9", "type": "list", "formula1": "Yes,No", "prompt": "+ Pick one (required)"}}),
+                '+',
+            ),
+        ] {
+            let error = workbook(std::slice::from_ref(&item)).unwrap_err();
+            assert!(
+                error.contains(&format!(
+                    "starts with {first}, so it is read as a formula, and it calls"
+                )) && !error.contains("apostrophe"),
+                "R63: {item}: {error}"
+            );
+        }
+    }
+
+    /// R62: officecli writes a chart list that holds a `!` whole into the
+    /// chart's formula (`<c:f>Sheet1!$A$1,WEBSERVICE(B2)</c:f>`), so a list
+    /// with `!` or `|` is read whole as a formula, and a sparkline's `data`
+    /// is a reference.
+    #[test]
+    fn a_list_with_a_reference_in_it_is_read_whole() {
+        let chart = |props: Value| json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": props});
+        let series = |props: Value| json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": props});
+        let sparkline = |props: Value| json!({"command": "add", "parent": "/Sheet1", "type": "sparkline", "props": props});
+        for (item, why) in [
+            // The review's inputs.
+            (
+                series(json!({"values": "Sheet1!A1,WEBSERVICE(B2&A1)"})),
+                "calls WEBSERVICE",
+            ),
+            (
+                chart(
+                    json!({"chartType": "column", "data": "S1:1,2", "categories": "Sheet1!A1,IMAGE(B2)"}),
+                ),
+                "calls IMAGE",
+            ),
+            (
+                json!({"command": "set", "path": "/Sheet1/chart[1]", "props": {"series1.values": "Sheet1!A1,INDIRECT(B2)"}}),
+                "calls INDIRECT",
+            ),
+            (
+                series(json!({"values": "1,2", "categories": "Sheet1!A1,cmd|x!A1"})),
+                "holds |",
+            ),
+            (
+                series(json!({"values": "Sheet1!A1;IMAGE(B2)"})),
+                "calls IMAGE",
+            ),
+            (
+                series(json!({"values": "Sheet1!A1 IMAGE(B2)"})),
+                "calls IMAGE",
+            ),
+            // A `|` is enough, and a `!` in labels is no reference.
+            (
+                chart(json!({"chartType": "column", "data": "S1:1,2", "categories": "A|B,C"})),
+                "holds |",
+            ),
+            (
+                chart(
+                    json!({"chartType": "column", "data": "S1:1,2", "categories": "Hello!,World"}),
+                ),
+                "holds !, so officecli writes it as a formula",
+            ),
+            // A sparkline's `data` is officecli's alias of `dataRange`.
+            (
+                json!({"command": "set", "path": "sparkline[1]", "props": {"data": "calc|x!A1:A5"}}),
+                "holds |",
+            ),
+            (
+                sparkline(json!({"location": "D2", "data": "powershell|'x'!A1:A5"})),
+                "holds |",
+            ),
+            (
+                sparkline(json!({"location": "D3", "data": "WEBSERVICE(B2)"})),
+                "calls WEBSERVICE",
+            ),
+        ] {
+            let error = workbook(std::slice::from_ref(&item)).unwrap_err();
+            assert!(
+                error.contains("item 0:") && error.contains(why),
+                "R62: {item}: {error}"
+            );
+        }
+        // Lists without `!` or `|` are still read cell by cell, and
+        // references pass.
+        for item in [
+            chart(
+                json!({"chartType": "column", "data": "S1:1,2", "categories": "North (EU),South (US)"}),
+            ),
+            json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "columns": "Name,Amount (USD),Date"}}),
+            series(
+                json!({"values": "Sheet1!$B$2:$B$5", "categories": "Sheet1!A2:A3,Sheet1!A5:A6"}),
+            ),
+            sparkline(json!({"location": "D1", "data": "Sheet1!A1:A5"})),
+        ] {
+            workbook(std::slice::from_ref(&item))
+                .unwrap_or_else(|error| panic!("R62: {item}: {error}"));
+        }
+    }
+
+    /// R64: `file:` is an address only where a word starts.
+    #[test]
+    fn a_file_address_starts_a_word() {
+        let chart = |title: &str| json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": title}});
+        for item in [
+            chart("Risk profile: by region"),
+            cell(json!({"value": r#"=LEN("Risk profile: by region")"#})),
+        ] {
+            workbook(std::slice::from_ref(&item))
+                .unwrap_or_else(|error| panic!("R64: {item}: {error}"));
+        }
+        for item in [
+            chart("file:///etc/passwd"),
+            chart("Read (file:x)"),
+            chart("Read file:x"),
+            cell(json!({"value": r#"=LEN("see file:x")"#})),
+        ] {
+            let error = workbook(std::slice::from_ref(&item)).unwrap_err();
+            assert!(
+                error.contains("names a file: address"),
+                "R64: {item}: {error}"
+            );
+        }
     }
 
     #[test]
