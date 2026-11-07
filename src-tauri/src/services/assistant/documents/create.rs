@@ -310,8 +310,8 @@ const ROOTS: &[&str] = &[
 enum Property {
     File,
     Link,
-    /// A deck's table or chart data, inline, checked as a whole (see
-    /// [`data_reaches_out`]).
+    /// A deck's table or chart data, or its chart categories, inline,
+    /// checked as a whole (see [`data_reaches_out`]).
     Data,
     /// A workbook's or document's table data, inline, checked cell by cell
     /// too (see [`cells_reach_out`]).
@@ -324,9 +324,8 @@ enum Property {
 }
 
 /// The class of a property by its key, in a document of `format`. A deck's
-/// `data` is checked as a whole and its chart `categories` are prose:
-/// officecli 1.0.160 reads a table's data as a file only when the whole
-/// value names one, and never reads categories as one.
+/// `data` and chart `categories` are checked as a whole: officecli 1.0.160
+/// reads a table's data as a file only when the whole value names one.
 fn property(key: &str, format: DocumentFormat) -> Property {
     let key = key.to_ascii_lowercase();
     let last = key.rsplit('.').next().unwrap_or(&key);
@@ -335,11 +334,11 @@ fn property(key: &str, format: DocumentFormat) -> Property {
         Property::File
     } else if LINK_KEYS.contains(&last) {
         Property::Link
-    } else if key == "data" && deck {
+    } else if deck && matches!(key.as_str(), "data" | "categories") {
         Property::Data
     } else if key == "data" {
         Property::Cells
-    } else if PROSE_KEYS.contains(&key.as_str()) || (deck && key == "categories") {
+    } else if PROSE_KEYS.contains(&key.as_str()) {
         Property::Prose
     } else if matches!(last, "gradient" | "background") || last.ends_with("fill") {
         Property::Fill
@@ -1551,16 +1550,16 @@ fn names_an_address(text: &str) -> bool {
         || lower.starts_with("file:")
 }
 
-/// Whether a deck's table or chart `data` would be read as a file or an
-/// address rather than as inline cells. officecli 1.0.160 reads it as a file
-/// only when the whole value names one, so the whole value (trimmed) is
-/// checked: it starts with one of [`PATH_STARTS`] or a drive's root (`C:\`);
-/// a `..` segment climbs out of the folder (`a,b/../../x` too: .NET folds
-/// `a,b/..` away); it is one cell that names a drive (`C:t.csv`, see
-/// [`names_a_drive`]) or holds a slash (`dir/s.csv`); or it is an address.
-/// A bare file name (`s.csv`) names nothing outside the document's folder.
-/// The cells of a value of several are text, whatever they start with:
-/// `/`, `@x`, `A:优秀`, `.NET`, `~approx`, and a chart's `A:1,2;B:3,4`.
+/// Whether a deck's table or chart `data` (or chart `categories`) would be
+/// read as a file or an address rather than as inline cells. officecli
+/// 1.0.160 reads it as a file only when the whole value names one, so the
+/// whole value (trimmed) is checked: it starts with one of [`PATH_STARTS`],
+/// a drive's root (`C:\`) or a drive (see [`starts_with_a_drive`]); a `..`
+/// segment climbs out of the folder (`a,b/../../x` too: .NET folds `a,b/..`
+/// away); it is one cell holding a slash (`dir/s.csv`); or it is an
+/// address. A bare file name (`s.csv`) names nothing outside the document's
+/// folder. The other cells of a value of several are text, whatever they
+/// start with: `/`, `@x`, `A:优秀`, `.NET`, `~approx`.
 fn data_reaches_out(text: &str) -> bool {
     let value = text.trim();
     let path = value.replace('\\', "/");
@@ -1569,9 +1568,27 @@ fn data_reaches_out(text: &str) -> bool {
         matches!(path.as_bytes(), [letter, b':', b'/', ..] if letter.is_ascii_alphabetic());
     PATH_STARTS.iter().any(|start| value.starts_with(start))
         || drive_root
+        || starts_with_a_drive(value)
         || path.split('/').any(|part| part.trim() == "..")
-        || (one_cell && (names_a_drive(value) || path.contains('/')))
+        || (one_cell && path.contains('/'))
         || names_an_address(value)
+}
+
+/// Whether a whole `data` value starts with a drive: one ASCII letter and a
+/// colon, unless what follows up to the first `;` (or the end) is a list of
+/// numbers, as in a chart's one-letter series (`A:1,2;B:3,4`, `B:`). A
+/// Windows path may hold `,` and `;`, so `C:a,b.csv` and `C:x;y` are a
+/// drive's.
+fn starts_with_a_drive(value: &str) -> bool {
+    match value.as_bytes() {
+        [letter, b':', rest @ ..] if letter.is_ascii_alphabetic() => {
+            let first = rest.split(|byte| *byte == b';').next().unwrap_or_default();
+            !first
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || b".+-, ".contains(byte))
+        }
+        _ => false,
+    }
 }
 
 /// Whether a workbook's or document's table `data` would be read as a file
@@ -5363,9 +5380,12 @@ esac"#,
             chart("A:1,2", "Q1,Q2"),
             chart("B:3.5,-4", "Q1,Q2"),
             chart("A:1,2;B:3,4", "Q1,Q2"),
-            // Categories are prose, whatever they start with.
+            // Categories are read whole too: their other cells are text.
             chart("Sales:1,2", ".NET,Java"),
-            chart("Sales:1,2", "~/x,/etc/hosts"),
+            chart("Sales:1,2", "~approx,x"),
+            chart("Sales:1,2", "Q1,/etc/hosts"),
+            // A one-letter series of numbers, or none yet, names no drive.
+            chart("B:", "Q1"),
             // A bare file name names nothing outside the document's folder.
             table("s.csv"),
         ];
@@ -5402,6 +5422,12 @@ esac"#,
             "a,b/../../secret.csv",
             "x\n../../secret.csv",
             "C:\\Users\\x\\a,b.csv",
+            // A drive, then a path that may hold a separator.
+            "C:a,b.csv",
+            "C:x;y",
+            "C:t.csv",
+            "c:x",
+            "A:1,2,x.csv",
         ];
         for data in PATH_LIKE_DATA.iter().chain(whole.iter()) {
             let error = deck_batch(&[table(data)]).unwrap_err();
@@ -5410,6 +5436,20 @@ esac"#,
                 "{data}: {error}"
             );
             assert!(deck_batch(&[chart(data, "Q1,Q2")]).is_err(), "{data}");
+        }
+        // Categories that name a file, a mention, a drive or an address as a
+        // whole.
+        for categories in [
+            "/etc/hosts",
+            "@file",
+            "C:a,b.csv",
+            "https://x.example/c.csv",
+        ] {
+            let error = deck_batch(&[chart("Sales:1,2", categories)]).unwrap_err();
+            assert!(
+                error.contains("\"props.categories\""),
+                "{categories}: {error}"
+            );
         }
     }
 

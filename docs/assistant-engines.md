@@ -385,9 +385,11 @@ refusal names the item and what to change, and nothing is made.
 - Values, by the property's key: a file property (`src`, `path`, `image`,
   `preview`, `poster`, ...) takes a `data:` URI and nothing else, so local and
   remote pictures are out; a link takes `https:`, `http:`, `mailto:` or a slide;
-  a table's `data` is inline CSV (in a deck the whole value is checked, since
-  officecli reads a file only when the whole value names one, and chart
-  `categories` are prose; in Word and Excel each cell is checked too); fills take colours, gradients or a `data:`
+  a table's `data` is inline CSV (in a deck the whole value of `data` and of
+  chart `categories` is checked, since officecli reads a file only when the
+  whole value names one, and a value starting with a drive letter is refused
+  unless numbers follow it up to the first `;`; in Word and Excel each cell is
+  checked too); fills take colours, gradients or a `data:`
   image; prose (`text`, `title`, `notes`, `alt`, `description`, `tooltip`,
   `value`, `formula`) may hold anything, including addresses; every other value
   may not name a file or an address (an absolute or `..` path, `~`, a drive, a
