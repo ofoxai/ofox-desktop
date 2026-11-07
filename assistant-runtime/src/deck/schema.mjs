@@ -125,13 +125,14 @@ export function deckOf(content) {
   return deckShaped(candidate) ? candidate : null;
 }
 
-// A literal backslash and n (or r, or both as \r\n), as a model writes a
-// line break when it escapes twice, is a line break: the host reads it so
-// in text and notes (create.rs unescape_newlines), so every string of the
-// deck reads it so here too, before any limit or estimate sees it.
-const LITERAL_NEWLINE = /\\r\\n|\\n|\\r/g;
+// A literal \n or \r\n (a backslash and a letter), as a model writes a line
+// break when it escapes twice, is a line break, as the host does: it reads
+// them so in text and notes (create.rs unescape_newlines), so every string
+// of the deck (titles too) reads them so here, before any limit or estimate
+// sees it. A lone \r is left as it is (`C:\reports`), as the host leaves it.
+const LITERAL_NEWLINE = /\\r\\n|\\n/g;
 
-// `value` with every literal \n, \r and \r\n in its strings (at any depth)
+// `value` with every literal \n and \r\n in its strings (at any depth)
 // turned into a line break; nothing else changes and `value` is not
 // modified.
 export function normalizeLiteralNewlines(value) {
@@ -434,6 +435,19 @@ function normalizeCta(slide, ctx) {
   };
 }
 
+// The first table header, chart category and series name start the
+// value officecli reads as a whole, and the host refuses one that starts
+// like a mention or a path (create.rs data_reaches_out); a drive only
+// reaches a table header, since chart labels hold no colon.
+const PATH_START = /^(?:@|[/\\]|\.{1,2}[/\\]|~[/\\]|[A-Za-z]:)/;
+
+// A problem when `text`, the first cell of an officecli value, starts like
+// a mention or a path.
+function firstCell(ctx, text, field) {
+  if (text !== undefined && PATH_START.test(text))
+    problem(ctx, `${field} must not start with "@" or a path prefix`);
+}
+
 // A chart label ends up inside an officecli argument, so it must not hold
 // the characters that argument is split on.
 function label(ctx, value, path) {
@@ -523,6 +537,8 @@ function normalizeChart(ctx, value) {
       };
     },
   });
+  firstCell(ctx, categories?.[0], `${field}.categories[0]`);
+  firstCell(ctx, series?.[0]?.name, `${field}.series[0].name`);
   // A pie draws one series; the others would be dropped, so it is refused.
   if (kind === "pie" && series !== undefined && series.length > 1)
     problem(ctx, `a pie chart takes one series; got ${series.length}`);
@@ -549,6 +565,7 @@ function normalizeTable(ctx, value) {
         breaks: "short",
       }),
   });
+  firstCell(ctx, columns?.[0], `${field}.columns[0]`);
   // The limit on rows counts the header, which is `columns` here.
   const rows = list(ctx, value.rows, {
     field: `${field}.rows`,

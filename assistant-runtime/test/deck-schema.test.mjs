@@ -146,7 +146,7 @@ test("deckOf reads a deck sent as JSON text, without kind, or as Deck", () => {
     assert.equal(deckOf(content), null, JSON.stringify(content));
 });
 
-test("normalizeLiteralNewlines turns \\n, \\r and \\r\\n into line breaks", () => {
+test("normalizeLiteralNewlines turns \\n and \\r\\n into line breaks", () => {
   const input = {
     kind: "deck",
     slides: [
@@ -154,12 +154,17 @@ test("normalizeLiteralNewlines turns \\n, \\r and \\r\\n into line breaks", () =
     ],
   };
   const snapshot = structuredClone(input);
+  // A lone \r stays, as the host leaves it.
   assert.deepEqual(normalizeLiteralNewlines(input), {
     kind: "deck",
-    slides: [{ body: "一\n二\n三\n四", values: [1, "a\nb"], keep: true }],
+    slides: [{ body: "一\n二\n三\\r四", values: [1, "a\nb"], keep: true }],
   });
   assert.deepEqual(input, snapshot, "the input is not modified");
   assert.equal(normalizeLiteralNewlines("no breaks"), "no breaks");
+  assert.equal(
+    normalizeLiteralNewlines("保存到 C:\\reports 文件夹"),
+    "保存到 C:\\reports 文件夹",
+  );
   assert.equal(normalizeLiteralNewlines(null), null);
 });
 
@@ -684,6 +689,45 @@ test("parseDeck rejects chart labels with separators", () => {
     'slide 1 (showcase): media.chart.categories[1] is "H1;H2"; it must not contain , ; or :',
     'slide 1 (showcase): media.chart.series[0].name is "收入:预算"; it must not contain , ; or :',
   ]);
+});
+
+test("parseDeck rejects a first header, category or series name like a path", () => {
+  for (const start of ["@handle", "/", "./x", "~/x"]) {
+    const table = { columns: [start, "说明"], rows: [["a", "b"]] };
+    assert.deepEqual(problemsOf(deckWith(showcase({ table }))), [
+      'slide 1 (showcase): media.table.columns[0] must not start with "@" or a path prefix',
+    ]);
+    assert.deepEqual(
+      problemsOf(
+        deckWith(showcase({ chart: chart({ categories: [start, "Q2"] }) })),
+      ),
+      [
+        'slide 1 (showcase): media.chart.categories[0] must not start with "@" or a path prefix',
+      ],
+    );
+    assert.deepEqual(
+      problemsOf(
+        deckWith(
+          showcase({
+            chart: chart({ series: [{ name: start, values: [1, 2] }] }),
+          }),
+        ),
+      ),
+      [
+        'slide 1 (showcase): media.chart.series[0].name must not start with "@" or a path prefix',
+      ],
+    );
+  }
+  // Later cells, and a first cell that only contains one, are text.
+  const table = {
+    columns: ["账号", "@handle"],
+    rows: [["/", "a@b"]],
+  };
+  parsed(deckWith(showcase({ table })));
+  parsed(deckWith(showcase({ chart: chart({ categories: ["Q1", "@x"] }) })));
+  parsed(
+    deckWith(showcase({ chart: chart({ categories: ["2025/26", "Q2"] }) })),
+  );
 });
 
 test("parseDeck rejects a chart with an unknown kind, or limits exceeded", () => {

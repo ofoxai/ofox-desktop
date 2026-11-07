@@ -271,9 +271,12 @@ one the model wrote: the allowlist check, the sandboxed engine run, `validate`,
 one) and `language` is `zh`, `en` or `ja`, which picks the font chain.
 A successful call says `Rendered N slides from the deck with theme navy.`
 The runtime also takes the deck as a JSON string, without `kind` when it has a
-`slides` list, or with `kind` in any case, and reads a literal `\n`, `\r` or
-`\r\n` in any of its text as a line break before it checks the limits (as the
-host does in `text` and `notes`). When the host refuses a batch the runtime
+`slides` list, or with `kind` in any case, and reads a literal `\n` or `\r\n`
+in any of its text as a line break before it checks the limits, as the host does
+in `text` and `notes` (a lone `\r`, as in `C:\reports`, is kept). A showcase's
+first table header, first chart category and first series name may not start
+with `@` or a path prefix (`/`, `./`, `../`, `~/`, a drive), since they start
+the value the host checks as a whole. When the host refuses a batch the runtime
 rendered, the model is told `The rendered batch was refused by the host (this is
 a renderer problem, not your deck): ` before the host's words, so it does not
 rewrite a deck that was fine.
