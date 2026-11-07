@@ -80,6 +80,10 @@ Responses 流、各种错误响应）校验分类，并用替身 curl 把整条�
 
 待用户拿真实 key 跑完后填写。
 
+补充（2026-11-07，非本脚本）：`create_document` 的最终工具 schema（`format` 枚举、`content` 为字符串或对象数组）
+已用真实 key 对 `POST /v1/chat/completions`（`openai/gpt-6.1-terra`）做过流式与非流式各一次探测，均返回 200 并产生
+`create_document` 工具调用；下表的四项仍待填写。
+
 - 运行日期：
 - 网关：`https://api.<apex>/v1`
 - 对话模型 / 图片模型：
