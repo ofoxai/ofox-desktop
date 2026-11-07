@@ -1,8 +1,6 @@
 // Estimates whether a text fits its box, using the same model as officecli's
 // `view issues` checker (officecli 1.0.160), so a deck that passes here does
 // not overflow when the host checks it. Sizes are in cm; font sizes in pt.
-import { textLength } from "./schema.mjs";
-
 // 1 pt = 0.0353 cm. A CJK glyph is one font size wide, a Latin character
 // 0.55 of one, a line is 1.32 font sizes tall. Insets are 0.1 in left and
 // right, 0.05 in top and bottom (0.254 cm and 0.127 cm).
@@ -15,6 +13,22 @@ export const FIT = {
 };
 
 const PT_CM = 0.0353;
+
+// The characters schema.mjs textLength counts as CJK.
+const CJK = /[\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/u;
+
+// How wide a paragraph is, in CJK characters. The checker measures any other
+// character at 0.55 of the font size, so the fit estimate must too; the
+// limits the model sees (schema.mjs textLength) still count it as half.
+// Line breaks take no room.
+function width(paragraph) {
+  let units = 0;
+  for (const char of paragraph) {
+    if (char === "\n" || char === "\r") continue;
+    units += CJK.test(char) ? 1 : FIT.latinRatio;
+  }
+  return units;
+}
 
 // How many CJK characters fit on one line of a box `widthCm` wide.
 export function lineCapacity(widthCm, sizePt) {
@@ -32,7 +46,7 @@ export function lineCount(text, widthCm, sizePt) {
     .split(/\r?\n/)
     .reduce(
       (total, paragraph) =>
-        total + Math.max(1, Math.ceil(textLength(paragraph) / capacity)),
+        total + Math.max(1, Math.ceil(width(paragraph) / capacity)),
       0,
     );
 }

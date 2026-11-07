@@ -20,9 +20,19 @@ test("six one-line bullets at 20pt need about 6.9 cm", () => {
   assert.ok(height >= 6.8 && height <= 7.0, `height was ${height}`);
 });
 
-test("mixed text counts Latin as half", () => {
+test("mixed text counts Latin at 0.55 of a CJK character", () => {
+  // Width 12 at 36pt holds (12 − 0.508) / (36 × 0.0353) = 9.04 units;
+  // "Transformer 入门" is 11 × 0.55 + 0.55 (the space) + 2 = 8.6: one line.
   assert.equal(lineCount("Transformer 入门", 12, 36), 1);
   assert.equal(lineCount(zh(41), 29.21, 20), 2);
+});
+
+test("Latin text is measured at the checker's 0.55, not the limits' half", () => {
+  // A full-width line at 20pt holds (29.21 − 0.508) / (20 × 0.0353) = 40.65
+  // units. 73 Latin characters are 73 × 0.55 = 40.15: one line. 74 are
+  // 74 × 0.55 = 40.7: two lines, where counting half (37) would say one.
+  assert.equal(lineCount("x".repeat(73), 29.21, 20), 1);
+  assert.equal(lineCount("x".repeat(74), 29.21, 20), 2);
 });
 
 test("an empty paragraph still counts one line", () => {
