@@ -1501,24 +1501,30 @@ fn location(text: &str, scheme: impl Fn(&str, &str) -> bool) -> bool {
 /// What a `data` value, or one of its cells, starts with when officecli
 /// would read it as a file: a root, a folder (`./`, `../`, `~/`, either
 /// slash) or a mention (`@file`). A drive is checked apart (see
-/// [`data_reaches_out`]).
+/// [`names_a_drive`]).
 const PATH_STARTS: &[&str] = &["/", "\\", "./", ".\\", "../", "..\\", "~/", "~\\", "@"];
 
+/// Whether a cell starts with a drive: one ASCII letter and a colon
+/// (`C:\x`, or `C:x`, relative to the drive's current folder), unless only
+/// numbers follow, as in a one-letter chart series (`A:1`, `B:3.5`).
+fn names_a_drive(cell: &str) -> bool {
+    match cell.as_bytes() {
+        [letter, b':', rest @ ..] if letter.is_ascii_alphabetic() => !rest
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || b".+-, ".contains(byte)),
+        _ => false,
+    }
+}
+
 /// Whether a table's or chart's `data` would be read as a file or an
-/// address rather than as inline cells: it, or one of its cells (split at
-/// `,`, `;`, tabs and line breaks), starts like a path ([`PATH_STARTS`], or
-/// a drive: one letter, a colon and a slash); a `..` segment climbs out of
+/// address rather than as inline cells: one of its cells (split at `,`,
+/// `;`, tabs and line breaks; the first starts the value) starts like a
+/// path ([`PATH_STARTS`], [`names_a_drive`]); a `..` segment climbs out of
 /// the folder; or it is an address (`scheme://…`, `file:`). Anything else
-/// is prose: `.NET`, `~approx`, `Sales:5`, `v1.2`, `a:b`.
+/// is prose: `.NET`, `~approx`, `Sales:5`, `v1.2`, `A:1,2`.
 fn data_reaches_out(text: &str) -> bool {
-    let path_like = |cell: &str| {
-        let bytes = cell.as_bytes();
-        let drive = bytes.len() >= 3
-            && bytes[0].is_ascii_alphabetic()
-            && bytes[1] == b':'
-            && matches!(bytes[2], b'/' | b'\\');
-        drive || PATH_STARTS.iter().any(|start| cell.starts_with(start))
-    };
+    let path_like =
+        |cell: &str| names_a_drive(cell) || PATH_STARTS.iter().any(|start| cell.starts_with(start));
     // `a,b/../../x` climbs out of the folder too: .NET folds `b/..` away.
     let climbs = text
         .replace('\\', "/")
@@ -4735,7 +4741,7 @@ esac"#,
             {"command": "add", "parent": "/body", "type": "paragraph", "after": "find:Summary", "props": {"text": "x"}},
             {"command": "add", "parent": "/", "type": "table", "props": {"data": "Name,Cost;Hosting,1200"}},
             {"command": "add", "parent": "/", "type": "table", "props": {"data": "Name,Score\nAlice,90"}},
-            {"command": "add", "parent": "/", "type": "table", "props": {"data": "a:b,c"}},
+            {"command": "add", "parent": "/", "type": "table", "props": {"data": "ab:c,d"}},
             // Gradients, image fills, number formats and lengths in their
             // own syntax.
             {"command": "add", "parent": "/slide[1]", "type": "shape", "props": {"fill": "linear:FF0000-0000FF-90", "gradient": "radial:FF0000-0000FF", "background": "image:data:image/png;base64,iVBORw0KGgo=", "x": ".5in", "y": "-2pt", "width": "0.5cm", "link": "/slide[3]/shape[@name=Title]"}},
@@ -4940,8 +4946,20 @@ esac"#,
             table("指标,变化;\"含税, +18%\",=1"),
             chart("-成本:1,2"),
             chart("Sales:5"),
+            // A one-letter series of numbers names no drive.
+            chart("A:1,2"),
+            chart("B:3.5,-4"),
+            chart("A:1,2;B:3,4"),
         ];
-        for prose in [".NET", "~approx", "Sales:5", "含税, +18%", "v1.2", "a:b"] {
+        for prose in [
+            ".NET",
+            "~approx",
+            "Sales:5",
+            "含税, +18%",
+            "v1.2",
+            "ab:c",
+            "A:1,2",
+        ] {
             items.push(table(prose));
             items.push(table(&format!("Name,Note;x,{prose}")));
         }
@@ -4957,15 +4975,19 @@ esac"#,
         }
     }
 
-    /// `data` values and cells that read as a file in every format.
-    const PATH_LIKE_DATA: &[&str] = &["/x.csv", "@file", "C:\\x", "../x", "~/x", ".\\x"];
+    /// `data` values and cells that read as a file in every format: a
+    /// drive is one letter and a colon (`C:t.csv` is relative to the drive's
+    /// current folder), unless only numbers follow.
+    const PATH_LIKE_DATA: &[&str] = &[
+        "/x.csv", "@file", "C:\\x", "../x", "~/x", ".\\x", "C:t.csv", "C:x", "D:data", "a:b",
+    ];
 
     /// A workbook's table cells are prose too, unless they read as a file;
     /// its formula checks still hold.
     #[test]
     fn workbook_data_cells_are_prose_unless_path_like() {
         let table = |data: &str| json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": data}});
-        for prose in [".NET", "~approx", "Sales:5", "v1.2", "a:b"] {
+        for prose in [".NET", "~approx", "Sales:5", "v1.2", "ab:c", "A:1"] {
             let item = table(&format!("Name,{prose}"));
             workbook(std::slice::from_ref(&item)).unwrap_or_else(|error| panic!("{item}: {error}"));
         }
@@ -5624,14 +5646,16 @@ esac"#,
         // Table data: rows inline, never a file or an address.
         for data in [
             "Name,Score\nAlice,90",
-            "a:b,c",
+            "ab:c,d",
             "H1,H2;R1C1,R1C2",
             "Total",
             "https,x",
-            // Prose: a drive is a letter, a colon and a slash; a folder is
-            // `.` or `~` and a slash.
-            "C:t.csv",
+            // Prose: a folder is `.` or `~` and a slash; a drive followed by
+            // numbers only is a one-letter chart series.
             ".t.csv",
+            "A:1,2",
+            "B:3.5,-4",
+            "D:",
         ] {
             assert!(!refused("data", data), "{data}");
         }
@@ -5641,6 +5665,9 @@ esac"#,
             "https://x/t.csv,extra",
             "@t.csv",
             "C:\\t.csv",
+            "C:t.csv",
+            "c:x",
+            "a:b,c",
             "~/t.csv",
             "\\\\server\\t.csv",
             "file:t.csv",
@@ -5792,7 +5819,7 @@ esac"#,
         }
         for data in [
             "Name,Score\nAlice,90",
-            "a:b,c",
+            "ab:c,d",
             "Q1..Q4,ok",
             "data:text/csv,a,b",
         ] {
