@@ -191,9 +191,11 @@ signed tree after any engine or entitlement change, is the only check.
 The model makes a file with one tool, `create_document({ name, format, content })`.
 The runtime registers it from the run's `documents` parameter, which lists the
 formats this computer can make: the text formats always, the Office formats when
-officecli is present and `pdf` when typst is. The system prompt tells the model
-to use the tool when the user asks for a file and never to say it cannot attach
-one.
+officecli is present and `pdf` when typst is. The system prompt is written from
+that list: it tells the model to use the tool when the user asks for a file or
+names a PDF, Word, PowerPoint or Excel document, and never to say it cannot
+attach one; a format whose engine is missing is named as one this machine cannot
+produce, which the model says if asked.
 
 Before the first document of a format in a conversation the model reads the
 matching bundled skill with `use_skill`: `ofox-office-docx`, `ofox-office-pptx`,

@@ -33,6 +33,17 @@ const samples = {
   generate_speech: { text: "hello", language: "en" },
   web_search: { query: "Pi SDK" },
   web_fetch: { url: "https://example.com/" },
+  create_document: { name: "notes.md", format: "md", content: "# Notes" },
+};
+
+// create_document's other content shape: an officecli batch.
+const batch = {
+  name: "deck.pptx",
+  format: "pptx",
+  content: [
+    { command: "add", parent: "/", type: "slide" },
+    { command: "set", path: "/slide[1]/shape[1]", props: { text: "Hi" } },
+  ],
 };
 
 for (const platform of ["macos", "windows"])
@@ -47,6 +58,19 @@ for (const platform of ["macos", "windows"])
           apiKey: "synthetic-schema-only-credential",
           localConfig: { cwd: tmpdir(), platform },
           webSearch: true,
+          documents: {
+            formats: [
+              "md",
+              "txt",
+              "csv",
+              "html",
+              "json",
+              "pptx",
+              "docx",
+              "xlsx",
+              "pdf",
+            ],
+          },
           media: {
             image: {
               model: "test/image",
@@ -83,6 +107,14 @@ for (const platform of ["macos", "windows"])
           args,
           tool.name,
         );
+        if (tool.name === "create_document")
+          assert.deepEqual(
+            validateToolArguments(tool, {
+              name: tool.name,
+              arguments: structuredClone(batch),
+            }),
+            batch,
+          );
         if (
           ["use_skill", "find_skills", "install_skill", "save_skill"].includes(
             tool.name,

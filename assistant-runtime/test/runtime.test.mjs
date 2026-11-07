@@ -3602,11 +3602,17 @@ test("system prompt tells the model to produce files with create_document", asyn
   assert.match(formats, /"md"/);
   assert.match(formats, /"pdf"/);
   assert.doesNotMatch(formats, /pptx/);
+  const prompt = body.messages[0].content;
   assert.match(
-    body.messages[0].content,
-    /produce the file with create_document/,
+    prompt,
+    /When the user asks for a file, or names a PDF document, produce it with create_document\./,
   );
-  assert.match(body.messages[0].content, /never say you cannot attach/);
+  assert.match(
+    prompt,
+    /This machine cannot produce Word, PowerPoint or Excel files; say so if asked\./,
+  );
+  assert.match(prompt, /call use_skill on its skill \(ofox-office-pdf\)/);
+  assert.doesNotMatch(prompt, /never say you cannot attach|ofox-office-md/);
 });
 
 test("no create_document without the documents param", async (t) => {
@@ -3629,7 +3635,7 @@ test("no create_document without the documents param", async (t) => {
     assert.equal(body.tools, undefined);
     assert.doesNotMatch(
       body.messages[0].content,
-      /create_document|cannot attach/,
+      /create_document|cannot attach|cannot produce/,
     );
   }
 });

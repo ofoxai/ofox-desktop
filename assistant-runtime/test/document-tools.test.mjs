@@ -389,18 +389,92 @@ test("a reply that is not a completed document fails the call", async () => {
 });
 
 test("the guidelines tell the model to make files and read the skill first", () => {
-  const guidelines = fixture().tools[0].promptGuidelines.join(" ");
+  const guidelines = fixture().tools[0].promptGuidelines.join("\n");
   assert.match(
     guidelines,
-    /produce the file with create_document; never say you cannot attach files\./,
+    /When the user asks for a file, or names a PDF, Word, PowerPoint or Excel document, produce it with create_document; never say you cannot attach files\./,
   );
   assert.match(
     guidelines,
-    /call use_skill on the matching ofox-office-\* skill/,
+    /Before the first PDF, Word, PowerPoint or Excel document in a conversation, call use_skill on its skill \(ofox-office-pdf, ofox-office-docx, ofox-office-pptx or ofox-office-xlsx\)/,
   );
+  assert.doesNotMatch(guidelines, /cannot produce/);
   assert.match(guidelines, /two or three sentences on the structure first/);
   assert.match(
     guidelines,
     /At most 3 documents per reply; retry a failed document at most twice/,
   );
+});
+
+test("without the engines the guidelines say which files cannot be made", () => {
+  const textOnly = fixture({ formats: ["md", "txt", "csv", "html", "json"] })
+    .tools[0].promptGuidelines;
+  const text = textOnly.join("\n");
+  assert.match(
+    text,
+    /When the user asks for a file, produce it with create_document\./,
+  );
+  assert.match(
+    text,
+    /This machine cannot produce PDF, Word, PowerPoint or Excel files; say so if asked\./,
+  );
+  assert.doesNotMatch(
+    text,
+    /never say you cannot attach|use_skill|ofox-office/,
+  );
+
+  const pdfOnly = fixture({
+    formats: ["md", "txt", "pdf"],
+  }).tools[0].promptGuidelines.join("\n");
+  assert.match(
+    pdfOnly,
+    /or names a PDF document, produce it with create_document\./,
+  );
+  assert.match(
+    pdfOnly,
+    /This machine cannot produce Word, PowerPoint or Excel files; say so if asked\./,
+  );
+  assert.match(pdfOnly, /call use_skill on its skill \(ofox-office-pdf\)/);
+  assert.doesNotMatch(
+    pdfOnly,
+    /never say you cannot attach|ofox-office-(md|txt|docx)/,
+  );
+});
+
+test("the schema is plain JSON Schema: an enum and a string or object list", () => {
+  const { tool } = createDocument({ formats: ["md", "pptx"] });
+  const { format, content } = tool.parameters.properties;
+  assert.deepEqual(format, { type: "string", enum: ["md", "pptx"] });
+  assert.deepEqual(content, {
+    anyOf: [
+      { type: "string", maxLength: 2_000_000 },
+      {
+        type: "array",
+        items: { type: "object", properties: {}, additionalProperties: true },
+        maxItems: 2000,
+      },
+    ],
+  });
+  assert.doesNotMatch(
+    JSON.stringify(tool.parameters),
+    /patternProperties|"const"/,
+  );
+  // Pi coerces a scalar to a string and one object to a list of it; a
+  // list of anything but objects, or one over the limits, fails.
+  for (const content of [
+    ["text"],
+    [[DECK[0]]],
+    [5],
+    Array(2001).fill({}),
+    "x".repeat(2_000_001),
+  ])
+    assert.throws(
+      () =>
+        validateToolArguments(tool, {
+          name: tool.name,
+          arguments: { name: "deck.pptx", format: "pptx", content },
+        }),
+      /Validation failed/,
+      JSON.stringify(content),
+    );
 });

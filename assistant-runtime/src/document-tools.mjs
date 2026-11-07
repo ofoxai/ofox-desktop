@@ -15,12 +15,37 @@ const OFFICE_FORMATS = new Set(["pptx", "docx", "xlsx"]);
 const MAX_ISSUE_TEXT = 500;
 const PREVIEWS = { ".png": thumbnailFromPng, ".svg": thumbnailFromSvg };
 
-const GUIDELINES = [
-  "When the user asks for a PDF, Word, PowerPoint or Excel file, or to write/make a document, produce the file with create_document; never say you cannot attach files.",
-  "Before the first document of a format in a conversation, call use_skill on the matching ofox-office-* skill and follow it.",
-  "Reply with two or three sentences on the structure first, then call the tool; after the result, summarize the file and mention issues.",
-  "At most 3 documents per reply; retry a failed document at most twice, then explain.",
+// The formats a user names, in the words they use; each has its skill.
+const NAMED_FORMATS = [
+  ["pdf", "PDF"],
+  ["docx", "Word"],
+  ["pptx", "PowerPoint"],
+  ["xlsx", "Excel"],
 ];
+
+const either = (words) =>
+  words.length > 1
+    ? `${words.slice(0, -1).join(", ")} or ${words.at(-1)}`
+    : words[0];
+
+// What the model is told depends on what this machine can make: a format
+// whose engine is missing is one the model says it cannot produce.
+function guidelines(formats) {
+  const named = NAMED_FORMATS.filter(([format]) => formats.includes(format));
+  const missing = NAMED_FORMATS.filter(([format]) => !formats.includes(format));
+  const words = (list) => either(list.map(([, word]) => word));
+  return [
+    named.length
+      ? `When the user asks for a file, or names a ${words(named)} document, produce it with create_document${missing.length ? "." : "; never say you cannot attach files."}`
+      : "When the user asks for a file, produce it with create_document.",
+    missing.length &&
+      `This machine cannot produce ${words(missing)} files; say so if asked.`,
+    named.length &&
+      `Before the first ${words(named)} document in a conversation, call use_skill on its skill (${either(named.map(([format]) => `ofox-office-${format}`))}) and follow it.`,
+    "Reply with two or three sentences on the structure first, then call the tool; after the result, summarize the file and mention issues.",
+    "At most 3 documents per reply; retry a failed document at most twice, then explain.",
+  ].filter(Boolean);
+}
 
 function description(formats) {
   const office = formats.filter((format) => OFFICE_FORMATS.has(format));
@@ -134,10 +159,10 @@ export function documentTools(runtime, context, { vision }) {
         maxLength: 120,
         description: "File name with extension",
       }),
-      format: Type.Union(formats.map((format) => Type.Literal(format))),
+      format: Type.String({ enum: formats }),
       content: Type.Union([
         Type.String({ maxLength: 2_000_000 }),
-        Type.Array(Type.Record(Type.String(), Type.Unknown()), {
+        Type.Array(Type.Object({}, { additionalProperties: true }), {
           maxItems: 2000,
         }),
       ]),
@@ -182,5 +207,5 @@ export function documentTools(runtime, context, { vision }) {
       };
     },
   );
-  return [{ ...tool, promptGuidelines: GUIDELINES }];
+  return [{ ...tool, promptGuidelines: guidelines(formats) }];
 }
