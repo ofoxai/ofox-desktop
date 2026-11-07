@@ -7566,6 +7566,9 @@ mod real_eval {
         let officecli = engines_at(&bundle)
             .officecli
             .expect("the document engines are prepared (run `pnpm assistant:prepare`)");
+        // On a serial run libtest has printed `test <name> ... ` with no line
+        // end; the case lines start on lines of their own.
+        println!();
         for item in &models {
             let model = model_of(item);
             let id = match &model {
@@ -7606,6 +7609,46 @@ mod real_eval {
                 println!("{}", line.to_string().replace(&key, "***"));
             }
         }
+    }
+
+    /// The eval runs only models the app offers, set up as the app sets them
+    /// up; no network.
+    #[test]
+    fn eval_models_are_built_as_the_app_builds_them() {
+        let row = json!({
+            "id": "openai/gpt-6.1-terra", "object": "model", "name": "OpenAI: GPT-6.1 Terra",
+            "context_length": 400000,
+            "supported_endpoints": ["/v1/responses", "/v1/chat/completions"],
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            "top_provider": {"max_completion_tokens": 128000},
+            "pricing": {"prompt": "0.000001", "completion": "0.000008"},
+        });
+        let model = model_of(&row).unwrap();
+        assert_eq!(model.max_output_tokens, 128000);
+        assert!(model.supports_images);
+        assert_eq!(json!(model.protocol), "openai-responses");
+        // A row the app drops is refused, not run on `test_model()` settings.
+        for dropped in [
+            json!({"id": "x/no-endpoints", "object": "model", "context_length": 128000}),
+            json!({"id": "x/no-endpoints", "contextWindow": 64000, "context_length": 128000}),
+            json!({"id": "x/no-endpoints"}),
+        ] {
+            let error = model_of(&dropped).unwrap_err();
+            assert!(error.starts_with("x/no-endpoints: "), "{error}");
+        }
+        let image = model_of(&json!({
+            "id": "openai/gpt-image-2", "context_length": 0,
+            "supported_endpoints": ["/v1/images/generations"],
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["image"]},
+        }))
+        .unwrap_err();
+        assert!(image.contains("not a chat model"), "{image}");
+        // The app's own camelCase model object takes the rest from `test_model()`.
+        let shaped = model_of(&json!({"id": "x/shaped", "contextWindow": 64000})).unwrap();
+        assert_eq!(
+            (shaped.context_window, shaped.max_output_tokens),
+            (64000, 4096)
+        );
     }
 
     /// One prompt in a new conversation with `model` on the real gateway.
@@ -7813,19 +7856,35 @@ mod real_eval {
     }
 
     /// A `/v1/models` row goes through the app's own parser, so the model
-    /// runs with the protocol, tools and output limit the app gives it. A
-    /// model object (as [`test_model`] writes one) takes what it leaves out
-    /// from there.
+    /// runs with the protocol, tools and output limit the app gives it, and a
+    /// row the app drops is refused rather than run on made-up settings. Only
+    /// a model object in the app's own camelCase shape (as [`test_model`]
+    /// writes one, with no catalog field) takes what it leaves out from there.
     fn model_of(item: &Value) -> Result<Model, String> {
-        let model = if item.get("supported_endpoints").is_some() {
-            parse_models(json!({ "data": [item] }), Source::V1)
-                .pop()
-                .ok_or_else(|| format!("{} is no model the app lists", item["id"]))?
-        } else {
+        let id = item["id"].as_str().unwrap_or("?");
+        let catalog_row = [
+            "object",
+            "supported_endpoints",
+            "context_length",
+            "architecture",
+            "top_provider",
+        ]
+        .iter()
+        .any(|field| item.get(field).is_some());
+        let model_object = ["supportedEndpoints", "contextWindow"]
+            .iter()
+            .any(|field| item.get(field).is_some());
+        let model = if model_object && !catalog_row {
             let fields = item.as_object().ok_or("a model is a JSON object")?;
             let mut model = serde_json::to_value(test_model()).unwrap();
             model.as_object_mut().unwrap().extend(fields.clone());
-            serde_json::from_value(model).map_err(|error| format!("{}: {error}", item["id"]))?
+            serde_json::from_value(model).map_err(|error| format!("{id}: {error}"))?
+        } else {
+            parse_models(json!({ "data": [item] }), Source::V1)
+                .pop()
+                .ok_or_else(|| {
+                    format!("{id}: the app drops this catalog row and does not offer it")
+                })?
         };
         if model.kind != Kind::Chat {
             return Err(format!(

@@ -191,9 +191,12 @@ function mask(text, key = "") {
     );
 }
 
-// cargo 的 stdout 里夹着测试框架的输出；只认带 case 和 ok 的 JSON 对象行。
+// cargo 的 stdout 里夹着测试框架的输出；只认带 case 和 ok 的 JSON 对象。串行运行时
+// libtest 先打印不换行的 "test <名字> ... "，第一行结果可能接在它后面，所以从 {"case"
+// 处读起。
 function parseLine(line) {
-  const text = line.trim();
+  const start = line.indexOf('{"case"');
+  const text = (start >= 0 ? line.slice(start) : line).trim();
   if (!text.startsWith("{")) return null;
   try {
     const value = JSON.parse(text);
@@ -545,24 +548,41 @@ function selfTest() {
     "xlsx-grades",
     "docx-weekly",
   ];
-  const stdout = [
-    "running 1 test",
+  const results = [
+    "openai/gpt-6.1-terra",
+    "google/gemini-luna",
+    "deepseek/deepseek-v4.1-flash",
+  ].flatMap((model) =>
+    cases.map((name) => JSON.stringify(passLine(model, name))),
+  );
+  // libtest 串行运行（--test-threads=1）时的真实排布："test <名字> ... " 不换行，
+  // 第一行结果接在它后面，"ok" 在最后一行结果之后。
+  const libtest = (lines) => [
     "{not json",
     '{"other": true}',
-    ...[
-      "openai/gpt-6.1-terra",
-      "google/gemini-luna",
-      "deepseek/deepseek-v4.1-flash",
-    ].flatMap((model) =>
-      cases.map((name) => JSON.stringify(passLine(model, name))),
-    ),
-    "test real_eval::four_prompts_on_the_listed_models ... ok",
+    "running 1 test",
+    `test real_eval::four_prompts_on_the_listed_models ... ${lines[0]}`,
+    ...lines.slice(1),
+    "ok",
+    "",
+    "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 101 filtered out; finished in 812.40s",
   ];
-  check("只收集用例的 JSON 行", () => {
+  const stdout = libtest(results);
+  check("只收集用例的 JSON 行（第一行接在 libtest 的前缀后）", () => {
     const lines = stdout.map(parseLine).filter(Boolean);
     assert.equal(lines.length, 12);
     assert.equal(lines[0].case, "pdf-sichuan");
+    assert.equal(lines[0].model, "openai/gpt-6.1-terra");
     assert.equal(lines[11].model, "deepseek/deepseek-v4.1-flash");
+  });
+  check("只收集用例的 JSON 行（测试先打印一个空行）", () => {
+    const lines = libtest(["", ...results])
+      .map(parseLine)
+      .filter(Boolean);
+    assert.equal(lines.length, 12);
+    assert.equal(lines[0].case, "pdf-sichuan");
+    assert.equal(parseLine('{"ok": false, "case": "x"}')?.case, "x");
+    assert.equal(parseLine('test a ... {"case": "x"}'), null, "没有 ok");
   });
   check("报告：表头、行、合计", () => {
     const lines = stdout.map(parseLine).filter(Boolean);
