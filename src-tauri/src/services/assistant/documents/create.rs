@@ -51,8 +51,14 @@ const MAX_ERROR_CHARS: usize = 1900;
 const MAX_LISTED_FAILURES: usize = 5;
 const MAX_FAILURE_CHARS: usize = 220;
 /// How many problems `view issues` lists before identical ones are counted
-/// together and the most important [`MAX_ISSUES`] are kept.
-const VIEW_ISSUES_LIMIT: &str = "500";
+/// together and the most important [`MAX_ISSUES`] are kept: 200 issues are
+/// about 80 KB of JSON, well inside the runner's [`OUTPUT_LIMIT`] (a report
+/// cut there would lose every issue).
+const VIEW_ISSUES_LIMIT: &str = "200";
+/// The issue a document gets when `view issues` gave no report: no count of
+/// problems is not the same as none.
+const ISSUES_UNAVAILABLE: &str =
+    "issues unavailable: officecli did not report the document's formatting and content problems";
 /// Page setup, fonts and heading styles; the model writes only the body.
 const PRELUDE: &str = include_str!("pdf-prelude.typ");
 const MAIN: &str = "main.typ";
@@ -198,6 +204,15 @@ impl Document {
             content,
         })
     }
+}
+
+/// The `sandbox-exec` an engine runs under, kept once a probe showed the
+/// engine works there. A failed probe is not kept: the next document tries
+/// again, and only the first failure is logged.
+#[derive(Default)]
+pub struct EngineSandbox {
+    works: tokio::sync::OnceCell<PathBuf>,
+    warned: std::sync::atomic::AtomicBool,
 }
 
 /// The commands a batch may hold: they change the document and nothing else.
@@ -409,7 +424,14 @@ fn check_batch(commands: &mut [Value]) -> Result<(), String> {
                 .and_then(|path| path.strip_prefix('/'))
                 .is_some_and(|sheet| sheets.contains(&sheet.to_lowercase()));
         let added = verb == "add" && kind == "sheet";
-        if let Some(name) = name.filter(|name| (renamed || added) && may_root(name)) {
+        if let Some(name) = name.filter(|_| renamed || added) {
+            // Said here: a later path under it would fail as a confusing
+            // path error.
+            if !may_root(name) {
+                return Err(problem(&format!(
+                    "sheet name \"{name}\" cannot be used as a path root; rename the sheet"
+                )));
+            }
             sheets.push(name.to_lowercase());
         }
     }
@@ -1766,28 +1788,38 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 (deny network*)"#;
 
 /// `/tmp/officecli-<uid>`, where officecli keeps temporary files whatever
-/// `TMPDIR` says: created private, refused when it is someone else's or a
-/// link.
+/// `TMPDIR` says: see [`private_folder`].
 #[cfg(unix)]
 fn officecli_scratch() -> Result<PathBuf, String> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    // SAFETY: getuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    private_folder(Path::new(&format!("/tmp/officecli-{uid}")), uid)
+}
+
+/// `path` as a folder only `uid` can use: created with mode 0700, or one
+/// `uid` already owns (made 0700 when it is not); refused when it is
+/// someone else's or a link.
+#[cfg(unix)]
+fn private_folder(path: &Path, uid: u32) -> Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let unsafe_folder = || {
         refuse(
             FAILED,
             "officecli's temporary folder is not a private folder",
         )
     };
-    // SAFETY: getuid has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    let path = PathBuf::from(format!("/tmp/officecli-{uid}"));
-    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+    match std::fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(unsafe_folder()),
     }
-    let meta = std::fs::symlink_metadata(&path).map_err(|_| unsafe_folder())?;
+    let meta = std::fs::symlink_metadata(path).map_err(|_| unsafe_folder())?;
     if !meta.is_dir() || meta.uid() != uid {
         return Err(unsafe_folder());
+    }
+    if meta.mode() & 0o7777 != 0o700 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|_| unsafe_folder())?;
     }
     path.canonicalize().map_err(|_| unsafe_folder())
 }
@@ -1944,8 +1976,11 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
         VIEW_ISSUES_LIMIT,
         "--json",
     ];
-    if let Some(report) = work.report(&view).await {
-        issues.extend(view_issues(work, &report));
+    match work.report(&view).await {
+        Some(report) if data(&report)["issues"].is_array() => {
+            issues.extend(view_issues(work, &report))
+        }
+        _ => issues.push(Issue::warning(ISSUES_UNAVAILABLE.into(), None)),
     }
     let count = match format.count() {
         Some(key) => work
@@ -2399,40 +2434,43 @@ impl AssistantHost {
         }
     }
 
-    /// The `sandbox-exec` an engine runs under: tried once per engine, with
-    /// `--version` under its profile. Without it (not macOS, or the probe
-    /// failed) the batch checks and the dead proxy alone hold the engine.
-    async fn engine_sandbox(
-        &self,
-        cell: &tokio::sync::OnceCell<Option<PathBuf>>,
-        work: &Work<'_>,
-    ) -> Option<PathBuf> {
-        cell.get_or_init(|| async {
-            let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
-            let Some(sandbox) = sandbox else {
-                log::warn!(
-                    "[Assistant] sandbox-exec is unavailable; {} runs without it",
-                    work.name
-                );
-                return None;
-            };
-            let probe = Work {
-                sandbox: Some(&sandbox),
-                ..*work
-            };
-            match probe.run(&["--version"]).await {
-                Ok(output) if output.status == Some(0) => Some(sandbox),
-                _ => {
-                    log::warn!(
-                        "[Assistant] {} does not run under sandbox-exec; it runs without it",
+    /// The `sandbox-exec` an engine runs under: `--version` under its
+    /// profile, until a probe passes; a failed one is tried again with the
+    /// next document. Without it (not macOS, or the probe failed) the batch
+    /// checks and the dead proxy alone hold the engine.
+    async fn engine_sandbox(&self, cell: &EngineSandbox, work: &Work<'_>) -> Option<PathBuf> {
+        let probed = cell
+            .works
+            .get_or_try_init(|| async {
+                let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
+                let Some(sandbox) = sandbox else {
+                    return Err(format!(
+                        "sandbox-exec is unavailable; {} runs without it",
                         work.name
-                    );
-                    None
+                    ));
+                };
+                let probe = Work {
+                    sandbox: Some(&sandbox),
+                    ..*work
+                };
+                match probe.run(&["--version"]).await {
+                    Ok(output) if output.status == Some(0) => Ok(sandbox),
+                    _ => Err(format!(
+                        "{} does not run under sandbox-exec; it runs without it",
+                        work.name
+                    )),
                 }
+            })
+            .await;
+        match probed {
+            Ok(sandbox) => Some(sandbox.clone()),
+            Err(why) => {
+                if !cell.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                    log::warn!("[Assistant] {why}");
+                }
+                None
             }
-        })
-        .await
-        .clone()
+        }
     }
 
     async fn make_document(
@@ -2792,6 +2830,9 @@ mod tests {
     /// A stand-in officecli: `create` writes a zip header, `batch` saves
     /// the batch it got and prints `batch`, the views print `issues`,
     /// `stats` and an SVG.
+    /// officecli's `view issues --json` report of a document without any.
+    const NO_ISSUES: &str = r#"{"success":true,"data":{"count":0,"issues":[]}}"#;
+
     fn officecli(batch: &str, issues: &str, stats: &str) -> String {
         format!(
             r#"case "$1" in
@@ -2831,7 +2872,7 @@ esac"#;
         let f = fixture(
             Some(&officecli(
                 r#"{"results":[{"index":0,"success":true}]}"#,
-                r#"{"issues":[]}"#,
+                NO_ISSUES,
                 r#"{"slides":3}"#,
             )),
             None,
@@ -2888,7 +2929,7 @@ esac"#;
         let f = fixture(
             Some(&officecli(
                 r#"{"results":[{"index":0,"success":true},{"index":1,"success":false,"code":"invalid_path","output":"Slide 5 not found. Run `help batch` for the JSON item schema."}],"atomicRolledBack":true}"#,
-                r#"{"issues":[]}"#,
+                NO_ISSUES,
                 r#"{"slides":1}"#,
             )),
             None,
@@ -2919,7 +2960,7 @@ esac"#;
             .map(|index| json!({"index": index, "success": false, "error": "x".repeat(900), "code": "invalid_value"}))
             .collect();
         let batch = json!({"success": false, "data": {"results": failures, "summary": {"failed": 9, "atomicRolledBack": true}}});
-        let f = fixture(Some(&officecli(&batch.to_string(), "{}", "{}")), None);
+        let f = fixture(Some(&officecli(&batch.to_string(), NO_ISSUES, "{}")), None);
         let error = f
             .call(
                 "call-1",
@@ -2950,7 +2991,7 @@ esac"#;
             {"index": 1, "success": true, "output": "Added shape at /slide[1]/shape[@id=100000]\nWARNING: UNSUPPORTED props: color (did you mean fill?). Run 'officecli help <format> <element>' to see valid props, or raw-set for raw XML."},
             {"index": 2, "success": true, "warning": "text was trimmed"},
         ], "summary": {"failed": 0}}});
-        let f = fixture(Some(&officecli(&batch.to_string(), "{}", "{}")), None);
+        let f = fixture(Some(&officecli(&batch.to_string(), NO_ISSUES, "{}")), None);
         let result = f
             .call(
                 "call-1",
@@ -3017,6 +3058,55 @@ esac"#;
         assert!(result["file"].get("slides").is_none());
         assert!(result["file"].get("pages").is_none());
         assert!(result["previewPath"].is_null());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn an_issues_report_that_does_not_parse_is_not_zero_issues() {
+        // Cut by the output limit, not JSON, or without its list.
+        for report in [
+            r#"{"success":true,"data":{"count":250,"issues":[{"severity":1,"#,
+            "not json",
+            r#"{"success":false}"#,
+        ] {
+            let f = fixture(
+                Some(&officecli(
+                    r#"{"results":[{"index":0,"success":true}]}"#,
+                    report,
+                    "{}",
+                )),
+                None,
+            );
+            let result = f
+                .call(
+                    "call-1",
+                    json!({"name": "memo", "format": "docx", "content": deck()}),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                result["issues"],
+                json!([{"severity": "warning", "message": ISSUES_UNAVAILABLE}]),
+                "{report}"
+            );
+        }
+        let f = fixture(
+            Some(&officecli(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                "{}",
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "memo", "format": "docx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["issues"], json!([]));
+        assert_eq!(VIEW_ISSUES_LIMIT, "200");
     }
 
     #[tokio::test]
@@ -3431,7 +3521,7 @@ esac"#,
         let f = fixture(
             Some(&officecli(
                 r#"{"results":[{"index":0,"success":true}]}"#,
-                "{}",
+                NO_ISSUES,
                 "{}",
             )),
             None,
@@ -3553,7 +3643,7 @@ esac"#,
         let f = fixture(
             Some(&officecli(
                 r#"{"results":[{"index":0,"success":true}]}"#,
-                "{}",
+                NO_ISSUES,
                 "{}",
             )),
             None,
@@ -3697,6 +3787,26 @@ esac"#,
             check_batch(&mut commands)
         };
         assert!(batch("Users", "/Users/x/secret.txt").is_err());
+        // The sheet's own item says why, for an added or a renamed sheet.
+        for (name, error) in [
+            ("Home", batch("Home", "/Sheet1/A1").unwrap_err()),
+            ("Media", batch("Media", "/Sheet1/A1").unwrap_err()),
+            ("a/b", batch("a/b", "/Sheet1/A1").unwrap_err()),
+            (
+                "Library",
+                check_batch(&mut [
+                    json!({"command": "set", "path": "/Sheet1", "props": {"name": "Library"}}),
+                ])
+                .unwrap_err(),
+            ),
+        ] {
+            assert!(
+                error.contains(&format!(
+                    "item 0: sheet name \"{name}\" cannot be used as a path root; rename the sheet"
+                )),
+                "{error}"
+            );
+        }
         // A file system's folder name roots nothing, even as a sheet.
         assert!(batch("Users", "/Users/A1").is_err());
         assert!(batch("Program Files", "/Program Files/A1").is_err());
@@ -4621,17 +4731,63 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn the_scratch_folder_is_made_private_when_it_is_ours() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        let open = |path: &Path| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap()
+        };
+        let root = tempfile::tempdir().unwrap();
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let fresh = root.path().join("fresh");
+        private_folder(&fresh, uid).unwrap();
+        assert_eq!(mode(&fresh), 0o700);
+        let ours = root.path().join("ours");
+        std::fs::create_dir(&ours).unwrap();
+        open(&ours);
+        private_folder(&ours, uid).unwrap();
+        assert_eq!(mode(&ours), 0o700);
+        // Someone else's is refused, and left as it is.
+        open(&ours);
+        assert!(private_folder(&ours, uid + 1).is_err());
+        assert_eq!(mode(&ours), 0o755);
+        // So is a link, even to a folder of ours.
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert!(private_folder(&link, uid).is_err());
+    }
+
     /// A stand-in `sandbox-exec` that logs its arguments, and fails its
     /// probe when `works` is false; otherwise it runs the engine.
     fn stub_sandbox(dir: &Path, works: bool) -> PathBuf {
+        let probe = if works {
+            String::new()
+        } else {
+            "case \"$*\" in *--version*) exit 1 ;; esac".into()
+        };
+        stub_sandbox_probing(dir, &probe)
+    }
+
+    /// [`stub_sandbox`] whose probe fails the first time only.
+    fn stub_sandbox_failing_once(dir: &Path) -> PathBuf {
+        let marker = dir.join("probed").display().to_string();
+        stub_sandbox_probing(
+            dir,
+            &format!(
+                "case \"$*\" in *--version*) [ -e '{marker}' ] || {{ : > '{marker}'; exit 1; }} ;; esac"
+            ),
+        )
+    }
+
+    /// A stand-in `sandbox-exec` that logs its arguments, runs `probe`, then
+    /// the engine.
+    fn stub_sandbox_probing(dir: &Path, probe: &str) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("sandbox-exec");
         let log = dir.join("sandbox.log").display().to_string();
-        let probe = if works {
-            ""
-        } else {
-            "case \"$*\" in *--version*) exit 1 ;; esac"
-        };
         std::fs::write(
             &path,
             format!(
@@ -4656,7 +4812,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
     async fn officecli_runs_in_the_sandbox_once_its_probe_passes() {
         let script = officecli(
             r#"{"results":[{"index":0,"success":true}]}"#,
-            "{}",
+            NO_ISSUES,
             r#"{"slides":1}"#,
         );
         let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, true)));
@@ -4707,7 +4863,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
     async fn a_data_image_works_under_the_profile_that_hides_the_users_files() {
         let script = officecli(
             r#"{"results":[{"index":0,"success":true}]}"#,
-            "{}",
+            NO_ISSUES,
             r#"{"slides":1}"#,
         );
         let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, true)));
@@ -4751,7 +4907,11 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
     #[tokio::test]
     #[serial_test::serial(document_engines)]
     async fn officecli_runs_without_the_sandbox_when_it_does_not_work() {
-        let script = officecli(r#"{"results":[{"index":0,"success":true}]}"#, "{}", "{}");
+        let script = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            "{}",
+        );
         let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, false)));
         for call in ["call-1", "call-2"] {
             f.call(
@@ -4761,10 +4921,15 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             .await
             .unwrap();
         }
-        // Probed once; the documents were made without it.
+        // Probed for each document, as a failure is not kept; the documents
+        // were made without it.
         let log = sandbox_log(&f);
-        assert_eq!(log.len(), 1, "{log:?}");
-        assert!(log[0].ends_with("--version"));
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert!(
+            log.iter().all(|line| line.ends_with("--version")),
+            "{log:?}"
+        );
+        assert!(f.host.office_sandbox.works.get().is_none());
 
         // No sandbox-exec at all: the same.
         let f = fixture_in(Some(&script), None, |dir| Some(dir.join("missing")));
@@ -4775,6 +4940,45 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
         .await
         .unwrap();
         assert!(sandbox_log(&f).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_failed_sandbox_probe_is_tried_again_with_the_next_document() {
+        let script = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            r#"{"slides":1}"#,
+        );
+        let f = fixture_in(Some(&script), None, |dir| {
+            Some(stub_sandbox_failing_once(dir))
+        });
+        for call in ["call-1", "call-2", "call-3"] {
+            f.call(
+                call,
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        }
+        let log = sandbox_log(&f);
+        // The first document ran without it; the second probed again, and it
+        // and the third ran in it with no further probe.
+        let probes: Vec<_> = log
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| line.ends_with("--version"))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(probes, [0, 1], "{log:?}");
+        assert_eq!(
+            log.iter()
+                .filter(|line| line.contains(" create out.pptx"))
+                .count(),
+            2,
+            "{log:?}"
+        );
+        assert!(f.host.office_sandbox.works.get().is_some());
     }
 
     #[tokio::test]
@@ -5029,8 +5233,8 @@ exit 1"#
         );
         if cfg!(target_os = "macos") {
             assert_eq!(
-                f.host.office_sandbox.get(),
-                Some(&Some(PathBuf::from("/usr/bin/sandbox-exec")))
+                f.host.office_sandbox.works.get(),
+                Some(&PathBuf::from("/usr/bin/sandbox-exec"))
             );
         }
         // A reply makes three documents: another run for the rest.

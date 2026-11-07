@@ -7214,6 +7214,16 @@ mod documents {
         assert_eq!(generation["params"]["slides"], 8);
         assert_eq!(outcome.result["details"]["file"]["slides"], 8);
         assert!(bytes.starts_with(b"PK"));
+        // The deck validates: no issue is an error.
+        let issues = generation["params"]["issues"].as_array().unwrap();
+        assert!(
+            issues.iter().all(|issue| issue["severity"] != "error"),
+            "{issues:?}"
+        );
+        assert_eq!(
+            outcome.result["details"]["issues"],
+            generation["params"]["issues"]
+        );
         let sent = outcome.sent();
         assert!(sent.contains("Created deck.pptx (pptx, "), "{sent}");
         assert!(

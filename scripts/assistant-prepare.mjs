@@ -312,7 +312,13 @@ async function engineVersion(executable) {
   for (const key of ["PATH", "SystemRoot"])
     if (process.env[key]) env[key] = process.env[key];
   try {
-    return execFileSync(executable, ["--version"], { encoding: "utf8", env });
+    // A hung engine fails the prepare instead of stalling it.
+    return execFileSync(executable, ["--version"], {
+      encoding: "utf8",
+      env,
+      timeout: 60_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   } finally {
     await rm(home, { recursive: true, force: true });
   }

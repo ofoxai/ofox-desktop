@@ -74,7 +74,7 @@ On dark fills use FFFFFF or a light tint; mid-gray vanishes on a projector.
 ]
 ```
 
-**Picture.** `src` is a base64 `data:` URI of image data you really have (PNG, JPEG, or a small SVG you wrote; SVG needs a recent PowerPoint). Attachments cannot be referenced; web URLs are often refused. Set `alt`, or use shapes.
+**Picture.** `src` is a base64 `data:` URI of image data you really have (PNG, JPEG, or a small SVG you wrote; SVG needs a recent PowerPoint). Attachments cannot be referenced; web URLs are refused. Set `alt`, or use shapes.
 
 ```json
 [{"command":"add","parent":"/slide[1]","type":"picture","props":{"name":"Dot","src":"data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMCAxMCI+PGNpcmNsZSBjeD0iNSIgY3k9IjUiIHI9IjUiIGZpbGw9IiMxRTI3NjEiLz48L3N2Zz4=","x":"30.54cm","y":"16.3cm","width":"1cm","height":"1cm","alt":"Brand dot"}}]

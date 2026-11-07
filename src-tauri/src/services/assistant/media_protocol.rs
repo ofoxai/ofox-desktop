@@ -194,6 +194,11 @@ fn serve(
     let Ok((file, mut handle, len)) = open_file(store, parts[0], parts[1]) else {
         return empty(404);
     };
+    // The renderer shows a document as a card and saves it; it never loads
+    // one here. Served, a model-written HTML file would run in this origin.
+    if is_document(&file.mime_type) {
+        return empty(404);
+    }
     let range = request.headers().get("range");
     let (start, end, status) = if let Some(header) = range {
         let Some((start, end)) = header.to_str().ok().and_then(|h| byte_range(h, len)) else {
@@ -685,6 +690,22 @@ mod tests {
             open_file(&store, &sid, &aid).err().as_deref(),
             Some("assistant_attachment_not_found")
         );
+    }
+    #[test]
+    fn documents_are_saved_but_never_served() {
+        for mime in DOCUMENT_MIMES {
+            let (_root, store, owner, sid, aid) = fixture();
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].mime_type = mime.into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(open_file(&store, &sid, &aid).is_ok(), "{mime}");
+            let response = serve(&store, &owner, 7, &request(&owner, &sid, &aid));
+            assert_eq!(response.status(), 404, "{mime}");
+            assert!(response.body().is_empty(), "{mime}");
+        }
     }
     #[test]
     fn documents_are_capped_at_twenty_five_mib() {

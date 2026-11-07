@@ -2418,6 +2418,19 @@ describe("attachments", () => {
       });
       expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
     });
+
+    it("on a create_document tool_start, says it is making the document", async () => {
+      const emit = await sendFiles();
+      emit("tool_start", {
+        messageId: "reply",
+        name: "create_document",
+        toolCallId: "c1",
+        args: { name: "deck.pptx", format: "pptx", content: [] },
+      });
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Generating a document…",
+      );
+    });
   });
 
   it("says it is reading the files of a reply being regenerated", async () => {

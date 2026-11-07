@@ -7,7 +7,10 @@ mod catalog_refresh;
 pub mod local;
 use super::{
     catalog,
-    documents::engines::{engines_at, Engines},
+    documents::{
+        create::EngineSandbox,
+        engines::{engines_at, Engines},
+    },
     drops::DropSlot,
     process,
     projection::{
@@ -355,11 +358,11 @@ pub struct AssistantHost {
     /// The bundled document engines; found once, as they never change while
     /// the app runs.
     engines: OnceLock<Engines>,
-    /// The `sandbox-exec` officecli runs under, once its first run showed it
-    /// works there; `None` when it does not (see `documents::create`).
-    pub(super) office_sandbox: tokio::sync::OnceCell<Option<PathBuf>>,
+    /// The `sandbox-exec` officecli runs under, once a probe showed it works
+    /// there (see `documents::create`).
+    pub(super) office_sandbox: EngineSandbox,
     /// The same for Typst.
-    pub(super) typst_sandbox: tokio::sync::OnceCell<Option<PathBuf>>,
+    pub(super) typst_sandbox: EngineSandbox,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -772,8 +775,8 @@ impl AssistantHost {
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
             engines: OnceLock::new(),
-            office_sandbox: tokio::sync::OnceCell::new(),
-            typst_sandbox: tokio::sync::OnceCell::new(),
+            office_sandbox: EngineSandbox::default(),
+            typst_sandbox: EngineSandbox::default(),
         })
     }
 

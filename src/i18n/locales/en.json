@@ -5187,7 +5187,8 @@
     "activity": {
       "searching": "Searching the web…",
       "readingPage": "Reading a page…",
-      "readingFile": "Reading a file…"
+      "readingFile": "Reading a file…",
+      "makingDocument": "Generating a document…"
     },
     "welcome": "How can I help?",
     "emptyBoundary": "The assistant only reads files you attach, and searches the web only when web search is on.",

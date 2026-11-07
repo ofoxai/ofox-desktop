@@ -621,7 +621,12 @@ describe("a reply's sources", () => {
 describe("what a streaming reply is doing", () => {
   const streaming = (
     content: string,
-    activity: "searching" | "readingPage" | "readingFile" | null,
+    activity:
+      | "searching"
+      | "readingPage"
+      | "readingFile"
+      | "makingDocument"
+      | null,
     status: AssistantMessage["status"] = "streaming",
   ) => (
     <AssistantMessageView
@@ -637,6 +642,7 @@ describe("what a streaming reply is doing", () => {
     ["searching", "Searching the web…"],
     ["readingPage", "Reading a page…"],
     ["readingFile", "Reading a file…"],
+    ["makingDocument", "Generating a document…"],
   ] as const)("says %s instead of thinking", (activity, text) => {
     render(streaming("", activity));
     expect(screen.getByRole("status")).toHaveTextContent(text);

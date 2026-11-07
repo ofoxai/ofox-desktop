@@ -83,12 +83,17 @@ export type AssistantTransferResult =
   | ({ kind: "restore" } & AssistantRestoreReport);
 
 /** What a running reply is doing, as the user is told; never a tool's name. */
-export type AssistantActivity = "searching" | "readingPage" | "readingFile";
+export type AssistantActivity =
+  | "searching"
+  | "readingPage"
+  | "readingFile"
+  | "makingDocument";
 
 const TOOL_ACTIVITY = new Map<string, AssistantActivity>([
   ["web_search", "searching"],
   ["web_fetch", "readingPage"],
   ["read_attachment", "readingFile"],
+  ["create_document", "makingDocument"],
 ]);
 
 /** A tool call of the followed run that has not ended, by its call id. */

@@ -90,7 +90,7 @@ description: Read before writing a Word document (.docx) with create_document. R
 ]
 ```
 
-**Picture.** `src` is a base64 `data:` URI of image data you really have (PNG, JPEG, or a small SVG you wrote; SVG needs a recent Word). Attachments cannot be referenced and web URLs are often refused. Always set `alt`, `width` and `height`; the picture gets its own paragraph, which you can center.
+**Picture.** `src` is a base64 `data:` URI of image data you really have (PNG, JPEG, or a small SVG you wrote; SVG needs a recent Word). Attachments cannot be referenced and web URLs are refused. Always set `alt`, `width` and `height`; the picture gets its own paragraph, which you can center.
 
 ```json
 [

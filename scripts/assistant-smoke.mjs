@@ -339,6 +339,7 @@ async function productionSmoke() {
         cwd: work,
         env: engineEnvironment,
         encoding: "utf8",
+        timeout: 60_000,
         stdio: ["ignore", "pipe", "pipe"],
       });
     assert.ok(

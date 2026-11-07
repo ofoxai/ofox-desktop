@@ -5187,7 +5187,8 @@
     "activity": {
       "searching": "正在搜索网页…",
       "readingPage": "正在阅读网页…",
-      "readingFile": "正在读取文件…"
+      "readingFile": "正在读取文件…",
+      "makingDocument": "正在生成文档…"
     },
     "welcome": "有什么可以帮你？",
     "emptyBoundary": "助手只读取你附加的文件；开启联网后才会搜索网页。",
