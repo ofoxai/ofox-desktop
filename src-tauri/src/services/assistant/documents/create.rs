@@ -601,23 +601,55 @@ const FORMULA_FAMILIES: &[&str] = &["CUBE"];
 /// (`formula1`, `arrayFormula`, `sharedFormula`…): a named range's `ref`
 /// and `refersTo`, a pivot table's `calculatedField`.
 const FORMULA_KEYS: &[&str] = &["ref", "refersto", "calculatedfield", "calculatedfields"];
-/// On a [`FORMULA_TARGETS`] element, the parts of a property's name that
-/// make it hold a reference or a formula, when one of its parts contains
-/// one (`dataRange`, `valuesRef`, `value2`). Its other properties (`title`,
-/// `name`, `columns`, `prompt`…) are text, read as a formula only when they
-/// start like one.
-const REFERENCE_PARTS: &[&str] = &[
-    "formula",
-    "ref",
-    "sqref",
-    "range",
-    "values",
-    "categories",
-    "value",
-    "source",
+/// On a [`FORMULA_TARGETS`] element, the properties that are text, by the
+/// last part of their name (R59): read as a formula only when they start
+/// like one, and otherwise only checked for what names a place outside the
+/// workbook (see [`refused_reference`]). Every other property of such an
+/// element is read as a formula.
+const TEXT_KEYS: &[&str] = &[
+    "title",
+    "axistitle",
+    "cattitle",
+    "valtitle",
+    "xtitle",
+    "ytitle",
+    "name",
+    "seriesname",
+    "legend",
+    "label",
+    "labels",
+    "prompt",
+    "error",
+    "errortitle",
+    "inputtitle",
+    "inputmessage",
+    "errormessage",
+    "header",
+    "headers",
+    "caption",
+    "style",
+    "numberformat",
+    "numfmt",
+    "format",
+    "font",
+    "color",
+    "fill",
+    "size",
+    "bold",
+    "italic",
+];
+/// The properties that hold an inline list, by the last part of their name
+/// (R57): chart data and categories, a series' values, a table's columns,
+/// a pivot table's fields. One reference is read as a formula; a list is
+/// checked cell by cell (see [`refused_list`]).
+const LIST_KEYS: &[&str] = &[
     "data",
-    "refersto",
-    "calculatedfield",
+    "categories",
+    "values",
+    "columns",
+    "rows",
+    "cols",
+    "filters",
 ];
 /// The xlsx elements whose references and values may be formulas without a
 /// leading `=`, by `type` or in a path (`/Sheet1/cf[1]`), named in lower
@@ -660,11 +692,13 @@ const WORKBOOK_EXTENSIONS: &[&str] = &[
     ".xls", ".xlsx", ".xlsm", ".xlsb", ".xla", ".xlam", ".xlt", ".xltx", ".xltm", ".ods", ".csv",
 ];
 
-/// The formulas of an xlsx batch (R50, R53, R54, R56). Any value that starts
-/// like a formula is one, whatever its key or element; so is any value of a
-/// formula key (see [`is_formula_key`]), and of a [`REFERENCE_PARTS`] key on
-/// a [`FORMULA_TARGETS`] element. A formula calls only [`FORMULA_ALLOWED`]
-/// functions, holds none of
+/// The formulas of an xlsx batch (R50, R53, R54, R56, R57, R59). A formula
+/// key (see [`is_formula_key`]) is a formula whatever it holds. On a
+/// [`FORMULA_TARGETS`] element, an inline list ([`LIST_KEYS`]) is checked
+/// cell by cell unless it is one reference, [`TEXT_KEYS`] are text, and any
+/// other property is a formula. Anywhere else, a value that starts like a
+/// formula is one. A formula calls only [`FORMULA_ALLOWED`] functions, holds
+/// none of
 /// [`FORMULA_FUNCTIONS`], no DDE link, no other workbook, and no file share
 /// or address outside HYPERLINK's quoted link. A table's inline rows hold
 /// values only. Excel evaluates what passes: formulas are filtered, not
@@ -688,18 +722,25 @@ fn check_formulas(commands: &[Value]) -> Result<(), String> {
                 .collect::<String>()
                 .to_ascii_lowercase();
             let parts: Vec<&str> = name.split('.').collect();
-            let reference = targeted
-                && parts
-                    .iter()
-                    .any(|part| REFERENCE_PARTS.iter().any(|word| part.contains(word)));
-            let why = if is_formula_key(&parts) || reference {
+            let last = parts.last().copied().unwrap_or_default();
+            let data = name == "data";
+            let why = if is_formula_key(&parts) {
+                refused_formula(text)
+            } else if (targeted && LIST_KEYS.contains(&last)) || data {
+                if is_single_reference(text) {
+                    refused_formula(text)
+                } else {
+                    refused_list(text, data)
+                }
+            } else if targeted && !TEXT_KEYS.contains(&last) {
                 refused_formula(text)
             } else if starts_like_a_formula(text) {
                 refused_formula(text).map(|why| read_as_a_formula(text, &why))
+            } else if targeted {
+                refused_reference(text)
             } else {
                 None
             };
-            let why = why.or_else(|| (name == "data").then(|| refused_data_cells(text)).flatten());
             if let Some(why) = why {
                 return Err(refuse(
                     FAILED,
@@ -769,16 +810,80 @@ fn holds_formulas(fields: &Map<String, Value>) -> bool {
             .is_some_and(target)
 }
 
-/// Why a table's inline rows are refused, if they are: a cell (split at
-/// `,`, `;`, tabs and line breaks) that starts like a formula. Table data
-/// holds values; a formula goes in its cell's `formula`.
-fn refused_data_cells(text: &str) -> Option<String> {
+/// Whether `text` is one cell or range reference: `A1`, `$A$1:$B$9`,
+/// `Sheet1!A1:B9`, `'My Sheet'!A1`.
+fn is_single_reference(text: &str) -> bool {
+    let text = text.trim();
+    let cells = match text.rsplit_once('!') {
+        Some((sheet, cells)) => {
+            let named = match sheet
+                .strip_prefix('\'')
+                .and_then(|name| name.strip_suffix('\''))
+            {
+                Some(quoted) => !quoted.is_empty() && !quoted.replace("''", "").contains('\''),
+                None => {
+                    !sheet.is_empty()
+                        && sheet
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.'))
+                }
+            };
+            if !named {
+                return false;
+            }
+            cells
+        }
+        None => text,
+    };
+    let cell = |cell: &str| is_cell(&cell.replace('$', ""));
+    match cells.split_once(':') {
+        Some((start, end)) => cell(start) && cell(end),
+        None => cell(cells),
+    }
+}
+
+/// Why an inline list is refused, if it is: a cell (split at `,`, `;`, tabs
+/// and line breaks) that names a place outside the workbook, or that starts
+/// like a formula and is one that is refused. Table `data` holds values
+/// only: any cell that starts like a formula is refused there.
+fn refused_list(text: &str, data: bool) -> Option<String> {
     text.split([',', ';', '\t', '\n', '\r'])
-        .any(|cell| starts_like_a_formula(cell.trim().trim_matches('"')))
-        .then(|| {
-            "has a cell that starts with =, +, - or @ and is not a number; table rows hold values only: set a formula with \"formula\" on its cell"
-                .into()
+        .map(|cell| cell.trim().trim_matches('"'))
+        .find_map(|cell| {
+            refused_reference(cell).or_else(|| {
+                let formula = starts_like_a_formula(cell);
+                let refused = formula.then(|| refused_formula(cell)).flatten();
+                refused.or_else(|| (data && formula).then(|| DATA_VALUES.to_owned()))
+            })
         })
+        .map(|why| format!("has a cell that {why}"))
+}
+
+/// Why table rows that hold a formula are refused.
+const DATA_VALUES: &str = "starts with =, +, - or @ and is not a number; table rows hold values only: set a formula with \"formula\" on its cell";
+/// Why text that names another workbook is refused.
+const OTHER_WORKBOOK: &str =
+    "refers to another workbook or a file; a formula may refer only to this workbook's sheets";
+/// Why text that names a file share or an address is refused.
+const SHARE_OR_ADDRESS: &str = "names a file share or an address; only HYPERLINK's first argument may hold an https:, http: or mailto: address";
+/// Why text that names a `file:` address is refused.
+const FILE_ADDRESS: &str = "names a file: address; a formula cannot";
+
+/// Why text is refused for naming a place outside the workbook, if it is:
+/// another workbook (`[book]Sheet!A1`, a quoted path before `!`), a file
+/// share (`\\`), an address (`://`, a leading `//`) or a `file:` address.
+/// Text keeps its words and quotes: nothing else is read as a formula.
+fn refused_reference(text: &str) -> Option<String> {
+    let why = if text.to_ascii_lowercase().contains("file:") {
+        FILE_ADDRESS
+    } else if refers_to_another_workbook(text) {
+        OTHER_WORKBOOK
+    } else if text.contains("\\\\") || text.contains("://") || text.trim_start().starts_with("//") {
+        SHARE_OR_ADDRESS
+    } else {
+        return None;
+    };
+    Some(why.into())
 }
 
 /// Why a formula is refused, if it is: a call of a function that is not
@@ -819,7 +924,7 @@ fn refused_formula(text: &str) -> Option<String> {
         );
     }
     if text.to_ascii_lowercase().contains("file:") {
-        return Some("names a file: address; a formula cannot".into());
+        return Some(FILE_ADDRESS.into());
     }
     let Some(addresses) = hyperlink_addresses(text) else {
         return Some(
@@ -828,10 +933,7 @@ fn refused_formula(text: &str) -> Option<String> {
         );
     };
     if refers_to_another_workbook(text) {
-        return Some(
-            "refers to another workbook or a file; a formula may refer only to this workbook's sheets"
-                .into(),
-        );
+        return Some(OTHER_WORKBOOK.into());
     }
     let mut outside = String::with_capacity(text.len());
     let mut from = 0;
@@ -842,10 +944,7 @@ fn refused_formula(text: &str) -> Option<String> {
     }
     outside.push_str(&text[from..]);
     if outside.contains("\\\\") || outside.contains("//") {
-        return Some(
-            "names a file share or an address; only HYPERLINK's first argument may hold an https:, http: or mailto: address"
-                .into(),
-        );
+        return Some(SHARE_OR_ADDRESS.into());
     }
     None
 }
@@ -4104,11 +4203,11 @@ esac"#,
                 "RTD",
             ),
             (
-                json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "WEBSERVICE(B2)"}}),
+                json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"valuesRef": "WEBSERVICE(B2)"}}),
                 "WEBSERVICE",
             ),
             (
-                json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"values": "INDIRECT(B2)"}}),
+                json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"valuesRef": "INDIRECT(B2)"}}),
                 "INDIRECT",
             ),
             (
@@ -4181,12 +4280,43 @@ esac"#,
                 "calls WEBSERVICE",
             ),
             (
-                json!({"command": "add", "parent": "/Sheet1", "type": "pivotTable", "props": {"position": "H1", "values": "IMAGE(B2)"}}),
+                json!({"command": "add", "parent": "/Sheet1", "type": "pivotTable", "props": {"position": "H1", "aggregate": "IMAGE(B2)"}}),
                 "calls IMAGE",
             ),
             (
                 json!({"command": "add", "parent": "/", "type": "name", "props": {"name": "feed", "value": "WEBSERVICE(B2)"}}),
                 "calls WEBSERVICE",
+            ),
+            // R57: an inline list, cell by cell; one reference as a formula.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales:1,2,3", "categories": "[\\\\x\\y.xlsx]Sheet1!A1"}}),
+                "has a cell that",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales:1,2", "categories": "Q1,=WEBSERVICE(A1)"}}),
+                "has a cell that calls WEBSERVICE",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales:1,2", "categories": "Q1,https://x.example/a"}}),
+                "has a cell that names a file share or an address",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "'[x.xlsx]S'!B2:B5"}}),
+                "another workbook",
+            ),
+            // R59: on a chart, a key that is not text is a formula.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "foo": "WEBSERVICE(\"https://x\")"}}),
+                "calls WEBSERVICE",
+            ),
+            // R59: text names no place outside the workbook.
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "From [x.xlsx]Sheet1!A1"}}),
+                "another workbook",
+            ),
+            (
+                json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "See \\\\server\\share"}}),
+                "file share",
             ),
             // R56: a chart's text that starts like a formula is one.
             (
@@ -4260,6 +4390,11 @@ esac"#,
             json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"name": "Sales (2026)", "values": "Sheet1!B2:B5"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:C4", "name": "Ledger", "columns": "Name,Amount (USD),Date"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "validation", "props": {"ref": "B2:B9", "type": "list", "formula1": "Yes,No", "prompt": "Pick one (required)", "errorTitle": "Wrong value (see list)", "error": "Call support (ext. 12)"}}),
+            // R57: inline lists keep their words, and one reference passes.
+            json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Sales (k):1,2,3", "categories": "North (EU),South (US)"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name,Amount (USD)\nAlice,5"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Name,Amount (USD)\nAlice,5", "categories": "'My Sheet'!A2:A5"}}),
+            json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "Sheet1!$B$2:$B$5", "categories": "A2:A5"}}),
         ] {
             workbook(std::slice::from_ref(&item)).unwrap_or_else(|error| panic!("{item}: {error}"));
         }
@@ -4269,26 +4404,11 @@ esac"#,
             json!({"command": "set", "path": "/Chart/A1", "props": {"value": "See https://example.com"}}),
         ])
         .unwrap();
-        // Every formula the bundled skills teach, and a chart titled as the
-        // xlsx skill asks: with its unit in parentheses.
-        // (Only the workbook commands: Word and PowerPoint tables are prose.)
+        // Every command the bundled skills teach (their Word and PowerPoint
+        // tables too), and a chart titled as the xlsx skill asks: with its
+        // unit in parentheses.
         let mut commands: Vec<Value> =
-            serde_json::from_str::<Vec<Value>>(include_str!("testdata/skill-batches.json"))
-                .unwrap()
-                .into_iter()
-                .filter(|item| {
-                    ELEMENT_FIELDS.iter().all(|field| {
-                        let root = item[*field]
-                            .as_str()
-                            .and_then(|path| path.strip_prefix('/'))
-                            .and_then(|path| path.split(['/', '[']).next())
-                            .unwrap_or_default()
-                            .to_ascii_lowercase();
-                        root == "sheet" || !ROOTS.contains(&root.as_str())
-                    })
-                })
-                .collect();
-        assert!(commands.len() > 30, "{}", commands.len());
+            serde_json::from_str(include_str!("testdata/skill-batches.json")).unwrap();
         commands.push(json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "dataRange": "Sheet1!A1:B5", "title": "Revenue (USD)"}}));
         check_formulas(&commands).unwrap();
         // Formulas are checked in workbooks only: a Word equation's `|x|`
