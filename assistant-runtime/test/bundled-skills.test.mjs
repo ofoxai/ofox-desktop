@@ -116,7 +116,10 @@ test("office skill examples have the create_document content shape", async () =>
   }
 });
 
-test("the pptx skill's worked example is the deck the host tests render", async () => {
+// The worked example has its own fixture, rendered to zero issues by the
+// real engine when it changes; deck-object.json is the end-to-end deck, on
+// another topic, so the real-model eval does not measure copying.
+test("the pptx skill's worked example is the deck-example fixture", async () => {
   const skill = (await bundledSkills()).find(
     (item) => item.dir === "ofox-office-pptx",
   );
@@ -127,11 +130,14 @@ test("the pptx skill's worked example is the deck the host tests render", async 
   const fixture = JSON.parse(
     await readFile(
       new URL(
-        "../../src-tauri/tests/fixtures/assistant-documents/deck-object.json",
+        "../../src-tauri/tests/fixtures/assistant-documents/deck-example.json",
         import.meta.url,
       ),
       "utf8",
     ),
   );
   assert.deepEqual(decks[0], fixture);
+  const { problems, warnings } = parseDeck(fixture);
+  assert.equal(problems, undefined);
+  assert.deepEqual(warnings, []);
 });

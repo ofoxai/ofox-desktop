@@ -68,42 +68,42 @@ A pillar, grid item or step may be a `"heading: body"` string, which splits at t
 
 ## Worked example
 
-「做一个 Transformer 介绍的 PPT」: eight slides, none of the same type next to another. Its evidence figures are made up for the example; never copy them into a real deck.
+「做一个介绍 Ofox 的 PPT。数据：内测 3 个月，1200 位用户，绑定一次平均 30 秒，满意度 92%。」: eight slides, none of the same type next to another. The user's brief gave these numbers, so the evidence page uses them and no others; without numbers from the user, leave `evidence` out.
 
 ```json
 {
   "kind": "deck",
-  "title": "Transformer 入门",
+  "title": "认识 Ofox",
   "language": "zh",
   "slides": [
-    {"type": "hero", "title": "Transformer 入门", "subtitle": "注意力机制如何改变深度学习", "meta": "团队技术分享 · 2026 年 11 月"},
-    {"type": "statement", "statement": "让每个词都能直接看到整句话", "note": "2017 年 Transformer 取代 RNN，成为今天大模型的共同基础", "notes": "先抛结论：注意力让模型一步看到全句，后面几页解释为什么这很重要。"},
-    {"type": "pillars", "title": "为什么需要 Transformer", "pillars": [
-      {"heading": "RNN 逐词计算", "body": "必须按顺序处理每个词，GPU 无法并行，训练很慢"},
-      {"heading": "长句信息衰减", "body": "距离越远的词，信息在逐步传递中越容易丢失"},
-      {"heading": "注意力取代循环", "body": "每个词一步直接关注全句，既能并行，也不怕距离"}
-    ], "notes": "三个痛点对应三个收益：并行、长距离依赖、训练规模。"},
-    {"type": "timeline", "title": "从注意力到大模型", "steps": [
-      {"heading": "2014 年", "body": "注意力首次用于 RNN 翻译"},
-      {"heading": "2017 年", "body": "Transformer 论文发表"},
-      {"heading": "2018 年", "body": "BERT 与 GPT 相继出现"},
-      {"heading": "2022 年", "body": "大模型走向公众"}
-    ], "notes": "四个节点只讲一句话，重点放在 2017 年。"},
-    {"type": "comparison", "title": "RNN 与 Transformer", "left": {"heading": "RNN", "points": ["逐词顺序计算", "长距离依赖容易丢失", "训练难以并行", "结构简单，参数较少"]}, "right": {"heading": "Transformer", "points": ["整句并行计算", "任意两词直接关联", "充分利用 GPU", "计算量随句长平方增长"]}, "notes": "先讲 RNN 的局限，再讲 Transformer 的优势，最后坦率提到它的计算成本。"},
-    {"type": "evidence", "title": "落地效果：Q1 收入 +18%", "metrics": [
-      {"value": "+18%", "label": "Q1 收入", "note": "相对上季度"},
-      {"value": "3×", "label": "GPU 训练速度", "note": "对比 RNN 基线"},
-      {"value": "-40%", "label": "推理延迟", "note": "同等精度下"}
-    ], "detail": ["数据来自内部 A/B 测试，样本为 2026 年 Q1"], "notes": "三个指标都来自内部 A/B 测试：先讲收入，再讲训练速度和延迟。"},
-    {"type": "grid", "title": "Transformer 的应用", "items": [
-      {"heading": "文本", "body": "翻译、摘要与对话"},
-      {"heading": "图像", "body": "ViT 把图片切成小块处理"},
-      {"heading": "语音", "body": "识别与合成同样适用"},
-      {"heading": "代码", "body": "补全、解释与审查"},
-      {"heading": "视频", "body": "按时空小块建模与生成"},
-      {"heading": "多模态", "body": "图文音统一在一个模型里"}
-    ], "notes": "六个场景共用同一套结构，这正是它流行的原因。"},
-    {"type": "cta", "title": "谢谢，欢迎提问", "subtitle": "下一步：用 PyTorch 实现一个小型 Transformer", "contact": "ai-club@example.com"}
+    {"type": "hero", "title": "认识 Ofox", "subtitle": "一个账号，用好你的 AI 工具", "meta": "产品介绍 · 团队分享"},
+    {"type": "statement", "statement": "AI 工具越来越多，配置不该越来越难", "note": "Ofox 把账号、密钥和模型选择收进一个桌面应用", "notes": "先讲痛点：每多一个工具，就多一套账号、密钥和配置文件。"},
+    {"type": "pillars", "title": "Ofox 能做什么", "pillars": [
+      {"heading": "一键绑定", "body": "登录后为 Claude Code、Codex 等工具写好配置，不用手动复制密钥"},
+      {"heading": "统一模型", "body": "一个账号接入多家模型，在每个工具里按需切换"},
+      {"heading": "桌面助手", "body": "写文档、做 PPT、生成图片和视频，结果直接存成附件"}
+    ], "notes": "先讲绑定，这是新用户最先感受到的；再讲模型和助手。"},
+    {"type": "timeline", "title": "从安装到开始使用", "steps": [
+      {"heading": "安装", "body": "下载桌面应用并打开"},
+      {"heading": "登录", "body": "用 Ofox 账号登录"},
+      {"heading": "绑定", "body": "选择要用的工具，一键写好配置"},
+      {"heading": "使用", "body": "回到原来的工具，直接开始工作"}
+    ], "notes": "强调不改变用户习惯：绑定之后仍在原来的工具里工作。"},
+    {"type": "grid", "title": "可以绑定的工具", "items": [
+      {"heading": "Claude Code", "body": "终端里的编程助手"},
+      {"heading": "Codex", "body": "命令行编程代理"},
+      {"heading": "Gemini CLI", "body": "命令行 AI 助手"},
+      {"heading": "OpenCode", "body": "开源的终端编程工具"},
+      {"heading": "OpenClaw", "body": "个人 AI 助手"},
+      {"heading": "Hermes", "body": "开源 AI 代理"}
+    ], "notes": "列出常用的几款，现场可以演示其中一款的绑定。"},
+    {"type": "evidence", "title": "内测 3 个月的结果", "metrics": [
+      {"value": "1200", "label": "内测用户", "note": "内测 3 个月"},
+      {"value": "30 秒", "label": "完成一次绑定", "note": "从登录到可用的平均时间"},
+      {"value": "92%", "label": "内测满意度"}
+    ], "notes": "三个数字都来自内测资料：先讲用户规模，再讲绑定速度和满意度。"},
+    {"type": "comparison", "title": "手动配置与 Ofox", "left": {"heading": "手动配置", "points": ["每个工具单独注册账号", "密钥复制粘贴到配置文件", "换模型要改多处设置", "出了问题自己排查"]}, "right": {"heading": "用 Ofox", "points": ["一个账号管理全部工具", "登录后自动写好配置", "在应用里切换模型", "解绑时还原原来的配置"]}, "notes": "左边是用户今天的做法，右边逐条对应 Ofox 省掉的步骤。"},
+    {"type": "cta", "title": "现在就试试 Ofox", "subtitle": "下载桌面应用，登录后选择要绑定的工具", "contact": "ofox.ai"}
   ]
 }
 ```

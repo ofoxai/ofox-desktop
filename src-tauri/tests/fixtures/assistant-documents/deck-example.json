@@ -1,0 +1,35 @@
+{
+  "kind": "deck",
+  "title": "认识 Ofox",
+  "language": "zh",
+  "slides": [
+    {"type": "hero", "title": "认识 Ofox", "subtitle": "一个账号，用好你的 AI 工具", "meta": "产品介绍 · 团队分享"},
+    {"type": "statement", "statement": "AI 工具越来越多，配置不该越来越难", "note": "Ofox 把账号、密钥和模型选择收进一个桌面应用", "notes": "先讲痛点：每多一个工具，就多一套账号、密钥和配置文件。"},
+    {"type": "pillars", "title": "Ofox 能做什么", "pillars": [
+      {"heading": "一键绑定", "body": "登录后为 Claude Code、Codex 等工具写好配置，不用手动复制密钥"},
+      {"heading": "统一模型", "body": "一个账号接入多家模型，在每个工具里按需切换"},
+      {"heading": "桌面助手", "body": "写文档、做 PPT、生成图片和视频，结果直接存成附件"}
+    ], "notes": "先讲绑定，这是新用户最先感受到的；再讲模型和助手。"},
+    {"type": "timeline", "title": "从安装到开始使用", "steps": [
+      {"heading": "安装", "body": "下载桌面应用并打开"},
+      {"heading": "登录", "body": "用 Ofox 账号登录"},
+      {"heading": "绑定", "body": "选择要用的工具，一键写好配置"},
+      {"heading": "使用", "body": "回到原来的工具，直接开始工作"}
+    ], "notes": "强调不改变用户习惯：绑定之后仍在原来的工具里工作。"},
+    {"type": "grid", "title": "可以绑定的工具", "items": [
+      {"heading": "Claude Code", "body": "终端里的编程助手"},
+      {"heading": "Codex", "body": "命令行编程代理"},
+      {"heading": "Gemini CLI", "body": "命令行 AI 助手"},
+      {"heading": "OpenCode", "body": "开源的终端编程工具"},
+      {"heading": "OpenClaw", "body": "个人 AI 助手"},
+      {"heading": "Hermes", "body": "开源 AI 代理"}
+    ], "notes": "列出常用的几款，现场可以演示其中一款的绑定。"},
+    {"type": "evidence", "title": "内测 3 个月的结果", "metrics": [
+      {"value": "1200", "label": "内测用户", "note": "内测 3 个月"},
+      {"value": "30 秒", "label": "完成一次绑定", "note": "从登录到可用的平均时间"},
+      {"value": "92%", "label": "内测满意度"}
+    ], "notes": "三个数字都来自内测资料：先讲用户规模，再讲绑定速度和满意度。"},
+    {"type": "comparison", "title": "手动配置与 Ofox", "left": {"heading": "手动配置", "points": ["每个工具单独注册账号", "密钥复制粘贴到配置文件", "换模型要改多处设置", "出了问题自己排查"]}, "right": {"heading": "用 Ofox", "points": ["一个账号管理全部工具", "登录后自动写好配置", "在应用里切换模型", "解绑时还原原来的配置"]}, "notes": "左边是用户今天的做法，右边逐条对应 Ofox 省掉的步骤。"},
+    {"type": "cta", "title": "现在就试试 Ofox", "subtitle": "下载桌面应用，登录后选择要绑定的工具", "contact": "ofox.ai"}
+  ]
+}
