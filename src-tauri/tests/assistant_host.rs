@@ -7323,6 +7323,59 @@ mod documents {
         assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
     }
 
+    /// R61: a chart's inline categories and values that are not references
+    /// are written as literals (`<c:strLit>`, `<c:numLit>`), never as a
+    /// formula, so the host lets them through as text.
+    #[test]
+    fn a_chart_keeps_inline_list_cells_as_literals() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let content = json!([
+            {"command":"set","path":"/Sheet1/A1","props":{"value":"Region"}},
+            {"command":"set","path":"/Sheet1/B2","props":{"value":"5"}},
+            {"command":"add","parent":"/Sheet1","type":"chart","props":{"chartType":"column","data":"Sales (k):1,2","categories":"IMAGE(B2),North (EU)","title":"Revenue (USD)"}},
+            {"command":"add","parent":"/Sheet1/chart[1]","type":"series","props":{"name":"V1","values":"WEBSERVICE(B2),2","categories":"IMAGE(B2),North (EU)"}},
+            {"command":"add","parent":"/Sheet1/chart[1]","type":"series","props":{"name":"V2","values":"INDIRECT(B2)"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-xlsx",
+            json!({"name": "chart.xlsx", "format": "xlsx", "content": content}),
+        );
+        let (_, bytes) = outcome.made(XLSX);
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let (mut charts, mut parts) = (String::new(), String::new());
+        for index in 0..archive.len() {
+            let mut part = archive.by_index(index).unwrap();
+            let mut text = String::new();
+            part.read_to_string(&mut text).unwrap();
+            if part.name().unwrap().contains("charts/chart") {
+                charts.push_str(&text);
+            }
+            parts.push_str(&text);
+        }
+        assert!(charts.contains("<c:strLit>"), "{charts}");
+        assert!(charts.contains("<c:numLit>"), "{charts}");
+        for cell in ["IMAGE(B2)", "North (EU)", "WEBSERVICE(B2)", "INDIRECT(B2)"] {
+            assert!(
+                charts.contains(&format!("<c:v>{cell}</c:v>")),
+                "{cell}: {charts}"
+            );
+        }
+        // No formula element anywhere in the workbook holds them.
+        for open in ["<c:f>", "<x:f>", "<x:f ", "<f>", "<f "] {
+            for formula in parts.split(open).skip(1) {
+                let formula = formula.split("</").next().unwrap_or_default();
+                for name in ["WEBSERVICE", "INDIRECT", "IMAGE"] {
+                    assert!(!formula.contains(name), "{open}{formula}");
+                }
+            }
+        }
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
     #[test]
     fn rejects_an_invalid_batch_without_a_file() {
         let Some(bundle) = engines_runtime() else {

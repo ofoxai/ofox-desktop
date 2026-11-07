@@ -4402,6 +4402,14 @@ esac"#,
             json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B2", "data": "Name,Amount (USD)\nAlice,5"}}),
             json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "Name,Amount (USD)\nAlice,5", "categories": "'My Sheet'!A2:A5"}}),
             json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "Sheet1!$B$2:$B$5", "categories": "A2:A5"}}),
+            // R61: officecli writes a list cell that is no reference as a
+            // literal (`<c:numLit>`, `<c:strLit>`), never as a formula (see
+            // `a_chart_keeps_inline_list_cells_as_literals` in
+            // tests/assistant_host.rs).
+            json!({"command": "add", "parent": "/Sheet1/chart[1]", "type": "series", "props": {"values": "WEBSERVICE(B2)"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "Chart-Series", "props": {"values": "INDIRECT(B2)"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "pivotTable", "props": {"position": "H1", "values": "IMAGE(B2)"}}),
+            json!({"command": "add", "parent": "/Sheet1", "type": "chart", "props": {"chartType": "column", "data": "S1:1,2", "categories": "IMAGE(B2),North (EU)"}}),
         ] {
             workbook(std::slice::from_ref(&item)).unwrap_or_else(|error| panic!("{item}: {error}"));
         }
