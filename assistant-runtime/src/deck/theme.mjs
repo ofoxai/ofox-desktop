@@ -4,6 +4,8 @@
 // A theme holds roles, never coordinates: layout.mjs places things and the
 // renderer picks a role (primary, card, onDark) for each. Every `sizes` list
 // runs from large to small so text.mjs `fitSize` can take it as it is.
+// Rounded cards keep officecli's default corner: the host refuses the `adj`
+// that would set another one, so a theme has no corner radius.
 // This module imports nothing, so schema.mjs can read the theme names from it.
 
 const navy = {
@@ -37,7 +39,7 @@ const navy = {
     caption: [16, 14, 13],
     kpi: [72, 60, 48],
   },
-  decor: { titleRule: "bar", radiusCm: 0.3, pageNumber: true },
+  decor: { titleRule: "bar", pageNumber: true },
 };
 
 export const THEMES = { navy };

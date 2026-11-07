@@ -4,6 +4,7 @@ import {
   LIMITS,
   PAGE_TYPES,
   deckOf,
+  normalizeLiteralNewlines,
   parseDeck,
   textLength,
 } from "../src/deck/schema.mjs";
@@ -116,6 +117,50 @@ test("deckOf finds a deck object and its one-element wrapper", () => {
   assert.equal(deckOf([deck, deck]), null);
   assert.equal(deckOf(null), null);
   assert.equal(deckOf([]), null);
+});
+
+test("deckOf reads a deck sent as JSON text, without kind, or as Deck", () => {
+  const slides = [{ type: "hero", title: "认识 Ofox" }];
+  const deck = { kind: "deck", title: "认识 Ofox", slides };
+  // Serialized as a JSON string.
+  assert.deepEqual(deckOf(JSON.stringify(deck)), deck);
+  assert.deepEqual(deckOf(JSON.stringify([deck])), deck);
+  // No kind, but a slides list; alone or wrapped.
+  const unkinded = { title: "认识 Ofox", slides };
+  assert.equal(deckOf(unkinded), unkinded);
+  assert.equal(deckOf([unkinded]), unkinded);
+  // The kind in any case.
+  for (const kind of ["Deck", "DECK", " deck "]) {
+    const named = { ...deck, kind };
+    assert.equal(deckOf(named), named, kind);
+  }
+  // None of these is a deck.
+  for (const content of [
+    "Slide 1: Quarterly results",
+    JSON.stringify([{ command: "add", type: "slide" }]),
+    JSON.stringify("deck"),
+    { kind: "batch", slides },
+    { title: "认识 Ofox", slides: "hero" },
+    [{ command: "add", parent: "/", type: "slide" }],
+  ])
+    assert.equal(deckOf(content), null, JSON.stringify(content));
+});
+
+test("normalizeLiteralNewlines turns \\n, \\r and \\r\\n into line breaks", () => {
+  const input = {
+    kind: "deck",
+    slides: [
+      { body: "一\\n二\\r\\n三\\r四", values: [1, "a\\nb"], keep: true },
+    ],
+  };
+  const snapshot = structuredClone(input);
+  assert.deepEqual(normalizeLiteralNewlines(input), {
+    kind: "deck",
+    slides: [{ body: "一\n二\n三\n四", values: [1, "a\nb"], keep: true }],
+  });
+  assert.deepEqual(input, snapshot, "the input is not modified");
+  assert.equal(normalizeLiteralNewlines("no breaks"), "no breaks");
+  assert.equal(normalizeLiteralNewlines(null), null);
 });
 
 function fullDeck() {
@@ -489,6 +534,40 @@ test("parseDeck accepts a body with two line breaks and notes with more", () => 
   assert.equal(deck.slides[0].items[2].body, "第一行\r\n第二行\n第三行");
   assert.equal(LIMITS.lineBreaks.body, 2);
   assert.equal(LIMITS.lineBreaks.short, 0);
+});
+
+test("parseDeck counts a literal \\n as the line break the host makes of it", () => {
+  // Three literal \n in a body: over the two-break limit.
+  assert.deepEqual(
+    problemsOf(
+      deckWith(HERO, STATEMENT, grid(["背景", "机制", "一\\n二\\n三\\n四"])),
+    ),
+    ["slide 3 (grid): items[2].body has 3 line breaks; the limit is 2"],
+  );
+  // One in a heading: a one-line field.
+  assert.deepEqual(
+    problemsOf(
+      deckWith(HERO, STATEMENT, {
+        ...grid(["背景", "机制", "结构"]),
+        items: [
+          { heading: "文本\\n图像", body: "背景" },
+          { heading: "机制", body: "机制" },
+          { heading: "结构", body: "结构" },
+        ],
+      }),
+    ),
+    ["slide 3 (grid): items[0].heading has 1 line break; the limit is 0"],
+  );
+  // One in a title too: it is not left for the slide to show.
+  assert.deepEqual(
+    problemsOf(deckWith({ ...HERO, title: "Transformer\\n入门" })),
+    ["slide 1 (hero): title has 1 line break; the limit is 0"],
+  );
+  // Two in a body are allowed, and become real line breaks.
+  const { deck } = parsed(
+    deckWith(HERO, STATEMENT, grid(["背景", "机制", "一\\n二\\n三"])),
+  );
+  assert.equal(deck.slides[2].items[2].body, "一\n二\n三");
 });
 
 test("parseDeck rejects a line break in a list item", () => {

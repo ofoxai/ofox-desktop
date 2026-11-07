@@ -98,12 +98,53 @@ export function textLength(text) {
 const isObject = (value) =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+// An object that is a deck: its `kind` is "deck" in any case, or it has no
+// `kind` and a `slides` list. A batch command has neither.
+function deckShaped(value) {
+  if (!isObject(value)) return false;
+  if (value.kind === undefined) return Array.isArray(value.slides);
+  return (
+    typeof value.kind === "string" && value.kind.trim().toLowerCase() === "deck"
+  );
+}
+
 // create_document's content is a deck object, or that object alone in an
-// array (some models wrap a single object); a batch of commands is neither.
+// array (some models wrap a single object), or that object serialized as a
+// JSON string; a batch of commands is none of these.
 export function deckOf(content) {
+  let given = content;
+  if (typeof given === "string") {
+    try {
+      given = JSON.parse(given);
+    } catch {
+      return null;
+    }
+  }
   const candidate =
-    Array.isArray(content) && content.length === 1 ? content[0] : content;
-  return isObject(candidate) && candidate.kind === "deck" ? candidate : null;
+    Array.isArray(given) && given.length === 1 ? given[0] : given;
+  return deckShaped(candidate) ? candidate : null;
+}
+
+// A literal backslash and n (or r, or both as \r\n), as a model writes a
+// line break when it escapes twice, is a line break: the host reads it so
+// in text and notes (create.rs unescape_newlines), so every string of the
+// deck reads it so here too, before any limit or estimate sees it.
+const LITERAL_NEWLINE = /\\r\\n|\\n|\\r/g;
+
+// `value` with every literal \n, \r and \r\n in its strings (at any depth)
+// turned into a line break; nothing else changes and `value` is not
+// modified.
+export function normalizeLiteralNewlines(value) {
+  if (typeof value === "string") return value.replace(LITERAL_NEWLINE, "\n");
+  if (Array.isArray(value)) return value.map(normalizeLiteralNewlines);
+  if (isObject(value))
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [
+        key,
+        normalizeLiteralNewlines(item),
+      ]),
+    );
+  return value;
 }
 
 // Problems and warnings name where they are: "deck", "slide 3" and, once the
@@ -611,9 +652,11 @@ function normalizeSlide(slide, index, problems, warnings) {
 }
 
 // Reads a deck object. Returns the normalized copy and the warnings, or,
-// when anything is wrong, every problem found and no deck.
-export function parseDeck(value, { fallbackLanguage = "zh" } = {}) {
-  if (!isObject(value)) return { problems: ["deck must be an object"] };
+// when anything is wrong, every problem found and no deck. Literal \n
+// sequences are line breaks first (see normalizeLiteralNewlines).
+export function parseDeck(given, { fallbackLanguage = "zh" } = {}) {
+  if (!isObject(given)) return { problems: ["deck must be an object"] };
+  const value = normalizeLiteralNewlines(given);
   const problems = [];
   const warnings = [];
   const ctx = { scope: "deck", problems, warnings };

@@ -75,11 +75,16 @@ const en = (count) =>
     .join("")
     .replace(/ $/, "x");
 
-const headed = (count, heading, body, text = zh) =>
+const headed = (count, heading, body, text = zh, bodyText = text) =>
   Array.from({ length: count }, () => ({
     heading: text(heading),
-    body: text(body),
+    body: bodyText(body),
   }));
+
+// `count` units of `text` that use both line breaks a body allows, as
+// short first paragraphs, so the third takes the most lines it can.
+const broken = (text) => (count) =>
+  text === zh ? `幻\n灯\n${zh(count - 2)}` : `S\nT\n${en(count - 1)}`;
 
 const PIXEL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
@@ -112,11 +117,16 @@ const MEDIA_AT_LIMITS = {
 };
 
 // One page of each of the ten types, every field at its limit, in `text`
-// (zh or en); the showcase holds `media`.
-const tenAtLimits = (text, media = "table") => [
+// (zh or en); the showcase holds `media`. Body-like fields (pillar, step
+// and grid bodies, a statement's note, a showcase body) are in `body`.
+const tenAtLimits = (text, media = "table", body = text) => [
   { type: "hero", title: text(18), subtitle: text(30), meta: text(30) },
-  { type: "statement", statement: text(40), note: text(60) },
-  { type: "pillars", title: text(22), pillars: headed(4, 12, 60, text) },
+  { type: "statement", statement: text(40), note: body(60) },
+  {
+    type: "pillars",
+    title: text(22),
+    pillars: headed(4, 12, 60, text, body),
+  },
   {
     type: "evidence",
     title: text(22),
@@ -127,14 +137,18 @@ const tenAtLimits = (text, media = "table") => [
     })),
     detail: [text(40), text(40), text(40)],
   },
-  { type: "timeline", title: text(22), steps: headed(6, 10, 30, text) },
+  {
+    type: "timeline",
+    title: text(22),
+    steps: headed(6, 10, 30, text, body),
+  },
   {
     type: "comparison",
     title: text(22),
     left: { heading: text(12), points: Array(4).fill(text(30)) },
     right: { heading: text(12), points: Array(4).fill(text(30)) },
   },
-  { type: "grid", title: text(22), items: headed(8, 10, 30, text) },
+  { type: "grid", title: text(22), items: headed(8, 10, 30, text, body) },
   { type: "quote", quote: text(60), source: text(20) },
   { type: "cta", title: text(18), subtitle: text(40), contact: text(30) },
   {
@@ -142,7 +156,7 @@ const tenAtLimits = (text, media = "table") => [
     title: text(22),
     media: MEDIA_AT_LIMITS[media](text),
     caption: text(30),
-    body: text(100),
+    body: body(100),
   },
 ];
 
@@ -369,6 +383,27 @@ test("pillar body size follows the column count at the limit", () => {
   assert.equal(bodySize(2), "18");
   assert.equal(bodySize(3), "16");
   assert.equal(bodySize(4), "14");
+});
+
+test("a full row of English grid headings drops to 14pt to stay on one line", () => {
+  const page = (heading) => ({
+    type: "grid",
+    title: "Applications",
+    items: Array.from({ length: 8 }, () => ({
+      heading,
+      body: `S\nT\n${en(29)}`,
+    })),
+  });
+  const sizeOf = (heading) =>
+    named(
+      renderDeck(around(page(heading), "en"), navy).commands,
+      "s2-heading-1",
+    ).props.size;
+  assert.equal(sizeOf(en(10)), "14");
+  assert.equal(sizeOf("Text"), "16");
+  const { commands } = renderDeck(around(page(en(10)), "en"), navy);
+  const last = named(commands, "s2-card-8").props;
+  assert.ok(bottomOf(last) <= CONTENT.bottom, `ends at ${bottomOf(last)}`);
 });
 
 test("grid with eight items uses two rows", () => {
@@ -887,6 +922,10 @@ test("every renderer fits its content at the limits", () => {
     enTen(),
     deck(tenAtLimits(zh, "chart")),
     deck(tenAtLimits(en, "image"), "en"),
+    // Bodies that use both line breaks they may hold, under English
+    // headings of 20 letters (and the same in Chinese).
+    deck(tenAtLimits(en, "table", broken(en)), "en"),
+    deck(tenAtLimits(zh, "chart", broken(zh))),
   ];
   for (const made of decks) {
     const { commands } = renderDeck(made, navy);

@@ -221,6 +221,104 @@ test("a one-element array holding the deck is a deck too", async () => {
   assert.match(result.content[0].text, /^Rendered 3 slides /);
 });
 
+test("a deck sent as JSON text, without kind or as Deck is rendered", async () => {
+  const { kind, ...unkinded } = DECK_OBJECT;
+  assert.equal(kind, "deck");
+  for (const content of [
+    JSON.stringify(DECK_OBJECT),
+    unkinded,
+    [unkinded],
+    { ...DECK_OBJECT, kind: "Deck" },
+  ]) {
+    const { calls, tool } = createDocument();
+    const result = await tool.execute("c1", {
+      name: "deck.pptx",
+      format: "pptx",
+      content,
+    });
+    assert.notEqual(result.isError, true, JSON.stringify(content));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].args.content[0].type, "slide");
+    assert.match(result.content[0].text, /^Rendered 3 slides /);
+  }
+});
+
+test("pptx text that is no deck is told the deck object comes first", async () => {
+  const { calls, tool } = createDocument();
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: "Slide 1: Quarterly results",
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.details.code, "assistant_document_content");
+  assert.equal(
+    result.content[0].text,
+    'pptx content must be a deck object ({"kind":"deck",…}) or, for experts, an array of officecli batch commands.',
+  );
+  assert.deepEqual(calls, []);
+});
+
+const RENDER_REFUSED =
+  "The rendered batch was refused by the host (this is a renderer problem, not your deck): ";
+
+test("a host refusal of a rendered deck is blamed on the renderer", async () => {
+  const refusal =
+    'assistant_document_failed: item 52: "props.data" must be the table\'s rows inline (CSV); files and addresses cannot be used';
+  // The host refuses by failing the call (the IPC error's message is the
+  // refusal), or with a failed reply.
+  const replies = [
+    () => {
+      throw Object.assign(new Error(refusal), { code: refusal });
+    },
+    () => ({
+      status: "failed",
+      error: { code: "assistant_document_failed", message: refusal },
+    }),
+  ];
+  for (const reply of replies) {
+    const { tool } = createDocument({ reply });
+    await assert.rejects(
+      tool.execute("c1", {
+        name: "deck.pptx",
+        format: "pptx",
+        content: DECK_OBJECT,
+      }),
+      (error) => {
+        assert.equal(error.message, `${RENDER_REFUSED}${refusal}`);
+        return true;
+      },
+    );
+    // A batch the model wrote is its own: no prefix.
+    const own = createDocument({ reply }).tool;
+    await assert.rejects(
+      own.execute("c2", { name: "deck.pptx", format: "pptx", content: DECK }),
+      (error) => {
+        assert.equal(error.message, refusal);
+        return true;
+      },
+    );
+  }
+  // Other failures of a rendered deck keep their own words.
+  const limit = "assistant_document_limit: at most 3 documents per reply";
+  const { tool } = createDocument({
+    reply: () => {
+      throw Object.assign(new Error(limit), { code: limit });
+    },
+  });
+  await assert.rejects(
+    tool.execute("c3", {
+      name: "deck.pptx",
+      format: "pptx",
+      content: DECK_OBJECT,
+    }),
+    (error) => {
+      assert.equal(error.message, limit);
+      return true;
+    },
+  );
+});
+
 test("what the deck ignored is told to the model", async () => {
   const { tool } = createDocument();
   const result = await tool.execute("c1", {

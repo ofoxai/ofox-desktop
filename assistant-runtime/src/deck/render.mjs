@@ -18,7 +18,7 @@ import {
   textboxCommand,
   titleCommands,
 } from "./layout.mjs";
-import { fitSize, heightCm, lineCount } from "./text.mjs";
+import { FIT, fitSize, heightCm, lineCount } from "./text.mjs";
 import { imageSize } from "./image.mjs";
 import { fontsFor } from "./theme.mjs";
 
@@ -44,8 +44,14 @@ function fitBox(text, width, room, sizes) {
 }
 
 // The largest size that keeps `text` on one line, else the smallest.
-const oneLineSize = (text, width, sizes) =>
-  sizes.find((size) => lineCount(text, width, size) === 1) ?? sizes.at(-1);
+// `options` are lineCount's: TITLE_FONT for text in the title font.
+const oneLineSize = (text, width, sizes, options) =>
+  sizes.find((size) => lineCount(text, width, size, options) === 1) ??
+  sizes.at(-1);
+
+// Latin letters in the title font (Arial Black) are wider than the
+// checker's estimate (see FIT.titleLatinRatio).
+const TITLE_FONT = { latinRatio: FIT.titleLatinRatio };
 
 // Boxes side by side share one size, the smallest any text needs (`sizeOf`
 // picks a text's own size), so they read as a set, and one height, the
@@ -181,7 +187,7 @@ const COVER_SMALL_PT = 16;
 function cover(ctx, title, lines) {
   const { n, theme, fonts } = ctx;
   const { colors, sizes } = theme;
-  const size = oneLineSize(title, COVER_TITLE.w, sizes.hero);
+  const size = oneLineSize(title, COVER_TITLE.w, sizes.hero, TITLE_FONT);
   const [heading] = titleCommands(n, title, {
     theme,
     fonts,
@@ -346,8 +352,11 @@ export function renderPillars(ctx, slide) {
 }
 
 // Spec: grid cells have 16pt bold headings over 14pt bodies, at most four
-// to a row; more items split into two rows, the first row the longer.
-const GRID_HEADING_PT = 16;
+// to a row; more items split into two rows, the first row the longer. A
+// heading that 16pt cannot keep on one line takes 14pt: at four to a row a
+// 20-letter English heading wraps at 16pt, and two rows of such cards, with
+// bodies that use both line breaks, would end past the content area.
+const GRID_HEADING_SIZES = [16, 14];
 const GRID_BODY_PT = 14;
 const GRID_ROW_MAX = 4;
 
@@ -357,7 +366,7 @@ export function renderGrid(ctx, slide) {
     items.length <= GRID_ROW_MAX ? items.length : Math.ceil(items.length / 2);
   const slots = columns(perRow);
   const fitted = fitCards(items, slots[0].w, {
-    headingSizes: [GRID_HEADING_PT],
+    headingSizes: GRID_HEADING_SIZES,
     bodySizes: [GRID_BODY_PT],
     bodyRoom: Infinity,
   });

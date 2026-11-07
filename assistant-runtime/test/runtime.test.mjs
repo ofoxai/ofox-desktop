@@ -3788,6 +3788,9 @@ test("a create_document call the runtime rejects ends unsuccessful, a created fi
   const results = requests[1].messages.filter(
     (message) => message.role === "tool",
   );
-  assert.match(JSON.stringify(results[0]), /must be an array/);
+  assert.match(
+    JSON.stringify(results[0]),
+    /pptx content must be a deck object .* or, for experts, an array of officecli batch commands/,
+  );
   assert.match(JSON.stringify(results[1]), /attachment att-notes/);
 });

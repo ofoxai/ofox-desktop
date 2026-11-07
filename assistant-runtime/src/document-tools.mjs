@@ -70,16 +70,44 @@ function description(formats) {
   return `Create one file the user can open and save; it appears under your reply. ${shapes.join("; ")}.`;
 }
 
-// Office formats take a batch of commands, the others a text.
+// Office formats take a batch of commands (a pptx usually a deck object,
+// which is rendered into one first), the others a text.
 function contentProblem({ format, content }) {
-  if (OFFICE_FORMATS.has(format))
-    return Array.isArray(content)
-      ? null
+  if (OFFICE_FORMATS.has(format)) {
+    if (Array.isArray(content)) return null;
+    return format === "pptx"
+      ? 'pptx content must be a deck object ({"kind":"deck",…}) or, for experts, an array of officecli batch commands.'
       : `${format} content must be an array of officecli batch commands.`;
+  }
   if (typeof content === "string") return null;
   return format === "pdf"
     ? "pdf content must be a string of Typst markup."
     : `${format} content must be a string with the file's text.`;
+}
+
+// The host refuses a batch with this code (create.rs FAILED), whether its
+// checks or officecli turned it down.
+const DOCUMENT_FAILED = "assistant_document_failed";
+
+// A batch this runtime rendered from a deck and the host refused is the
+// renderer's fault: the model is told so, or it would rewrite a deck that
+// was fine.
+const RENDER_REFUSED =
+  "The rendered batch was refused by the host (this is a renderer problem, not your deck): ";
+
+// Whether a host failure is its refusal of the batch: its code, or the
+// code its message starts with (a refusal reads "<code>: <why>").
+const isRefusal = (code, message) =>
+  code === DOCUMENT_FAILED || String(message).startsWith(DOCUMENT_FAILED);
+
+// A thrown host failure, prefixed with RENDER_REFUSED when it refused a
+// rendered batch; any other failure is left as it is.
+function refusedRender(error) {
+  if (!isRefusal(error?.code, error?.message)) return error;
+  return Object.assign(new Error(`${RENDER_REFUSED}${error.message}`), {
+    code: error.code,
+    outcomeUnknown: error.outcomeUnknown,
+  });
 }
 
 // A deck object becomes the batch that draws it, or the problems that stop
@@ -222,17 +250,27 @@ export function documentTools(runtime, context, { vision }) {
           details: { code: "assistant_document_content" },
           isError: true,
         };
-      const result = await runtime.hostTool(
-        context,
-        "create_document",
-        request,
-        signal,
-        toolCallId,
-      );
-      if (result?.status !== "completed" || !result.file)
-        throw new Error(
-          result?.error?.message ?? "The host did not create the document",
+      let result;
+      try {
+        result = await runtime.hostTool(
+          context,
+          "create_document",
+          request,
+          signal,
+          toolCallId,
         );
+      } catch (error) {
+        throw rendered ? refusedRender(error) : error;
+      }
+      if (result?.status !== "completed" || !result.file) {
+        const message =
+          result?.error?.message ?? "The host did not create the document";
+        throw new Error(
+          rendered && isRefusal(result?.error?.code, message)
+            ? `${RENDER_REFUSED}${message}`
+            : message,
+        );
+      }
       // The file exists now: what follows reads only local files and does
       // not stop for an abort, so the result reaches the history either way.
       const { filePath, previewPath, ...details } = result;

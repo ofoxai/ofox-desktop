@@ -102,12 +102,42 @@ test("a box with no room for text never fits", () => {
   assert.equal(result.fits, false);
 });
 
-test("FIT holds the officecli checker constants", () => {
+test("FIT holds the officecli checker constants and the title font's", () => {
   assert.deepEqual(FIT, {
     cjkWidthCm: 0.0353,
     latinRatio: 0.55,
+    titleLatinRatio: 0.62,
     lineHeightCm: 0.0466,
     insetXCm: 0.254,
     insetYCm: 0.127,
   });
+});
+
+test("text in the title font counts Latin at 0.62", () => {
+  // Arial Black sets this title 30.9 cm wide at 44pt: past the 28.70 cm a
+  // full-width box holds, though 0.55 says it fits. At 0.62 it is 20.46
+  // units; a line holds 18.48 at 44pt, 20.33 at 40 and 22.59 at 36.
+  const title = "Why Attention Replaced Recurrence";
+  const wide = { latinRatio: FIT.titleLatinRatio };
+  assert.equal(lineCount(title, 29.21, 44), 1);
+  assert.equal(lineCount(title, 29.21, 44, wide), 2);
+  assert.equal(lineCount(title, 29.21, 40, wide), 2);
+  assert.equal(lineCount(title, 29.21, 36, wide), 1);
+  // CJK text measures the same either way.
+  for (const size of [44, 40, 36])
+    assert.equal(
+      lineCount(zh(20), 29.21, size, wide),
+      lineCount(zh(20), 29.21, size),
+    );
+});
+
+test("fitSize passes the Latin ratio on to the line count", () => {
+  const title = "Why Attention Replaced Recurrence";
+  // One line of 44pt is 2.304 cm tall, two are 4.355 cm.
+  assert.equal(fitSize(title, 29.21, 2.4, [44, 40, 36]).size, 44);
+  const wide = fitSize(title, 29.21, 2.4, [44, 40, 36], {
+    latinRatio: FIT.titleLatinRatio,
+  });
+  assert.equal(wide.size, 36);
+  assert.equal(wide.lines, 1);
 });

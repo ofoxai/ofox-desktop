@@ -3,7 +3,7 @@
 // ofox-office-pptx skill teaches (x 2.33 cm, 29.21 cm wide, content from
 // y 5 cm). Builders write what they are given: choosing a size or a box that
 // fits is the renderer's job (see text.mjs), except for the title's default.
-import { lineCount } from "./text.mjs";
+import { FIT, lineCount } from "./text.mjs";
 
 export const CANVAS = { wCm: 33.867, hCm: 19.05 };
 export const MARGIN_CM = 2.33;
@@ -72,9 +72,15 @@ export function slideCommand(n, { background, title }) {
 }
 
 // The largest title size that keeps `title` on one line, else the smallest.
+// Latin letters in the title font are wider than the checker's estimate
+// (see FIT.titleLatinRatio).
 function titleSize(title, width, sizes) {
   return (
-    sizes.find((size) => lineCount(title, width, size) === 1) ?? sizes.at(-1)
+    sizes.find(
+      (size) =>
+        lineCount(title, width, size, { latinRatio: FIT.titleLatinRatio }) ===
+        1,
+    ) ?? sizes.at(-1)
   );
 }
 

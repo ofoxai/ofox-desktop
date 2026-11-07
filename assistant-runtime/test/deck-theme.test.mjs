@@ -205,6 +205,24 @@ test("titleCommands picks the largest title size that fits one line", () => {
   assert.equal(sizeOf("字".repeat(30)), "36");
 });
 
+test("an English title is measured in its Arial Black width", () => {
+  const sizeOf = (text, language) =>
+    Number(
+      titleCommands(1, text, {
+        theme: navy,
+        fonts: fontsFor(navy, language),
+      })[0].props.size,
+    );
+  // 33 characters: 30.9 cm wide at 44pt in Arial Black, so it must not take
+  // 44pt; the same title inside a Chinese deck is set in Arial Black too.
+  for (const language of ["en", "zh"])
+    assert.ok(
+      sizeOf("Why Attention Replaced Recurrence", language) <= 40,
+      language,
+    );
+  assert.equal(sizeOf("Quarterly Revenue Review", "en"), 44);
+});
+
 test("textboxCommand writes units and names", () => {
   const command = textboxCommand(2, "s2-body", "第一条\n第二条", {
     x: 2.33,
