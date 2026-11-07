@@ -68,6 +68,11 @@ M1/M2 让助手能稳定生成真实、可打开、安全的 PDF / Word / PPT / 
 
 ### A. 内容模型（pptx，第一版）
 
+2026-11-08 用户决定：页型、配色和排版常数按 AionUi 的做法取，即 OfficeCLI 随附的 morph-ppt 技能
+（Apache-2.0，`skills/morph-ppt/reference/pptx-design.md` §4、`decision-rules.md`、`styles/`）。AionUi 自己没有 PPT 技能，
+内嵌的就是这一份。我们只取它的页型词汇、调色板角色和字号地板；排版由我们的渲染器做，模型不写坐标。
+调研记录：`docs/superpowers/research/2026-11-07-slide-types-and-themes.md`。
+
 `create_document` 保持一个工具。`format: "pptx"` 时 `content` 可以是 **deck 对象**（路径 A）或 **批处理数组**（路径 C）；运行时按形状区分。deck 对象：
 
 ```json
@@ -77,31 +82,66 @@ M1/M2 让助手能稳定生成真实、可打开、安全的 PDF / Word / PPT / 
   "language": "zh",
   "theme": "navy",
   "slides": [
-    { "type": "cover", "title": "认识 Ofox", "subtitle": "让想法更快变成答案与作品", "notes": "…" },
-    { "type": "bullets", "title": "为什么需要 Transformer", "bullets": ["RNN 逐词计算，难以并行", "…"], "notes": "…" },
-    { "type": "cards", "title": "核心能力", "cards": [{ "heading": "理解与整理", "body": "回答问题、解释概念" }] },
-    { "type": "kpi", "title": "数据", "items": [{ "value": "118%", "label": "NRR" }] },
-    { "type": "table", "title": "计划", "columns": ["阶段", "负责人", "时间"], "rows": [["试点", "运营", "Q1"]] },
-    { "type": "chart", "title": "收入", "chart": { "kind": "bar", "categories": ["Q1", "Q2"], "series": [{ "name": "收入", "values": [12, 15] }] } },
-    { "type": "image", "title": "架构", "image": "data:image/png;base64,…", "caption": "…", "body": "可选的旁注" },
-    { "type": "closing", "title": "把任务说清楚", "subtitle": "…" }
+    { "type": "hero", "title": "认识 Ofox", "subtitle": "让想法更快变成答案与作品", "meta": "团队分享 · 2026 年 11 月" },
+    { "type": "statement", "statement": "从自动化到自主：为什么现在需要 agent", "note": "可选的一句补充" },
+    { "type": "pillars", "title": "三项核心能力", "pillars": [{ "heading": "感知", "body": "文本、图像、语音多模态输入" }, { "heading": "推理", "body": "…" }, { "heading": "执行", "body": "…" }] },
+    { "type": "evidence", "title": "数据", "metrics": [{ "value": "118%", "label": "NRR", "note": "同比" }], "detail": ["EMEA 三月上线", "续约率 +12%"] },
+    { "type": "timeline", "title": "推进节奏", "steps": [{ "heading": "试点", "body": "Q1，运营牵头" }, { "heading": "推广", "body": "Q2" }, { "heading": "复盘", "body": "Q3" }] },
+    { "type": "comparison", "title": "RNN 与 Transformer", "left": { "heading": "RNN", "points": ["逐词计算", "长句衰减"] }, "right": { "heading": "Transformer", "points": ["并行计算", "全句可见"] } },
+    { "type": "grid", "title": "今天讲什么", "items": [{ "heading": "背景", "body": "…" }, { "heading": "机制", "body": "…" }, { "heading": "结构", "body": "…" }, { "heading": "应用", "body": "…" }] },
+    { "type": "quote", "quote": "把任务说清楚，剩下的交给它。", "source": "用户反馈" },
+    { "type": "showcase", "title": "收入", "media": { "chart": { "kind": "bar", "categories": ["Q1", "Q2"], "series": [{ "name": "收入", "values": [12, 15] }] } }, "caption": "单位：百万" },
+    { "type": "cta", "title": "开始构建你的 agent", "subtitle": "app.ofox.ai", "contact": "…" }
   ]
 }
 ```
 
-- 页型固定八种：`cover`、`section`、`bullets`、`cards`（2–4 张）、`kpi`（1–4 个）、`table`、`chart`（bar / line / pie）、`image`（图 + 文）、`closing`。每种页型的字段、条数上限、每条字数上限写在 JSON Schema 里，并在技能里用一张表告诉模型。
+- 页型固定十种，取自 morph-ppt：`hero`（开场）、`statement`（一句关键信息 / 过渡）、`pillars`（2–4 栏并列）、`evidence`（数据与指标）、
+  `timeline`（流程 / 时间线）、`comparison`（左右对比）、`grid`（3–8 个条目）、`quote`（引言，留白）、`cta`（收尾号召）、`showcase`（大面积展示一张图、一张图表或一张表）。
+  **没有 bullets 页型**：列表内容用 `pillars`（2–4 条）或 `grid`（3–8 条）表达，技能里写明。
+- 每种页型的字段、条数上限、每条字数上限写在 JSON Schema 里，并在技能里用一张表告诉模型。上限按 officecli 检查器的常数核过，
+  在渲染要点列的字号下都放得下；单位是中文字符，拉丁字符按两倍计：
+
+| 页型 | 字段 | 上限 | 渲染要点 |
+|---|---|---|---|
+| `hero` | title、subtitle?、meta? | 18 / 30 / 30 | 深底居中，标题 44–60pt 按长度选，logo 右下 |
+| `statement` | statement、note? | 40 / 60 | 深底或浅底居中，32–40pt，最多两行 |
+| `pillars` | title、pillars[{heading, body}] | 2–4 栏；12 / 60；标题 22 | 等宽卡片，3 栏正文 16pt、4 栏 14pt |
+| `evidence` | title、metrics[{value, label, note?}]、detail?[] | 1–4 个；6 字符 / 12 / 30；detail ≤ 3 × 40 | 1–2 个 72pt，3 个 60pt，4 个 48pt；detail 右侧 18pt |
+| `timeline` | title、steps[{heading, body}] | 3–6 步；10 / 30 | 横向编号卡片 |
+| `comparison` | title、left{heading, points[]}、right{…} | 每侧 heading 12，points ≤ 4 × 30 | 50/50 两栏，18pt，对比色 |
+| `grid` | title、items[{heading, body}] | 3–8 个；10 / 30 | 两行各 ≤ 4，14pt |
+| `quote` | quote、source? | 60 / 20 | 居中 28–32pt，极少装饰 |
+| `cta` | title、subtitle?、contact? | 18 / 40 / 30 | 深底居中 |
+| `showcase` | title、media（三选一：image \| chart \| table）、caption?、body? | chart ≤ 8 类别 × ≤ 3 系列，饼图 2–6 片；table ≤ 6 列 × 6 行（含表头），表头 8、单元格 12；caption 30、body 100 | 媒体占中央 20 × 11 cm，body 在右 18pt |
+| deck | title、language、theme?、slides[]、每页 notes? | 3–30 页；notes 300 | 超过 30 页拒绝并建议拆成两份 |
+
 - 文本只有纯文本和换行；没有富文本、没有坐标、没有字号。模型写不了“这个框多高”，所以也写不坏。
-- 图片来源：模型写不出几百 KB 的 base64，所以 `image` 字段（以及 B2 换图、PDF 内嵌图）接受 **`attachment:<id>`**，指向本会话的附件，包括 `generate_image` 生成的图。宿主在校验器之前把它解析成 `data:` URI（pptx / docx / xlsx）或复制进工作目录的 `assets/<id>`（Typst 用 `image("assets/<id>")`），只接受 PNG / JPEG / SVG、单张 ≤ 5 MB、仅限本会话可见的附件；校验器对文件键的规则不变（引擎仍然只看到 data URI 或工作目录里的文件）。`data:` URI 仍然接受。
+- 图片来源：模型写不出几百 KB 的 base64，所以 `showcase.media.image`（以及 B2 换图、PDF 内嵌图）接受 **`attachment:<id>`**，指向本会话的附件，包括 `generate_image` 生成的图。宿主在校验器之前把它解析成 `data:` URI（pptx / docx / xlsx）或复制进工作目录的 `assets/<id>`（Typst 用 `image("assets/<id>")`），只接受 PNG / JPEG / SVG、单张 ≤ 5 MB、仅限本会话可见的附件；校验器对文件键的规则不变（引擎仍然只看到 data URI 或工作目录里的文件）。`data:` URI 仍然接受。
 - `notes` 每页可选，进演讲者备注。`language` 决定 CJK 字体与标点；`theme` 可省略，省略时取偏好套件的默认主题，再退到 `navy`。
-- 解析宽容但不删内容：数组给成字符串就拆行；数字给成字符串就转；未知字段丢弃。**超出条数或字数上限一律拒绝整个调用**，错误里点名是第几页、哪个字段、上限多少，让模型拆页或精简后重发；渲染器绝不截断或改写用户的文字（反目标）。上限取得宽（实现者定，量级：每页 ≤ 6 条要点、每条 ≤ 60 个 CJK 字符、表格 ≤ 8 行 × 6 列）。未知页型同样拒绝并列出可用页型。被拒绝的调用不产生文件，也就没有卡片。
+- 解析宽容但不删内容：数组给成字符串就拆行；数字给成字符串就转；未知字段丢弃。**超出条数或字数上限一律拒绝整个调用**，错误里点名是第几页、哪个字段、上限多少，让模型拆页或精简后重发；渲染器绝不截断或改写用户的文字（反目标）。未知页型同样拒绝并列出可用页型。被拒绝的调用不产生文件，也就没有卡片。
 
 ### 主题与排版规则（渲染器）
 
-- 三套主题作为样式表随运行时发布：`navy`（深海，商务）、`forest`（森林，稳重）、`warm`（暖阳，活泼）。每套定义：调色板（primary / secondary / accent / text / muted / background、深底文字色）、拉丁与 CJK 字体、封面与内页背景、装饰（标题下划线或色条、页码、页脚公司名）。
+- 三套主题作为样式表随运行时发布，角色和字体槽位照 morph-ppt 的 `style.md`：颜色 `background`、`card`、`primary`、`secondary`、`accent`、
+  `text_primary`、`text_secondary`、`text_muted`，加 `dark`（hero / statement / cta 的深底色，其上文字用 `on_dark`）和 `chart[]`（4–6 个图表系列色，
+  由 primary / secondary / accent 及其浅色推导）；字体 `title_en`、`title_cn`、`body`、`data`。装饰：标题样式（下划线 / 色条 / 无）、圆角（0 或 0.3 cm）、
+  页脚（页码、公司名）。起始数值取自 morph 风格库（实现者可微调，保留 Apache-2.0 来源说明）：
+
+| 主题 | 来源风格 | background / card | primary / secondary / accent | text 主 / 次 / 弱 | dark |
+|---|---|---|---|---|---|
+| `navy`（商务） | light--minimal-corporate + light--project-proposal | FFFFFF / E8EEF4 | 1E3A5F / D4A84B / 3498DB | 333333 / 666666 / 999999 | 1E3A5F |
+| `forest`（稳重自然） | warm--earth-organic | F5F0E8 / E8D5B0 | 6B8E6B / 8B6F47 / D4956B | 3C2415 / 6B5B4A / 9E8E7A | 3C2415 |
+| `warm`（活泼） | light--training-interactive | FFF9E6 / FFFFFF | FF6B6B / 4ECDC4 / FFE66D | 2D3436 / 636E72 / B2BEC3 | 2D3436 |
+
+  字体：拉丁标题 Arial Black、拉丁正文 / 数据 Arial，中文标题与正文 Microsoft YaHei，日文 Yu Gothic；都随 Office 在 macOS 与 Windows 发布。
+  深底判定用 OfficeCLI 的亮度公式 `(R×299 + G×587 + B×114) / 1000`，亮度 < 128 的底色上文字亮度 ≥ 80%。
 - 画布 16:9（33.867 × 19.05 cm）。内容边距 2.33 cm，标题带高约 3.7 cm，内容区从 y ≈ 5 cm 起，块间距 0.76 cm，N 张卡片宽 = (29.21 − (N − 1) × 0.76) ÷ N。这些数字来自现有 `ofox-office-pptx` 技能，改为代码常量。
-- 字号表：标题 36–44，副标题与卡片标题 20–24，正文 18–24，说明 12–14，KPI 数字 60–72。渲染器按内容量在区间内选字号，再按 `lines × size × 0.05 cm + 0.4 cm` 定框高；一行可容纳约 `width_cm ÷ (size × 0.035)` 个 CJK 字符、两倍的拉丁字符。超出就先降字号到区间下限；到下限仍放不下的记 issue 交给质检闭环处理，**不缩到区间以下，不截断，不改写文字**（内容量由内容模型的上限在解析时挡住，见上）。
+- 字号表（morph 的舞台档）：hero 44–60，statement 32–40，内容页标题 36–44，副标题与卡片标题 20–24，正文 18–24，卡片正文与表格 14–18，说明 13–16，KPI 数字 48–72；13pt 以下一律不用。
+  渲染器按内容量在区间内选字号，估算常数与 officecli 检查器一致：CJK 字宽 = 字号 × 0.0353 cm，拉丁 = 0.55 倍；行高 = 字号 × 0.0466 cm（1.32 倍行距）；
+  文本框左右内边距各 0.254 cm、上下各 0.127 cm。超出就先降字号到区间下限；到下限仍放不下的记 issue 交给质检闭环处理，**不缩到区间以下，不截断，不改写文字**（内容量由内容模型的上限在解析时挡住，见上）。
 - 渲染器输出的是和模型写的一样的 officecli 批处理，所以宿主的校验器原样生效。
-- 偏好套件覆盖主题：`brand.primary` / `accent` 替换调色板对应项；公司名进页脚；logo（data URI，≤ 200 KB）放封面右下。
+- 偏好套件覆盖主题：`brand.primary` / `accent` 替换调色板对应项，`chart[]` 随之重新推导；公司名进页脚；logo（data URI，≤ 200 KB）放 hero 右下。
 
 ### 生成前先给大纲（技能规则）
 
@@ -150,7 +190,8 @@ M1/M2 让助手能稳定生成真实、可打开、安全的 PDF / Word / PPT / 
 
 ### 技能与工具描述
 
-- `ofox-office-pptx/SKILL.md` 改写：页型表、字段上限、大纲先行规则、`revises` 规则、修改规则；专家模式（原始批处理）压缩到末尾一节。`ofox-office-docx` / `xlsx` 增加 inspect / edit 的用法。
+- `ofox-office-pptx/SKILL.md` 改写：页型表、字段上限、叙事结构建议（problem_solution / insight_driven / vision_driven / educational，取自 morph-ppt `decision-rules.md`）、
+  “列表用 pillars 或 grid、相邻两页页型不同”、大纲先行规则（待调研后定）、`revises` 规则、修改规则；专家模式（原始批处理）压缩到末尾一节。`ofox-office-docx` / `xlsx` 增加 inspect / edit 的用法。
 - `create_document` 的描述与 guidelines 说明 deck 对象优先、批处理为专家模式。
 - 工具结果一律纯文本（路线图第 8 项的审计随本里程碑对这三个工具完成）。
 
@@ -202,7 +243,7 @@ M1/M2 让助手能稳定生成真实、可打开、安全的 PDF / Word / PPT / 
 4. 用户文件的编辑不做自动修正，只报告。
 5. 渲染器在 Node 运行时；质检闭环在 Rust 宿主（它拥有引擎和沙箱）。
 6. 大纲先行：要不要做、阈值多少，2026-11-07 决定先调研其他产品的做法再定（路线图“待调研”第 1 条）；本稿原建议是页数 ≥ 6 或用途、受众不明时先给大纲。
-7. 三套主题的名字和基调：navy / forest / warm。
+7. 三套主题的名字和基调：navy / forest / warm；来源风格见“主题与排版规则”。
 8. M3 第一版覆盖 PPT 的精美化和三种格式的编辑；Word / Excel 的精美化在 M3d。
 9. 内容超限一律拒绝调用，渲染器绝不截断（审稿后定）。
 10. 图片用 `attachment:<id>` 引用会话附件，宿主在校验器前解析；PDF 内嵌图同机制（审稿后定）。
@@ -213,6 +254,9 @@ M1/M2 让助手能稳定生成真实、可打开、安全的 PDF / Word / PPT / 
 15. M3a 拆成 M3a-1 / M3a-2 / M3a-3，执行顺序 M3a-1 → M3a-2 → M3b → M3a-3 → M3c；每个切片单独计划、单独验收（2026-11-07 用户定）。
 16. 真实模型回归脚本的最小版随 M3a-1 交付，只跑 4 个生成提示 × 3 模型；之后每个切片都用它做门槛，M3c 补全（2026-11-07 用户定）。
 17. 第 9 条维持：超限拒绝整个调用，渲染器绝不截断；排版规则里残留的截断句已删（2026-11-07 用户定）。
+18. 页型、配色、常数按 AionUi（即 OfficeCLI morph-ppt 技能）取：十种页型 hero / statement / pillars / evidence / timeline / comparison / grid / quote / cta / showcase，
+    没有 bullets 页型；主题角色与字体槽位照 `style.md`，三套主题的起始数值来自其风格库；排版仍由我们的渲染器做，模型不写坐标（2026-11-08 用户定）。
+19. 渲染器的文字估算常数与 officecli 检查器一致（字宽、行距、内边距），避免质检闭环反复发现溢出（调研结论）。
 
 ## 留给实现者决定
 
