@@ -364,14 +364,16 @@ Isolation and platforms:
   uses; this is unverified. The Windows branches of the runner (process jobs,
   no sandbox) are not compiled in the macOS development environment, so they
   have had no compiler or test run. Windows acceptance is a separate gate.
-- A `/tmp/officecli-<uid>` folder that is not the current user's own private
-  folder (another owner, a link, a file) makes every Word, Excel and PowerPoint
+- A `/tmp/officecli-<uid>` folder that is not the current user's own folder
+  (another owner, a link, a file) makes every Word, Excel and PowerPoint
   document fail closed on macOS: officecli keeps temporary files there whatever
   `TMPDIR` says, and the sandbox profile needs to allow exactly that folder.
-  Documents work again once the folder is removed.
-- A crash or a forced quit during a run leaves that run's `outputs/<docId>`
-  folders in the conversation's folder until the conversation is removed; a
-  normal end of a run, including a stop or a failure, removes them.
+  Documents work again once the folder is removed. The user's own folder with
+  looser permissions is made private (0700) and used.
+- A crash, a forced quit, or an app shutdown that aborts a run's task during a
+  run leaves that run's `outputs/<docId>` folders in the conversation's folder
+  until the conversation is removed; a normal end of a run, including a stop or
+  a failure, removes them.
 
 Signing and packaging:
 
@@ -397,9 +399,20 @@ What the files and previews are:
 - There are no `submitting` or `failed` document cards: a record is written
   only once the file exists, so a failed or interrupted document leaves no card
   (the model gets the error and may retry, at most twice).
+- When officecli gives no usable issues report (for example one cut at the
+  runner's output limit), the document gets one warning, "issues unavailable",
+  instead of a count of zero. At most 200 issues are asked for.
+- CSV files are written as the model wrote them and are not formula-checked: a
+  cell that starts with `=`, `+`, `-` or `@` is a formula when the file is
+  opened in Excel (CSV formula injection). Only xlsx batches are filtered.
+- **Save and open** (保存并打开) of an html document opens the saved copy in the
+  default browser from `file://`, where the model-written page and its scripts
+  run. The app itself never loads a document: its media protocol refuses to
+  serve one.
 
-Features of the engines that are deliberately unavailable, because a batch must
-read nothing outside the document and run nothing:
+Features of the engines that are deliberately unavailable, because making a
+document must read nothing outside it and run nothing. An Excel workbook's
+formulas run later, when it is opened: they are filtered, not sandboxed.
 
 - diagrams (officecli renders them in a browser it starts and loads a script
   from the network), OLE objects and embedded packages;
@@ -409,7 +422,23 @@ read nothing outside the document and run nothing:
   instruction that runs, fetches or links (DDE, INCLUDEPICTURE, LINK, and so on);
 - number formats that escape a character with a backslash, such as `\$`: a
   backslash reads as a path separator to the check. `$#,##0` is accepted;
-- Typst packages (`#import "@…"`).
+- Typst packages (`#import "@…"`);
+- Excel formulas outside an allowlist. A formula (a `formula`, `formula1`,
+  `formula2`, `ref` or `refersTo` value, any value of a conditional format,
+  validation, named range, chart, sparkline or table, and any value that starts
+  with `=`, `+`, `-` or `@` and is not a number) may call only maths and
+  rounding, statistics, logic, text, lookup and reference, date and time,
+  finance, information and dynamic-array functions (SUM, IF, IFERROR, VLOOKUP,
+  XLOOKUP, INDEX, MATCH, TEXT, DATE, PMT, ISNUMBER, UNIQUE, FILTER and the like),
+  and HYPERLINK only with one quoted https:, http:, mailto: or # address as its
+  first argument. Refused even inside quoted text: functions that fetch, run code
+  or build a reference from text (WEBSERVICE, IMAGE, RTD, FILTERXML,
+  STOCKHISTORY, CUBE…, IMPORT…, CALL, REGISTER, EXEC, PY, DDE, INDIRECT and
+  others), a DDE `|`, another workbook (`[book]Sheet!A1`, a quoted path before
+  `!`), `\\`, `//` and `file:`. So a formula with such a word or character in
+  its text (`"Call us"`, `"a|b"`, an address outside HYPERLINK) is refused too.
+  A table's inline rows hold values only: no cell may start with `=`, `+`, `-`
+  or `@` unless it is a number.
 
 Tool behavior changed in this round:
 

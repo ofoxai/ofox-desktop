@@ -10,6 +10,10 @@ under `assistant-runtime/resources/engines/`, which the application ships as
 | officecli | 1.0.160 | Word, Excel and PowerPoint files | A self-contained, trimmed .NET 10 single-file program (not NativeAOT) |
 | typst     | 0.15.1  | PDF from Typst markup            | A Rust program, no runtime and no JIT                                 |
 
+They add to the package roughly: officecli about 34 MB (its download is the bare
+binary), typst 14 to 22 MB compressed depending on the platform, and about 75 MB
+together once unpacked (macOS arm64: officecli 34 MB, typst 45 MB).
+
 Both are Apache-2.0. Their licences and notices ship in
 `resources/notices/officecli.txt` and `typst.txt` and next to each executable
 (`LICENSE`, `NOTICE`); the smoke test fails if either notice is missing.
@@ -37,8 +41,10 @@ the version, URLs and digests together, then re-run the smoke test below.
 
 Both engines keep state under `HOME`, and officecli can start a resident
 process or update itself. `assistant-prepare.mjs` and `assistant-smoke.mjs`
-therefore run them with a throwaway `HOME` and `OFFICECLI_NO_AUTO_RESIDENT=1`
-and `OFFICECLI_SKIP_UPDATE=1`; the host must do the same.
+therefore run them with a throwaway `HOME` (and `USERPROFILE`, `TMPDIR`, `TEMP`
+and `TMP` in the same folder), `OFFICECLI_NO_AUTO_RESIDENT=1` and
+`OFFICECLI_SKIP_UPDATE=1`, and stop an engine run after 60 seconds; the host must
+do the same.
 
 ## macOS signing
 
@@ -51,12 +57,12 @@ typst only ad-hoc (linker-signed).
 
 Entitlements are chosen per executable name in `scripts/assistant-entitlements.mjs`:
 
-| Executable                          | Entitlements file                                | Keys                              |
-| ----------------------------------- | ------------------------------------------------ | --------------------------------- |
-| `node`                              | `assistant-runtime/node-entitlements.plist`      | `com.apple.security.cs.allow-jit` |
-| `officecli`                         | `assistant-runtime/officecli-entitlements.plist` | `com.apple.security.cs.allow-jit` |
-| `typst`                             | none (explicit `null`)                           | hardened runtime only             |
-| any other Mach-O under `resources/` | none                                             | hardened runtime only             |
+| Executable                              | Entitlements file                                | Keys                              |
+| --------------------------------------- | ------------------------------------------------ | --------------------------------- |
+| `node`                                  | `assistant-runtime/node-entitlements.plist`      | `com.apple.security.cs.allow-jit` |
+| `officecli`                             | `assistant-runtime/officecli-entitlements.plist` | `com.apple.security.cs.allow-jit` |
+| `typst`                                 | none (explicit `null`)                           | hardened runtime only             |
+| any Mach-O outside `resources/engines/` | none                                             | hardened runtime only             |
 
 The table lists every engine executable on purpose. A Mach-O under
 `resources/engines/` with no entry (a new engine, or an upstream rename) fails
@@ -297,13 +303,24 @@ refusal names the item and what to change, and nothing is made.
   scheme).
 - Word fields only show a page number or a date: `page`, `numpages`, `date`,
   `time` and `toc`, with no instruction that runs, fetches or links.
+- Excel formulas (a `formula` key, a value that starts with `=`, `+`, `-` or
+  `@` and is not a number, and every value of a conditional format, validation,
+  named range, chart, sparkline or table) call only allowlisted functions, refuse
+  WEBSERVICE, IMAGE, INDIRECT, DDE and the like even in quoted text, and refer
+  to no other workbook, file share or address (HYPERLINK may link to one quoted
+  `https:`, `http:`, `mailto:` or `#` address). A table's inline rows hold
+  values, not formulas. Formulas are filtered, not sandboxed: Excel evaluates
+  what passes when the workbook is opened (see
+  [known limitations](known-limitations.md#assistant-document-engines-2026-11-07)).
 
-The engines then run as isolated children: a clean environment, `HOME`, `TMPDIR`,
-`TEMP` and `TMP` pointing into the document's `.home`, `OFFICECLI_NO_AUTO_RESIDENT=1`,
-`OFFICECLI_SKIP_UPDATE=1`, a Typst package folder that is empty and read-only,
+The engines then run as isolated children: a clean environment, `HOME`,
+`USERPROFILE`, `TMPDIR`, `TEMP` and `TMP` pointing into the document's `.home`,
+`OFFICECLI_NO_AUTO_RESIDENT=1`, `OFFICECLI_SKIP_UPDATE=1`, a Typst package
+folder that is empty and read-only,
 every proxy variable pointing at a port nothing listens on, and no inherited
-credentials. On macOS each engine also runs under `sandbox-exec` (probed once per
-engine; if the probe fails the engine runs without it and the host logs it): no
+credentials. On macOS each engine also runs under `sandbox-exec` (probed per engine
+until a probe passes; while it fails the engine runs without it, the next document
+probes again, and the host logs the first failure): no
 network for either engine; officecli writes only the document's folder and its own
 temporary folder, and reads nothing under `/Users` and `/Volumes` except the
 document's folder and its own. Windows
@@ -345,7 +362,8 @@ This is the user's step, with a real Ofox key; the development lane never ran it
    (Preview or a PDF reader, PowerPoint or Keynote, Excel or Numbers, Word or
    Pages) with no repair prompt, warning or blank page, and the content is what
    the card said. Open the saved copy twice to be sure it is not the stored file.
-5. After each reply ends, the conversation's `outputs/` folder is empty (no
+5. After each reply ends, the conversation's
+   `<AppConfig>/assistant/<owner>/<session id>/outputs/` folder is empty (no
    `<docId>` folders are left).
 6. Optional: ask for a document with a picture, a chart, and a Word section
    break to see how the model uses the skills.
