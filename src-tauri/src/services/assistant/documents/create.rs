@@ -2350,14 +2350,11 @@ async fn after_failed_fix(
     error: String,
     fixed: usize,
 ) -> Result<(Vec<Issue>, usize), String> {
-    // officecli 1.0.160 reports validation errors as `"success": false`.
     let valid = work
         .report(&["validate", file, "--json"])
         .await
         .is_some_and(|report| {
-            report["success"] != false
-                && data(&report)["valid"] != false
-                && validation_issues(work, &report).is_empty()
+            !validation_failed(&report) && validation_issues(work, &report).is_empty()
         });
     if !valid {
         return Err(error);
@@ -2514,14 +2511,38 @@ fn item_warnings(work: &Work<'_>, item: &Value) -> Vec<Issue> {
     issues
 }
 
+/// Whether a `validate --json` report says the file is not valid:
+/// officecli 1.0.160 says `"success": false`, others `"valid": false`.
+fn validation_failed(report: &Value) -> bool {
+    report["success"] == false || data(report)["valid"] == false
+}
+
+/// The entries of the list `key` in `place`, if it holds one.
+fn listed<'a>(place: &'a Value, key: &str) -> &'a [Value] {
+    place[key].as_array().map(Vec::as_slice).unwrap_or_default()
+}
+
 /// `validate --json`: schema errors, which may keep Office from opening it.
+/// A report that says the file is not valid (see [`validation_failed`])
+/// lists them as `errors` or `warnings`, under `data` or at its top
+/// (officecli 1.0.160: the top's `warnings`): each is an error. Otherwise
+/// only `data.errors` are.
 fn validation_issues(work: &Work<'_>, report: &Value) -> Vec<Issue> {
-    let errors = data(report)["errors"]
-        .as_array()
-        .map(Vec::as_slice)
-        .unwrap_or_default();
+    let errors: Vec<&Value> = if validation_failed(report) {
+        let mut places = vec![report];
+        if report["data"].is_object() {
+            places.insert(0, &report["data"]);
+        }
+        places
+            .into_iter()
+            .flat_map(|place| [listed(place, "errors"), listed(place, "warnings")])
+            .flatten()
+            .collect()
+    } else {
+        listed(data(report), "errors").iter().collect()
+    };
     errors
-        .iter()
+        .into_iter()
         .filter_map(|error| {
             let description = error["description"]
                 .as_str()
@@ -3718,6 +3739,53 @@ esac"#
         }
     }
 
+    /// officecli 1.0.160 lists a failed validation's findings as
+    /// `warnings` of a report that says `"success": false`: each is an
+    /// error, listed first, and the document is still made.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_failed_validation_reports_its_findings_as_errors() {
+        let invalid = r#"{"success":false,"message":"","warnings":[{"message":"Found 1 validation error(s):","code":"warning"},{"message":"[Schema] /ppt/slides/slide1.xml: The element has unexpected child element 'p:bogus'.","code":"warning"}]}"#;
+        let untitled = json!({"success": true, "data": {"count": 1, "issues": [{
+            "id": "T1", "type": 1, "severity": 1, "path": "/slide[1]", "message": "Slide has no title",
+        }]}})
+        .to_string();
+        let (f, result) = made_deck(&officecli_fixing(
+            &[&untitled],
+            r#"{"slides":1}"#,
+            GEOMETRY,
+            FIX_APPLIED,
+            &[invalid],
+        ))
+        .await;
+        assert_eq!(
+            result["issues"],
+            json!([
+                {"severity": "error", "message": "Found 1 validation error(s):"},
+                {"severity": "error", "message": "[Schema] /ppt/slides/slide1.xml: The element has unexpected child element 'p:bogus'."},
+                {"severity": "warning", "message": "Slide has no title", "path": "/slide[1]"},
+            ])
+        );
+        assert_eq!(f.record().attachments.len(), 1, "the document is kept");
+        // A report that says `valid: false` under `data` reads the same.
+        let invalid = r#"{"success":true,"data":{"valid":false,"errors":[{"description":"bad child","path":"/slide[1]"}],"warnings":[{"message":"also bad"}]}}"#;
+        let (_f, result) = made_deck(&officecli_fixing(
+            &[NO_ISSUES],
+            r#"{"slides":1}"#,
+            GEOMETRY,
+            FIX_APPLIED,
+            &[invalid],
+        ))
+        .await;
+        assert_eq!(
+            result["issues"],
+            json!([
+                {"severity": "error", "message": "bad child", "path": "/slide[1]"},
+                {"severity": "error", "message": "also bad"},
+            ])
+        );
+    }
+
     const TYPST_OK: &str = r#"for a; do last=$a; done
 echo "$*" >> typst-args
 [ -w "$TYPST_PACKAGE_PATH" ] && echo writable > packages-writable
@@ -4839,6 +4907,42 @@ esac"#,
 
     fn cell(props: Value) -> Value {
         json!({"command": "set", "path": "/Sheet1/A1", "props": props})
+    }
+
+    /// `items` as a pptx batch: the checks' answer.
+    fn deck_batch(items: &[Value]) -> Result<(), String> {
+        Document::new(CreateDocumentArgs {
+            name: "a".into(),
+            format: DocumentFormat::Pptx,
+            content: Value::Array(items.to_vec()),
+        })
+        .map(drop)
+    }
+
+    /// A deck's table cells and chart series names are prose: PowerPoint
+    /// evaluates nothing, so a leading `+`, `-`, `=` or `@` is text there.
+    #[test]
+    fn deck_data_cells_are_prose() {
+        let table = |data: &str| json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": {"data": data}});
+        for item in [
+            table("指标,变化;收入,+18%;成本,-5%"),
+            // officecli's quoted cell, a comma inside.
+            table("指标,变化;\"含税, +18%\",=1"),
+            table("指标,变化;\"含税, +18%\",@x"),
+            json!({"command": "add", "parent": "/slide[1]", "type": "chart", "props": {"chartType": "column", "data": "-成本:1,2", "categories": "Q1,Q2"}}),
+        ] {
+            deck_batch(std::slice::from_ref(&item))
+                .unwrap_or_else(|error| panic!("{item}: {error}"));
+        }
+        // Files and addresses are still refused.
+        for data in ["/Users/x/t.csv", "@t.csv", "https://x.example/t.csv"] {
+            assert!(deck_batch(&[table(data)]).is_err(), "{data}");
+        }
+        // A workbook's table rows still hold values only.
+        let sheet_table = json!({"command": "add", "parent": "/Sheet1", "type": "table", "props": {"ref": "A1:B3", "data": "指标,变化;收入,+18%;成本,-5%"}});
+        assert!(workbook(&[sheet_table])
+            .unwrap_err()
+            .contains("table rows hold values only"));
     }
 
     #[test]
