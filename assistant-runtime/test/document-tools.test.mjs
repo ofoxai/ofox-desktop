@@ -290,6 +290,10 @@ test("the host's layout fixes are told to the model", async () => {
     await text({ fixed: 3 }),
     /^Created .* Issues: 0\. Auto-fixed 3 layout issues\./,
   );
+  assert.match(
+    await text({ fixed: 1 }),
+    /^Created .* Issues: 0\. Auto-fixed 1 layout issue\.\n/,
+  );
   for (const extra of [{}, { fixed: 0 }, { fixed: "3" }])
     assert.doesNotMatch(await text(extra), /Auto-fixed/, JSON.stringify(extra));
 });

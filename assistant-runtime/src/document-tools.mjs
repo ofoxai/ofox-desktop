@@ -142,10 +142,9 @@ function describe(result, format) {
     quantity(file.sheets, "sheet"),
   ].filter(Boolean);
   // The host adds `fixed` for Office files: layout problems it repaired.
-  const fixed =
-    Number.isSafeInteger(result.fixed) && result.fixed > 0
-      ? ` Auto-fixed ${result.fixed} layout issues.`
-      : "";
+  const repaired =
+    result.fixed > 0 ? quantity(result.fixed, "layout issue") : "";
+  const fixed = repaired && ` Auto-fixed ${repaired}.`;
   return [
     `Created ${file.name} (${facts.join(", ")}) as attachment ${file.id}. Issues: ${issues.length}.${fixed}`,
     ...issues.map(issueLine),
