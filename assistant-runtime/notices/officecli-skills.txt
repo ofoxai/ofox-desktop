@@ -14,6 +14,18 @@ and command-line workflows were replaced by batch command arrays for the
 create_document tool, limited to a subset of elements; examples and worked
 examples are new.
 
+The deck object that create_document renders for PowerPoint (runtime/src/deck/
+and the page-type table of the ofox-office-pptx skill) takes its ten page types
+(hero, statement, pillars, evidence, timeline, comparison, grid, quote, cta,
+showcase), its narrative structures and its palette values from the morph-ppt
+skill of the same repository (skills/morph-ppt, in particular
+reference/styles/light--minimal-corporate and light--project-proposal),
+licensed under the Apache License, Version 2.0. Changes: the page types are
+drawn by our own renderer in JavaScript, with field limits, line-break rules
+and layout constants of our own; the palette values and font roles are
+reimplemented as the single theme "navy"; and the narrative structures are
+rewritten in our own words.
+
 OfficeCLI NOTICE
 ----------------
 

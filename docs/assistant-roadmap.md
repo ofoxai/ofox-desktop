@@ -35,6 +35,9 @@
 | 5 | M3c 度量 | 回归脚本补修改用例 + token/时间统计 + 验收表，18 次最多失败 1 次 | todo |
 | 6 | M3d 后半段 | Word / Excel 渲染器与主题、基于内容重做精美版 | todo，另立计划 |
 
+2026-11-08：M3a-1 的实现已在 `feat/assistant-deliverables` 上，等用户验收和一次真实模型回归
+（`pnpm assistant:real-eval`，结果填进 `docs/assistant-engines.md`）；验收通过后再改上表状态。
+
 下面的“生成 / 修改 / 验收”是整段 M3 的总目标，不是单个切片的范围。
 
 生成：
