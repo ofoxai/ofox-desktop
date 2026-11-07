@@ -895,9 +895,10 @@ const SHARE_OR_ADDRESS: &str = "names a file share or an address; only HYPERLINK
 /// Why text that names a `file:` address is refused.
 const FILE_ADDRESS: &str = "names a file: address; a formula cannot";
 /// Why an inline list on a [`FORMULA_TARGETS`] element that holds a `!`
-/// but is not references is refused (R62): officecli writes it whole as
-/// the chart's formula.
-const LIST_REFERENCES: &str = "holds !, so officecli writes it as a formula, and it is not a reference such as Sheet1!A2:A5 or several separated by ,: an inline list of labels or numbers cannot hold !";
+/// but is not a union of references is refused (R62/R66): officecli writes
+/// a chart series list whole as its formula, so every list key is read
+/// whole once it holds a `!`.
+const LIST_REFERENCES: &str = "holds !, so the whole list is read as a formula, and it is not a union of references such as Sheet1!A2:A5,Sheet1!B2:B5; reword the label without ! or point the series at cells";
 
 /// Whether `text` names a `file:` address: `file:`, in any case, where a
 /// word starts (R64): at the start, or after a character that is not an
@@ -4577,7 +4578,18 @@ esac"#,
                 chart(
                     json!({"chartType": "column", "data": "S1:1,2", "categories": "Hello!,World"}),
                 ),
-                "holds !, so officecli writes it as a formula",
+                "holds !, so the whole list is read as a formula",
+            ),
+            // R66: after the formula check the list must be a union of
+            // references, so an expression or an allowlisted call is no
+            // reference either.
+            (
+                series(json!({"values": "Sheet1!A1+Sheet1!A2"})),
+                "holds !, so the whole list is read as a formula",
+            ),
+            (
+                series(json!({"values": "Sheet1!A1,SUM(B2)"})),
+                "holds !, so the whole list is read as a formula",
             ),
             // A sparkline's `data` is officecli's alias of `dataRange`.
             (
