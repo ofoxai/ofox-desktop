@@ -132,6 +132,17 @@ def _footer(slide, page):
         p = tf.paragraphs[0]; p.alignment = align
         r = p.add_run(); r.text = content; _font(r, 9, T.faint)
 
+def background(slide, color):
+    """Colour the whole slide. The slide's own background is set for PowerPoint, and a full-slide rectangle goes at the back
+    of the slide for the preview, which paints every page white and ignores that background. Text on it needs a light colour."""
+    f = slide.background.fill; f.solid(); f.fore_color.rgb = rgb(color)
+    pres = slide.part.package.presentation_part.presentation
+    r = shape(slide, MSO_SHAPE.RECTANGLE, 0, 0, 1, 1, fill=color)
+    r.left, r.top, r.width, r.height = 0, 0, pres.slide_width, pres.slide_height
+    r.name = "Background"
+    tree = slide.shapes._spTree; tree.remove(r._element); tree.insert(2, r._element)  # after nvGrpSpPr and grpSpPr
+    return r
+
 def _notes(slide, notes):
     if notes: slide.notes_slide.notes_text_frame.text = notes
 
@@ -148,7 +159,7 @@ def content_slide(prs, title, subtitle="", notes=""):
     return s
 
 def cover_slide(prs, title, subtitle="", kicker="", meta="", notes="", art=None):
-    s = prs.slides.add_slide(_layout(prs, "Cover")); _state["page"] += 1
+    s = prs.slides.add_slide(_layout(prs, "Cover")); _state["page"] += 1; background(s, T.primaryDark)
     w = 7.4 if art else 10.5
     size = 44 if lines_for(title, 44, w) <= 2 else 36
     th = min(2, lines_for(title, size, w)) * size * 1.2 / 72
@@ -167,7 +178,7 @@ def cover_slide(prs, title, subtitle="", kicker="", meta="", notes="", art=None)
     return s
 
 def section_slide(prs, title, number="", subtitle="", notes=""):
-    s = prs.slides.add_slide(_layout(prs, "Section")); _state["page"] += 1
+    s = prs.slides.add_slide(_layout(prs, "Section")); _state["page"] += 1; background(s, T.primaryDark)
     if number: text(s, str(number), G.X, 1.6, 3, 80 * 1.4 / 72, size=80, color=T.accent, bold=True)
     _flush(s.shapes.title.text_frame, "top")
     p = s.shapes.title.text_frame.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; r = p.add_run(); r.text = title; _font(r, 36, T.white, True)

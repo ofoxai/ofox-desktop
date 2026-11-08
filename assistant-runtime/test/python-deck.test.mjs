@@ -4,6 +4,8 @@ import { copyFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
+import { thumbnailFromSvg } from "../src/thumbnails.mjs";
 import {
   officecli,
   options,
@@ -224,6 +226,149 @@ test("leaves the footer out when there is none", options, async (t) => {
   const found = placeholders(entries.get("ppt/slides/slide1.xml").toString());
   assert.deepEqual(found.map(({ type }) => type).sort(), ["sldNum", "title"]);
 });
+
+/**
+ * The RGB pixels of a page as the model's overview draws it: officecli's SVG
+ * for the page, through the runtime's thumbnail code. officecli paints every
+ * page white and ignores a slide's own background, so what a slide shows
+ * there is what its shapes draw.
+ */
+async function previewPixels(t, file, page) {
+  const svg = await office(
+    t,
+    "view",
+    file,
+    "svg",
+    "--start",
+    page,
+    "--end",
+    page,
+  );
+  const thumbnail = await thumbnailFromSvg(Buffer.from(svg));
+  const image = await loadImage(Buffer.from(thumbnail.data, "base64"));
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  const { data } = context.getImageData(0, 0, image.width, image.height);
+  const at = (x, y) => [
+    ...data.subarray((y * image.width + x) * 4, (y * image.width + x) * 4 + 3),
+  ];
+  // How many pixels in a box are light (text on a dark slide) or dark.
+  const count = ([x, y, w, h], keep) => {
+    let n = 0;
+    for (let row = y; row < y + h; row++)
+      for (let column = x; column < x + w; column++)
+        if (keep(at(column, row))) n += 1;
+    return n;
+  };
+  return {
+    width: image.width,
+    height: image.height,
+    at,
+    light: (box) => count(box, (rgb) => rgb.every((v) => v > 200)),
+    dark: (box) => count(box, (rgb) => rgb.every((v) => v < 100)),
+  };
+}
+
+const isDark = (rgb) => rgb.every((v) => v < 100);
+const isWhite = (rgb) => rgb.every((v) => v > 240);
+
+test(
+  "draws cover and section slides dark in the preview",
+  options,
+  async (t) => {
+    const result = await build(
+      t,
+      `
+prs = new_deck(title="Dark", footer="Ofox quarterly")
+cover_slide(prs, "A cover", subtitle="With a subtitle")
+section_slide(prs, "A section", number="01")
+content_slide(prs, "A white content slide")
+`,
+    );
+    const [cover, section, content] = [
+      await previewPixels(t, result.out, 1),
+      await previewPixels(t, result.out, 2),
+      await previewPixels(t, result.out, 3),
+    ];
+    // The corners and the middle of both dark slides are dark.
+    for (const [name, page] of [
+      ["cover", cover],
+      ["section", section],
+    ])
+      for (const [x, y] of [
+        [2, 2],
+        [page.width - 3, 2],
+        [2, page.height - 3],
+        [page.width - 3, page.height - 3],
+        [page.width >> 1, page.height >> 1],
+      ])
+        assert.ok(
+          isDark(page.at(x, y)),
+          `${name} at ${x},${y}: ${page.at(x, y)}`,
+        );
+    // The cover's title (white, 44 pt) sits on that dark: its box (x 0.72 in,
+    // y 1.9 in, 57.6 px per inch) has light pixels and mostly dark ones.
+    const title = [41, 109, 400, 40];
+    assert.ok(cover.light(title) > 300, `light pixels: ${cover.light(title)}`);
+    assert.ok(cover.dark(title) > 8000, `dark pixels: ${cover.dark(title)}`);
+    // A normal content slide stays white.
+    assert.ok(isWhite(content.at(2, 2)), `${content.at(2, 2)}`);
+    assert.ok(isWhite(content.at(content.width - 3, content.height - 3)));
+  },
+);
+
+test(
+  "background() colours any slide in the preview and in the file",
+  options,
+  async (t) => {
+    const result = await build(
+      t,
+      `
+prs = new_deck(title="Background", footer="Ofox quarterly")
+cover_slide(prs, "A cover")
+s = content_slide(prs, "A coloured slide")
+background(s, T.primary)
+s.shapes.title.text_frame.paragraphs[0].runs[0].font.color.rgb = rgb(T.white)
+text(s, "Readable on the colour", 0.72, 2.0, 8, 0.5, size=18, color=T.white)
+content_slide(prs, "A white content slide")
+`,
+    );
+    const entries = await zipEntries(result.out);
+    const xml = entries.get("ppt/slides/slide2.xml").toString();
+    // For PowerPoint: the slide's own background; for the preview: a full-slide
+    // rectangle that is the first shape, with no line.
+    assert.match(xml, /<p:bg><p:bgPr><a:solidFill><a:srgbClr val="1E3A5F"\/>/);
+    const first = xml.match(/<p:sp>[\s\S]*?<\/p:sp>/)[0];
+    assert.match(
+      first,
+      /<a:off x="0" y="0"\/><a:ext cx="12192000" cy="6858000"\/>/,
+    );
+    assert.match(first, /<a:srgbClr val="1E3A5F"\/>/);
+    assert.match(first, /<a:ln><a:noFill\/><\/a:ln>/);
+
+    const coloured = await previewPixels(t, result.out, 2);
+    for (const [x, y] of [
+      [2, 2],
+      [coloured.width - 3, coloured.height - 3],
+      [coloured.width >> 1, coloured.height >> 1],
+    ])
+      assert.ok(
+        isDark(coloured.at(x, y)),
+        `at ${x},${y}: ${coloured.at(x, y)}`,
+      );
+    // The text on it is drawn light.
+    assert.ok(coloured.light([41, 115, 300, 25]) > 100, "text on the colour");
+    const white = await previewPixels(t, result.out, 3);
+    assert.ok(isWhite(white.at(2, 2)), `${white.at(2, 2)}`);
+
+    assert.deepEqual((await office(t, "validate", result.out)).errors, []);
+    assert.deepEqual(
+      (await office(t, "view", result.out, "issues")).issues,
+      [],
+    );
+  },
+);
 
 test("validates clean", options, async (t) => {
   const result = await build(
