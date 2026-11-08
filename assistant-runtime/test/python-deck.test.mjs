@@ -313,12 +313,66 @@ ax.tick_params(labelsize=8)
 plot(s, fig, 0.72, 4.7, 5, 2, alt="small ticks")
 `,
   );
-  const lint = JSON.parse(await readFile(result.lint, "utf8")).join("\n");
+  const lines = JSON.parse(await readFile(result.lint, "utf8"));
+  const lint = lines.join("\n");
   assert.match(lint, /card "A card": text needs/);
   assert.match(lint, /steps: .*lower h/);
   assert.match(lint, /figure "small figure": smallest text/);
-  assert.match(lint, /plot "small ticks": .*use at least 10/);
+  // One line for all the small ticks, with the way to fix them.
+  assert.deepEqual(
+    lines.filter((line) => line.startsWith('plot "small ticks"')),
+    [
+      'plot "small ticks": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
+    ],
+  );
 });
+
+test(
+  "lints small plot text once per group, and only what is drawn",
+  options,
+  async (t) => {
+    const result = await build(
+      t,
+      `
+prs = new_deck(title="Plots")
+s = content_slide(prs, "Plots")
+
+fig, ax = plt.subplots()
+ax.plot([1, 2, 3])
+ax.tick_params(labelsize=8)
+plot(s, fig, 0.72, 1.7, 5, 2, alt="small ticks")
+
+# Two axes, everything 8 pt: still one line per group, not one per axes.
+fig, axes = plt.subplots(1, 2)
+for ax in axes:
+    ax.plot([1, 2, 3])
+    ax.set_title("Title", fontsize=8)
+    ax.set_xlabel("Label", fontsize=8)
+    ax.tick_params(labelsize=8)
+plot(s, fig, 6.2, 1.7, 5, 2, alt="small all")
+
+# The tick at 5 is outside the view limits: matplotlib never draws it.
+fig, ax = plt.subplots()
+ax.plot([0, 1, 2])
+ax.set_xticks([0, 1, 2, 5])
+ax.set_xlim(0, 2.1)
+ax.get_xticklabels()[-1].set_fontsize(8)
+plot(s, fig, 0.72, 4.2, 5, 2, alt="far tick")
+
+fig, ax = plt.subplots()
+ax.plot([1, 2, 3])
+plot(s, fig, 6.2, 4.2, 5, 2, alt="fine")
+`,
+    );
+    const lines = JSON.parse(await readFile(result.lint, "utf8"));
+    assert.deepEqual(lines, [
+      'plot "small ticks": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
+      'plot "small all": title is 8 pt; use at least 10 (ax.set_title(text, fontsize=12))',
+      'plot "small all": axis labels are 8 pt; use at least 10 (ax.set_xlabel(text, fontsize=10))',
+      'plot "small all": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
+    ]);
+  },
+);
 
 test("draws Chinese in plots", options, async (t) => {
   // matplotlib reports a glyph its font lacks as a UserWarning and draws a

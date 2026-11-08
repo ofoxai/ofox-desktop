@@ -260,11 +260,33 @@ def figure(slide, svg, x, y, w, h, alt="figure"):
     png = base64.b64decode(host.svg_to_png(svg, round(w * 192), round(h * 192)))
     return _picture(slide, png, x, y, w, h, alt)
 
+# The lint line for each group of plot text: how it reads, and how to fix it.
+_PLOT_TEXT = {
+    "title": ("title is", "ax.set_title(text, fontsize=12)"),
+    "axis labels": ("axis labels are", "ax.set_xlabel(text, fontsize=10)"),
+    "tick labels": ("tick labels are", "ax.tick_params(labelsize=10)"),
+}
+
+def _plot_text(fig):
+    """The text a plot draws, by group. Tick labels are those inside the axis view limits: the others are never drawn."""
+    groups = {name: [] for name in _PLOT_TEXT}
+    for ax in fig.axes:
+        groups["title"].append(ax.title)
+        groups["axis labels"] += [ax.xaxis.label, ax.yaxis.label]
+        for axis in (ax.xaxis, ax.yaxis):
+            axis.get_majorticklabels()  # refreshes the labels' text
+            lo, hi = sorted(axis.get_view_interval()); eps = (hi - lo) * 1e-9
+            groups["tick labels"] += [tk.label1 for tk in axis.get_major_ticks() if lo - eps <= tk.get_loc() <= hi + eps]
+    return groups
+
 def plot(slide, fig, x, y, w, h, alt="chart"):
     """A matplotlib figure placed at x, y, w, h (inches); it is resized to the box."""
     fig.set_size_inches(w, h)
-    for ax in fig.axes:
-        for t in [ax.title, ax.xaxis.label, ax.yaxis.label] + ax.get_xticklabels() + ax.get_yticklabels():
-            if t.get_text() and t.get_fontsize() < 10: LINT.append(f'plot "{alt}": text "{t.get_text()[:10]}" is {t.get_fontsize():.0f} pt; use at least 10')
+    for group, texts in _plot_text(fig).items():
+        sizes = [t.get_fontsize() for t in texts if t.get_text() and t.get_visible() and t.get_fontsize() < 10]
+        if sizes:
+            what, fix = _PLOT_TEXT[group]; small, large = min(sizes), max(sizes)
+            size = f"{small:g}" if small == large else f"{small:g}-{large:g}"
+            LINT.append(f'plot "{alt}": {what} {size} pt; use at least 10 ({fix})')
     buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200, facecolor="white"); plt.close(fig)
     return _picture(slide, buf.getvalue(), x, y, w, h, alt)
