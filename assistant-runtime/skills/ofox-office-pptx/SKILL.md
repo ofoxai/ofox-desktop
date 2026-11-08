@@ -102,19 +102,19 @@ cover_slide(prs, "缓存命中率与接口速度", subtitle="两个耗时，算�
 s = content_slide(prs, "请求怎么走", subtitle="命中直接返回，未命中才去查数据库",
                   notes="命中只要 5 ms，未命中要 100 ms，差了 20 倍。")
 svg = f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1267 941" font-family="Microsoft YaHei, PingFang SC, sans-serif">
-<rect x="40" y="250" width="240" height="150" rx="16" fill="#{T.tint}" stroke="#{T.primary}" stroke-width="3"/>
-<text x="160" y="338" font-size="40" fill="#{T.primary}" text-anchor="middle" font-weight="bold">请求</text>
-<rect x="470" y="250" width="280" height="150" rx="16" fill="#{T.primary}"/>
-<text x="610" y="338" font-size="40" fill="#{T.white}" text-anchor="middle" font-weight="bold">缓存</text>
-<rect x="940" y="250" width="290" height="150" rx="16" fill="#{T.accentTint}" stroke="#{T.accent}" stroke-width="3"/>
-<text x="1085" y="338" font-size="40" fill="#{T.accent}" text-anchor="middle" font-weight="bold">返回 5 ms</text>
-<rect x="470" y="640" width="280" height="150" rx="16" fill="#{T.tint}" stroke="#{T.primary}" stroke-width="3"/>
-<text x="610" y="728" font-size="40" fill="#{T.primary}" text-anchor="middle" font-weight="bold">数据库 100 ms</text>
-<line x1="285" y1="325" x2="455" y2="325" stroke="#{T.primary}" stroke-width="5"/><polygon points="470,325 445,312 445,338" fill="#{T.primary}"/>
-<line x1="755" y1="325" x2="925" y2="325" stroke="#{T.accent}" stroke-width="5"/><polygon points="940,325 915,312 915,338" fill="#{T.accent}"/>
-<line x1="610" y1="405" x2="610" y2="625" stroke="#{T.primary}" stroke-width="5"/><polygon points="610,640 597,615 623,615" fill="#{T.primary}"/>
-<text x="847" y="290" font-size="32" fill="#{T.accent}" text-anchor="middle">命中</text>
-<text x="630" y="530" font-size="32" fill="#{T.muted}" text-anchor="start">未命中</text>
+<rect x="40" y="360" width="250" height="220" rx="18" fill="#{T.tint}" stroke="#{T.primary}" stroke-width="3"/>
+<text x="165" y="484" font-size="44" fill="#{T.primary}" text-anchor="middle" font-weight="bold">请求</text>
+<rect x="430" y="360" width="260" height="220" rx="18" fill="#{T.primary}"/>
+<text x="560" y="484" font-size="44" fill="#{T.white}" text-anchor="middle" font-weight="bold">缓存</text>
+<rect x="880" y="40" width="347" height="220" rx="18" fill="#{T.accentTint}" stroke="#{T.accent}" stroke-width="3"/>
+<text x="1053" y="164" font-size="40" fill="#{T.accent}" text-anchor="middle" font-weight="bold">返回 5 ms</text>
+<rect x="880" y="680" width="347" height="220" rx="18" fill="#{T.tint}" stroke="#{T.primary}" stroke-width="3"/>
+<text x="1053" y="804" font-size="40" fill="#{T.primary}" text-anchor="middle" font-weight="bold">数据库 100 ms</text>
+<line x1="295" y1="470" x2="412" y2="470" stroke="#{T.primary}" stroke-width="5"/><polygon points="430,470 405,457 405,483" fill="#{T.primary}"/>
+<path d="M690,470 H780 V150 H862" fill="none" stroke="#{T.accent}" stroke-width="5"/><polygon points="880,150 855,137 855,163" fill="#{T.accent}"/>
+<path d="M690,470 H780 V790 H862" fill="none" stroke="#{T.primary}" stroke-width="5"/><polygon points="880,790 855,777 855,803" fill="#{T.primary}"/>
+<text x="800" y="330" font-size="34" fill="#{T.accent}" text-anchor="start">命中</text>
+<text x="800" y="640" font-size="34" fill="#{T.muted}" text-anchor="start">未命中</text>
 </svg>'''
 figure(s, svg, 0.72, 1.7, 6.6, 4.9, alt="请求经过缓存的流程")
 card(s, 7.62, 1.7, 4.993, 2.3, "命中", points=["缓存里已有结果", "5 ms 返回", "不碰数据库"], highlight=True)
