@@ -1,10 +1,10 @@
 # Thin deck helpers for python-pptx (v2 port), run inside Pyodide before the model's code.
-import io, re, base64
+import io, re, base64, datetime
 from lxml import etree
 from pptx import Presentation
 from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
-from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR
+from pptx.enum.shapes import MSO_SHAPE, MSO_CONNECTOR, PP_PLACEHOLDER
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.chart.data import CategoryChartData, XyChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_LABEL_POSITION
@@ -31,6 +31,7 @@ class G:
 
 LINT = []
 _state = {"footer": "", "page": 0}
+TEMPLATE = "/template.pptx"
 
 # ---- fit estimates (CJK 1em, Latin 0.55em, line height 1.3) ----
 _CJK = re.compile(r"[⺀-鿿가-힯豈-﫿＀-￯　-〿]")
@@ -96,48 +97,66 @@ def arrow(slide, x1, y1, x2, y2, color=None, width=1.5):
     return c
 
 def new_deck(title="", footer=""):
-    prs = Presentation(); prs.slide_width = Inches(G.W); prs.slide_height = Inches(G.H)
+    """A deck on the 16:9 template (layouts Cover, Section, Content). footer is the text on every content slide."""
+    prs = Presentation(TEMPLATE)
+    now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
     prs.core_properties.title = title; prs.core_properties.author = "Ofox"
+    prs.core_properties.created = now; prs.core_properties.modified = now
     _state["footer"] = footer; _state["page"] = 0
     return prs
 
 def _layout(prs, name):
     for l in prs.slide_layouts:
         if l.name == name: return l
-    return prs.slide_layouts[6]
+    raise RuntimeError(f"the template has no layout named {name}")
 
-def _bg(slide, color):
-    f = slide.background.fill; f.solid(); f.fore_color.rgb = rgb(color)
+def _placeholder(slide, kind):
+    """The slide's own copy of a layout placeholder python-pptx does not clone (footer, page number)."""
+    for ph in slide.slide_layout.placeholders:
+        if ph.placeholder_format.type == kind:
+            slide.shapes.clone_placeholder(ph)
+            return next(p for p in slide.placeholders if p.placeholder_format.idx == ph.placeholder_format.idx)
+    raise RuntimeError(f"the layout {slide.slide_layout.name} has no placeholder {kind}")
+
+def _flush(tf, anchor):
+    """Zero insets and an explicit anchor: the preview does not read them from the layout."""
+    tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0
+    tf.vertical_anchor = _ANCHOR[anchor]; tf.word_wrap = True
+
+def _footer(slide, page):
+    """The footer text and the page number, each in the layout's own placeholder.
+    The number is plain text, not a slide-number field: the preview draws a field blank."""
+    for kind, content, align in ((PP_PLACEHOLDER.FOOTER, _state["footer"], PP_ALIGN.LEFT), (PP_PLACEHOLDER.SLIDE_NUMBER, str(page), PP_ALIGN.RIGHT)):
+        if not content: continue
+        tf = _placeholder(slide, kind).text_frame; _flush(tf, "top")
+        p = tf.paragraphs[0]; p.alignment = align
+        r = p.add_run(); r.text = content; _font(r, 9, T.faint)
 
 def _notes(slide, notes):
     if notes: slide.notes_slide.notes_text_frame.text = notes
 
 def content_slide(prs, title, subtitle="", notes=""):
-    s = prs.slides.add_slide(_layout(prs, "Title Only")); _state["page"] += 1
+    s = prs.slides.add_slide(_layout(prs, "Content")); _state["page"] += 1
     need(f'title "{title}"', text_height(title, 26, G.CW - 0.2, 1.1), 0.62)
-    t = s.shapes.title; t.left, t.top, t.width, t.height = Inches(G.X + 0.2), Inches(0.4), Inches(G.CW - 0.2), Inches(0.62)
-    tf = t.text_frame; tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0; tf.vertical_anchor = MSO_ANCHOR.MIDDLE; tf.word_wrap = True
-    p = tf.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; r = p.add_run(); r.text = title; _font(r, 26, T.primary, True)
-    shape(s, MSO_SHAPE.RECTANGLE, G.X, 0.5, 0.07, 0.5, fill=T.accent)
-    ln = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, Inches(G.X), Inches(1.42), Inches(G.R), Inches(1.42)); ln.line.color.rgb = rgb(T.line); ln.line.width = Pt(0.75)
+    _flush(s.shapes.title.text_frame, "middle")
+    p = s.shapes.title.text_frame.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; r = p.add_run(); r.text = title; _font(r, 26, T.primary, True)
     if subtitle:
         need(f'subtitle of "{title}"', text_height(subtitle, 13, G.CW - 0.2, 1.2), 0.38)
         text(s, subtitle, G.X + 0.2, 1.0, G.CW - 0.2, 0.36, size=13, color=T.muted, valign="middle")
-    text(s, _state["footer"], G.X, 7.0, 8, 0.3, size=9, color=T.faint)
-    text(s, str(_state["page"]), 12.0, 7.0, 0.6, 0.3, size=9, color=T.faint, align="right")
+    _footer(s, _state["page"])
     _notes(s, notes)
     return s
 
 def cover_slide(prs, title, subtitle="", kicker="", meta="", notes="", art=None):
-    s = prs.slides.add_slide(_layout(prs, "Title Only")); _state["page"] += 1; _bg(s, T.primaryDark)
+    s = prs.slides.add_slide(_layout(prs, "Cover")); _state["page"] += 1
     w = 7.4 if art else 10.5
     size = 44 if lines_for(title, 44, w) <= 2 else 36
-    th = min(2, lines_for(title, size, w)) * size * 1.15 / 72
+    th = min(2, lines_for(title, size, w)) * size * 1.2 / 72
     y = 1.9
     if kicker: text(s, kicker, G.X, y - 0.55, w, 0.4, size=13, color=T.accent, bold=True)
     t = s.shapes.title; t.left, t.top, t.width, t.height = Inches(G.X), Inches(y), Inches(w), Inches(th)
-    tf = t.text_frame; tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0; tf.vertical_anchor = MSO_ANCHOR.TOP; tf.word_wrap = True
-    p = tf.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; p.line_spacing = 1.0; r = p.add_run(); r.text = title; _font(r, size, T.white, True)
+    _flush(t.text_frame, "top")
+    p = t.text_frame.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; p.line_spacing = 1.0; r = p.add_run(); r.text = title; _font(r, size, T.white, True)
     y += th + 0.25
     if subtitle:
         sh = text_height(subtitle, 20, w, 1.4); text(s, subtitle, G.X, y, w, sh, size=20, color="DCE6F0"); y += sh + 0.3
@@ -148,11 +167,10 @@ def cover_slide(prs, title, subtitle="", kicker="", meta="", notes="", art=None)
     return s
 
 def section_slide(prs, title, number="", subtitle="", notes=""):
-    s = prs.slides.add_slide(_layout(prs, "Title Only")); _state["page"] += 1; _bg(s, T.primaryDark)
-    if number: text(s, str(number), G.X, 1.6, 3, 1.4, size=80, color=T.accent, bold=True)
-    t = s.shapes.title; t.left, t.top, t.width, t.height = Inches(G.X), Inches(3.1), Inches(11), Inches(1.0)
-    tf = t.text_frame; tf.margin_left = tf.margin_right = tf.margin_top = tf.margin_bottom = 0; tf.vertical_anchor = MSO_ANCHOR.TOP
-    p = tf.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; r = p.add_run(); r.text = title; _font(r, 36, T.white, True)
+    s = prs.slides.add_slide(_layout(prs, "Section")); _state["page"] += 1
+    if number: text(s, str(number), G.X, 1.6, 3, 80 * 1.4 / 72, size=80, color=T.accent, bold=True)
+    _flush(s.shapes.title.text_frame, "top")
+    p = s.shapes.title.text_frame.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; r = p.add_run(); r.text = title; _font(r, 36, T.white, True)
     if subtitle: text(s, subtitle, G.X, 4.2, 11, 1.0, size=18, color="DCE6F0")
     _notes(s, notes)
     return s

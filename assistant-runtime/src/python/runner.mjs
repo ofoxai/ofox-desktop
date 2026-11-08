@@ -146,6 +146,10 @@ async function run({ assets, code, out, lint }) {
     path.join(site, "deck.py"),
     readFileSync(new URL("./deck.py", import.meta.url)),
   );
+  py.FS.writeFile(
+    "/template.pptx",
+    readFileSync(new URL("./template.pptx", import.meta.url)),
+  );
   py.FS.mkdir("/fonts");
   py.FS.writeFile(
     `/fonts/${path.basename(manifest.font)}`,
