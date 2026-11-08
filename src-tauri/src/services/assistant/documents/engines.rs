@@ -9,6 +9,20 @@ use std::path::{Component, Path, PathBuf};
 pub struct Engines {
     pub officecli: Option<PathBuf>,
     pub typst: Option<PathBuf>,
+    /// Always `None` off macOS: the Python engine runs only in
+    /// `sandbox-exec` (see `documents::create`).
+    pub python: Option<PythonEngine>,
+}
+
+/// The Python deck engine: the runtime's Node runs the runner script on the
+/// Pyodide assets (`node <runner> --assets <assets> …`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PythonEngine {
+    /// The manifest's `node`.
+    pub node: PathBuf,
+    pub runner: PathBuf,
+    /// The folder of the manifest's `assets.json`, the runner's `--assets`.
+    pub assets: PathBuf,
 }
 
 /// Read `base/manifest.json`. A missing or unreadable manifest, field or
@@ -18,8 +32,8 @@ pub fn engines_at(base: &Path) -> Engines {
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .unwrap_or(Value::Null);
-    let locate = |name: &str| {
-        let relative = Path::new(manifest["engines"][name]["path"].as_str()?);
+    let file = |field: &Value| {
+        let relative = Path::new(field.as_str()?);
         // The manifest is ours, but a path that leaves `base` is no engine.
         let inside = relative
             .components()
@@ -27,9 +41,23 @@ pub fn engines_at(base: &Path) -> Engines {
         let path = base.join(relative);
         (inside && path.is_file()).then_some(path)
     };
+    let engine = |name: &str| &manifest["engines"][name];
+    let python = || {
+        let assets = file(&engine("python")["path"])?;
+        Some(PythonEngine {
+            node: file(&manifest["node"])?,
+            runner: file(&engine("python")["runner"])?,
+            assets: assets.parent()?.to_path_buf(),
+        })
+    };
     Engines {
-        officecli: locate("officecli"),
-        typst: locate("typst"),
+        officecli: file(&engine("officecli")["path"]),
+        typst: file(&engine("typst")["path"]),
+        python: if cfg!(target_os = "macos") {
+            python()
+        } else {
+            None
+        },
     }
 }
 
@@ -81,6 +109,57 @@ mod tests {
         assert_eq!(typst, base.path().join("engines/typst/typst"));
     }
 
+    const PYTHON_FILES: [&str; 3] = [
+        "node/node",
+        "runtime/src/python/runner.mjs",
+        "engines/python/assets.json",
+    ];
+
+    fn python_manifest(node: &str, runner: &str) -> serde_json::Value {
+        json!({"node": node, "engines": {"python": {
+            "path": "engines/python/assets.json",
+            "runner": runner,
+            "version": "314.0.7",
+        }}})
+    }
+
+    #[test]
+    fn engines_at_reads_the_python_engine() {
+        let manifest = python_manifest("node/node", "runtime/src/python/runner.mjs");
+        let base = runtime_with(manifest.clone(), &PYTHON_FILES);
+        let python = engines_at(base.path()).python;
+        if cfg!(target_os = "macos") {
+            let python = python.unwrap();
+            assert_eq!(python.node, base.path().join("node/node"));
+            assert_eq!(
+                python.runner,
+                base.path().join("runtime/src/python/runner.mjs")
+            );
+            // The runner's `--assets`: the folder of `assets.json`.
+            assert_eq!(python.assets, base.path().join("engines/python"));
+        } else {
+            // It runs only in macOS's sandbox-exec: elsewhere there is none.
+            assert_eq!(python, None);
+        }
+        // Without any one of its three files there is no engine.
+        for missing in PYTHON_FILES {
+            let present: Vec<&str> = PYTHON_FILES
+                .into_iter()
+                .filter(|file| *file != missing)
+                .collect();
+            let base = runtime_with(manifest.clone(), &present);
+            assert_eq!(engines_at(base.path()).python, None, "{missing}");
+        }
+        // Nor with a path that leaves the runtime folder.
+        for (node, runner) in [
+            ("../node/node", "runtime/src/python/runner.mjs"),
+            ("node/node", "/runtime/src/python/runner.mjs"),
+        ] {
+            let base = runtime_with(python_manifest(node, runner), &PYTHON_FILES);
+            assert_eq!(engines_at(base.path()).python, None, "{node} {runner}");
+        }
+    }
+
     #[test]
     fn engines_at_ignores_missing_files_and_absent_field() {
         let base = runtime_with(
@@ -128,6 +207,7 @@ mod tests {
         let both = Engines {
             officecli: Some("officecli".into()),
             typst: Some("typst".into()),
+            python: None,
         };
         assert_eq!(
             both.formats(),
@@ -136,6 +216,7 @@ mod tests {
         let office_only = Engines {
             officecli: Some("officecli".into()),
             typst: None,
+            python: None,
         };
         assert!(!office_only.formats().contains(&"pdf"));
         assert!(office_only.formats().contains(&"docx"));

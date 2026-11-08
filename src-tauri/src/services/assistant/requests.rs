@@ -97,7 +97,7 @@ impl AssistantHost {
         // Documents only with the runtime that registers their tool.
         let runtime = match self.runtime() {
             Ok(r) => json!({"available":true,"reason":null,"version":r.version,
-                "documents":{"formats":self.engines().formats()}}),
+                "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
             Err(reason) => json!({"available":false,"reason":reason,"version":null}),
         };
         let key = if self.env.key_ready(&identity).await {
@@ -2237,6 +2237,7 @@ mod tests {
         super::super::documents::engines::Engines {
             officecli: officecli.then(|| "engines/officecli/officecli".into()),
             typst: typst.then(|| "engines/typst/typst".into()),
+            python: None,
         }
     }
 

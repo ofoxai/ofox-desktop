@@ -363,6 +363,8 @@ pub struct AssistantHost {
     pub(super) office_sandbox: EngineSandbox,
     /// The same for Typst.
     pub(super) typst_sandbox: EngineSandbox,
+    /// The same for the Python engine, which without it does not run at all.
+    pub(super) python_sandbox: EngineSandbox,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -777,6 +779,7 @@ impl AssistantHost {
             engines: OnceLock::new(),
             office_sandbox: EngineSandbox::default(),
             typst_sandbox: EngineSandbox::default(),
+            python_sandbox: EngineSandbox::default(),
         })
     }
 
@@ -976,6 +979,14 @@ impl AssistantHost {
             Ok(base) => self.engines.get_or_init(|| engines_at(&base)).clone(),
             Err(_) => Engines::default(),
         }
+    }
+
+    /// Whether Python decks are offered: the engine is there (on macOS
+    /// only) and so is `sandbox-exec`. A probe that fails later turns Python
+    /// content away in `create_document`.
+    pub(super) fn python_offered(&self) -> bool {
+        self.engines().python.is_some()
+            && self.env.sandbox_exec().is_some_and(|path| path.is_file())
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
@@ -6793,6 +6804,54 @@ while read line; do :; done"#,
         assert!(formats.contains(&json!("pdf")));
         assert!(formats.contains(&json!("md")));
         assert!(!formats.contains(&json!("docx")));
+    }
+    #[tokio::test]
+    async fn bootstrap_reports_python_availability() {
+        let python = json!({
+            "path": "engines/python/assets.json",
+            "runner": "runtime/src/python/runner.mjs",
+            "version": "314.0.7",
+        });
+        let boot_with = |files: &[&str], manifest: Value| {
+            let (config, env, host) = fixture_with_env();
+            let base = config.path().join("runtime-with-engines");
+            for file in ["node/node", "runtime/src/main.mjs"].iter().chain(files) {
+                std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
+                std::fs::write(base.join(file), "").unwrap();
+            }
+            std::fs::write(base.join("manifest.json"), manifest.to_string()).unwrap();
+            *env.runtime.lock().unwrap() = Some(base);
+            async move {
+                let boot = host.bootstrap().await.unwrap();
+                drop(config);
+                boot
+            }
+        };
+        // No Python engine: not offered.
+        let boot = boot_with(&[], json!({"node": "node/node", "engines": {}})).await;
+        assert_eq!(boot["runtime"]["available"], true);
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        // Its runner or assets missing: not offered either.
+        let boot = boot_with(
+            &["runtime/src/python/runner.mjs"],
+            json!({"node": "node/node", "engines": {"python": python}}),
+        )
+        .await;
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        // All there: offered on macOS, where sandbox-exec is; the engine
+        // exists nowhere else.
+        let boot = boot_with(
+            &[
+                "runtime/src/python/runner.mjs",
+                "engines/python/assets.json",
+            ],
+            json!({"node": "node/node", "engines": {"python": python}}),
+        )
+        .await;
+        assert_eq!(
+            boot["runtime"]["documents"]["python"],
+            cfg!(target_os = "macos")
+        );
     }
     fn audio_target(host: &AssistantHost, sid: &str) -> DeleteRequest {
         DeleteRequest {

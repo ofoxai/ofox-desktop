@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The engine failed, or refused the content; the message says why.
 pub const FAILED: &str = "assistant_document_failed";
@@ -215,6 +216,15 @@ impl Document {
 pub struct EngineSandbox {
     works: tokio::sync::OnceCell<PathBuf>,
     warned: std::sync::atomic::AtomicBool,
+}
+
+impl EngineSandbox {
+    /// Log why there is no sandbox, the first time only.
+    fn warn_once(&self, why: &str) {
+        if !self.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            log::warn!("[Assistant] {why}");
+        }
+    }
 }
 
 /// The commands a batch may hold: they change the document and nothing else.
@@ -2069,12 +2079,22 @@ struct Work<'a> {
     name: &'static str,
     /// `sandbox-exec`, to run the engine under `profile`.
     sandbox: Option<&'a Path>,
-    /// [`OFFICE_SANDBOX`] or [`TYPST_SANDBOX`].
+    /// [`OFFICE_SANDBOX`], [`TYPST_SANDBOX`] or [`PYTHON_SANDBOX`].
     profile: &'static str,
     /// Where officecli keeps its own temporary files (see
     /// [`officecli_scratch`]); the profile lets it write there.
     scratch: Option<&'a Path>,
+    /// The folder the profile lets the engine read (`ENGINE`); `None` is
+    /// the folder of `exe`.
+    read_root: Option<&'a Path>,
+    /// How long one run may take: [`ENGINE_TIMEOUT`], or [`PYTHON_TIMEOUT`].
+    timeout: Duration,
 }
+
+/// How long one Python run may take: matplotlib builds its font cache on
+/// the first one.
+#[cfg_attr(not(test), allow(dead_code))] // until create_document runs Python content
+const PYTHON_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// What officecli may do on macOS: no network; of the user's folders
 /// (`/Users`, `/Volumes`) read only the document's own and the engine's;
@@ -2095,6 +2115,21 @@ const OFFICE_SANDBOX: &str = r#"(version 1)
 const TYPST_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)"#;
+
+/// What the Python engine may do on macOS: as officecli, but with no
+/// temporary folder of its own (its home is in the document's folder), and
+/// its engine root is the runtime folder, where Node, the runner with its
+/// modules and the Pyodide assets are. Pyodide is no boundary: this profile
+/// is what holds the model's code, so Python never runs without it (see
+/// [`Work::needs_sandbox`]).
+const PYTHON_SANDBOX: &str = r#"(version 1)
+(allow default)
+(deny network*)
+(deny file-read-data (subpath "/Users") (subpath "/Volumes"))
+(deny file-write*)
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))
+(allow file-read-data file-write* (subpath (param "DOC")))
+(allow file-read-data (subpath (param "ENGINE")))"#;
 
 /// `/tmp/officecli-<uid>`, where officecli keeps temporary files whatever
 /// `TMPDIR` says: see [`private_folder`].
@@ -2157,12 +2192,33 @@ fn real(path: &Path) -> String {
 }
 
 impl Work<'_> {
+    /// Whether the engine may run only in its sandbox: the Python engine,
+    /// which fails closed. officecli and Typst still run without one (see
+    /// [`AssistantHost::engine_sandbox`]).
+    fn needs_sandbox(&self) -> bool {
+        self.profile == PYTHON_SANDBOX
+    }
+
     async fn run(&self, args: &[&str]) -> Result<EngineOutput, String> {
+        if self.sandbox.is_none() && self.needs_sandbox() {
+            log::warn!(
+                "[Assistant] {} was asked to run without its sandbox",
+                self.name
+            );
+            return Err(refuse(
+                FAILED,
+                format!("{} runs only in its sandbox", self.name),
+            ));
+        }
         let output = match self.sandbox {
             Some(sandbox) => {
                 let doc = format!("DOC={}", real(self.dir));
                 let real_exe = PathBuf::from(real(self.exe));
-                let engine = format!("ENGINE={}", real(real_exe.parent().unwrap_or(&real_exe)));
+                let root = match self.read_root {
+                    Some(root) => real(root),
+                    None => real(real_exe.parent().unwrap_or(&real_exe)),
+                };
+                let engine = format!("ENGINE={root}");
                 let scratch = format!("SCRATCH={}", real(self.scratch.unwrap_or(self.dir)));
                 let exe = self.exe.to_string_lossy();
                 let wrapped = [
@@ -2180,9 +2236,9 @@ impl Work<'_> {
                     args,
                 ]
                 .concat();
-                run_engine(sandbox, &wrapped, self.dir, self.home, ENGINE_TIMEOUT).await
+                run_engine(sandbox, &wrapped, self.dir, self.home, self.timeout).await
             }
-            None => run_engine(self.exe, args, self.dir, self.home, ENGINE_TIMEOUT).await,
+            None => run_engine(self.exe, args, self.dir, self.home, self.timeout).await,
         };
         let output = output.map_err(|error| {
             log::warn!("[Assistant] {} could not run: {error}", self.name);
@@ -2197,7 +2253,7 @@ impl Work<'_> {
                 format!(
                     "{} did not finish within {} seconds; make the document smaller",
                     self.name,
-                    ENGINE_TIMEOUT.as_secs()
+                    self.timeout.as_secs()
                 ),
             ));
         }
@@ -3022,20 +3078,19 @@ impl AssistantHost {
         }
     }
 
-    /// The `sandbox-exec` an engine runs under: `--version` under its
-    /// profile, until a probe passes; a failed one is tried again with the
-    /// next document. Without it (not macOS, or the probe failed) the batch
-    /// checks and the dead proxy alone hold the engine.
-    async fn engine_sandbox(&self, cell: &EngineSandbox, work: &Work<'_>) -> Option<PathBuf> {
-        let probed = cell
-            .works
+    /// `sandbox-exec`, once `work`'s engine ran `--version` in it under its
+    /// profile; a failed probe is tried again with the next document. The
+    /// error says why there is none.
+    async fn probe_sandbox(
+        &self,
+        cell: &EngineSandbox,
+        work: &Work<'_>,
+    ) -> Result<PathBuf, String> {
+        cell.works
             .get_or_try_init(|| async {
                 let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
                 let Some(sandbox) = sandbox else {
-                    return Err(format!(
-                        "sandbox-exec is unavailable; {} runs without it",
-                        work.name
-                    ));
+                    return Err("sandbox-exec is unavailable".to_owned());
                 };
                 let probe = Work {
                     sandbox: Some(&sandbox),
@@ -3043,19 +3098,39 @@ impl AssistantHost {
                 };
                 match probe.run(&["--version"]).await {
                     Ok(output) if output.status == Some(0) => Ok(sandbox),
-                    _ => Err(format!(
-                        "{} does not run under sandbox-exec; it runs without it",
-                        work.name
-                    )),
+                    _ => Err(format!("{} does not run under sandbox-exec", work.name)),
                 }
             })
-            .await;
-        match probed {
-            Ok(sandbox) => Some(sandbox.clone()),
+            .await
+            .cloned()
+    }
+
+    /// The `sandbox-exec` officecli or Typst runs under (see
+    /// [`Self::probe_sandbox`]). Without it (not macOS, or the probe failed)
+    /// the engine still runs: the batch checks and the dead proxy alone hold
+    /// it.
+    async fn engine_sandbox(&self, cell: &EngineSandbox, work: &Work<'_>) -> Option<PathBuf> {
+        match self.probe_sandbox(cell, work).await {
+            Ok(sandbox) => Some(sandbox),
             Err(why) => {
-                if !cell.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                    log::warn!("[Assistant] {why}");
-                }
+                cell.warn_once(&format!("{why}; {} runs without it", work.name));
+                None
+            }
+        }
+    }
+
+    /// The `sandbox-exec` the Python engine runs under, for `work`, its work
+    /// before it has one. Unlike [`Self::engine_sandbox`] this fails closed:
+    /// Pyodide is no boundary, so only the sandbox holds the model's code,
+    /// and without a passing probe there is no Python engine (the model
+    /// sends deck objects instead).
+    #[cfg_attr(not(test), allow(dead_code))] // until create_document runs Python content
+    async fn python_engine(&self, work: &Work<'_>) -> Option<PathBuf> {
+        match self.probe_sandbox(&self.python_sandbox, work).await {
+            Ok(sandbox) => Some(sandbox),
+            Err(why) => {
+                self.python_sandbox
+                    .warn_once(&format!("{why}; the Python engine is off"));
                 None
             }
         }
@@ -3098,6 +3173,8 @@ impl AssistantHost {
                     sandbox: None,
                     profile: OFFICE_SANDBOX,
                     scratch: scratch.as_deref(),
+                    read_root: None,
+                    timeout: ENGINE_TIMEOUT,
                 };
                 let sandbox = self.engine_sandbox(&self.office_sandbox, &work).await;
                 work.sandbox = sandbox.as_deref();
@@ -3112,6 +3189,8 @@ impl AssistantHost {
                     sandbox: None,
                     profile: TYPST_SANDBOX,
                     scratch: None,
+                    read_root: None,
+                    timeout: ENGINE_TIMEOUT,
                 };
                 let sandbox = self.engine_sandbox(&self.typst_sandbox, &work).await;
                 work.sandbox = sandbox.as_deref();
@@ -6825,6 +6904,11 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             r#"(allow file-read-data file-write* (subpath (param "SCRATCH")))"#,
             &format!("-D DOC={}", dir.display()),
             &format!("-D SCRATCH={}", officecli_scratch().unwrap().display()),
+            // officecli's own folder is its engine root.
+            &format!(
+                "-D ENGINE={} ",
+                real(&f.env.runtime.join("engines/officecli"))
+            ),
         ] {
             assert!(batch.contains(rule), "{rule}: {batch}");
         }
@@ -6908,6 +6992,186 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             "{log:?}"
         );
         assert!(f.host.office_sandbox.works.get().is_some());
+    }
+
+    /// A stand-in Python engine in a fixture's runtime folder, whose `node`
+    /// logs each run's arguments to `node.log`, and a document's folders.
+    struct Python {
+        node: PathBuf,
+        runtime: PathBuf,
+        dir: PathBuf,
+        home: PathBuf,
+        log: PathBuf,
+    }
+
+    fn stand_in_python(f: &Fixture) -> Python {
+        use std::os::unix::fs::PermissionsExt;
+        let runtime = f.env.runtime.clone();
+        let node = runtime.join("node/node");
+        let log = f.root.path().join("node.log");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(
+            &node,
+            format!("#!/bin/sh\necho \"$*\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let dir = f.root.path().join("python-doc");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        Python {
+            node,
+            runtime,
+            dir,
+            home,
+            log,
+        }
+    }
+
+    impl Python {
+        /// The engine's work as `create_document` sets it up, before
+        /// [`AssistantHost::python_engine`] gives it a sandbox.
+        fn work(&self) -> Work<'_> {
+            Work {
+                exe: &self.node,
+                dir: &self.dir,
+                home: &self.home,
+                name: "Python",
+                sandbox: None,
+                profile: PYTHON_SANDBOX,
+                scratch: None,
+                read_root: Some(&self.runtime),
+                timeout: PYTHON_TIMEOUT,
+            }
+        }
+
+        /// The arguments of each run of the engine itself.
+        fn runs(&self) -> Vec<String> {
+            std::fs::read_to_string(&self.log)
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_runs_under_sandbox_exec_with_its_profile() {
+        let f = fixture_in(None, None, |dir| Some(stub_sandbox(dir, true)));
+        let python = stand_in_python(&f);
+        let sandbox = f.host.python_engine(&python.work()).await.unwrap();
+        let work = Work {
+            sandbox: Some(&sandbox),
+            ..python.work()
+        };
+        let output = work
+            .run(&[
+                "runtime/src/python/runner.mjs",
+                "--assets",
+                "engines/python",
+            ])
+            .await
+            .unwrap();
+        assert_eq!(output.status, Some(0));
+        assert_eq!(PYTHON_TIMEOUT, Duration::from_secs(90));
+        // The probe, then the run: both under the Python profile, whose
+        // engine root is the whole runtime folder (Node, the runner and the
+        // assets are in different folders of it).
+        let log = sandbox_log(&f);
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert!(log[0].ends_with(" --version"), "{log:?}");
+        assert!(
+            log[1].ends_with(" runtime/src/python/runner.mjs --assets engines/python"),
+            "{log:?}"
+        );
+        let profile = format!("-p {}", PYTHON_SANDBOX.replace('\n', " "));
+        let root = format!("-D ENGINE={} ", real(&python.runtime));
+        let doc = format!("-D DOC={} ", real(&python.dir));
+        for line in &log {
+            for wanted in [&profile, &root, &doc] {
+                assert!(line.contains(wanted.as_str()), "{wanted}: {line}");
+            }
+        }
+        assert_eq!(
+            python.runs(),
+            [
+                "--version",
+                "runtime/src/python/runner.mjs --assets engines/python"
+            ]
+        );
+        // What the profile allows: no network; of the user's folders read
+        // only the document's and the runtime's; write only the document's.
+        for rule in [
+            "(deny network*)",
+            r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes"))"#,
+            "(deny file-write*)",
+            r#"(allow file-read-data file-write* (subpath (param "DOC")))"#,
+            r#"(allow file-read-data (subpath (param "ENGINE")))"#,
+        ] {
+            assert!(PYTHON_SANDBOX.contains(rule), "{rule}");
+        }
+        assert!(!PYTHON_SANDBOX.contains("SCRATCH"));
+        assert!(f.host.python_sandbox.works.get().is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_is_unavailable_when_the_probe_fails() {
+        let f = fixture_in(None, None, |dir| Some(stub_sandbox(dir, false)));
+        let python = stand_in_python(&f);
+        // Unlike officecli, a failed probe leaves no engine at all; it is
+        // not kept, so the next document probes again.
+        assert_eq!(f.host.python_engine(&python.work()).await, None);
+        assert_eq!(f.host.python_engine(&python.work()).await, None);
+        let log = sandbox_log(&f);
+        assert_eq!(log.len(), 2, "{log:?}");
+        assert!(log.iter().all(|line| line.ends_with(" --version")));
+        assert!(f.host.python_sandbox.works.get().is_none());
+        // And its work refuses to start without the sandbox.
+        let error = python
+            .work()
+            .run(&["runtime/src/python/runner.mjs"])
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("Python runs only in its sandbox"), "{error}");
+        assert!(python.runs().is_empty(), "{:?}", python.runs());
+
+        // No sandbox-exec at all: the same.
+        let f = fixture_in(None, None, |dir| Some(dir.join("missing")));
+        let python = stand_in_python(&f);
+        assert_eq!(f.host.python_engine(&python.work()).await, None);
+        assert!(python.runs().is_empty(), "{:?}", python.runs());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_slow_engine_is_stopped_at_its_timeout() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join(engine(root.path(), "slow", "sleep 30"));
+        let dir = root.path().join("doc");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let work = Work {
+            exe: &exe,
+            dir: &dir,
+            home: &home,
+            name: "officecli",
+            sandbox: None,
+            profile: OFFICE_SANDBOX,
+            scratch: None,
+            read_root: None,
+            timeout: Duration::from_secs(1),
+        };
+        let started = std::time::Instant::now();
+        let error = work.run(&[]).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(code(&error), FAILED);
+        assert!(
+            error.contains("officecli did not finish within 1 seconds"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
