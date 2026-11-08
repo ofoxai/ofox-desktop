@@ -52,3 +52,11 @@
 - python-pptx 写死的图表坐标轴编号为负数，officecli 严格校验不认（PowerPoint 正常打开）→ 宿主改写成正数。
 - officecli 的检查结果按文件路径缓存（常驻进程），同一路径重新生成会拿到旧结果 → 每次用新文件名，并设 `OFFICECLI_NO_AUTO_RESIDENT=1`。
 - Pyodide 同进程执行没有超时手段 → 产品里放进 worker 线程，超时直接终止。
+
+## 更正：Pyodide 本身不是安全边界（2026-11-09）
+
+前面“WASM 隔离、不需要额外系统沙箱”的结论不成立。复查发现，在 Node 里运行的 Pyodide 中，Python 代码能接触到宿主的
+JavaScript 环境，关掉默认的全局对象入口也挡不住。所以模型写的 Python 必须放进独立子进程，并套上操作系统级沙箱：
+干净环境变量、无网络、只能写本次文档的目录。macOS 可复用文档引擎现有的 `sandbox-exec`；Windows 目前只有校验器和失效代理，
+需要补一个系统沙箱（参考 deepseek-harness `packages/sandbox` 的受限令牌做法），否则这条路线不能在 Windows 上默认开启。
+QuickJS 不受此影响：它只暴露显式注入的函数。
