@@ -2116,12 +2116,22 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)"#;
 
-/// What the Python engine may do on macOS: as officecli, but with no
-/// temporary folder of its own (its home is in the document's folder), and
-/// its engine root is the runtime folder, where Node, the runner with its
-/// modules and the Pyodide assets are. Pyodide is no boundary: this profile
-/// is what holds the model's code, so Python never runs without it (see
-/// [`Work::needs_sandbox`]).
+/// What the Python engine may do on macOS. Pyodide is no boundary: this
+/// profile is what holds the model's code, so Python never runs without it
+/// (see [`Work::needs_sandbox`]), and it holds more than officecli's.
+///
+/// - Files as for officecli, without a temporary folder of its own (its home
+///   is in the document's folder). The engine root is the runtime folder,
+///   where Node, the runner with its modules and the Pyodide assets are.
+/// - No other program: no new process at all, and only `EXE`, the bundled
+///   Node that `sandbox-exec` starts, may be executed. No native code from
+///   the document's folder, the one place the code can write.
+/// - No system service but `com.apple.fonts`, which @napi-rs/canvas needs
+///   to draw an SVG figure's text in system fonts such as PingFang SC.
+///   Everything else Node looks up it does without: the preferences
+///   (`cfprefsd`, which would hand out what the file rules hide), user and
+///   group lookups, notifications, CoreServices, the system log.
+/// - No signal to another process.
 const PYTHON_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)
@@ -2129,7 +2139,15 @@ const PYTHON_SANDBOX: &str = r#"(version 1)
 (deny file-write*)
 (allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))
 (allow file-read-data file-write* (subpath (param "DOC")))
-(allow file-read-data (subpath (param "ENGINE")))"#;
+(allow file-read-data (subpath (param "ENGINE")))
+(deny process-fork)
+(deny process-exec*)
+(allow process-exec (literal (param "EXE")))
+(deny file-map-executable (subpath (param "DOC")))
+(deny mach-lookup)
+(allow mach-lookup (global-name "com.apple.fonts"))
+(deny signal)
+(allow signal (target self))"#;
 
 /// `/tmp/officecli-<uid>`, where officecli keeps temporary files whatever
 /// `TMPDIR` says: see [`private_folder`].
@@ -2220,6 +2238,8 @@ impl Work<'_> {
                 };
                 let engine = format!("ENGINE={root}");
                 let scratch = format!("SCRATCH={}", real(self.scratch.unwrap_or(self.dir)));
+                // The program the profile may execute: the engine itself.
+                let allowed = format!("EXE={}", real_exe.display());
                 let exe = self.exe.to_string_lossy();
                 let wrapped = [
                     &[
@@ -2229,6 +2249,8 @@ impl Work<'_> {
                         &engine,
                         "-D",
                         &scratch,
+                        "-D",
+                        &allowed,
                         "-p",
                         self.profile,
                         &exe,
@@ -7088,8 +7110,10 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
         let profile = format!("-p {}", PYTHON_SANDBOX.replace('\n', " "));
         let root = format!("-D ENGINE={} ", real(&python.runtime));
         let doc = format!("-D DOC={} ", real(&python.dir));
+        // The one program it may execute: Node itself.
+        let exe = format!("-D EXE={} ", real(&python.node));
         for line in &log {
-            for wanted in [&profile, &root, &doc] {
+            for wanted in [&profile, &root, &doc, &exe] {
                 assert!(line.contains(wanted.as_str()), "{wanted}: {line}");
             }
         }
@@ -7101,18 +7125,176 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             ]
         );
         // What the profile allows: no network; of the user's folders read
-        // only the document's and the runtime's; write only the document's.
+        // only the document's and the runtime's; write only the document's;
+        // start no other program, nor native code the code wrote; reach no
+        // system service but the fonts; signal no other process.
         for rule in [
             "(deny network*)",
             r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes"))"#,
             "(deny file-write*)",
             r#"(allow file-read-data file-write* (subpath (param "DOC")))"#,
             r#"(allow file-read-data (subpath (param "ENGINE")))"#,
+            "(deny process-fork)",
+            "(deny process-exec*)",
+            r#"(allow process-exec (literal (param "EXE")))"#,
+            r#"(deny file-map-executable (subpath (param "DOC")))"#,
+            "(deny mach-lookup)",
+            r#"(allow mach-lookup (global-name "com.apple.fonts"))"#,
+            "(deny signal)",
+            "(allow signal (target self))",
         ] {
             assert!(PYTHON_SANDBOX.contains(rule), "{rule}");
         }
         assert!(!PYTHON_SANDBOX.contains("SCRATCH"));
+        assert_eq!(PYTHON_SANDBOX.matches("(allow mach-lookup").count(), 1);
+        assert_eq!(PYTHON_SANDBOX.matches("(allow process-exec").count(), 1);
         assert!(f.host.python_sandbox.works.get().is_some());
+    }
+
+    /// The runtime `pnpm assistant:prepare` stages, which macOS CI prepares
+    /// before these tests: the Python engine is macOS-only, so a Mac must
+    /// have it.
+    #[cfg(target_os = "macos")]
+    fn staged_runtime() -> PathBuf {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../assistant-runtime/resources")
+            .canonicalize()
+            .expect("run `pnpm assistant:prepare` first");
+        assert!(
+            base.join("node/node").is_file(),
+            "run `pnpm assistant:prepare` first"
+        );
+        base
+    }
+
+    /// The real profile under the real `sandbox-exec`, for `exe` with
+    /// `root` as its engine root, in the document folder `dir`.
+    #[cfg(target_os = "macos")]
+    fn real_python_work<'a>(
+        exe: &'a Path,
+        root: &'a Path,
+        dir: &'a Path,
+        home: &'a Path,
+    ) -> Work<'a> {
+        std::fs::create_dir_all(home).unwrap();
+        Work {
+            exe,
+            dir,
+            home,
+            name: "Python",
+            sandbox: Some(Path::new("/usr/bin/sandbox-exec")),
+            profile: PYTHON_SANDBOX,
+            scratch: None,
+            read_root: Some(root),
+            timeout: Duration::from_secs(60),
+        }
+    }
+
+    /// Node starts under the real profile and passes the probe; the code it
+    /// runs starts no other program (not even Node again), loads no native
+    /// code it wrote, and signals no other process.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn the_python_profile_runs_node_and_nothing_else() {
+        let runtime = staged_runtime();
+        let node = runtime.join("node/node");
+        let napi = runtime.join("runtime/node_modules/@napi-rs");
+        let addon = std::fs::read_dir(&napi)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("canvas-darwin")
+            })
+            .flat_map(|folder| std::fs::read_dir(folder).unwrap())
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "node"))
+            .expect("the canvas addon of the staged runtime");
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("doc");
+        let home = dir.join("home");
+        let work = real_python_work(&node, &runtime, &dir, &home);
+
+        // The probe passes, so the host offers the engine.
+        let f = fixture_in(None, None, |_| Some(PathBuf::from("/usr/bin/sandbox-exec")));
+        assert_eq!(
+            f.host
+                .python_engine(&Work {
+                    sandbox: None,
+                    ..work
+                })
+                .await,
+            Some(PathBuf::from("/usr/bin/sandbox-exec"))
+        );
+
+        let script = dir.join("probe.js");
+        std::fs::write(
+            &script,
+            r#"const { spawnSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const [addon, pid] = process.argv.slice(2);
+const started = (file, args) => {
+  const run = spawnSync(file, args);
+  return run.error ? run.error.code : `exit ${run.status}`;
+};
+const loaded = (file) => {
+  try { process.dlopen({ exports: {} }, file); return "loaded"; } catch (e) { return e.code; }
+};
+const seen = { node: process.version };
+seen.sh = started("/bin/sh", ["-c", "true"]);
+seen.node_again = started(process.execPath, ["--version"]);
+seen.engine_addon = loaded(addon);
+fs.copyFileSync(addon, "copy.node");
+seen.written_addon = loaded(path.resolve("copy.node"));
+try { process.kill(Number(pid), "SIGCONT"); seen.signal = "sent"; } catch (e) { seen.signal = e.code; }
+console.log(JSON.stringify(seen));
+"#,
+        )
+        .unwrap();
+        let output = work
+            .run(&[
+                &script.to_string_lossy(),
+                &addon.to_string_lossy(),
+                &std::process::id().to_string(),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(output.status, Some(0), "{}", output.stderr);
+        let seen: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert!(seen["node"].as_str().unwrap().starts_with('v'), "{seen}");
+        assert_eq!(seen["sh"], "EPERM", "{seen}");
+        assert_eq!(seen["node_again"], "EPERM", "{seen}");
+        // The runtime's own addon loads; the same bytes written by the code
+        // do not.
+        assert_eq!(seen["engine_addon"], "loaded", "{seen}");
+        assert_eq!(seen["written_addon"], "ERR_DLOPEN_FAILED", "{seen}");
+        assert_eq!(seen["signal"], "EPERM", "{seen}");
+    }
+
+    /// The preferences the file rules hide are not handed out by
+    /// `cfprefsd` either: under the profile, `defaults` (let in as the one
+    /// program) reads no global domain.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn the_python_profile_keeps_system_services_out_of_reach() {
+        let defaults = Path::new("/usr/bin/defaults");
+        let outside = std::process::Command::new(defaults)
+            .args(["read", "-g"])
+            .output()
+            .unwrap();
+        assert!(outside.status.success() && !outside.stdout.is_empty());
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("doc");
+        let home = dir.join("home");
+        let work = real_python_work(defaults, Path::new("/usr/bin"), &dir, &home);
+        let inside = work.run(&["read", "-g"]).await.unwrap();
+        assert_ne!(inside.status, Some(0), "{}", inside.stdout);
+        assert_eq!(inside.stdout.trim(), "");
     }
 
     #[tokio::test]
