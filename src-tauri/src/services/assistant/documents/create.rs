@@ -2,7 +2,9 @@
 //! makes the file with a bundled engine in a private folder of the
 //! conversation, checks it and keeps it as a generated attachment of the
 //! reply. The result names the file's path and its first page's preview for
-//! the runtime alone (see `assistant-runtime/src/document-tools.mjs`).
+//! the runtime alone (see `assistant-runtime/src/document-tools.mjs`). A
+//! preview makes and checks the file without keeping it; a later call
+//! delivers it as it is (`fromPreview`), or else the end of the reply does.
 //!
 //! What the engines print reaches the model and the reply's card only through
 //! [`Work::shown`]: without the document's folder and without anything that
@@ -36,6 +38,9 @@ pub const TOO_LARGE: &str = "assistant_document_too_large";
 const DISABLED: &str = "assistant_capability_disabled";
 /// The most documents one reply may make.
 pub const MAX_DOCUMENTS_PER_RUN: usize = 3;
+/// The most previews of one file one reply may make; they do not count
+/// toward [`MAX_DOCUMENTS_PER_RUN`].
+pub const MAX_PREVIEWS_PER_NAME: usize = 2;
 /// The longest `content`, serialized.
 pub const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 /// The longest Python deck code, in bytes.
@@ -73,6 +78,9 @@ const BATCH: &str = "batch.json";
 const PYTHON_DIR: &str = "python";
 const CODE: &str = "code.py";
 const LINT: &str = "lint.json";
+/// The most lint lines read: a result keeps [`MAX_ISSUES`] issues, and
+/// each line costs a scrub before identical ones are counted together.
+const MAX_LINT_LINES: usize = MAX_ISSUES * 10;
 /// The issue a Python deck gets when its lint cannot be read.
 const LINT_UNAVAILABLE: &str =
     "lint unavailable: the deck helpers' checks of the layout were not reported";
@@ -96,10 +104,12 @@ pub struct CreateDocumentArgs {
     /// Required, except by a call that delivers a preview (`from_preview`).
     #[serde(default)]
     pub content: Option<Value>,
-    /// Make and check the file without delivering it. Refused for now.
+    /// Make and check the file without delivering it (see
+    /// [`AssistantHost::preview_document`]).
     #[serde(default)]
     pub preview: bool,
-    /// Deliver the file of an earlier preview. Refused for now.
+    /// Deliver the file of an earlier preview of the reply, by its
+    /// `previewId` (see [`AssistantHost::deliver_preview`]).
     #[serde(default, rename = "fromPreview")]
     pub from_preview: Option<String>,
 }
@@ -2067,6 +2077,40 @@ fn refuse(code: &str, why: impl AsRef<str>) -> String {
     format!("{code}: {}", why.as_ref())
 }
 
+/// The refusal of a document beyond the reply's [`MAX_DOCUMENTS_PER_RUN`].
+fn too_many_documents() -> String {
+    refuse(
+        LIMIT,
+        format!("at most {MAX_DOCUMENTS_PER_RUN} documents per reply"),
+    )
+}
+
+/// What a preview answers: its id, count and issues for the model, and its
+/// slide pictures' paths for the runtime alone (it shows the model an
+/// overview of them).
+fn preview_result(
+    doc_id: &str,
+    format: DocumentFormat,
+    made: &Made,
+    secrets: &[String],
+) -> Result<Value, String> {
+    let mut issues = serde_json::to_value(&made.issues).map_err(|_| PROTOCOL)?;
+    scrub_secrets_in(&mut issues, secrets);
+    let pages: Vec<_> = made
+        .pages
+        .iter()
+        .map(|page| page.to_string_lossy())
+        .collect();
+    let mut result = json!({
+        "status": "completed", "preview": true, "previewId": doc_id,
+        "issues": issues, "pagePaths": pages,
+    });
+    if let (Some(key), Some(count)) = (format.count(), made.count) {
+        result[key] = json!(count);
+    }
+    Ok(result)
+}
+
 /// The engine a format needs, `None` for text; refused when it is missing.
 fn engine_for(format: DocumentFormat, engines: &Engines) -> Result<Option<PathBuf>, String> {
     let engine = match format.engine() {
@@ -2156,6 +2200,7 @@ fn seal_packages(home: &Path) -> Result<(), String> {
 }
 
 /// What an engine made.
+#[derive(Clone)]
 struct Made {
     file: PathBuf,
     /// The first page's picture, for the runtime's thumbnail.
@@ -2169,6 +2214,23 @@ struct Made {
     /// The layout fixes the host applied after the checks (see
     /// [`fix_layout`]).
     fixed: usize,
+}
+
+/// A document made as a preview (see [`AssistantHost::preview_document`]),
+/// in its folder until the reply ends: delivered as it is by a later call's
+/// `fromPreview` (see [`AssistantHost::deliver_preview`]), or else at the
+/// end of the reply (see [`AssistantHost::deliver_previews`]).
+#[derive(Clone)]
+pub(in crate::services::assistant) struct PreviewRecord {
+    /// The file it was previewed as.
+    pub(in crate::services::assistant) name: String,
+    /// Its folder `outputs/<doc_id>`; the id the attachment takes.
+    pub(in crate::services::assistant) doc_id: String,
+    /// The call that made it: at the end of the reply it is delivered as
+    /// that call's document.
+    call_id: String,
+    format: DocumentFormat,
+    made: Made,
 }
 
 /// One engine at work in one document's folder.
@@ -2379,13 +2441,24 @@ impl Work<'_> {
             return Err(refuse(
                 FAILED,
                 format!(
-                    "{} did not finish within {} seconds; make the document smaller",
+                    "{} did not finish within {} seconds; {}",
                     self.name,
-                    self.timeout.as_secs()
+                    self.timeout.as_secs(),
+                    self.when_too_slow()
                 ),
             ));
         }
         Ok(output)
+    }
+
+    /// What to change when a run took too long: Python's time goes mostly
+    /// into drawing matplotlib figures.
+    fn when_too_slow(&self) -> &'static str {
+        if self.profile == PYTHON_SANDBOX {
+            "draw fewer or simpler figures and send the whole code again"
+        } else {
+            "make the document smaller"
+        }
     }
 
     /// A check's JSON report, whatever its exit status says; `None` when it
@@ -2587,15 +2660,17 @@ fn fresh_folder(path: &Path) -> Result<(), String> {
     crate::config::create_private_dir_all(path).map_err(|_| unwritable())
 }
 
-/// The lines of `lint.json`, a JSON array of strings, read as a slide
-/// picture is (see `attachments::open_page`): `None` when it is not such a
-/// file. Blocking file IO.
+/// The first [`MAX_LINT_LINES`] lines of `lint.json`, a JSON array of
+/// strings, read as a slide picture is (see `attachments::open_page`):
+/// `None` when it is not such a file. Blocking file IO.
 fn read_lint(path: &Path) -> Option<Vec<String>> {
     use std::io::Read;
     let (file, size) = attachments::open_page(path).ok()?;
     let mut text = String::new();
     file.take(size).read_to_string(&mut text).ok()?;
-    serde_json::from_str(&text).ok()
+    let mut lines: Vec<String> = serde_json::from_str(&text).ok()?;
+    lines.truncate(MAX_LINT_LINES);
+    Some(lines)
 }
 
 /// Why the runner made no deck: its report, found after whatever the code
@@ -3294,12 +3369,10 @@ impl AssistantHost {
                 "unknown or malformed arguments: name, format (pptx, docx, xlsx, pdf, md, txt, csv, html or json) and content are expected",
             )
         })?;
-        if args.preview || args.from_preview.is_some() {
-            return Err(refuse(
-                FAILED,
-                "preview is not available yet: send the content without preview or fromPreview",
-            ));
+        if args.from_preview.is_some() {
+            return self.deliver_preview(run, media, call_id, args).await;
         }
+        let preview = args.preview;
         let engine = engine_for(args.format, &self.engines())?;
         let document = Document::new(args)?;
         // Refused before the document counts; a sandbox probe that fails
@@ -3307,17 +3380,170 @@ impl AssistantHost {
         if matches!(document.content, Content::Python(_)) && !self.python_offered() {
             return Err(refuse(FAILED, NO_PYTHON));
         }
+        let doc_id = id();
+        if preview {
+            return self
+                .preview_document(run, media, call_id, &doc_id, &document, engine)
+                .await;
+        }
         if !media.reserve_document(MAX_DOCUMENTS_PER_RUN) {
+            return Err(too_many_documents());
+        }
+        let delivered = async {
+            let made = self.make_file(run, &doc_id, &document, engine).await?;
+            self.deliver(
+                run,
+                call_id,
+                &doc_id,
+                &document.name,
+                document.format,
+                &made,
+            )
+            .await
+        }
+        .await;
+        match &delivered {
+            Ok(_) => media.record_delivery(&document.name),
+            Err(_) => media.release_document(),
+        }
+        delivered
+    }
+
+    /// Make `document` in the new folder `doc_id` without delivering it:
+    /// one of the file's [`MAX_PREVIEWS_PER_NAME`] previews (given back
+    /// when it fails), not one of the reply's documents. The model sees its
+    /// count and issues and either delivers it (see
+    /// [`Self::deliver_preview`]) or sends new content.
+    async fn preview_document(
+        &self,
+        run: &Arc<RunControl>,
+        media: &MediaRun,
+        call_id: &str,
+        doc_id: &str,
+        document: &Document,
+        engine: Option<PathBuf>,
+    ) -> Result<Value, String> {
+        media.record_preview(&document.name, doc_id)?;
+        let previewed = async {
+            let made = self.make_file(run, doc_id, document, engine).await?;
+            let result = preview_result(doc_id, document.format, &made, &self.known_keys())?;
+            Ok((made, result))
+        }
+        .await;
+        match previewed {
+            Ok((made, result)) => {
+                media.keep_preview(PreviewRecord {
+                    name: document.name.clone(),
+                    doc_id: doc_id.to_owned(),
+                    call_id: call_id.to_owned(),
+                    format: document.format,
+                    made,
+                });
+                Ok(result)
+            }
+            Err(error) => {
+                media.release_preview(doc_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// A call's `fromPreview`: deliver a preview this reply made as it is,
+    /// without running an engine (its bytes, issues and slide pictures), as
+    /// the call's document under the name the call gives.
+    async fn deliver_preview(
+        &self,
+        run: &Arc<RunControl>,
+        media: &MediaRun,
+        call_id: &str,
+        args: CreateDocumentArgs,
+    ) -> Result<Value, String> {
+        if args.content.is_some() {
             return Err(refuse(
-                LIMIT,
-                format!("at most {MAX_DOCUMENTS_PER_RUN} documents per reply"),
+                FAILED,
+                "send either content or fromPreview: fromPreview delivers the previewed file as it is, and content makes a new one",
             ));
         }
-        let made = self.make_document(run, call_id, &document, engine).await;
-        if made.is_err() {
-            media.release_document();
+        if args.preview {
+            return Err(refuse(
+                FAILED,
+                "fromPreview delivers a file that was previewed already: send it without preview",
+            ));
         }
-        made
+        let preview_id = args.from_preview.unwrap_or_default();
+        let Some(preview) = media.take_preview(&preview_id) else {
+            return Err(refuse(
+                FAILED,
+                "fromPreview names no preview of this reply that is still to deliver: a preview is delivered once, within the reply that made it; send the content again",
+            ));
+        };
+        if preview.format != args.format {
+            let format = preview.format.extension();
+            media.keep_preview(preview);
+            return Err(refuse(
+                FAILED,
+                format!("fromPreview names a {format} preview: send format {format} with it"),
+            ));
+        }
+        if !media.reserve_document(MAX_DOCUMENTS_PER_RUN) {
+            media.keep_preview(preview);
+            return Err(too_many_documents());
+        }
+        let name = file_name(&args.name, preview.format);
+        let delivered = self
+            .deliver(
+                run,
+                call_id,
+                &preview.doc_id,
+                &name,
+                preview.format,
+                &preview.made,
+            )
+            .await;
+        if delivered.is_ok() {
+            media.record_delivery(&preview.name);
+            media.record_delivery(&name);
+        } else {
+            media.release_document();
+            media.keep_preview(preview);
+        }
+        delivered
+    }
+
+    /// At the end of the reply, before its folders go: deliver each file
+    /// it previewed and delivered no document as, from its latest preview,
+    /// as the document of the call that made it, within the reply's
+    /// [`MAX_DOCUMENTS_PER_RUN`]. A stopped reply delivers none: like a
+    /// generation's, its outcome is not kept (see `still_running`), and the
+    /// user never saw a preview. Best effort: a preview that cannot be
+    /// delivered is logged, and the run still ends.
+    pub(in crate::services::assistant) async fn deliver_previews(&self, run: &Arc<RunControl>) {
+        let Some(media) = run.media.as_ref().filter(|_| !run.cancelled()) else {
+            return;
+        };
+        for preview in media.undelivered_previews() {
+            if !media.reserve_document(MAX_DOCUMENTS_PER_RUN) {
+                log::warn!("[Assistant] a preview was not delivered: the reply made its documents");
+                continue;
+            }
+            let delivered = self
+                .deliver(
+                    run,
+                    &preview.call_id,
+                    &preview.doc_id,
+                    &preview.name,
+                    preview.format,
+                    &preview.made,
+                )
+                .await;
+            if let Err(error) = delivered {
+                media.release_document();
+                log::warn!(
+                    "[Assistant] could not deliver a preview: {}",
+                    scrub_secrets(&error, &run.secrets())
+                );
+            }
+        }
     }
 
     /// Remove the folders the run's documents were made in: their files are
@@ -3444,24 +3670,25 @@ impl AssistantHost {
         make_python(&python, office, &engine).await
     }
 
-    async fn make_document(
+    /// Make `document`'s file with `engine` (none for text) in the new
+    /// folder `outputs/<doc_id>` (see [`prepare`]), and check it.
+    async fn make_file(
         &self,
         run: &Arc<RunControl>,
-        call_id: &str,
+        doc_id: &str,
         document: &Document,
         engine: Option<PathBuf>,
-    ) -> Result<Value, String> {
-        let mid = run.reply_id();
+    ) -> Result<Made, String> {
         attachments::tool_room(&self.load(run).await?, 1, 0)?;
         let store = self.store(&run.identity.owner)?;
         // The folder outlives this call: the runtime reads the preview from
-        // it once the call has answered. The end of the run removes it.
-        let doc_id = id();
+        // it once the call has answered, and a preview is delivered from it.
+        // The end of the run removes it.
         if let Some(media) = &run.media {
-            media.track_document_folder(&doc_id);
+            media.track_document_folder(doc_id);
         }
         let (dir, home) = blocking({
-            let (store, sid, doc_id) = (store.clone(), run.session_id.clone(), doc_id.clone());
+            let (sid, doc_id) = (run.session_id.clone(), doc_id.to_owned());
             let (document, language) = (document.clone(), run.ui_language.clone());
             move || prepare(&store, &sid, &doc_id, &document, &language)
         })
@@ -3517,9 +3744,27 @@ impl AssistantHost {
             },
             _ => return Err(DISABLED.into()),
         };
+        Ok(made)
+    }
+
+    /// Deliver `made`, made in the folder `doc_id`, as the reply's document
+    /// `name` of the call `call_id`: a generated attachment that takes the
+    /// folder's id, a deck's slide pictures kept beside it, and its
+    /// generation published. The result names the file's path and its
+    /// first page's preview for the runtime.
+    async fn deliver(
+        &self,
+        run: &Arc<RunControl>,
+        call_id: &str,
+        doc_id: &str,
+        name: &str,
+        format: DocumentFormat,
+        made: &Made,
+    ) -> Result<Value, String> {
+        let mid = run.reply_id();
+        let store = self.store(&run.identity.owner)?;
         let issues = serde_json::to_value(&made.issues).map_err(|_| PROTOCOL)?;
-        let mut params =
-            json!({"name": document.name, "format": format.extension(), "issues": issues});
+        let mut params = json!({"name": name, "format": format.extension(), "issues": issues});
         if let (Some(key), Some(count)) = (format.count(), made.count) {
             params[key] = json!(count);
         }
@@ -3544,8 +3789,8 @@ impl AssistantHost {
         // The attachment takes the id of the folder it was made in.
         let (attachment, kept) = blocking({
             let (sid, mid, run) = (run.session_id.clone(), mid.clone(), run.clone());
-            let (path, name, record) = (made.file.clone(), document.name.clone(), record.clone());
-            let pages = made.pages.clone();
+            let (path, name, record) = (made.file.clone(), name.to_owned(), record.clone());
+            let (doc_id, pages) = (doc_id.to_owned(), made.pages.clone());
             move || {
                 let mut file = std::fs::File::open(&path)
                     .map_err(|_| refuse(FAILED, "the engine finished without writing the file"))?;
@@ -3762,6 +4007,20 @@ mod tests {
         let host = AssistantHost::new(env.clone());
         let store = host.store(&identity().owner).unwrap();
         let sid = store.create("test/chat", false).unwrap().session.id;
+        let run = start_run(&host, &sid);
+        Fixture {
+            root,
+            env,
+            host,
+            run,
+            sid,
+        }
+    }
+
+    /// A new chat run of conversation `sid`, with its reply, as the
+    /// conversation's live run.
+    fn start_run(host: &Arc<AssistantHost>, sid: &str) -> Arc<RunControl> {
+        let store = host.store(&identity().owner).unwrap();
         let send: SendRequest = serde_json::from_value(json!({
             "sessionId": sid, "runId": id(), "operationId": id(), "text": "make a file",
         }))
@@ -3771,7 +4030,7 @@ mod tests {
         control.ui_language = "en".into();
         let run = Arc::new(control);
         host.register_run(run.clone(), host.generation(), || {
-            store.mutate(&sid, |record| {
+            store.mutate(sid, |record| {
                 record.session.active_run = Some(RunRef {
                     run_id: run.run_id.clone(),
                     operation_id: run.operation_id.clone(),
@@ -3787,23 +4046,27 @@ mod tests {
             })
         })
         .unwrap();
-        Fixture {
-            root,
-            env,
-            host,
-            run,
-            sid,
-        }
+        run
     }
 
     impl Fixture {
         async fn call(&self, call: &str, args: Value) -> Result<Value, String> {
+            self.call_in(&self.run, call, args).await
+        }
+
+        /// [`Self::call`] in the chat run `run` of the conversation.
+        async fn call_in(
+            &self,
+            run: &Arc<RunControl>,
+            call: &str,
+            args: Value,
+        ) -> Result<Value, String> {
             self.host
                 .dispatch_document_tool(
-                    &self.run,
+                    run,
                     &json!({
-                        "sessionId": self.sid, "runId": self.run.run_id,
-                        "operationId": self.run.operation_id, "toolCallId": call,
+                        "sessionId": self.sid, "runId": run.run_id,
+                        "operationId": run.operation_id, "toolCallId": call,
                         "name": "create_document", "args": args,
                     }),
                 )
@@ -3820,17 +4083,41 @@ mod tests {
 
         /// The folders documents were made in.
         fn outputs(&self) -> Vec<PathBuf> {
-            let root = self
-                .root
+            match std::fs::read_dir(self.output("")) {
+                Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+                Err(_) => vec![],
+            }
+        }
+
+        /// The folder document `doc_id` was made in (`""`: their parent).
+        fn output(&self, doc_id: &str) -> PathBuf {
+            self.root
                 .path()
                 .join("config/assistant")
                 .join(identity().owner)
                 .join(&self.sid)
-                .join("outputs");
-            match std::fs::read_dir(root) {
-                Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
-                Err(_) => vec![],
-            }
+                .join("outputs")
+                .join(doc_id)
+        }
+
+        /// The conversation's generated attachments, in order: name, id
+        /// and bytes.
+        fn delivered(&self) -> Vec<(String, String, Vec<u8>)> {
+            let root = self
+                .host
+                .store(&identity().owner)
+                .unwrap()
+                .attachment_root(&self.sid)
+                .unwrap();
+            self.record()
+                .attachments
+                .into_iter()
+                .filter(|a| a.origin.as_deref() == Some("generated"))
+                .map(|a| {
+                    let bytes = std::fs::read(root.join(&a.id)).unwrap();
+                    (a.name, a.id, bytes)
+                })
+                .collect()
         }
 
         fn events(&self, kind: &str) -> Vec<Value> {
@@ -7769,6 +8056,51 @@ console.log(JSON.stringify({
         );
     }
 
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_python_run_that_times_out_suggests_fewer_figures() {
+        let root = tempfile::tempdir().unwrap();
+        let node = root.path().join(engine(root.path(), "node", "sleep 30"));
+        let sandbox = stub_sandbox(root.path(), true);
+        let dir = root.path().join("doc");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let work = Work {
+            exe: &node,
+            dir: &dir,
+            home: &home,
+            name: "Python",
+            sandbox: Some(&sandbox),
+            profile: PYTHON_SANDBOX,
+            scratch: None,
+            read_root: Some(root.path()),
+            timeout: Duration::from_secs(1),
+        };
+        let started = std::time::Instant::now();
+        let error = work.run(&["runner.mjs"]).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(code(&error), FAILED);
+        assert!(
+            error.contains("Python did not finish within 1 seconds"),
+            "{error}"
+        );
+        assert!(error.contains("fewer or simpler figures"), "{error}");
+    }
+
+    #[test]
+    fn lint_is_read_up_to_its_line_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join(LINT);
+        let lines: Vec<String> = (0..1000).map(|n| format!("line {n}")).collect();
+        std::fs::write(&path, serde_json::to_vec(&lines).unwrap()).unwrap();
+        assert_eq!(MAX_LINT_LINES, MAX_ISSUES * 10);
+        // The first lines, before any becomes an issue.
+        assert_eq!(read_lint(&path).unwrap(), lines[..MAX_LINT_LINES]);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&lines[..3]).unwrap()).unwrap();
+        assert_eq!(read_lint(&path).unwrap(), lines[..3]);
+    }
+
     /// A lint line of the deck helpers, as the stand-in runner reports it.
     #[cfg(target_os = "macos")]
     const LINT_LINE: &str =
@@ -8231,8 +8563,10 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
             .unwrap();
         assert_eq!(result["status"], "completed");
 
-        // The engine is there but its sandbox probe fails: the same, and
-        // the document does not count against the reply.
+        // The engine is there but no sandbox probe passes, officecli's
+        // included, so officecli's refuses it first (for the Python probe
+        // alone, see `python_is_refused_when_only_its_own_probe_fails`):
+        // the same, and the document does not count against the reply.
         #[cfg(target_os = "macos")]
         {
             let f = python_fixture(&script, &deck_runner(), |dir| stub_sandbox(dir, false));
@@ -8255,6 +8589,54 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
             assert!(sandbox_log(&f)
                 .iter()
                 .all(|line| !line.contains(" --code ")));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_is_refused_when_only_its_own_probe_fails() {
+        let script = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            r#"{"slides":1}"#,
+        );
+        // officecli's probe passes; the Python engine's (its Node) fails.
+        let f = python_fixture(&script, &deck_runner(), |dir| {
+            stub_sandbox_probing(
+                dir,
+                "case \"$*\" in *'/node/node --version') exit 1 ;; esac",
+            )
+        });
+        let error = f
+            .call("call-1", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert!(f.record().attachments.is_empty());
+        let log = sandbox_log(&f);
+        assert!(
+            log.iter()
+                .any(|line| line.ends_with("/officecli --version")),
+            "{log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|line| line.ends_with("/node/node --version")),
+            "{log:?}"
+        );
+        assert!(f.host.office_sandbox.works.get().is_some());
+        assert!(f.host.python_sandbox.works.get().is_none());
+        // The runner never ran, and the document did not count.
+        assert!(log.iter().all(|line| !line.contains(" --code ")));
+        for call in ["call-2", "call-3", "call-4"] {
+            f.call(
+                call,
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -8285,23 +8667,16 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
 
     #[tokio::test]
     #[serial_test::serial(document_engines)]
-    async fn previews_are_refused_until_they_exist() {
+    async fn content_is_required_unless_a_preview_is_delivered() {
         let f = fixture(None, None);
         for args in [
-            json!({"name": "a", "format": "txt", "content": "x", "preview": true}),
-            json!({"name": "a", "format": "txt", "fromPreview": "doc-1"}),
+            json!({"name": "a", "format": "txt"}),
+            json!({"name": "a", "format": "txt", "preview": true}),
         ] {
             let error = f.call(&id(), args.clone()).await.unwrap_err();
             assert_eq!(code(&error), FAILED, "{args}");
-            assert!(error.contains("preview is not available yet"), "{error}");
+            assert!(error.contains("content is required"), "{error}");
         }
-        // Without either, content is still required.
-        let error = f
-            .call("call-1", json!({"name": "a", "format": "txt"}))
-            .await
-            .unwrap_err();
-        assert_eq!(code(&error), FAILED);
-        assert!(error.contains("content is required"), "{error}");
         assert!(f.outputs().is_empty());
         let result = f
             .call(
@@ -8311,6 +8686,391 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
             .await
             .unwrap();
         assert_eq!(result["status"], "completed");
+    }
+
+    /// A stand-in officecli under a stand-in `sandbox-exec` that logs every
+    /// run (see [`sandbox_log`]): its decks have two slides, each drawn as
+    /// SVG; each `create` writes bytes no other run writes (its process
+    /// id), and a batch that names "Broken" fails.
+    fn preview_fixture() -> Fixture {
+        let script = format!(
+            r#"case "$1" in
+create) printf 'PK\003\004%s' "$$" > "$2"; exit 0 ;;
+batch) grep -q Broken "$4" && {{ echo '{{"results":[{{"index":0,"success":false,"code":"invalid_value","output":"broken"}}],"atomicRolledBack":true}}'; exit 1; }} ;;
+esac
+{}"#,
+            officecli_drawing(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":2}"#,
+                r#"echo "<svg>$5</svg>""#,
+            )
+        );
+        fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, true)))
+    }
+
+    /// `create_document` arguments that preview a deck named `name`.
+    fn preview_args(name: &str) -> Value {
+        json!({"name": name, "format": "pptx", "content": deck(), "preview": true})
+    }
+
+    /// `create_document` arguments that deliver the preview `preview_id`.
+    fn from_preview_args(preview_id: &Value) -> Value {
+        json!({"name": "Plan.pptx", "format": "pptx", "fromPreview": preview_id})
+    }
+
+    /// The slide pictures a preview's folder holds, as the stand-in draws
+    /// them.
+    fn two_pages() -> Vec<(String, String)> {
+        vec![
+            ("1.svg".into(), "<svg>1</svg>".into()),
+            ("2.svg".into(), "<svg>2</svg>".into()),
+        ]
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_preview_makes_no_attachment() {
+        let f = preview_fixture();
+        let result = f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        let preview_id = result["previewId"].as_str().unwrap();
+        let dir = f.output(preview_id);
+        // The model gets the id, the count and the issues; the runtime the
+        // path of every slide's picture.
+        assert_eq!(
+            result,
+            json!({
+                "status": "completed", "preview": true, "previewId": preview_id,
+                "slides": 2, "issues": [],
+                "pagePaths": [dir.join("pages/1.svg"), dir.join("pages/2.svg")],
+            })
+        );
+        for (name, svg) in two_pages() {
+            assert_eq!(
+                std::fs::read_to_string(dir.join("pages").join(name)).unwrap(),
+                svg
+            );
+        }
+        assert!(dir.join("out.pptx").is_file());
+        let record = f.record();
+        assert!(record.attachments.is_empty());
+        assert!(record.messages[0].generations.is_empty());
+        assert!(f.events("generation").is_empty());
+        // Any format the host makes previews alike; a text file has no
+        // pages and no count.
+        let text = f
+            .call(
+                "call-2",
+                json!({"name": "notes", "format": "md", "content": "# Hi", "preview": true}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(text["preview"], true);
+        assert_eq!(text["pagePaths"], json!([]));
+        assert!(text.get("slides").is_none(), "{text}");
+        assert!(f.record().attachments.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn from_preview_delivers_the_previewed_file() {
+        let f = preview_fixture();
+        let preview = f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        let preview_id = &preview["previewId"];
+        let dir = f.output(preview_id.as_str().unwrap());
+        let bytes = std::fs::read(dir.join("out.pptx")).unwrap();
+        let runs = sandbox_log(&f).len();
+
+        let result = f
+            .call("call-2", from_preview_args(preview_id))
+            .await
+            .unwrap();
+        // No engine ran and no folder was made.
+        assert_eq!(sandbox_log(&f).len(), runs);
+        assert_eq!(f.outputs(), std::slice::from_ref(&dir));
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["file"]["name"], "Plan.pptx");
+        assert_eq!(result["file"]["mimeType"], PPTX);
+        assert_eq!(result["file"]["slides"], 2);
+        assert_eq!(result["svgPages"], 2);
+        assert_eq!(result["issues"], json!([]));
+        assert_eq!(result["filePath"], json!(dir.join("out.pptx")));
+        assert_eq!(result["previewPath"], json!(dir.join("pages/1.svg")));
+        // The attachment is the previewed file, with its slide pictures.
+        let delivered = f.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, "Plan.pptx");
+        assert_eq!(delivered[0].2, bytes);
+        assert_eq!(kept_pages(&f, &result), two_pages());
+        let record = f.record();
+        let generation = record.messages[0].media_for(Some("call-2")).unwrap();
+        assert_eq!(generation.kind, "document");
+        assert_eq!(generation.params["slides"], 2);
+        assert_eq!(generation.params["svgPages"], 2);
+        assert_eq!(f.events("generation").len(), 1);
+
+        // Delivered once: the id is spent, and the end of the reply
+        // delivers nothing more.
+        let error = f
+            .call("call-3", from_preview_args(preview_id))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        assert_eq!(f.delivered().len(), 1);
+        assert!(f.outputs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn from_preview_rejects_unknown_ids_and_extra_content() {
+        let f = preview_fixture();
+        let preview = f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        let preview_id = &preview["previewId"];
+        let runs = sandbox_log(&f).len();
+        // New content as well: which file to deliver is unclear.
+        let mut both = from_preview_args(preview_id);
+        both["content"] = deck();
+        let error = f.call("call-2", both).await.unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(
+            error.contains("send either content or fromPreview"),
+            "{error}"
+        );
+        // A preview of a preview.
+        let mut again = from_preview_args(preview_id);
+        again["preview"] = json!(true);
+        let error = f.call("call-3", again).await.unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("without preview"), "{error}");
+        // Another format than the preview's.
+        let error = f
+            .call(
+                "call-4",
+                json!({"name": "Plan", "format": "docx", "fromPreview": preview_id}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("a pptx preview"), "{error}");
+        // Ids no preview of this reply has.
+        for unknown in ["doc-1", "", "../outputs"] {
+            let error = f
+                .call(&id(), from_preview_args(&json!(unknown)))
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), FAILED, "{unknown}");
+            assert!(error.contains("no preview of this reply"), "{error}");
+        }
+        assert_eq!(sandbox_log(&f).len(), runs);
+        assert!(f.record().attachments.is_empty());
+        // The refusals left the preview to deliver.
+        f.call("call-5", from_preview_args(preview_id))
+            .await
+            .unwrap();
+
+        // A preview of another reply.
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        let next = start_run(&f.host, &f.sid);
+        let error = f
+            .call_in(&next, "call-1", from_preview_args(preview_id))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("no preview of this reply"), "{error}");
+        assert_eq!(f.delivered().len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_third_preview_is_refused() {
+        let f = preview_fixture();
+        f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        // The same file, however the model names it.
+        f.call("call-2", preview_args("Plan")).await.unwrap();
+        let runs = sandbox_log(&f).len();
+        let error = f
+            .call("call-3", preview_args("Plan.pptx"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), LIMIT);
+        assert!(error.contains("at most 2 previews"), "{error}");
+        assert_eq!(MAX_PREVIEWS_PER_NAME, 2);
+        // Refused before any engine ran.
+        assert_eq!(sandbox_log(&f).len(), runs);
+        assert_eq!(f.outputs().len(), 2);
+        // Another file has its own previews, and the file can still be
+        // delivered.
+        f.call("call-4", preview_args("Other.pptx")).await.unwrap();
+        f.call(
+            "call-5",
+            json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_failed_preview_does_not_count() {
+        let f = preview_fixture();
+        let mut broken = preview_args("Plan.pptx");
+        broken["content"][0]["props"]["title"] = json!("Broken");
+        for call in ["call-1", "call-2", "call-3"] {
+            let error = f.call(call, broken.clone()).await.unwrap_err();
+            assert_eq!(code(&error), FAILED, "{error}");
+        }
+        f.call("call-4", preview_args("Plan.pptx")).await.unwrap();
+        f.call("call-5", preview_args("Plan.pptx")).await.unwrap();
+        // Nothing to deliver from the failures.
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        assert_eq!(f.delivered().len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn an_undelivered_preview_is_delivered_at_the_end() {
+        let f = preview_fixture();
+        f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        let latest = f.call("call-2", preview_args("Plan.pptx")).await.unwrap();
+        let bytes = std::fs::read(
+            f.output(latest["previewId"].as_str().unwrap())
+                .join("out.pptx"),
+        )
+        .unwrap();
+        // Files the reply delivered, from their preview or anew, are not
+        // delivered again.
+        let other = f.call("call-3", preview_args("Other.pptx")).await.unwrap();
+        f.call(
+            "call-4",
+            json!({"name": "Other.pptx", "format": "pptx", "fromPreview": other["previewId"]}),
+        )
+        .await
+        .unwrap();
+        f.call("call-5", preview_args("Notes.pptx")).await.unwrap();
+        f.call(
+            "call-6",
+            json!({"name": "Notes.pptx", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(f.delivered().len(), 2);
+        let runs = sandbox_log(&f).len();
+
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        // Plan.pptx once, as its latest preview: the document of the call
+        // that made it, with its slide pictures.
+        let delivered = f.delivered();
+        let names: Vec<&str> = delivered.iter().map(|(name, ..)| name.as_str()).collect();
+        assert_eq!(names, ["Other.pptx", "Notes.pptx", "Plan.pptx"]);
+        assert_eq!(delivered[2].2, bytes);
+        assert_eq!(
+            kept_pages(&f, &json!({"file": {"id": delivered[2].1}})),
+            two_pages()
+        );
+        assert_eq!(sandbox_log(&f).len(), runs);
+        let record = f.record();
+        let reply = &record.messages[0];
+        let generation = reply.media_for(Some("call-2")).unwrap();
+        assert_eq!(generation.outputs, [delivered[2].1.clone()]);
+        assert_eq!(generation.params["svgPages"], 2);
+        assert!(reply.media_for(Some("call-1")).is_none());
+        assert_eq!(reply.status, "completed");
+        // Published before the run ended; then the folders went.
+        let kinds: Vec<String> = f
+            .env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.r#type.clone())
+            .filter(|kind| kind == "generation" || kind == "run_end")
+            .collect();
+        assert_eq!(kinds, ["generation", "generation", "generation", "run_end"]);
+        assert!(f.outputs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_stopped_reply_delivers_no_preview() {
+        let f = preview_fixture();
+        f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        f.run.cancel.send_replace(true);
+        f.host.finish(&f.run, Ok(Finish::Stopped)).await;
+        assert!(f.delivered().is_empty());
+        assert!(f.events("generation").is_empty());
+        assert!(f.outputs().is_empty());
+        assert_eq!(f.events("run_end").len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn previews_do_not_count_toward_the_document_limit() {
+        let f = preview_fixture();
+        let mut previews = vec![];
+        for name in ["A", "B", "C", "D"] {
+            previews.push(f.call(&id(), preview_args(name)).await.unwrap());
+        }
+        for name in ["E", "F", "G"] {
+            f.call(
+                &id(),
+                json!({"name": name, "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        }
+        let error = f
+            .call(
+                &id(),
+                json!({"name": "H", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), LIMIT);
+        assert!(error.contains("at most 3 documents per reply"), "{error}");
+        // Delivering a preview is a document like any other, at the end of
+        // the reply too.
+        let error = f
+            .call(&id(), from_preview_args(&previews[0]["previewId"]))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), LIMIT);
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        assert_eq!(f.delivered().len(), 3);
+        assert!(f.outputs().is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_python_deck_is_delivered_as_it_was_previewed() {
+        let officecli = officecli_drawing(
+            r#"{"results":[]}"#,
+            NO_ISSUES,
+            r#"{"slides":2}"#,
+            r#"echo "<svg>$5</svg>""#,
+        );
+        let f = python_fixture(&officecli, &deck_runner(), |dir| stub_sandbox(dir, true));
+        let mut args = python_args("prs = new_deck()");
+        args["preview"] = json!(true);
+        let preview = f.call("call-1", args).await.unwrap();
+        assert_eq!(preview["slides"], 2);
+        assert_eq!(
+            preview["issues"],
+            json!([{"severity": "warning", "message": LINT_LINE}])
+        );
+        assert_eq!(preview["pagePaths"].as_array().unwrap().len(), 2);
+        assert!(f.record().attachments.is_empty());
+        let runs = sandbox_log(&f).len();
+        let result = f
+            .call("call-2", from_preview_args(&preview["previewId"]))
+            .await
+            .unwrap();
+        assert_eq!(result["issues"], preview["issues"]);
+        assert_eq!(result["svgPages"], 2);
+        // Neither the runner nor officecli ran again.
+        assert_eq!(sandbox_log(&f).len(), runs);
+        assert_eq!(generated_bytes(&f), PYTHON_DECK);
     }
 
     #[tokio::test]

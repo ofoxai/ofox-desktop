@@ -2199,6 +2199,9 @@ impl AssistantHost {
             Err(_) => control.cancelled(),
         };
         let completed = matches!(outcome, Ok(Finish::Completed));
+        // A file the reply previewed and never delivered is delivered from
+        // its folder before the folders go.
+        self.deliver_previews(control).await;
         self.remove_document_folders(control).await;
         // A failure that cost nothing leaves the session's cost known.
         let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);

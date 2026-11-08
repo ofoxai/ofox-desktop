@@ -7,6 +7,7 @@ use super::*;
 use crate::services::assistant::{
     attachments::{self, Source},
     catalog::Model,
+    documents::create::{PreviewRecord, LIMIT as DOCUMENT_LIMIT, MAX_PREVIEWS_PER_NAME},
     host::{blocking, scrub_secrets, scrub_secrets_in, AssistantHost, RunControl, PROTOCOL, STATE},
     materials::{self, Material, Plan},
     media, media_host, media_http,
@@ -19,10 +20,10 @@ use crate::services::assistant::{
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -47,10 +48,28 @@ pub(in crate::services::assistant) struct MediaRun {
     /// The ids of the `outputs/<id>` folders documents were made in; they
     /// are removed when the run ends.
     document_folders: Mutex<Vec<String>>,
+    /// The documents made as previews, and the files delivered.
+    previews: Mutex<Previews>,
     calls: Mutex<HashMap<String, CallRecord>>,
     /// Submitted videos, polled once the run ends: (reply, tool call,
     /// authority generation).
     polls: Mutex<Vec<(String, String, u64)>>,
+}
+
+/// A run's previews (see `documents::create`): each one asked for, in
+/// order, and the file names it delivered documents as.
+#[derive(Default)]
+struct Previews {
+    asked: Vec<AskedPreview>,
+    delivered: HashSet<String>,
+}
+
+/// A preview of the file `name` in the folder `doc_id`; `made` while it is
+/// made and not delivered.
+struct AskedPreview {
+    name: String,
+    doc_id: String,
+    made: Option<PreviewRecord>,
 }
 
 impl MediaRun {
@@ -62,6 +81,7 @@ impl MediaRun {
             speech: AtomicUsize::new(0),
             documents: AtomicUsize::new(0),
             document_folders: Mutex::new(vec![]),
+            previews: Mutex::default(),
             calls: Mutex::new(HashMap::new()),
             polls: Mutex::new(vec![]),
         }
@@ -136,6 +156,83 @@ impl MediaRun {
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |made| {
                 Some(made.saturating_sub(1))
             });
+    }
+
+    fn previews(&self) -> MutexGuard<'_, Previews> {
+        self.previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hold one of the [`MAX_PREVIEWS_PER_NAME`] previews of the file
+    /// `name` for the folder `doc_id`; refused when none is left.
+    pub fn record_preview(&self, name: &str, doc_id: &str) -> Result<(), String> {
+        let mut previews = self.previews();
+        let asked = previews.asked.iter().filter(|p| p.name == name).count();
+        if asked >= MAX_PREVIEWS_PER_NAME {
+            return Err(refuse(
+                DOCUMENT_LIMIT,
+                format!(
+                    "at most {MAX_PREVIEWS_PER_NAME} previews of {name} per reply; deliver one with fromPreview, or send the content without preview"
+                ),
+            ));
+        }
+        previews.asked.push(AskedPreview {
+            name: name.into(),
+            doc_id: doc_id.into(),
+            made: None,
+        });
+        Ok(())
+    }
+
+    /// Give back the preview held for the folder `doc_id`: it was not made.
+    pub fn release_preview(&self, doc_id: &str) {
+        self.previews().asked.retain(|p| p.doc_id != doc_id);
+    }
+
+    /// Keep `preview`, made in the folder held for it, until it is
+    /// delivered; again when its delivery failed.
+    pub fn keep_preview(&self, preview: PreviewRecord) {
+        let mut previews = self.previews();
+        if let Some(asked) = previews
+            .asked
+            .iter_mut()
+            .find(|p| p.doc_id == preview.doc_id)
+        {
+            asked.made = Some(preview);
+        }
+    }
+
+    /// The preview in the folder `doc_id` this run made and has not
+    /// delivered, taken for its delivery.
+    pub fn take_preview(&self, doc_id: &str) -> Option<PreviewRecord> {
+        self.previews()
+            .asked
+            .iter_mut()
+            .find(|p| p.doc_id == doc_id)
+            .and_then(|p| p.made.take())
+    }
+
+    /// Remember that the run delivered a document as the file `name`.
+    pub fn record_delivery(&self, name: &str) {
+        self.previews().delivered.insert(name.into());
+    }
+
+    /// For each file the run previewed and delivered no document as, its
+    /// latest preview, taken for its delivery; in the order they were asked
+    /// for.
+    pub fn undelivered_previews(&self) -> Vec<PreviewRecord> {
+        let mut previews = self.previews();
+        let Previews { asked, delivered } = &mut *previews;
+        let mut latest: Vec<PreviewRecord> = vec![];
+        for preview in asked.iter_mut().rev() {
+            if delivered.contains(&preview.name) || latest.iter().any(|p| p.name == preview.name) {
+                continue;
+            }
+            latest.extend(preview.made.take());
+        }
+        latest.reverse();
+        latest
     }
 
     /// What an earlier call with the same id answered (an unknown outcome
