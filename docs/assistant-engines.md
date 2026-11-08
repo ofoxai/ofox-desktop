@@ -324,10 +324,16 @@ the computers that cannot run it.
   (matplotlib builds its font cache in the first run), and when the user stops
   the reply the runner ends with it. Python runs are serialised, one at a time,
   since each takes hundreds of megabytes.
-- **Fail closed.** Python is offered only when both probes pass: its own and
-  officecli's, which checks the deck. If `sandbox-exec` is missing or either probe
-  fails, the engine is off: the tool and the prompt say nothing of Python, and a
-  call that sends Python code is refused with `send a deck object instead`.
+- **Fail closed.** Python is offered while `sandbox-exec` is there and neither
+  sandbox probe has failed: its own and officecli's, which checks the deck. The
+  probes run with the first document that needs them, so until then Python is
+  offered, and a call whose sandbox turns out to be missing is refused with
+  `send a deck object instead`; nothing runs outside a sandbox. Once officecli's
+  latest probe has failed, or the Python probe has failed once, the tool and the
+  prompt say nothing of Python, and a call that sends Python code anyway is
+  refused the same way. A failed Python probe keeps Python off until the app
+  restarts; officecli's probe is tried again with the next document, and Python
+  is offered again once it passes.
   officecli and Typst, by contrast, run without a sandbox when their probe fails.
 - **Checks.** The runner makes the chart axis ids positive (python-pptx writes
   negative ones, which the schema does not allow). The host copies the deck out of

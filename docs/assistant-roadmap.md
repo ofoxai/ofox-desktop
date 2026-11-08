@@ -83,7 +83,8 @@
 - 运行与辅助：`assistant-runtime/src/python/runner.mjs`、辅助库 `deck.py`、16:9 模板 `template.pptx`（由
   `scripts/assistant-deck-template.mjs` 生成）。
 - 宿主：Python 在独立子进程里、用自己的 `sandbox-exec` 配置、在文档目录下自己的子目录里运行（无网络、不能启动其他程序、
-  只写自己的目录、不读用户的其他文件和临时目录）；Python 与 officecli 两个沙箱探测都通过才提供，失败即关闭；deck 作为
+  只写自己的目录、不读用户的其他文件和临时目录）；Python 与 officecli 两个沙箱探测都没失败时提供（探测随第一份需要它的
+  文档运行），某次调用发现沙箱缺失就拒绝该调用，Python 自己的探测失败一次就到重启前都不再提供，失败即关闭；deck 作为
   普通文件拷出，由 officecli 校验、查问题、修溢出、出每页 SVG；Python 运行串行。
 - 预览：`preview: true` 只出总览图（最多 24 页）和检查结果，不出附件；之后带新内容或 `fromPreview` 交付；每个文件名每次回复
   最多预览 2 次；回复结束时最近一次预览自动交付（用户停止的回复不交付）。工具说明只在宿主提供 Python 时提 python 和预览。

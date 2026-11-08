@@ -8608,6 +8608,7 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
                 "case \"$*\" in *'/node/node --version') exit 1 ;; esac",
             )
         });
+        assert!(f.host.python_offered());
         let error = f
             .call("call-1", python_args("prs = new_deck()"))
             .await
@@ -8615,6 +8616,22 @@ cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
         assert_eq!(code(&error), FAILED);
         assert!(error.contains("send a deck object instead"), "{error}");
         assert!(f.record().attachments.is_empty());
+        // The failed probe turns Python off for the session: the model is
+        // no longer told of it, and Python content is refused without
+        // probing again.
+        assert!(!f.host.python_offered());
+        let probes = |log: &[String]| {
+            log.iter()
+                .filter(|line| line.ends_with("/node/node --version"))
+                .count()
+        };
+        let probed = probes(&sandbox_log(&f));
+        let error = f
+            .call("call-1b", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert_eq!(probes(&sandbox_log(&f)), probed);
         let log = sandbox_log(&f);
         assert!(
             log.iter()

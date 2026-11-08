@@ -987,15 +987,19 @@ impl AssistantHost {
 
     /// Whether Python decks are offered: the engine is there (on macOS
     /// only), and so are officecli, which checks every deck, and
-    /// `sandbox-exec`, and officecli's latest sandbox probe did not fail
-    /// (officecli checks a Python deck only in its sandbox). A probe that
-    /// fails later turns Python content away in `create_document`.
+    /// `sandbox-exec`; officecli's latest sandbox probe did not fail
+    /// (officecli checks a Python deck only in its sandbox), and the Python
+    /// engine's own probe has not failed. Before a probe has run, Python is
+    /// offered and a call is refused when its sandbox turns out missing. A
+    /// failed Python probe turns it off for the session: Python content is
+    /// then refused before the engine is probed again.
     pub(super) fn python_offered(&self) -> bool {
         let engines = self.engines();
         engines.python.is_some()
             && engines.officecli.is_some()
             && self.env.sandbox_exec().is_some_and(|path| path.is_file())
             && !self.office_sandbox.failed()
+            && !self.python_sandbox.failed()
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
