@@ -8,7 +8,7 @@
 //! [`Work::shown`]: without the document's folder and without anything that
 //! looks like a credential.
 use super::{
-    engines::Engines,
+    engines::{Engines, PythonEngine},
     fix,
     runner::{run_engine, EngineOutput, ENGINE_TIMEOUT, OUTPUT_LIMIT, TYPST_PACKAGES},
 };
@@ -38,6 +38,8 @@ const DISABLED: &str = "assistant_capability_disabled";
 pub const MAX_DOCUMENTS_PER_RUN: usize = 3;
 /// The longest `content`, serialized.
 pub const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
+/// The longest Python deck code, in bytes.
+const MAX_PYTHON_BYTES: usize = 200_000;
 /// The most commands one Office document's batch may hold.
 const MAX_COMMANDS: usize = 2000;
 const MAX_NAME_CHARS: usize = 120;
@@ -65,6 +67,22 @@ const ISSUES_UNAVAILABLE: &str =
 const PRELUDE: &str = include_str!("pdf-prelude.typ");
 const MAIN: &str = "main.typ";
 const BATCH: &str = "batch.json";
+/// The model's Python deck code, and the deck helpers' lint the runner
+/// writes beside the deck: a JSON array of strings.
+const CODE: &str = "code.py";
+const LINT: &str = "lint.json";
+/// The issue a Python deck gets when its lint cannot be read.
+const LINT_UNAVAILABLE: &str =
+    "lint unavailable: the deck helpers' checks of the layout were not reported";
+/// Why Python content is refused when the Python engine cannot run here.
+const NO_PYTHON: &str = "Python content cannot run on this computer; send a deck object instead";
+/// What Python content is, as a refusal says it.
+const PYTHON_SHAPE: &str = r#"python content is {"kind":"python","code":"<the Python code>"}: the code as one string, and nothing else"#;
+/// The labels of the runner's error report, the one block that ends its
+/// stderr: the code's own mistake (the end of its traceback), or anything
+/// else (see `assistant-runtime/src/python/runner.mjs`).
+const PYTHON_ERROR: &str = "PythonError: ";
+const RUNNER_ERROR: &str = "RunnerError: ";
 /// The engines' home and temp folder, inside the document's folder.
 const HOME: &str = ".home";
 
@@ -73,7 +91,15 @@ const HOME: &str = ".home";
 pub struct CreateDocumentArgs {
     pub name: String,
     pub format: DocumentFormat,
-    pub content: Value,
+    /// Required, except by a call that delivers a preview (`from_preview`).
+    #[serde(default)]
+    pub content: Option<Value>,
+    /// Make and check the file without delivering it. Refused for now.
+    #[serde(default)]
+    pub preview: bool,
+    /// Deliver the file of an earlier preview. Refused for now.
+    #[serde(default, rename = "fromPreview")]
+    pub from_preview: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -153,13 +179,20 @@ enum Content {
     Commands(Vec<Value>),
     /// Typst markup, or the text of a text file.
     Text(String),
+    /// A pptx's Python deck code, run by the Python engine (see
+    /// [`make_python`]).
+    Python(String),
 }
 
 impl Document {
     fn new(args: CreateDocumentArgs) -> Result<Self, String> {
-        let size = serde_json::to_vec(&args.content)
-            .map_err(|_| PROTOCOL)?
-            .len();
+        let content = args.content.ok_or_else(|| {
+            refuse(
+                FAILED,
+                "content is required: name, format and content are expected",
+            )
+        })?;
+        let size = serde_json::to_vec(&content).map_err(|_| PROTOCOL)?.len();
         if size > MAX_CONTENT_BYTES {
             return Err(refuse(
                 TOO_LARGE,
@@ -167,9 +200,24 @@ impl Document {
             ));
         }
         let format = args.format;
-        let extension = format.extension();
-        let content = match (format.engine(), args.content) {
-            (Engine::Office, Value::Array(mut commands)) => {
+        let content = match (python_code(&content, format)?, format.engine(), content) {
+            (Some(_), _, _) if format != DocumentFormat::Pptx => {
+                return Err(refuse(
+                    FAILED,
+                    format!("python content is for pptx only; {}", content_shape(format)),
+                ))
+            }
+            (Some(code), _, _) if code.len() > MAX_PYTHON_BYTES => {
+                return Err(refuse(
+                    TOO_LARGE,
+                    format!(
+                        "the Python code is {} bytes, over the limit of {MAX_PYTHON_BYTES} bytes; make the deck shorter",
+                        code.len()
+                    ),
+                ))
+            }
+            (Some(code), _, _) => Content::Python(code),
+            (None, Engine::Office, Value::Array(mut commands)) => {
                 check_batch(&mut commands, format)?;
                 unescape_newlines(&mut commands);
                 if format == DocumentFormat::Xlsx {
@@ -177,35 +225,62 @@ impl Document {
                 }
                 Content::Commands(commands)
             }
-            (Engine::Office, _) => {
-                return Err(refuse(
-                    FAILED,
-                    format!("{extension} content must be an array of officecli batch commands"),
-                ))
-            }
-            (Engine::Typst, Value::String(body)) if imports_a_package(&body) => {
+            (None, Engine::Typst, Value::String(body)) if imports_a_package(&body) => {
                 return Err(refuse(
                     FAILED,
                     "Typst packages are not available: write the body without #import or #include of \"@…\" packages",
                 ))
             }
-            (Engine::Typst, Value::String(body)) => Content::Text(body),
-            (Engine::Typst, _) => {
-                return Err(refuse(FAILED, "pdf content must be a string of Typst markup"))
-            }
-            (Engine::Text, Value::String(text)) => Content::Text(text),
-            (Engine::Text, _) => {
-                return Err(refuse(
-                    FAILED,
-                    format!("{extension} content must be a string with the file's text"),
-                ))
-            }
+            (None, Engine::Typst | Engine::Text, Value::String(text)) => Content::Text(text),
+            (None, _, _) => return Err(refuse(FAILED, content_shape(format))),
         };
         Ok(Self {
             name: file_name(&args.name, format),
             format,
             content,
         })
+    }
+}
+
+/// What `format`'s content must be, as a refusal says it.
+fn content_shape(format: DocumentFormat) -> String {
+    let extension = format.extension();
+    match format.engine() {
+        Engine::Office => {
+            format!("{extension} content must be an array of officecli batch commands")
+        }
+        Engine::Typst => "pdf content must be a string of Typst markup".into(),
+        Engine::Text => format!("{extension} content must be a string with the file's text"),
+    }
+}
+
+/// The Python deck code of `content` when it is
+/// `{"kind":"python","code":"…"}`, or that object as JSON text, as some
+/// models send it (text only for an Office format: a text file's text is
+/// its own, and a pdf's is Typst markup). `None` when it is not Python
+/// content; refused when it is but holds no code as one string, or
+/// something besides.
+fn python_code(content: &Value, format: DocumentFormat) -> Result<Option<String>, String> {
+    let parsed: Map<String, Value>;
+    let object = match content {
+        Value::Object(object) => object,
+        Value::String(text) if format.engine() == Engine::Office => {
+            match serde_json::from_str::<Value>(text) {
+                Ok(Value::Object(object)) => {
+                    parsed = object;
+                    &parsed
+                }
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    if object.get("kind").and_then(Value::as_str) != Some("python") {
+        return Ok(None);
+    }
+    match object.get("code") {
+        Some(Value::String(code)) if object.len() == 2 => Ok(Some(code.clone())),
+        _ => Err(refuse(FAILED, PYTHON_SHAPE)),
     }
 }
 
@@ -1949,6 +2024,17 @@ fn clip(text: &str, max: usize) -> String {
     clipped
 }
 
+/// At most `max` characters of `text`, the last ones.
+fn tail(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_owned();
+    }
+    let mut clipped = String::from('…');
+    clipped.extend(text.chars().skip(count + 1 - max.max(1)));
+    clipped
+}
+
 /// `text` without officecli's "Run 'officecli help …'" advice: the model
 /// cannot run it.
 fn without_help(text: &str) -> String {
@@ -2013,6 +2099,7 @@ fn prepare(
             seal_packages(&home)?;
         }
         (Content::Text(text), _) => write_new(&dir.join(document.format.file()), text.as_bytes())?,
+        (Content::Python(code), _) => write_new(&dir.join(CODE), code.as_bytes())?,
     }
     Ok((dir, home))
 }
@@ -2093,7 +2180,6 @@ struct Work<'a> {
 
 /// How long one Python run may take: matplotlib builds its font cache on
 /// the first one.
-#[cfg_attr(not(test), allow(dead_code))] // until create_document runs Python content
 const PYTHON_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// What officecli may do on macOS: no network; of the user's folders
@@ -2340,8 +2426,7 @@ fn data(report: &Value) -> &Value {
 }
 
 /// An Office document: create the file, run the batch (atomic: one failed
-/// command and nothing is applied), then check it, fix a deck's layout (see
-/// [`fix_layout`]) and count it.
+/// command and nothing is applied), then check it (see [`check_office`]).
 async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, String> {
     let file = format.file();
     let file = file.as_str();
@@ -2358,7 +2443,20 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
     let batch = work
         .run(&["batch", file, "--input", BATCH, "--json"])
         .await?;
-    let mut issues = batch_issues(work, &batch)?;
+    let issues = batch_issues(work, &batch)?;
+    check_office(work, format, issues).await
+}
+
+/// Check the Office file officecli finds in the document's folder, with
+/// the `issues` found so far: validate it, fix a deck's layout (see
+/// [`fix_layout`]), count it and draw a deck's slides (see [`svg_pages`]).
+async fn check_office(
+    work: &Work<'_>,
+    format: DocumentFormat,
+    mut issues: Vec<Issue>,
+) -> Result<Made, String> {
+    let file = format.file();
+    let file = file.as_str();
     if let Some(report) = work.report(&["validate", file, "--json"]).await {
         issues.extend(validation_issues(work, &report));
     }
@@ -2395,6 +2493,100 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
         issues: finished(issues),
         fixed,
     })
+}
+
+/// A deck from the model's Python code: the runner
+/// (`assistant-runtime/src/python/runner.mjs`) runs `code.py` in Pyodide
+/// and writes the deck and the deck helpers' lint; `office` then checks the
+/// deck as it checks a batch's (see [`check_office`]), the lint lines being
+/// warnings. The code can write the document's folder, links included: a
+/// deck that is not a regular file there is no deck, and the lint is read
+/// without following a link.
+async fn make_python(
+    python: &Work<'_>,
+    office: &Work<'_>,
+    engine: &PythonEngine,
+) -> Result<Made, String> {
+    let file = DocumentFormat::Pptx.file();
+    let (runner, assets) = (
+        engine.runner.to_string_lossy(),
+        engine.assets.to_string_lossy(),
+    );
+    let output = python
+        .run(&[
+            &runner, "--assets", &assets, "--code", CODE, "--out", &file, "--lint", LINT,
+        ])
+        .await?;
+    if output.status != Some(0) {
+        return Err(python_failure(python, &output));
+    }
+    let dir = python.dir.to_path_buf();
+    let lint = blocking(move || {
+        let deck = std::fs::symlink_metadata(dir.join(&file)).is_ok_and(|meta| meta.is_file());
+        if !deck {
+            return Err(refuse(
+                FAILED,
+                "the Python engine finished without writing the deck",
+            ));
+        }
+        Ok(read_lint(&dir.join(LINT)))
+    })
+    .await?;
+    let issues = match lint {
+        Some(lines) => lines
+            .iter()
+            .map(|line| Issue::warning(python.shown(line), None))
+            .collect(),
+        None => vec![Issue::warning(LINT_UNAVAILABLE.into(), None)],
+    };
+    check_office(office, DocumentFormat::Pptx, issues).await
+}
+
+/// The lines of `lint.json`, a JSON array of strings, read as a slide
+/// picture is (see `attachments::open_page`): `None` when it is not such a
+/// file. Blocking file IO.
+fn read_lint(path: &Path) -> Option<Vec<String>> {
+    use std::io::Read;
+    let (file, size) = attachments::open_page(path).ok()?;
+    let mut text = String::new();
+    file.take(size).read_to_string(&mut text).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Why the runner made no deck: its report, found after whatever the code
+/// printed to stderr before it (which may be long and is not shown), and
+/// kept from its end, where a traceback names the error. Without a report,
+/// the end of what it printed (the engine was stopped), or, when the code
+/// printed more than the runner keeps of stderr, that it lost the report.
+fn python_failure(work: &Work<'_>, output: &EngineOutput) -> String {
+    let stderr = output.stderr.trim_end();
+    let report = [PYTHON_ERROR, RUNNER_ERROR]
+        .iter()
+        .flat_map(|label| stderr.match_indices(label))
+        .map(|(at, _)| at)
+        .filter(|&at| at == 0 || stderr[..at].ends_with('\n'))
+        .max();
+    // The runner keeps at most OUTPUT_LIMIT bytes: the report came after.
+    if report.is_none() && output.stderr.len() + 4 >= OUTPUT_LIMIT {
+        return refuse(
+            FAILED,
+            "the Python code wrote more to stderr than the host keeps, so its error report was lost; write less to sys.stderr and send the code again",
+        );
+    }
+    let (lead, said) = match report {
+        Some(at) if stderr[at..].starts_with(PYTHON_ERROR) => (
+            "the Python code failed; fix it and send the whole code again:\n",
+            &stderr[at..],
+        ),
+        Some(at) => ("the Python engine failed:\n", &stderr[at..]),
+        None => (
+            "the Python engine stopped without an error report:\n",
+            stderr,
+        ),
+    };
+    let said = if said.is_empty() { "no output" } else { said };
+    let room = MAX_ERROR_CHARS - lead.chars().count();
+    refuse(FAILED, format!("{lead}{}", tail(&work.shown(said), room)))
 }
 
 /// `view issues --json`, when it gave a report with its list.
@@ -3057,8 +3249,19 @@ impl AssistantHost {
                 "unknown or malformed arguments: name, format (pptx, docx, xlsx, pdf, md, txt, csv, html or json) and content are expected",
             )
         })?;
+        if args.preview || args.from_preview.is_some() {
+            return Err(refuse(
+                FAILED,
+                "preview is not available yet: send the content without preview or fromPreview",
+            ));
+        }
         let engine = engine_for(args.format, &self.engines())?;
         let document = Document::new(args)?;
+        // Refused before the document counts; a sandbox probe that fails
+        // later (see `python_deck`) is refused the same way.
+        if matches!(document.content, Content::Python(_)) && !self.python_offered() {
+            return Err(refuse(FAILED, NO_PYTHON));
+        }
         if !media.reserve_document(MAX_DOCUMENTS_PER_RUN) {
             return Err(refuse(
                 LIMIT,
@@ -3152,7 +3355,6 @@ impl AssistantHost {
     /// Pyodide is no boundary, so only the sandbox holds the model's code,
     /// and without a passing probe there is no Python engine (the model
     /// sends deck objects instead).
-    #[cfg_attr(not(test), allow(dead_code))] // until create_document runs Python content
     async fn python_engine(&self, work: &Work<'_>) -> Option<PathBuf> {
         match self.probe_sandbox(&self.python_sandbox, work).await {
             Ok(sandbox) => Some(sandbox),
@@ -3162,6 +3364,30 @@ impl AssistantHost {
                 None
             }
         }
+    }
+
+    /// A deck from the model's Python code (see [`make_python`]), checked by
+    /// `office` in the same folder: only in the Python engine's sandbox, and
+    /// one deck at a time.
+    async fn python_deck(&self, office: &Work<'_>) -> Result<Made, String> {
+        let no_python = || refuse(FAILED, NO_PYTHON);
+        let engine = self.engines().python.ok_or_else(no_python)?;
+        let runtime = self.env.runtime_dir()?;
+        let mut python = Work {
+            exe: &engine.node,
+            dir: office.dir,
+            home: office.home,
+            name: "Python",
+            sandbox: None,
+            profile: PYTHON_SANDBOX,
+            scratch: None,
+            read_root: Some(&runtime),
+            timeout: PYTHON_TIMEOUT,
+        };
+        let sandbox = self.python_engine(&python).await.ok_or_else(no_python)?;
+        python.sandbox = Some(&sandbox);
+        let _turn = self.python_turn.lock().await;
+        make_python(&python, office, &engine).await
     }
 
     async fn make_document(
@@ -3188,7 +3414,7 @@ impl AssistantHost {
         .await?;
         let format = document.format;
         let made = match (format.engine(), engine.as_deref(), &document.content) {
-            (Engine::Office, Some(exe), _) => {
+            (Engine::Office, Some(exe), content) => {
                 let scratch = match self.env.sandbox_exec() {
                     Some(_) => Some(blocking(officecli_scratch).await?),
                     None => None,
@@ -3206,7 +3432,10 @@ impl AssistantHost {
                 };
                 let sandbox = self.engine_sandbox(&self.office_sandbox, &work).await;
                 work.sandbox = sandbox.as_deref();
-                make_office(&work, format).await?
+                match content {
+                    Content::Python(_) => self.python_deck(&work).await?,
+                    _ => make_office(&work, format).await?,
+                }
             }
             (Engine::Typst, Some(exe), Content::Text(body)) => {
                 let mut work = Work {
@@ -5447,7 +5676,9 @@ esac"#,
         Document::new(CreateDocumentArgs {
             name: "a".into(),
             format: DocumentFormat::Xlsx,
-            content: Value::Array(items.to_vec()),
+            content: Some(Value::Array(items.to_vec())),
+            preview: false,
+            from_preview: None,
         })
         .map(drop)
     }
@@ -5461,7 +5692,9 @@ esac"#,
         Document::new(CreateDocumentArgs {
             name: "a".into(),
             format: DocumentFormat::Pptx,
-            content: Value::Array(items.to_vec()),
+            content: Some(Value::Array(items.to_vec())),
+            preview: false,
+            from_preview: None,
         })
         .map(drop)
     }
@@ -6032,7 +6265,9 @@ esac"#,
         Document::new(CreateDocumentArgs {
             name: "a".into(),
             format: DocumentFormat::Docx,
-            content: json!([{"command": "add", "parent": "/body", "type": "equation", "props": {"formula": r"|x| \\ y"}}]),
+            content: Some(json!([{"command": "add", "parent": "/body", "type": "equation", "props": {"formula": r"|x| \\ y"}}])),
+            preview: false,
+            from_preview: None,
         })
         .unwrap();
     }
@@ -7478,6 +7713,406 @@ console.log(JSON.stringify({
             error.contains("officecli did not finish within 1 seconds"),
             "{error}"
         );
+    }
+
+    /// A lint line of the deck helpers, as the stand-in runner reports it.
+    #[cfg(target_os = "macos")]
+    const LINT_LINE: &str =
+        "card Plan: the box is 3.00 in tall but its text needs 1.20 in; lower h or add content";
+    /// The deck the stand-in runner copies to `out.pptx`.
+    #[cfg(target_os = "macos")]
+    const PYTHON_DECK: &[u8] = b"PK\x03\x04a deck from python";
+
+    /// A [`fixture_in`] whose runtime also holds the Python engine, under a
+    /// stand-in `sandbox-exec` whose probe passes when `works`. Its `node`
+    /// passes the probe and runs the runner as a shell script; the runner
+    /// logs its arguments to `runner.log` in the document's folder, then runs
+    /// the shell body `runner` with `$code`, `$out` and `$lint` set from its
+    /// arguments and `$root` the runtime folder, where `deck.pptx` is
+    /// [`PYTHON_DECK`].
+    #[cfg(target_os = "macos")]
+    fn python_fixture(officecli: &str, runner: &str, works: bool) -> Fixture {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture_in(Some(officecli), None, |dir| Some(stub_sandbox(dir, works)));
+        let runtime = f.env.runtime.clone();
+        let write = |path: &str, bytes: &[u8], mode: u32| {
+            let path = runtime.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        write(
+            "node/node",
+            b"#!/bin/sh\n[ \"$1\" = --version ] && { echo v22; exit 0; }\nrunner=\"$1\"; shift\nexec /bin/sh \"$runner\" \"$@\"\n",
+            0o755,
+        );
+        write(
+            "runtime/src/python/runner.mjs",
+            format!(
+                "echo \"$*\" >> runner.log\nroot=\"${{0%/runtime/src/python/runner.mjs}}\"\nwhile [ $# -gt 1 ]; do case \"$1\" in --code) code=\"$2\" ;; --out) out=\"$2\" ;; --lint) lint=\"$2\" ;; esac; shift 2; done\n{runner}\n"
+            )
+            .as_bytes(),
+            0o644,
+        );
+        write("engines/python/assets.json", b"{}", 0o644);
+        write("deck.pptx", PYTHON_DECK, 0o644);
+        let manifest = json!({"node": "node/node", "engines": {
+            "officecli": {"path": "engines/officecli/officecli"},
+            "python": {
+                "path": "engines/python/assets.json",
+                "runner": "runtime/src/python/runner.mjs",
+            },
+        }});
+        std::fs::write(runtime.join("manifest.json"), manifest.to_string()).unwrap();
+        f
+    }
+
+    /// A stand-in runner that writes the deck and one lint line.
+    #[cfg(target_os = "macos")]
+    fn deck_runner() -> String {
+        format!(r#"cp "$root/deck.pptx" "$out"; printf '%s' '["{LINT_LINE}"]' > "$lint""#)
+    }
+
+    /// `create_document` arguments for a pptx made from `code`.
+    fn python_args(code: &str) -> Value {
+        json!({"name": "Plan.pptx", "format": "pptx", "content": {"kind": "python", "code": code}})
+    }
+
+    /// The bytes of the reply's generated attachment.
+    #[cfg(target_os = "macos")]
+    fn generated_bytes(f: &Fixture) -> Vec<u8> {
+        let attachment = f
+            .record()
+            .attachments
+            .into_iter()
+            .find(|a| a.origin.as_deref() == Some("generated"))
+            .unwrap();
+        let root = f
+            .host
+            .store(&identity().owner)
+            .unwrap()
+            .attachment_root(&f.sid)
+            .unwrap();
+        std::fs::read(root.join(attachment.id)).unwrap()
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_content_makes_a_pptx_and_reports_lint() {
+        let officecli = officecli_drawing(
+            r#"{"results":[]}"#,
+            NO_ISSUES,
+            r#"{"slides":2}"#,
+            r#"echo "<svg>$5</svg>""#,
+        );
+        let f = python_fixture(&officecli, &deck_runner(), true);
+        let code = "prs = new_deck()\ncontent_slide(prs, \"Plan\")\n";
+        let result = f.call("call-1", python_args(code)).await.unwrap();
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["file"]["mimeType"], PPTX);
+        assert_eq!(result["file"]["name"], "Plan.pptx");
+        assert_eq!(result["file"]["slides"], 2);
+        assert_eq!(result["svgPages"], 2);
+        // The helpers' lint reaches the model as warnings.
+        assert_eq!(
+            result["issues"],
+            json!([{"severity": "warning", "message": LINT_LINE}])
+        );
+        let file = PathBuf::from(result["filePath"].as_str().unwrap());
+        assert!(file.is_file());
+        let dir = file.parent().unwrap();
+        assert_eq!(
+            result["previewPath"],
+            json!(dir.join("pages").join("1.svg"))
+        );
+        // The runner got the code as the model wrote it; officecli made no
+        // file of its own and ran no batch, and the attachment is the
+        // runner's deck.
+        assert_eq!(std::fs::read_to_string(dir.join("code.py")).unwrap(), code);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("runner.log")).unwrap(),
+            format!(
+                "--assets {} --code code.py --out out.pptx --lint lint.json\n",
+                f.env.runtime.join("engines/python").display()
+            )
+        );
+        assert!(!dir.join("batch-seen.json").exists());
+        assert_eq!(generated_bytes(&f), PYTHON_DECK);
+        let kept = kept_pages(&f, &result);
+        assert_eq!(
+            kept,
+            [
+                ("1.svg".into(), "<svg>1</svg>".into()),
+                ("2.svg".into(), "<svg>2</svg>".into())
+            ]
+        );
+        // The runner ran under the Python profile with Node as its one
+        // program; officecli under its own.
+        let log = sandbox_log(&f);
+        let runner = log
+            .iter()
+            .find(|line| line.contains(" --code code.py "))
+            .unwrap();
+        for wanted in [
+            format!("-p {}", PYTHON_SANDBOX.replace('\n', " ")),
+            format!("-D ENGINE={} ", real(&f.env.runtime)),
+            format!("-D EXE={} ", real(&f.env.runtime.join("node/node"))),
+        ] {
+            assert!(runner.contains(&wanted), "{wanted}: {runner}");
+        }
+        assert!(log
+            .iter()
+            .filter(|line| line.contains(" out.pptx ") && !line.contains(" --code "))
+            .all(|line| line
+                .contains("(allow file-read-data file-write* (subpath (param \"SCRATCH\")))")));
+        // The same object as JSON text is Python content too.
+        let mut text = python_args(code);
+        text["content"] = json!(text["content"].to_string());
+        let result = f.call("call-2", text).await.unwrap();
+        assert_eq!(result["status"], "completed");
+        assert_eq!(result["issues"][0]["message"], LINT_LINE);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_python_error_reaches_the_model() {
+        let officecli = officecli(r#"{"results":[]}"#, NO_ISSUES, r#"{"slides":1}"#);
+        // What the code printed comes first; the runner's one labelled
+        // block ends stderr.
+        let runner = r#"case "$(cat "$code")" in
+*name_error*) i=0; while [ $i -lt 3000 ]; do echo "printed by the code $i" >&2; i=$((i + 1)); done
+  printf 'PythonError: Traceback (most recent call last):\n  File "deck_code.py", line 1, in <module>\nNameError: name %sx%s is not defined\n' "'" "'" >&2; exit 1 ;;
+*runner_error*) echo 'RunnerError: missing wheels/numpy.whl' >&2; exit 1 ;;
+*silent*) echo 'killed' >&2; exit 1 ;;
+*flood*) head -c 300000 /dev/zero | tr '\0' x >&2; echo 'PythonError: ValueError: lost' >&2; exit 1 ;;
+esac"#;
+        let f = python_fixture(&officecli, runner, true);
+        let error = f
+            .call("call-1", python_args("name_error"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(
+            error.contains("NameError: name 'x' is not defined"),
+            "{error}"
+        );
+        assert!(error.contains("deck_code.py\", line 1"), "{error}");
+        assert!(!error.contains("printed by the code"), "{error}");
+        assert!(error.chars().count() <= 2000, "{}", error.len());
+        let error = f
+            .call("call-2", python_args("runner_error"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(
+            error.contains("RunnerError: missing wheels/numpy.whl"),
+            "{error}"
+        );
+        let error = f.call("call-3", python_args("silent")).await.unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("without an error report"), "{error}");
+        assert!(error.contains("killed"), "{error}");
+        // More than the runner keeps of stderr: the report is lost, and the
+        // model is told why rather than shown the end of what was printed.
+        let error = f.call("call-7", python_args("flood")).await.unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("write less to sys.stderr"), "{error}");
+        assert!(!error.contains("xxx"), "{error}");
+        // No document, and none counted against the reply.
+        assert!(f.record().attachments.is_empty());
+        for call in ["call-4", "call-5", "call-6"] {
+            f.call(call, json!({"name": "n", "format": "txt", "content": "x"}))
+                .await
+                .unwrap();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_deck_or_lint_the_code_links_elsewhere_is_not_read() {
+        let officecli = officecli(r#"{"results":[]}"#, NO_ISSUES, r#"{"slides":1}"#);
+        // The code can write the document's folder, links included.
+        let runner = r#"case "$(cat "$code")" in
+*link_deck*) ln -s "$root/deck.pptx" "$out"; echo '[]' > "$lint" ;;
+*link_lint*) cp "$root/deck.pptx" "$out"; ln -s "$root/secret.json" "$lint" ;;
+esac"#;
+        let f = python_fixture(&officecli, runner, true);
+        std::fs::write(
+            f.env.runtime.join("secret.json"),
+            r#"["a secret outside the folder"]"#,
+        )
+        .unwrap();
+        let error = f
+            .call("call-1", python_args("link_deck"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("without writing the deck"), "{error}");
+        assert!(f.record().attachments.is_empty());
+        let result = f.call("call-2", python_args("link_lint")).await.unwrap();
+        let issues = result["issues"].to_string();
+        assert!(!issues.contains("a secret"), "{issues}");
+        assert!(issues.contains("lint unavailable"), "{issues}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_content_is_pptx_only() {
+        let f = fixture(Some("exit 9"), Some("exit 9"));
+        let python = json!({"kind": "python", "code": "prs = new_deck()"});
+        for (format, content) in [
+            ("docx", python.clone()),
+            ("xlsx", json!(python.to_string())),
+            ("pdf", python.clone()),
+            ("md", python.clone()),
+        ] {
+            let error = f
+                .call(
+                    &id(),
+                    json!({"name": "a", "format": format, "content": content}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), FAILED, "{format}");
+            assert!(error.contains("python content is for pptx only"), "{error}");
+        }
+        assert!(f.outputs().is_empty());
+        // A text file's text is its own, whatever it looks like.
+        let result = f
+            .call(
+                "call-json",
+                json!({"name": "a", "format": "json", "content": python.to_string()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed");
+        // Python content holds the code as a string, and nothing else.
+        for content in [
+            json!({"kind": "python"}),
+            json!({"kind": "python", "code": 1}),
+            json!({"kind": "python", "code": "x", "theme": "navy"}),
+        ] {
+            let error = f
+                .call(
+                    &id(),
+                    json!({"name": "a", "format": "pptx", "content": content}),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), FAILED, "{content}");
+            assert!(error.contains(r#"{"kind":"python","code":"#), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_content_needs_the_engine() {
+        let script = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            r#"{"slides":1}"#,
+        );
+        let f = fixture_in(Some(&script), None, |dir| Some(stub_sandbox(dir, true)));
+        let error = f
+            .call("call-1", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert!(f.outputs().is_empty());
+        // Deck batches work as before.
+        let result = f
+            .call(
+                "call-2",
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed");
+
+        // The engine is there but its sandbox probe fails: the same, and
+        // the document does not count against the reply.
+        #[cfg(target_os = "macos")]
+        {
+            let f = python_fixture(&script, &deck_runner(), false);
+            let error = f
+                .call("call-1", python_args("prs = new_deck()"))
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), FAILED);
+            assert!(error.contains("send a deck object instead"), "{error}");
+            assert!(f.record().attachments.is_empty());
+            for call in ["call-2", "call-3", "call-4"] {
+                f.call(
+                    call,
+                    json!({"name": "a", "format": "pptx", "content": deck()}),
+                )
+                .await
+                .unwrap();
+            }
+            // The runner never ran.
+            assert!(sandbox_log(&f)
+                .iter()
+                .all(|line| !line.contains(" --code ")));
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn oversized_python_code_is_refused() {
+        let f = fixture(Some("exit 9"), None);
+        let error = f
+            .call("call-1", python_args(&"#".repeat(200_001)))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), TOO_LARGE);
+        assert!(error.contains("200000 bytes"), "{error}");
+        // Counted in bytes: 66,667 three-byte characters are 200,001 bytes.
+        let error = f
+            .call("call-2", python_args(&"数".repeat(66_667)))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), TOO_LARGE);
+        // At the limit it is not too large (here it has no engine).
+        let error = f
+            .call("call-3", python_args(&"#".repeat(200_000)))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED, "{error}");
+        assert!(f.outputs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn previews_are_refused_until_they_exist() {
+        let f = fixture(None, None);
+        for args in [
+            json!({"name": "a", "format": "txt", "content": "x", "preview": true}),
+            json!({"name": "a", "format": "txt", "fromPreview": "doc-1"}),
+        ] {
+            let error = f.call(&id(), args.clone()).await.unwrap_err();
+            assert_eq!(code(&error), FAILED, "{args}");
+            assert!(error.contains("preview is not available yet"), "{error}");
+        }
+        // Without either, content is still required.
+        let error = f
+            .call("call-1", json!({"name": "a", "format": "txt"}))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("content is required"), "{error}");
+        assert!(f.outputs().is_empty());
+        let result = f
+            .call(
+                "call-2",
+                json!({"name": "a", "format": "txt", "content": "x", "preview": false}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed");
     }
 
     #[tokio::test]

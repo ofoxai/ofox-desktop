@@ -365,6 +365,9 @@ pub struct AssistantHost {
     pub(super) typst_sandbox: EngineSandbox,
     /// The same for the Python engine, which without it does not run at all.
     pub(super) python_sandbox: EngineSandbox,
+    /// Python decks take turns, whichever reply makes them: each run of
+    /// the engine is a process of several hundred MB.
+    pub(super) python_turn: tokio::sync::Mutex<()>,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -780,6 +783,7 @@ impl AssistantHost {
             office_sandbox: EngineSandbox::default(),
             typst_sandbox: EngineSandbox::default(),
             python_sandbox: EngineSandbox::default(),
+            python_turn: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -982,10 +986,13 @@ impl AssistantHost {
     }
 
     /// Whether Python decks are offered: the engine is there (on macOS
-    /// only) and so is `sandbox-exec`. A probe that fails later turns Python
-    /// content away in `create_document`.
+    /// only), and so are officecli, which checks every deck, and
+    /// `sandbox-exec`. A probe that fails later turns Python content away in
+    /// `create_document`.
     pub(super) fn python_offered(&self) -> bool {
-        self.engines().python.is_some()
+        let engines = self.engines();
+        engines.python.is_some()
+            && engines.officecli.is_some()
             && self.env.sandbox_exec().is_some_and(|path| path.is_file())
     }
 
@@ -6838,14 +6845,29 @@ while read line; do :; done"#,
         )
         .await;
         assert_eq!(boot["runtime"]["documents"]["python"], false);
-        // All there: offered on macOS, where sandbox-exec is; the engine
-        // exists nowhere else.
+        // All there but officecli, which checks every Python deck: not
+        // offered.
         let boot = boot_with(
             &[
                 "runtime/src/python/runner.mjs",
                 "engines/python/assets.json",
             ],
             json!({"node": "node/node", "engines": {"python": python}}),
+        )
+        .await;
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        // All there: offered on macOS, where sandbox-exec is; the engine
+        // exists nowhere else.
+        let boot = boot_with(
+            &[
+                "runtime/src/python/runner.mjs",
+                "engines/python/assets.json",
+                "engines/officecli/officecli",
+            ],
+            json!({"node": "node/node", "engines": {
+                "python": python,
+                "officecli": {"path": "engines/officecli/officecli"},
+            }}),
         )
         .await;
         assert_eq!(

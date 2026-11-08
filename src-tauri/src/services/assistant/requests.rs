@@ -813,6 +813,7 @@ impl AssistantHost {
                 model.tools,
                 self.runtime().is_ok(),
                 &self.engines(),
+                self.python_offered(),
             ));
         }
         self.emit_start(
@@ -1527,15 +1528,21 @@ fn web_params(
 
 /// The document formats a run can make with `create_document`: for a model
 /// that takes tools while the runtime is there to register the tool. Text
-/// formats need no engine, so they are always among them.
+/// formats need no engine, so they are always among them. `python` says
+/// whether a pptx may also be Python code (see `AssistantHost::python_offered`):
+/// the runtime describes the tool from these, not from the bootstrap.
 fn document_params(
     tools: bool,
     runtime: bool,
     engines: &super::documents::engines::Engines,
+    python: bool,
 ) -> Map<String, Value> {
     let mut params = Map::new();
     if tools && runtime {
-        params.insert("documents".into(), json!({"formats": engines.formats()}));
+        params.insert(
+            "documents".into(),
+            json!({"formats": engines.formats(), "python": python}),
+        );
     }
     params
 }
@@ -2243,14 +2250,14 @@ mod tests {
 
     #[test]
     fn run_params_include_document_formats() {
-        let params = Value::Object(document_params(true, true, &engines(true, true)));
+        let params = Value::Object(document_params(true, true, &engines(true, true), false));
         let formats = params["documents"]["formats"].as_array().unwrap();
         for format in [
             "pdf", "pptx", "docx", "xlsx", "md", "txt", "csv", "html", "json",
         ] {
             assert!(formats.contains(&json!(format)), "{format}");
         }
-        let typst_only = Value::Object(document_params(true, true, &engines(false, true)));
+        let typst_only = Value::Object(document_params(true, true, &engines(false, true), false));
         let formats = typst_only["documents"]["formats"].as_array().unwrap();
         assert!(formats.contains(&json!("pdf")));
         assert!(!formats.contains(&json!("pptx")));
@@ -2260,16 +2267,25 @@ mod tests {
     fn run_params_document_formats_without_engines() {
         // Text needs no engine: the tool is still there.
         assert_eq!(
-            Value::Object(document_params(true, true, &engines(false, false))),
-            json!({"documents": {"formats": ["md", "txt", "csv", "html", "json"]}})
+            Value::Object(document_params(true, true, &engines(false, false), false)),
+            json!({"documents": {"formats": ["md", "txt", "csv", "html", "json"], "python": false}})
         );
     }
 
     #[test]
+    fn run_params_say_whether_python_decks_are_offered() {
+        // The runtime builds create_document from these, not the bootstrap.
+        let offered = Value::Object(document_params(true, true, &engines(true, true), true));
+        assert_eq!(offered["documents"]["python"], true);
+        let not = Value::Object(document_params(true, true, &engines(true, true), false));
+        assert_eq!(not["documents"]["python"], false);
+    }
+
+    #[test]
     fn run_params_omit_documents_for_models_without_tools() {
-        assert!(document_params(false, true, &engines(true, true)).is_empty());
+        assert!(document_params(false, true, &engines(true, true), true).is_empty());
         // Without the runtime nothing registers the tool.
-        assert!(document_params(true, false, &engines(true, true)).is_empty());
+        assert!(document_params(true, false, &engines(true, true), true).is_empty());
     }
 
     #[test]
