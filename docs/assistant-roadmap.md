@@ -1,6 +1,6 @@
 # 助手待办清单（按优先级）
 
-记录日期：2026-11-07，同日按设计稿 M3–M5 和参考调研补齐缺口。基线：分支
+记录日期：2026-11-07，同日按设计稿 M3–M5 和参考调研补齐缺口；2026-11-09 增补第 1a 项（用 Python 写 PPT）。基线：分支
 `feat/assistant-deliverables`（M1/M2 已完成：PDF/PPTX/DOCX/XLSX 可稳定生成，引擎随包分发并签名，
 批处理沙箱与公式白名单）。设计稿：`docs/superpowers/specs/2026-11-07-assistant-deliverables-and-media-design.md`。
 产品定位：助手直接产出**一份**用户要的、精美的 Office 文件，首轮即可用，并且能继续改。
@@ -39,6 +39,9 @@
 待用户验收与真实模型回归（`pnpm assistant:real-eval`，结果填进
 `docs/assistant-engines.md`）；验收通过后再改上表状态。
 
+2026-11-09：M3a-1 的 deck 对象真机验收认为质量太差，用户决定统一改用 Python 写文档（macOS 先行），
+见下面第 1a 项；M3d 的 Word / Excel 也按这个决定在第 1a 项之后的切片里做，不另写 JS 渲染器。
+
 下面的“生成 / 修改 / 验收”是整段 M3 的总目标，不是单个切片的范围。
 
 生成：
@@ -63,6 +66,41 @@
   DeepSeek Flash 上各跑一次，一次出一份、零警告、三个模型观感一致。
 - “把第 2 页标题改成 X”只改一页；上传一份 docx 改标题，原文件不变。
 - Word：样式模板（标题、正文、表格、页眉页脚）；Excel：表格样式、数字格式、图表样式；PDF 只补主题。
+
+### 1a. P1：用 Python 写 PPT（macOS 先行） — done（2026-11-09 代码与假模型 e2e 完成；待用户验收）
+
+设计稿：`docs/superpowers/specs/2026-11-09-assistant-python-documents-design.md`，实施计划：
+`docs/superpowers/plans/2026-11-09-assistant-python-decks.md`，调研：`docs/superpowers/research/2026-11-08-ppt-quality-gap.md`、
+`2026-11-08-python-runtime.md`。这里的 P1 是这一轮在设计稿里的名字，与下面“P1：图像与视频”的优先级分组无关。
+
+起因：deck 对象能稳定出文件，但每页一排小卡片、平均 90 字、没有图，版式单调；对照样例是强模型自由写 python-pptx、
+用 matplotlib 画图的产物。
+
+已交付（macOS）：
+- Python 引擎：Pyodide 314.0.7，随包的 wheel（numpy、matplotlib 等、lxml、Pillow、python-pptx、python-docx、openpyxl、
+  XlsxWriter）和思源黑体，由 `scripts/python-downloads.json` 锁定版本与 SHA-256，`scripts/assistant-prepare.mjs` 只在 macOS
+  放进包、其他平台剪掉，声明写在 `assistant-runtime/notices/python.txt`。
+- 运行与辅助：`assistant-runtime/src/python/runner.mjs`、辅助库 `deck.py`、16:9 模板 `template.pptx`（由
+  `scripts/assistant-deck-template.mjs` 生成）。
+- 宿主：Python 在独立子进程里、用自己的 `sandbox-exec` 配置、在文档目录下自己的子目录里运行（无网络、不能启动其他程序、
+  只写自己的目录、不读用户的其他文件和临时目录）；Python 与 officecli 两个沙箱探测都通过才提供，失败即关闭；deck 作为
+  普通文件拷出，由 officecli 校验、查问题、修溢出、出每页 SVG；Python 运行串行。
+- 预览：`preview: true` 只出总览图（最多 24 页）和检查结果，不出附件；之后带新内容或 `fromPreview` 交付；每个文件名每次回复
+  最多预览 2 次；回复结束时最近一次预览自动交付（用户停止的回复不交付）。工具说明只在宿主提供 Python 时提 python 和预览。
+- 技能：`ofox-office-pptx` 先教 Python 路线；deck 对象作兜底（Windows / Linux、沙箱探测失败时）。
+- 回归：`pnpm assistant:real-eval` 的报告多 `route`（python / deck）和 `previews` 两列，pptx 用例要求最终只有一份附件、
+  零警告。
+
+待用户验收：`pnpm assistant:real-eval`（四个提示 × terra / Luna / DeepSeek Flash，结果填进 `docs/assistant-engines.md`）；
+真机上做“讲解 Transformer”，与对照样例并排看。通过后改本项为“验收通过”，再开下面的切片。
+
+后续切片（各自单独立设计、单独验收）：
+
+| 顺序 | 切片 | 交付 | 状态 |
+|---|---|---|---|
+| P1-2 | Word / Excel 用 Python | 复用 P1 的引擎、隔离与预览；docx / xlsx 辅助库与模板；再往后改用户上传的文件也走它（M3b） | todo |
+| P1-3 | Windows 沙箱 | Windows 上与 macOS `sandbox-exec` 同等的系统级隔离；做完才能在 Windows 开 Python 引擎，到那时 Windows 才不再只走 deck 对象 | todo |
+| P1-4 | officecli / Typst 沙箱加固 | P1 评审时记下：两个引擎的 macOS 沙箱配置比 Python 的松（Typst 只禁了网络）；把 Python 那份的收紧移植过来，并加测试 | todo |
 
 ### 2. 在线预览，只生成一份 — todo
 
@@ -126,7 +164,7 @@
 - 危险命令预检（`rm -rf`、`sudo`、`chmod 777` 等）直接转为询问，作为体验层而非安全层。
 - 不持有 sudo；需要提权的动作走系统原生提权框，逐个确认。
 - 无人值守或定时运行时，所有询问一律视为拒绝（deepseek 的 `never` 策略）。
-- 技能脚本的独立沙盒与自带 Python（1.5.1 和本轮都推迟）。
+- 技能脚本的独立沙盒与自带 Python（1.5.1 和本轮都推迟；文档引擎的 Python 见第 1a 项，只跑 pptx 代码）。
 
 ### 7. MCP：OAuth 登录与常驻服务 — todo
 
@@ -146,6 +184,9 @@
 
 - Windows：文档引擎运行器的 Windows 分支从未编译，需先编译通过，再手动验收四种格式和中文字体。
 - 公证：`APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` 由发布负责人提供，公证后从安装包里实跑两个引擎。
+- Python 引擎（macOS）：公证后从安装包里实跑一次 Python 路线（预览 + 交付）；`python.txt` 补上 `pyodide.asm.wasm`
+  内含的 C 库（libffi、expat、libmpdec、bzip2 / xz）的声明；在较老的 macOS 上确认 SVG 图里的中文不退成方块
+  （沙箱不让读每用户的字体缓存，未验证）。
 - 网关并行工具调用 bug（`delta.tool_calls[].index` 不递增）重新探测；仍在就按设计稿只对
   chat-completions 请求加 `parallel_tool_calls: false`，并写明移除条件。
 - `docs/assistant-engines.md` 的真实 key 验收表填写；新增文案的 zh / en / ja 齐全。

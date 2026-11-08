@@ -1,22 +1,27 @@
 # Assistant document engines
 
 The assistant creates Office files and PDFs with two bundled command-line
-engines. `pnpm assistant:prepare` downloads, verifies, signs and stages them
+engines, and on macOS makes PowerPoint decks from Python code with a third.
+`pnpm assistant:prepare` downloads, verifies, signs and stages them
 under `assistant-runtime/resources/engines/`, which the application ships as
 `assistant-runtime/engines/` in its resources.
 
-| Engine    | Version | Used for                         | What it is                                                            |
-| --------- | ------- | -------------------------------- | --------------------------------------------------------------------- |
-| officecli | 1.0.160 | Word, Excel and PowerPoint files | A self-contained, trimmed .NET 10 single-file program (not NativeAOT) |
-| typst     | 0.15.1  | PDF from Typst markup            | A Rust program, no runtime and no JIT                                 |
+| Engine    | Version                        | Used for                                      | What it is                                                                                                                            |
+| --------- | ------------------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| officecli | 1.0.160                        | Word, Excel and PowerPoint files              | A self-contained, trimmed .NET 10 single-file program (not NativeAOT)                                                                 |
+| typst     | 0.15.1                         | PDF from Typst markup                         | A Rust program, no runtime and no JIT                                                                                                 |
+| python    | Pyodide 314.0.7 (CPython 3.14) | PowerPoint decks from Python code, macOS only | CPython compiled to WebAssembly, run by the runtime's own Node with bundled wheels and a CJK font ([below](#python-decks-pptx-macos)) |
 
 They add to the package roughly: officecli about 34 MB (its download is the bare
 binary), typst 14 to 22 MB compressed depending on the platform, and about 75 MB
 together once unpacked (macOS arm64: officecli 34 MB, typst 45 MB).
 
-Both are Apache-2.0. Their licences and notices ship in
+officecli and typst are Apache-2.0. Their licences and notices ship in
 `resources/notices/officecli.txt` and `typst.txt` and next to each executable
-(`LICENSE`, `NOTICE`); the smoke test fails if either notice is missing.
+(`LICENSE`, `NOTICE`); the smoke test fails if either notice is missing. The
+Python engine adds about 37 MB on macOS (Pyodide's package 13 MB, wheels 16 MB,
+the font 8 MB); Pyodide is MPL-2.0 and its notice, with those of the wheels and
+the font, is `resources/notices/python.txt`.
 
 ## Sources and verification
 
@@ -38,6 +43,18 @@ unchanged engine is skipped on the next run.
 Builds exist for darwin-arm64, darwin-x64, linux-x64 and win32-x64. The
 released platforms are macOS arm64 and Windows x64. To bump an engine, change
 the version, URLs and digests together, then re-run the smoke test below.
+
+The Python engine is pinned in `scripts/python-downloads.json`: the Pyodide
+version (the `pyodide` package in the runtime's `package-lock.json`), and for
+each wheel its file name and SHA-256 (numpy, matplotlib and its dependencies,
+lxml, Pillow, python-pptx, python-docx, openpyxl, XlsxWriter and the pure Python
+packages they need), plus the Noto Sans SC font. `assistant-prepare.mjs`
+downloads and verifies them like the engines above (`OFOX_PYODIDE_BASE_URL`
+points the binary wheels at a mirror; the digests are still checked) and stages
+them under `resources/engines/python/`, recorded in the manifest with the
+runner script. Only the platforms listed in that file stage it (macOS today);
+elsewhere nothing is staged and the `pyodide` package is pruned from the
+runtime. Nothing is downloaded when a deck is made.
 
 Both engines keep state under `HOME`, and officecli can start a resident
 process or update itself. `assistant-prepare.mjs` and `assistant-smoke.mjs`
@@ -176,14 +193,18 @@ application's 12.0 minimum.
 Nothing extra. Windows has no hardened runtime or entitlements. The engines are
 bundled as `officecli.exe` and `typst.exe`, exactly as downloaded and verified
 against the digests above. The Windows installer is not code-signed yet (see
-the release workflow), so the engines are not either.
+the release workflow), so the engines are not either. The Python engine is not
+bundled on Windows or Linux: it runs only inside the macOS system sandbox, and
+those platforms have no equivalent yet, so a PowerPoint there is always made
+from a deck object.
 
 ## Smoke test
 
 `pnpm assistant:smoke` fails if a manifest entry for either engine is missing,
 if either engine does not report its pinned version, if officecli cannot create
-and edit a DOCX, if typst cannot compile a PDF, or if an engine notice is
-missing.
+and edit a DOCX, if typst cannot compile a PDF, or if an engine notice (including
+`python.txt`) is missing. It also checks that the `pyodide` package ships where
+the Python engine is offered and is pruned everywhere else.
 
 CI and the branch-package workflow run it after an unsigned
 `assistant-prepare` (no `APPLE_SIGNING_IDENTITY`), so they do not exercise the
@@ -202,7 +223,10 @@ that list: it tells the model to use the tool when the user asks for a file or
 names one of the PDF, Word, PowerPoint and Excel formats this computer can make.
 Only when all four are available does it add that the model must never say it
 cannot attach a file; otherwise it names the formats this machine cannot
-produce, which the model says if asked.
+produce, which the model says if asked. The tool's description and the prompt
+mention Python code and previews only when the host offers the Python engine
+(`documents.python`; see [Python decks](#python-decks-pptx-macos)): a computer
+that cannot run it never hears of them.
 
 Before the first document of a format in a conversation the model reads the
 matching bundled skill with `use_skill`: `ofox-office-docx`, `ofox-office-pptx`,
@@ -210,16 +234,19 @@ matching bundled skill with `use_skill`: `ofox-office-docx`, `ofox-office-pptx`,
 and layout rules; the three Office skills are adapted from the OfficeCLI
 repository (the PowerPoint skill and the deck renderer take their page types
 and palette from its `morph-ppt` skill) and the PDF skill is original (see
-`assistant-runtime/notices/officecli-skills.txt`).
+`assistant-runtime/notices/officecli-skills.txt`). The PowerPoint skill teaches
+the Python route first (a slide plan, the helpers, design rules, the preview
+step) and keeps the deck object as the fallback for a computer that does not
+offer Python.
 
 ### Formats and content
 
-| `format`                           | `content`                                              | What the host does                                                                                                                                                                                         |
-| ---------------------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pptx`                             | a deck object, or an array of officecli batch commands | runs the batch the model wrote, or the one the runtime rendered from a deck object ([below](#the-deck-object-pptx)): as for docx and xlsx, plus [layout fixes](#layout-fixes) and one `view svg` per slide |
-| `docx`, `xlsx`                     | an array of officecli batch commands                   | `officecli create`, then `batch --input --json` (atomic: one failure rolls it all back), `validate`, `view issues`                                                                                         |
-| `pdf`                              | the Typst markup of the body, as a string              | joins the host's prelude and the body into `main.typ`, `typst compile`, then renders page 1 as a preview                                                                                                   |
-| `md`, `txt`, `csv`, `html`, `json` | the file's text, as a string                           | writes the file as given                                                                                                                                                                                   |
+| `format`                           | `content`                                                                        | What the host does                                                                                                                                                                                                                                                                                                 |
+| ---------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `pptx`                             | Python deck code (macOS), a deck object, or an array of officecli batch commands | runs the Python code and takes the deck it saved ([below](#python-decks-pptx-macos)), or runs the batch the model wrote or the runtime rendered from a deck object ([below](#the-deck-object-pptx)); every route ends with the checks of docx and xlsx, [layout fixes](#layout-fixes) and one `view svg` per slide |
+| `docx`, `xlsx`                     | an array of officecli batch commands                                             | `officecli create`, then `batch --input --json` (atomic: one failure rolls it all back), `validate`, `view issues`                                                                                                                                                                                                 |
+| `pdf`                              | the Typst markup of the body, as a string                                        | joins the host's prelude and the body into `main.typ`, `typst compile`, then renders page 1 as a preview                                                                                                                                                                                                           |
+| `md`, `txt`, `csv`, `html`, `json` | the file's text, as a string                                                     | writes the file as given                                                                                                                                                                                                                                                                                           |
 
 An Office batch is a list of `add`, `set`, `remove`, `move` and `swap` commands
 (officecli's `op` is accepted as an alias of `command`). One batch makes one
@@ -259,10 +286,63 @@ text, heading styles and the document language (the interface language).
 Compile errors come back with their line and column in the body the model wrote
 (the prelude's lines are not counted) and the quoted source line.
 
+#### Python decks (pptx, macOS)
+
+Where the host offers the Python engine, the model's first choice for PowerPoint
+is Python code: `content` is `{ "kind": "python", "code": "…" }` (the code as
+one string of at most 200 000 bytes; the runtime also takes that object as JSON
+text). A deck written this way is free in layout and holds plots and diagrams
+drawn from the model's own numbers, where a deck object has ten fixed page types
+and one picture, chart or table on a showcase slide; the deck object stays for
+the computers that cannot run it.
+
+- **What runs.** The host writes the code to `outputs/<docId>/python/code.py` and
+  starts the runner (`assistant-runtime/src/python/runner.mjs`) with the
+  runtime's own Node. The runner loads Pyodide and the bundled wheels (nothing is
+  downloaded or installed) and runs the code with python-pptx, matplotlib and
+  numpy at hand and the deck helpers `deck.py` already imported: a cover, a
+  section break and a content page with a real title placeholder, and cards, key
+  numbers, steps, a timeline, text, shapes, SVG figures and matplotlib plots.
+  Chinese text in plots uses the bundled Noto Sans SC. The deck starts from
+  `template.pptx`, a 16:9 template with a cover, a section and a content layout
+  (title placeholder, footer, page number), built by
+  `scripts/assistant-deck-template.mjs`. As they write, the helpers check how
+  much room a text needs, how empty a box is, the smallest type in a figure and
+  an SVG's proportions, and report what they find as issues.
+- **What comes back.** The runner saves the deck itself; the code never does. A
+  mistake in the code comes back as the end of its Python traceback, bounded, and
+  nothing is made; the model fixes the line and sends the code again (at most two
+  retries, as for any failed document).
+- **How it is held.** Pyodide is not a security boundary, so the operating
+  system holds the code. The host runs the runner as its own child process, under
+  its own `sandbox-exec` profile (stricter than officecli's), with the clean
+  environment, the private home and temporary folders and the dead proxy that the
+  other engines get, in its own subfolder of the document's folder,
+  `outputs/<docId>/python/`. The code cannot use the network, cannot start any
+  other program, can write only that subfolder, and cannot read the user's other
+  files or the shared temporary folders. It is stopped after 90 seconds
+  (matplotlib builds its font cache in the first run), and when the user stops
+  the reply the runner ends with it. Python runs are serialised, one at a time,
+  since each takes hundreds of megabytes.
+- **Fail closed.** Python is offered only when both probes pass: its own and
+  officecli's, which checks the deck. If `sandbox-exec` is missing or either probe
+  fails, the engine is off: the tool and the prompt say nothing of Python, and a
+  call that sends Python code is refused with `send a deck object instead`.
+  officecli and Typst, by contrast, run without a sandbox when their probe fails.
+- **Checks.** The runner makes the chart axis ids positive (python-pptx writes
+  negative ones, which the schema does not allow). The host copies the deck out of
+  the Python subfolder as a regular file (a link, a folder or a file over 25 MiB
+  is no deck), and officecli, in its own sandbox, checks it as it checks a
+  batch's file: `validate`, `view issues`, up to two rounds of
+  [layout fixes](#layout-fixes) and one SVG page per slide. The helpers' own
+  lines are reported with officecli's issues, as warnings.
+
 #### The deck object (pptx)
 
-For PowerPoint the model's first choice is a deck object, not commands:
-`{ "kind": "deck", "title", "language", "theme", "slides": [...] }`. The model
+Where the host does not offer Python (Windows, Linux, a macOS whose sandbox
+probes fail), the model's first choice for PowerPoint is a deck object, not
+commands: `{ "kind": "deck", "title", "language", "theme", "slides": [...] }`;
+where it does, a deck object is the fallback. The model
 writes content only (text, lists, and one picture, chart or table on a showcase
 slide). The runtime chooses fonts, sizes, colours and positions, renders the
 slides with the `navy` theme into a batch, and that batch takes the same path as
@@ -330,11 +410,13 @@ and slide pages as a rendered deck.
   opens the copy the user saved (never the stored one); **Save…** only saves.
 - While a document is made the host works in `<session id>/outputs/<docId>/`
   (mode 0700): the content (`batch.json` or `main.typ`), the engine's private
-  `.home` (its home and temporary folder) and the output and preview files. The
-  folder stays for the tool call, because the runtime reads the preview from it
-  after the host has answered, and is removed when the run ends, whether the run
-  completed, was stopped or failed. A folder that cannot be removed is logged and
-  never fails the run.
+  `.home` (its home and temporary folder) and the output and preview files; a
+  Python deck's code and its runner's output are in the subfolder `python/`.
+  The folder stays for the tool call, because the runtime reads the preview from
+  it after the host has answered (and, for a
+  [preview](#previewing-before-delivering), until the reply ends), and is removed
+  when the run ends, whether the run completed, was stopped or failed. A folder
+  that cannot be removed is logged and never fails the run.
 
 ### Layout fixes
 
@@ -366,10 +448,13 @@ has none to fix, because the renderer fits its own text.
 | ---------------------------- | ---------------------------------------------------------------------- |
 | Documents per reply          | 3 (a refused or failed document does not count)                        |
 | `content`, serialized        | 2 MiB                                                                  |
+| Python deck code             | 200 000 bytes                                                          |
+| Previews of one file name    | 2 per reply; they do not count as documents                            |
 | Commands in one Office batch | 2000                                                                   |
 | File name                    | 120 characters; folders are dropped and the format's extension is kept |
 | One generated file           | 25 MiB; a conversation's files together 500 MiB                        |
 | One engine run               | 60 s, then it and everything it started are killed                     |
+| One Python run               | 90 s, then it and everything it started are killed                     |
 | Engine output                | 256 KiB each of stdout and stderr                                      |
 | Issues in a result and card  | 20, errors first, repeated ones counted together                       |
 | Retries                      | the model retries a failed document at most twice, then explains       |
@@ -423,8 +508,10 @@ until a probe passes; while it fails the engine runs without it, the next docume
 probes again, and the host logs the first failure): no
 network for either engine; officecli writes only the document's folder and its own
 temporary folder, and reads nothing under `/Users` and `/Volumes` except the
-document's folder and its own. Windows
-and Linux have the validator and the dead proxy only (see
+document's folder and its own. The Python engine is the exception to "runs
+without it": it has its own, stricter profile and never runs without it (see
+[Python decks](#python-decks-pptx-macos)). Windows
+and Linux have the validator and the dead proxy only, and no Python (see
 [known limitations](known-limitations.md#assistant-document-engines-2026-11-07)).
 
 ### Previews
@@ -464,10 +551,41 @@ backups, restores and forks copy only the attachment file. Nothing in the app
 shows these pages yet; they are the input of the page-by-page preview in the
 [roadmap](assistant-roadmap.md).
 
+### Previewing before delivering
+
+Where the host offers Python, a pptx can be made in two steps, so the model looks
+at the deck before the user is shown anything.
+
+- `create_document({ name, format: "pptx", content, preview: true })` makes the
+  file and runs all its checks and SVG pages in a new document folder, and
+  delivers nothing: no attachment, no card, no generation record, and it is not
+  one of the reply's three documents. The result holds a `previewId`, the slide
+  count and the issues; the model also gets an overview image of the slides.
+- The overview is one contact sheet that the runtime draws from the slides' SVG
+  pages (with their text, as for the first-page preview above): two columns, each
+  slide numbered in order, up to 24 slides (it says so when a deck has more). A
+  model that cannot see images gets the issues only.
+- To deliver, the model calls again: either with content and without `preview`
+  (the code may have changed: this makes a new file) or with
+  `fromPreview: "<previewId>"` and no content, which delivers the previewed file
+  as it is, with its checks and slide pages, without running an engine. A
+  preview is delivered once, in the reply that made it and in its own format;
+  `fromPreview` together with `content` or `preview` is refused. The delivered
+  attachment takes the preview folder's id.
+- A file name may be previewed twice per reply (a preview that fails gives its
+  count back). A third is refused with a message to deliver.
+- When a reply ends without delivering a file it previewed, the host delivers
+  that file's latest preview itself, as the document of the call that made it
+  (within the reply's three documents). A reply the user stops delivers nothing:
+  the user never saw the previews. Preview folders go with the others when the
+  reply ends.
+
 ### Not in this round
 
 Editing or inspecting an existing Office file (`inspect_document` and
 `edit_document` in the design) is not built: the model can only make new files.
+Python is used for PowerPoint decks only; Word and Excel files, and Python on
+Windows, are later slices (see the [roadmap](assistant-roadmap.md)).
 
 ## Acceptance on a real key
 
@@ -494,6 +612,12 @@ This is the user's step, with a real Ofox key; the development lane never ran it
    `<docId>` folders are left).
 6. Optional: ask for a document with a picture, a chart, and a Word section
    break to see how the model uses the skills.
+7. On macOS, where the Python route runs, ask for the same deck as the research's
+   reference sample ("讲解 Transformer") and put the two side by side (see
+   [the quality-gap research](superpowers/research/2026-11-08-ppt-quality-gap.md)):
+   every slide should have a title, a one-sentence point, two to four zones and a
+   visual that explains; the reply shows one card, made after the model's own
+   preview.
 
 Record the result here, one line per prompt, with the date, build and macOS version.
 
@@ -526,20 +650,26 @@ pnpm assistant:real-eval [--apex ofox.ai|ofox.io] [--account assistant-key] \
   `.real-eval/<time>` unless `--out` says otherwise (the folder is git-ignored).
   Each case's files, their text, the rendered `.pages` and the reply are under
   `OUT/<model>/<case>/`, to open by hand.
-- A case passes when the reply made exactly one file, with zero warnings, in
-  exactly one `create_document` call, and no Office file's text holds a literal
-  `\n`. The report ends with `通过 N / (模型数 × 4)`, 12 for the default three
-  models. The exit code is 0 for at most one failure and 1 for more; 2 is a
-  usage or environment error.
+- A case passes when the reply made exactly one file, with zero warnings, and no
+  Office file's text holds a literal `\n`; every case but the pptx also takes
+  exactly one `create_document` call. The pptx case may take one call per preview
+  and one to deliver (or none, when the end of the reply delivers the last
+  preview). Its row says which route the model took, `route` `python` for deck
+  code or `deck` for a deck object (`-` for the other cases), and how many
+  `previews` it made; a call that failed shows in the result's note. The report
+  ends with `通过 N / (模型数 × 4)`, 12 for the default three models. The exit
+  code is 0 for at most one failure and 1 for more; 2 is a usage or environment
+  error.
 - `--self-test` checks the script itself with no key, no network and no cargo,
   and `--help` lists the options.
 
 The report's table is pasted into the table below, one row per case, with the
 build and the tally `通过 N / (模型数 × 4)` under it. The columns are the date,
-the model, the case, the number of files, the warnings, the layout fixes applied
-(`fixed`), the `create_document` calls, the seconds, the tokens (input /
-output) and the result.
+the model, the case, the route (`python`, `deck` or `-`), the previews, the
+number of files, the warnings, the layout fixes applied (`fixed`), the
+`create_document` calls, the seconds, the tokens (input / output) and the
+result.
 
-| 日期        | 模型 | 用例 | 文件数 | 警告 | 自动修正 | 调用次数 |  秒 | tokens | 结果 |
-| ----------- | ---- | ---- | -----: | ---: | -------: | -------: | --: | ------ | ---- |
-| not yet run |      |      |        |      |          |          |     |        |      |
+| 日期        | 模型 | 用例 | route | previews | 文件数 | 警告 | 自动修正 | 调用次数 |  秒 | tokens | 结果 |
+| ----------- | ---- | ---- | ----- | -------: | -----: | ---: | -------: | -------: | --: | ------ | ---- |
+| not yet run |      |      |       |          |        |      |          |          |     |        |      |

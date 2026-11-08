@@ -7746,6 +7746,19 @@ mod documents {
             "{tool}"
         );
 
+        // The real eval reads the route and the previews from this history.
+        let history = std::fs::read_to_string(
+            session_dir(outcome.config.path(), &outcome.sid).join("session.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::real_eval::documents_of(&history),
+            super::real_eval::Documents {
+                route: Some("python"),
+                previews: 1
+            }
+        );
+
         let results = document_results(outcome.config.path(), &outcome.sid);
         let [preview, delivery] = &results[..] else {
             panic!("two create_document results: {results:?}");
@@ -7854,6 +7867,18 @@ mod documents {
         assert!(
             !prompt.contains("send the Python deck code") && !prompt.contains("preview: true"),
             "{prompt}"
+        );
+
+        let history = std::fs::read_to_string(
+            session_dir(outcome.config.path(), &outcome.sid).join("session.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::real_eval::documents_of(&history),
+            super::real_eval::Documents {
+                route: Some("deck"),
+                previews: 0
+            }
         );
 
         let (generation, bytes) = outcome.made(PPTX);
@@ -8012,6 +8037,11 @@ mod real_eval {
         fixed: u64,
         svg_pages: u64,
         calls: usize,
+        /// How the pptx's content was sent (see [`Documents::route`]); `None`
+        /// for a case that makes no pptx.
+        route: Option<&'static str>,
+        /// The previews the reply made.
+        previews: usize,
         input: u64,
         output: u64,
         /// Every Office file was read, and none has a literal `\n` in its text.
@@ -8028,8 +8058,91 @@ mod real_eval {
         }
 
         fn ok(&self) -> bool {
-            self.files == 1 && self.warnings == 0 && self.calls == 1 && self.clean_text
+            // A deck is looked at before it is delivered: it takes a call
+            // per preview and one to deliver (or none, when the reply's end
+            // delivers the last preview). Every other case takes one call.
+            let calls = if self.route.is_some() {
+                self.calls >= 1
+            } else {
+                self.calls == 1
+            };
+            self.files == 1 && self.warnings == 0 && calls && self.clean_text
         }
+    }
+
+    /// What a reply's `create_document` calls were, from the conversation's
+    /// native history.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub(super) struct Documents {
+        /// `python` when the last pptx call that sent content sent Python
+        /// deck code, `deck` when it sent a deck object (or officecli
+        /// commands); a call that delivers a preview sends none. `None`
+        /// when the reply made no pptx.
+        pub(super) route: Option<&'static str>,
+        /// The previews that were made: one that failed made none.
+        pub(super) previews: usize,
+    }
+
+    /// Whether `content` is Python deck code as the runtime reads it: the
+    /// object `{"kind":"python","code":"…"}`, a list of one around it, or
+    /// its JSON text.
+    fn is_python(content: &Value) -> bool {
+        let parsed;
+        let given = match content {
+            Value::String(text) => match serde_json::from_str::<Value>(text) {
+                Ok(value) => {
+                    parsed = value;
+                    &parsed
+                }
+                Err(_) => return false,
+            },
+            other => other,
+        };
+        let candidate = match given {
+            Value::Array(items) if items.len() == 1 => &items[0],
+            other => other,
+        };
+        candidate["kind"] == "python"
+    }
+
+    /// The route and the previews of the `create_document` calls in
+    /// `history` (a `session.jsonl`); a line that is not an entry is skipped.
+    pub(super) fn documents_of(history: &str) -> Documents {
+        let mut found = Documents::default();
+        let messages = history
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["type"] == "message")
+            .map(|entry| entry["message"].clone());
+        for message in messages {
+            match message["role"].as_str() {
+                Some("assistant") => {
+                    for call in message["content"].as_array().into_iter().flatten() {
+                        let args = &call["arguments"];
+                        if call["type"] == "toolCall"
+                            && call["name"] == "create_document"
+                            && args["format"] == "pptx"
+                            && !args["content"].is_null()
+                        {
+                            found.route = Some(if is_python(&args["content"]) {
+                                "python"
+                            } else {
+                                "deck"
+                            });
+                        }
+                    }
+                }
+                Some("toolResult")
+                    if message["toolName"] == "create_document"
+                        && message["isError"] != true
+                        && message["details"]["preview"] == true =>
+                {
+                    found.previews += 1;
+                }
+                _ => {}
+            }
+        }
+        found
     }
 
     #[test]
@@ -8095,6 +8208,8 @@ mod real_eval {
                     "fixed": tally.fixed,
                     "svgPages": tally.svg_pages,
                     "calls": tally.calls,
+                    "route": tally.route,
+                    "previews": tally.previews,
                     "seconds": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
                     "tokens": {"input": tally.input, "output": tally.output},
                     "note": note,
@@ -8142,6 +8257,170 @@ mod real_eval {
             (shaped.context_window, shaped.max_output_tokens),
             (64000, 4096)
         );
+    }
+
+    /// The conversation's native history as the eval reads it: one line per
+    /// entry, the model's tool calls in its messages and the host's answers
+    /// as tool results.
+    fn history(entries: &[Value]) -> String {
+        entries
+            .iter()
+            .map(|entry| json!({"type": "message", "message": entry}).to_string() + "\n")
+            .collect()
+    }
+
+    fn calls_of(calls: &[Value]) -> Value {
+        let parts: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(index, arguments)| {
+                json!({"type": "toolCall", "id": format!("call-{index}"),
+                       "name": "create_document", "arguments": arguments})
+            })
+            .collect();
+        json!({"role": "assistant", "content": parts})
+    }
+
+    fn result_of(details: Value, is_error: bool) -> Value {
+        json!({"role": "toolResult", "toolName": "create_document",
+               "isError": is_error, "details": details})
+    }
+
+    fn python(preview: bool) -> Value {
+        json!({"name": "a.pptx", "format": "pptx", "preview": preview,
+               "content": {"kind": "python", "code": "prs = new_deck()"}})
+    }
+
+    fn deck() -> Value {
+        json!({"name": "a.pptx", "format": "pptx",
+               "content": {"kind": "deck", "slides": []}})
+    }
+
+    #[test]
+    fn the_route_and_previews_are_read_from_the_history() {
+        let preview = result_of(json!({"preview": true, "previewId": "p1"}), false);
+        let delivered = result_of(json!({"file": {"name": "a.pptx"}}), false);
+        let from_preview = json!({"name": "a.pptx", "format": "pptx", "fromPreview": "p1"});
+
+        // Python code previewed, then delivered as it was previewed.
+        let found = documents_of(&history(&[
+            calls_of(&[python(true)]),
+            preview.clone(),
+            calls_of(std::slice::from_ref(&from_preview)),
+            delivered.clone(),
+        ]));
+        assert_eq!((found.route, found.previews), (Some("python"), 1));
+
+        // A deck object sent once, never previewed.
+        let found = documents_of(&history(&[calls_of(&[deck()]), delivered.clone()]));
+        assert_eq!((found.route, found.previews), (Some("deck"), 0));
+
+        // Two previews, and a reply that ended with the latest delivered by
+        // the host.
+        let found = documents_of(&history(&[
+            calls_of(&[python(true)]),
+            preview.clone(),
+            calls_of(&[python(true)]),
+            preview.clone(),
+        ]));
+        assert_eq!((found.route, found.previews), (Some("python"), 2));
+
+        // No call at all.
+        assert_eq!(documents_of(""), Documents::default());
+    }
+
+    #[test]
+    fn a_failed_preview_is_not_counted_and_the_last_content_decides_the_route() {
+        let preview = result_of(json!({"preview": true, "previewId": "p1"}), false);
+        let failed = result_of(json!({"code": "assistant_document_failed"}), true);
+        let found = documents_of(&history(&[
+            calls_of(&[python(true)]),
+            failed,
+            calls_of(&[deck()]),
+            preview,
+        ]));
+        assert_eq!((found.route, found.previews), (Some("deck"), 1));
+    }
+
+    #[test]
+    fn python_content_is_found_as_the_runtime_reads_it() {
+        let text = json!({"kind": "python", "code": "x"}).to_string();
+        let wrapped = json!([{"kind": "python", "code": "x"}]);
+        for content in [json!(text), wrapped] {
+            let call = json!({"name": "a.pptx", "format": "pptx", "content": content});
+            let found = documents_of(&history(&[calls_of(&[call])]));
+            assert_eq!(found.route, Some("python"));
+        }
+        // An array of officecli commands, or other text, is not Python.
+        for content in [
+            json!([{"command": "add"}]),
+            json!("not json"),
+            json!({"kind": "deck"}),
+        ] {
+            let call = json!({"name": "a.pptx", "format": "pptx", "content": content});
+            let found = documents_of(&history(&[calls_of(&[call])]));
+            assert_eq!(found.route, Some("deck"));
+        }
+    }
+
+    #[test]
+    fn only_a_pptx_has_a_route() {
+        let call = json!({"name": "a.docx", "format": "docx", "content": [{"command": "add"}]});
+        let found = documents_of(&history(&[
+            calls_of(&[call]),
+            // Other tools and malformed lines are not create_document.
+            json!({"role": "toolResult", "toolName": "use_skill", "details": {"preview": true}}),
+        ]));
+        assert_eq!(found, Documents::default());
+        assert_eq!(
+            documents_of("{not json\n{\"type\":\"custom\"}\n"),
+            Documents::default()
+        );
+    }
+
+    #[test]
+    fn a_pptx_may_take_a_call_per_preview_and_every_other_case_takes_one() {
+        let clean = |route, previews, calls| Tally {
+            files: 1,
+            calls,
+            route,
+            previews,
+            clean_text: true,
+            ..Tally::default()
+        };
+        assert!(clean(None, 0, 1).ok(), "a pdf, one call");
+        assert!(!clean(None, 0, 2).ok(), "a pdf, a retry");
+        assert!(clean(Some("deck"), 0, 1).ok());
+        assert!(clean(Some("python"), 1, 2).ok(), "preview, then deliver");
+        assert!(
+            clean(Some("python"), 2, 3).ok(),
+            "two previews, then deliver"
+        );
+        assert!(
+            clean(Some("python"), 1, 1).ok(),
+            "delivered at the reply's end"
+        );
+        assert!(!clean(Some("python"), 0, 0).ok(), "no call");
+        assert!(!Tally {
+            files: 2,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+        assert!(!Tally {
+            files: 0,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+        assert!(!Tally {
+            warnings: 1,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+        assert!(!Tally {
+            clean_text: false,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
     }
 
     /// One prompt in a new conversation with `model` on the real gateway.
@@ -8223,6 +8502,18 @@ mod real_eval {
             .filter(|end| end["name"] == "create_document")
             .collect();
         tally.calls = calls.len();
+        // How the deck was sent and previewed is in the model's own calls,
+        // which the events leave out.
+        match std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl")) {
+            Ok(text) => {
+                let documents = documents_of(&text);
+                tally.route = documents.route;
+                tally.previews = documents.previews;
+            }
+            Err(error) => tally.notes.push(format!(
+                "could not read the conversation's history: {error}"
+            )),
+        }
         let refused = calls.iter().filter(|end| end["success"] != true).count();
         if refused > 0 {
             tally

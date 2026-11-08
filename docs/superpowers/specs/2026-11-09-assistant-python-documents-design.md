@@ -1,6 +1,9 @@
 # 助手 P1：用 Python 写 PPT（macOS 先行）— 设计稿
 
-日期：2026-11-09。前置：M3 设计稿 `2026-11-07-assistant-office-polish-and-edit-design.md`（M3a-1 已交付 deck 对象路线）。
+日期：2026-11-09
+状态：已实现（2026-11-09 代码、假模型 e2e 与回归脚本完成），待用户验收：`pnpm assistant:real-eval` 与真机“讲解 Transformer”对照。
+
+前置：M3 设计稿 `2026-11-07-assistant-office-polish-and-edit-design.md`（M3a-1 已交付 deck 对象路线）。
 调研：`docs/superpowers/research/2026-11-08-ppt-quality-gap.md`、`2026-11-08-python-runtime.md`。
 
 ## 为什么做

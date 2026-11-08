@@ -15,7 +15,8 @@
 //   3. 跑 `cargo test --test assistant_host real_eval -- --ignored`（src-tauri 里的
 //      `real_eval::four_prompts_on_the_listed_models`），每个用例在 stdout 打印一行 JSON。
 //   4. 收集这些 JSON 行，写 <out>/report.md；用例生成的文件在
-//      <out>/<模型>/<用例>/ 下。
+//      <out>/<模型>/<用例>/ 下。pptx 用例还记录模型走的路线（route：python 代码或 deck
+//      对象；其它用例是 -）和预览了几次（previews），并要求最终只有一份附件、零警告。
 //
 // 退出码：0 失败 ≤ 1 个；1 失败 ≥ 2 个；2 用法或环境错误（没有 key、目录读不到、
 // 模型没选中）。
@@ -70,7 +71,7 @@ const HELP = `真实模型回归：四个验收提示（pdf / ppt / 成绩表 / 
 
 key：环境变量 OFOX_API_KEY；没有就读钥匙串 service ${SERVICE} / account <--account>（仅 macOS）。
 
-输出：<out>/report.md（每个用例一行，末尾 "通过 N / 总数"），以及 <out>/<模型>/<用例>/ 下
+输出：<out>/report.md（每个用例一行，含 pptx 走的路线 route 和预览次数 previews，末尾 "通过 N / 总数"），以及 <out>/<模型>/<用例>/ 下
 用例生成的文件、它们的文字（.txt）、渲染页（.pages/）和回复（reply.md）。
 
 退出码：0 失败 ≤ 1 个；1 失败 ≥ 2 个；2 用法或环境错误。`;
@@ -264,15 +265,15 @@ function passedOf(lines) {
 function renderReport(lines, { date, apex, models, total, cargoCode }) {
   const rows = lines.map((line) => {
     const tokens = `${line.tokens?.input ?? 0} / ${line.tokens?.output ?? 0}`;
-    return `| ${date} | ${cell(line.model)} | ${cell(line.case)} | ${line.files ?? 0} | ${line.warnings ?? 0} | ${line.fixed ?? 0} | ${line.calls ?? 0} | ${line.seconds ?? 0} | ${tokens} | ${verdict(line)} |`;
+    return `| ${date} | ${cell(line.model)} | ${cell(line.case)} | ${cell(line.route || "-")} | ${line.previews ?? 0} | ${line.files ?? 0} | ${line.warnings ?? 0} | ${line.fixed ?? 0} | ${line.calls ?? 0} | ${line.seconds ?? 0} | ${tokens} | ${verdict(line)} |`;
   });
   const out = [
     `# 真实模型回归 ${date}`,
     "",
     `网关：https://api.${apex}；模型：${models.map(cell).join("、")}`,
     "",
-    "| 日期 | 模型 | 用例 | 文件数 | 警告 | 自动修正 | 调用次数 | 秒 | tokens | 结果 |",
-    "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+    "| 日期 | 模型 | 用例 | route | previews | 文件数 | 警告 | 自动修正 | 调用次数 | 秒 | tokens | 结果 |",
+    "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ...rows,
     "",
   ];
@@ -533,11 +534,13 @@ function selfTest() {
     case: name,
     model,
     ok: true,
+    route: name === "pptx-transformer" ? "python" : null,
+    previews: name === "pptx-transformer" ? 1 : 0,
     files: 1,
     warnings: 0,
     fixed: 1,
     svgPages: 8,
-    calls: 1,
+    calls: name === "pptx-transformer" ? 2 : 1,
     seconds: 42.5,
     tokens: { input: 1200, output: 3400 },
     note: "",
@@ -605,7 +608,12 @@ function selfTest() {
     const rows = report.split("\n");
     assert.ok(
       rows.includes(
-        "| 日期 | 模型 | 用例 | 文件数 | 警告 | 自动修正 | 调用次数 | 秒 | tokens | 结果 |",
+        "| 日期 | 模型 | 用例 | route | previews | 文件数 | 警告 | 自动修正 | 调用次数 | 秒 | tokens | 结果 |",
+      ),
+    );
+    assert.ok(
+      rows.includes(
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
       ),
     );
     assert.equal(
@@ -614,7 +622,12 @@ function selfTest() {
     );
     assert.ok(
       rows.includes(
-        "| 2026-11-08 | openai/gpt-6.1-terra | pdf-sichuan | 1 | 0 | 1 | 1 | 42.5 | 1200 / 3400 | 通过 |",
+        "| 2026-11-08 | openai/gpt-6.1-terra | pdf-sichuan | - | 0 | 1 | 0 | 1 | 1 | 42.5 | 1200 / 3400 | 通过 |",
+      ),
+    );
+    assert.ok(
+      rows.includes(
+        "| 2026-11-08 | google/gemini-luna | pptx-transformer | python | 1 | 1 | 0 | 1 | 2 | 42.5 | 1200 / 3400 | 通过 |",
       ),
     );
     const failed = rows.find(
@@ -624,6 +637,34 @@ function selfTest() {
     assert.ok(report.trimEnd().endsWith("通过 11 / 12"));
     assert.ok(!report.includes(fakeKey));
     assert.ok(!report.includes("selftest"));
+  });
+  check("报告：route 与 previews 两列", () => {
+    const base = {
+      date: "2026-11-09",
+      apex: "ofox.ai",
+      models: ["a"],
+      total: 2,
+      cargoCode: 0,
+    };
+    const rows = renderReport(
+      [
+        {
+          ...passLine("a", "pptx-transformer"),
+          route: "deck",
+          previews: 0,
+          calls: 1,
+        },
+        // 没有这两个字段的行：route 显示 -，previews 显示 0。
+        { case: "pdf-sichuan", model: "a", ok: true },
+      ],
+      base,
+    ).split("\n");
+    const row = (name) => rows.find((line) => line.includes(`| ${name} |`));
+    assert.match(
+      row("pptx-transformer"),
+      /\| pptx-transformer \| deck \| 0 \| 1 \|/,
+    );
+    assert.match(row("pdf-sichuan"), /\| pdf-sichuan \| - \| 0 \| 0 \|/);
   });
   check("报告：缺行按失败计", () => {
     const lines = stdout.map(parseLine).filter(Boolean).slice(0, 10);
