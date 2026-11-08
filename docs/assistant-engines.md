@@ -333,7 +333,13 @@ the computers that cannot run it.
   prompt say nothing of Python, and a call that sends Python code anyway is
   refused the same way. A failed Python probe keeps Python off until the app
   restarts; officecli's probe is tried again with the next document, and Python
-  is offered again once it passes.
+  is offered again once it passes. The engine counts as there only when every
+  file its `assets.json` lists under `files` (each wheel, the font and its
+  licence) is staged. A runner that fails before it runs the code (exit 2: its
+  assets, Pyodide or a package do not load) also keeps Python off until the app
+  restarts, and that call is refused with `send a deck object instead` and the
+  runner's reason; a failure once the code has started (exit 1, `os._exit` in
+  the code included) is the code's, and Python stays on.
   officecli and Typst, by contrast, run without a sandbox when their probe fails.
 - **Checks.** The runner makes the chart axis ids positive (python-pptx writes
   negative ones, which the schema does not allow). The host copies the deck out of

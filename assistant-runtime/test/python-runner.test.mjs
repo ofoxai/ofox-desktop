@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { copyFile, mkdir, readFile, readdir, symlink } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -8,7 +9,9 @@ import {
   options,
   requireEngine,
   run,
+  runner,
   scratch,
+  staged,
   zipEntries,
 } from "./fixtures/python-engine.mjs";
 
@@ -29,15 +32,40 @@ test("makes a pptx from code", options, async (t) => {
 test("reports a Python error", options, async (t) => {
   const result = await run(t, "prs = new_deck()\nprint(undefined_name)\n");
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /^PythonError: /);
+  assert.match(result.stderr, /^\nPythonError: /);
   assert.match(result.stderr, /NameError/);
   // The traceback is cut to its end, not left to fill the host's buffer.
-  assert.ok(result.stderr.length <= "PythonError: ".length + 1800 + 1);
+  assert.ok(result.stderr.length <= "\nPythonError: ".length + 1800 + 1);
   assert.equal(await exists(result.out), false);
 });
 
+// The host finds the report by its label at the start of a line.
+test("starts its report on a line of its own", options, async (t) => {
+  const result = await run(
+    t,
+    'import sys\nsys.stderr.write("no newline")\nsys.stderr.flush()\nprs = new_deck()\nraise ValueError("boom")\n',
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^no newline\nPythonError: /);
+  assert.match(result.stderr, /ValueError: boom/);
+});
+
+// Exit 2 means the engine itself is broken (the host stops offering it);
+// exit 1 is the code's own failure.
+test("exits 2 when it is started wrongly", options, async () => {
+  await requireEngine();
+  const result = spawnSync(staged, [runner, "--assets", assets], {
+    env: { PATH: process.env.PATH },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /^\nRunnerError: usage: /);
+});
+
 // Code that ends the process or Pyodide itself must still come back as one
-// short, labelled error, not Node's dump of Pyodide's minified source.
+// short, labelled error, not Node's dump of Pyodide's minified source. It is
+// the code's failure (exit 1), even when Pyodide reports it from outside the
+// code, so the host keeps offering the engine.
 for (const [name, code] of [
   ["sys.exit", "import sys\nprs = new_deck()\nsys.exit(0)\n"],
   ["os._exit", "import os\nprs = new_deck()\nos._exit(0)\n"],
@@ -48,7 +76,7 @@ for (const [name, code] of [
     async (t) => {
       const result = await run(t, code);
       assert.equal(result.status, 1);
-      assert.match(result.stderr, /^(PythonError|RunnerError): /);
+      assert.match(result.stderr, /^\n(PythonError|RunnerError): /);
       assert.ok(result.stderr.length <= 4096, `${result.stderr.length} bytes`);
       assert.doesNotMatch(result.stderr, /Node\.js v/);
       assert.equal(await exists(result.out), false);
@@ -135,8 +163,9 @@ test("fails on a missing wheel", options, async (t) => {
       path.join(copy, "assets.json"),
     );
     const result = await run(t, TITLE_SLIDE, { assetsDir: copy });
-    assert.equal(result.status, 1, missing);
-    assert.match(result.stderr, /RunnerError/, missing);
+    // Before the code ran: the engine is broken, not the code.
+    assert.equal(result.status, 2, missing);
+    assert.match(result.stderr, /^\nRunnerError: /, missing);
     assert.ok(result.stderr.includes(missing), result.stderr);
     assert.equal(await exists(result.out), false, missing);
   }

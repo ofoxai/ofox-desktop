@@ -2591,11 +2591,13 @@ async fn check_office(
 /// its folder, links included, and put the folder itself behind a link: a
 /// deck that is not a regular file of at most
 /// [`attachments::MAX_FILE_BYTES`] in a folder that is not a link is no
-/// deck, and neither the deck nor the lint is read through a link.
+/// deck, and neither the deck nor the lint is read through a link. A runner
+/// that could not start the code sets `broken` (see [`ENGINE_BROKEN`]).
 async fn make_python(
     python: &Work<'_>,
     office: &Work<'_>,
     engine: &PythonEngine,
+    broken: &std::sync::atomic::AtomicBool,
 ) -> Result<Made, String> {
     let file = DocumentFormat::Pptx.file();
     let (runner, assets) = (
@@ -2607,6 +2609,11 @@ async fn make_python(
             &runner, "--assets", &assets, "--code", CODE, "--out", &file, "--lint", LINT,
         ])
         .await?;
+    if output.status == Some(ENGINE_BROKEN) {
+        broken.store(true, std::sync::atomic::Ordering::Relaxed);
+        log::warn!("[Assistant] the Python engine could not start the code; it is off until the app restarts");
+        return Err(python_broken(python, &output));
+    }
     if output.status != Some(0) {
         return Err(python_failure(python, &output));
     }
@@ -2673,6 +2680,37 @@ fn read_lint(path: &Path) -> Option<Vec<String>> {
     Some(lines)
 }
 
+/// The runner's exit status when it failed before running the code (its
+/// arguments, the assets, Pyodide or a package): the engine is broken, not
+/// the code, and Python is off until the app restarts.
+const ENGINE_BROKEN: i32 = 2;
+
+/// Where the runner's report starts in `stderr`: its last label at the
+/// start of a line, after whatever the code printed.
+fn report_at(stderr: &str) -> Option<usize> {
+    [PYTHON_ERROR, RUNNER_ERROR]
+        .iter()
+        .flat_map(|label| stderr.match_indices(label))
+        .map(|(at, _)| at)
+        .filter(|&at| at == 0 || stderr[..at].ends_with('\n'))
+        .max()
+}
+
+/// The refusal of a call whose runner could not start the code (see
+/// [`ENGINE_BROKEN`]): as when there is no Python, with the runner's reason.
+fn python_broken(work: &Work<'_>, output: &EngineOutput) -> String {
+    let stderr = output.stderr.trim();
+    let said = report_at(stderr).map_or(stderr, |at| &stderr[at..]);
+    let said = if said.is_empty() { "no output" } else { said };
+    refuse(
+        FAILED,
+        format!(
+            "{NO_PYTHON}. The Python engine did not start: {}",
+            clip(&work.shown(said), MAX_ISSUE_CHARS)
+        ),
+    )
+}
+
 /// Why the runner made no deck: its report, found after whatever the code
 /// printed to stderr before it (which may be long and is not shown), and
 /// kept from its end, where a traceback names the error. Without a report,
@@ -2680,12 +2718,7 @@ fn read_lint(path: &Path) -> Option<Vec<String>> {
 /// printed more than the runner keeps of stderr, that it lost the report.
 fn python_failure(work: &Work<'_>, output: &EngineOutput) -> String {
     let stderr = output.stderr.trim_end();
-    let report = [PYTHON_ERROR, RUNNER_ERROR]
-        .iter()
-        .flat_map(|label| stderr.match_indices(label))
-        .map(|(at, _)| at)
-        .filter(|&at| at == 0 || stderr[..at].ends_with('\n'))
-        .max();
+    let report = report_at(stderr);
     // The runner keeps at most OUTPUT_LIMIT bytes: the report came after.
     if report.is_none() && output.stderr.len() + 4 >= OUTPUT_LIMIT {
         return refuse(
@@ -3667,7 +3700,7 @@ impl AssistantHost {
         let sandbox = self.python_engine(&python).await.ok_or_else(no_python)?;
         python.sandbox = Some(&sandbox);
         let _turn = self.python_turn.lock().await;
-        make_python(&python, office, &engine).await
+        make_python(&python, office, &engine, &self.python_broken).await
     }
 
     /// Make `document`'s file with `engine` (none for text) in the new
@@ -8291,7 +8324,7 @@ console.log(JSON.stringify({
         let runner = r#"case "$(cat "$code")" in
 *name_error*) i=0; while [ $i -lt 3000 ]; do echo "printed by the code $i" >&2; i=$((i + 1)); done
   printf 'PythonError: Traceback (most recent call last):\n  File "deck_code.py", line 1, in <module>\nNameError: name %sx%s is not defined\n' "'" "'" >&2; exit 1 ;;
-*runner_error*) echo 'RunnerError: missing wheels/numpy.whl' >&2; exit 1 ;;
+*runner_error*) echo 'RunnerError: Program terminated with exit(0)' >&2; exit 1 ;;
 *silent*) echo 'killed' >&2; exit 1 ;;
 *flood*) head -c 300000 /dev/zero | tr '\0' x >&2; echo 'PythonError: ValueError: lost' >&2; exit 1 ;;
 esac"#;
@@ -8314,7 +8347,7 @@ esac"#;
             .unwrap_err();
         assert_eq!(code(&error), FAILED);
         assert!(
-            error.contains("RunnerError: missing wheels/numpy.whl"),
+            error.contains("RunnerError: Program terminated with exit(0)"),
             "{error}"
         );
         let error = f.call("call-3", python_args("silent")).await.unwrap_err();
@@ -8333,6 +8366,67 @@ esac"#;
             f.call(call, json!({"name": "n", "format": "txt", "content": "x"}))
                 .await
                 .unwrap();
+        }
+    }
+
+    /// The runner exits 2 when it fails before running the code (its
+    /// assets, Pyodide or a package do not load) and 1 when the code ran and
+    /// failed, even by ending the process.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_runner_that_cannot_start_the_code_turns_python_off() {
+        let officecli = officecli(r#"{"results":[]}"#, NO_ISSUES, r#"{"slides":1}"#);
+        let runner = r#"case "$(cat "$code")" in
+*exits*) printf 'printed\nRunnerError: Program terminated with exit(0)\n' >&2; exit 1 ;;
+*) printf '\nRunnerError: missing wheels/numpy.whl\n' >&2; exit 2 ;;
+esac"#;
+        let f = python_fixture(&officecli, runner, |dir| stub_sandbox(dir, true));
+        let runs = |f: &Fixture| {
+            sandbox_log(f)
+                .iter()
+                .filter(|line| line.contains(" --code "))
+                .count()
+        };
+        // The code's own failure: Python stays on.
+        let error = f.call("call-1", python_args("exits")).await.unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(
+            error.contains("RunnerError: Program terminated with exit(0)"),
+            "{error}"
+        );
+        assert!(!error.contains("send a deck object instead"), "{error}");
+        assert!(f.host.python_offered());
+        // The engine's: the call is refused as Python is, with the
+        // runner's reason, and Python is off for the session.
+        let error = f
+            .call("call-2", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert!(
+            error.contains("RunnerError: missing wheels/numpy.whl"),
+            "{error}"
+        );
+        assert!(!f.host.python_offered());
+        assert_eq!(runs(&f), 2);
+        let error = f
+            .call("call-3", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert_eq!(runs(&f), 2, "the engine ran again");
+        // No document, and none counted against the reply; deck objects
+        // still work.
+        assert!(f.record().attachments.is_empty());
+        for call in ["call-4", "call-5", "call-6"] {
+            f.call(
+                call,
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
         }
     }
 

@@ -3,8 +3,13 @@
 //   node runner.mjs --assets <dir> --code <code.py> --out <out.pptx> --lint <lint.json>
 //
 // Exit 0: out.pptx and lint.json (a JSON array of strings) are written.
-// Exit 1: stderr is "PythonError: <end of the traceback>" for the model's own
-// mistakes or "RunnerError: <reason>" for anything else; nothing is written.
+// Exit 1: the code ran and failed. stderr ends with "PythonError: <end of the
+// traceback>" for the model's own mistakes or "RunnerError: <reason>" for
+// anything else that ended it (such as os._exit); nothing is written.
+// Exit 2: the runner failed before the code ran (its arguments, the assets,
+// Pyodide or a package that does not load): "RunnerError: <reason>". The
+// engine is broken, not the code.
+// The report starts on a line of its own, after whatever the code printed.
 //
 // Every package comes from <assets> (assets.json, wheels/, fonts/); nothing is
 // downloaded. The host runs this in a sandboxed child process: Pyodide is not
@@ -19,6 +24,9 @@ import { loadPyodide, version as pyodideVersion } from "pyodide";
 const TRACEBACK_CHARS = 1800;
 
 class RunnerError extends Error {}
+
+// Whether the model's code has started: a failure before it is the engine's.
+let codeStarted = false;
 
 // Runs with the model's code in `user_code`; returns the lint messages as JSON.
 const RUN = `
@@ -156,8 +164,12 @@ async function run({ assets, code, out, lint }) {
     readFileSync(path.join(assets, manifest.font)),
   );
   py.registerJsModule("host", { svg_to_png: svgToPng });
+  // What the code's prelude imports loads now, so that a package that does
+  // not load is the engine's failure, not the code's.
+  py.runPython("import deck, pptx.parts.chart");
 
   const globals = py.toPy({ user_code: readFileSync(code, "utf8") });
+  codeStarted = true;
   const messages = await py.runPythonAsync(RUN, { globals });
   writeFileSync(out, py.FS.readFile("/tmp/out.pptx"));
   writeFileSync(lint, messages);
@@ -172,8 +184,8 @@ function fail(error) {
     error?.name === "PythonError"
       ? `PythonError: ${message.slice(-TRACEBACK_CHARS)}`
       : `RunnerError: ${message.slice(0, TRACEBACK_CHARS)}`;
-  writeFileSync(2, `${text}\n`);
-  process.exit(1);
+  writeFileSync(2, `\n${text}\n`);
+  process.exit(codeStarted ? 1 : 2);
 }
 process.on("uncaughtException", fail);
 process.on("unhandledRejection", fail);

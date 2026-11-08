@@ -365,6 +365,10 @@ pub struct AssistantHost {
     pub(super) typst_sandbox: EngineSandbox,
     /// The same for the Python engine, which without it does not run at all.
     pub(super) python_sandbox: EngineSandbox,
+    /// Whether the Python engine failed before running the code (its runner
+    /// exited 2: the assets, Pyodide or a package did not load): it is off
+    /// until the app restarts.
+    pub(super) python_broken: AtomicBool,
     /// Python decks take turns, whichever reply makes them: each run of
     /// the engine is a process of several hundred MB.
     pub(super) python_turn: tokio::sync::Mutex<()>,
@@ -783,6 +787,7 @@ impl AssistantHost {
             office_sandbox: EngineSandbox::default(),
             typst_sandbox: EngineSandbox::default(),
             python_sandbox: EngineSandbox::default(),
+            python_broken: AtomicBool::new(false),
             python_turn: tokio::sync::Mutex::new(()),
         })
     }
@@ -991,8 +996,9 @@ impl AssistantHost {
     /// (officecli checks a Python deck only in its sandbox), and the Python
     /// engine's own probe has not failed. Before a probe has run, Python is
     /// offered and a call is refused when its sandbox turns out missing. A
-    /// failed Python probe turns it off for the session: Python content is
-    /// then refused before the engine is probed again.
+    /// failed Python probe, or a runner that could not start the code (see
+    /// [`Self::python_broken`]), turns it off for the session: Python
+    /// content is then refused before the engine runs again.
     pub(super) fn python_offered(&self) -> bool {
         let engines = self.engines();
         engines.python.is_some()
@@ -1000,6 +1006,7 @@ impl AssistantHost {
             && self.env.sandbox_exec().is_some_and(|path| path.is_file())
             && !self.office_sandbox.failed()
             && !self.python_sandbox.failed()
+            && !self.python_broken.load(Ordering::Relaxed)
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
