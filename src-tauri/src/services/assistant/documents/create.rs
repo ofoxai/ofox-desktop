@@ -2120,13 +2120,19 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 /// profile is what holds the model's code, so Python never runs without it
 /// (see [`Work::needs_sandbox`]), and it holds more than officecli's.
 ///
-/// - Files as for officecli, without a temporary folder of its own (its home
-///   is in the document's folder). The engine root is the runtime folder,
-///   where Node, the runner with its modules and the Pyodide assets are.
+/// - Of the folders that hold the user's files (theirs, the volumes, the
+///   shared and per-user temporary and cache folders) it reads only the
+///   document's and the engine root, the runtime folder where Node, the
+///   runner with its modules and the Pyodide assets are; its home and temp
+///   folder are in the document's folder. No terminal: it neither reads
+///   nor writes a tty.
+/// - It writes only the document's folder, `/dev/null`, `/dev/zero` and
+///   `/dev/dtracehelper` (where Node registers its DTrace probes).
 /// - No other program: no new process at all, and only `EXE`, the bundled
 ///   Node that `sandbox-exec` starts, may be executed. No native code from
 ///   the document's folder, the one place the code can write.
-/// - No system service but `com.apple.fonts`, which @napi-rs/canvas needs
+/// - No system service but the font server (`com.apple.fonts`, and its
+///   older name `com.apple.FontObjectsServer`), which @napi-rs/canvas needs
 ///   to draw an SVG figure's text in system fonts such as PingFang SC.
 ///   Everything else Node looks up it does without: the preferences
 ///   (`cfprefsd`, which would hand out what the file rules hide), user and
@@ -2135,9 +2141,9 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 const PYTHON_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)
-(deny file-read-data (subpath "/Users") (subpath "/Volumes"))
+(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty)"))
 (deny file-write*)
-(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper"))
 (allow file-read-data file-write* (subpath (param "DOC")))
 (allow file-read-data (subpath (param "ENGINE")))
 (deny process-fork)
@@ -2145,7 +2151,7 @@ const PYTHON_SANDBOX: &str = r#"(version 1)
 (allow process-exec (literal (param "EXE")))
 (deny file-map-executable (subpath (param "DOC")))
 (deny mach-lookup)
-(allow mach-lookup (global-name "com.apple.fonts"))
+(allow mach-lookup (global-name "com.apple.fonts") (global-name "com.apple.FontObjectsServer"))
 (deny signal)
 (allow signal (target self))"#;
 
@@ -7124,14 +7130,17 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
                 "runtime/src/python/runner.mjs --assets engines/python"
             ]
         );
-        // What the profile allows: no network; of the user's folders read
-        // only the document's and the runtime's; write only the document's;
-        // start no other program, nor native code the code wrote; reach no
-        // system service but the fonts; signal no other process.
+        // What the profile allows: no network; of the user's folders (the
+        // temporary and cache ones too) read only the document's and the
+        // runtime's, and no terminal; write only the document's and three
+        // devices; start no other program, nor native code the code wrote;
+        // reach no system service but the font server, by either name;
+        // signal no other process.
         for rule in [
             "(deny network*)",
-            r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes"))"#,
+            r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty)"))"#,
             "(deny file-write*)",
+            r#"(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper"))"#,
             r#"(allow file-read-data file-write* (subpath (param "DOC")))"#,
             r#"(allow file-read-data (subpath (param "ENGINE")))"#,
             "(deny process-fork)",
@@ -7139,13 +7148,15 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
             r#"(allow process-exec (literal (param "EXE")))"#,
             r#"(deny file-map-executable (subpath (param "DOC")))"#,
             "(deny mach-lookup)",
-            r#"(allow mach-lookup (global-name "com.apple.fonts"))"#,
+            r#"(allow mach-lookup (global-name "com.apple.fonts") (global-name "com.apple.FontObjectsServer"))"#,
             "(deny signal)",
             "(allow signal (target self))",
         ] {
             assert!(PYTHON_SANDBOX.contains(rule), "{rule}");
         }
         assert!(!PYTHON_SANDBOX.contains("SCRATCH"));
+        // The devices above are the only writes outside the document's folder.
+        assert_eq!(PYTHON_SANDBOX.matches("(allow file-write*").count(), 1);
         assert_eq!(PYTHON_SANDBOX.matches("(allow mach-lookup").count(), 1);
         assert_eq!(PYTHON_SANDBOX.matches("(allow process-exec").count(), 1);
         assert!(f.host.python_sandbox.works.get().is_some());
@@ -7273,6 +7284,102 @@ console.log(JSON.stringify(seen));
         assert_eq!(seen["engine_addon"], "loaded", "{seen}");
         assert_eq!(seen["written_addon"], "ERR_DLOPEN_FAILED", "{seen}");
         assert_eq!(seen["signal"], "EPERM", "{seen}");
+
+        // Nor another program in Node's place: the exec itself is refused,
+        // not only the new process (Node aborts when `execve` fails).
+        let exec = work
+            .run(&[
+                "-e",
+                r#"process.execve("/bin/echo", ["/bin/echo", "exec-escaped"])"#,
+            ])
+            .await
+            .unwrap();
+        assert_ne!(exec.status, Some(0), "{}", exec.stdout);
+        assert!(!exec.stdout.contains("exec-escaped"), "{}", exec.stdout);
+        assert!(
+            exec.stderr
+                .contains("process.execve failed with error code EPERM"),
+            "{}",
+            exec.stderr
+        );
+    }
+
+    /// Under the real profile the code reads the document's folder and no
+    /// other file of the user's, not even in the temporary folders, and no
+    /// terminal of theirs.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn the_python_profile_reads_no_other_files_and_no_terminal() {
+        let runtime = staged_runtime();
+        let node = runtime.join("node/node");
+        // Under the per-user temporary folder (`/private/var/folders`).
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("doc");
+        let home = dir.join("home");
+        let work = real_python_work(&node, &runtime, &dir, &home);
+        let own = dir.join("own.txt");
+        let beside = root.path().join("beside.txt");
+        let shared = tempfile::tempdir_in("/private/tmp").unwrap();
+        let in_tmp = shared.path().join("tmp.txt");
+        for file in [&own, &beside, &in_tmp] {
+            std::fs::write(file, "text").unwrap();
+        }
+        // A terminal of the user's: a pseudo-terminal this test opens.
+        let (mut master, mut slave) = (0, 0);
+        // SAFETY: openpty fills in two descriptors; the name, settings and
+        // window size it may leave out.
+        let opened = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(opened, 0);
+        // SAFETY: `slave` is a terminal, so ttyname gives its NUL-ended name.
+        let tty = unsafe { std::ffi::CStr::from_ptr(libc::ttyname(slave)) }
+            .to_string_lossy()
+            .into_owned();
+        let script = dir.join("files.js");
+        std::fs::write(
+            &script,
+            r#"const fs = require("fs");
+const [own, beside, tmp, tty] = process.argv.slice(2);
+const read = (file) => { try { return fs.readFileSync(file, "utf8"); } catch (e) { return e.code; } };
+const open = (file, mode) => { try { fs.closeSync(fs.openSync(file, mode)); return "opened"; } catch (e) { return e.code; } };
+console.log(JSON.stringify({
+  own: read(own), beside: read(beside), tmp: read(tmp),
+  tty_read: open(tty, "r"), tty_write: open(tty, "w"),
+  dev_tty: open("/dev/tty", "w"), dev_null: open("/dev/null", "w"),
+}));
+"#,
+        )
+        .unwrap();
+        let args = [&script, &own, &beside, &in_tmp].map(|path| path.to_string_lossy());
+        let args: Vec<&str> = args
+            .iter()
+            .map(|arg| arg.as_ref())
+            .chain([tty.as_str()])
+            .collect();
+        let output = work.run(&args).await.unwrap();
+        // SAFETY: both descriptors are this test's own and open.
+        unsafe {
+            libc::close(slave);
+            libc::close(master);
+        }
+        assert_eq!(output.status, Some(0), "{}", output.stderr);
+        let seen: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(seen["own"], "text", "{seen}");
+        assert_eq!(seen["beside"], "EPERM", "{seen}");
+        assert_eq!(seen["tmp"], "EPERM", "{seen}");
+        assert_eq!(seen["tty_read"], "EPERM", "{seen}");
+        assert_eq!(seen["tty_write"], "EPERM", "{seen}");
+        // Refused, or there is no controlling terminal at all.
+        assert_ne!(seen["dev_tty"], "opened", "{seen}");
+        assert_eq!(seen["dev_null"], "opened", "{seen}");
     }
 
     /// The preferences the file rules hide are not handed out by
