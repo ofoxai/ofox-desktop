@@ -67,6 +67,11 @@ enum Reply {
     Wait(Arc<AtomicBool>, Box<Reply>),
     /// A 200 with these bytes, as a speech request is answered.
     Bytes(&'static str, Vec<u8>),
+    /// The reply this makes of the request, as a model answers what a tool
+    /// result said (e.g. a call that names an id the result gave).
+    /// Only the macOS Python deck tests use it so far.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Answer(fn(&Request) -> Reply),
 }
 
 /// Tool-call ids are unique, as a provider's are.
@@ -206,13 +211,17 @@ fn serve(stream: TcpStream, script: &Script) {
         let scripted = script.titles.lock().unwrap().pop_front();
         scripted.unwrap_or_else(|| Reply::Error(400, json!({"error": {"message": "unscripted"}})))
     } else {
-        script.requests.lock().unwrap().push(request);
-        script
+        script.requests.lock().unwrap().push(request.clone());
+        let scripted = script
             .replies
             .lock()
             .unwrap()
             .pop_front()
-            .expect("the gateway got a request the test did not script")
+            .expect("the gateway got a request the test did not script");
+        match scripted {
+            Reply::Answer(answer) => answer(&request),
+            reply => reply,
+        }
     };
     while let Reply::Wait(gate, inner) = reply {
         while !gate.load(Ordering::SeqCst) {
@@ -302,6 +311,7 @@ fn serve(stream: TcpStream, script: &Script) {
             );
         }
         Reply::Wait(..) => unreachable!("opened above"),
+        Reply::Answer(..) => unreachable!("answered above"),
         Reply::Bytes(mime, bytes) => {
             let _ = out.write_all(
                 format!(
@@ -7042,24 +7052,43 @@ mod documents {
         tool_ends: Vec<Value>,
         requests: Vec<Request>,
         detail: Detail,
-        /// The `create_document` result as the runtime keeps it in its history.
+        /// The last `create_document` result as the runtime keeps it in its
+        /// history.
         result: Value,
     }
 
+    /// Every `create_document` result in the conversation's native history,
+    /// in order.
+    fn document_results(config: &Path, sid: &str) -> Vec<Value> {
+        let native =
+            std::fs::read_to_string(session_dir(config, sid).join("session.jsonl")).unwrap();
+        native
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|entry| entry["type"] == "message")
+            .map(|entry| entry["message"].clone())
+            .filter(|m| m["role"] == "toolResult" && m["toolName"] == "create_document")
+            .collect()
+    }
+
     impl Outcome {
-        /// The `create_document` result's text as the model was sent it.
+        /// The last `create_document` result's text as the model was sent it.
         fn sent(&self) -> String {
-            let id = &self.result["toolCallId"];
-            self.requests[1].body["messages"]
-                .as_array()
-                .into_iter()
-                .flatten()
+            self.sent_of(&self.result)
+        }
+
+        /// `result`'s text as the model was sent it.
+        fn sent_of(&self, result: &Value) -> String {
+            let id = &result["toolCallId"];
+            self.requests
+                .iter()
+                .flat_map(|request| request.body["messages"].as_array().into_iter().flatten())
                 .find(|m| m["role"] == "tool" && &m["tool_call_id"] == id)
                 .map(|m| text_of(&m["content"]))
                 .unwrap_or_else(|| {
                     panic!(
-                        "no create_document result was sent: {:?}",
-                        self.requests[1].body
+                        "no create_document result {id} was sent: {:?}",
+                        self.requests.last().map(|request| &request.body)
                     )
                 })
         }
@@ -7147,17 +7176,34 @@ mod documents {
     /// One turn: the model reads `skill`, calls `create_document` with
     /// `args`, then answers.
     fn create_document(bundle: &Path, model: Model, skill: &str, args: Value) -> Outcome {
+        document_turn(bundle, model, skill, args, vec![])
+    }
+
+    /// One turn: the model reads `skill` and calls `create_document` with
+    /// `args`, then makes one more model turn for each of `next` (its tool
+    /// calls), then answers.
+    fn document_turn(
+        bundle: &Path,
+        model: Model,
+        skill: &str,
+        args: Value,
+        next: Vec<Reply>,
+    ) -> Outcome {
         let config = tempfile::tempdir().unwrap();
         let gateway = Gateway::start();
         let env = TestEnv::new(config.path(), bundle, &[("ofox.ai", &gateway)]);
         *env.catalog.lock().unwrap() = vec![model];
         let host = AssistantHost::new(env.clone());
+        let turns = 2 + next.len();
         let (sid, run, end, detail) = runtime().block_on(async {
             let sid = create(&host).await;
             gateway.reply(Reply::ToolCalls(vec![
                 ("use_skill", json!({"name": skill})),
                 ("create_document", args),
             ]));
+            for reply in next {
+                gateway.reply(reply);
+            }
             gateway.reply(Reply::Stream("The document is ready.".into()));
             let (run, end) = turn(&host, &env, request(&sid, "Make the document", json!({}))).await;
             let detail = host.get_session(&sid).await.unwrap();
@@ -7172,7 +7218,7 @@ mod documents {
             of_type(&env, &run, "error"),
             requests.iter().map(tool_results).collect::<Vec<_>>()
         );
-        assert_eq!(requests.len(), 2, "the tool calls, then the answer");
+        assert_eq!(requests.len(), turns, "the tool calls, then the answer");
         assert!(tool_names(&requests[0]).contains(&"create_document".to_string()));
         let tool_ends = of_type(&env, &run, "tool_end");
         let skill_end = tool_ends
@@ -7187,15 +7233,8 @@ mod documents {
                 .any(|text| text.contains(skill) && text.contains("create_document({ name: ")),
             "the bundled skill reached the model"
         );
-        let native =
-            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
-                .unwrap();
-        let result = native
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|entry| entry["type"] == "message")
-            .map(|entry| entry["message"].clone())
-            .find(|m| m["role"] == "toolResult" && m["toolName"] == "create_document")
+        let result = document_results(config.path(), &sid)
+            .pop()
             .expect("the create_document result is in the history");
         assert_no_secret_in_events(&env, &[KEY, NEW_KEY]);
         Outcome {
@@ -7578,6 +7617,365 @@ mod documents {
             "{sent}"
         );
         assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    // ── Python decks (macOS only, where the engine ships) ────────────────
+
+    /// The prepared runtime with the Python engine as well: on macOS a
+    /// runtime prepared without it is a failure.
+    #[cfg(target_os = "macos")]
+    fn python_runtime() -> Option<PathBuf> {
+        let bundle = engines_runtime()?;
+        assert!(
+            cc_switch_lib::assistant::documents::engines::engines_at(&bundle)
+                .python
+                .is_some(),
+            "the Python engine is not prepared at {}; run `pnpm assistant:prepare`",
+            bundle.display()
+        );
+        Some(bundle)
+    }
+
+    /// The Python code of the pptx skill's worked example, from the skill as
+    /// the runtime gives it to the model: four slides in which neither the
+    /// helpers nor officecli find anything wrong.
+    #[cfg(target_os = "macos")]
+    fn worked_example(bundle: &Path) -> String {
+        let skill =
+            std::fs::read_to_string(bundle.join("runtime/skills/ofox-office-pptx/SKILL.md"))
+                .unwrap();
+        let (_, example) = skill
+            .split_once("## Worked example")
+            .expect("the skill has a worked example");
+        let (_, code) = example
+            .split_once("```python\n")
+            .expect("the example is Python code");
+        code.split_once("\n```")
+            .expect("the code block ends")
+            .0
+            .to_owned()
+    }
+
+    /// The `create_document` tool as `request` offered it to the model.
+    #[cfg(target_os = "macos")]
+    fn document_tool(request: &Request) -> &Value {
+        request.body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|tool| &tool["function"])
+            .find(|tool| tool["name"] == "create_document")
+            .expect("create_document is offered")
+    }
+
+    /// The model's turn after a preview: deliver it by the previewId its
+    /// result named.
+    #[cfg(target_os = "macos")]
+    fn deliver_the_preview(request: &Request) -> Reply {
+        let id = tool_results(request)
+            .iter()
+            .rev()
+            .find_map(|text| {
+                let (_, rest) = text.split_once("as previewId ")?;
+                rest.split(';').next().map(str::to_owned)
+            })
+            .expect("a preview result names its previewId");
+        Reply::ToolCalls(vec![(
+            "create_document",
+            json!({"name": "cache.pptx", "format": "pptx", "fromPreview": id}),
+        )])
+    }
+
+    /// What the bundled officecli's `validate` reports of `bytes`, run the
+    /// way the host runs it.
+    #[cfg(target_os = "macos")]
+    fn validated(bundle: &Path, bytes: &[u8]) -> Value {
+        use cc_switch_lib::assistant::documents::{engines::engines_at, runner};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(dir.path().join("deck.pptx"), bytes).unwrap();
+        let officecli = engines_at(bundle).officecli.unwrap();
+        let output = runtime()
+            .block_on(runner::run_engine(
+                &officecli,
+                &["validate", "deck.pptx", "--json"],
+                dir.path(),
+                &home,
+                runner::ENGINE_TIMEOUT,
+            ))
+            .unwrap();
+        assert_eq!(output.status, Some(0), "{}", output.stderr);
+        serde_json::from_str(output.stdout.trim())
+            .unwrap_or_else(|e| panic!("{e}: {}", output.stdout))
+    }
+
+    /// The Python route with the real engines: the model previews its deck
+    /// code (nothing is delivered), reads the previewId from the result and
+    /// delivers that preview with `fromPreview`. The one attachment is the
+    /// previewed file (it takes the preview's id), validates, has no issue
+    /// and keeps a picture of every slide.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial(python_runner)]
+    fn previews_then_delivers_a_python_deck() {
+        let Some(bundle) = python_runtime() else {
+            return;
+        };
+        let code = worked_example(&bundle);
+        let outcome = document_turn(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "cache.pptx", "format": "pptx",
+                   "content": {"kind": "python", "code": code}, "preview": true}),
+            vec![Reply::Answer(deliver_the_preview)],
+        );
+        // Python content and its preview step were offered.
+        let tool = document_tool(&outcome.requests[0]);
+        assert!(
+            tool["description"]
+                .as_str()
+                .unwrap()
+                .contains(r#"{"kind":"python","code":"…"}"#),
+            "{tool}"
+        );
+        let properties = &tool["parameters"]["properties"];
+        assert!(
+            properties["preview"].is_object() && properties["fromPreview"].is_object(),
+            "{tool}"
+        );
+
+        let results = document_results(outcome.config.path(), &outcome.sid);
+        let [preview, delivery] = &results[..] else {
+            panic!("two create_document results: {results:?}");
+        };
+        assert_ne!(preview["isError"], true, "{preview}");
+        let details = &preview["details"];
+        assert_eq!(details["preview"], true, "{details}");
+        assert_eq!(details["slides"], 4, "{details}");
+        assert_eq!(details["issues"], json!([]), "{details}");
+        let preview_id = details["previewId"].as_str().expect("a previewId");
+        let told = outcome.sent_of(preview);
+        assert!(
+            told.contains(&format!(
+                "Previewed cache.pptx (pptx, 4 slides) as previewId {preview_id}; nothing is delivered yet. Issues: 0."
+            )),
+            "{told}"
+        );
+        assert!(!told.contains("attachment"), "{told}");
+
+        // One document, published by the delivering call: the preview made
+        // no attachment and no card of its own.
+        let (generation, bytes) = outcome.made(PPTX);
+        assert_eq!(generation["toolCallId"], delivery["toolCallId"]);
+        assert_ne!(generation["toolCallId"], preview["toolCallId"]);
+        let attachment = &outcome.detail.attachments[0];
+        assert_eq!(attachment.id, preview_id, "the previewed file is delivered");
+        assert_eq!(attachment.name, "cache.pptx");
+        assert!(bytes.starts_with(b"PK"));
+        let params = &generation["params"];
+        assert_eq!(params["format"], "pptx");
+        assert_eq!(params["slides"], 4, "{params}");
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["fixed"], 0, "{params}");
+        assert_eq!(params["svgPages"], 4, "{params}");
+        let pages = outcome.stored().join(format!("{preview_id}.pages"));
+        for page in 1..=4 {
+            let path = pages.join(format!("{page}.svg"));
+            let svg = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(svg.trim_start().starts_with("<svg"), "{}", path.display());
+        }
+        let report = validated(&bundle, &bytes);
+        assert_eq!(report["success"], true, "{report}");
+        assert_eq!(report["data"]["errors"], json!([]), "{report}");
+        let sent = outcome.sent();
+        assert!(
+            sent.contains("Created cache.pptx (pptx, ") && sent.contains("Issues: 0."),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// A copy of the prepared runtime whose manifest lists no Python engine:
+    /// every other part is the prepared runtime's, through links.
+    #[cfg(target_os = "macos")]
+    fn runtime_without_python(bundle: &Path) -> tempfile::TempDir {
+        let copy = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(bundle).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() != "manifest.json" {
+                std::os::unix::fs::symlink(entry.path(), copy.path().join(entry.file_name()))
+                    .unwrap();
+            }
+        }
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+        let engines = manifest["engines"].as_object_mut().unwrap();
+        assert!(
+            engines.remove("python").is_some(),
+            "the prepared manifest lists the Python engine"
+        );
+        std::fs::write(copy.path().join("manifest.json"), manifest.to_string()).unwrap();
+        copy
+    }
+
+    /// Without the manifest's Python engine the model hears nothing of
+    /// Python or previews, and the deck object still makes a clean deck.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn falls_back_to_the_deck_object_without_python() {
+        let Some(bundle) = python_runtime() else {
+            return;
+        };
+        let without = runtime_without_python(&bundle);
+        let engines = cc_switch_lib::assistant::documents::engines::engines_at(without.path());
+        assert!(engines.python.is_none() && engines.officecli.is_some());
+        let outcome = create_document(
+            without.path(),
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-object.json")}),
+        );
+        let tool = document_tool(&outcome.requests[0]);
+        let offered = tool.to_string().to_lowercase();
+        assert!(
+            !offered.contains("python") && !offered.contains("preview"),
+            "{tool}"
+        );
+        let prompt = outcome.requests[0].body["messages"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            prompt.contains("For a pptx, send the deck object the skill describes"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("send the Python deck code") && !prompt.contains("preview: true"),
+            "{prompt}"
+        );
+
+        let (generation, bytes) = outcome.made(PPTX);
+        assert!(bytes.starts_with(b"PK"));
+        let params = &generation["params"];
+        assert_eq!(params["slides"], 8, "{params}");
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["svgPages"], 8, "{params}");
+        let sent = outcome.sent();
+        assert!(
+            sent.contains("Rendered 8 slides from the deck with theme navy"),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// The processes whose command line names `script`, as (pid, parent
+    /// pid). A process that has ended but not been reaped has no command
+    /// line left.
+    #[cfg(target_os = "macos")]
+    fn processes_naming(script: &str) -> Vec<(u32, u32)> {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-axww", "-o", "pid=,ppid=,command="])
+            .output()
+            .expect("ps runs");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(script))
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// Stopping the reply while the runner runs the model's code ends the
+    /// runner. The code marks in its folder that it started (through
+    /// Pyodide's bridge to Node, as the sandbox lets it write there) and then
+    /// spins for longer than the host's time limit, so only the stop ends it
+    /// within the test (and a runner a failed test leaks ends by itself).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial(python_runner)]
+    fn stopping_the_reply_ends_the_runner() {
+        let Some(bundle) = python_runtime() else {
+            return;
+        };
+        // As the host names it on the runner's command line.
+        let runner = cc_switch_lib::assistant::documents::engines::engines_at(&bundle)
+            .python
+            .unwrap()
+            .runner;
+        let runner = runner.to_string_lossy();
+        assert!(
+            processes_naming(&runner).is_empty(),
+            "a runner is left from before"
+        );
+        let code = "import js, time\njs.process.getBuiltinModule(\"fs\").writeFileSync(\"started\", \"\")\nend = time.time() + 120\nwhile time.time() < end:\n    pass\n";
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "create_document",
+                json!({"name": "loop.pptx", "format": "pptx",
+                       "content": {"kind": "python", "code": code}, "preview": true}),
+            )]));
+            let run = host
+                .send(request(&sid, "Make the deck", json!({})))
+                .await
+                .unwrap();
+            let outputs = session_dir(config.path(), &sid).join("outputs");
+            let started = || {
+                std::fs::read_dir(&outputs)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|doc| doc.path().join("python/started").is_file())
+            };
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !started() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the runner never ran the code: {:?}",
+                    of_type(&env, &run.run_id, "tool_end")
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let host_pid = std::process::id();
+            let running = processes_naming(&runner);
+            assert!(
+                running.iter().any(|&(_, parent)| parent == host_pid),
+                "the host's runner is running: {running:?}"
+            );
+
+            host.stop(&sid, &run.run_id, &run.operation_id)
+                .await
+                .unwrap();
+            let end = wait_for(&env, &run.run_id, "run_end").await;
+            assert_eq!(end.data["status"], "stopped", "{:?}", end.data);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let left = processes_naming(&runner);
+                if left.is_empty() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the runner outlived the stopped reply: {left:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            let detail = host.get_session(&sid).await.unwrap();
+            assert!(detail.attachments.is_empty(), "{:?}", detail.attachments);
+            assert!(of_type(&env, &run.run_id, "generation").is_empty());
+            assert_eq!(gateway.requests().len(), 1, "no model turn after the stop");
+            host.shutdown().await;
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
     }
 }
 
