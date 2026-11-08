@@ -431,7 +431,16 @@ and Linux have the validator and the dead proxy only (see
 
 The model sees a preview of the first page only if it can see images. A PDF's
 preview is Typst's PNG of page 1; a PowerPoint's is officecli's SVG of slide 1,
-which the runtime draws with `@napi-rs/canvas`. Both become a JPEG of at most 768
+which the runtime draws with `@napi-rs/canvas`. The canvas's SVG reader skips
+`foreignObject`, where officecli puts every text box, so the runtime draws the
+shapes first and then the text itself (`assistant-runtime/src/slide-text.mjs`):
+it reads each box's place, paragraphs and runs from the SVG, takes 1 pt as 2 px
+(officecli's scale for any slide size), wraps the lines to the box as the
+slide's CSS does, and lets the canvas fall back to a system font for CJK. Text
+is drawn over all shapes rather than in paint order, and a box under a
+transform other than `translate`, or inside a chart's nested `<svg>`, is left
+out. An SVG that is not XML gets no preview rather than a slide without its
+words. Both become a JPEG of at most 768
 px on the long edge and 200 KB, at a lower quality if needed and left out if it is
 still too large, so a tool result stays well under the 1 MiB line limit. Word and
 Excel files have no preview. The model also gets the file's id, name, type,

@@ -1,6 +1,7 @@
 // Images a model is shown of a file: a rendered PDF page, or a thumbnail of
 // a generated document's first page or slide. The native canvas addon loads
 // on first use, not with the runtime.
+import { drawSlideText, slideText } from "./slide-text.mjs";
 
 const THUMBNAIL_EDGE = 768;
 const MAX_THUMBNAIL_BYTES = 200 * 1024;
@@ -53,10 +54,14 @@ export async function thumbnailFromPng(bytes, options) {
 /**
  * A thumbnail of SVG bytes, drawn at the full long edge: a vector loses
  * nothing when enlarged, and an SVG sized only by its viewBox loads small.
- * Rejects when this canvas build cannot read the SVG.
+ * The canvas's SVG reader skips foreignObject, where officecli puts a
+ * slide's text, so that text is drawn on top (slide-text.mjs). Rejects when
+ * this canvas build cannot read the SVG, or when the SVG is not XML: a
+ * slide drawn without its words would tell the model it is blank.
  */
 export async function thumbnailFromSvg(bytes, options = {}) {
-  const { loadImage } = await import("@napi-rs/canvas");
+  const { createCanvas, loadImage } = await import("@napi-rs/canvas");
+  const text = slideText(Buffer.from(bytes).toString("utf8"));
   const image = await loadImage(bytes);
   const maxEdge = options.maxEdge ?? THUMBNAIL_EDGE;
   const scale = maxEdge / Math.max(image.width, image.height);
@@ -66,5 +71,14 @@ export async function thumbnailFromSvg(bytes, options = {}) {
   const height = Math.max(1, Math.round(image.height * scale));
   image.width = width;
   image.height = height;
-  return encodeThumbnail(image, options);
+  const canvas = createCanvas(width, height);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(image, 0, 0, width, height);
+  if (text.boxes.length > 0 && text.width > 0 && text.height > 0) {
+    context.scale(width / text.width, height / text.height);
+    drawSlideText(context, text.boxes);
+  }
+  return encodeThumbnail(canvas, options);
 }

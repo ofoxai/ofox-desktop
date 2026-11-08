@@ -83,24 +83,76 @@ test("a PNG preview becomes a JPEG thumbnail", async () => {
   assert.equal(image.height, 432);
 });
 
+// Whether this build of the canvas reads SVG at all, so only that skips a
+// test and a failure in the thumbnail code fails it.
+async function readsSvg() {
+  try {
+    await loadImage(
+      Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>',
+      ),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 test("an SVG preview is drawn at the full long edge when the canvas reads SVG", async (t) => {
   // A slide's size only in its viewBox: the canvas gives it a small default.
   const svg = Buffer.from(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 540"><rect width="960" height="540" fill="#fff"/><text x="40" y="100" font-size="60">Title</text></svg>',
   );
-  let thumbnail;
-  try {
-    thumbnail = await thumbnailFromSvg(svg);
-  } catch (error) {
+  if (!(await readsSvg())) {
     // This build of the canvas has no SVG support: the caller skips the
     // preview, which document-tools tests cover.
-    t.skip(`SVG unsupported: ${error.message}`);
+    t.skip("SVG unsupported");
     return;
   }
-  const image = await decoded(thumbnail);
+  const image = await decoded(await thumbnailFromSvg(svg));
   assert.equal(image.width, 768);
   // The default size it loads at (267x150) is rounded.
   assert.ok(Math.abs(image.height - 432) <= 1, `height ${image.height}`);
+});
+
+// Light pixels in a region of a decoded thumbnail.
+async function lightPixels(thumbnail, [x, y, w, h]) {
+  const image = await decoded(thumbnail);
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  const { data } = context.getImageData(x, y, w, h);
+  let count = 0;
+  for (let i = 0; i < data.length; i += 4)
+    if (data[i] > 200 && data[i + 1] > 200 && data[i + 2] > 200) count += 1;
+  return count;
+}
+
+test("an officecli slide's text, kept in foreignObject, is drawn on the thumbnail", async (t) => {
+  // White 60pt text in a box across the middle of a navy 16:9 slide.
+  const slide = (text) =>
+    Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">' +
+        '<rect width="1920" height="1080" fill="#1E3A5F"/>' +
+        '<g transform="translate(132,340)"><rect width="1656" height="255" fill="none"/>' +
+        '<foreignObject x="14.4" y="7.2" width="1627" height="240">' +
+        '<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;justify-content:center;line-height:1">' +
+        '<div style="white-space:pre-wrap;margin:0;font-size:60pt;text-align:center;line-height:1.41">' +
+        `<span style="font-family:'Arial';font-weight:bold;color:#FFFFFF">${text}</span>` +
+        "</div></div></foreignObject></g></svg>",
+    );
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  // The box spans x 58–720 and y 139–242 of the 768 × 432 thumbnail.
+  const region = [58, 139, 662, 103];
+  const lit = async (text) =>
+    lightPixels(await thumbnailFromSvg(slide(text)), region);
+  assert.ok((await lit("Transformer")) > 2000, "Latin text is drawn");
+  // Arial has no CJK glyphs: the canvas falls back to a system font.
+  assert.ok((await lit("入门介绍")) > 2000, "CJK text is drawn");
+  assert.equal(await lit(""), 0, "no text, no light pixels");
 });
 
 test("bytes that are no image are refused, for the caller to skip", async () => {
