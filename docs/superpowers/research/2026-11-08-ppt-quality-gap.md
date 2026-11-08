@@ -88,3 +88,17 @@ LibreOffice 渲染（160–200 MB / 平台）、整页出图（不可编辑）�
   Anionex/banana-slides 16.0k（AGPL）、MiniMax-AI/skills 13.8k（MIT）、presenton/presenton 11.8k（Apache-2.0）、
   ningzimu/codex-ppt-skill 7.7k（MIT）、icip-cas/PPTAgent 5.2k（MIT）、liustack/pptwise 27（MIT，Node-only，离我们的架构最近）。
 - 对照样例：同题 8 页 PPT，python-pptx 默认模板、全部空白版式、配图为 Matplotlib 生成；数据由解包 XML 量得。
+
+## 补充：gpt-image-2.6 的 SVG 输出（2026-11-08 实测）
+
+Ofox 已支持：`POST /v1/images/generations`，`model: "openai/gpt-image-2.6-flare"`，`output_format: "svg"`，
+并且必须带 `svg: { "model": "gpt-6-luna" }`（不带会 400）。模型目录的参数表里还没写 `output_format`。
+机制是先出一张参考图，再由写作模型照图写 SVG（响应里另有 `svg_usage`）。
+
+| 用例 | 耗时 | 估算费用 | 结果 |
+|---|---|---|---|
+| 带文字的 Transformer 架构图 | 62 秒 | 约 $0.04 | 结构对，文字不行：没居中、长标签被截断、两块深蓝底上的字也是深蓝（Chrome 里同样如此，是 SVG 本身的问题） |
+| 无文字的封面插图（词块 + 注意力弧线） | 48 秒 | 约 $0.10 | 干净、配色按要求、2.8 KB；运行时的 @napi-rs/canvas 直接转 PNG 无误 |
+
+结论：它适合封面、章节页和空白区的无字插图与图标，可选、异步、失败时不放图；
+讲解用的示意图和数据图要准确的文字和数据，仍由代码画（原生形状与图表，原生做不了的由代码生成 SVG 再栅格化）。
