@@ -462,20 +462,23 @@ test("python assets are pinned and staged", async () => {
   }
   const staged = new URL("engines/python/", resources);
   const assets = await readJson(new URL("assets.json", staged));
-  assert.deepEqual(assets, {
-    pyodide: downloads.pyodide,
-    binary: downloads.binary.map((pin) => pin.name),
-    pure: downloads.pure.map((pin) => pin.file),
-    font: "fonts/NotoSansSC-Regular.otf",
-  });
   const shipped = [
     ...[...downloads.binary, ...downloads.pure].map((pin) => [
       `wheels/${pin.file}`,
       pin.sha256,
     ]),
-    [assets.font, downloads.font.sha256],
+    ["fonts/NotoSansSC-Regular.otf", downloads.font.sha256],
     [`fonts/${downloads.font.license.file}`, downloads.font.license.sha256],
   ];
+  // `files` lists every staged file: the host offers the engine only when
+  // each of them is there.
+  assert.deepEqual(assets, {
+    pyodide: downloads.pyodide,
+    binary: downloads.binary.map((pin) => pin.name),
+    pure: downloads.pure.map((pin) => pin.file),
+    font: "fonts/NotoSansSC-Regular.otf",
+    files: shipped.map(([file]) => file),
+  });
   for (const [file, sha] of shipped) {
     assert.ok(await exists(new URL(file, staged)), `${file} must ship`);
     assert.equal(sha256(await readFile(new URL(file, staged))), sha, file);

@@ -412,13 +412,28 @@ async function preparePython(installed) {
       url: font.license.url,
     },
   ];
-  // Current means the stamp matches and every staged file still has its pinned
-  // digest; assets.json is written last, so an interrupted copy has none.
+  // `files` lists every staged file: the host offers the engine only when each
+  // of them is there.
+  const assetsText =
+    JSON.stringify(
+      {
+        pyodide: downloads.pyodide,
+        binary: downloads.binary.map((pin) => pin.name),
+        pure: downloads.pure.map((pin) => pin.file),
+        font: `fonts/${font.file}`,
+        files: files.map(({ to }) => to),
+      },
+      null,
+      2,
+    ) + "\n";
+  // Current means the stamp matches, assets.json is the one this script
+  // writes and every staged file still has its pinned digest; assets.json is
+  // written last, so an interrupted copy has none.
   const isCurrent = async () => {
     if (JSON.stringify(installed.python) !== JSON.stringify(stamp))
       return false;
     try {
-      await access(assetsFile);
+      if ((await readFile(assetsFile, "utf8")) !== assetsText) return false;
       for (const { to, pin } of files)
         if (digest(await readFile(path.join(directory, to))) !== pin.sha256)
           return false;
@@ -440,19 +455,7 @@ async function preparePython(installed) {
       // The cache keeps its files private; the bundle's must be readable.
       await chmod(path.join(directory, to), 0o644);
     }
-    await writeFile(
-      assetsFile,
-      JSON.stringify(
-        {
-          pyodide: downloads.pyodide,
-          binary: downloads.binary.map((pin) => pin.name),
-          pure: downloads.pure.map((pin) => pin.file),
-          font: `fonts/${font.file}`,
-        },
-        null,
-        2,
-      ) + "\n",
-    );
+    await writeFile(assetsFile, assetsText);
     process.stdout.write(
       `Staged the Python engine (Pyodide ${stamp.version})\n`,
     );

@@ -6833,7 +6833,13 @@ while read line; do :; done"#,
             let base = config.path().join("runtime-with-engines");
             for file in ["node/node", "runtime/src/main.mjs"].iter().chain(files) {
                 std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
-                std::fs::write(base.join(file), "").unwrap();
+                // The engine's assets list the files staged beside them.
+                let text = if file.ends_with("assets.json") {
+                    r#"{"files": []}"#
+                } else {
+                    ""
+                };
+                std::fs::write(base.join(file), text).unwrap();
             }
             std::fs::write(base.join("manifest.json"), manifest.to_string()).unwrap();
             *env.runtime.lock().unwrap() = Some(base);

@@ -28,26 +28,20 @@ pub struct PythonEngine {
 /// Read `base/manifest.json`. A missing or unreadable manifest, field or
 /// file is no engine, not an error.
 pub fn engines_at(base: &Path) -> Engines {
-    let manifest = std::fs::read(base.join("manifest.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .unwrap_or(Value::Null);
-    let file = |field: &Value| {
-        let relative = Path::new(field.as_str()?);
-        // The manifest is ours, but a path that leaves `base` is no engine.
-        let inside = relative
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)));
-        let path = base.join(relative);
-        (inside && path.is_file()).then_some(path)
-    };
+    let manifest = read_json(&base.join("manifest.json"));
+    // The manifest is ours, but a path that leaves `base` is no engine.
+    let file = |field: &Value| file_inside(base, field);
     let engine = |name: &str| &manifest["engines"][name];
     let python = || {
         let assets = file(&engine("python")["path"])?;
+        let folder = assets.parent()?.to_path_buf();
+        if !assets_staged(&assets, &folder) {
+            return None;
+        }
         Some(PythonEngine {
             node: file(&manifest["node"])?,
             runner: file(&engine("python")["runner"])?,
-            assets: assets.parent()?.to_path_buf(),
+            assets: folder,
         })
     };
     Engines {
@@ -59,6 +53,34 @@ pub fn engines_at(base: &Path) -> Engines {
             None
         },
     }
+}
+
+/// The JSON in `path`; `Null` when it cannot be read or parsed.
+fn read_json(path: &Path) -> Value {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .unwrap_or(Value::Null)
+}
+
+/// `folder/<field>` when `field` is a relative path that stays inside
+/// `folder` and names a file there.
+fn file_inside(folder: &Path, field: &Value) -> Option<PathBuf> {
+    let relative = Path::new(field.as_str()?);
+    let inside = relative
+        .components()
+        .all(|part| matches!(part, Component::Normal(_)));
+    let path = folder.join(relative);
+    (inside && path.is_file()).then_some(path)
+}
+
+/// Whether every file the Python engine's `assets` (its `assets.json`)
+/// lists under `files` (each wheel, the font, its licence) is a file in its
+/// `folder`: a partial copy is no engine, rather than one that fails to load.
+fn assets_staged(assets: &Path, folder: &Path) -> bool {
+    read_json(assets)["files"]
+        .as_array()
+        .is_some_and(|files| files.iter().all(|f| file_inside(folder, f).is_some()))
 }
 
 impl Engines {
@@ -109,11 +131,16 @@ mod tests {
         assert_eq!(typst, base.path().join("engines/typst/typst"));
     }
 
-    const PYTHON_FILES: [&str; 3] = [
+    const PYTHON_FILES: [&str; 5] = [
         "node/node",
         "runtime/src/python/runner.mjs",
         "engines/python/assets.json",
+        "engines/python/wheels/numpy.whl",
+        "engines/python/fonts/NotoSansSC-Regular.otf",
     ];
+
+    /// The staged files `assets.json` lists, in the engine's folder.
+    const ASSETS: &str = r#"{"files": ["wheels/numpy.whl", "fonts/NotoSansSC-Regular.otf"]}"#;
 
     fn python_manifest(node: &str, runner: &str) -> serde_json::Value {
         json!({"node": node, "engines": {"python": {
@@ -123,10 +150,25 @@ mod tests {
         }}})
     }
 
+    /// [`runtime_with`] whose `assets.json`, when it is among `files`,
+    /// holds `assets`.
+    fn python_runtime(
+        manifest: serde_json::Value,
+        files: &[&str],
+        assets: &str,
+    ) -> tempfile::TempDir {
+        let base = runtime_with(manifest, files);
+        let path = base.path().join("engines/python/assets.json");
+        if path.is_file() {
+            std::fs::write(path, assets).unwrap();
+        }
+        base
+    }
+
     #[test]
     fn engines_at_reads_the_python_engine() {
         let manifest = python_manifest("node/node", "runtime/src/python/runner.mjs");
-        let base = runtime_with(manifest.clone(), &PYTHON_FILES);
+        let base = python_runtime(manifest.clone(), &PYTHON_FILES, ASSETS);
         let python = engines_at(base.path()).python;
         if cfg!(target_os = "macos") {
             let python = python.unwrap();
@@ -141,13 +183,15 @@ mod tests {
             // It runs only in macOS's sandbox-exec: elsewhere there is none.
             assert_eq!(python, None);
         }
-        // Without any one of its three files there is no engine.
+        // Without any one of its files there is no engine: Node, the
+        // runner, `assets.json`, or a staged file `assets.json` lists (an
+        // interrupted or partial copy).
         for missing in PYTHON_FILES {
             let present: Vec<&str> = PYTHON_FILES
                 .into_iter()
                 .filter(|file| *file != missing)
                 .collect();
-            let base = runtime_with(manifest.clone(), &present);
+            let base = python_runtime(manifest.clone(), &present, ASSETS);
             assert_eq!(engines_at(base.path()).python, None, "{missing}");
         }
         // Nor with a path that leaves the runtime folder.
@@ -155,8 +199,24 @@ mod tests {
             ("../node/node", "runtime/src/python/runner.mjs"),
             ("node/node", "/runtime/src/python/runner.mjs"),
         ] {
-            let base = runtime_with(python_manifest(node, runner), &PYTHON_FILES);
+            let base = python_runtime(python_manifest(node, runner), &PYTHON_FILES, ASSETS);
             assert_eq!(engines_at(base.path()).python, None, "{node} {runner}");
+        }
+        // Nor when `assets.json` lists no files, or a file outside the
+        // engine's folder (which is there), or is no JSON.
+        let mut outside = PYTHON_FILES.to_vec();
+        outside.push("engines/numpy.whl");
+        for assets in [
+            "{}",
+            r#"{"files": "wheels/numpy.whl"}"#,
+            r#"{"files": ["wheels/numpy.whl", 1]}"#,
+            r#"{"files": ["../numpy.whl"]}"#,
+            r#"{"files": ["/etc/hosts"]}"#,
+            r#"{"files": ["wheels"]}"#,
+            "",
+        ] {
+            let base = python_runtime(manifest.clone(), &outside, assets);
+            assert_eq!(engines_at(base.path()).python, None, "{assets}");
         }
     }
 

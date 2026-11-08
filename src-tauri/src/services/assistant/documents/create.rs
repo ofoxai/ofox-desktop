@@ -8144,7 +8144,12 @@ console.log(JSON.stringify({
             .as_bytes(),
             0o644,
         );
-        write("engines/python/assets.json", b"{}", 0o644);
+        write(
+            "engines/python/assets.json",
+            br#"{"files": ["wheels/numpy.whl"]}"#,
+            0o644,
+        );
+        write("engines/python/wheels/numpy.whl", b"", 0o644);
         write("deck.pptx", PYTHON_DECK, 0o644);
         let manifest = json!({"node": "node/node", "engines": {
             "officecli": {"path": "engines/officecli/officecli"},
