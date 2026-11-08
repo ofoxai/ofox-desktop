@@ -791,12 +791,17 @@ pub(super) fn record_kept_pages(
 
 /// A slide picture the host wrote in a document's folder, opened for
 /// reading, with its size: a regular file within the runner's
-/// [`OUTPUT_LIMIT`], in a folder that is not a link. The engine can write
-/// that folder, so a link is never followed (on Unix it cannot be swapped in
-/// after the check either) and the file is opened without blocking: a link,
-/// pipe or device left in a page's place is refused instead of read or
-/// waited on.
+/// [`OUTPUT_LIMIT`], in a folder that is not a link (see [`open_written`]).
 pub(super) fn open_page(page: &Path) -> Result<(fs::File, u64), String> {
+    open_written(page, OUTPUT_LIMIT as u64)
+}
+
+/// A file an engine could write, opened for reading, with its size: a
+/// regular file of at most `max` bytes, in a folder that is not a link. A
+/// link is never followed (on Unix it cannot be swapped in after the check
+/// either) and the file is opened without blocking: a link, pipe or device
+/// left in its place is refused instead of read or waited on.
+pub(super) fn open_written(page: &Path, max: u64) -> Result<(fs::File, u64), String> {
     let real = |path: &Path, dir: bool| {
         fs::symlink_metadata(path).is_ok_and(
             |meta| {
@@ -820,7 +825,7 @@ pub(super) fn open_page(page: &Path) -> Result<(fs::File, u64), String> {
     }
     let file = options.open(page).map_err(|_| UNREADABLE)?;
     let meta = file.metadata().map_err(|_| UNREADABLE)?;
-    if !meta.is_file() || meta.len() > OUTPUT_LIMIT as u64 {
+    if !meta.is_file() || meta.len() > max {
         return Err(UNREADABLE.into());
     }
     Ok((file, meta.len()))

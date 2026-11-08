@@ -67,8 +67,10 @@ const ISSUES_UNAVAILABLE: &str =
 const PRELUDE: &str = include_str!("pdf-prelude.typ");
 const MAIN: &str = "main.typ";
 const BATCH: &str = "batch.json";
-/// The model's Python deck code, and the deck helpers' lint the runner
-/// writes beside the deck: a JSON array of strings.
+/// The Python engine's own folder in the document's, with its own home:
+/// the code, the deck it writes and the deck helpers' lint (a JSON array of
+/// strings) are there, and officecli never uses it.
+const PYTHON_DIR: &str = "python";
 const CODE: &str = "code.py";
 const LINT: &str = "lint.json";
 /// The issue a Python deck gets when its lint cannot be read.
@@ -291,9 +293,17 @@ fn python_code(content: &Value, format: DocumentFormat) -> Result<Option<String>
 pub struct EngineSandbox {
     works: tokio::sync::OnceCell<PathBuf>,
     warned: std::sync::atomic::AtomicBool,
+    /// Whether the latest probe failed.
+    failed: std::sync::atomic::AtomicBool,
 }
 
 impl EngineSandbox {
+    /// Whether the latest probe failed: until one passes, the engine has no
+    /// sandbox. `false` before any probe.
+    pub(in crate::services::assistant) fn failed(&self) -> bool {
+        self.failed.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     /// Log why there is no sandbox, the first time only.
     fn warn_once(&self, why: &str) {
         if !self.warned.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -2099,7 +2109,11 @@ fn prepare(
             seal_packages(&home)?;
         }
         (Content::Text(text), _) => write_new(&dir.join(document.format.file()), text.as_bytes())?,
-        (Content::Python(code), _) => write_new(&dir.join(CODE), code.as_bytes())?,
+        (Content::Python(code), _) => {
+            let python = dir.join(PYTHON_DIR);
+            crate::config::create_private_dir_all(&python.join(HOME)).map_err(|_| unwritable())?;
+            write_new(&python.join(CODE), code.as_bytes())?
+        }
     }
     Ok((dir, home))
 }
@@ -2496,12 +2510,15 @@ async fn check_office(
 }
 
 /// A deck from the model's Python code: the runner
-/// (`assistant-runtime/src/python/runner.mjs`) runs `code.py` in Pyodide
-/// and writes the deck and the deck helpers' lint; `office` then checks the
-/// deck as it checks a batch's (see [`check_office`]), the lint lines being
-/// warnings. The code can write the document's folder, links included: a
-/// deck that is not a regular file there is no deck, and the lint is read
-/// without following a link.
+/// (`assistant-runtime/src/python/runner.mjs`) runs `code.py` in Pyodide in
+/// `python`'s folder ([`PYTHON_DIR`]) and writes the deck and the deck
+/// helpers' lint there; the deck is copied to `office`'s folder, officecli's
+/// home is made anew, and `office` checks the deck as it checks a batch's
+/// (see [`check_office`]), the lint lines being warnings. The code can write
+/// its folder, links included, and put the folder itself behind a link: a
+/// deck that is not a regular file of at most
+/// [`attachments::MAX_FILE_BYTES`] in a folder that is not a link is no
+/// deck, and neither the deck nor the lint is read through a link.
 async fn make_python(
     python: &Work<'_>,
     office: &Work<'_>,
@@ -2520,16 +2537,15 @@ async fn make_python(
     if output.status != Some(0) {
         return Err(python_failure(python, &output));
     }
-    let dir = python.dir.to_path_buf();
+    let (from, into, home) = (
+        python.dir.to_path_buf(),
+        office.dir.to_path_buf(),
+        office.home.to_path_buf(),
+    );
     let lint = blocking(move || {
-        let deck = std::fs::symlink_metadata(dir.join(&file)).is_ok_and(|meta| meta.is_file());
-        if !deck {
-            return Err(refuse(
-                FAILED,
-                "the Python engine finished without writing the deck",
-            ));
-        }
-        Ok(read_lint(&dir.join(LINT)))
+        take_deck(&from.join(&file), &into.join(&file))?;
+        fresh_folder(&home)?;
+        Ok(read_lint(&from.join(LINT)))
     })
     .await?;
     let issues = match lint {
@@ -2540,6 +2556,35 @@ async fn make_python(
         None => vec![Issue::warning(LINT_UNAVAILABLE.into(), None)],
     };
     check_office(office, DocumentFormat::Pptx, issues).await
+}
+
+/// Copy the deck the Python engine wrote at `from` to `to`, a new file, as
+/// [`attachments::open_written`] reads it. Blocking file IO.
+fn take_deck(from: &Path, to: &Path) -> Result<(), String> {
+    use std::io::Read;
+    let no_deck = || {
+        refuse(
+            FAILED,
+            "the Python engine finished without writing the deck: out.pptx must be a regular file of at most 25 MiB",
+        )
+    };
+    let (file, size) =
+        attachments::open_written(from, attachments::MAX_FILE_BYTES).map_err(|_| no_deck())?;
+    let mut bytes = vec![];
+    file.take(size)
+        .read_to_end(&mut bytes)
+        .map_err(|_| no_deck())?;
+    write_new(to, &bytes)
+}
+
+/// `path` as a new, empty private folder, whatever was there.
+fn fresh_folder(path: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(path).map_err(|_| unwritable())?,
+        Ok(_) => std::fs::remove_file(path).map_err(|_| unwritable())?,
+        Err(_) => {}
+    }
+    crate::config::create_private_dir_all(path).map_err(|_| unwritable())
 }
 
 /// The lines of `lint.json`, a JSON array of strings, read as a slide
@@ -3317,7 +3362,8 @@ impl AssistantHost {
         cell: &EngineSandbox,
         work: &Work<'_>,
     ) -> Result<PathBuf, String> {
-        cell.works
+        let probed = cell
+            .works
             .get_or_try_init(|| async {
                 let sandbox = self.env.sandbox_exec().filter(|path| path.is_file());
                 let Some(sandbox) = sandbox else {
@@ -3333,7 +3379,10 @@ impl AssistantHost {
                 }
             })
             .await
-            .cloned()
+            .cloned();
+        cell.failed
+            .store(probed.is_err(), std::sync::atomic::Ordering::Relaxed);
+        probed
     }
 
     /// The `sandbox-exec` officecli or Typst runs under (see
@@ -3367,16 +3416,21 @@ impl AssistantHost {
     }
 
     /// A deck from the model's Python code (see [`make_python`]), checked by
-    /// `office` in the same folder: only in the Python engine's sandbox, and
-    /// one deck at a time.
+    /// `office`: each in its own sandbox, or not at all (officecli reads what
+    /// the code wrote), and one deck at a time.
     async fn python_deck(&self, office: &Work<'_>) -> Result<Made, String> {
         let no_python = || refuse(FAILED, NO_PYTHON);
+        if office.sandbox.is_none() {
+            return Err(no_python());
+        }
         let engine = self.engines().python.ok_or_else(no_python)?;
         let runtime = self.env.runtime_dir()?;
+        let dir = office.dir.join(PYTHON_DIR);
+        let home = dir.join(HOME);
         let mut python = Work {
             exe: &engine.node,
-            dir: office.dir,
-            home: office.home,
+            dir: &dir,
+            home: &home,
             name: "Python",
             sandbox: None,
             profile: PYTHON_SANDBOX,
@@ -7723,17 +7777,21 @@ console.log(JSON.stringify({
     #[cfg(target_os = "macos")]
     const PYTHON_DECK: &[u8] = b"PK\x03\x04a deck from python";
 
-    /// A [`fixture_in`] whose runtime also holds the Python engine, under a
-    /// stand-in `sandbox-exec` whose probe passes when `works`. Its `node`
-    /// passes the probe and runs the runner as a shell script; the runner
-    /// logs its arguments to `runner.log` in the document's folder, then runs
-    /// the shell body `runner` with `$code`, `$out` and `$lint` set from its
+    /// A [`fixture_in`] whose runtime also holds the Python engine, under the
+    /// stand-in `sandbox-exec` that `sandbox` gives for the fixture's folder.
+    /// Its `node` passes the probe and runs the runner as a shell script; the
+    /// runner logs its arguments to `runner.log` in its folder, then runs the
+    /// shell body `runner` with `$code`, `$out` and `$lint` set from its
     /// arguments and `$root` the runtime folder, where `deck.pptx` is
     /// [`PYTHON_DECK`].
     #[cfg(target_os = "macos")]
-    fn python_fixture(officecli: &str, runner: &str, works: bool) -> Fixture {
+    fn python_fixture(
+        officecli: &str,
+        runner: &str,
+        sandbox: impl FnOnce(&Path) -> PathBuf,
+    ) -> Fixture {
         use std::os::unix::fs::PermissionsExt;
-        let f = fixture_in(Some(officecli), None, |dir| Some(stub_sandbox(dir, works)));
+        let f = fixture_in(Some(officecli), None, |dir| Some(sandbox(dir)));
         let runtime = f.env.runtime.clone();
         let write = |path: &str, bytes: &[u8], mode: u32| {
             let path = runtime.join(path);
@@ -7765,6 +7823,16 @@ console.log(JSON.stringify({
         }});
         std::fs::write(runtime.join("manifest.json"), manifest.to_string()).unwrap();
         f
+    }
+
+    /// A stand-in `sandbox-exec` whose probe fails for officecli only: the
+    /// Python engine's passes.
+    #[cfg(target_os = "macos")]
+    fn sandbox_failing_officecli(dir: &Path) -> PathBuf {
+        stub_sandbox_probing(
+            dir,
+            "case \"$*\" in *'/officecli --version') exit 1 ;; esac",
+        )
     }
 
     /// A stand-in runner that writes the deck and one lint line.
@@ -7806,7 +7874,7 @@ console.log(JSON.stringify({
             r#"{"slides":2}"#,
             r#"echo "<svg>$5</svg>""#,
         );
-        let f = python_fixture(&officecli, &deck_runner(), true);
+        let f = python_fixture(&officecli, &deck_runner(), |dir| stub_sandbox(dir, true));
         let code = "prs = new_deck()\ncontent_slide(prs, \"Plan\")\n";
         let result = f.call("call-1", python_args(code)).await.unwrap();
         assert_eq!(result["status"], "completed");
@@ -7826,12 +7894,13 @@ console.log(JSON.stringify({
             result["previewPath"],
             json!(dir.join("pages").join("1.svg"))
         );
-        // The runner got the code as the model wrote it; officecli made no
-        // file of its own and ran no batch, and the attachment is the
-        // runner's deck.
-        assert_eq!(std::fs::read_to_string(dir.join("code.py")).unwrap(), code);
+        // The runner got the code as the model wrote it, in its own folder;
+        // officecli made no file of its own and ran no batch, and the
+        // attachment is the runner's deck.
+        let own = dir.join("python");
+        assert_eq!(std::fs::read_to_string(own.join("code.py")).unwrap(), code);
         assert_eq!(
-            std::fs::read_to_string(dir.join("runner.log")).unwrap(),
+            std::fs::read_to_string(own.join("runner.log")).unwrap(),
             format!(
                 "--assets {} --code code.py --out out.pptx --lint lint.json\n",
                 f.env.runtime.join("engines/python").display()
@@ -7856,6 +7925,7 @@ console.log(JSON.stringify({
             .unwrap();
         for wanted in [
             format!("-p {}", PYTHON_SANDBOX.replace('\n', " ")),
+            format!("-D DOC={} ", real(&own)),
             format!("-D ENGINE={} ", real(&f.env.runtime)),
             format!("-D EXE={} ", real(&f.env.runtime.join("node/node"))),
         ] {
@@ -7888,7 +7958,7 @@ console.log(JSON.stringify({
 *silent*) echo 'killed' >&2; exit 1 ;;
 *flood*) head -c 300000 /dev/zero | tr '\0' x >&2; echo 'PythonError: ValueError: lost' >&2; exit 1 ;;
 esac"#;
-        let f = python_fixture(&officecli, runner, true);
+        let f = python_fixture(&officecli, runner, |dir| stub_sandbox(dir, true));
         let error = f
             .call("call-1", python_args("name_error"))
             .await
@@ -7934,12 +8004,15 @@ esac"#;
     #[serial_test::serial(document_engines)]
     async fn a_deck_or_lint_the_code_links_elsewhere_is_not_read() {
         let officecli = officecli(r#"{"results":[]}"#, NO_ISSUES, r#"{"slides":1}"#);
-        // The code can write the document's folder, links included.
+        // The code can write its folder, links included, and put the folder
+        // itself behind a link.
         let runner = r#"case "$(cat "$code")" in
 *link_deck*) ln -s "$root/deck.pptx" "$out"; echo '[]' > "$lint" ;;
 *link_lint*) cp "$root/deck.pptx" "$out"; ln -s "$root/secret.json" "$lint" ;;
+*link_folder*) here=$(pwd); cp "$root/deck.pptx" "$root/$out"; echo '[]' > "$root/$lint"
+  cd ..; rm -rf "$here"; ln -s "$root" "$here" ;;
 esac"#;
-        let f = python_fixture(&officecli, runner, true);
+        let f = python_fixture(&officecli, runner, |dir| stub_sandbox(dir, true));
         std::fs::write(
             f.env.runtime.join("secret.json"),
             r#"["a secret outside the folder"]"#,
@@ -7952,10 +8025,135 @@ esac"#;
         assert_eq!(code(&error), FAILED);
         assert!(error.contains("without writing the deck"), "{error}");
         assert!(f.record().attachments.is_empty());
+        let error = f
+            .call("call-3", python_args("link_folder"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("without writing the deck"), "{error}");
+        assert!(f.record().attachments.is_empty());
         let result = f.call("call-2", python_args("link_lint")).await.unwrap();
         let issues = result["issues"].to_string();
         assert!(!issues.contains("a secret"), "{issues}");
         assert!(issues.contains("lint unavailable"), "{issues}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_output_stays_out_of_officecli_home() {
+        // officecli notes its home and what is in it when it checks the deck.
+        let officecli = format!(
+            "case \"$1\" in validate) echo \"$HOME\" > office-home.txt; ls -A \"$HOME\" > office-home-list.txt ;; esac\n{}",
+            officecli(r#"{"results":[]}"#, NO_ISSUES, r#"{"slides":1}"#)
+        );
+        // The code writes its own home, and tries officecli's beside it (the
+        // real profile stops that; the stand-in does not).
+        let runner = r#"echo "$HOME" > home.txt; : > "$HOME/planted"
+mkdir -p ../.home; : > ../.home/escaped
+cp "$root/deck.pptx" "$out"; echo '[]' > "$lint""#;
+        let f = python_fixture(&officecli, runner, |dir| stub_sandbox(dir, true));
+        let result = f
+            .call("call-1", python_args("prs = new_deck()"))
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed");
+        let dir = PathBuf::from(result["filePath"].as_str().unwrap())
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let read = |path: PathBuf| std::fs::read_to_string(path).unwrap();
+        assert_eq!(
+            read(dir.join("python/home.txt")).trim(),
+            dir.join("python/.home").display().to_string()
+        );
+        assert_eq!(
+            read(dir.join("office-home.txt")).trim(),
+            dir.join(".home").display().to_string()
+        );
+        let seen = read(dir.join("office-home-list.txt"));
+        assert!(
+            !seen.contains("planted") && !seen.contains("escaped"),
+            "{seen}"
+        );
+        assert!(!dir.join(".home/escaped").exists());
+        // The runner's sandbox folder is its own; officecli's is the
+        // document's, where the deck was copied.
+        let log = sandbox_log(&f);
+        let runner = log.iter().find(|line| line.contains(" --code ")).unwrap();
+        assert!(
+            runner.contains(&format!("-D DOC={} ", real(&dir.join("python")))),
+            "{runner}"
+        );
+        let validate = log.iter().find(|line| line.contains(" validate ")).unwrap();
+        assert!(
+            validate.contains(&format!("-D DOC={} ", real(&dir))),
+            "{validate}"
+        );
+        assert_eq!(generated_bytes(&f), PYTHON_DECK);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_needs_officecli_in_its_sandbox() {
+        let officecli = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            r#"{"slides":1}"#,
+        );
+        // The Python probe passes; officecli's fails, so it would check the
+        // deck without its sandbox.
+        let f = python_fixture(&officecli, &deck_runner(), sandbox_failing_officecli);
+        let error = f
+            .call("call-1", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), FAILED);
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert!(f.record().attachments.is_empty());
+        assert!(sandbox_log(&f)
+            .iter()
+            .all(|line| !line.contains(" --code ")));
+        // Deck batches keep officecli's fallback.
+        let result = f
+            .call(
+                "call-2",
+                json!({"name": "a", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["status"], "completed");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn python_is_not_offered_while_officecli_has_no_sandbox() {
+        let officecli = officecli(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            r#"{"slides":1}"#,
+        );
+        let batch = json!({"name": "a", "format": "pptx", "content": deck()});
+        // Offered until officecli's probe fails, and from the next document
+        // whose probe passes.
+        let f = python_fixture(&officecli, &deck_runner(), stub_sandbox_failing_once);
+        assert!(f.host.python_offered());
+        f.call("call-1", batch.clone()).await.unwrap();
+        assert!(!f.host.python_offered());
+        let error = f
+            .call("call-2", python_args("prs = new_deck()"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("send a deck object instead"), "{error}");
+        assert!(f.outputs().len() == 1, "{:?}", f.outputs());
+        f.call("call-3", batch.clone()).await.unwrap();
+        assert!(f.host.python_offered());
+        // A probe that keeps failing keeps it off.
+        let f = python_fixture(&officecli, &deck_runner(), sandbox_failing_officecli);
+        f.call("call-1", batch.clone()).await.unwrap();
+        f.call("call-2", batch).await.unwrap();
+        assert!(!f.host.python_offered());
     }
 
     #[tokio::test]
@@ -8037,7 +8235,7 @@ esac"#;
         // the document does not count against the reply.
         #[cfg(target_os = "macos")]
         {
-            let f = python_fixture(&script, &deck_runner(), false);
+            let f = python_fixture(&script, &deck_runner(), |dir| stub_sandbox(dir, false));
             let error = f
                 .call("call-1", python_args("prs = new_deck()"))
                 .await
