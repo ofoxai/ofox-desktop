@@ -468,7 +468,7 @@ has none to fix, because the renderer fits its own text.
 | One generated file           | 25 MiB; a conversation's files together 500 MiB                        |
 | One engine run               | 60 s, then it and everything it started are killed                     |
 | One Python run               | 90 s, then it and everything it started are killed                     |
-| Engine output                | 256 KiB each of stdout and stderr                                      |
+| Engine output                | 256 KiB each of stdout and stderr; 4 MiB for a slide's SVG page        |
 | Issues in a result and card  | 20, errors first, repeated ones counted together                       |
 | Retries                      | the model retries a failed document at most twice, then explains       |
 
@@ -551,9 +551,10 @@ Besides that first page, the host exports every slide of a PowerPoint as SVG
 keeps the pages beside the attachment, at
 `<session id>/attachments/<attachment id>.pages/<n>.svg` (the attachment takes
 the id of the `outputs/<docId>/` folder it was made in): the folder is 0700, the
-files 0600, and the folder is removed with the attachment. A page whose SVG is
-over the 256 KiB output limit is skipped with the warning
-`slide n has no preview`, and the others are kept; if the engine fails in the
+files 0600, and the folder is removed with the attachment. officecli inlines a
+slide's pictures (plots, figures) as base64, so a page run keeps up to 4 MiB of
+output rather than the 256 KiB of other runs. A page whose SVG is over that is
+skipped with the warning `slide n has no preview`, and the others are kept; if the engine fails in the
 middle of the export, the slides not exported get one warning,
 `slides a-b have no preview`, and so do slides 61 and on of a longer deck. The
 generation record, the attachment's details and the result carry `svgPages`,

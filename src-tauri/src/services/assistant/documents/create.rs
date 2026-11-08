@@ -12,7 +12,10 @@
 use super::{
     engines::{Engines, PythonEngine},
     fix,
-    runner::{run_engine, EngineOutput, ENGINE_TIMEOUT, OUTPUT_LIMIT, TYPST_PACKAGES},
+    runner::{
+        run_engine_limited, EngineOutput, ENGINE_TIMEOUT, OUTPUT_LIMIT, SVG_OUTPUT_LIMIT,
+        TYPST_PACKAGES,
+    },
 };
 use crate::services::assistant::{
     attachments,
@@ -2388,6 +2391,11 @@ impl Work<'_> {
     }
 
     async fn run(&self, args: &[&str]) -> Result<EngineOutput, String> {
+        self.run_limited(args, OUTPUT_LIMIT).await
+    }
+
+    /// [`Self::run`], keeping at most `limit` bytes of each output stream.
+    async fn run_limited(&self, args: &[&str], limit: usize) -> Result<EngineOutput, String> {
         if self.sandbox.is_none() && self.needs_sandbox() {
             log::warn!(
                 "[Assistant] {} was asked to run without its sandbox",
@@ -2428,9 +2436,12 @@ impl Work<'_> {
                     args,
                 ]
                 .concat();
-                run_engine(sandbox, &wrapped, self.dir, self.home, self.timeout).await
+                run_engine_limited(sandbox, &wrapped, self.dir, self.home, self.timeout, limit)
+                    .await
             }
-            None => run_engine(self.exe, args, self.dir, self.home, self.timeout).await,
+            None => {
+                run_engine_limited(self.exe, args, self.dir, self.home, self.timeout, limit).await
+            }
         };
         let output = output.map_err(|error| {
             log::warn!("[Assistant] {} could not run: {error}", self.name);
@@ -2670,11 +2681,12 @@ fn fresh_folder(path: &Path) -> Result<(), String> {
 }
 
 /// The first [`MAX_LINT_LINES`] lines of `lint.json`, a JSON array of
-/// strings, read as a slide picture is (see `attachments::open_page`):
-/// `None` when it is not such a file. Blocking file IO.
+/// strings of at most [`OUTPUT_LIMIT`] bytes, read as a slide picture is
+/// (see `attachments::open_written`): `None` when it is not such a file.
+/// Blocking file IO.
 fn read_lint(path: &Path) -> Option<Vec<String>> {
     use std::io::Read;
-    let (file, size) = attachments::open_page(path).ok()?;
+    let (file, size) = attachments::open_written(path, OUTPUT_LIMIT as u64).ok()?;
     let mut text = String::new();
     file.take(size).read_to_string(&mut text).ok()?;
     let mut lines: Vec<String> = serde_json::from_str(&text).ok()?;
@@ -3150,7 +3162,7 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
     for n in 1..=count.min(MAX_SVG_PAGES) {
         let at = n.to_string();
         let view = ["view", file, "svg", "--start", &at, "--end", &at];
-        let Ok(output) = work.run(&view).await else {
+        let Ok(output) = work.run_limited(&view, SVG_OUTPUT_LIMIT).await else {
             issues.push(no_preview(n, count));
             stopped = true;
             break;
@@ -3211,9 +3223,9 @@ fn real_folder(path: &Path) -> bool {
 /// The SVG a `view svg` run printed, when it printed one whole.
 fn whole_svg(output: &EngineOutput) -> Option<&str> {
     let svg = output.stdout.trim();
-    // The runner keeps at most OUTPUT_LIMIT bytes: a longer one was cut.
+    // The runner keeps at most SVG_OUTPUT_LIMIT bytes: a longer one was cut.
     let whole = output.status == Some(0)
-        && output.stdout.len() + 4 < OUTPUT_LIMIT
+        && output.stdout.len() + 4 < SVG_OUTPUT_LIMIT
         && svg.starts_with('<')
         && svg.contains("<svg")
         && svg.ends_with('>');
@@ -4886,8 +4898,8 @@ esac"#;
     #[tokio::test]
     #[serial_test::serial(document_engines)]
     async fn an_oversized_page_is_skipped_with_a_warning() {
-        // Slide 2 is 300 KiB: more than the runner keeps of an engine's output.
-        let svg = r#"if [ "$5" = 2 ]; then printf '<svg>'; head -c 307200 /dev/zero | tr '\0' x; echo '</svg>'; else echo "<svg>$5</svg>"; fi"#;
+        // Slide 2 is 4.5 MiB: more than the runner keeps of a slide's SVG.
+        let svg = r#"if [ "$5" = 2 ]; then printf '<svg>'; head -c 4718592 /dev/zero | tr '\0' x; echo '</svg>'; else echo "<svg>$5</svg>"; fi"#;
         let f = fixture(
             Some(&officecli_drawing(
                 r#"{"results":[{"index":0,"success":true}]}"#,
@@ -4920,6 +4932,40 @@ esac"#;
                 ("3.svg".to_owned(), "<svg>3</svg>".to_owned()),
             ]
         );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_slide_with_large_pictures_keeps_its_page() {
+        // Slide 2 is 600 KiB, as officecli draws a slide with two or three
+        // plots (it inlines each picture as base64).
+        let svg = r#"if [ "$5" = 2 ]; then printf '<svg>'; head -c 614400 /dev/zero | tr '\0' x; echo '</svg>'; else echo "<svg>$5</svg>"; fi"#;
+        let f = fixture(
+            Some(&officecli_drawing(
+                r#"{"results":[{"index":0,"success":true}]}"#,
+                NO_ISSUES,
+                r#"{"slides":3}"#,
+                svg,
+            )),
+            None,
+        );
+        let result = f
+            .call(
+                "call-1",
+                json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result["issues"], json!([]));
+        assert_eq!(result["svgPages"], 3);
+        let kept = kept_pages(&f, &result);
+        let names: Vec<&str> = kept.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["1.svg", "2.svg", "3.svg"]);
+        assert_eq!(kept[1].1.len(), "<svg></svg>".len() + 614400);
+        // A preview's overview gets every slide.
+        let preview = f.call("call-2", preview_args("Plan.pptx")).await.unwrap();
+        assert_eq!(preview["issues"], json!([]));
+        assert_eq!(preview["pagePaths"].as_array().unwrap().len(), 3);
     }
 
     /// A deck of three slides made by `officecli` (see [`officecli_drawing`]

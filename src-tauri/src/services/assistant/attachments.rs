@@ -2,7 +2,7 @@
 //! disk) or pasted (bytes): which formats can be imported, the limits, and
 //! the all-or-nothing copy into the session's private attachments folder
 //! (see [`AssistantStore::attachment_dir`]).
-use super::documents::runner::OUTPUT_LIMIT;
+use super::documents::runner::SVG_OUTPUT_LIMIT;
 use super::{
     store::{private_subdir, AssistantStore, SessionRecord, PAGES_SUFFIX},
     types::*,
@@ -790,10 +790,11 @@ pub(super) fn record_kept_pages(
 }
 
 /// A slide picture the host wrote in a document's folder, opened for
-/// reading, with its size: a regular file within the runner's
-/// [`OUTPUT_LIMIT`], in a folder that is not a link (see [`open_written`]).
+/// reading, with its size: a regular file within what the runner keeps of
+/// a slide's SVG ([`SVG_OUTPUT_LIMIT`]), in a folder that is not a link (see
+/// [`open_written`]).
 pub(super) fn open_page(page: &Path) -> Result<(fs::File, u64), String> {
-    open_written(page, OUTPUT_LIMIT as u64)
+    open_written(page, SVG_OUTPUT_LIMIT as u64)
 }
 
 /// A file an engine could write, opened for reading, with its size: a

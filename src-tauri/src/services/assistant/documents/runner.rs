@@ -10,6 +10,11 @@ pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Each of stdout and stderr keeps at most this many bytes.
 pub const OUTPUT_LIMIT: usize = 256 * 1024;
 
+/// The same for a run that prints one slide as SVG (`view svg`): officecli
+/// inlines the slide's pictures (plots, figures) as base64, so a slide with
+/// a few of them is several times [`OUTPUT_LIMIT`].
+pub const SVG_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+
 /// Once the engine has exited or been killed, how long its pipes may stay
 /// open (a process it left behind can hold them) before the output is given up.
 const PIPE_GRACE: Duration = Duration::from_secs(2);
@@ -32,13 +37,27 @@ pub struct EngineOutput {
 /// Run `exe` with `args` in `cwd`. The engine sees none of the app's
 /// environment: `home` is its home and temp folder, it neither updates itself
 /// nor leaves a resident process, it finds Typst packages only in an empty
-/// folder of `home`, and its web requests go to [`DEAD_PROXY`].
+/// folder of `home`, and its web requests go to [`DEAD_PROXY`]. Each of its
+/// stdout and stderr keeps at most [`OUTPUT_LIMIT`] bytes.
 pub async fn run_engine(
     exe: &Path,
     args: &[&str],
     cwd: &Path,
     home: &Path,
     timeout: Duration,
+) -> Result<EngineOutput, String> {
+    run_engine_limited(exe, args, cwd, home, timeout, OUTPUT_LIMIT).await
+}
+
+/// [`run_engine`], keeping at most `limit` bytes of each of stdout and
+/// stderr.
+pub async fn run_engine_limited(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    timeout: Duration,
+    limit: usize,
 ) -> Result<EngineOutput, String> {
     let packages = home.join(TYPST_PACKAGES);
     std::fs::create_dir_all(&packages).map_err(|_| "assistant_process_start_failed")?;
@@ -77,8 +96,8 @@ pub async fn run_engine(
     let stderr = child
         .take_stderr()
         .ok_or("assistant_command_outcome_unknown")?;
-    let stdout = tokio::spawn(process::bounded_output(stdout, OUTPUT_LIMIT));
-    let stderr = tokio::spawn(process::bounded_output(stderr, OUTPUT_LIMIT));
+    let stdout = tokio::spawn(process::bounded_output(stdout, limit));
+    let stderr = tokio::spawn(process::bounded_output(stderr, limit));
     let (status, timed_out) = match tokio::time::timeout(timeout, child.child.wait()).await {
         Ok(status) => (
             status
@@ -104,8 +123,8 @@ pub async fn run_engine(
     };
     Ok(EngineOutput {
         status,
-        stdout: text(&stdout),
-        stderr: text(&stderr),
+        stdout: text(&stdout, limit),
+        stderr: text(&stderr, limit),
         timed_out,
     })
 }
@@ -122,12 +141,12 @@ async fn drained(mut reader: JoinHandle<io::Result<Vec<u8>>>) -> Option<Vec<u8>>
     }
 }
 
-/// UTF-8 text of at most [`OUTPUT_LIMIT`] bytes: a character cut by the limit
+/// UTF-8 text of at most `limit` bytes: a character cut by the limit
 /// becomes a replacement character, which is longer than what it replaces.
-fn text(bytes: &[u8]) -> String {
+fn text(bytes: &[u8], limit: usize) -> String {
     let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if text.len() > OUTPUT_LIMIT {
-        let mut end = OUTPUT_LIMIT;
+    if text.len() > limit {
+        let mut end = limit;
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -151,7 +170,7 @@ mod tests {
         let mut bytes = vec![b'a'; OUTPUT_LIMIT - 1];
         bytes.extend("é".as_bytes());
         bytes.truncate(OUTPUT_LIMIT);
-        let text = text(&bytes);
+        let text = text(&bytes, OUTPUT_LIMIT);
         assert!(text.len() <= OUTPUT_LIMIT);
         assert!(text.chars().all(|c| c == 'a'));
     }
