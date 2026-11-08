@@ -35,3 +35,20 @@
    统一的好处是一种语言、一套技能，并且能改已有文件；代价是内存比 QuickJS 高。
 3. 原生 Python 暂不做：体积大、要逐个签名、Windows 上没有隔离。等出现 Pyodide 没有的包或大数据量性能问题再评估。
 4. 视频走 ffmpeg，与 Python 无关。
+
+## 补充：同题 PPT 用 python-pptx（Pyodide）再跑一轮（2026-11-09）
+
+辅助库原样移植成 Python（`deck.py`：页头、卡片、kpi、steps、timeline、callout、formula、figure(SVG)、plot(matplotlib)），
+规则同 JS 版，改为输出 ```python；matplotlib 用思源黑体（Noto Sans CJK SC，OFL）显示中文；同样做一轮看图自查。
+
+| 模型 | 首版尝试 | 首版 写时检查 / 溢出 | 自查后 | 输出 token（首版） | 备注 |
+|---|---|---|---|---|---|
+| gpt-6.1-terra | 1 | 3 / 4 | 0 / 0 | 5.2k（JS 版 7.8k） | 37 + 27 秒 |
+| gpt-6-luna | 2（第一次回复没有代码块） | 6 / 4 | 0 / 1 | 5.3k | |
+| deepseek-v4.1-flash（effort low） | 3（未定义变量、SVG 解析失败，报错发回后自修） | 6 / 5 | 1 / 2 | 5.1k–14.6k | matplotlib 画的注意力热力图带坐标轴和数值，正弦位置编码曲线 |
+
+结论：版面质量与 JS 版相当；Python 代码更短；数据图用 matplotlib 更顺手。新发现的问题：
+- python-pptx 默认模板的版式自带日期、页脚、页码占位符，会在每页底部渲染出“1/27/13”和重叠的页脚（对照样例同病）→ 要用我们自己的 16:9 模板。
+- python-pptx 写死的图表坐标轴编号为负数，officecli 严格校验不认（PowerPoint 正常打开）→ 宿主改写成正数。
+- officecli 的检查结果按文件路径缓存（常驻进程），同一路径重新生成会拿到旧结果 → 每次用新文件名，并设 `OFFICECLI_NO_AUTO_RESIDENT=1`。
+- Pyodide 同进程执行没有超时手段 → 产品里放进 worker 线程，超时直接终止。
