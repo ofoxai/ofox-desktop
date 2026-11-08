@@ -1556,21 +1556,19 @@ fn names_an_address(text: &str) -> bool {
 /// whole value (trimmed) is checked: it starts with one of [`PATH_STARTS`],
 /// a drive's root (`C:\`) or a drive (see [`starts_with_a_drive`]); a `..`
 /// segment climbs out of the folder (`a,b/../../x` too: .NET folds `a,b/..`
-/// away); it is one cell holding a slash (`dir/s.csv`); or it is an
-/// address. A bare file name (`s.csv`) names nothing outside the document's
+/// away); or it is an address. A relative name without those (`s.csv`,
+/// `dir/s.csv`, `2025/26`) names nothing outside the engine's own work
 /// folder. The other cells of a value of several are text, whatever they
 /// start with: `/`, `@x`, `A:优秀`, `.NET`, `~approx`.
 fn data_reaches_out(text: &str) -> bool {
     let value = text.trim();
     let path = value.replace('\\', "/");
-    let one_cell = !value.contains([',', ';', '\n', '\r', '\t']);
     let drive_root =
         matches!(path.as_bytes(), [letter, b':', b'/', ..] if letter.is_ascii_alphabetic());
     PATH_STARTS.iter().any(|start| value.starts_with(start))
         || drive_root
         || starts_with_a_drive(value)
         || path.split('/').any(|part| part.trim() == "..")
-        || (one_cell && path.contains('/'))
         || names_an_address(value)
 }
 
@@ -5365,7 +5363,8 @@ esac"#,
     /// [`data_reaches_out`]): officecli 1.0.160 reads a file only when the
     /// whole value names one, so each cell of a value of several is text,
     /// and PowerPoint evaluates nothing, so a leading `+`, `-`, `=`, `.`,
-    /// `~`, `@`, `/` or a colon is text there. Chart categories are prose.
+    /// `~`, `@`, `/` or a colon is text there. Chart categories are checked
+    /// the same way.
     #[test]
     fn deck_data_is_read_whole() {
         let table = |data: &str| json!({"command": "add", "parent": "/slide[1]", "type": "table", "props": {"data": data}});
@@ -5386,8 +5385,12 @@ esac"#,
             chart("Sales:1,2", "Q1,/etc/hosts"),
             // A one-letter series of numbers, or none yet, names no drive.
             chart("B:", "Q1"),
-            // A bare file name names nothing outside the document's folder.
+            // A relative name without a refused prefix or a `..` segment
+            // names nothing outside the engine's work folder.
             table("s.csv"),
+            table("dir/s.csv"),
+            chart("收入/成本:5", "2025/26"),
+            chart("Sales:5", "2025/26"),
         ];
         for prose in [
             ".NET",
@@ -5414,8 +5417,7 @@ esac"#,
         // A whole value that names a file or an address is refused.
         let whole = [
             "./s.csv",
-            "dir/s.csv",
-            "dir\\s.csv",
+            "a/../b",
             " /x.csv",
             "https://x.example/t.csv",
             "file:t.csv",
