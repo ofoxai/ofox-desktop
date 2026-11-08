@@ -2124,8 +2124,8 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 ///   shared and per-user temporary and cache folders) it reads only the
 ///   document's and the engine root, the runtime folder where Node, the
 ///   runner with its modules and the Pyodide assets are; its home and temp
-///   folder are in the document's folder. No terminal: it neither reads
-///   nor writes a tty.
+///   folder are in the document's folder. No terminal device: it neither
+///   reads nor writes a tty, a pty or a serial callout device (`cu.*`).
 /// - It writes only the document's folder, `/dev/null`, `/dev/zero` and
 ///   `/dev/dtracehelper` (where Node registers its DTrace probes).
 /// - No other program: no new process at all, and only `EXE`, the bundled
@@ -2141,7 +2141,7 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 const PYTHON_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)
-(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty)"))
+(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty|cu\.)"))
 (deny file-write*)
 (allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper"))
 (allow file-read-data file-write* (subpath (param "DOC")))
@@ -7138,7 +7138,7 @@ printf '%%PDF-1.7 /Type /Page' > "$last""#;
         // signal no other process.
         for rule in [
             "(deny network*)",
-            r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty)"))"#,
+            r#"(deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty|cu\.)"))"#,
             "(deny file-write*)",
             r#"(allow file-write* (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper"))"#,
             r#"(allow file-read-data file-write* (subpath (param "DOC")))"#,
@@ -7343,17 +7343,30 @@ console.log(JSON.stringify(seen));
         let tty = unsafe { std::ffi::CStr::from_ptr(libc::ttyname(slave)) }
             .to_string_lossy()
             .into_owned();
+        // A serial callout device, the other side of a tty, if the Mac has
+        // one (Bluetooth and the debug console usually do).
+        let callout = std::fs::read_dir("/dev")
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| {
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("cu.")
+            })
+            .map(|path| path.to_string_lossy().into_owned());
         let script = dir.join("files.js");
         std::fs::write(
             &script,
             r#"const fs = require("fs");
-const [own, beside, tmp, tty] = process.argv.slice(2);
+const [own, beside, tmp, tty, callout] = process.argv.slice(2);
 const read = (file) => { try { return fs.readFileSync(file, "utf8"); } catch (e) { return e.code; } };
 const open = (file, mode) => { try { fs.closeSync(fs.openSync(file, mode)); return "opened"; } catch (e) { return e.code; } };
 console.log(JSON.stringify({
   own: read(own), beside: read(beside), tmp: read(tmp),
   tty_read: open(tty, "r"), tty_write: open(tty, "w"),
   dev_tty: open("/dev/tty", "w"), dev_null: open("/dev/null", "w"),
+  callout_read: callout ? open(callout, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK) : null,
 }));
 "#,
         )
@@ -7362,7 +7375,7 @@ console.log(JSON.stringify({
         let args: Vec<&str> = args
             .iter()
             .map(|arg| arg.as_ref())
-            .chain([tty.as_str()])
+            .chain([tty.as_str(), callout.as_deref().unwrap_or("")])
             .collect();
         let output = work.run(&args).await.unwrap();
         // SAFETY: both descriptors are this test's own and open.
@@ -7380,6 +7393,10 @@ console.log(JSON.stringify({
         // Refused, or there is no controlling terminal at all.
         assert_ne!(seen["dev_tty"], "opened", "{seen}");
         assert_eq!(seen["dev_null"], "opened", "{seen}");
+        match callout {
+            Some(callout) => assert_eq!(seen["callout_read"], "EPERM", "{callout}: {seen}"),
+            None => eprintln!("skipped the callout check: this Mac has no /dev/cu.* device"),
+        }
     }
 
     /// The preferences the file rules hide are not handed out by
