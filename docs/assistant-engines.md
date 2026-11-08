@@ -462,6 +462,7 @@ has none to fix, because the renderer fits its own text.
 | `content`, serialized        | 2 MiB                                                                  |
 | Python deck code             | 200 000 bytes                                                          |
 | Previews of one file name    | 2 per reply; they do not count as documents                            |
+| Previews per reply           | 6, whatever their names (3 documents × 2 previews)                     |
 | Commands in one Office batch | 2000                                                                   |
 | File name                    | 120 characters; folders are dropped and the format's extension is kept |
 | One generated file           | 25 MiB; a conversation's files together 500 MiB                        |
@@ -584,8 +585,9 @@ at the deck before the user is shown anything.
   preview is delivered once, in the reply that made it and in its own format;
   `fromPreview` together with `content` or `preview` is refused. The delivered
   attachment takes the preview folder's id.
-- A file name may be previewed twice per reply (a preview that fails gives its
-  count back). A third is refused with a message to deliver.
+- A file name may be previewed twice per reply, and a reply makes at most six
+  previews in all (a preview that fails gives its count back). One more is
+  refused with a message to deliver, before any engine runs.
 - When a reply ends without delivering a file it previewed, the host delivers
   that file's latest preview itself, as the document of the call that made it
   (within the reply's three documents). A preview made before the reply

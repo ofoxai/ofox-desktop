@@ -41,6 +41,8 @@ pub const MAX_DOCUMENTS_PER_RUN: usize = 3;
 /// The most previews of one file one reply may make; they do not count
 /// toward [`MAX_DOCUMENTS_PER_RUN`].
 pub const MAX_PREVIEWS_PER_NAME: usize = 2;
+/// Previews per reply, whatever their names: each may be a long Python run.
+pub const MAX_PREVIEWS_PER_RUN: usize = MAX_DOCUMENTS_PER_RUN * MAX_PREVIEWS_PER_NAME;
 /// The longest `content`, serialized.
 pub const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 /// The longest Python deck code, in bytes.
@@ -9021,6 +9023,35 @@ esac
         f.call(
             "call-5",
             json!({"name": "Plan.pptx", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_reply_makes_at_most_six_previews() {
+        let f = preview_fixture();
+        // Each file within its own two: the reply's total still stops them.
+        for name in ["A", "B", "C", "D", "E", "F"] {
+            f.call(&id(), preview_args(name)).await.unwrap();
+        }
+        let runs = sandbox_log(&f).len();
+        let error = f.call(&id(), preview_args("G")).await.unwrap_err();
+        assert_eq!(code(&error), LIMIT);
+        assert!(error.contains("at most 6 previews per reply"), "{error}");
+        assert!(error.contains("fromPreview"), "{error}");
+        assert_eq!(MAX_PREVIEWS_PER_RUN, 6);
+        // Refused before any engine ran, and a second look at a file is
+        // refused alike.
+        let error = f.call(&id(), preview_args("A")).await.unwrap_err();
+        assert!(error.contains("at most 6 previews per reply"), "{error}");
+        assert_eq!(sandbox_log(&f).len(), runs);
+        assert_eq!(f.outputs().len(), 6);
+        // Documents can still be delivered.
+        f.call(
+            "call-deliver",
+            json!({"name": "G", "format": "pptx", "content": deck()}),
         )
         .await
         .unwrap();

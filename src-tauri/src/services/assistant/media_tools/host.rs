@@ -9,6 +9,7 @@ use crate::services::assistant::{
     catalog::Model,
     documents::create::{
         DocumentFormat, PreviewRecord, LIMIT as DOCUMENT_LIMIT, MAX_PREVIEWS_PER_NAME,
+        MAX_PREVIEWS_PER_RUN,
     },
     host::{blocking, scrub_secrets, scrub_secrets_in, AssistantHost, RunControl, PROTOCOL, STATE},
     materials::{self, Material, Plan},
@@ -175,9 +176,18 @@ impl MediaRun {
     }
 
     /// Hold one of the [`MAX_PREVIEWS_PER_NAME`] previews of the file
-    /// `name` for the folder `doc_id`; refused when none is left.
+    /// `name`, and one of the reply's [`MAX_PREVIEWS_PER_RUN`], for the
+    /// folder `doc_id`; refused when none is left.
     pub fn record_preview(&self, name: &str, doc_id: &str) -> Result<(), String> {
         let mut previews = self.previews();
+        if previews.asked.len() >= MAX_PREVIEWS_PER_RUN {
+            return Err(refuse(
+                DOCUMENT_LIMIT,
+                format!(
+                    "at most {MAX_PREVIEWS_PER_RUN} previews per reply; deliver a file with fromPreview, or send the content without preview"
+                ),
+            ));
+        }
         let asked = previews.asked.iter().filter(|p| p.name == name).count();
         if asked >= MAX_PREVIEWS_PER_NAME {
             return Err(refuse(
