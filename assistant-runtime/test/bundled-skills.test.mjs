@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import test from "node:test";
 import { parseDeck } from "../src/deck/schema.mjs";
+import { options, run } from "./fixtures/python-engine.mjs";
 
 const skillsDir = new URL("../skills/", import.meta.url);
 // The body of each SKILL.md is what use_skill returns to the model.
-const bodyLimit = (name) => (name === "ofox-office-pdf" ? 8000 : 12000);
+// The pptx skill carries two routes (Python deck code, and the deck object
+// where Python is unavailable) and a worked example for each.
+const BODY_LIMITS = { "ofox-office-pdf": 8000, "ofox-office-pptx": 26000 };
+const bodyLimit = (name) => BODY_LIMITS[name] ?? 12000;
 // Skills teach create_document content (batch arrays, deck objects), never
 // command-line calls.
 const cliCall = /\bofficecli\s+[a-z]/i;
@@ -141,3 +145,87 @@ test("the pptx skill's worked example is the deck-example fixture", async () => 
   assert.equal(problems, undefined);
   assert.deepEqual(warnings, []);
 });
+
+// The pptx skill teaches two routes: Python deck code, and the deck object
+// where Python is unavailable. These tests keep the Python half honest.
+const pptxSkill = async () =>
+  (await bundledSkills()).find((item) => item.dir === "ofox-office-pptx");
+
+const section = (body, heading) => {
+  const start = body.search(new RegExp(`^## ${heading}$`, "m"));
+  assert.ok(start >= 0, `a "${heading}" section`);
+  const rest = body.slice(start + 1);
+  const end = rest.search(/^## /m);
+  return end < 0 ? rest : rest.slice(0, end);
+};
+
+// "name(a, b=1)" -> ["a", "b"]
+const parameterNames = (parameters) =>
+  parameters
+    .split(",")
+    .map((parameter) => parameter.split("=")[0].trim())
+    .filter(Boolean);
+
+test("the pptx skill names only helpers that exist, with their parameters", async () => {
+  const deckPy = await readFile(
+    new URL("../src/python/deck.py", import.meta.url),
+    "utf8",
+  );
+  // Top-level helpers the model's code can call: no leading underscore.
+  const defined = new Map(
+    [...deckPy.matchAll(/^def ([A-Za-z]\w*)\((.*)\):/gm)].map(
+      ([, name, parameters]) => [name, parameterNames(parameters)],
+    ),
+  );
+  const documented = [
+    ...section((await pptxSkill()).body, "Helpers").matchAll(
+      /`([a-z_]+)\(([^`]*)\)`/g,
+    ),
+  ].map(([, name, parameters]) => [name, parameterNames(parameters)]);
+  assert.ok(documented.length > 0, "documented helpers");
+  for (const [name, parameters] of documented) {
+    assert.ok(defined.has(name), `${name} is not defined in deck.py`);
+    assert.deepEqual(parameters, defined.get(name), `${name} parameters`);
+  }
+  // A helper added to deck.py must reach the skill.
+  assert.deepEqual(
+    documented.map(([name]) => name).sort(),
+    [...defined.keys()].sort(),
+  );
+});
+
+test("the pptx skill describes preview then deliver, and the deck object where Python is unavailable", async () => {
+  const { body } = await pptxSkill();
+  assert.match(body, /preview: true/);
+  assert.match(body, /fromPreview: "<previewId>"/);
+  // The same mechanics the tool itself states.
+  assert.match(body, /twice per reply/);
+  assert.match(body, /delivered automatically/);
+  const fallback = section(body, "When Python is unavailable");
+  for (const word of ['"kind": "deck"', "pillars", "evidence", "timeline"])
+    assert.ok(fallback.includes(word), `the fallback section has ${word}`);
+  // The deck object is the fallback: Python comes first.
+  assert.ok(
+    body.indexOf("preview: true") <
+      body.indexOf("## When Python is unavailable"),
+  );
+});
+
+test(
+  "the pptx skill's Python example builds a deck with no lint",
+  options,
+  async (t) => {
+    const { body } = await pptxSkill();
+    const blocks = [...body.matchAll(/```python\n([\s\S]*?)\n```/g)].map(
+      ([, code]) => code,
+    );
+    assert.ok(blocks.length >= 1, "a Python example");
+    for (const code of blocks) {
+      assert.doesNotMatch(code, /prs\.save|sys\.exit|subprocess|\bopen\(/);
+      const result = await run(t, code);
+      assert.equal(result.status, 0, result.stderr);
+      const lint = JSON.parse(await readFile(result.lint, "utf8"));
+      assert.deepEqual(lint, []);
+    }
+  },
+);
