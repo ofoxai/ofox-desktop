@@ -419,6 +419,68 @@ test("grid with eight items uses two rows", () => {
   }
 });
 
+// The vertical middle of a block from the top of `first` to the foot of
+// `last`, and the middle of the content area such a block is centered in.
+const middleOf = (first, last) => (cm(first.y) + bottomOf(last)) / 2;
+const CONTENT_MIDDLE = (CONTENT.top + CONTENT.bottom) / 2;
+const short = (count) => headed(count, 2, 8);
+
+test("short pillars are centered in the content area at their minimum height", () => {
+  const { commands } = renderDeck(
+    around({ type: "pillars", title: "三项", pillars: short(3) }),
+    navy,
+  );
+  const card = named(commands, "s2-card-1").props;
+  assert.equal(card.height, "6cm");
+  near(middleOf(card, card), CONTENT_MIDDLE, "pillars centered");
+  const heading = named(commands, "s2-heading-1").props;
+  near(cm(heading.y), cm(card.y) + 0.25, "text stays at the card's top");
+});
+
+test("a short two-row grid is centered in the content area", () => {
+  const { commands } = renderDeck(
+    around({ type: "grid", title: "五项", items: short(5) }),
+    navy,
+  );
+  const [first, under] = [1, 4].map((i) => named(commands, `s2-card-${i}`));
+  assert.equal(first.props.height, "4cm");
+  near(
+    cm(under.props.y),
+    bottomOf(first.props) + GAP_CM,
+    "second row a gap under the first",
+  );
+  near(middleOf(first.props, under.props), CONTENT_MIDDLE, "grid centered");
+});
+
+test("a short timeline is centered in the content area", () => {
+  const { commands } = renderDeck(
+    around({ type: "timeline", title: "四步", steps: short(4) }),
+    navy,
+  );
+  const mark = named(commands, "s2-step-1-no").props;
+  const card = named(commands, "s2-card-1").props;
+  assert.equal(card.height, "4cm");
+  near(middleOf(mark, card), CONTENT_MIDDLE, "timeline centered");
+});
+
+test("a short comparison is centered in the content area", () => {
+  const { commands } = renderDeck(
+    around({
+      type: "comparison",
+      title: "对比",
+      left: { heading: "甲", points: ["一点"] },
+      right: { heading: "乙", points: ["一点", "两点"] },
+    }),
+    navy,
+  );
+  const vs = named(commands, "s2-vs").props;
+  const left = named(commands, "s2-left-heading").props;
+  const points = named(commands, "s2-right-points").props;
+  const top = Math.min(cm(vs.y), cm(left.y));
+  near((top + bottomOf(points)) / 2, CONTENT_MIDDLE, "comparison centered");
+  assert.ok(top >= CONTENT.top, `starts at ${top}`);
+});
+
 test("notes become speaker notes", () => {
   const { commands } = renderDeck(sixPages(), navy);
   const notes = commands.filter((command) => command.type === "notes");

@@ -92,6 +92,12 @@ function stackCentered(heights, gap) {
   });
 }
 
+// The top of a block `h` tall centered in the content area, so a page with
+// little on it does not leave the lower half of the slide empty. A block as
+// tall as the area or taller starts at its top.
+const contentTop = (h) =>
+  CONTENT.top + Math.max(0, (CONTENT.bottom - CONTENT.top - h) / 2);
+
 // --- Content pages: title, rule, cards -----------------------------------
 
 // The short bar under a content page's title (decor.titleRule "bar").
@@ -139,8 +145,8 @@ const CARD_PAD_CM = 0.25;
 // Sizes and heights for cards `w` wide holding `items` ({ heading, body }):
 // headings take the largest size that keeps every one on one line, bodies
 // the largest that fits every one within `bodyRoom`; all cards are as tall
-// as the tallest.
-function fitCards(items, w, { headingSizes, bodySizes, bodyRoom }) {
+// as the tallest, and at least `minH`.
+function fitCards(items, w, { headingSizes, bodySizes, bodyRoom, minH = 0 }) {
   const inner = w - 2 * CARD_PAD_CM;
   const heading = fitRow(
     items.map((item) => item.heading),
@@ -152,7 +158,11 @@ function fitCards(items, w, { headingSizes, bodySizes, bodyRoom }) {
     inner,
     (text) => fitBox(text, inner, bodyRoom, bodySizes).size,
   );
-  return { heading, body, h: 2 * CARD_PAD_CM + heading.h + body.h };
+  return {
+    heading,
+    body,
+    h: Math.max(minH, 2 * CARD_PAD_CM + heading.h + body.h),
+  };
 }
 
 // Card `i` at { x, y, w }: a rounded `card`-colored panel, its heading on
@@ -345,6 +355,9 @@ export function renderQuote(ctx, slide) {
 // Room for a pillar's body: at the 60-character limit this lands on 16pt in
 // three columns and 14pt in four, the sizes the spec gives pillars.
 const PILLAR_BODY_ROOM_CM = 4.4;
+// Cards are at least this tall, so a few short ones still hold the page
+// rather than lying in a thin strip; their text stays at the top.
+const PILLAR_MIN_CM = 6;
 
 export function renderPillars(ctx, slide) {
   const { sizes } = ctx.theme;
@@ -353,17 +366,13 @@ export function renderPillars(ctx, slide) {
     headingSizes: sizes.subtitle,
     bodySizes: sizes.card,
     bodyRoom: PILLAR_BODY_ROOM_CM,
+    minH: PILLAR_MIN_CM,
   });
+  const y = contentTop(fitted.h);
   return [
     ...contentPage(ctx, slide.title),
     ...slide.pillars.flatMap((item, index) =>
-      cardCommands(
-        ctx,
-        index + 1,
-        item,
-        { ...slots[index], y: CONTENT.top },
-        fitted,
-      ),
+      cardCommands(ctx, index + 1, item, { ...slots[index], y }, fitted),
     ),
   ];
 }
@@ -376,6 +385,7 @@ export function renderPillars(ctx, slide) {
 const GRID_HEADING_SIZES = [16, 14];
 const GRID_BODY_PT = 14;
 const GRID_ROW_MAX = 4;
+const GRID_MIN_CM = 4;
 
 export function renderGrid(ctx, slide) {
   const { items } = slide;
@@ -386,12 +396,15 @@ export function renderGrid(ctx, slide) {
     headingSizes: GRID_HEADING_SIZES,
     bodySizes: [GRID_BODY_PT],
     bodyRoom: Infinity,
+    minH: GRID_MIN_CM,
   });
+  const rows = Math.ceil(items.length / perRow);
+  const top = contentTop(rows * fitted.h + (rows - 1) * GAP_CM);
   return [
     ...contentPage(ctx, slide.title),
     ...items.flatMap((item, index) => {
       const row = Math.floor(index / perRow);
-      const y = CONTENT.top + row * (fitted.h + GAP_CM);
+      const y = top + row * (fitted.h + GAP_CM);
       return cardCommands(
         ctx,
         index + 1,
@@ -454,7 +467,7 @@ export function renderEvidence(ctx, slide) {
       ? undefined
       : fitBox(list, CONTENT.w, Infinity, [DETAIL_PT]).h;
   const total = h + (listH === undefined ? 0 : GAP_CM + listH);
-  const top = CONTENT.top + (CONTENT.bottom - CONTENT.top - total) / 2;
+  const top = contentTop(total);
 
   const commands = contentPage(ctx, slide.title);
   metrics.forEach((metric, index) => {
@@ -516,6 +529,7 @@ const STEP_BODY_PT = 14;
 const TRACK_CM = 0.12;
 // Between a step's circle and its card.
 const STEP_GAP_CM = 0.3;
+const STEP_CARD_MIN_CM = 4;
 
 export function renderTimeline(ctx, slide) {
   const { n, theme } = ctx;
@@ -526,10 +540,12 @@ export function renderTimeline(ctx, slide) {
     headingSizes: [STEP_HEADING_PT],
     bodySizes: [STEP_BODY_PT],
     bodyRoom: Infinity,
+    minH: STEP_CARD_MIN_CM,
   });
   const centers = slots.map(({ x, w }) => x + w / 2);
-  const middle = CONTENT.top + STEP_MARK_CM / 2;
-  const cardY = CONTENT.top + STEP_MARK_CM + STEP_GAP_CM;
+  const top = contentTop(STEP_MARK_CM + STEP_GAP_CM + fitted.h);
+  const middle = top + STEP_MARK_CM / 2;
+  const cardY = top + STEP_MARK_CM + STEP_GAP_CM;
   return [
     ...contentPage(ctx, slide.title),
     // Added before the circles, so they are drawn over it.
@@ -549,7 +565,7 @@ export function renderTimeline(ctx, slide) {
           String(i),
           {
             x: centers[index] - STEP_MARK_CM / 2,
-            y: CONTENT.top,
+            y: top,
             w: STEP_MARK_CM,
             h: STEP_MARK_CM,
           },
@@ -602,14 +618,15 @@ export function renderComparison(ctx, slide) {
       () => SIDE_HEADING_PT,
     ).h,
   );
-  // The bars sit low enough that the VS circle centered on them starts
-  // inside the content area.
-  const barY = CONTENT.top + Math.max(0, (VS_CM - bar) / 2);
   const points = fitRow(
     sides.map((side) => side.points.join("\n")),
     w,
     () => POINTS_PT,
   );
+  // The bars sit low enough that the VS circle centered on them starts
+  // inside the block, and the block is centered in the content area.
+  const above = Math.max(0, (VS_CM - bar) / 2);
+  const barY = contentTop(above + bar + SIDE_GAP_CM + points.h) + above;
   return [
     ...contentPage(ctx, slide.title),
     ...sides.flatMap((side, index) => {
