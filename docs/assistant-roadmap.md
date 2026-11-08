@@ -28,7 +28,7 @@
 
 | 顺序 | 切片 | 交付 | 状态 |
 |---|---|---|---|
-| 1 | M3a-1 生成骨架 | deck 内容模型 + `navy` 主题 + 渲染器 + 质检闭环 + 全页 SVG + 技能页型表 + 最小真实回归脚本（4 提示 × 3 模型） | todo |
+| 1 | M3a-1 生成骨架 | deck 内容模型 + `navy` 主题 + 渲染器 + 质检闭环 + 全页 SVG + 技能页型表 + 最小真实回归脚本（4 提示 × 3 模型） | done（2026-11-08 代码与假模型 e2e 完成；待用户真机验收与 `pnpm assistant:real-eval`） |
 | 2 | M3a-2 一次只出一份 | `revises` 卡片替换 + `content.json` + 大纲规则（待调研） | todo |
 | 3 | M3b 修改 | `inspect_document` + `edit_document`（docx / pptx / xlsx）+ 源字节不变 | todo |
 | 4 | M3a-3 像用户的 | `forest` / `warm` 主题 + 偏好套件 + PDF 主题 + `attachment:<id>` 图片 | todo |
