@@ -370,6 +370,55 @@ content_slide(prs, "A white content slide")
   },
 );
 
+test(
+  "background() on a cover replaces its background, not hides behind it",
+  options,
+  async (t) => {
+    const result = await build(
+      t,
+      `
+prs = new_deck(title="Recoloured")
+s = cover_slide(prs, "A black cover", subtitle="Recoloured once")
+background(s, "000000")
+s = section_slide(prs, "A black section", number="02")
+background(s, "000000")
+background(s, "000000")
+`,
+    );
+    const entries = await zipEntries(result.out);
+    for (const page of [1, 2]) {
+      const xml = entries.get(`ppt/slides/slide${page}.xml`).toString();
+      // One Background shape, the first one in the tree, in the latest colour,
+      // however many times the colour was set; the slide's own fill agrees.
+      assert.equal(xml.match(/name="Background"/g)?.length, 1, `slide ${page}`);
+      const first = xml.match(/<p:sp>[\s\S]*?<\/p:sp>/)[0];
+      assert.match(first, /name="Background"/);
+      assert.match(first, /<a:solidFill><a:srgbClr val="000000"\/>/);
+      assert.doesNotMatch(xml, /val="152B47"/);
+      assert.match(
+        xml,
+        /<p:bg><p:bgPr><a:solidFill><a:srgbClr val="000000"\/>/,
+      );
+      // What the preview draws is black, not the navy the slide started with.
+      const preview = await previewPixels(t, result.out, page);
+      for (const [x, y] of [
+        [2, 2],
+        [preview.width - 3, preview.height - 3],
+        [preview.width >> 1, preview.height >> 1],
+      ])
+        assert.ok(
+          preview.at(x, y).every((v) => v < 12),
+          `page ${page} at ${x},${y}: ${preview.at(x, y)}`,
+        );
+    }
+    assert.deepEqual((await office(t, "validate", result.out)).errors, []);
+    assert.deepEqual(
+      (await office(t, "view", result.out, "issues")).issues,
+      [],
+    );
+  },
+);
+
 test("validates clean", options, async (t) => {
   const result = await build(
     t,

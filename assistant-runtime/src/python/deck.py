@@ -134,13 +134,16 @@ def _footer(slide, page):
 
 def background(slide, color):
     """Colour the whole slide. The slide's own background is set for PowerPoint, and a full-slide rectangle goes at the back
-    of the slide for the preview, which paints every page white and ignores that background. Text on it needs a light colour."""
+    of the slide for the preview, which paints every page white and ignores that background. Text on it needs a light colour.
+    Calling it again recolours: the slide keeps one Background rectangle (cover and section slides start with one)."""
     f = slide.background.fill; f.solid(); f.fore_color.rgb = rgb(color)
+    tree = slide.shapes._spTree
+    for old in [sh for sh in slide.shapes if sh.name == "Background"]: tree.remove(old._element)  # a cover starts with one: the latest colour wins
     pres = slide.part.package.presentation_part.presentation
     r = shape(slide, MSO_SHAPE.RECTANGLE, 0, 0, 1, 1, fill=color)
     r.left, r.top, r.width, r.height = 0, 0, pres.slide_width, pres.slide_height
     r.name = "Background"
-    tree = slide.shapes._spTree; tree.remove(r._element); tree.insert(2, r._element)  # after nvGrpSpPr and grpSpPr
+    tree.remove(r._element); tree.insert(2, r._element)  # after nvGrpSpPr and grpSpPr
     return r
 
 def _notes(slide, notes):
