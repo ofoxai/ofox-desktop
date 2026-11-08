@@ -48,7 +48,11 @@ def positive_axis_ids(prs):
 
 namespace = {"__name__": "__main__"}
 exec("from deck import *", namespace)
-exec(compile(user_code, "deck_code.py", "exec"), namespace)
+try:
+    exec(compile(user_code, "deck_code.py", "exec"), namespace)
+except SystemExit:
+    # Pyodide would end the whole process from a timer, outside our catch.
+    raise RuntimeError("the code called sys.exit(); remove it")
 prs = namespace.get("prs")
 if prs is None:
     raise RuntimeError("the code must create prs = new_deck(...)")
@@ -155,14 +159,24 @@ async function run({ assets, code, out, lint }) {
   writeFileSync(lint, messages);
 }
 
+// Every failure ends here as one bounded block on stderr. Pyodide raises some
+// of them (os._exit, a fatal error) from a timer, outside the try below, so
+// the process-level handlers report them the same way.
+function fail(error) {
+  const message = String(error?.message ?? error).trim();
+  const text =
+    error?.name === "PythonError"
+      ? `PythonError: ${message.slice(-TRACEBACK_CHARS)}`
+      : `RunnerError: ${message.slice(0, TRACEBACK_CHARS)}`;
+  writeFileSync(2, `${text}\n`);
+  process.exit(1);
+}
+process.on("uncaughtException", fail);
+process.on("unhandledRejection", fail);
+
 try {
   await run(main(process.argv.slice(2)));
   process.exit(0);
 } catch (error) {
-  const text =
-    error?.name === "PythonError"
-      ? `PythonError: ${error.message.trim().slice(-TRACEBACK_CHARS)}`
-      : `RunnerError: ${error?.message ?? error}`;
-  writeFileSync(2, `${text}\n`);
-  process.exit(1);
+  fail(error);
 }

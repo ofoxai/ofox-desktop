@@ -134,6 +134,27 @@ test("reports a Python error", options, async (t) => {
   assert.equal(await exists(result.out), false);
 });
 
+// Code that ends the process or Pyodide itself must still come back as one
+// short, labelled error, not Node's dump of Pyodide's minified source.
+for (const [name, code] of [
+  ["sys.exit", "import sys\nprs = new_deck()\nsys.exit(0)\n"],
+  ["os._exit", "import os\nprs = new_deck()\nos._exit(0)\n"],
+]) {
+  test(
+    `reports ${name} in the code as one bounded error`,
+    options,
+    async (t) => {
+      const result = await run(t, code);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /^(PythonError|RunnerError): /);
+      assert.ok(result.stderr.length <= 4096, `${result.stderr.length} bytes`);
+      assert.doesNotMatch(result.stderr, /Node\.js v/);
+      assert.equal(await exists(result.out), false);
+      assert.equal(await exists(result.lint), false);
+    },
+  );
+}
+
 test("requires prs", options, async (t) => {
   const result = await run(t, "x = 1\n");
   assert.equal(result.status, 1);
