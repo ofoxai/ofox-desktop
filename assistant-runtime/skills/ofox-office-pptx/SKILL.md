@@ -20,7 +20,7 @@ If create_document offers `{"kind":"python","code":"…"}` content, make the dec
 
 1. Send the code with `preview: true`. Nothing is delivered: you get a `previewId`, the issues and an overview image of the slides, numbered in order.
 2. Look at the image and read the issues: clipped or overlapping text, empty areas, small text, a plot or figure out of place. Fix the code.
-3. Deliver by calling again without `preview` (the code may have changed), or with `fromPreview: "<previewId>"` and no content to deliver that preview as it is. A file may be previewed twice per reply; if the reply ends without delivering, the latest preview is delivered automatically.
+3. Deliver under the same file name by calling again without `preview` (the code may have changed), or with `fromPreview: "<previewId>"` and no content to deliver that preview as it is. A file may be previewed twice per reply; if the reply ends without delivering, the latest preview is delivered automatically.
 
 A Python error comes back as the end of the traceback and nothing is made: fix that line and resend (at most 2 retries). After delivery, tell the user what the deck contains and mention any issue left.
 

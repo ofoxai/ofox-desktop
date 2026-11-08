@@ -7,7 +7,9 @@ use super::*;
 use crate::services::assistant::{
     attachments::{self, Source},
     catalog::Model,
-    documents::create::{PreviewRecord, LIMIT as DOCUMENT_LIMIT, MAX_PREVIEWS_PER_NAME},
+    documents::create::{
+        DocumentFormat, PreviewRecord, LIMIT as DOCUMENT_LIMIT, MAX_PREVIEWS_PER_NAME,
+    },
     host::{blocking, scrub_secrets, scrub_secrets_in, AssistantHost, RunControl, PROTOCOL, STATE},
     materials::{self, Material, Plan},
     media, media_host, media_http,
@@ -57,19 +59,27 @@ pub(in crate::services::assistant) struct MediaRun {
 }
 
 /// A run's previews (see `documents::create`): each one asked for, in
-/// order, and the file names it delivered documents as.
+/// order, the file names it delivered documents as, and when it last
+/// delivered a document of each format.
 #[derive(Default)]
 struct Previews {
     asked: Vec<AskedPreview>,
     delivered: HashSet<String>,
+    /// By format extension, the [`Self::clock`] of the run's latest
+    /// delivery of that format.
+    last_delivery: HashMap<&'static str, u64>,
+    /// Counts the previews made and the documents delivered, in order.
+    clock: u64,
 }
 
 /// A preview of the file `name` in the folder `doc_id`; `made` while it is
-/// made and not delivered.
+/// made and not delivered, `made_at` the [`Previews::clock`] when it was
+/// first made.
 struct AskedPreview {
     name: String,
     doc_id: String,
     made: Option<PreviewRecord>,
+    made_at: Option<u64>,
 }
 
 impl MediaRun {
@@ -181,6 +191,7 @@ impl MediaRun {
             name: name.into(),
             doc_id: doc_id.into(),
             made: None,
+            made_at: None,
         });
         Ok(())
     }
@@ -194,11 +205,12 @@ impl MediaRun {
     /// delivered; again when its delivery failed.
     pub fn keep_preview(&self, preview: PreviewRecord) {
         let mut previews = self.previews();
-        if let Some(asked) = previews
-            .asked
-            .iter_mut()
-            .find(|p| p.doc_id == preview.doc_id)
-        {
+        let Previews { asked, clock, .. } = &mut *previews;
+        if let Some(asked) = asked.iter_mut().find(|p| p.doc_id == preview.doc_id) {
+            if asked.made_at.is_none() {
+                *clock += 1;
+                asked.made_at = Some(*clock);
+            }
             asked.made = Some(preview);
         }
     }
@@ -213,20 +225,41 @@ impl MediaRun {
             .and_then(|p| p.made.take())
     }
 
-    /// Remember that the run delivered a document as the file `name`.
-    pub fn record_delivery(&self, name: &str) {
-        self.previews().delivered.insert(name.into());
+    /// Remember that the run delivered a document of `format` as the file
+    /// `name`.
+    pub fn record_delivery(&self, name: &str, format: DocumentFormat) {
+        let mut previews = self.previews();
+        previews.clock += 1;
+        let now = previews.clock;
+        previews.delivered.insert(name.into());
+        previews.last_delivery.insert(format.extension(), now);
     }
 
     /// For each file the run previewed and delivered no document as, its
     /// latest preview, taken for its delivery; in the order they were asked
-    /// for.
+    /// for. A preview made before the run delivered a document of its
+    /// format is left out: that document stands for it, whatever its name
+    /// (the model renamed the file when it delivered it).
     pub fn undelivered_previews(&self) -> Vec<PreviewRecord> {
         let mut previews = self.previews();
-        let Previews { asked, delivered } = &mut *previews;
+        let Previews {
+            asked,
+            delivered,
+            last_delivery,
+            ..
+        } = &mut *previews;
+        let superseded = |preview: &AskedPreview| match (&preview.made, preview.made_at) {
+            (Some(made), Some(at)) => last_delivery
+                .get(made.format.extension())
+                .is_some_and(|&delivered| delivered > at),
+            _ => false,
+        };
         let mut latest: Vec<PreviewRecord> = vec![];
         for preview in asked.iter_mut().rev() {
-            if delivered.contains(&preview.name) || latest.iter().any(|p| p.name == preview.name) {
+            if delivered.contains(&preview.name)
+                || latest.iter().any(|p| p.name == preview.name)
+                || superseded(preview)
+            {
                 continue;
             }
             latest.extend(preview.made.take());

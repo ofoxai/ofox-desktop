@@ -777,6 +777,7 @@ test("mentions python only when the host offers it", () => {
     assert.match(text, /\{"kind":"python"/);
     assert.match(text, /preview/);
     assert.match(text, /fromPreview/);
+    assert.match(text, /same file name/);
   }
   assert.match(offered.description, /deck object/);
 
@@ -1008,6 +1009,7 @@ test("a preview result carries one contact sheet", async (t) => {
   assert.match(text, /deliver with fromPreview: "doc-9"/);
   assert.match(text, /delivered automatically/);
   assert.match(text, /without preview/);
+  assert.match(text, /under the same file name/);
   assert.doesNotMatch(text, /Created|attachment/);
   // The host's paths are for this runtime alone.
   assert.equal(result.details.pagePaths, undefined);

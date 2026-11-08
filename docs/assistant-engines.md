@@ -588,7 +588,11 @@ at the deck before the user is shown anything.
   count back). A third is refused with a message to deliver.
 - When a reply ends without delivering a file it previewed, the host delivers
   that file's latest preview itself, as the document of the call that made it
-  (within the reply's three documents). A reply the user stops delivers nothing:
+  (within the reply's three documents). A preview made before the reply
+  delivered any document of its format is left out: that document stands for
+  it, whatever its name, so a model that renames the file when it delivers it
+  does not leave two decks. The tool and the skill tell the model to deliver
+  under the same file name. A reply the user stops delivers nothing:
   the user never saw the previews. Preview folders go with the others when the
   reply ends.
 

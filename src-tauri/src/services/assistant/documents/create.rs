@@ -2229,7 +2229,7 @@ pub(in crate::services::assistant) struct PreviewRecord {
     /// The call that made it: at the end of the reply it is delivered as
     /// that call's document.
     call_id: String,
-    format: DocumentFormat,
+    pub(in crate::services::assistant) format: DocumentFormat,
     made: Made,
 }
 
@@ -3436,7 +3436,7 @@ impl AssistantHost {
         }
         .await;
         match &delivered {
-            Ok(_) => media.record_delivery(&document.name),
+            Ok(_) => media.record_delivery(&document.name, document.format),
             Err(_) => media.release_document(),
         }
         delivered
@@ -3534,8 +3534,8 @@ impl AssistantHost {
             )
             .await;
         if delivered.is_ok() {
-            media.record_delivery(&preview.name);
-            media.record_delivery(&name);
+            media.record_delivery(&preview.name, preview.format);
+            media.record_delivery(&name, preview.format);
         } else {
             media.release_document();
             media.keep_preview(preview);
@@ -9047,28 +9047,31 @@ esac
     #[serial_test::serial(document_engines)]
     async fn an_undelivered_preview_is_delivered_at_the_end() {
         let f = preview_fixture();
-        f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
-        let latest = f.call("call-2", preview_args("Plan.pptx")).await.unwrap();
-        let bytes = std::fs::read(
-            f.output(latest["previewId"].as_str().unwrap())
-                .join("out.pptx"),
-        )
-        .unwrap();
         // Files the reply delivered, from their preview or anew, are not
         // delivered again.
-        let other = f.call("call-3", preview_args("Other.pptx")).await.unwrap();
+        let other = f.call("call-1", preview_args("Other.pptx")).await.unwrap();
         f.call(
-            "call-4",
+            "call-2",
             json!({"name": "Other.pptx", "format": "pptx", "fromPreview": other["previewId"]}),
         )
         .await
         .unwrap();
-        f.call("call-5", preview_args("Notes.pptx")).await.unwrap();
+        f.call("call-3", preview_args("Notes.pptx")).await.unwrap();
         f.call(
-            "call-6",
+            "call-4",
             json!({"name": "Notes.pptx", "format": "pptx", "content": deck()}),
         )
         .await
+        .unwrap();
+        // A file previewed after them and never delivered is (previews made
+        // before a delivery of their format are not: see
+        // `a_preview_renamed_on_delivery_is_not_delivered_again`).
+        f.call("call-5", preview_args("Plan.pptx")).await.unwrap();
+        let latest = f.call("call-6", preview_args("Plan.pptx")).await.unwrap();
+        let bytes = std::fs::read(
+            f.output(latest["previewId"].as_str().unwrap())
+                .join("out.pptx"),
+        )
         .unwrap();
         assert_eq!(f.delivered().len(), 2);
         let runs = sandbox_log(&f).len();
@@ -9087,10 +9090,10 @@ esac
         assert_eq!(sandbox_log(&f).len(), runs);
         let record = f.record();
         let reply = &record.messages[0];
-        let generation = reply.media_for(Some("call-2")).unwrap();
+        let generation = reply.media_for(Some("call-6")).unwrap();
         assert_eq!(generation.outputs, [delivered[2].1.clone()]);
         assert_eq!(generation.params["svgPages"], 2);
-        assert!(reply.media_for(Some("call-1")).is_none());
+        assert!(reply.media_for(Some("call-5")).is_none());
         assert_eq!(reply.status, "completed");
         // Published before the run ended; then the folders went.
         let kinds: Vec<String> = f
@@ -9104,6 +9107,47 @@ esac
             .collect();
         assert_eq!(kinds, ["generation", "generation", "generation", "run_end"]);
         assert!(f.outputs().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_preview_renamed_on_delivery_is_not_delivered_again() {
+        // The model previews a deck, then delivers new content under another
+        // name: that delivery stands for the preview.
+        for renamed in ["deck_v2.pptx", "Deck.pptx"] {
+            let f = preview_fixture();
+            f.call("call-1", preview_args("deck.pptx")).await.unwrap();
+            f.call(
+                "call-2",
+                json!({"name": renamed, "format": "pptx", "content": deck()}),
+            )
+            .await
+            .unwrap();
+            f.host.finish(&f.run, Ok(Finish::Completed)).await;
+            let delivered = f.delivered();
+            let names: Vec<&str> = delivered.iter().map(|(name, ..)| name.as_str()).collect();
+            assert_eq!(names, [renamed]);
+        }
+        // A delivery of another format stands for no preview, and a preview
+        // made after the reply's last delivery of its format is delivered.
+        let f = preview_fixture();
+        f.call(
+            "call-1",
+            json!({"name": "notes", "format": "md", "content": "# Notes", "preview": true}),
+        )
+        .await
+        .unwrap();
+        f.call(
+            "call-2",
+            json!({"name": "other.pptx", "format": "pptx", "content": deck()}),
+        )
+        .await
+        .unwrap();
+        f.call("call-3", preview_args("deck.pptx")).await.unwrap();
+        f.host.finish(&f.run, Ok(Finish::Completed)).await;
+        let delivered = f.delivered();
+        let names: Vec<&str> = delivered.iter().map(|(name, ..)| name.as_str()).collect();
+        assert_eq!(names, ["other.pptx", "notes.md", "deck.pptx"]);
     }
 
     #[tokio::test]

@@ -64,7 +64,7 @@ function guidelines(formats, python) {
         ? 'For a pptx, send the Python deck code ({"kind":"python","code":"…"}) or the deck object the skill describes; do not write slide coordinates yourself.'
         : "For a pptx, send the deck object the skill describes; do not write slide coordinates yourself."),
     python &&
-      'Send a pptx with preview: true first: look at the overview and the issues, fix what is wrong, then deliver by calling again without preview (the code may change) or with fromPreview: "<previewId>" and no content. If you end the reply without delivering, the latest preview is delivered automatically.',
+      'Send a pptx with preview: true first: look at the overview and the issues, fix what is wrong, then deliver under the same file name by calling again without preview (the code may change) or with fromPreview: "<previewId>" and no content. If you end the reply without delivering, the latest preview is delivered automatically.',
     "Reply with two or three sentences on the structure first, then call the tool; after the result, summarize the file and mention issues.",
     "At most 3 documents per reply; retry a failed document at most twice, then explain.",
   ].filter(Boolean);
@@ -87,7 +87,7 @@ function description(formats, python) {
     text.length && `${text.join(", ")}: content is the file's text`,
   ].filter(Boolean);
   const preview = python
-    ? " A pptx can be previewed first (preview: true): the host makes and checks it, and you get its previewId, its issues and an overview of its slides; nothing is delivered until you call again without preview, or send fromPreview with that previewId and no content."
+    ? " A pptx can be previewed first (preview: true): the host makes and checks it, and you get its previewId, its issues and an overview of its slides; nothing is delivered until you call again without preview, or send fromPreview with that previewId and no content, under the same file name."
     : "";
   return `Create one file the user can open and save; it appears under your reply. ${shapes.join("; ")}.${preview}`;
 }
@@ -245,7 +245,7 @@ function describePreview(result, { name, format }) {
 }
 
 const previewNext = (previewId) =>
-  `Fix what the issues and the slides show and call create_document again: with preview: true for another look (a file may be previewed twice per reply), or without preview to deliver the changed code. To keep this file as it is, deliver with fromPreview: "${previewId}" and no content. If you end the reply without delivering, the latest preview is delivered automatically.`;
+  `Fix what the issues and the slides show and call create_document again under the same file name: with preview: true for another look (a file may be previewed twice per reply), or without preview to deliver the changed code. To keep this file as it is, deliver with fromPreview: "${previewId}" and no content. If you end the reply without delivering, the latest preview is delivered automatically.`;
 
 // What the overview image is, or why there is none; nothing when a model
 // that cannot see images was shown none.
