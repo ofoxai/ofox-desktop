@@ -3,7 +3,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { UNUSED_PACKAGE_PATHS } from "./assistant-prune.mjs";
+import {
+  PYTHON_PACKAGE_PATHS,
+  UNUSED_PACKAGE_PATHS,
+} from "./assistant-prune.mjs";
+import { pythonEngineOffered } from "./python-assets.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const resources = path.join(root, "assistant-runtime/resources");
@@ -393,6 +397,17 @@ for (const unused of UNUSED_PACKAGE_PATHS)
     false,
     `${unused} must be pruned; run pnpm assistant:prepare`,
   );
+// The pyodide package ships exactly where the Python engine is offered.
+const pythonOffered = pythonEngineOffered(
+  `${process.platform}-${process.arch}`,
+  readJson(path.join(root, "scripts", "python-downloads.json")),
+);
+for (const python of PYTHON_PACKAGE_PATHS)
+  assert.equal(
+    existsSync(path.join(production, "node_modules", python)),
+    pythonOffered,
+    `${python} must ${pythonOffered ? "ship" : "be pruned"}; run pnpm assistant:prepare`,
+  );
 for (const kept of [
   "node_modules/pdfjs-dist/legacy/build/pdf.mjs",
   "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs",
@@ -429,6 +444,7 @@ for (const notice of [
   "office.txt",
   "officecli.txt",
   "typst.txt",
+  "python.txt",
 ])
   assert.ok(
     existsSync(path.join(resources, "notices", notice)),

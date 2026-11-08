@@ -140,7 +140,7 @@
     }
   ],
   "font": {
-    "name": "noto-sans-sc-regular",
+    "name": "noto-sans-sc",
     "version": "Sans2.004",
     "file": "NotoSansSC-Regular.otf",
     "url": "https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",

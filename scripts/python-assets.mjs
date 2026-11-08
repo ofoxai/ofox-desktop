@@ -11,3 +11,9 @@ export function pyodideWheelUrl(pin, env = process.env) {
   if (!base) return pin.url;
   return `${base.endsWith("/") ? base : `${base}/`}${pin.file}`;
 }
+
+// The Python engine is offered only on the platforms python-downloads.json
+// lists (macOS). Everywhere else its wheels are not staged and the pyodide npm
+// package, which can only run that engine, is pruned from the production tree.
+export const pythonEngineOffered = (platform, downloads) =>
+  downloads.platforms.includes(platform);

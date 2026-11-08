@@ -26,7 +26,7 @@ import {
   writeInstallStamp,
 } from "./assistant-install-stamp.mjs";
 import { pruneProduction } from "./assistant-prune.mjs";
-import { pyodideWheelUrl } from "./python-assets.mjs";
+import { pyodideWheelUrl, pythonEngineOffered } from "./python-assets.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = path.join(root, "assistant-runtime");
@@ -44,6 +44,9 @@ const node = path.join(
   process.platform === "win32" ? "node.exe" : "node",
 );
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const pythonPinsFile = path.join(root, "scripts", "python-downloads.json");
+const pythonPinsBytes = await readFile(pythonPinsFile);
+const pythonPins = JSON.parse(pythonPinsBytes);
 const cache = path.join(runtime, ".cache");
 await mkdir(cache, { recursive: true });
 
@@ -379,18 +382,17 @@ async function installEngine(name, engine, pinned, directory, executable) {
 // a CJK font pinned by python-downloads.json, staged under
 // resources/engines/python/ where the runner reads them. Pyodide itself comes
 // from the runtime's npm dependency. The engine is offered on the platforms
-// the pins list (macOS), so no other installer carries these ~40 MB.
+// the pins list (macOS). Elsewhere nothing is staged and pruneProduction drops
+// the pyodide package, so those installers carry none of it.
 async function preparePython(installed) {
-  const pinsFile = path.join(root, "scripts", "python-downloads.json");
-  const pinsBytes = await readFile(pinsFile);
-  const downloads = JSON.parse(pinsBytes);
-  if (!downloads.platforms.includes(target)) {
+  const downloads = pythonPins;
+  if (!pythonEngineOffered(target, downloads)) {
     process.stdout.write(`Python engine is not offered on ${target}\n`);
     return null;
   }
   const directory = path.join(resources, "engines", "python");
   const assetsFile = path.join(directory, "assets.json");
-  const stamp = { version: downloads.pyodide, sha256: digest(pinsBytes) };
+  const stamp = { version: downloads.pyodide, sha256: digest(pythonPinsBytes) };
   const { font } = downloads;
   const files = [
     ...downloads.binary.map((pin) => ({
@@ -535,10 +537,12 @@ if (process.argv.includes("--node-only")) {
   const stampFile = path.join(resources, "runtime-install.json");
   const wanted = await installStamp({
     runtime,
-    // A change to how the tree is installed or pruned redoes both.
+    // A change to how the tree is installed or pruned redoes both; the Python
+    // pins decide whether the pyodide package is pruned.
     scripts: [
       fileURLToPath(import.meta.url),
       path.join(root, "scripts", "assistant-prune.mjs"),
+      pythonPinsFile,
     ],
     nodeVersion: manifest.version,
     platform: target,
@@ -557,7 +561,9 @@ if (process.argv.includes("--node-only")) {
         path.join(production, filename),
       );
     await install(production);
-    await pruneProduction(production);
+    await pruneProduction(production, {
+      pythonEngine: pythonEngineOffered(target, pythonPins),
+    });
     await writeInstallStamp(stampFile, wanted);
   }
   // The runtime's own source is copied every time: it changes without the lockfile.

@@ -14,10 +14,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { pruneProduction } from "../../scripts/assistant-prune.mjs";
+import yauzl from "yauzl";
+import {
+  PYTHON_PACKAGE_PATHS,
+  pruneProduction,
+} from "../../scripts/assistant-prune.mjs";
 import {
   PYODIDE_BASE_URL,
   pyodideWheelUrl,
+  pythonEngineOffered,
 } from "../../scripts/python-assets.mjs";
 
 const exists = (file) =>
@@ -502,4 +507,176 @@ test("OFOX_PYODIDE_BASE_URL replaces only the Pyodide CDN base of a wheel", () =
     pyodideWheelUrl(pin, { OFOX_PYODIDE_BASE_URL: mirror.slice(0, -1) }),
     mirrored,
   );
+});
+
+test("the Python engine is offered on macOS only, and its npm package is pruned elsewhere", async (t) => {
+  const downloads = await readJson(
+    new URL("../../scripts/python-downloads.json", import.meta.url),
+  );
+  for (const [target, offered] of Object.entries({
+    "darwin-arm64": true,
+    "darwin-x64": true,
+    "win32-x64": false,
+    "linux-x64": false,
+  }))
+    assert.equal(pythonEngineOffered(target, downloads), offered, target);
+  assert.deepEqual(PYTHON_PACKAGE_PATHS, ["pyodide"]);
+
+  const production = await mkdtemp(path.join(tmpdir(), "ofox-python-prune-"));
+  t.after(() => rm(production, { recursive: true, force: true }));
+  const modules = path.join(production, "node_modules");
+  const files = [
+    "pyodide/pyodide.asm.wasm",
+    "pyodide/pyodide-lock.json",
+    "pdfjs-dist/legacy/build/pdf.mjs",
+    "ws/index.js",
+  ];
+  const stage = async () => {
+    await rm(modules, { recursive: true, force: true });
+    for (const file of files) {
+      await mkdir(path.dirname(path.join(modules, file)), { recursive: true });
+      await writeFile(path.join(modules, file), "fixture");
+    }
+  };
+  // Offered: the package stays. Not offered: only the package goes.
+  for (const options of [undefined, { pythonEngine: true }]) {
+    await stage();
+    await pruneProduction(production, options);
+    for (const file of files)
+      assert.equal(await exists(path.join(modules, file)), true, file);
+  }
+  await stage();
+  await pruneProduction(production, { pythonEngine: false });
+  assert.equal(await exists(path.join(modules, "pyodide")), false);
+  for (const file of files.filter((file) => !file.startsWith("pyodide/")))
+    assert.equal(await exists(path.join(modules, file)), true, file);
+
+  // The tree this machine prepared follows the same decision.
+  assert.equal(
+    await exists(
+      new URL("../resources/runtime/node_modules/pyodide/", import.meta.url),
+    ),
+    pythonEngineOffered(platform, downloads),
+  );
+});
+
+// The license files a wheel carries, as the notice must reproduce them.
+const wheelLicensePattern =
+  /\.dist-info\/(licen[sc]e[^/]*|copying[^/]*|licenses\/.+)$|mpl-data\/fonts\/ttf\/LICENSE_[A-Z]+$/i;
+const noticeText = (text) =>
+  text
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n")
+    .trim();
+
+function licensesInWheel(file) {
+  return new Promise((resolve, reject) => {
+    yauzl.open(file, { lazyEntries: true }, (error, zip) => {
+      if (error) return reject(error);
+      const found = [];
+      zip.on("error", reject);
+      zip.on("end", () => resolve(found));
+      zip.on("entry", (entry) => {
+        if (!wheelLicensePattern.test(entry.fileName)) return zip.readEntry();
+        zip.openReadStream(entry, (error, stream) => {
+          if (error) return reject(error);
+          const chunks = [];
+          stream.on("error", reject);
+          stream.on("data", (chunk) => chunks.push(chunk));
+          stream.on("end", () => {
+            found.push([
+              entry.fileName,
+              Buffer.concat(chunks).toString("utf8"),
+            ]);
+            zip.readEntry();
+          });
+        });
+      });
+      zip.readEntry();
+    });
+  });
+}
+
+test("the Python notice names every pinned package, Pyodide and the font, and reproduces their license texts", async () => {
+  const downloads = await readJson(
+    new URL("../../scripts/python-downloads.json", import.meta.url),
+  );
+  const lock = await readJson(
+    new URL("../node_modules/pyodide/pyodide-lock.json", import.meta.url),
+  );
+  const notice = await readFile(
+    new URL("../notices/python.txt", import.meta.url),
+    "utf8",
+  );
+  assert.equal(notice.includes("\r"), false);
+
+  // "<name> <version> (<license>)" over a rule, as office.txt does it; names
+  // compare the way package names do.
+  const normalize = (name) => name.toLowerCase().replace(/[-_. ]+/g, "-");
+  const noticed = new Map();
+  for (const [, name, version] of notice.matchAll(/^(.+) (\S+) \(.+\)\n-+\n/gm))
+    noticed.set(normalize(name), [
+      ...(noticed.get(normalize(name)) ?? []),
+      version,
+    ]);
+  const wanted = [
+    ...[...downloads.binary, ...downloads.pure, downloads.font].map((pin) => [
+      pin.name,
+      pin.version,
+    ]),
+    ["pyodide", downloads.pyodide],
+    ["cpython", lock.info.python],
+    [
+      "emscripten",
+      lock.info.platform
+        .match(/^emscripten_(\d+)_(\d+)_(\d+)$/)
+        .slice(1)
+        .join("."),
+    ],
+  ];
+  for (const [name, version] of wanted)
+    assert.ok(
+      noticed.get(normalize(name))?.includes(version),
+      `python.txt must have a "${name} ${version} (license)" section`,
+    );
+
+  // The texts of what the runtime itself and the C libraries need.
+  for (const marker of [
+    "Mozilla Public License Version 2.0", // Pyodide
+    "PYTHON SOFTWARE FOUNDATION LICENSE VERSION 2", // CPython
+    "University of Illinois/NCSA Open Source License", // Emscripten
+    "SIL OPEN FONT LICENSE Version 1.1", // Noto Sans SC
+    "\nFreeType (FTL)\n",
+    "\nlibjpeg-turbo (",
+    "\nzlib (Zlib)\n",
+    "\nlibtiff 4.4.0 (",
+    "\nlibwebp (",
+    "\nQhull (",
+    "\nlibxml2 (MIT)\n",
+    "\nlibxslt (MIT)\n",
+  ])
+    assert.ok(notice.includes(marker), marker);
+
+  // Where the wheels and the font are staged, every license file they carry
+  // is in the notice word for word.
+  if (!pythonEngineOffered(platform, downloads)) return;
+  const staged = new URL("../resources/engines/python/", import.meta.url);
+  for (const pin of [...downloads.binary, ...downloads.pure]) {
+    const licenses = await licensesInWheel(
+      fileURLToPath(new URL(`wheels/${pin.file}`, staged)),
+    );
+    assert.ok(licenses.length > 0, `${pin.file} carries no license file`);
+    for (const [file, text] of licenses)
+      assert.ok(
+        notice.includes(noticeText(text)),
+        `${pin.name}: ${file} is missing from python.txt`,
+      );
+  }
+  const ofl = await readFile(
+    new URL(`fonts/${downloads.font.license.file}`, staged),
+    "utf8",
+  );
+  assert.ok(notice.includes(noticeText(ofl)), "the font's OFL text");
 });
