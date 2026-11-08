@@ -9194,6 +9194,32 @@ esac
         assert_eq!(f.events("run_end").len(), 1);
     }
 
+    /// A reply that fails (the provider, say) without the user stopping it
+    /// still delivers its preview: unlike a stopped one, its outcome is kept.
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn a_failed_reply_still_delivers_its_preview() {
+        let f = preview_fixture();
+        let preview = f.call("call-1", preview_args("Plan.pptx")).await.unwrap();
+        let bytes = std::fs::read(
+            f.output(preview["previewId"].as_str().unwrap())
+                .join("out.pptx"),
+        )
+        .unwrap();
+        f.host
+            .finish(&f.run, Err("assistant_provider_error".into()))
+            .await;
+        let delivered = f.delivered();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, "Plan.pptx");
+        assert_eq!(delivered[0].2, bytes);
+        assert_eq!(f.events("generation").len(), 1);
+        let ended = f.events("run_end");
+        assert_eq!(ended.len(), 1);
+        assert_eq!(ended[0]["status"], "error");
+        assert!(f.outputs().is_empty());
+    }
+
     #[tokio::test]
     #[serial_test::serial(document_engines)]
     async fn previews_do_not_count_toward_the_document_limit() {

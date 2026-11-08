@@ -594,9 +594,10 @@ at the deck before the user is shown anything.
   delivered any document of its format is left out: that document stands for
   it, whatever its name, so a model that renames the file when it delivers it
   does not leave two decks. The tool and the skill tell the model to deliver
-  under the same file name. A reply the user stops delivers nothing:
-  the user never saw the previews. Preview folders go with the others when the
-  reply ends.
+  under the same file name. A reply the user stops delivers nothing: the user
+  never saw the previews, and a stop keeps no tool's outcome. A reply that fails
+  without being stopped (a provider error, say) still delivers them, as one that
+  completes does. Preview folders go with the others when the reply ends.
 
 ### Not in this round
 
