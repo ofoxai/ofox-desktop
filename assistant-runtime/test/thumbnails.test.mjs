@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createCanvas, ImageData, loadImage } from "@napi-rs/canvas";
 import {
+  contactSheet,
   encodeThumbnail,
   thumbnailFromPng,
   thumbnailFromSvg,
@@ -128,19 +129,21 @@ async function lightPixels(thumbnail, [x, y, w, h]) {
   return count;
 }
 
+// White 60pt text in a box across the middle of a navy 16:9 slide, as
+// officecli draws it: the text in foreignObject, which the canvas skips.
+const navySlide = (text) =>
+  Buffer.from(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">' +
+      '<rect width="1920" height="1080" fill="#1E3A5F"/>' +
+      '<g transform="translate(132,340)"><rect width="1656" height="255" fill="none"/>' +
+      '<foreignObject x="14.4" y="7.2" width="1627" height="240">' +
+      '<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;justify-content:center;line-height:1">' +
+      '<div style="white-space:pre-wrap;margin:0;font-size:60pt;text-align:center;line-height:1.41">' +
+      `<span style="font-family:'Arial';font-weight:bold;color:#FFFFFF">${text}</span>` +
+      "</div></div></foreignObject></g></svg>",
+  );
+
 test("an officecli slide's text, kept in foreignObject, is drawn on the thumbnail", async (t) => {
-  // White 60pt text in a box across the middle of a navy 16:9 slide.
-  const slide = (text) =>
-    Buffer.from(
-      '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">' +
-        '<rect width="1920" height="1080" fill="#1E3A5F"/>' +
-        '<g transform="translate(132,340)"><rect width="1656" height="255" fill="none"/>' +
-        '<foreignObject x="14.4" y="7.2" width="1627" height="240">' +
-        '<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;justify-content:center;line-height:1">' +
-        '<div style="white-space:pre-wrap;margin:0;font-size:60pt;text-align:center;line-height:1.41">' +
-        `<span style="font-family:'Arial';font-weight:bold;color:#FFFFFF">${text}</span>` +
-        "</div></div></foreignObject></g></svg>",
-    );
   if (!(await readsSvg())) {
     t.skip("SVG unsupported");
     return;
@@ -148,11 +151,91 @@ test("an officecli slide's text, kept in foreignObject, is drawn on the thumbnai
   // The box spans x 58–720 and y 139–242 of the 768 × 432 thumbnail.
   const region = [58, 139, 662, 103];
   const lit = async (text) =>
-    lightPixels(await thumbnailFromSvg(slide(text)), region);
+    lightPixels(await thumbnailFromSvg(navySlide(text)), region);
   assert.ok((await lit("Transformer")) > 2000, "Latin text is drawn");
   // Arial has no CJK glyphs: the canvas falls back to a system font.
   assert.ok((await lit("入门介绍")) > 2000, "CJK text is drawn");
   assert.equal(await lit(""), 0, "no text, no light pixels");
+});
+
+// The pixel at (x, y) of a decoded thumbnail.
+async function pixelAt(thumbnail, x, y) {
+  const image = await decoded(thumbnail);
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  return [...context.getImageData(x, y, 1, 1).data.slice(0, 3)];
+}
+
+// A contact sheet of 1600 px lays 16:9 slides out in two columns: a 24 px
+// gap around every cell and a 32 px strip above it for its number, so a
+// cell is 764 x 430 and sits at (24 + 788 * column, 56 + 486 * row).
+const cellAt = (column, row) => [24 + 788 * column, 56 + 486 * row, 764, 430];
+
+test("a contact sheet draws every slide, with its text, in two columns", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const sheet = await contactSheet([
+    navySlide("Transformer"),
+    navySlide("入门介绍"),
+    navySlide(""),
+  ]);
+  assert.equal(sheet.mimeType, "image/jpeg");
+  const image = await decoded(sheet);
+  assert.equal(image.width, 1600);
+  // Two rows of cells for three slides.
+  assert.equal(image.height, 24 + 2 * (32 + 430 + 24));
+  // The slide's text box spans x 58–708 and y 138–233 of its cell.
+  const text = ([x, y]) => [x + 58, y + 138, 650, 95];
+  const filled = [cellAt(0, 0), cellAt(1, 0), cellAt(0, 1)];
+  for (const [x, y, w, h] of filled) {
+    const [r, g, b] = await pixelAt(sheet, x + 10, y + h - 10);
+    assert.ok(r < 80 && b > 60 && b < 140, `navy ${r},${g},${b}`);
+  }
+  assert.ok((await lightPixels(sheet, text(filled[0]))) > 2000, "Latin text");
+  assert.ok((await lightPixels(sheet, text(filled[1]))) > 2000, "CJK text");
+  assert.equal(await lightPixels(sheet, text(filled[2])), 0, "no text");
+  // The fourth cell has no slide: the sheet's light background.
+  const [x, y, w, h] = cellAt(1, 1);
+  const [r, g, b] = await pixelAt(sheet, x + w / 2, y + h / 2);
+  assert.ok(r > 200 && g > 200 && b > 200, `empty ${r},${g},${b}`);
+});
+
+test("a contact sheet of one slide has one row and keeps the width", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const image = await decoded(await contactSheet([navySlide("Only")]));
+  assert.equal(image.width, 1600);
+  assert.equal(image.height, 24 + 32 + 430 + 24);
+  // One column of 800 px: cells 752 wide and 423 high.
+  const column = await decoded(
+    await contactSheet([navySlide("A"), navySlide("B")], {
+      columns: 1,
+      width: 800,
+    }),
+  );
+  assert.equal(column.width, 800);
+  assert.equal(column.height, 24 + 2 * (32 + 423 + 24));
+});
+
+test("a contact sheet stays within its byte budget", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const sheet = await contactSheet(
+    Array.from({ length: 24 }, (_, i) => navySlide(`Slide ${i + 1}`)),
+  );
+  assert.ok(Buffer.from(sheet.data, "base64").length <= 600 * 1024);
+});
+
+test("a contact sheet needs slides, and slides that are SVG", async () => {
+  await assert.rejects(contactSheet([]), /at least one/);
+  await assert.rejects(contactSheet([navySlide("ok"), Buffer.from("no svg")]));
 });
 
 test("bytes that are no image are refused, for the caller to skip", async () => {

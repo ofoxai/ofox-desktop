@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { createCanvas } from "@napi-rs/canvas";
+import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { documentTools } from "../src/document-tools.mjs";
 import { pdfPages } from "./fixtures/pdf.mjs";
@@ -36,6 +36,7 @@ const completed = (extra = {}) => ({
 
 function fixture({
   formats = FORMATS,
+  python = false,
   vision = true,
   reply = () => completed(),
 } = {}) {
@@ -56,7 +57,7 @@ function fixture({
     calls,
     tools: documentTools(
       runtime,
-      { params: { documents: { formats } } },
+      { params: { documents: { formats, python } } },
       { vision },
     ),
   };
@@ -721,4 +722,429 @@ test("the schema is plain JSON Schema: an enum and a string or object list", () 
       /Validation failed/,
       JSON.stringify(content),
     );
+});
+
+// ---- Python decks and previews (the host offers them with documents.python)
+
+const PYTHON = {
+  kind: "python",
+  code: 'from deck import *\nprs = new_deck()\ncover_slide(prs, "Quarterly results")\n',
+};
+
+const previewed = (extra = {}) => ({
+  status: "completed",
+  preview: true,
+  previewId: "doc-9",
+  slides: 3,
+  issues: [],
+  pagePaths: [],
+  ...extra,
+});
+
+// Whether this build of the canvas reads SVG at all, so only that skips a
+// test and a failure in the overview code fails it.
+async function readsSvg() {
+  try {
+    await loadImage(
+      Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>',
+      ),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `count` slide SVGs in `directory`, as the host's pages/N.svg; their paths. */
+async function writePages(directory, count) {
+  const paths = [];
+  for (let page = 1; page <= count; page++) {
+    const file = path.join(directory, `${page}.svg`);
+    await writeFile(
+      file,
+      `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#1E3A5F"/><text x="40" y="100" font-size="60" fill="#fff">Slide ${page}</text></svg>`,
+    );
+    paths.push(file);
+  }
+  return paths;
+}
+
+test("mentions python only when the host offers it", () => {
+  const offered = fixture({ python: true }).tools[0];
+  const words = [offered.description, ...offered.promptGuidelines];
+  for (const text of [words[0], words.slice(1).join("\n")]) {
+    assert.match(text, /\{"kind":"python"/);
+    assert.match(text, /preview/);
+    assert.match(text, /fromPreview/);
+  }
+  assert.match(offered.description, /deck object/);
+
+  const absent = fixture({ python: false }).tools[0];
+  const plain = [absent.description, ...absent.promptGuidelines].join("\n");
+  assert.doesNotMatch(plain, /python|preview|fromPreview/i);
+  assert.equal(
+    absent.description,
+    fixture({}).tools[0].description,
+    "documents.python missing reads like false",
+  );
+});
+
+test("the guidelines tell a python model to preview, then deliver", () => {
+  const text = fixture({ python: true }).tools[0].promptGuidelines.join("\n");
+  assert.match(text, /preview: true/);
+  assert.match(text, /fromPreview: "<previewId>"/);
+  assert.match(text, /ends? the reply without delivering/);
+  assert.match(text, /At most 3 documents per reply/);
+  // Without pptx there is nothing to write Python for.
+  const textOnly = fixture({ python: true, formats: ["md", "pdf"] }).tools[0];
+  assert.doesNotMatch(
+    [textOnly.description, ...textOnly.promptGuidelines].join("\n"),
+    /python/i,
+  );
+});
+
+test("python content and a preview pass the schema only when offered", () => {
+  const offered = createDocument({ python: true }).tool;
+  const args = { name: "deck.pptx", format: "pptx", content: PYTHON };
+  // Pi must not wrap the one object into a list.
+  for (const extra of [{}, { preview: true }]) {
+    assert.deepEqual(
+      validateToolArguments(offered, {
+        name: offered.name,
+        arguments: { ...args, ...extra },
+      }),
+      { ...args, ...extra },
+    );
+  }
+  // fromPreview delivers a file made already: no content.
+  const delivery = {
+    name: "deck.pptx",
+    format: "pptx",
+    fromPreview: "doc-9",
+  };
+  assert.deepEqual(
+    validateToolArguments(offered, { name: offered.name, arguments: delivery }),
+    delivery,
+  );
+  const { content } = offered.parameters.properties;
+  const [, , code] = content.anyOf;
+  assert.equal(code.properties.code.maxLength, 200_000);
+
+  const plain = createDocument({ python: false }).tool;
+  assert.deepEqual(Object.keys(plain.parameters.properties), [
+    "name",
+    "format",
+    "content",
+  ]);
+  assert.deepEqual(plain.parameters.required, ["name", "format", "content"]);
+  assert.doesNotMatch(
+    JSON.stringify(offered.parameters),
+    /patternProperties|"const"/,
+  );
+});
+
+test("passes python content to the host unchanged", async () => {
+  // As the model sent it: the object, Pi's one-element list around it, or
+  // its JSON text. Never a deck: the renderer must not touch the code.
+  const huge = { ...PYTHON, code: "x = 1\n".repeat(40_000) };
+  for (const content of [
+    PYTHON,
+    [PYTHON],
+    JSON.stringify(PYTHON),
+    { kind: "python" },
+  ]) {
+    const { calls, tool } = createDocument({ python: true });
+    const args = { name: "deck.pptx", format: "pptx", content };
+    const result = await tool.execute("c1", { ...args, preview: true });
+    const sent = Array.isArray(content) ? content[0] : content;
+    assert.deepEqual(
+      calls,
+      [
+        {
+          name: "create_document",
+          args: { ...args, content: sent, preview: true },
+          toolCallId: "c1",
+        },
+      ],
+      JSON.stringify(content),
+    );
+    assert.doesNotMatch(result.content[0].text, /Rendered|Ignored/);
+  }
+  // Over the schema's length the schema lets it through as a list, and the
+  // host's byte limit, not this runtime, refuses it.
+  const { calls, tool } = createDocument({ python: true });
+  await tool.execute("c2", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: [huge],
+  });
+  assert.equal(calls[0].args.content, huge);
+});
+
+test("python content is the host's to refuse when it offers no python", async () => {
+  const refusal =
+    "assistant_document_failed: Python content cannot run on this computer; send a deck object instead";
+  const { tool } = createDocument({
+    python: false,
+    reply: () => {
+      throw Object.assign(new Error(refusal), { code: refusal });
+    },
+  });
+  await assert.rejects(
+    tool.execute("c1", { name: "deck.pptx", format: "pptx", content: PYTHON }),
+    (error) => {
+      assert.equal(error.message, refusal);
+      return true;
+    },
+  );
+});
+
+test("python content for another format is the host's to refuse, text is its own", async () => {
+  const { calls, tool } = createDocument({ python: true });
+  const docx = await tool.execute("c1", {
+    name: "a.docx",
+    format: "docx",
+    content: PYTHON,
+  });
+  assert.equal(docx.isError, true);
+  assert.equal(docx.details.code, "assistant_document_content");
+  const text = JSON.stringify(PYTHON);
+  await tool.execute("c2", { name: "a.json", format: "json", content: text });
+  assert.deepEqual(
+    calls.map((call) => call.args.content),
+    [text],
+  );
+});
+
+test("text that is no deck or python is told what a pptx takes", async () => {
+  const content = async (python) => {
+    const { tool } = createDocument({ python });
+    const result = await tool.execute("c1", {
+      name: "deck.pptx",
+      format: "pptx",
+      content: "Slide 1: Quarterly results",
+    });
+    return result.content[0].text;
+  };
+  assert.equal(
+    await content(true),
+    'pptx content must be {"kind":"python","code":"…"}, a deck object ({"kind":"deck",…}) or, for experts, an array of officecli batch commands.',
+  );
+  assert.match(await content(false), /^pptx content must be a deck object /);
+});
+
+test("a call with neither content nor fromPreview is refused without the host", async () => {
+  const { calls, tool } = createDocument({ python: true });
+  for (const [format, name] of [
+    ["pptx", "deck.pptx"],
+    ["md", "notes.md"],
+  ]) {
+    const result = await tool.execute("c1", { name, format });
+    assert.equal(result.isError, true);
+    assert.equal(result.details.code, "assistant_document_content");
+  }
+  assert.deepEqual(calls, []);
+});
+
+test("fromPreview delivers without content and is described as a created file", async () => {
+  const { calls, tool } = createDocument({ python: true });
+  const args = { name: "deck.pptx", format: "pptx", fromPreview: "doc-9" };
+  const result = await tool.execute("c1", args);
+  assert.deepEqual(calls, [
+    { name: "create_document", args, toolCallId: "c1" },
+  ]);
+  assert.notEqual(result.isError, true);
+  assert.match(
+    result.content[0].text,
+    /^Created deck\.pptx .* attachment att-deck/,
+  );
+  // Content next to it is the host's to refuse: it is not rendered.
+  await tool.execute("c2", { ...args, content: DECK_OBJECT });
+  assert.deepEqual(calls[1].args.content, DECK_OBJECT);
+});
+
+test("a preview result carries one contact sheet", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const directory = await folder(t);
+  const pagePaths = await writePages(directory, 3);
+  const reply = () =>
+    previewed({
+      pagePaths,
+      issues: [
+        {
+          severity: "warning",
+          message: "Text overflows its box",
+          path: "/slide[2]/shape[1]",
+        },
+      ],
+    });
+  const { calls, tool } = createDocument({ python: true, reply });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(
+    result.content.map((part) => part.type),
+    ["text", "image"],
+  );
+  const image = await loadImage(Buffer.from(result.content[1].data, "base64"));
+  assert.equal(result.content[1].mimeType, "image/jpeg");
+  assert.equal(image.width, 1600);
+  const text = result.content[0].text;
+  assert.match(text, /previewId doc-9/);
+  assert.match(text, /\(pptx, 3 slides\)/);
+  assert.match(text, /Issues: 1\./);
+  assert.match(
+    text,
+    /warning at \/slide\[2\]\/shape\[1\]: Text overflows its box/,
+  );
+  assert.match(text, /deliver with fromPreview: "doc-9"/);
+  assert.match(text, /delivered automatically/);
+  assert.match(text, /without preview/);
+  assert.doesNotMatch(text, /Created|attachment/);
+  // The host's paths are for this runtime alone.
+  assert.equal(result.details.pagePaths, undefined);
+  assert.equal(result.details.previewId, "doc-9");
+  assert.equal(result.details.preview, true);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(directory));
+  assert.doesNotMatch(JSON.stringify(result), /pagePaths/);
+  assert.equal(calls.length, 1);
+});
+
+test("a preview shown to a model that cannot see images is text only", async (t) => {
+  const directory = await folder(t);
+  const pagePaths = await writePages(directory, 2);
+  const { tool } = createDocument({
+    python: true,
+    vision: false,
+    reply: () => previewed({ pagePaths, slides: 2 }),
+  });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  assert.deepEqual(
+    result.content.map((part) => part.type),
+    ["text"],
+  );
+  const text = result.content[0].text;
+  assert.match(text, /previewId doc-9/);
+  assert.match(text, /2 slides/);
+  assert.match(text, /Issues: 0\./);
+  assert.match(text, /deliver with fromPreview: "doc-9"/);
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(directory));
+  assert.equal(result.details.pagePaths, undefined);
+});
+
+test("a preview whose pages cannot be drawn is text only, with one warning", async (t) => {
+  const directory = await folder(t);
+  const broken = path.join(directory, "1.svg");
+  await writeFile(broken, "this is not an svg");
+  for (const pagePaths of [[broken], [path.join(directory, "missing.svg")]]) {
+    const warn = t.mock.method(console, "warn", () => {});
+    const { tool } = createDocument({
+      python: true,
+      reply: () => previewed({ pagePaths }),
+    });
+    const result = await tool.execute("c1", {
+      name: "deck.pptx",
+      format: "pptx",
+      content: PYTHON,
+      preview: true,
+    });
+    warn.mock.restore();
+    assert.deepEqual(
+      result.content.map((part) => part.type),
+      ["text"],
+    );
+    assert.match(result.content[0].text, /previewId doc-9/);
+    assert.match(result.content[0].text, /No overview of the slides/);
+    assert.equal(warn.mock.callCount(), 1);
+    assert.match(String(warn.mock.calls[0].arguments[0]), /overview/i);
+  }
+  // No pages at all (a text file's preview): nothing to draw, nothing to warn.
+  const warn = t.mock.method(console, "warn", () => {});
+  const { tool } = createDocument({ python: true, reply: () => previewed() });
+  const result = await tool.execute("c2", {
+    name: "notes.md",
+    format: "md",
+    content: "# Notes",
+    preview: true,
+  });
+  assert.equal(result.content.length, 1);
+  assert.equal(warn.mock.callCount(), 0);
+});
+
+test("the overview shows the first 24 slides and says how many there are", async (t) => {
+  const directory = await folder(t);
+  const pagePaths = await writePages(directory, 25);
+  const { tool } = createDocument({
+    python: true,
+    vision: false,
+    reply: () => previewed({ pagePaths, slides: 25 }),
+  });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  // Without vision nothing is read or drawn, and nothing is said about it.
+  assert.doesNotMatch(result.content[0].text, /first 24/);
+  if (!(await readsSvg())) return;
+  const seeing = createDocument({
+    python: true,
+    reply: () => previewed({ pagePaths, slides: 25 }),
+  }).tool;
+  const shown = await seeing.execute("c2", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  assert.match(shown.content[0].text, /It shows the first 24 of 25 slides\./);
+  const image = await loadImage(Buffer.from(shown.content[1].data, "base64"));
+  // Twelve rows of 16:9 cells.
+  assert.equal(image.height, 24 + 12 * (32 + 430 + 24));
+});
+
+test("a deck object can be previewed too, with what was rendered first", async () => {
+  const { tool } = createDocument({
+    python: true,
+    vision: false,
+    reply: () => previewed(),
+  });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: DECK_OBJECT,
+    preview: true,
+  });
+  assert.match(
+    result.content[0].text,
+    /^Rendered 3 slides from the deck with theme navy\.\nPreview/,
+  );
+});
+
+test("a completed reply with neither a file nor a preview still fails the call", async () => {
+  for (const reply of [
+    { status: "completed", issues: [] },
+    { status: "completed", preview: true, issues: [], pagePaths: [] },
+    { status: "completed", preview: false, previewId: "doc-9" },
+  ]) {
+    const { tool } = createDocument({ python: true, reply: () => reply });
+    await assert.rejects(
+      tool.execute("c1", { name: "deck.pptx", format: "pptx", content: DECK }),
+      /The host did not create the document/,
+    );
+  }
 });
