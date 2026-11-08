@@ -26,6 +26,7 @@ import {
   writeInstallStamp,
 } from "./assistant-install-stamp.mjs";
 import { pruneProduction } from "./assistant-prune.mjs";
+import { pyodideWheelUrl } from "./python-assets.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = path.join(root, "assistant-runtime");
@@ -374,6 +375,96 @@ async function installEngine(name, engine, pinned, directory, executable) {
   await rm(extraction, { recursive: true, force: true });
 }
 
+// The Python engine is not a binary: Pyodide's wheels, pure-Python wheels and
+// a CJK font pinned by python-downloads.json, staged under
+// resources/engines/python/ where the runner reads them. Pyodide itself comes
+// from the runtime's npm dependency. The engine is offered on the platforms
+// the pins list (macOS), so no other installer carries these ~40 MB.
+async function preparePython(installed) {
+  const pinsFile = path.join(root, "scripts", "python-downloads.json");
+  const pinsBytes = await readFile(pinsFile);
+  const downloads = JSON.parse(pinsBytes);
+  if (!downloads.platforms.includes(target)) {
+    process.stdout.write(`Python engine is not offered on ${target}\n`);
+    return null;
+  }
+  const directory = path.join(resources, "engines", "python");
+  const assetsFile = path.join(directory, "assets.json");
+  const stamp = { version: downloads.pyodide, sha256: digest(pinsBytes) };
+  const { font } = downloads;
+  const files = [
+    ...downloads.binary.map((pin) => ({
+      to: `wheels/${pin.file}`,
+      pin,
+      url: pyodideWheelUrl(pin),
+    })),
+    ...downloads.pure.map((pin) => ({
+      to: `wheels/${pin.file}`,
+      pin,
+      url: pin.url,
+    })),
+    { to: `fonts/${font.file}`, pin: font, url: font.url },
+    {
+      to: `fonts/${font.license.file}`,
+      pin: font.license,
+      url: font.license.url,
+    },
+  ];
+  // Current means the stamp matches and every staged file still has its pinned
+  // digest; assets.json is written last, so an interrupted copy has none.
+  const isCurrent = async () => {
+    if (JSON.stringify(installed.python) !== JSON.stringify(stamp))
+      return false;
+    try {
+      await access(assetsFile);
+      for (const { to, pin } of files)
+        if (digest(await readFile(path.join(directory, to))) !== pin.sha256)
+          return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await isCurrent())) {
+    await rm(directory, { recursive: true, force: true });
+    for (const { to, pin, url } of files) {
+      const cached = await cachedDownload({
+        url,
+        archive: `python-${pin.file}`,
+        sha256: pin.sha256,
+      });
+      await mkdir(path.dirname(path.join(directory, to)), { recursive: true });
+      await copyFile(cached, path.join(directory, to));
+      // The cache keeps its files private; the bundle's must be readable.
+      await chmod(path.join(directory, to), 0o644);
+    }
+    await writeFile(
+      assetsFile,
+      JSON.stringify(
+        {
+          pyodide: downloads.pyodide,
+          binary: downloads.binary.map((pin) => pin.name),
+          pure: downloads.pure.map((pin) => pin.file),
+          font: `fonts/${font.file}`,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    process.stdout.write(
+      `Staged the Python engine (Pyodide ${stamp.version})\n`,
+    );
+  }
+  return {
+    stamp,
+    entry: {
+      path: path.posix.join("engines", "python", "assets.json"),
+      runner: "runtime/src/python/runner.mjs",
+      version: downloads.pyodide,
+    },
+  };
+}
+
 // resources/engines/source.json records what is installed. While it matches
 // the pins and the engine reports its version, the next prepare skips the
 // engine. Returns the manifest entry of each engine with a build for this
@@ -421,6 +512,12 @@ async function prepareEngines() {
       path: path.posix.join("engines", name, path.basename(pinned.executable)),
       version: engine.version,
     };
+  }
+  const python = await preparePython(installed);
+  if (python) {
+    stamps.python = python.stamp;
+    await writeFile(stampFile, JSON.stringify(stamps, null, 2) + "\n");
+    entries.python = python.entry;
   }
   return entries;
 }

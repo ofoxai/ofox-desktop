@@ -1,0 +1,155 @@
+{
+  "_note": "binary wheels: version, file name and SHA-256 are copied from pyodide-lock.json of the pyodide npm package (the lock is the source of truth for Pyodide's own builds), pinned at the canonical jsDelivr URL; assistant-prepare.mjs honors OFOX_PYODIDE_BASE_URL to download them from a mirror and still verifies the SHA-256. pure wheels: the single py3-none-any wheel of each release on PyPI; the SHA-256 is PyPI's digest and was checked against the downloaded file. font: NotoSansSC-Regular.otf (Noto Sans CJK, SIL Open Font License 1.1) from the notofonts/noto-cjk release tag Sans2.004 (commit 523d033d6cb47f4a80c58a35753646f5c3608a78), downloaded once over TLS and its SHA-256 pinned here (trust on first verified download); the OFL text is pinned from the same tag. The Python engine is offered on macOS only, so only the platforms listed here stage it.",
+  "pyodide": "314.0.7",
+  "platforms": ["darwin-arm64", "darwin-x64"],
+  "binary": [
+    {
+      "name": "numpy",
+      "version": "2.4.6",
+      "file": "numpy-2.4.6-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/numpy-2.4.6-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "sha256": "a292c1f5d7d8a2208cd5e94fc467604c131cabcd2fc14fed6eefde121e7fabdf"
+    },
+    {
+      "name": "matplotlib",
+      "version": "3.10.8",
+      "file": "matplotlib-3.10.8-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/matplotlib-3.10.8-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "sha256": "722857932f8f62eac64f8439af15c94d427f9fb945f9590cd242805c983d2d54"
+    },
+    {
+      "name": "contourpy",
+      "version": "1.3.3",
+      "file": "contourpy-1.3.3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/contourpy-1.3.3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "sha256": "0ac15ebf9f820d2d1c3526388aa2818b631cb6c4aae1682efd6b4cc12c1f302c"
+    },
+    {
+      "name": "cycler",
+      "version": "0.12.1",
+      "file": "cycler-0.12.1-py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/cycler-0.12.1-py3-none-any.whl",
+      "sha256": "8ee450085f15b47f78b034d60059af6a3649e98fa5dde073363437742cc0b4ea"
+    },
+    {
+      "name": "fonttools",
+      "version": "4.62.1",
+      "file": "fonttools-4.62.1-py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/fonttools-4.62.1-py3-none-any.whl",
+      "sha256": "0d1516e073fd0a8d8e6d9af46417b6a26209a42518024a18f7085e72d2599605"
+    },
+    {
+      "name": "kiwisolver",
+      "version": "1.5.0",
+      "file": "kiwisolver-1.5.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/kiwisolver-1.5.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "sha256": "47781998156721147c128a3c74547d5703e0e3cc454d8203e629339368308a93"
+    },
+    {
+      "name": "packaging",
+      "version": "26.1",
+      "file": "packaging-26.1-py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/packaging-26.1-py3-none-any.whl",
+      "sha256": "565acbbea54da30348b6d68b6a54373e6f777987db9f1db6966b4b3a5060d303"
+    },
+    {
+      "name": "pyparsing",
+      "version": "3.3.2",
+      "file": "pyparsing-3.3.2-py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pyparsing-3.3.2-py3-none-any.whl",
+      "sha256": "f0dd8225b5f8e945980b400bd465b4b90cb0498a2eede0d9dbea98372f6110c5"
+    },
+    {
+      "name": "python-dateutil",
+      "version": "2.9.0.post0",
+      "file": "python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/python_dateutil-2.9.0.post0-py2.py3-none-any.whl",
+      "sha256": "9b13365edf9c188f570baf9c540bbb3029ada2a2dacb9694b3659941693ee9e5"
+    },
+    {
+      "name": "pytz",
+      "version": "2026.1.post1",
+      "file": "pytz-2026.1.post1-py2.py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pytz-2026.1.post1-py2.py3-none-any.whl",
+      "sha256": "b8249d6450146e0b61e6d710dc02ebb35a904796c4c2f97fe87d4ac5872db36a"
+    },
+    {
+      "name": "six",
+      "version": "1.17.0",
+      "file": "six-1.17.0-py2.py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/six-1.17.0-py2.py3-none-any.whl",
+      "sha256": "228c50f73aa7addf2c2ccf2979c256802a59ab69cad8152b31b9443cc8140f42"
+    },
+    {
+      "name": "lxml",
+      "version": "6.1.3",
+      "file": "lxml-6.1.3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/lxml-6.1.3-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "sha256": "6a0b98f57a538cb6af4868c3499efec2bb52f7ed59fed94b7fbf195d6e40281f"
+    },
+    {
+      "name": "pillow",
+      "version": "12.2.0",
+      "file": "pillow-12.2.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/pillow-12.2.0-cp314-cp314-pyemscripten_2026_0_wasm32.whl",
+      "sha256": "e29838b7a756e4ee0f27a9cfa9a387ee0dfa2e9dd44be2dd595130b9f9d93ac3"
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.15.0",
+      "file": "typing_extensions-4.15.0-py3-none-any.whl",
+      "url": "https://cdn.jsdelivr.net/pyodide/v314.0.7/full/typing_extensions-4.15.0-py3-none-any.whl",
+      "sha256": "4fec68770a05408e668a4fa53d6bf4f0f684b9dacf820c7c5d6e97d3ad225e29"
+    }
+  ],
+  "pure": [
+    {
+      "name": "python-pptx",
+      "version": "1.0.2",
+      "file": "python_pptx-1.0.2-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/d9/4f/00be2196329ebbff56ce564aa94efb0fbc828d00de250b1980de1a34ab49/python_pptx-1.0.2-py3-none-any.whl",
+      "sha256": "160838e0b8565a8b1f67947675886e9fea18aa5e795db7ae531606d68e785cba"
+    },
+    {
+      "name": "python-docx",
+      "version": "1.2.0",
+      "file": "python_docx-1.2.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/d0/00/1e03a4989fa5795da308cd774f05b704ace555a70f9bf9d3be057b680bcf/python_docx-1.2.0-py3-none-any.whl",
+      "sha256": "3fd478f3250fbbbfd3b94fe1e985955737c145627498896a8a6bf81f4baf66c7"
+    },
+    {
+      "name": "openpyxl",
+      "version": "3.1.5",
+      "file": "openpyxl-3.1.5-py2.py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c0/da/977ded879c29cbd04de313843e76868e6e13408a94ed6b987245dc7c8506/openpyxl-3.1.5-py2.py3-none-any.whl",
+      "sha256": "5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2"
+    },
+    {
+      "name": "xlsxwriter",
+      "version": "3.2.9",
+      "file": "xlsxwriter-3.2.9-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/3a/0c/3662f4a66880196a590b202f0db82d919dd2f89e99a27fadef91c4a33d41/xlsxwriter-3.2.9-py3-none-any.whl",
+      "sha256": "9a5db42bc5dff014806c58a20b9eae7322a134abb6fce3c92c181bfb275ec5b3"
+    },
+    {
+      "name": "et-xmlfile",
+      "version": "2.0.0",
+      "file": "et_xmlfile-2.0.0-py3-none-any.whl",
+      "url": "https://files.pythonhosted.org/packages/c1/8b/5fe2cc11fee489817272089c4203e679c63b570a5aaeb18d852ae3cbba6a/et_xmlfile-2.0.0-py3-none-any.whl",
+      "sha256": "7a91720bc756843502c3b7504c77b8fe44217c85c537d85037f0f536151b2caa"
+    }
+  ],
+  "font": {
+    "name": "noto-sans-sc-regular",
+    "version": "Sans2.004",
+    "file": "NotoSansSC-Regular.otf",
+    "url": "https://github.com/notofonts/noto-cjk/raw/Sans2.004/Sans/SubsetOTF/SC/NotoSansSC-Regular.otf",
+    "sha256": "faa6c9df652116dde789d351359f3d7e5d2285a2b2a1f04a2d7244df706d5ea9",
+    "license": {
+      "name": "noto-sans-sc-license",
+      "file": "OFL.txt",
+      "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/Sans2.004/LICENSE",
+      "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2"
+    }
+  }
+}

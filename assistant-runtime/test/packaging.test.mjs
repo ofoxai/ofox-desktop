@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   access,
   mkdir,
@@ -14,6 +15,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { pruneProduction } from "../../scripts/assistant-prune.mjs";
+import {
+  PYODIDE_BASE_URL,
+  pyodideWheelUrl,
+} from "../../scripts/python-assets.mjs";
 
 const exists = (file) =>
   access(file).then(
@@ -336,4 +341,165 @@ test("engine stamp matches the pinned digests", async () => {
       sha256: pinned.sha256,
     });
   }
+});
+
+// The Python engine: Pyodide's own wheels and pure-Python wheels pinned by
+// scripts/python-downloads.json, plus a CJK font. Staged on macOS only.
+const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const pythonExpected = {
+  binary: {
+    numpy: "2.4.6",
+    matplotlib: "3.10.8",
+    contourpy: "1.3.3",
+    cycler: "0.12.1",
+    fonttools: "4.62.1",
+    kiwisolver: "1.5.0",
+    packaging: "26.1",
+    pyparsing: "3.3.2",
+    "python-dateutil": "2.9.0.post0",
+    pytz: "2026.1.post1",
+    six: "1.17.0",
+    lxml: "6.1.3",
+    pillow: "12.2.0",
+    "typing-extensions": "4.15.0",
+  },
+  pure: {
+    "python-pptx": "1.0.2",
+    "python-docx": "1.2.0",
+    openpyxl: "3.1.5",
+    xlsxwriter: "3.2.9",
+    "et-xmlfile": "2.0.0",
+  },
+};
+
+test("python assets are pinned and staged", async () => {
+  const downloadsUrl = new URL(
+    "../../scripts/python-downloads.json",
+    import.meta.url,
+  );
+  const downloads = await readJson(downloadsUrl);
+  const lock = await readJson(
+    new URL("../node_modules/pyodide/pyodide-lock.json", import.meta.url),
+  );
+
+  // Pyodide itself is a dependency of the runtime at the same version.
+  assert.equal(downloads.pyodide, "314.0.7");
+  const runtimePackage = await readJson(
+    new URL("../package.json", import.meta.url),
+  );
+  assert.equal(runtimePackage.dependencies.pyodide, downloads.pyodide);
+  const runtimeLock = await readJson(
+    new URL("../package-lock.json", import.meta.url),
+  );
+  assert.equal(
+    runtimeLock.packages["node_modules/pyodide"].version,
+    downloads.pyodide,
+  );
+
+  // Every pin names itself, downloads over https and carries a SHA-256.
+  const wheelsAndFont = [
+    ...downloads.binary,
+    ...downloads.pure,
+    downloads.font,
+  ];
+  for (const pin of [...wheelsAndFont, downloads.font.license]) {
+    assert.ok(pin.name, JSON.stringify(pin));
+    assert.match(pin.url, /^https:\/\//, pin.name);
+    assert.match(pin.sha256, /^[0-9a-f]{64}$/, pin.name);
+  }
+  // The staged file is named as the download is.
+  for (const pin of wheelsAndFont)
+    assert.equal(path.posix.basename(new URL(pin.url).pathname), pin.file);
+
+  // Each required package is pinned exactly once at the required version.
+  for (const [group, expected] of Object.entries(pythonExpected)) {
+    const names = downloads[group].map((pin) => pin.name);
+    assert.deepEqual(names.toSorted(), Object.keys(expected).toSorted(), group);
+    for (const pin of downloads[group])
+      assert.equal(pin.version, expected[pin.name], pin.name);
+  }
+
+  // A binary wheel is exactly what Pyodide's lock file names, at its own CDN.
+  for (const pin of downloads.binary) {
+    const locked = lock.packages[pin.name];
+    assert.ok(locked, `${pin.name} is not in pyodide-lock.json`);
+    assert.equal(locked.version, pin.version, pin.name);
+    assert.equal(locked.file_name, pin.file, pin.name);
+    assert.equal(locked.sha256, pin.sha256, pin.name);
+    assert.equal(pin.url, `${PYODIDE_BASE_URL}${locked.file_name}`, pin.name);
+  }
+  for (const pin of downloads.pure)
+    assert.match(
+      pin.url,
+      /^https:\/\/files\.pythonhosted\.org\/packages\//,
+      pin.name,
+    );
+
+  // The font and its license come from a release tag, never a moving branch.
+  assert.match(
+    downloads.font.url,
+    /^https:\/\/github\.com\/notofonts\/noto-cjk\/raw\/Sans\d+\.\d+\/Sans\/SubsetOTF\/SC\/NotoSansSC-Regular\.otf$/,
+  );
+  assert.match(
+    downloads.font.license.url,
+    /^https:\/\/raw\.githubusercontent\.com\/notofonts\/noto-cjk\/Sans\d+\.\d+\/LICENSE$/,
+  );
+
+  // Staging: where the engine is offered every listed file ships; elsewhere
+  // nothing of it is in the manifest or the stamp.
+  const resources = new URL("../resources/", import.meta.url);
+  const manifest = await readJson(new URL("manifest.json", resources));
+  const stamps = await readJson(new URL("engines/source.json", resources));
+  if (!downloads.platforms.includes(platform)) {
+    assert.equal(manifest.engines?.python, undefined);
+    assert.equal(stamps.python, undefined);
+    return;
+  }
+  const staged = new URL("engines/python/", resources);
+  const assets = await readJson(new URL("assets.json", staged));
+  assert.deepEqual(assets, {
+    pyodide: downloads.pyodide,
+    binary: downloads.binary.map((pin) => pin.name),
+    pure: downloads.pure.map((pin) => pin.file),
+    font: "fonts/NotoSansSC-Regular.otf",
+  });
+  const shipped = [
+    ...[...downloads.binary, ...downloads.pure].map((pin) => [
+      `wheels/${pin.file}`,
+      pin.sha256,
+    ]),
+    [assets.font, downloads.font.sha256],
+    [`fonts/${downloads.font.license.file}`, downloads.font.license.sha256],
+  ];
+  for (const [file, sha] of shipped) {
+    assert.ok(await exists(new URL(file, staged)), `${file} must ship`);
+    assert.equal(sha256(await readFile(new URL(file, staged))), sha, file);
+  }
+  assert.deepEqual(manifest.engines.python, {
+    path: "engines/python/assets.json",
+    runner: "runtime/src/python/runner.mjs",
+    version: downloads.pyodide,
+  });
+  assert.deepEqual(stamps.python, {
+    version: downloads.pyodide,
+    sha256: sha256(await readFile(downloadsUrl)),
+  });
+});
+
+test("OFOX_PYODIDE_BASE_URL replaces only the Pyodide CDN base of a wheel", () => {
+  const wheel = `${PYODIDE_BASE_URL}numpy-2.4.6-cp314-cp314-pyemscripten_2026_0_wasm32.whl`;
+  const pin = { file: path.posix.basename(wheel), url: wheel };
+  assert.equal(pyodideWheelUrl(pin, {}), wheel);
+  assert.equal(pyodideWheelUrl(pin, { OFOX_PYODIDE_BASE_URL: "" }), wheel);
+  const mirror = "https://gcore.jsdelivr.net/pyodide/v314.0.7/full/";
+  const mirrored = `${mirror}${pin.file}`;
+  assert.equal(
+    pyodideWheelUrl(pin, { OFOX_PYODIDE_BASE_URL: mirror }),
+    mirrored,
+  );
+  // A missing trailing slash is added, not glued onto the file name.
+  assert.equal(
+    pyodideWheelUrl(pin, { OFOX_PYODIDE_BASE_URL: mirror.slice(0, -1) }),
+    mirrored,
+  );
 });
