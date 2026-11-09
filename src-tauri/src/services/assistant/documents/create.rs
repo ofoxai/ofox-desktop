@@ -9284,7 +9284,7 @@ esac
         )
         .unwrap();
         f.host
-            .finish(&f.run, Err("assistant_provider_error".into()))
+            .finish(&f.run, Err("assistant_model_request_failed".into()))
             .await;
         let delivered = f.delivered();
         assert_eq!(delivered.len(), 1);

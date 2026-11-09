@@ -37,6 +37,8 @@ async function prepareFixture(platform: string, systemRoot: string | null) {
     "assistant-entitlements.mjs",
     "assistant-install-stamp.mjs",
     "assistant-prune.mjs",
+    "python-assets.mjs",
+    "python-downloads.json",
   ])
     await copyFile(path.resolve("scripts", name), path.join(scripts, name));
   const target = `${platform}-x64`;
