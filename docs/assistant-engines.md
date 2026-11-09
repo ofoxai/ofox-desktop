@@ -347,7 +347,8 @@ the computers that cannot run it.
   is no deck), and officecli, in its own sandbox, checks it as it checks a
   batch's file: `validate`, `view issues`, up to two rounds of
   [layout fixes](#layout-fixes) and one SVG page per slide. The helpers' own
-  lines are reported with officecli's issues, as warnings.
+  lines, each starting with `slide N: `, are reported with officecli's issues,
+  as warnings.
 
 #### The deck object (pptx)
 

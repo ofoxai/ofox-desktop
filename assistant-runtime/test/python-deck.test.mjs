@@ -488,7 +488,10 @@ test("lints what will not fit", options, async (t) => {
     t,
     `
 prs = new_deck(title="Lint")
+cover_slide(prs, "Cover")
 s = content_slide(prs, "Lint")
+need("my box", 2, 1)
+need("my box", 2, 1, slide=s)
 card(s, 0.72, 1.7, 5, 0.8, "A card", points=["First point of the card", "Second point of the card", "Third point of the card"])
 steps(
     s,
@@ -509,14 +512,23 @@ plot(s, fig, 0.72, 4.7, 5, 2, alt="small ticks")
   );
   const lines = JSON.parse(await readFile(result.lint, "utf8"));
   const lint = lines.join("\n");
-  assert.match(lint, /card "A card": text needs/);
-  assert.match(lint, /steps: .*lower h/);
-  assert.match(lint, /figure "small figure": smallest text/);
+  // Each helper line names its slide: the content slide is the second.
+  assert.match(lint, /^slide 2: card "A card": text needs/m);
+  assert.match(lint, /^slide 2: steps: .*lower h/m);
+  assert.match(lint, /^slide 2: figure "small figure": smallest text/m);
+  // The model's own need() names a slide when it is given one.
+  assert.deepEqual(
+    lines.filter((line) => line.includes("my box")),
+    [
+      "my box: text needs 2.00 in, box has 1.00 in",
+      "slide 2: my box: text needs 2.00 in, box has 1.00 in",
+    ],
+  );
   // One line for all the small ticks, with the way to fix them.
   assert.deepEqual(
-    lines.filter((line) => line.startsWith('plot "small ticks"')),
+    lines.filter((line) => line.includes('plot "small ticks"')),
     [
-      'plot "small ticks": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
+      'slide 2: plot "small ticks": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
     ],
   );
 });
@@ -560,10 +572,10 @@ plot(s, fig, 6.2, 4.2, 5, 2, alt="fine")
     );
     const lines = JSON.parse(await readFile(result.lint, "utf8"));
     assert.deepEqual(lines, [
-      'plot "small ticks": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
-      'plot "small all": title is 8 pt; use at least 10 (ax.set_title(text, fontsize=12))',
-      'plot "small all": axis labels are 8 pt; use at least 10 (ax.set_xlabel(text, fontsize=10))',
-      'plot "small all": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
+      'slide 1: plot "small ticks": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
+      'slide 1: plot "small all": title is 8 pt; use at least 10 (ax.set_title(text, fontsize=12))',
+      'slide 1: plot "small all": axis labels are 8 pt; use at least 10 (ax.set_xlabel(text, fontsize=10))',
+      'slide 1: plot "small all": tick labels are 8 pt; use at least 10 (ax.tick_params(labelsize=10))',
     ]);
   },
 );

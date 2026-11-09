@@ -204,6 +204,8 @@ test("the pptx skill describes preview then deliver, and the deck object where P
   // A delivery under another name would leave the preview to be delivered
   // as well.
   assert.match(body, /same file name/);
+  // The helpers' lint lines name their slide.
+  assert.match(section(body, "Lint lines"), /`slide N: `/);
   const fallback = section(body, "When Python is unavailable");
   for (const word of ['"kind": "deck"', "pillars", "evidence", "timeline"])
     assert.ok(fallback.includes(word), `the fallback section has ${word}`);

@@ -8214,7 +8214,7 @@ connect(port).then((connected) => console.log(JSON.stringify({
     /// A lint line of the deck helpers, as the stand-in runner reports it.
     #[cfg(target_os = "macos")]
     const LINT_LINE: &str =
-        "card Plan: the box is 3.00 in tall but its text needs 1.20 in; lower h or add content";
+        "slide 1: card Plan: the box is 3.00 in tall but its text needs 1.20 in; lower h or add content";
     /// The deck the stand-in runner copies to `out.pptx`.
     #[cfg(target_os = "macos")]
     const PYTHON_DECK: &[u8] = b"PK\x03\x04a deck from python";

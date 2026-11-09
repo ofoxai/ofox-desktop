@@ -43,8 +43,17 @@ def text_height(text, pt, width_in, spacing=1.3): return lines_for(text, pt, wid
 def bullets_height(items, pt, width_in, gap_pt=6):
     indent = pt * 1.1 / 72
     return sum(text_height(it if isinstance(it, str) else it["text"], pt, width_in - indent, 1.25) + gap_pt / 72 for it in items)
-def need(what, needed, has):
-    if needed > has + 0.04: LINT.append(f"{what}: text needs {needed:.2f} in, box has {has:.2f} in")
+def _number(slide):
+    """The slide's place in its deck, from 1."""
+    slides = slide.part.package.presentation_part.presentation.slides
+    return next((n for n, s in enumerate(slides, 1) if s.slide_id == slide.slide_id), 0)
+def _lint(slide, message): LINT.append(f"slide {_number(slide)}: {message}")
+def need(what, needed, has, slide=None):
+    """A lint line when the text needs more room than the box has; it names the slide when one is given."""
+    if needed <= has + 0.04: return
+    message = f"{what}: text needs {needed:.2f} in, box has {has:.2f} in"
+    if slide is None: LINT.append(message)
+    else: _lint(slide, message)
 
 def rgb(h): return RGBColor.from_string(str(h).lstrip("#"))
 
@@ -151,11 +160,11 @@ def _notes(slide, notes):
 
 def content_slide(prs, title, subtitle="", notes=""):
     s = prs.slides.add_slide(_layout(prs, "Content")); _state["page"] += 1
-    need(f'title "{title}"', text_height(title, 26, G.CW - 0.2, 1.1), 0.62)
+    need(f'title "{title}"', text_height(title, 26, G.CW - 0.2, 1.1), 0.62, s)
     _flush(s.shapes.title.text_frame, "middle")
     p = s.shapes.title.text_frame.paragraphs[0]; p.alignment = PP_ALIGN.LEFT; r = p.add_run(); r.text = title; _font(r, 26, T.primary, True)
     if subtitle:
-        need(f'subtitle of "{title}"', text_height(subtitle, 13, G.CW - 0.2, 1.2), 0.38)
+        need(f'subtitle of "{title}"', text_height(subtitle, 13, G.CW - 0.2, 1.2), 0.38, s)
         text(s, subtitle, G.X + 0.2, 1.0, G.CW - 0.2, 0.36, size=13, color=T.muted, valign="middle")
     _footer(s, _state["page"])
     _notes(s, notes)
@@ -191,15 +200,15 @@ def section_slide(prs, title, number="", subtitle="", notes=""):
 
 def bullets(slide, items, x, y, w, h, size=13, color=None, gap=6):
     first = items[0] if isinstance(items[0], str) else items[0]["text"]
-    need(f'bullets "{first[:12]}…"', bullets_height(items, size, w, gap), h)
+    need(f'bullets "{first[:12]}…"', bullets_height(items, size, w, gap), h, slide)
     return text(slide, items, x, y, w, h, size=size, color=color, bullet=True, gap=gap)
 
 def card(slide, x, y, w, h, title, body="", points=None, highlight=False, size=13):
     iw = w - 0.6; head_h = text_height(title, size + 2, iw, 1.4); top = y + 0.42 + head_h + 0.12
     body_h = bullets_height(points, size, iw) if points else (text_height(body, size, iw, 1.25) if body else 0)
     total = top - y + body_h + 0.22
-    need(f'card "{title}"', total, h)
-    if total < h * 0.5: LINT.append(f'card "{title}": the box is {h:.2f} in tall but its text needs {total:.2f} in; lower h or add content')
+    need(f'card "{title}"', total, h, slide)
+    if total < h * 0.5: _lint(slide, f'card "{title}": the box is {h:.2f} in tall but its text needs {total:.2f} in; lower h or add content')
     shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, x, y, w, h, fill=T.accentTint if highlight else T.tint, line=T.accent if highlight else T.line, radius=0.08)
     shape(slide, MSO_SHAPE.RECTANGLE, x + 0.3, y + 0.26, 0.5, 0.05, fill=T.accent if highlight else T.primary)
     text(slide, title, x + 0.3, y + 0.4, iw, head_h, size=size + 2, bold=True, color=T.accent if highlight else T.primary)
@@ -215,7 +224,7 @@ def kpi(slide, x, y, w, h, value, label, note="", highlight=False):
     text(slide, str(value), x + 0.3, y + 0.25, w - 0.6, vh, size=size, bold=True, color=T.accent if highlight else T.primary)
     text(slide, label, x + 0.3, y + 0.3 + vh, w - 0.6, 0.4, size=14, bold=True)
     if note:
-        ny = y + 0.75 + vh; need(f'kpi note "{label}"', text_height(note, 12, w - 0.6), y + h - ny - 0.15)
+        ny = y + 0.75 + vh; need(f'kpi note "{label}"', text_height(note, 12, w - 0.6), y + h - ny - 0.15, slide)
         text(slide, note, x + 0.3, ny, w - 0.6, max(0.3, y + h - ny - 0.15), size=12, color=T.muted)
 
 def steps(slide, items, x, y, w, h, highlight=-1, size=12):
@@ -224,8 +233,8 @@ def steps(slide, items, x, y, w, h, highlight=-1, size=12):
     for it in items:
         th = text_height(it["title"], size + 1, bw - 0.3, 1.4); bh = text_height(it["body"], size, bw - 0.3) if it.get("body") else 0
         blocks.append((th, bh, th + (0.08 + bh if it.get("body") else 0)))
-    tallest = max(b[2] for b in blocks); need("steps", tallest + 0.3, h)
-    if tallest + 0.3 < h * 0.5: LINT.append(f"steps: boxes are {h:.2f} in tall but the text needs {tallest + 0.3:.2f} in; lower h or add a body line")
+    tallest = max(b[2] for b in blocks); need("steps", tallest + 0.3, h, slide)
+    if tallest + 0.3 < h * 0.5: _lint(slide, f"steps: boxes are {h:.2f} in tall but the text needs {tallest + 0.3:.2f} in; lower h or add a body line")
     for i, it in enumerate(items):
         bx = x + i * (bw + gap); hi = i == highlight; th, bh, total = blocks[i]
         shape(slide, MSO_SHAPE.ROUNDED_RECTANGLE, bx, y, bw, h, fill=T.accentTint if hi else T.white, line=T.accent if hi else T.primary, line_w=1, radius=0.08)
@@ -243,12 +252,12 @@ def timeline(slide, items, x, y, w, h, highlight=-1, size=12):
         shape(slide, MSO_SHAPE.OVAL, cx - 0.11, line_y - 0.11, 0.22, 0.22, fill=T.accent if hi else T.primary, line=T.white, line_w=1.5)
         text(slide, it["title"], cx - step / 2 + 0.1, line_y + 0.3, step - 0.2, 0.4, size=size + 1, bold=True, align="center")
         if it.get("body"):
-            need(f'timeline "{it["title"]}"', 0.75 + text_height(it["body"], size, step - 0.2), y + h - line_y)
+            need(f'timeline "{it["title"]}"', 0.75 + text_height(it["body"], size, step - 0.2), y + h - line_y, slide)
             text(slide, it["body"], cx - step / 2 + 0.1, line_y + 0.75, step - 0.2, max(0.3, y + h - line_y - 0.75), size=size, color=T.muted, align="center")
 
 def callout(slide, y, message, x=None, w=None, h=0.62):
     x = G.X if x is None else x; w = G.CW if w is None else w
-    need(f'callout "{message[:12]}…"', text_height(message, 13, w - 0.5, 1.2) + 0.1, h)
+    need(f'callout "{message[:12]}…"', text_height(message, 13, w - 0.5, 1.2) + 0.1, h, slide)
     shape(slide, MSO_SHAPE.RECTANGLE, x, y, w, h, fill=T.tint)
     shape(slide, MSO_SHAPE.RECTANGLE, x, y, 0.06, h, fill=T.accent)
     text(slide, message, x + 0.3, y, w - 0.5, h, size=13, bold=True, color=T.primary, valign="middle")
@@ -268,9 +277,9 @@ def figure(slide, svg, x, y, w, h, alt="figure"):
     m = re.search(r"viewBox\s*=\s*[\"']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)", svg)
     if m:
         vw, vh = float(m.group(1)), float(m.group(2)); pt_per_px = w * 72 / vw
-        if abs(vw / vh - w / h) / (w / h) > 0.04: LINT.append(f'figure "{alt}": viewBox {vw:g}x{vh:g} does not match the box {w}x{h} in; it will be stretched')
+        if abs(vw / vh - w / h) / (w / h) > 0.04: _lint(slide, f'figure "{alt}": viewBox {vw:g}x{vh:g} does not match the box {w}x{h} in; it will be stretched')
         sizes = [float(v) for v in re.findall(r"font-size\s*=\s*[\"']([\d.]+)", svg)]
-        if sizes and min(sizes) * pt_per_px < 10: LINT.append(f'figure "{alt}": smallest text is {min(sizes) * pt_per_px:.1f} pt on the slide; use at least 10 pt')
+        if sizes and min(sizes) * pt_per_px < 10: _lint(slide, f'figure "{alt}": smallest text is {min(sizes) * pt_per_px:.1f} pt on the slide; use at least 10 pt')
     png = base64.b64decode(host.svg_to_png(svg, round(w * 192), round(h * 192)))
     return _picture(slide, png, x, y, w, h, alt)
 
@@ -301,6 +310,6 @@ def plot(slide, fig, x, y, w, h, alt="chart"):
         if sizes:
             what, fix = _PLOT_TEXT[group]; small, large = min(sizes), max(sizes)
             size = f"{small:g}" if small == large else f"{small:g}-{large:g}"
-            LINT.append(f'plot "{alt}": {what} {size} pt; use at least 10 ({fix})')
+            _lint(slide, f'plot "{alt}": {what} {size} pt; use at least 10 ({fix})')
     buf = io.BytesIO(); fig.savefig(buf, format="png", dpi=200, facecolor="white"); plt.close(fig)
     return _picture(slide, buf.getvalue(), x, y, w, h, alt)

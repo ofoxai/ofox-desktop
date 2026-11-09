@@ -48,7 +48,7 @@ Positions and sizes in inches, type in pt. 16:9, 13.333 × 7.5. `G`: content are
   On a content slide with a dark background the layout's navy title disappears and its accent tick and hairline are covered: recolour the title with `for r in s.shapes.title.text_frame.paragraphs[0].runs: r.font.color.rgb = rgb(T.white)`, leave `subtitle=""` and write the subtitle with the `text` helper in a light colour such as "DCE6F0", and give all other text a light colour.
 - Native chart: `chart = slide.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(x), Inches(y), Inches(w), Inches(h), chart_data).chart`; set `chart.font`, the axis tick label fonts and the data label font to `Pt(12)`, and colour the series from `T`.
 - Native table: `table = slide.shapes.add_table(rows, cols, Inches(x), Inches(y), Inches(w), Inches(h)).table`; fill each `table.cell(r, c)` from `T` (header `T.primary` with white text) and set every run's `font.size` to `Pt(12)` or more and `font.name` to `T.font`.
-- Fit estimates (CJK 1 em, Latin 0.55 em): `text_height(text, pt, width_in, spacing=1.3)`, `lines_for(text, pt, width_in)`, `em_width(s)`, `bullets_height(items, pt, width_in, gap_pt=6)`, `need(what, needed, has)` (adds a lint line when `needed` exceeds `has`), `rgb(h)` (hex to colour).
+- Fit estimates (CJK 1 em, Latin 0.55 em): `text_height(text, pt, width_in, spacing=1.3)`, `lines_for(text, pt, width_in)`, `em_width(s)`, `bullets_height(items, pt, width_in, gap_pt=6)`, `need(what, needed, has, slide=None)` (adds a lint line when `needed` exceeds `has`, naming `slide` when given), `rgb(h)` (hex to colour).
 
 ## Design rules
 
@@ -74,7 +74,7 @@ Positions and sizes in inches, type in pt. 16:9, 13.333 × 7.5. `G`: content are
 
 ## Lint lines
 
-The helpers report problems in the issues. Fix each in the code and look again.
+The helpers report problems in the issues, each line starting with `slide N: ` (the slide's place in the deck). Fix each in the code and look again.
 
 - `… text needs 1.20 in, box has 0.80 in` (title, subtitle, bullets, card, steps, timeline, kpi note, callout): the text does not fit. Shorten it, enlarge the box, or go down one size step; body text stays at 12 pt or more.
 - `… the box is 4.00 in tall but its text needs 1.50 in; lower h or add content` (a card; steps say "boxes are … lower h or add a body line"): the box is more than half empty. Lower `h` and use the space for another zone, or add content.
