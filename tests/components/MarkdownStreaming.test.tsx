@@ -175,6 +175,28 @@ describe("review follow-ups", () => {
   });
 });
 
+describe("a reply that is still one block", () => {
+  it("shows the formulas of its only block as source", async () => {
+    for (const text of ["$$\n\\frac12\\sin x<\n\\sin", "\\[\n\\frac12"]) {
+      const { container, unmount } = render(view(text, true));
+      await waitFor(() => expect(blocks(container)[0]?.tagName).toBe("PRE"));
+      unmount();
+    }
+    const { container } = render(view("单段 $a$ 和 \\(b\\) 还在写", true));
+    await waitFor(() =>
+      expect(container.querySelectorAll("code.language-math").length).toBe(2),
+    );
+    expect(container.querySelector(".katex")).toBeNull();
+  });
+
+  it("leaves indented code and a closed \\[ as they are", () => {
+    const code = render(view("前文\n\n    \\[x\\]\n    y", true));
+    expect(code.container.querySelector("pre code")?.textContent).toBe(
+      "\\[x\\]\ny\n",
+    );
+  });
+});
+
 describe("a reply whose parts refer to each other", () => {
   it("resolves a reference link defined in another block", () => {
     const { container } = render(

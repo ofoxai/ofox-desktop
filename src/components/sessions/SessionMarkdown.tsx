@@ -268,7 +268,7 @@ function splitBlocks(
       starts.push(source.lastIndexOf("\n", start - 1) + 1);
     end = node.position?.end.offset ?? start;
   }
-  if (starts.length < 2) return whole;
+  if (starts.length < 2) return { blocks: whole.blocks, whole: false };
   return {
     blocks: starts.map((start, index) => ({
       start,
@@ -284,18 +284,22 @@ function splitBlocks(
 // A display formula that has not closed yet: a `$$`, which
 // `rewriteMathDelimiters` shows as text, or a `\[` it leaves as it was.
 const UNCLOSED_FENCE =
-  /^([ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(?:\\\$\\\$|\\\[)[ \t]*([^\n]*)/;
+  /^([ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(?:\\\$\\\$|\\\[)[ \t]*([^\n\r]*)/;
 
 /**
  * The block being written, with a display formula it opens and has not
  * closed shown as its source: an opening fence that runs to the block's end.
  */
 const asWritten = (text: string) =>
-  text.replace(UNCLOSED_FENCE, (_, containers: string, rest: string) =>
-    rest
-      ? `${containers}$$\n${containers.replace(/[^\s>]/g, " ")}${rest}`
-      : `${containers}$$`,
-  );
+  // Indented code is not a formula, and a `\]` closes what it opens (the
+  // formula rewrite did not run on it: a long text, or KaTeX not loaded).
+  /^(?: {4}|\t)/.test(text) || text.includes("\\]")
+    ? text
+    : text.replace(UNCLOSED_FENCE, (_, containers: string, rest: string) =>
+        rest
+          ? `${containers}$$\n${containers.replace(/[^\s>]/g, " ")}${rest}`
+          : `${containers}$$`,
+      );
 
 /** One block, drawn again only when its text or how it is drawn changes. */
 const MarkdownBlock = memo(function MarkdownBlock({
