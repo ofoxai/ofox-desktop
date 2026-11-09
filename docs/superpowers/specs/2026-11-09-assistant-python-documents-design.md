@@ -52,7 +52,7 @@ runner：Pyodide + 本地 wheel + deck.py + 模板 → out.pptx、lint.json（�
   `engines.rs` 增加 `python` 引擎（runner 与资源目录都在场才算可用）。不在运行时下载任何东西。
 - 入口 `python-runner.mjs`（随运行时发布）：读文档目录里的 `code.py`，加载本地包（禁止网络加载）、写入 `deck.py` 与模板、
   执行代码、保存 `out.pptx`，把辅助库的检查写入 `lint.json`，错误时把 Python 回溯（截短）写到 stderr 并以非零退出。
-  加载时收窄 Pyodide 暴露给 Python 的 JS 全局对象、去掉 fetch——这是纵深防御，不是安全边界。
+  隔离靠独立进程和系统沙箱；收窄 Pyodide 暴露给 Python 的 JS 全局对象经验证无效，不做。
 
 ### 2. 隔离（宿主）
 
@@ -114,7 +114,7 @@ runner：Pyodide + 本地 wheel + deck.py + 模板 → out.pptx、lint.json（�
 
 1. PPT 统一走 Python（python-pptx），deck 对象保留为兜底（2026-11-09 用户定）。
 2. 运行时用 Pyodide，包随应用发布，运行时不下载（调研：官方 CDN 在国内 15 KB/s）。
-3. 安全靠子进程 + `sandbox-exec`，失败即关闭；Pyodide 的 JS 全局收窄只是纵深防御（2026-11-09 调研更正）。
+3. 安全靠子进程 + `sandbox-exec`，失败即关闭；收窄 Pyodide 的 JS 全局经验证无效，不做（2026-11-09 调研更正）。
 4. macOS 先行；Windows 等系统沙箱（2026-11-09 用户定）。
 5. 自查用“预览 + 交付”两步完成，不在本轮做 `revises` 卡片替换。
 6. 主题仍是 navy 一套；多主题、图标、AI 插图留到后续。
@@ -123,4 +123,3 @@ runner：Pyodide + 本地 wheel + deck.py + 模板 → out.pptx、lint.json（�
 
 - 思源黑体子集的字符范围（建议 GB2312 + 常用标点 + 拉丁），只要中文图表不出方块。
 - 总览图的分辨率与每行页数，只要 8 页能在一张图里看清标题和正文。
-- runner 内部怎么限制 Pyodide 的 JS 全局，只要不依赖它做隔离。
