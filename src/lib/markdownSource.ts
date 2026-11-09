@@ -8,12 +8,12 @@ const FENCE_OPEN =
 const FENCE_CLOSE = /^[\s>]*(`{3,}|~{3,})\s*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
 const INDENTED = /^(?: {4}|\t)/;
-// What may stand before a `$$` fence on its line.
-const CONTAINERS = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?/;
+// A `$$` fence alone on its line, after a quote's `>` or a list item's marker.
+const MATH_FENCE = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?\$\$[ \t]*$/;
 
-/** Where `line` holds `$$`: not escaped, not in a longer run of dollars, not in code. */
-function doubleDollars(line: string): number[] {
-  const found: number[] = [];
+/** How many `$$` `line` holds: not escaped, not in a longer run of dollars, not in code. */
+function doubleDollars(line: string): number {
+  let found = 0;
   for (let at = 0; at < line.length; ) {
     const char = line[at];
     if (char === "`") {
@@ -23,7 +23,7 @@ function doubleDollars(line: string): number[] {
     } else if (char === "$") {
       let end = at;
       while (line[end] === "$") end += 1;
-      if (end - at === 2) found.push(at);
+      if (end - at === 2) found += 1;
       at = end;
     } else {
       at += 1;
@@ -32,29 +32,18 @@ function doubleDollars(line: string): number[] {
   return found;
 }
 
-/**
- * Whether `line` closes the `$$` block it is in (`inMath`), or opens one: it
- * holds an odd number of `$$`, and, to open, one stands at the start of the
- * line or ends it. A lone `$$` inside a sentence opens nothing.
- */
-function flipsMath(line: string, inMath: boolean): boolean {
-  const dollars = doubleDollars(line);
-  if (dollars.length % 2 === 0) return false;
-  if (inMath) return true;
-  const start = CONTAINERS.exec(line)?.[0].length ?? 0;
-  return (
-    dollars[0] === start ||
-    dollars[dollars.length - 1] === line.trimEnd().length - 2
-  );
-}
-
 /** The most text a rewrite works through; a longer message is left as written. */
 export const MAX_REWRITE = 64 * 1024;
 
 /**
  * Splits text into runs of prose and runs of code (fenced or indented), by
  * line. A `run` is its lines joined, so a run of prose can be scanned whole.
- * An indented line inside a `$$` block is the formula's, not code.
+ * An indented line inside a `$$` block is the formula's, not code. That is
+ * read as `rewriteMathDelimiters` pairs `$$`: a line with an odd number of
+ * them opens or closes a block, and a blank line ends the block unless its
+ * opening fence stood alone on its line (and some line after it closes it).
+ * Indented code needs a blank line before it, so a `$$` in a sentence never
+ * reaches it.
  */
 export function splitCode(content: string): { code: boolean; text: string }[] {
   const runs: { code: boolean; lines: string[] }[] = [];
@@ -67,8 +56,19 @@ export function splitCode(content: string): { code: boolean; text: string }[] {
   let afterBlank = true;
   let afterCode = false;
   let inList = false;
-  let inMath = false;
-  for (const line of content.split("\n")) {
+  // The `$$` block a line is in: none, opened in a sentence, or opened by a
+  // fence alone on its line (which may span blank lines).
+  let math = "none" as "none" | "inline" | "fence";
+  const lines = content.split("\n");
+  const odd = lines.map((line) => doubleDollars(line) % 2 === 1);
+  const lastOdd = odd.lastIndexOf(true);
+  const flip = (at: number) => {
+    if (!odd[at]) return;
+    if (math !== "none") math = "none";
+    else if (!MATH_FENCE.test(lines[at])) math = "inline";
+    else if (at < lastOdd) math = "fence";
+  };
+  for (const [at, line] of lines.entries()) {
     const blank = line.trim() === "";
     let code = false;
     if (fence) {
@@ -83,11 +83,13 @@ export function splitCode(content: string): { code: boolean; text: string }[] {
         code = true;
         fence = { char: open[0], length: open.length };
       } else if (!blank && INDENTED.test(line)) {
-        code = (afterBlank || afterCode) && !inList && !inMath;
-        if (!code && flipsMath(line, inMath)) inMath = !inMath;
+        code = (afterBlank || afterCode) && !inList && math !== "fence";
+        if (!code) flip(at);
       } else if (!blank) {
-        if (flipsMath(line, inMath)) inMath = !inMath;
+        flip(at);
         inList = LIST_ITEM.test(line) || (inList && !afterBlank);
+      } else if (math === "inline") {
+        math = "none";
       }
     }
     add(code, line);

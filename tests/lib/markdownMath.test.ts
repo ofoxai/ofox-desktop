@@ -378,6 +378,30 @@ describe("rewriteMathDelimiters: review follow-ups", () => {
     );
   });
 
+  it("leaves indented code alone after a $$ formula opened mid-line", () => {
+    const code = "\n\n    echo $HOME$PATH";
+    expect(rewriteMathDelimiters("由 $$a + b\n= c$$" + code)).toBe(
+      "由 $$a + b\n= c$$" + code,
+    );
+    expect(rewriteMathDelimiters("公式为 $$E = mc^2\n$$" + code)).toBe(
+      "公式为\n$$\nE = mc^2\n$$" + code,
+    );
+    expect(rewriteMathDelimiters("x $$a$$ $$b\n$$" + code)).toBe(
+      "x $$a$$\n$$\nb\n$$" + code,
+    );
+    expect(
+      rewriteMathDelimiters(
+        "当前 shell 的 PID 是 $$\n\n    echo $$\n    echo $HOME$PATH",
+      ),
+    ).toBe("当前 shell 的 PID 是 \\$\\$\n\n    echo $$\n    echo $HOME$PATH");
+  });
+
+  it("keeps a block with an indented formula after a formula opened mid-line", () => {
+    expect(
+      rewriteMathDelimiters("由 $$a\n$$ 得\n\n$$\n\n    E = mc^2\n\n$$"),
+    ).toBe("由\n$$\na\n$$\n得\n\n$$\n\n    E = mc^2\n\n$$");
+  });
+
   it("asks KaTeX for muted errors", async () => {
     await loadMarkdownMath();
     const rehype = markdownMathPlugins()?.rehype ?? [];

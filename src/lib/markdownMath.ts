@@ -270,7 +270,14 @@ const ORDERED_START = /\d{1,9}(?=[.)](?:[ \t\r\n]|$))/y;
 
 // A table's delimiter row, such as `| --- | :-: |` or a one-column `|---`.
 const DELIMITER_ROW =
-  /^[ \t>]*(?:\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?::?-+:?[ \t]*)?|\|[ \t]*:?-+:?[ \t]*)$/;
+  /^(?:\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?::?-+:?[ \t]*)?|\|[ \t]*:?-+:?[ \t]*)$/;
+
+/**
+ * True when `line` is a delimiter row, after its quote markers and indent.
+ * Rows are short; a long line is not one, and is not worth matching.
+ */
+const delimiterRow = (line: string) =>
+  line.length <= 512 && DELIMITER_ROW.test(line.replace(/^[ \t>]*/, ""));
 // A line that ends a table: a `$$` fence (whose rest holds no `$`), a
 // heading, a quote, a list item or a rule starts a block of its own.
 const ENDS_TABLE =
@@ -291,7 +298,7 @@ function tableRows(text: string): [number, number][] {
   }
   const rows: [number, number][] = [];
   for (let row = 0; row < lines.length; row += 1) {
-    if (!lines[row].includes("|") || !DELIMITER_ROW.test(lines[row + 1] ?? ""))
+    if (!lines[row].includes("|") || !delimiterRow(lines[row + 1] ?? ""))
       continue;
     rows.push([starts[row], starts[row] + lines[row].length]);
     for (

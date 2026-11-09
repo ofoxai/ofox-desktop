@@ -10,9 +10,10 @@ const URL_RUN = /^[^\s<|]+/;
 const DEFINITION = / {0,3}\[[^\]\n]+\]:[^\n]*/y;
 // An HTML tag, comment or declaration, whose text may hold URLs, as
 // CommonMark reads one, or an autolink (`<https://…>`); `x<y 时 … z>0` is
-// neither.
+// neither. No part of it reads past the next `<`, so a line of unclosed
+// `<!--` is read once, not once per `<`.
 const TAG =
-  /<(?:[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"'=<>`]+))?)*\s*\/?|\/[A-Za-z][A-Za-z0-9-]*\s*|[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|!--[^\n]*?--|\?[^\n]*?\?|![A-Za-z][^>\n]*|!\[CDATA\[[^\n]*?\]\])>/y;
+  /<(?:[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"<\n]*"|'[^'<\n]*'|[^\s"'=<>`]+))?)*\s*\/?|\/[A-Za-z][A-Za-z0-9-]*\s*|[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|!--[^<\n]*?--|\?[^<\n]*?\?|![A-Za-z][^<>\n]*|!\[CDATA\[[^<\n]*?\]\])>/y;
 
 /**
  * True when `index` is inside a link's text: an unclosed `[` before it on its
