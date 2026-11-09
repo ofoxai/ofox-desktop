@@ -1,12 +1,12 @@
 /**
  * Full-width punctuation: ideographic space and marks (U+3000-303F), the
  * full-width forms of ASCII punctuation (U+FF01-FF0F, FF1A-FF20, FF3B-FF40,
- * FF5B-FF65) and the ellipsis. Letters and numerals inside those blocks (々,
+ * FF5B-FF65), curly quotes (U+2018-201F) and the ellipsis. Letters and numerals inside those blocks (々,
  * 〆, 〇) are part of a name, like ideographs and kana, so an IRI such as
  * /wiki/佐々木 stays whole.
  */
 export const FULL_WIDTH_PUNCTUATION =
-  /(?![\p{L}\p{N}])[…　-〿！-／：-＠［-｀｛-･]/u;
+  /(?![\p{L}\p{N}])[…‘-‟　-〿！-／：-＠［-｀｛-･]/u;
 const ASCII_SENTENCE_END = /[.,;:!?]+$/;
 /** What closes a quote, bracket or emphasis around a URL in running text. */
 const ASCII_CLOSERS = /[.,;:!?"'*_~\]]+$/;

@@ -45,4 +45,24 @@ describe("rewriteBareUrls", () => {
       "先 <https://a.com>，再 <https://b.com>。",
     );
   });
+
+  it("stops a URL at a table cell's bar", () => {
+    const text = "|官网|https://ofox.ai|中文（推荐）|";
+    expect(rewriteBareUrls(text)).toBe(text);
+  });
+
+  it("leaves link text, reference definitions and HTML attributes as they were", () => {
+    for (const text of [
+      "[官网 https://a.com，看](https://b.com)",
+      "[1]: https://a.com（官方）",
+      '<a href="https://a.com，">官网</a>',
+    ])
+      expect(rewriteBareUrls(text)).toBe(text);
+  });
+
+  it("ends a URL at a Chinese closing quote", () => {
+    expect(rewriteBareUrls("访问“https://ofox.ai/zh”，即可")).toBe(
+      "访问“<https://ofox.ai/zh>”，即可",
+    );
+  });
 });

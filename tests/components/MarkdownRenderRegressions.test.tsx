@@ -144,6 +144,23 @@ describe("display formulas", () => {
   });
 });
 
+describe("display formulas in lists and sentences", () => {
+  it("draws a formula that shares lines with its fences inside a list item", async () => {
+    const { container } = render(message("- 推导：\n- $$a\n  =b$$\n- 下一项"));
+    await drawn(container, 1);
+    expect(container.querySelector("li .katex-display")).not.toBeNull();
+    expect(count(container, ".katex-error")).toBe(0);
+    expect(count(container, "li")).toBe(3);
+  });
+
+  it("draws a formula opened mid-sentence and closed on its own line", async () => {
+    const { container } = render(message("公式为 $$\na+b\n$$\n\n后文"));
+    await drawn(container, 1);
+    expect(count(container, ".katex-display")).toBe(1);
+    expect(prose(container)).toContain("后文");
+  });
+});
+
 describe("formulas in tables", () => {
   it("keeps the cells of a row whose formula holds a vertical bar", async () => {
     const { container } = render(

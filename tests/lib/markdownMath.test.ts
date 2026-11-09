@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   hasMathMarkers,
   loadMarkdownMath,
+  markdownMathPlugins,
   markdownMathReady,
   rewriteMathDelimiters,
 } from "@/lib/markdownMath";
@@ -240,6 +241,80 @@ describe("rewriteMathDelimiters: $$ blocks", () => {
       "| 式 | 义 |\n|---|---|\n| $$\\vert x\\vert $$ | 绝对值 |\n| $$\\Vert v\\Vert $$ | 范数 |",
     );
     expect(rewriteMathDelimiters("$|x|$")).toBe("$$|x|$$");
+  });
+});
+
+describe("rewriteMathDelimiters: review follow-ups", () => {
+  it("still reads formulas with Chinese in subscripts and bold", () => {
+    expect(
+      rewriteMathDelimiters(
+        "合力 $F_{合}=ma$，速度 $v_{平均}$，区间 $x\\in[0，1]$，$\\mathbf{力}$",
+      ),
+    ).toBe(
+      "合力 $$F_{合}=ma$$，速度 $$v_{平均}$$，区间 $$x\\in[0，1]$$，$$\\mathbf{力}$$",
+    );
+    expect(hasMathMarkers("速度 $v_{平均}$")).toBe(true);
+  });
+
+  it("does not pair dollars across the rows of a table", () => {
+    for (const [text, out] of [
+      [
+        "| $$ | PID |\n|---|---|\n| $$x$$ | 公式 |",
+        "| \\$\\$ | PID |\n|---|---|\n| $$x$$ | 公式 |",
+      ],
+      [
+        "| a | b |\n|---|---|\n| $x | 1 |\n| y$ | 2 |",
+        "| a | b |\n|---|---|\n| $x | 1 |\n| y$ | 2 |",
+      ],
+    ])
+      expect(rewriteMathDelimiters(text)).toBe(out);
+  });
+
+  it("reads a one-column table's delimiter row", () => {
+    expect(rewriteMathDelimiters("| 式 |\n|---\n| $|x|$ |")).toBe(
+      "| 式 |\n|---\n| $$\\vert x\\vert $$ |",
+    );
+  });
+
+  it("keeps an escaped backslash before a bar in a table formula", () => {
+    expect(rewriteMathDelimiters("| a |\n|---|\n| $a \\\\| b$ |")).toBe(
+      "| a |\n|---|\n| $$a \\\\\\vert  b$$ |",
+    );
+  });
+
+  it("writes a formula in a list item as a block under the item", () => {
+    expect(rewriteMathDelimiters("- $$a\n  =b$$")).toBe(
+      "- $$\n  a\n  =b\n  $$",
+    );
+    const fenced = "- $$\n  a\n\n  b\n  $$";
+    expect(rewriteMathDelimiters(fenced)).toBe(fenced);
+  });
+
+  it("writes a formula opened mid-sentence and closed on its own line as a block", () => {
+    expect(rewriteMathDelimiters("公式为 $$\na+b\n$$\n\n后文")).toBe(
+      "公式为\n$$\na+b\n$$\n\n后文",
+    );
+  });
+
+  it("leaves a block whose formula is indented four spaces as it was", () => {
+    const text = "$$\n\n    E = mc^2\n\n$$";
+    expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("keeps the words moved after a closing $$ from starting a list or heading", () => {
+    expect(rewriteMathDelimiters("$$a\n=b$$ - 1")).toBe("$$\na\n=b\n$$\n\\- 1");
+    expect(rewriteMathDelimiters("$$a\n=b$$ # 注")).toBe(
+      "$$\na\n=b\n$$\n\\# 注",
+    );
+  });
+
+  it("asks KaTeX for muted errors", async () => {
+    await loadMarkdownMath();
+    const rehype = markdownMathPlugins()?.rehype ?? [];
+    const options = (
+      rehype[0] as unknown as [unknown, { errorColor?: string }]
+    )[1];
+    expect(options.errorColor).toBe("rgb(var(--ink-muted))");
   });
 });
 

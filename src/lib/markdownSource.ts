@@ -8,6 +8,7 @@ const FENCE_OPEN =
 const FENCE_CLOSE = /^[\s>]*(`{3,}|~{3,})\s*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
 const INDENTED = /^(?: {4}|\t)/;
+const MATH_FENCE = /^[\s>]*\$\$\s*$/;
 
 /** The most text a rewrite works through; a longer message is left as written. */
 export const MAX_REWRITE = 64 * 1024;
@@ -15,6 +16,7 @@ export const MAX_REWRITE = 64 * 1024;
 /**
  * Splits text into runs of prose and runs of code (fenced or indented), by
  * line. A `run` is its lines joined, so a run of prose can be scanned whole.
+ * An indented line inside a `$$` block is the formula's, not code.
  */
 export function splitCode(content: string): { code: boolean; text: string }[] {
   const runs: { code: boolean; lines: string[] }[] = [];
@@ -27,6 +29,7 @@ export function splitCode(content: string): { code: boolean; text: string }[] {
   let afterBlank = true;
   let afterCode = false;
   let inList = false;
+  let inMath = false;
   for (const line of content.split("\n")) {
     const blank = line.trim() === "";
     let code = false;
@@ -42,8 +45,10 @@ export function splitCode(content: string): { code: boolean; text: string }[] {
         code = true;
         fence = { char: open[0], length: open.length };
       } else if (!blank && INDENTED.test(line)) {
-        code = (afterBlank || afterCode) && !inList;
+        code = (afterBlank || afterCode) && !inList && !inMath;
+        if (!code && MATH_FENCE.test(line)) inMath = !inMath;
       } else if (!blank) {
+        if (MATH_FENCE.test(line)) inMath = !inMath;
         inList = LIST_ITEM.test(line) || (inList && !afterBlank);
       }
     }

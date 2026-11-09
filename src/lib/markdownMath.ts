@@ -76,9 +76,17 @@ function hasDollarMath(content: string): boolean {
   return false;
 }
 
-/** The end of the formula that opens at `from` (after `\(` or `\[`), or -1. */
-function closing(text: string, from: number, closer: string): number {
-  for (let index = from; index < text.length; ) {
+/**
+ * The end of the formula that opens at `from` (after `\(` or `\[`), or -1. It
+ * never reaches `limit` (the end of a table row).
+ */
+function closing(
+  text: string,
+  from: number,
+  closer: string,
+  limit = text.length,
+): number {
+  for (let index = from; index < limit; ) {
     if (text[index] === "\\") {
       if (text[index + 1] === closer) return index;
       index += 2;
@@ -92,31 +100,32 @@ function closing(text: string, from: number, closer: string): number {
 }
 
 // Chinese, Japanese or Korean text, and full-width punctuation.
-const CJK =
-  /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+const CJK = /[　-〿぀-ヿ㐀-鿿가-힯＀-￯]/;
 // The commands a formula writes words in.
 const TEXT_COMMANDS =
-  /\\(?:text|textrm|textbf|textit|mbox|mathrm|operatorname)\s*\{[^{}]*\}/g;
+  /\\(?:text[a-z]*|mbox|math(?:rm|bf|sf|tt|it)|boldsymbol|operatorname)\s*\{[^{}]*\}/g;
 
 /**
- * Words outside `\text{…}` and its kin: a formula holds none, so what lies
- * between two dollars that has some, as between two prices in a Chinese
- * sentence ("$0.412/M。…补偿$待核"), is text.
+ * A price, not a formula: what lies between two dollars starts with a digit
+ * and holds Chinese words outside `\text{…}`, as between the two prices in
+ * "$0.412/M。…补偿$待核". A formula may hold Chinese (`$F_{合}=ma$`), but it
+ * does not start with an amount and run on into the sentence.
  */
-const proseInFormula = (formula: string) =>
-  CJK.test(formula.replace(TEXT_COMMANDS, ""));
+const priceSpan = (span: string) =>
+  /^\d/.test(span) && CJK.test(span.replace(TEXT_COMMANDS, ""));
 
 /**
  * The `$` that closes the formula a lone `$` at `from` opens, or -1, as Pandoc
  * reads one: a non-space right after the opener, a non-space right before the
  * closer and no digit right after it; the first `$` that follows decides. So
- * `$5 and $10` and `$0.014–$0.028` stay money, and so does a span with Chinese
- * words outside `\text`. It never crosses a paragraph break, code or `$$`.
+ * `$5 and $10` and `$0.014–$0.028` stay money, and so does a price that runs
+ * on into a Chinese sentence (see `priceSpan`). It never crosses a paragraph
+ * break, code, `$$` or `limit` (the end of a table row).
  */
-function dollarClose(text: string, from: number): number {
+function dollarClose(text: string, from: number, limit = text.length): number {
   const first = text[from + 1];
   if (first === undefined || first === "$" || /\s/.test(first)) return -1;
-  for (let index = from + 1; index < text.length; ) {
+  for (let index = from + 1; index < limit; ) {
     const char = text[index];
     if (char === "\\") {
       index += 2;
@@ -129,7 +138,7 @@ function dollarClose(text: string, from: number): number {
       return after !== "$" &&
         !/\s/.test(text[index - 1]) &&
         !/\d/.test(after) &&
-        !proseInFormula(text.slice(from + 1, index))
+        !priceSpan(text.slice(from + 1, index))
         ? index
         : -1;
     } else {
@@ -148,22 +157,58 @@ function textMath(formula: string, before: string, after: string): string {
   return `${before === "$" ? " " : ""}$$${padded}$$${after === "$" ? " " : ""}`;
 }
 
-/** The start and the end (its line break, or the text's end) of the line that holds `at`. */
-function lineAround(text: string, at: number): { start: number; end: number } {
-  const end = text.indexOf("\n", at);
-  return {
-    start: text.lastIndexOf("\n", at - 1) + 1,
-    end: end < 0 ? text.length : end,
-  };
+// What may stand before a fence on its line: a quote's `>`, an indent, and a
+// list item's marker.
+const CONTAINER = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?$/;
+const LEADING_CONTAINER = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?/;
+const LIST_MARKER = /(?:[-*+]|\d{1,9}[.)])[ \t]+$/;
+
+/**
+ * The text before `at` on its line when it is nothing but containers (see
+ * CONTAINER), or null. It looks back a short way only, so a long line of
+ * formulas is read in one pass.
+ */
+function containersBefore(text: string, at: number): string | null {
+  let start = at;
+  while (start > 0 && text[start - 1] !== "\n") {
+    start -= 1;
+    if (at - start > 32) return null;
+  }
+  const prefix = text.slice(start, at);
+  return CONTAINER.test(prefix) ? prefix : null;
+}
+
+/** Containers as the indent of the lines under them: a list marker turns to spaces. */
+const indentOf = (containers: string) =>
+  containers.replace(LIST_MARKER, (marker) => " ".repeat(marker.length));
+
+/** The indent of the lines under the line that holds `at`. */
+function lineIndent(text: string, at: number): string {
+  const start = text.lastIndexOf("\n", at - 1) + 1;
+  return indentOf(LEADING_CONTAINER.exec(text.slice(start, at))?.[0] ?? "");
+}
+
+/** True when only spaces lie between `from` and the end of its line. */
+function blankToLineEnd(text: string, from: number): boolean {
+  let index = from;
+  while (text[index] === " " || text[index] === "\t" || text[index] === "\r")
+    index += 1;
+  return index >= text.length || text[index] === "\n";
 }
 
 /**
  * The `$$` that closes the one before `from`, or -1. An escaped dollar is not
- * one. It never crosses a paragraph break, unless the opening `$$` stood on a
- * line of its own (`block`), as a fence may.
+ * one. It never reaches `limit` (the end of a table row) and never crosses a
+ * paragraph break, unless the opening `$$` stood on a line of its own
+ * (`block`), as a fence may.
  */
-function doubleDollarClose(text: string, from: number, block: boolean): number {
-  for (let index = from; index < text.length; ) {
+function doubleDollarClose(
+  text: string,
+  from: number,
+  block: boolean,
+  limit: number,
+): number {
+  for (let index = from; index < limit; ) {
     const char = text[index];
     if (char === "\\") index += 2;
     else if (char === "$" && text[index + 1] === "$") return index;
@@ -177,25 +222,30 @@ function doubleDollarClose(text: string, from: number, block: boolean): number {
  * A display formula as a `$$` block whose fences stand on lines of their own,
  * the only shape remark-math reads as one: a fence with the formula on its
  * line is read as an opening fence that never closes, and takes the rest of
- * the message. `prefix` is what stands before the opening fence on its line
- * (a quote's `>`, a list item's indent); each line made here starts with it.
+ * the message. Each line made here starts with `indent` (a quote's `>`, the
+ * indent of a list item's lines).
  */
-function displayBlock(formula: string, prefix: string): string {
+function displayBlock(formula: string, indent: string): string {
   const onNextLine = /^[ \t]*\n/.test(formula);
   const lines = formula.replace(/^[ \t]*\n/, "").replace(/\n[ \t>]*$/, "");
-  return `$$\n${onNextLine ? "" : prefix}${lines}\n${prefix}$$`;
+  return `$$\n${onNextLine ? "" : indent}${lines}\n${indent}$$`;
 }
 
-// A table's delimiter row, such as `| --- | :-: |`.
+// The start of words that would open a list, a quote, a heading or a rule.
+const BLOCK_START =
+  /(?:[-+*](?=[ \t\r\n]|$)|#{1,6}(?=[ \t\r\n]|$)|>|(?:[-*_][ \t]*){3,}(?=\r?\n|$))/y;
+const ORDERED_START = /\d{1,9}(?=[.)](?:[ \t\r\n]|$))/y;
+
+// A table's delimiter row, such as `| --- | :-: |` or a one-column `|---`.
 const DELIMITER_ROW =
-  /^[ \t>]*\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?::?-+:?[ \t]*)?$/;
+  /^[ \t>]*(?:(?:\|[ \t]*:?-+:?[ \t]*)+|:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+)\|?[ \t]*$/;
 
 /**
  * The [start, end) offsets of the lines of `text` that are a table's: a line
  * with a `|` whose next line is a delimiter row, and the lines after it up to
  * a blank one.
  */
-function tableLines(text: string): [number, number][] {
+function tableRows(text: string): [number, number][] {
   const lines = text.split("\n");
   const starts: number[] = [];
   let offset = 0;
@@ -203,14 +253,28 @@ function tableLines(text: string): [number, number][] {
     starts.push(offset);
     offset += line.length + 1;
   }
-  const ranges: [number, number][] = [];
+  const rows: [number, number][] = [];
   for (let row = 0; row < lines.length; row += 1) {
     if (!lines[row].includes("|") || !DELIMITER_ROW.test(lines[row + 1] ?? ""))
       continue;
     for (; row < lines.length && lines[row].trim() !== ""; row += 1)
-      ranges.push([starts[row], starts[row] + lines[row].length]);
+      rows.push([starts[row], starts[row] + lines[row].length]);
   }
-  return ranges;
+  return rows;
+}
+
+/**
+ * For offsets asked in increasing order, the end of the table row that holds
+ * each, or -1 outside a table.
+ */
+function rowEnds(text: string): (at: number) => number {
+  const rows = tableRows(text);
+  let next = 0;
+  return (at) => {
+    while (next < rows.length && rows[next][1] <= at) next += 1;
+    const row = rows[next];
+    return row && at >= row[0] ? row[1] : -1;
+  };
 }
 
 /**
@@ -218,65 +282,98 @@ function tableLines(text: string): [number, number][] {
  * `|` before its formulas are read, so `$|x|$` in a cell would cut it apart.
  */
 const withoutBars = (formula: string) =>
-  formula.replace(/\\\|/g, "\\Vert ").replace(/\|/g, "\\vert ");
+  formula.replace(/\\[\s\S]|\|/g, (token) =>
+    token === "\\|" ? "\\Vert " : token === "|" ? "\\vert " : token,
+  );
 
 function rewriteMath(text: string): string {
-  const tables = tableLines(text);
-  const formulaAt = (formula: string, at: number) =>
-    tables.some(([start, end]) => at >= start && at < end)
-      ? withoutBars(formula)
-      : formula;
+  const rowEnd = rowEnds(text);
   let out = "";
+  // The last character written: reading it back from `out` would flatten the
+  // whole string each time, once per formula.
+  let last = "";
+  const emit = (part: string) => {
+    if (!part) return;
+    out += part;
+    last = part[part.length - 1];
+  };
   let index = 0;
   while (index < text.length) {
     const char = text[index];
     if (char === "`") {
       const end = codeSpanEnd(text, index);
-      out += text.slice(index, end);
+      emit(text.slice(index, end));
       index = end;
       continue;
     }
     const next = text[index + 1];
     if (char === "$" && next === "$") {
-      const line = lineAround(text, index);
-      const prefix = text.slice(line.start, index);
-      const atLineStart = /^[ \t>]*$/.test(prefix);
-      const alone = /^[ \t\r]*$/.test(text.slice(index + 2, line.end));
-      const end = doubleDollarClose(text, index + 2, atLineStart && alone);
+      const row = rowEnd(index);
+      const containers = row < 0 ? containersBefore(text, index) : null;
+      const alone = containers !== null && blankToLineEnd(text, index + 2);
+      const end = doubleDollarClose(
+        text,
+        index + 2,
+        alone,
+        row < 0 ? text.length : row,
+      );
       if (end < 0) {
         // Never closed: as text, rather than a fence that takes the rest.
-        out += "\\$\\$";
+        emit("\\$\\$");
         index += 2;
         continue;
       }
       const formula = text.slice(index + 2, end);
-      const rest = text.slice(end + 2, lineAround(text, end + 2).end);
-      const restBlank = /^[ \t\r]*$/.test(rest);
+      const multiline = formula.includes("\n");
+      const restBlank = blankToLineEnd(text, end + 2);
+      let indent: string | null = null;
+      if (containers !== null && (multiline || restBlank)) {
+        indent = indentOf(containers);
+      } else if (multiline && containersBefore(text, end) !== null) {
+        // Opened in a sentence, closed at the start of a line: that line
+        // would open a fence of its own, so the formula starts a new line.
+        indent = lineIndent(text, index);
+        out = out.replace(/[ \t]+$/, "");
+        emit(`\n${indent}`);
+      }
       index = end + 2;
-      if (atLineStart && (formula.includes("\n") || restBlank)) {
-        out += displayBlock(formula, prefix);
-        if (!restBlank) {
-          // The words after the closing fence go on a line of their own.
-          out += `\n${prefix}`;
-          while (text[index] === " " || text[index] === "\t") index += 1;
+      if (indent === null) {
+        emit(`$$${row < 0 ? formula : withoutBars(formula)}$$`);
+        continue;
+      }
+      emit(displayBlock(formula, indent));
+      if (!restBlank) {
+        // The words after the closing fence go on a line of their own, as
+        // words: what would open a list, quote or heading there is escaped.
+        emit(`\n${indent}`);
+        while (text[index] === " " || text[index] === "\t") index += 1;
+        BLOCK_START.lastIndex = index;
+        ORDERED_START.lastIndex = index;
+        const number = ORDERED_START.exec(text)?.[0];
+        if (BLOCK_START.test(text)) emit("\\");
+        else if (number) {
+          emit(`${number}\\`);
+          index += number.length;
         }
-      } else {
-        out += `$$${formulaAt(formula, end)}$$`;
       }
       continue;
     }
     if (char === "$") {
       // A lone `$` may open a formula.
-      const end = dollarClose(text, index);
+      const row = rowEnd(index);
+      const end = dollarClose(text, index, row < 0 ? text.length : row);
       if (end < 0) {
-        out += char;
+        emit(char);
         index += 1;
         continue;
       }
-      out += textMath(
-        formulaAt(text.slice(index + 1, end), index),
-        out.slice(-1),
-        text[end + 1] ?? "",
+      const formula = text.slice(index + 1, end);
+      emit(
+        textMath(
+          row < 0 ? formula : withoutBars(formula),
+          last,
+          text[end + 1] ?? "",
+        ),
       );
       index = end + 1;
       continue;
@@ -284,26 +381,30 @@ function rewriteMath(text: string): string {
     if (char !== "\\" || (next !== "(" && next !== "[")) {
       // A backslash and what it escapes go together, so `\\(` is not an opener.
       const length = char === "\\" ? 2 : 1;
-      out += text.slice(index, index + length);
+      emit(text.slice(index, index + length));
       index += length;
       continue;
     }
+    const row = rowEnd(index);
     const closer = next === "(" ? ")" : "]";
-    const end = closing(text, index + 2, closer);
+    const end = closing(text, index + 2, closer, row < 0 ? text.length : row);
     const formula = end < 0 ? "" : text.slice(index + 2, end);
     if (end < 0 || formula.includes("$$") || formula.trim() === "") {
       const stop = end < 0 ? index + 2 : end + 2;
-      out += text.slice(index, stop);
+      emit(text.slice(index, stop));
       index = stop;
       continue;
     }
-    const prefix = text.slice(lineAround(text, index).start, index);
-    const rest = text.slice(end + 2, lineAround(text, end).end);
-    const block =
-      next === "[" && /^[ \t>]*$/.test(prefix) && /^[ \t\r]*$/.test(rest);
-    out += block
-      ? displayBlock(formula, prefix)
-      : textMath(formulaAt(formula, index), out.slice(-1), text[end + 2] ?? "");
+    const containers = row < 0 ? containersBefore(text, index) : null;
+    emit(
+      next === "[" && containers !== null && blankToLineEnd(text, end + 2)
+        ? displayBlock(formula, indentOf(containers))
+        : textMath(
+            row < 0 ? formula : withoutBars(formula),
+            last,
+            text[end + 2] ?? "",
+          ),
+    );
     index = end + 2;
   }
   return out;
@@ -316,8 +417,8 @@ function rewriteMath(text: string): string {
  * formula that stands on its own lines as a block whose fences have lines of
  * their own. A `\[` on its own lines becomes a block too; every other formula
  * becomes text math. A `$$` that never closes is shown as text, and a
- * formula in a table row has its bars written as `\vert`. A message above
- * the size cap is left as written.
+ * formula in a table row stays in its row and has its bars written as
+ * `\vert`. A message above the size cap is left as written.
  */
 export function rewriteMathDelimiters(content: string): string {
   return rewriteProse(content, rewriteMath);

@@ -3,8 +3,22 @@ import { FULL_WIDTH_PUNCTUATION, splitUrlTail } from "@/lib/urlTail";
 
 const SCHEME = /^https?:\/\//i;
 const WWW = /^www\./i;
-// A bare URL runs to a space or a `<`, as markdown reads one.
-const URL_RUN = /^[^\s<]+/;
+// A bare URL runs to a space or a `<`, as markdown reads one, or to the `|`
+// that ends its table cell.
+const URL_RUN = /^[^\s<|]+/;
+// A reference definition, `[1]: https://…`, whose URL is the link's own.
+const DEFINITION = / {0,3}\[[^\]\n]+\]:[^\n]*/y;
+// An HTML tag, whose attributes may hold URLs, or an autolink (`<https://…>`).
+const TAG = /<[A-Za-z!/?][^>\n]*>/y;
+
+/** True when an unclosed `[` comes before `index` on its line: link text. */
+function inLinkText(text: string, index: number): boolean {
+  for (let at = index - 1; at >= 0 && index - at <= 200; at -= 1) {
+    if (text[at] === "]" || text[at] === "\n") return false;
+    if (text[at] === "[") return true;
+  }
+  return false;
+}
 
 /**
  * Whether markdown starts a bare URL at `index`: `http(s)://` after anything
@@ -13,8 +27,8 @@ const URL_RUN = /^[^\s<]+/;
  */
 function bareUrlAt(text: string, index: number): "scheme" | "www" | null {
   const before = text[index - 1] ?? "";
-  if (before === "[" || (before === "(" && text[index - 2] === "]"))
-    return null;
+  if (before === "(" && text[index - 2] === "]") return null;
+  if (inLinkText(text, index)) return null;
   const ahead = text.slice(index, index + 8);
   if (SCHEME.test(ahead)) return /[A-Za-z]/.test(before) ? null : "scheme";
   if (WWW.test(ahead)) return /^$|[\s(*_[\]~]/.test(before) ? "www" : null;
@@ -37,12 +51,20 @@ function rewriteUrls(text: string): string {
       index += 2;
       continue;
     }
+    if (index === 0 || text[index - 1] === "\n") {
+      DEFINITION.lastIndex = index;
+      if (DEFINITION.test(text)) {
+        out += text.slice(index, DEFINITION.lastIndex);
+        index = DEFINITION.lastIndex;
+        continue;
+      }
+    }
     if (char === "<") {
-      // An autolink or a tag goes as it is, up to its `>`.
-      const end = text.indexOf(">", index);
-      if (end > index && !/\s/.test(text.slice(index, end))) {
-        out += text.slice(index, end + 1);
-        index = end + 1;
+      // A tag goes as it is, attributes and all; so does an autolink.
+      TAG.lastIndex = index;
+      if (TAG.test(text)) {
+        out += text.slice(index, TAG.lastIndex);
+        index = TAG.lastIndex;
         continue;
       }
     }
