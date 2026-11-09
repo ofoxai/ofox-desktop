@@ -577,7 +577,9 @@ at the deck before the user is shown anything.
   count and the issues; the model also gets an overview image of the slides.
 - The overview is one contact sheet that the runtime draws from the slides' SVG
   pages (with their text, as for the first-page preview above): two columns, each
-  slide numbered in order, up to 24 slides (it says so when a deck has more). A
+  slide under its own number (taken from its page, `<n>.svg`), up to 24 slides.
+  It says so when a deck has more, or when slides have no page (the issues name
+  them); a page that cannot be drawn keeps its cell as a grey placeholder. A
   model that cannot see images gets the issues only.
 - To deliver, the model calls again: either with content and without `preview`
   (the code may have changed: this makes a new file) or with

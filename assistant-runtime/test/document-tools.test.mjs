@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { validateToolArguments } from "@earendil-works/pi-ai";
 import { documentTools } from "../src/document-tools.mjs";
+import { contactSheet } from "../src/thumbnails.mjs";
 import { pdfPages } from "./fixtures/pdf.mjs";
 
 const FORMATS = [
@@ -1117,6 +1118,70 @@ test("the overview shows the first 24 slides and says how many there are", async
   const image = await loadImage(Buffer.from(shown.content[1].data, "base64"));
   // Twelve rows of 16:9 cells.
   assert.equal(image.height, 24 + 12 * (32 + 430 + 24));
+});
+
+test("the overview labels each slide by its page and counts the deck's slides", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const directory = await folder(t);
+  const [one, two, , four] = await writePages(directory, 4);
+  // Slide 3 has no page (the host warns about it).
+  const { tool } = createDocument({
+    python: true,
+    reply: () => previewed({ pagePaths: [one, two, four], slides: 4 }),
+  });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  assert.match(result.content[0].text, /It shows 3 of 4 slides/);
+  const svg = (file) => readFile(file);
+  const labelled = async (labels) =>
+    (
+      await contactSheet(
+        await Promise.all(
+          [one, two, four].map(async (file, index) => ({
+            label: labels[index],
+            svg: await svg(file),
+          })),
+        ),
+      )
+    ).data;
+  assert.equal(result.content[1].data, await labelled(["1", "2", "4"]));
+  assert.notEqual(result.content[1].data, await labelled(["1", "2", "3"]));
+});
+
+test("a page that cannot be drawn leaves a placeholder in the overview", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const directory = await folder(t);
+  const [one, two] = await writePages(directory, 2);
+  await writeFile(two, "this is not an svg");
+  const { tool } = createDocument({
+    python: true,
+    reply: () => previewed({ pagePaths: [one, two], slides: 2 }),
+  });
+  const result = await tool.execute("c1", {
+    name: "deck.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  assert.deepEqual(
+    result.content.map((part) => part.type),
+    ["text", "image"],
+  );
+  const expected = await contactSheet([
+    { label: "1", svg: await readFile(one) },
+    { label: "2", svg: await readFile(two) },
+  ]);
+  assert.equal(result.content[1].data, expected.data);
 });
 
 test("a deck object can be previewed too, with what was rendered first", async () => {

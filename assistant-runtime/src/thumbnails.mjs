@@ -105,25 +105,40 @@ const SHEET_LABEL = 32;
 const MAX_SHEET_BYTES = 600 * 1024;
 const SHEET_ENCODINGS = [85, 65, 45].map((quality) => ["image/jpeg", quality]);
 
+// The cell of a slide that could not be drawn: a grey box that says so.
+function drawPlaceholder(context, x, y, width, height) {
+  context.save();
+  context.fillStyle = "#94a3b8";
+  context.fillRect(x, y, width, height);
+  context.fillStyle = "#f8fafc";
+  context.font = `bold ${SHEET_LABEL - 8}px sans-serif`;
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+  context.fillText("no picture", x + width / 2, y + height / 2);
+  context.restore();
+}
+
 /**
- * One JPEG of every slide, for a model to review a deck at a glance: the
- * slides' SVGs drawn with their text (as thumbnailFromSvg does) in
- * `columns` columns over a light background, each under its number from 1.
- * A cell is (width - gaps) / columns wide at the first slide's proportions
+ * One JPEG of a deck's slides, for a model to review it at a glance:
+ * `slides` is [{ label, svg }], each slide's number and its SVG bytes (null
+ * when they could not be read), drawn with their text (as thumbnailFromSvg
+ * does) in `columns` columns over a light background, each under its label.
+ * A slide that cannot be drawn keeps its cell, as a placeholder. A cell is
+ * (width - gaps) / columns wide at the proportions of the first slide drawn
  * (a deck has one slide size). Null when even the lowest quality is over
- * 600 KB; rejects when there are no slides, or one is not an SVG this
- * canvas can read.
+ * 600 KB; rejects when there are no slides, or none that this canvas can
+ * draw.
  */
-export async function contactSheet(
-  svgBuffers,
-  { columns = 2, width = 1600 } = {},
-) {
-  if (svgBuffers.length === 0)
+export async function contactSheet(slides, { columns = 2, width = 1600 } = {}) {
+  if (slides.length === 0)
     throw new Error("A contact sheet needs at least one slide");
   const { createCanvas } = await import("@napi-rs/canvas");
-  const slides = await Promise.all(svgBuffers.map(loadSlide));
-  const { image } = slides[0];
-  const aspect = image.height / image.width;
+  const loaded = await Promise.all(
+    slides.map(({ svg }) => (svg ? loadSlide(svg).catch(() => null) : null)),
+  );
+  const first = loaded.find(Boolean);
+  if (!first) throw new Error("No slide could be drawn");
+  const aspect = first.image.height / first.image.width;
   if (!Number.isFinite(aspect) || aspect <= 0)
     throw new Error("The SVG has no size");
   const cellWidth = Math.floor((width - (columns + 1) * SHEET_GAP) / columns);
@@ -137,11 +152,14 @@ export async function contactSheet(
   context.fillStyle = "#334155";
   context.font = `bold ${SHEET_LABEL - 8}px sans-serif`;
   context.textBaseline = "alphabetic";
-  slides.forEach((slide, index) => {
+  slides.forEach(({ label }, index) => {
     const x = SHEET_GAP + (index % columns) * (cellWidth + SHEET_GAP);
     const y = SHEET_GAP + Math.floor(index / columns) * rowHeight;
-    context.fillText(String(index + 1), x, y + SHEET_LABEL - 8);
-    drawSlide(context, slide, x, y + SHEET_LABEL, cellWidth, cellHeight);
+    context.fillText(String(label), x, y + SHEET_LABEL - 8);
+    const slide = loaded[index];
+    if (slide)
+      drawSlide(context, slide, x, y + SHEET_LABEL, cellWidth, cellHeight);
+    else drawPlaceholder(context, x, y + SHEET_LABEL, cellWidth, cellHeight);
   });
   return encodeWithin(canvas, SHEET_ENCODINGS, MAX_SHEET_BYTES);
 }

@@ -18,7 +18,7 @@ If create_document offers `{"kind":"python","code":"…"}` content, make the dec
 
 ## Preview, then deliver
 
-1. Send the code with `preview: true`. Nothing is delivered: you get a `previewId`, the issues and an overview image of the slides, numbered in order.
+1. Send the code with `preview: true`. Nothing is delivered: you get a `previewId`, the issues and an overview image of the slides, each under its slide number.
 2. Look at the image and read the issues: clipped or overlapping text, empty areas, small text, a plot or figure out of place. Fix the code.
 3. Deliver under the same file name by calling again without `preview` (the code may have changed), or with `fromPreview: "<previewId>"` and no content to deliver that preview as it is. A file may be previewed twice per reply; if the reply ends without delivering, the latest preview is delivered automatically.
 

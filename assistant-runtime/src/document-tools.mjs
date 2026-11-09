@@ -248,16 +248,21 @@ const previewNext = (previewId) =>
   `Fix what the issues and the slides show and call create_document again under the same file name: with preview: true for another look (a file may be previewed twice per reply), or without preview to deliver the changed code. To keep this file as it is, deliver with fromPreview: "${previewId}" and no content. If you end the reply without delivering, the latest preview is delivered automatically.`;
 
 // What the overview image is, or why there is none; nothing when a model
-// that cannot see images was shown none.
-function overviewNote({ vision, pages, image }) {
+// that cannot see images was shown none. `slides` is the deck's count: a
+// slide the host drew no page of is not in the image.
+function overviewNote({ vision, pages, slides, image }) {
   if (!vision || pages === 0) return [];
   if (!image)
     return ["No overview of the slides could be drawn; judge by the issues."];
+  const total = Number.isSafeInteger(slides) && slides > pages ? slides : pages;
+  const shown =
+    pages > OVERVIEW_SLIDES
+      ? ` It shows the first ${OVERVIEW_SLIDES} of ${total} slides.`
+      : pages < total
+        ? ` It shows ${pages} of ${total} slides; the issues say which have no picture.`
+        : "";
   return [
-    "The image is an overview of the slides, numbered in order." +
-      (pages > OVERVIEW_SLIDES
-        ? ` It shows the first ${OVERVIEW_SLIDES} of ${pages} slides.`
-        : ""),
+    `The image is an overview of the slides, each under its slide number.${shown}`,
   ];
 }
 
@@ -295,12 +300,20 @@ const thumbnail = (previewPath) =>
     return render(await readFile(previewPath));
   });
 
-// One image of a preview's slides, the first OVERVIEW_SLIDES of them.
+// A page's slide number: the host writes slide n as pages/<n>.svg.
+const slideNumber = (page, index) =>
+  /^(\d+)\.svg$/i.exec(path.basename(page))?.[1] ?? String(index + 1);
+
+// One image of a preview's slides, the first OVERVIEW_SLIDES of them, each
+// under its own number; a page that cannot be read is a placeholder.
 const overview = (pagePaths) =>
   shown("overview", async () =>
     contactSheet(
       await Promise.all(
-        pagePaths.slice(0, OVERVIEW_SLIDES).map((page) => readFile(page)),
+        pagePaths.slice(0, OVERVIEW_SLIDES).map(async (page, index) => ({
+          label: slideNumber(page, index),
+          svg: await readFile(page).catch(() => null),
+        })),
       ),
     ),
   );
@@ -420,7 +433,12 @@ export function documentTools(runtime, context, { vision }) {
               text: [
                 ...(rendered?.told ?? []),
                 describePreview(details, args),
-                ...overviewNote({ vision, pages: pages.length, image }),
+                ...overviewNote({
+                  vision,
+                  pages: pages.length,
+                  slides: details.slides,
+                  image,
+                }),
                 previewNext(details.previewId),
               ].join("\n"),
             },

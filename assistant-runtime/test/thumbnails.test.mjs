@@ -171,17 +171,30 @@ async function pixelAt(thumbnail, x, y) {
 // gap around every cell and a 32 px strip above it for its number, so a
 // cell is 764 x 430 and sits at (24 + 788 * column, 56 + 486 * row).
 const cellAt = (column, row) => [24 + 788 * column, 56 + 486 * row, 764, 430];
+// The strip above a cell, where its number is written.
+const labelAt = (column, row) => [24 + 788 * column, 24 + 486 * row, 764, 32];
+
+// Slides numbered from 1, as a contact sheet takes them.
+const numbered = (...svgs) =>
+  svgs.map((svg, index) => ({ label: String(index + 1), svg }));
+
+// The RGBA bytes of a region of a decoded sheet.
+async function region(sheet, [x, y, width, height]) {
+  const image = await decoded(sheet);
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0);
+  return Buffer.from(context.getImageData(x, y, width, height).data);
+}
 
 test("a contact sheet draws every slide, with its text, in two columns", async (t) => {
   if (!(await readsSvg())) {
     t.skip("SVG unsupported");
     return;
   }
-  const sheet = await contactSheet([
-    navySlide("Transformer"),
-    navySlide("入门介绍"),
-    navySlide(""),
-  ]);
+  const sheet = await contactSheet(
+    numbered(navySlide("Transformer"), navySlide("入门介绍"), navySlide("")),
+  );
   assert.equal(sheet.mimeType, "image/jpeg");
   const image = await decoded(sheet);
   assert.equal(image.width, 1600);
@@ -208,12 +221,12 @@ test("a contact sheet of one slide has one row and keeps the width", async (t) =
     t.skip("SVG unsupported");
     return;
   }
-  const image = await decoded(await contactSheet([navySlide("Only")]));
+  const image = await decoded(await contactSheet(numbered(navySlide("Only"))));
   assert.equal(image.width, 1600);
   assert.equal(image.height, 24 + 32 + 430 + 24);
   // One column of 800 px: cells 752 wide and 423 high.
   const column = await decoded(
-    await contactSheet([navySlide("A"), navySlide("B")], {
+    await contactSheet(numbered(navySlide("A"), navySlide("B")), {
       columns: 1,
       width: 800,
     }),
@@ -228,14 +241,76 @@ test("a contact sheet stays within its byte budget", async (t) => {
     return;
   }
   const sheet = await contactSheet(
-    Array.from({ length: 24 }, (_, i) => navySlide(`Slide ${i + 1}`)),
+    numbered(
+      ...Array.from({ length: 24 }, (_, i) => navySlide(`Slide ${i + 1}`)),
+    ),
   );
   assert.ok(Buffer.from(sheet.data, "base64").length <= 600 * 1024);
 });
 
-test("a contact sheet needs slides, and slides that are SVG", async () => {
+test("a contact sheet writes each cell's own label over it", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  // Slide 3 has no page: the third cell is slide 4, and says so.
+  const slides = numbered(navySlide("A"), navySlide("B"), navySlide("D"));
+  const missing = await contactSheet([
+    ...slides.slice(0, 2),
+    { label: "4", svg: slides[2].svg },
+  ]);
+  const positional = await contactSheet(slides);
+  // Inside the third cell, away from the JPEG blocks it shares with its
+  // label strip.
+  const [x, y, w, h] = cellAt(0, 1);
+  const inside = [x + 16, y + 16, w - 32, h - 32];
+  for (const cell of [labelAt(0, 0), labelAt(1, 0), inside])
+    assert.ok(
+      (await region(missing, cell)).equals(await region(positional, cell)),
+    );
+  assert.ok(
+    !(await region(missing, labelAt(0, 1))).equals(
+      await region(positional, labelAt(0, 1)),
+    ),
+    "the third label reads 4, not 3",
+  );
+});
+
+test("a slide that cannot be drawn keeps its cell, as a placeholder", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const sheet = await contactSheet([
+    { label: "1", svg: navySlide("ok") },
+    { label: "2", svg: Buffer.from("no svg") },
+    { label: "3", svg: null },
+  ]);
+  const image = await decoded(sheet);
+  assert.equal(image.height, 24 + 2 * (32 + 430 + 24));
+  const [r, g, b] = await pixelAt(sheet, cellAt(0, 0)[0] + 10, 56 + 420);
+  assert.ok(r < 80 && b > 60 && b < 140, `navy ${r},${g},${b}`);
+  // The placeholder is neither a slide nor the sheet's background.
+  for (const [x, y] of [cellAt(1, 0), cellAt(0, 1)]) {
+    const [r, g, b] = await pixelAt(sheet, x + 10, y + 10);
+    assert.ok(
+      Math.abs(r - 148) < 12 &&
+        Math.abs(g - 163) < 12 &&
+        Math.abs(b - 184) < 12,
+      `placeholder ${r},${g},${b}`,
+    );
+  }
+});
+
+test("a contact sheet needs a slide it can draw", async () => {
   await assert.rejects(contactSheet([]), /at least one/);
-  await assert.rejects(contactSheet([navySlide("ok"), Buffer.from("no svg")]));
+  await assert.rejects(
+    contactSheet([
+      { label: "1", svg: Buffer.from("no svg") },
+      { label: "2", svg: null },
+    ]),
+    /No slide could be drawn/,
+  );
 });
 
 test("bytes that are no image are refused, for the caller to skip", async () => {
