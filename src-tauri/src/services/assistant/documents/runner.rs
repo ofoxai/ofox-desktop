@@ -300,8 +300,9 @@ mod tests {
     }
 
     /// A deadline that kills the engine kills what it started too, and keeps
-    /// what it had printed. The deadline is long enough for a busy machine to
-    /// start the script.
+    /// what it had printed. macOS checks a new executable the first time it
+    /// runs, which can take seconds while a test run writes many of them, so
+    /// the script runs once before its deadline starts.
     #[cfg(unix)]
     #[tokio::test]
     async fn run_engine_kills_what_the_engine_started_and_keeps_its_output() {
@@ -309,8 +310,13 @@ mod tests {
         let pids = root.path().join("pids.txt");
         let exe = engine(
             root.path(),
-            r#"echo partial; echo $$ > "$1"; sleep 30 & echo $! >> "$1"; wait"#,
+            r#"[ "$1" = warm ] && exit 0; echo partial; echo $$ > "$1"; sleep 30 & echo $! >> "$1"; wait"#,
         );
+        assert!(std::process::Command::new(&exe)
+            .arg("warm")
+            .status()
+            .unwrap()
+            .success());
         let output = run_engine(
             &exe,
             &[pids.to_str().unwrap()],
