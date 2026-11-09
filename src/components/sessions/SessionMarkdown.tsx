@@ -8,6 +8,8 @@ import {
 } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly";
+import remarkCjkFriendlyStrikethrough from "remark-cjk-friendly-gfm-strikethrough";
 import { useTranslation } from "react-i18next";
 import { settingsApi } from "@/lib/api/settings";
 import { CodeBlock, codePreview } from "./CodeBlock";
@@ -223,7 +225,15 @@ export function SessionMarkdown({
     [mathPlugins, content],
   );
   const remarkPlugins = useMemo(
-    () => [remarkGfm, ...(mathPlugins?.remark ?? []), splitBareUrlTail],
+    () => [
+      remarkGfm,
+      // CommonMark will not close `**说明：**正文` (punctuation, then a
+      // letter): these let bold and strikethrough end beside Chinese text.
+      remarkCjkFriendly,
+      remarkCjkFriendlyStrikethrough,
+      ...(mathPlugins?.remark ?? []),
+      splitBareUrlTail,
+    ],
     [mathPlugins],
   );
   const plugins = useMemo(
