@@ -221,3 +221,35 @@
 - [ ] **Step 3: 运行** `node scripts/assistant-real-eval.mjs --self-test && pnpm assistant:test && pnpm assistant:smoke` → PASS。
 - [ ] **Step 4: 提交** `git commit -m "docs(assistant): document the Python deck route and its eval"`
 - [ ] **Step 5: 用户验收**：用户用钥匙串里的 key 跑 `pnpm assistant:real-eval`，并在真机上做“讲解 Transformer”，与对照样例并排看。
+
+## 附录：执行中的裁定（2026-11-09）
+
+执行时遇到计划没写明或互相冲突的地方，按“设计稿优先”当场裁定。每条写明代价（裁错了会怎样）。
+
+| # | 裁定 | 裁错的代价 |
+|---|---|---|
+| R1/R19 | 隔离靠独立进程与系统沙箱；不做 runner 内收窄 Pyodide 全局（验证无效），设计稿已改 | 少一层（无效的）防护 |
+| R2 | pptxgenjs 只作根目录 devDependency，供模板生成脚本用 | 依赖以后挪位置 |
+| R3 | 同一宿主用一把异步锁串行跑 Python，不写并发测试 | 罕见情况下两个 600 MB 进程同时存在 |
+| R4 | 锁定 jsDelivr 官方地址；`OFOX_PYODIDE_BASE_URL` 可换镜像，SHA 照验 | 多一个环境变量 |
+| R5 | runner 测试只在 macOS 跑，其他平台跳过并写明原因 | 无 |
+| R6/R22 | 页码在页码占位符里写成静态文字（officecli 预览画不出页码字段） | 用户在 PowerPoint 里调换顺序后页码不更新 |
+| R7/R8 | 每次运行的参数里也带 `python`；Python 可用还要求 officecli 可用 | macOS 上两者同发，暂无 |
+| R9/R10/R12 | 收紧 Python 沙箱配置并用真实 runner 验证；Python 与 officecli 各用自己的目录，只复制普通文件给 officecli；officecli 没有沙箱时拒绝 Python | 无（失败即关闭） |
+| R11 | Task 5 先接受 `preview` 参数但拒绝，Task 6 再实现 | 无 |
+| R13/R20 | Python 在任一探测失败前都提供；Python 探测失败后本次会话不再提供 | 一次偶发失败让 Python 到重启前都不可用 |
+| R14 | 用户停止的回复不自动交付预览；出错但未停止的回复照样交付 | 停在中途的用户需要再问一次 |
+| R15 | 失败的预览不计入每文件 2 次；`fromPreview` 用本次调用的文件名、拒绝换格式；自动交付也受每回复 3 份限制 | 限额语义的小差异 |
+| R16 | 每回复最多 6 次预览，在任何引擎运行前拒绝 | 无 |
+| R17 | 深色封面/章节背景画成整页矩形（officecli 预览忽略版式背景），并提供 `background()` | 整页矩形在 PowerPoint 里可被选中 |
+| R18 | e2e 若无法回显 previewId，用自动交付与改代码交付两条路证明 | `fromPreview` 只有单元测试覆盖（实际已做到回显） |
+| R21/R24 | runner 在用户代码运行前失败退出码 2 = 引擎坏了，本次会话关闭 Python；代码自己的错误（含 `os._exit`）退出码 1，不关闭；已排队的调用会再失败一次 | 用户代码开始后才出现的加载失败不被识别 |
+| R23 | 同格式的后续交付覆盖之前未交付的预览（哪怕是另一份 deck） | 预览过却没交付的第二份 deck 不会被自动交付 |
+| R25 | runner 顶层静态导入失败时仍是退出码 1（属安装损坏，冒烟测试覆盖） | 损坏的安装上每次 Python 调用都失败一次 |
+| R26 | 模型代码可故意退出码 2 关掉本次会话的 Python，接受（失败即关闭） | 模型能让自己的 Python 路线到重启前不可用 |
+
+## 附录：发布前与后续
+
+- 发布前：`notices/python.txt` 补齐 Pyodide 内置 C 库的许可证段；在 macOS 12–15 上确认中文字体正常；用公证过的安装包跑一遍 Python 路线。
+- 用户验收：`pnpm assistant:real-eval`；真机“讲解 Transformer”与对照样例并排看。
+- 留到后续切片的小问题：pptx 调用次数规则没有上限；`Reply::Answer` 嵌套时测试桩会 `unreachable!`；技能文件接近 26 000 字上限；图内 suptitle/图例文字未检查字号；officecli / Typst 的沙箱比 Python 的宽松（P1-4）。
