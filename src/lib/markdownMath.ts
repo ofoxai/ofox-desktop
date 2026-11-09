@@ -91,12 +91,27 @@ function closing(text: string, from: number, closer: string): number {
   return -1;
 }
 
+// Chinese, Japanese or Korean text, and full-width punctuation.
+const CJK =
+  /[\u3000-\u303f\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uff00-\uffef]/;
+// The commands a formula writes words in.
+const TEXT_COMMANDS =
+  /\\(?:text|textrm|textbf|textit|mbox|mathrm|operatorname)\s*\{[^{}]*\}/g;
+
+/**
+ * Words outside `\text{…}` and its kin: a formula holds none, so what lies
+ * between two dollars that has some, as between two prices in a Chinese
+ * sentence ("$0.412/M。…补偿$待核"), is text.
+ */
+const proseInFormula = (formula: string) =>
+  CJK.test(formula.replace(TEXT_COMMANDS, ""));
+
 /**
  * The `$` that closes the formula a lone `$` at `from` opens, or -1, as Pandoc
  * reads one: a non-space right after the opener, a non-space right before the
  * closer and no digit right after it; the first `$` that follows decides. So
- * `$5 and $10` and `$0.014–$0.028` stay money. It never crosses a paragraph
- * break, code or `$$`.
+ * `$5 and $10` and `$0.014–$0.028` stay money, and so does a span with Chinese
+ * words outside `\text`. It never crosses a paragraph break, code or `$$`.
  */
 function dollarClose(text: string, from: number): number {
   const first = text[from + 1];
@@ -111,7 +126,10 @@ function dollarClose(text: string, from: number): number {
       return -1;
     } else if (char === "$") {
       const after = text[index + 1] ?? "";
-      return after !== "$" && !/\s/.test(text[index - 1]) && !/\d/.test(after)
+      return after !== "$" &&
+        !/\s/.test(text[index - 1]) &&
+        !/\d/.test(after) &&
+        !proseInFormula(text.slice(from + 1, index))
         ? index
         : -1;
     } else {

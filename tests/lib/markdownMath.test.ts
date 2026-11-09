@@ -165,6 +165,20 @@ describe("rewriteMathDelimiters", () => {
   });
 });
 
+describe("rewriteMathDelimiters: money beside Chinese text", () => {
+  it("leaves two prices with Chinese words between them as text", () => {
+    const text = "token × $0.412/M。里的「补偿$待核」要等这个数";
+    expect(rewriteMathDelimiters(text)).toBe(text);
+    expect(hasMathMarkers(text)).toBe(false);
+  });
+
+  it("still reads a formula whose Chinese words sit in \\text", () => {
+    expect(rewriteMathDelimiters("$\\text{面积}=\\pi r^2$")).toBe(
+      "$$\\text{面积}=\\pi r^2$$",
+    );
+  });
+});
+
 describe("rewriteMathDelimiters: $$ blocks", () => {
   it("puts the fences of a formula that shares their lines on lines of their own", () => {
     expect(rewriteMathDelimiters("由\n\n$$a<b\n\\Rightarrow\nc$$\n\n后")).toBe(
