@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="410" viewBox="0 0 1200 410" role="img" aria-labelledby="title desc">
+<title id="title">How bound-tool configuration and requests flow</title><desc id="desc">Desktop manages native tool configuration. The tool sends requests directly to the configured service. Login credentials use system storage, while dedicated tool API keys are written into the tool&#x27;s native configuration. This is not a no-cloud or zero-data-sharing claim.</desc>
+<defs>
+ <linearGradient id="canvas" x2="1" y2="1"><stop stop-color="#12141d"/><stop offset="1" stop-color="#0a0b10"/></linearGradient>
+ <linearGradient id="accent"><stop stop-color="#ffb26b"/><stop offset="1" stop-color="#ff713d"/></linearGradient>
+ <radialGradient id="glow"><stop stop-color="#ff793c" stop-opacity=".2"/><stop offset="1" stop-color="#ff793c" stop-opacity="0"/></radialGradient>
+ <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse"><path d="M40 0H0V40" fill="none" stroke="#fff" stroke-opacity=".025"/></pattern>
+</defs>
+<style>
+ text{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;fill:#eef0f6}
+ .muted{fill:#a0a6b6} .label{font-size:15px;font-weight:600;letter-spacing:2px;fill:#ffad76}
+ .packet{stroke-dasharray:10 190;animation:travel 9s linear infinite}
+ .breathe{animation:breathe 6s ease-in-out infinite}
+ @keyframes travel{to{stroke-dashoffset:-800}}
+ @keyframes breathe{0%,100%{opacity:.45}50%{opacity:.95}}
+ @media(prefers-reduced-motion:reduce){.packet,.breathe{animation:none}}
+</style>
+<rect width="1200" height="410" rx="26" fill="url(#canvas)"/>
+<rect width="1200" height="410" rx="26" fill="url(#grid)"/>
+<rect x=".5" y=".5" width="1199" height="409" rx="25.5" fill="none" stroke="#2b2d39"/>
+
+<text x="58" y="57" class="label">CONFIGURATION YOU CAN UNDERSTAND</text>
+<text x="58" y="93" class="muted" font-size="17">Bound tools send model requests directly to their configured service.</text>
+<rect x="58" y="145" width="266" height="145" rx="18" fill="#1b1d27" stroke="#47414b"/>
+<text x="84" y="185" font-size="24" font-weight="600">Ofox Desktop</text>
+<text x="84" y="222" class="muted" font-size="16">Manages native configuration</text>
+<text x="84" y="251" class="muted" font-size="16">Checks changes &amp; conflicts</text>
+<path d="M326 217H444" fill="none" stroke="#8b8fa0" stroke-width="2" stroke-dasharray="4 7"/>
+<path d="m435 211 9 6-9 6" fill="none" stroke="#8b8fa0" stroke-width="2"/>
+<text x="384" y="194" class="muted" font-size="13" text-anchor="middle">configure</text>
+<rect x="462" y="145" width="270" height="145" rx="18" fill="#211c1a" stroke="#715040"/>
+<text x="488" y="185" font-size="24" font-weight="600">Your AI tool</text>
+<text x="488" y="222" class="muted" font-size="16">Its native configuration file</text>
+<text x="488" y="251" class="muted" font-size="16">Its dedicated API key</text>
+<path d="M734 217H875" fill="none" stroke="#694b3a" stroke-width="2"/>
+<path d="M734 217H875" fill="none" stroke="#ffad76" stroke-width="2" class="packet"/>
+<path d="m866 211 9 6-9 6" fill="none" stroke="#ffad76" stroke-width="2"/>
+<text x="804" y="194" class="muted" font-size="13" text-anchor="middle">model requests</text>
+<rect x="892" y="145" width="250" height="145" rx="18" fill="#1b1d27" stroke="#47414b"/>
+<text x="918" y="185" font-size="24" font-weight="600">Configured service</text>
+<text x="918" y="222" class="muted" font-size="16">Ofox or another provider</text>
+<text x="918" y="251" class="muted" font-size="16">Selected endpoint &amp; model</text>
+<text x="58" y="341" font-size="15" class="muted">Ofox login credentials use system credential storage. Tool API keys are also written to native tool configuration.</text>
+<text x="58" y="373" font-size="15" class="muted">This diagram describes bound external tools. The built-in assistant has its own model and tool requests.</text>
+
+</svg>

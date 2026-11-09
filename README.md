@@ -1,177 +1,293 @@
 <div align="center">
-
-<img src="src-tauri/icons/128x128@2x.png" alt="Ofox Desktop" width="96" height="96">
+<img src="src-tauri/icons/128x128@2x.png" alt="Ofox Desktop logo" width="72" height="72">
 
 # Ofox Desktop
 
-### 一个入口管理 AI 工具、会话、用量与资源
+### Connect in one click. Manage and create in one place.
 
-连接 Ofox 账号，管理本机 AI 工具的安装、接入和模型设置；
-查看会话与用量，将 MCP、Skills 和指令分发到支持的应用。
+One desktop app for your AI tools, sessions, resources, assistant, and usage.
 
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](https://github.com/ofoxai/ofox-desktop/releases/latest)
-[![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)
 
-[官网下载](https://ofox.ai/desktop) · [GitHub Releases](https://github.com/ofoxai/ofox-desktop/releases/latest) · [官网](https://ofox.ai)
+[![Version: v1.5.0](https://img.shields.io/badge/version-v1.5.0-f97316?style=flat-square)](#compatibility)
+[![Tools: 10](https://img.shields.io/badge/tools-10-18181b?style=flat-square)](#compatibility)
+[![Platform: macOS | Windows](https://img.shields.io/badge/macOS_%7C_Windows-18181b?style=flat-square)](#download)
+[![License: MIT](https://img.shields.io/badge/license-MIT-18181b?style=flat-square)](LICENSE)
 
+<h3><a href="https://ofox.ai/">Website</a> · <a href="https://ofox.ai/desktop">Download</a> · <a href="https://github.com/ofoxai/ofox-desktop/releases/latest">GitHub Releases</a></h3>
+
+[One-click setup](#quick-start) · [Workspace tour](#tour) · [Features](#features) · [Compatibility](#compatibility) · [FAQ](#faq)
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/hero-light.svg">
+<img src="assets/readme/hero.svg" alt="Ofox Desktop — one workspace for your AI tools">
+</picture>
 </div>
 
----
+_Light and dark previews follow your display preference._
 
-## 主要入口
+<a id="quick-start"></a>
 
-| 页面       | 可以做什么                                                     |
-| ---------- | -------------------------------------------------------------- |
-| **工具**   | 检测本机安装、安装或更新工具、绑定 Ofox、管理模型与接入状态    |
-| **会话**   | 按项目查看本地会话，搜索、导出、续聊，使用可恢复的回收站       |
-| **用量**   | 查看账户余额、本地请求和会话统计，按工具、项目、模型与日期筛选 |
-| **资源库** | 管理指令、MCP 和 Skills，发现原生配置，预览并分发到多个应用    |
-| **助手**   | 与 Ofox 模型对话，可产出 PDF、Word、PPT、Excel 文件并保存打开  |
+## New to AI tools? Start with one-click setup.
 
-不同工具、版本和操作系统支持的操作有所不同，应用会显示当前可用动作和不可用原因。
+1. **Sign in to Ofox.** One account connects the supported tools you choose.
+2. **Choose your tools.** Ofox detects installed clients. Keep the ones you want; install missing tools first using an available installer or their official download page.
+3. **Click “Connect” once.** Ofox manages a dedicated API key for each selected tool and writes its native access configuration. Check the result for each tool; conflicts and failures are shown separately.
 
-## 工具与模型
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/binding-flow-light.svg">
+<img src="assets/readme/binding-flow.svg" alt="Sign in, select detected tools, and start Ofox binding with one click">
+</picture>
 
-支持 Claude Code、Codex、ChatGPT 桌面版、Gemini CLI、OpenCode、OpenClaw、
-Hermes、WorkBuddy、DeepSeek Harness（dsh）和 Pi。
+### Watch one-click setup
 
-- **检测与安装管理**：区分已安装、未安装和检测异常，按实际安装来源提供更新、修复或手动处理入口。支持自动更新的工具可以逐个或批量更新；ChatGPT 等桌面客户端按其原生更新方式处理。
-- **Ofox 接入**：登录后为绑定工具管理专属 API Key，并按各工具的原生格式配置接入。退出登录、切换账号、卸载工具和解除绑定是不同操作，详见[绑定生命周期](docs/tool-lifecycle.md)。
-- **模型状态**：区分写入配置的默认模型与工具实际观察到的模型。支持保存和预览多工具模型方案；已有会话、启动参数及工具自己的模型选择仍可能影响实际使用的模型。
-- **共享配置**：Codex 与 ChatGPT 的 Codex 模式共用配置目标。ChatGPT 内已有会话的模型由客户端决定；dsh 新会话默认模型与已有会话也分别处理。
-- **恢复与解绑**：配置缺失时提供显式恢复；解绑先预览，再按 Ofox 管理的字段与当前文件状态恢复。能够识别的用户改动、共享配置持有者和其他资源会参与检查，冲突会说明原因。
-- **区域选择**：支持自动探测和手动选择 `ofox.ai` / `ofox.io`。启动和区域切换时协调 Ofox 管理的地址，用户自定义地址出现冲突时保留并提示。
+Continue setting up your tools: [<kbd> Configure MCP ↗ </kbd>](docs/resource-setup.md#en-mcp) · [<kbd> Configure Skills ↗ </kbd>](docs/resource-setup.md#en-skills)
 
-工具安装与绑定状态分别记录。卸载工具不会自动解除绑定，重新安装和恢复接入也分别提供操作。
-实际配置目录支持应用设置和部分原生环境变量覆盖，见[各工具配置与数据来源](docs/agent-wiring.md)和[更新方式](docs/tool-updates.md)。
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/onboarding-light.gif">
+<img src="assets/readme/onboarding.gif" alt="One-click setup demonstration using fictional data">
+</picture>
 
-## 资源库
+**Watch the video:** [Dark](assets/readme/onboarding.mp4) · [Light](assets/readme/onboarding-light.mp4)
 
-### MCP
+_One-click binding starts after sign-in and tool selection. Supported, installed clients receive configuration; this does not install every tool or change every existing session. The demos use fictional data, not live account requests._
 
-以应用矩阵查看服务器的分发状态，支持表单、命令和 JSON 配置输入、原生配置发现、
-导入比较、批量分发与撤回。修改会先预览并核对当前配置；同名冲突、来源变化和部分失败分别展示。
+Prefer local management? You can enter supported local features without binding. Connected external tools send model requests directly to their configured service and can keep using saved configuration after Ofox Desktop closes. See the [binding lifecycle](docs/tool-lifecycle.md).
 
-目标包括 Claude Code、Codex / ChatGPT、Gemini CLI、OpenCode、OpenClaw、Hermes、
-WorkBuddy、dsh 和 Pi。Codex / ChatGPT 共用一个物理配置目标；各客户端的传输协议、
-版本要求及配置范围由适配器检查。
+<a id="tour"></a>
 
-收录到资源库、写入应用配置与连接成功分别显示。MCP 连接检查需要显式执行，
-客户端的信任和 OAuth 授权仍在对应客户端完成。
+## Your AI workspace, at a glance
 
-### Skills
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/tools-en-light.webp">
+<img src="assets/readme/tools-en.webp" alt="Ofox Desktop tools overview">
+</picture>
 
-- 从 GitHub 仓库、skills.sh、ZIP、本地目录或应用中发现并收录 Skills。
-- 在已收录技能与在线发现之间切换，按名称、描述、仓库和来源路径搜索。
-- 选择多个应用分发，查看共享目录、已应用、待处理及内容不同的副本。
-- 同名不同内容先比较；选择替换时保留备份，也可以保留应用自己的版本。
-- 显式检查更新，处理备份、恢复和部分失败重试；本地修改不会因一次更新检查被自动覆盖。
+Manage installed tools, inspect their connection state, and preview model profiles across tools. Installation and Ofox binding are tracked separately; missing configuration can be restored explicitly, and unbinding starts with a change preview.
 
-### 指令与资源包
+**Advanced workspace video:** [Dark](assets/readme/tour.mp4) · [Light](assets/readme/tour-light.mp4)
 
-管理可编辑指令及模板，预览应用后的文件变化。支持选中资源的批量应用、撤回与资源包导入导出，
-并提供本机批次历史和恢复检查。恢复会重新核对当前状态，过期计划不能直接重放。
+_Screenshots and the tour use fictional demo data and real application components. Assistant content is illustrative; it is not a model benchmark or proof of a live request._
 
-完整的目标范围、配置格式与边界见[资源库说明](docs/library-workbench.md)。
+<a id="features"></a>
 
-## 会话与用量
+## Five places. One workflow.
 
-**会话**提供项目与会话列表、Markdown 导出、续聊入口及可恢复的回收站。
-操作能力取决于对应工具的本地记录；缺失、只支持元数据或无法确认的状态会明确显示。
+### Tools — spend less time setting up
 
-**用量**将账户信息与本地记录分别呈现，提供概览、请求明细与会话分析。
-请求面板包含汇总、分组图表、排名、日期选择、请求表格和 CSV 导出，支持按工具、
-项目、模型等维度筛选。请求面板的 Token 合计包含输入、输出、缓存读取和缓存写入；
-其他视图保留各自标明的统计口径。
+Discover installed tools, install supported clients, manage Ofox access, and keep model choices together. Updates follow the detected installation source; unsupported operations show a reason or an official manual route. Ofox-managed endpoints follow your selected `ofox.ai` / `ofox.io` region, with conflicts surfaced for user-edited addresses.
 
-本地统计依赖原生记录的覆盖范围。缺失证据、未知价格和部分覆盖分别标注；
-价格估算与服务端账单分别展示。详细口径见[用量契约](docs/usage-analytics-contract.md)和[请求面板说明](docs/usage-requests-alignment.md)。
+### Assistant — turn questions into your next step
 
-## 配置与凭据
+Talk to available models, attach files, use web search, and keep local conversation history. Branch or export conversations, and use voice input or read-aloud.
 
-- 模型请求由工具直接发送到其配置的服务端，Ofox Desktop 负责配置、管理与本地统计，不代理这些请求。
-- Ofox 保存的登录令牌和工具密钥使用系统凭据存储，开发版与正式版隔离。向工具提供的 API Key 仍需按其原生格式写入本机配置文件。
-- 配置改动使用文件事务与冲突检查，保留不属于本次操作的字段；跨文件操作可能部分完成，结果会逐项显示。
-- 环境变量冲突会给出来源和处理入口。WebDAV 同步、数据库备份与恢复可在设置中管理。
+- **Generate images** — turn a prompt into visual assets in the same conversation.
+- **Generate videos** — create clips without leaving your workspace.
+- **Generate speech** — turn text into spoken audio for narration and voiceovers.
 
-具体行为与已知边界见[工具接线](docs/agent-wiring.md)和[已知限制](docs/known-limitations.md)。
+Image, video, and speech generation require a supporting model and account. Formats, permissions, pricing, and availability vary by operation.
 
-## 安装与更新
-
-从[官网下载页](https://ofox.ai/desktop)或 [GitHub Releases](https://github.com/ofoxai/ofox-desktop/releases/latest) 取得正式安装包。
-
-| 平台                     | 安装包 | 说明                                                                        |
-| ------------------------ | ------ | --------------------------------------------------------------------------- |
-| macOS 12+，Apple Silicon | `.dmg` | 正式发布包含代码签名与 Apple 公证                                           |
-| Windows 10/11，x64       | `.exe` | NSIS 安装包；暂未代码签名，SmartScreen 提示时可在“更多信息”中选择“仍要运行” |
-
-应用顶栏会提示新版本，也可从设置检查更新。各 AI 客户端仍有自己的系统与版本要求。
-GitHub Release 附带 `SHA256SUMS.txt`，可用于核对安装包；线上更新清单为：
-
-```bash
-curl -fsSL https://desktop.ofox.ai/latest.json
-```
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/assistant-media-light.svg">
+<img src="assets/readme/assistant-media.svg" alt="Ofox assistant workflows for generating images, videos, and speech">
+</picture>
 
 <details>
-<summary>从早期版本升级后的 macOS 钥匙串授权</summary>
+<summary>See image, video, and speech generation controls</summary>
 
-从旧签名版本升级时，macOS 可能要求新版 Ofox Desktop 重新获得已有钥匙串条目的读取权限。
-这类提示涉及已保存的登录凭据和工具密钥，可能出现多次。
+These sample screens show model and parameter selection; no generation request was sent.
 
-确认是当前 Ofox Desktop 的升级提示后，按系统要求输入密码并选择“始终允许”。
-若之前拒绝了授权，可退出应用后重新打开再处理。后续是否再次提示取决于签名和系统授权状态。
+**Image generation** — Choose a model, size, quality, and image count.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/assistant-image-light.webp">
+<img src="assets/readme/assistant-image.webp" alt="Image generation" width="1440">
+</picture>
+
+**Video generation** — Set the duration, resolution, aspect ratio, and audio options.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/assistant-video-light.webp">
+<img src="assets/readme/assistant-video.webp" alt="Video generation" width="1440">
+</picture>
+
+**Speech generation** — Choose a voice and output format for your text.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/assistant-speech-light.webp">
+<img src="assets/readme/assistant-speech.webp" alt="Speech generation" width="1440">
+</picture>
 
 </details>
 
-## 开发
+**A fallback when setup goes wrong.** One click on “Not working? Ask the assistant” opens a prepared diagnosis request for that tool. After you send it, the assistant can troubleshoot configuration, environment, and Ofox bindings, make changes under your selected permissions, and verify the result. Unresolved problems remain explicit.
 
-需要 Node.js 20.19+（20.x）或 22.12+、pnpm 10 和 Rust stable。
-CI 使用 Node.js 20 与 pnpm 10.12.3。Windows 还需要 Microsoft C++ 生成工具和 WebView2；
-平台依赖见 [Tauri 前置要求](https://tauri.app/start/prerequisites/)。
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/configuration-rescue-light.svg">
+<img src="assets/readme/configuration-rescue.svg" alt="Assistant-guided configuration recovery: diagnose, approve changes, and verify">
+</picture>
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/assistant-light.webp">
+<img src="assets/readme/assistant.webp" alt="Ofox assistant with a fictional example conversation">
+</picture>
+
+### Sessions — pick up where you left off
+
+Browse projects and local conversations across supported tools. Search, read, export, resume, or use the recoverable trash where the source supports that operation.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/sessions-light.webp">
+<img src="assets/readme/sessions.webp" alt="Sessions — pick up where you left off" width="1440">
+</picture>
+
+Open full-size image: [Light](assets/readme/sessions-light.webp) · [Dark](assets/readme/sessions.webp)
+
+### Library — configure once, choose the targets
+
+Keep instructions, MCP servers, and Skills together. Discover native configuration, compare changes, and preview resource distribution before writing to selected applications.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/library-light.webp">
+<img src="assets/readme/library.webp" alt="Library — configure once, choose the targets" width="1440">
+</picture>
+
+Open full-size image: [Light](assets/readme/library-light.webp) · [Dark](assets/readme/library.webp)
+
+### Discover — find your next capability
+
+Browse curated MCP resources and Skills. Choosing a resource prepares a draft; collection, application, and a successful connection are separate states.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/discover-light.webp">
+<img src="assets/readme/discover.webp" alt="Discover — find your next capability" width="1440">
+</picture>
+
+Open full-size image: [Light](assets/readme/discover-light.webp) · [Dark](assets/readme/discover.webp)
+
+### Usage — understand your activity
+
+Explore local records by tool, project, model, and date. Inspect request details and export CSV. Coverage and unknown prices remain visible; estimates are separate from account billing.
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/usage-light.webp">
+<img src="assets/readme/usage.webp" alt="Usage — understand your activity" width="1440">
+</picture>
+
+Open full-size image: [Light](assets/readme/usage-light.webp) · [Dark](assets/readme/usage.webp)
+
+<a id="compatibility"></a>
+
+## Built around the tools you use
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/tool-wall-light.svg">
+<img src="assets/readme/tool-wall.svg" alt="Supported AI tool logos">
+</picture>
+
+Ten supported tools, one setup flow. The matrix below lists the actions available to each tool.
+
+| Tool                   | One-click access | Install / update                  | Sessions               | Usage     | MCP & Skills |
+| ---------------------- | ---------------- | --------------------------------- | ---------------------- | --------- | ------------ |
+| Claude Code            | ✓                | ✓                                 | Read · export · resume | ✓         | ✓            |
+| Codex                  | ✓                | ✓                                 | Read · export · resume | ✓         | ✓            |
+| ChatGPT (Codex mode)   | ✓                | Install / native update           | Via Codex              | Via Codex | ✓            |
+| OpenCode               | ✓                | ✓                                 | Read · export · resume | ✓         | ✓            |
+| OpenClaw               | ✓                | ✓                                 | Read · export          | ✓         | ✓            |
+| Hermes                 | ✓                | ✓                                 | Read · export          | ✓         | ✓            |
+| Gemini CLI             | ✓                | ✓                                 | Read · export · resume | ✓         | ✓            |
+| WorkBuddy              | ✓                | Official download / in-app update | Read · export          | ✓         | ✓            |
+| DeepSeek Harness (dsh) | ✓                | ✓                                 | Session list           | ✓         | ✓            |
+| Pi                     | ✓                | ✓                                 | Read · export · resume | ✓         | ✓            |
+
+**✓ Supported in 1.5.0.** Session cells list the available actions directly.
+
+- **Install and update:** automatic installation supports Apple Silicon Macs and Windows. CLI updates follow the detected installation method; unrecognized sources show manual guidance. ChatGPT updates through its app on macOS and winget / Microsoft Store on Windows; WorkBuddy uses its official download and in-app updater.
+- **ChatGPT and dsh:** ChatGPT's Codex mode shares Codex configuration and local sessions/usage; ordinary ChatGPT cloud chats are outside this integration. dsh requires 0.2+ and a profile initialized by running `dsh web` once; its session list shows metadata, without transcript reading, export, or resume.
+- **Resources:** MCP and Skills cover all ten tools. Instructions additionally support Claude Code, Codex, Gemini CLI, OpenCode, and Hermes. Each tool retains its native format and protocol rules; Codex / ChatGPT share a physical target.
+- **Usage:** local records provide usage analysis; Ofox account billing is a separate view. Coverage and price availability vary by source, so local estimates are not a complete provider bill.
+
+Integration details: [configuration and data sources](docs/agent-wiring.md) · [tool updates](docs/tool-updates.md) · [resource support](docs/library-workbench.md) · [known limitations](docs/known-limitations.md).
+
+<a id="download"></a>
+
+## Download
+
+| Platform    | Package                                    | Requirements                                                     |
+| ----------- | ------------------------------------------ | ---------------------------------------------------------------- |
+| **macOS**   | [Download `.dmg`](https://ofox.ai/desktop) | Apple Silicon, macOS 12+; signed and notarized official releases |
+| **Windows** | [Download `.exe`](https://ofox.ai/desktop) | x64, Windows 10/11; NSIS installer, currently unsigned           |
+
+[GitHub Releases](https://github.com/ofoxai/ofox-desktop/releases/latest) includes installers and `SHA256SUMS.txt`. Windows SmartScreen may show an unsigned-app warning; verify the source before using “More info → Run anyway.” Individual AI clients have their own system requirements.
+
+Check for updates in Ofox settings or follow the in-app update notice.
+
+<a id="faq"></a>
+
+## Your data and configuration
+
+<picture>
+<source media="(prefers-color-scheme: light)" srcset="assets/readme/data-flow-light.svg">
+<img src="assets/readme/data-flow.svg" alt="Data flow between Ofox Desktop, local tools, and selected services">
+</picture>
+
+<details>
+<summary><strong>Where do requests go?</strong></summary>
+
+External AI tools send model requests directly to their configured service; Ofox Desktop manages their configuration and local statistics. Those tools can keep using saved configuration after Ofox Desktop closes. The built-in assistant sends its own requests to the selected service; optional search and MCP operations involve their respective services.
+
+</details>
+
+<details>
+<summary><strong>How are credentials and configuration handled?</strong></summary>
+
+Official releases keep saved login tokens and tool-key copies in the system credential store. Development storage is separate. Connecting a tool still writes its dedicated API key to the local configuration format that tool requires. Configuration changes check for conflicts and preserve unrelated fields; a multi-file operation can partially complete and reports individual results. Review [agent wiring](docs/agent-wiring.md) for the boundaries.
+
+</details>
+
+<details>
+<summary><strong>Why can usage differ from my bill?</strong></summary>
+
+Local records can omit events or prices, and tools record tokens differently. Account billing, saved amounts, and current price estimates are distinct. Coverage and unknown values are shown explicitly. See the [usage contract](docs/usage-analytics-contract.md) and [request panel](docs/usage-requests-alignment.md).
+
+</details>
+
+<details>
+<summary><strong>Upgrading from an older macOS release?</strong></summary>
+
+A signing-certificate change can make macOS ask again for access to existing Keychain entries. After verifying that the prompt belongs to the Ofox Desktop update, follow the system prompt and choose “Always Allow.” Reopen Ofox if you previously denied access; later prompts depend on system authorization and signing state.
+
+</details>
+
+Found an issue or have an idea? [Open an issue](https://github.com/ofoxai/ofox-desktop/issues) or [contribute a pull request](https://github.com/ofoxai/ofox-desktop/pulls). Please remove credentials and personal content from reports and attachments.
+
+Feedback email: [**hi@ofox.ai**](mailto:hi@ofox.ai).
+
+<a id="development"></a>
+
+## Build with us
+
+<details>
+<summary>Build from source and contribute</summary>
+
+Tauri 2 · React 18 · TypeScript · Rust. Requires Node.js 20.19+ (20.x) or 22.12+, pnpm 10, and Rust stable. Native platform dependencies: [Tauri prerequisites](https://tauri.app/start/prerequisites/).
 
 ```bash
 pnpm install --frozen-lockfile
-pnpm dev                  # 启动完整 Tauri 开发应用
-pnpm dev:renderer         # 仅启动 renderer，端口 3011
-pnpm build:renderer       # 构建网页资源
-pnpm build                # 构建桌面应用
+pnpm dev                 # Full Tauri application
+pnpm dev:renderer        # Renderer only, port 3011
+pnpm build:renderer      # Build web assets
+pnpm build               # Build desktop application
 ```
 
-检查命令：
+Follow [AGENTS.md](AGENTS.md) and the [development standards](docs/code-standards.md) for checks and sandbox rules. Release procedures: [release gate](docs/code-standards.md#release-gate), [release workflow](.github/workflows/release.yml), and [branch packages](docs/branch-packages.md). Windows behavior needs native Windows verification.
 
-```bash
-pnpm typecheck
-pnpm format:check
-pnpm test:unit
-cargo fmt --check --manifest-path src-tauri/Cargo.toml
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-cargo test --manifest-path src-tauri/Cargo.toml
-```
+</details>
 
-测试配置、凭据与会话写入使用临时沙箱。平台专属行为需要在原生系统验证，
-macOS 结果不能代替 Windows；开发约定见 [AGENTS.md](AGENTS.md)和[代码标准](docs/code-standards.md)。
+<a id="license"></a>
 
-### 发版
+## License and credits
 
-正式发布使用 [Release workflow](.github/workflows/release.yml)，产物上传到 Cloudflare R2 和 GitHub Releases，
-再按平台合并更新 `latest.json`。
+[MIT](LICENSE). Reference projects: [cc-switch](https://github.com/farion1231/cc-switch) · [magpie](https://github.com/yetone/magpie). Thank you to their authors and contributors.
 
-1. 同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 中应用自身的版本，以及 `src-tauri/tauri.conf.json`。
-2. 完成检查，并取得同一最终提交的独立 Windows Probe 成功记录。PR 合并引用的验证不能代替源提交的 push / 手动验证。
-3. 在发布环境允许的分支上运行 `release.yml` 的 `dry_run=true`。确认提交 SHA 一致，等待完整检查、构建、签名、公证和安装包验证全部通过；遵守 GitHub 发布环境审批。
-4. 在该已验证提交上创建 `<version>_YYYYMMDD_HHMM` 标签，只推送这一个标签，触发正式发布。
-5. 核对 GitHub Release、两个平台的安装包校验值，以及线上 `latest.json`。
-
-签名和公证也属于 dry-run 验证。普通分支的预览安装包只用于测试，不能作为正式公证包分发，
-详见[分支安装包](docs/branch-packages.md)和[发布门禁](docs/code-standards.md#release-gate)。
-`scripts/release.sh` 仅供 CI 不可用时应急使用。
-
-## 许可
-
-[MIT](LICENSE)
-
-本项目基于 [cc-switch](https://github.com/farion1231/cc-switch)（MIT，Copyright © 2025 Jason Young）开发，
-在其基础上增加了 Ofox 账号、工具管理、资源库和会话用量等能力。
-Windows 命令行工具的检测、安装与升级移植自 [magpie](https://github.com/yetone/magpie)
-（MIT，Copyright © 2026 yetone）。感谢原作者的工作。
+[Full sources and licenses](docs/acknowledgements.md)
