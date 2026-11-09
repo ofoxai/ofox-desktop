@@ -8,14 +8,29 @@ const WWW = /^www\./i;
 const URL_RUN = /^[^\s<|]+/;
 // A reference definition, `[1]: https://…`, whose URL is the link's own.
 const DEFINITION = / {0,3}\[[^\]\n]+\]:[^\n]*/y;
-// An HTML tag, whose attributes may hold URLs, or an autolink (`<https://…>`).
-const TAG = /<[A-Za-z!/?][^>\n]*>/y;
+// An HTML tag, whose attributes may hold URLs, as CommonMark reads one, or an
+// autolink (`<https://…>`); `x<y 时 … z>0` is neither.
+const TAG =
+  /<(?:[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"'=<>`]+))?)*\s*\/?|\/[A-Za-z][A-Za-z0-9-]*\s*|[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>/y;
 
-/** True when an unclosed `[` comes before `index` on its line: link text. */
+/**
+ * True when `index` is inside a link's text: an unclosed `[` before it on its
+ * line, and a `](` or `][` after it that closes that text. A lone `[`, as in
+ * `区间 [0, 1)`, is not one.
+ */
 function inLinkText(text: string, index: number): boolean {
+  let open = false;
   for (let at = index - 1; at >= 0 && index - at <= 200; at -= 1) {
     if (text[at] === "]" || text[at] === "\n") return false;
-    if (text[at] === "[") return true;
+    if (text[at] === "[") {
+      open = true;
+      break;
+    }
+  }
+  if (!open) return false;
+  for (let at = index; at < text.length && at - index <= 500; at += 1) {
+    if (text[at] === "[" || text[at] === "\n") return false;
+    if (text[at] === "]") return text[at + 1] === "(" || text[at + 1] === "[";
   }
   return false;
 }
@@ -26,13 +41,16 @@ function inLinkText(text: string, index: number): boolean {
  * Not inside a link's destination (`](…`) or its text (`[…`).
  */
 function bareUrlAt(text: string, index: number): "scheme" | "www" | null {
-  const before = text[index - 1] ?? "";
-  if (before === "(" && text[index - 2] === "]") return null;
-  if (inLinkText(text, index)) return null;
   const ahead = text.slice(index, index + 8);
-  if (SCHEME.test(ahead)) return /[A-Za-z]/.test(before) ? null : "scheme";
-  if (WWW.test(ahead)) return /^$|[\s(*_[\]~]/.test(before) ? "www" : null;
-  return null;
+  const before = text[index - 1] ?? "";
+  const kind =
+    SCHEME.test(ahead) && !/[A-Za-z]/.test(before)
+      ? "scheme"
+      : WWW.test(ahead) && /^$|[\s(*_[\]~]/.test(before)
+        ? "www"
+        : null;
+  if (!kind || (before === "(" && text[index - 2] === "]")) return null;
+  return inLinkText(text, index) ? null : kind;
 }
 
 function rewriteUrls(text: string): string {

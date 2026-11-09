@@ -308,6 +308,34 @@ describe("rewriteMathDelimiters: review follow-ups", () => {
     );
   });
 
+  it("indents a list item's or a quote's formula lines that left their indent out", () => {
+    expect(rewriteMathDelimiters("- $$a\n=b$$\n\n后文")).toBe(
+      "- $$\n  a\n  =b\n  $$\n\n后文",
+    );
+    expect(rewriteMathDelimiters("> $$a\n=b$$")).toBe("> $$\n> a\n> =b\n> $$");
+    expect(rewriteMathDelimiters("- 公式为 $$\na+b\n$$")).toBe(
+      "- 公式为\n  $$\n  a+b\n  $$",
+    );
+  });
+
+  it("leaves indented code after a block whose closing fence stood alone", () => {
+    const text = "$$a=b\n$$\n\n代码：\n\n    echo $HOME$PATH";
+    expect(rewriteMathDelimiters(text)).toBe(
+      "$$\na=b\n$$\n\n代码：\n\n    echo $HOME$PATH",
+    );
+  });
+
+  it("ends a table at a $$ block", () => {
+    const text = "| 1 | 2 |\n|---|---|\n| a | b |\n$$\nx\n$$\n\n后文";
+    expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("reads a one-column delimiter row with a closing bar", () => {
+    expect(rewriteMathDelimiters("| 式 |\n---|\n| $|x|$ |")).toBe(
+      "| 式 |\n---|\n| $$\\vert x\\vert $$ |",
+    );
+  });
+
   it("asks KaTeX for muted errors", async () => {
     await loadMarkdownMath();
     const rehype = markdownMathPlugins()?.rehype ?? [];

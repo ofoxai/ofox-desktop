@@ -65,4 +65,16 @@ describe("rewriteBareUrls", () => {
       "访问“<https://ofox.ai/zh>”，即可",
     );
   });
+
+  it("still ends a URL after a bracket that is not link text", () => {
+    expect(rewriteBareUrls("区间 [0, 1) 内，见 https://a.com，然后")).toBe(
+      "区间 [0, 1) 内，见 <https://a.com>，然后",
+    );
+  });
+
+  it("does not take a less-than sign in a sentence for a tag", () => {
+    expect(rewriteBareUrls("当 x<y 时访问 **https://a.com**，再看 z>0")).toBe(
+      "当 x<y 时访问 **<https://a.com>**，再看 z>0",
+    );
+  });
 });

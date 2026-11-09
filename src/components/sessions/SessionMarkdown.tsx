@@ -92,8 +92,8 @@ function bareUrlText(node: MarkdownNode): string | null {
  * part of the link, and the link wrong. Ends such a link at its first
  * full-width punctuation mark and puts the rest after it as text.
  * `rewriteBareUrls` already does this before parsing, and keeps the bold
- * around such a URL, which this cannot; this is what is left for a message
- * above its size cap.
+ * around such a URL, which this cannot; this is the backstop for the URLs it
+ * leaves alone, as in a message above its size cap.
  */
 function splitBareUrlTail() {
   return (tree: unknown) => {

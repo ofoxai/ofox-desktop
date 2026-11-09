@@ -227,8 +227,34 @@ function doubleDollarClose(
  */
 function displayBlock(formula: string, indent: string): string {
   const onNextLine = /^[ \t]*\n/.test(formula);
-  const lines = formula.replace(/^[ \t]*\n/, "").replace(/\n[ \t>]*$/, "");
-  return `$$\n${onNextLine ? "" : indent}${lines}\n${indent}$$`;
+  const lines = formula
+    .replace(/^[ \t]*\n/, "")
+    .replace(/\n[ \t>]*$/, "")
+    .split("\n")
+    .map((line, at) =>
+      at === 0 && !onNextLine ? indent + line : underIndent(line, indent),
+    );
+  return `$$\n${lines.join("\n")}\n${indent}$$`;
+}
+
+// A line's quote markers, each `>` with the space after it.
+const QUOTE_MARKERS = /^(?:[ \t]*>[ \t]?)*/;
+
+/**
+ * A formula line under `indent`. Markdown lets a line leave out a quote's
+ * `>` or a list item's indent (a lazy line), but in a fence such a line ends
+ * the quote or the list item, and the fence with it: it gets them back.
+ */
+function underIndent(line: string, indent: string): string {
+  if (!indent || line.trim() === "") return line;
+  const quote = QUOTE_MARKERS.exec(indent)?.[0] ?? "";
+  const list = indent.slice(quote.length);
+  const own = QUOTE_MARKERS.exec(line)?.[0] ?? "";
+  const rest = line.slice(own.length);
+  const quotes = (text: string) => text.split(">").length - 1;
+  return quotes(own) >= quotes(quote) && rest.startsWith(list)
+    ? line
+    : quote + list + rest.trimStart();
 }
 
 // The start of words that would open a list, a quote, a heading or a rule.
@@ -238,12 +264,16 @@ const ORDERED_START = /\d{1,9}(?=[.)](?:[ \t\r\n]|$))/y;
 
 // A table's delimiter row, such as `| --- | :-: |` or a one-column `|---`.
 const DELIMITER_ROW =
-  /^[ \t>]*(?:(?:\|[ \t]*:?-+:?[ \t]*)+|:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)+)\|?[ \t]*$/;
+  /^[ \t>]*(?:(?:\|[ \t]*:?-+:?[ \t]*)+|:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|)\|?[ \t]*$/;
+// A line that ends a table: a `$$` fence, a heading, a quote, a list item or
+// a rule starts a block of its own.
+const ENDS_TABLE =
+  /^[ \t]{0,3}(?:\$\$|#{1,6}(?:[ \t]|$)|>|[-*+][ \t]|\d{1,9}[.)][ \t]|(?:[-*_][ \t]*){3,}$)/;
 
 /**
  * The [start, end) offsets of the lines of `text` that are a table's: a line
  * with a `|` whose next line is a delimiter row, and the lines after it up to
- * a blank one.
+ * a blank one or one that starts another block.
  */
 function tableRows(text: string): [number, number][] {
   const lines = text.split("\n");
@@ -257,7 +287,14 @@ function tableRows(text: string): [number, number][] {
   for (let row = 0; row < lines.length; row += 1) {
     if (!lines[row].includes("|") || !DELIMITER_ROW.test(lines[row + 1] ?? ""))
       continue;
-    for (; row < lines.length && lines[row].trim() !== ""; row += 1)
+    rows.push([starts[row], starts[row] + lines[row].length]);
+    for (
+      row += 1;
+      row < lines.length &&
+      lines[row].trim() !== "" &&
+      !ENDS_TABLE.test(lines[row]);
+      row += 1
+    )
       rows.push([starts[row], starts[row] + lines[row].length]);
   }
   return rows;

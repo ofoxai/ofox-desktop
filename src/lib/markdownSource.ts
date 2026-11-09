@@ -8,7 +8,11 @@ const FENCE_OPEN =
 const FENCE_CLOSE = /^[\s>]*(`{3,}|~{3,})\s*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
 const INDENTED = /^(?: {4}|\t)/;
-const MATH_FENCE = /^[\s>]*\$\$\s*$/;
+const INLINE_CODE = /`[^`\n]*`/g;
+
+/** True when a line opens or closes a `$$` block: it holds an odd number of `$$`. */
+const togglesMath = (line: string) =>
+  line.replace(INLINE_CODE, "").split("$$").length % 2 === 0;
 
 /** The most text a rewrite works through; a longer message is left as written. */
 export const MAX_REWRITE = 64 * 1024;
@@ -46,9 +50,9 @@ export function splitCode(content: string): { code: boolean; text: string }[] {
         fence = { char: open[0], length: open.length };
       } else if (!blank && INDENTED.test(line)) {
         code = (afterBlank || afterCode) && !inList && !inMath;
-        if (!code && MATH_FENCE.test(line)) inMath = !inMath;
+        if (!code && togglesMath(line)) inMath = !inMath;
       } else if (!blank) {
-        if (MATH_FENCE.test(line)) inMath = !inMath;
+        if (togglesMath(line)) inMath = !inMath;
         inList = LIST_ITEM.test(line) || (inList && !afterBlank);
       }
     }
