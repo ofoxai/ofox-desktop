@@ -7963,7 +7963,8 @@ console.log(JSON.stringify(seen));
 
     /// Under the real profile the code reads the document's folder and no
     /// other file of the user's, not even in the temporary folders, and no
-    /// terminal of theirs.
+    /// terminal of theirs; it writes no file beside the document's folder,
+    /// and connects to no port, not even one on this computer.
     #[cfg(target_os = "macos")]
     #[tokio::test]
     #[serial_test::serial(document_engines)]
@@ -7982,6 +7983,14 @@ console.log(JSON.stringify(seen));
         for file in [&own, &beside, &in_tmp] {
             std::fs::write(file, "text").unwrap();
         }
+        // Files the code tries to write: one in its folder (which it may
+        // write) and one beside it.
+        let own_new = dir.join("own-new.txt");
+        let beside_new = root.path().join("beside-new.txt");
+        // A port this computer listens on: this test can connect to it.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port().to_string();
+        drop(std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap());
         // A terminal of the user's: a pseudo-terminal this test opens.
         let (mut master, mut slave) = (0, 0);
         // SAFETY: openpty fills in two descriptors; the name, settings and
@@ -8016,25 +8025,40 @@ console.log(JSON.stringify(seen));
         std::fs::write(
             &script,
             r#"const fs = require("fs");
-const [own, beside, tmp, tty, callout] = process.argv.slice(2);
+const net = require("net");
+const [own, beside, tmp, ownNew, besideNew, tty, callout, port] = process.argv.slice(2);
 const read = (file) => { try { return fs.readFileSync(file, "utf8"); } catch (e) { return e.code; } };
+const write = (file) => { try { fs.writeFileSync(file, "x"); return "written"; } catch (e) { return e.code; } };
 const open = (file, mode) => { try { fs.closeSync(fs.openSync(file, mode)); return "opened"; } catch (e) { return e.code; } };
-console.log(JSON.stringify({
+const connect = (port) => new Promise((done) => {
+  const socket = net.connect({ host: "127.0.0.1", port: Number(port) });
+  socket.on("connect", () => { socket.destroy(); done("connected"); });
+  socket.on("error", (e) => done(e.code));
+});
+connect(port).then((connected) => console.log(JSON.stringify({
   own: read(own), beside: read(beside), tmp: read(tmp),
+  own_write: write(ownNew), beside_write: write(besideNew),
   tty_read: open(tty, "r"), tty_write: open(tty, "w"),
   dev_tty: open("/dev/tty", "w"), dev_null: open("/dev/null", "w"),
   callout_read: callout ? open(callout, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK) : null,
-}));
+  connect: connected,
+})));
 "#,
         )
         .unwrap();
-        let args = [&script, &own, &beside, &in_tmp].map(|path| path.to_string_lossy());
+        let args = [&script, &own, &beside, &in_tmp, &own_new, &beside_new]
+            .map(|path| path.to_string_lossy());
         let args: Vec<&str> = args
             .iter()
             .map(|arg| arg.as_ref())
-            .chain([tty.as_str(), callout.as_deref().unwrap_or("")])
+            .chain([
+                tty.as_str(),
+                callout.as_deref().unwrap_or(""),
+                port.as_str(),
+            ])
             .collect();
         let output = work.run(&args).await.unwrap();
+        drop(listener);
         // SAFETY: both descriptors are this test's own and open.
         unsafe {
             libc::close(slave);
@@ -8045,6 +8069,11 @@ console.log(JSON.stringify({
         assert_eq!(seen["own"], "text", "{seen}");
         assert_eq!(seen["beside"], "EPERM", "{seen}");
         assert_eq!(seen["tmp"], "EPERM", "{seen}");
+        // The probe sees a write that works: the one in its own folder.
+        assert_eq!(seen["own_write"], "written", "{seen}");
+        assert_eq!(seen["beside_write"], "EPERM", "{seen}");
+        assert!(!beside_new.exists());
+        assert_eq!(seen["connect"], "EPERM", "{seen}");
         assert_eq!(seen["tty_read"], "EPERM", "{seen}");
         assert_eq!(seen["tty_write"], "EPERM", "{seen}");
         // Refused, or there is no controlling terminal at all.
