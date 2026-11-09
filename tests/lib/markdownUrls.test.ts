@@ -77,4 +77,12 @@ describe("rewriteBareUrls", () => {
       "当 x<y 时访问 **<https://a.com>**，再看 z>0",
     );
   });
+
+  it("leaves comments and link text with brackets inside as they were", () => {
+    for (const text of [
+      "<!-- 见 https://a.com，c -->",
+      "[见 https://a.com，详见[1]](https://b.com)",
+    ])
+      expect(rewriteBareUrls(text)).toBe(text);
+  });
 });

@@ -8,10 +8,11 @@ const WWW = /^www\./i;
 const URL_RUN = /^[^\s<|]+/;
 // A reference definition, `[1]: https://…`, whose URL is the link's own.
 const DEFINITION = / {0,3}\[[^\]\n]+\]:[^\n]*/y;
-// An HTML tag, whose attributes may hold URLs, as CommonMark reads one, or an
-// autolink (`<https://…>`); `x<y 时 … z>0` is neither.
+// An HTML tag, comment or declaration, whose text may hold URLs, as
+// CommonMark reads one, or an autolink (`<https://…>`); `x<y 时 … z>0` is
+// neither.
 const TAG =
-  /<(?:[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"'=<>`]+))?)*\s*\/?|\/[A-Za-z][A-Za-z0-9-]*\s*|[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*)>/y;
+  /<(?:[A-Za-z][A-Za-z0-9-]*(?:\s+[A-Za-z_:][\w.:-]*(?:\s*=\s*(?:"[^"\n]*"|'[^'\n]*'|[^\s"'=<>`]+))?)*\s*\/?|\/[A-Za-z][A-Za-z0-9-]*\s*|[A-Za-z][A-Za-z0-9+.-]{1,31}:[^\s<>]*|!--[^\n]*?--|\?[^\n]*?\?|![A-Za-z][^>\n]*|!\[CDATA\[[^\n]*?\]\])>/y;
 
 /**
  * True when `index` is inside a link's text: an unclosed `[` before it on its
@@ -28,9 +29,12 @@ function inLinkText(text: string, index: number): boolean {
     }
   }
   if (!open) return false;
+  let depth = 0;
   for (let at = index; at < text.length && at - index <= 500; at += 1) {
-    if (text[at] === "[" || text[at] === "\n") return false;
-    if (text[at] === "]") return text[at + 1] === "(" || text[at + 1] === "[";
+    if (text[at] === "\n") return false;
+    if (text[at] === "[") depth += 1;
+    else if (text[at] === "]" && --depth < 0)
+      return text[at + 1] === "(" || text[at + 1] === "[";
   }
   return false;
 }

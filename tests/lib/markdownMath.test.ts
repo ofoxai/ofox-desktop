@@ -336,6 +336,48 @@ describe("rewriteMathDelimiters: review follow-ups", () => {
     );
   });
 
+  it("keeps a formula line that starts with > under a list item", () => {
+    for (const text of [
+      "- $$\n  f(x)\n  > 0\n  $$",
+      "- $$\n  a\n  >= b\n  $$",
+      "> - $$\n>   f(x)\n>   > 0\n>   $$",
+    ])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+    expect(rewriteMathDelimiters("- $$f(x)\n  > 0$$")).toBe(
+      "- $$\n  f(x)\n  > 0\n  $$",
+    );
+  });
+
+  it("leaves indented code alone after a stray $$ in a sentence", () => {
+    expect(
+      rewriteMathDelimiters(
+        "在 bash 里 $$ 是进程号。\n\n    echo $$\n    echo $HOME$PATH",
+      ),
+    ).toBe("在 bash 里 \\$\\$ 是进程号。\n\n    echo $$\n    echo $HOME$PATH");
+    expect(rewriteMathDelimiters("成本 $$$\n\n$$\n\n    E = mc^2\n\n$$")).toBe(
+      "成本 \\$\\$$\n\n$$\n\n    E = mc^2\n\n$$",
+    );
+    const after = "公式为\n$$\na+b\n$$\n\n代码：\n\n    echo $HOME$PATH";
+    expect(rewriteMathDelimiters(after)).toBe(after);
+    expect(
+      rewriteMathDelimiters(
+        "公式为 $$\na+b\n$$\n\n代码：\n\n    echo $HOME$PATH",
+      ),
+    ).toBe(after);
+  });
+
+  it("reads delimiter rows without bars at the edges", () => {
+    expect(rewriteMathDelimiters("名称 | 式\n--- | ---\n模 | $|x|$")).toBe(
+      "名称 | 式\n--- | ---\n模 | $$\\vert x\\vert $$",
+    );
+  });
+
+  it("keeps a table row that starts with a formula", () => {
+    expect(rewriteMathDelimiters("| a | b |\n|--|--|\n$$x$$ | $|y|$ |")).toBe(
+      "| a | b |\n|--|--|\n$$x$$ | $$\\vert y\\vert $$ |",
+    );
+  });
+
   it("asks KaTeX for muted errors", async () => {
     await loadMarkdownMath();
     const rehype = markdownMathPlugins()?.rehype ?? [];

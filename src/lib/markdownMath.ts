@@ -249,10 +249,16 @@ function underIndent(line: string, indent: string): string {
   if (!indent || line.trim() === "") return line;
   const quote = QUOTE_MARKERS.exec(indent)?.[0] ?? "";
   const list = indent.slice(quote.length);
-  const own = QUOTE_MARKERS.exec(line)?.[0] ?? "";
-  const rest = line.slice(own.length);
-  const quotes = (text: string) => text.split(">").length - 1;
-  return quotes(own) >= quotes(quote) && rest.startsWith(list)
+  const depth = quote.split(">").length - 1;
+  // Only as many `>` as the quote holds are markers; one more is the formula's.
+  let rest = line;
+  let markers = 0;
+  for (; markers < depth; markers += 1) {
+    const marker = /^[ \t]*>[ \t]?/.exec(rest);
+    if (!marker) break;
+    rest = rest.slice(marker[0].length);
+  }
+  return markers === depth && rest.startsWith(list)
     ? line
     : quote + list + rest.trimStart();
 }
@@ -264,11 +270,11 @@ const ORDERED_START = /\d{1,9}(?=[.)](?:[ \t\r\n]|$))/y;
 
 // A table's delimiter row, such as `| --- | :-: |` or a one-column `|---`.
 const DELIMITER_ROW =
-  /^[ \t>]*(?:(?:\|[ \t]*:?-+:?[ \t]*)+|:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|)\|?[ \t]*$/;
-// A line that ends a table: a `$$` fence, a heading, a quote, a list item or
-// a rule starts a block of its own.
+  /^[ \t>]*(?:\|?(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*(?::?-+:?[ \t]*)?|\|[ \t]*:?-+:?[ \t]*)$/;
+// A line that ends a table: a `$$` fence (whose rest holds no `$`), a
+// heading, a quote, a list item or a rule starts a block of its own.
 const ENDS_TABLE =
-  /^[ \t]{0,3}(?:\$\$|#{1,6}(?:[ \t]|$)|>|[-*+][ \t]|\d{1,9}[.)][ \t]|(?:[-*_][ \t]*){3,}$)/;
+  /^[ \t]{0,3}(?:\$\$[^$]*$|#{1,6}(?:[ \t]|$)|>|[-*+][ \t]|\d{1,9}[.)][ \t]|(?:[-*_][ \t]*){3,}$)/;
 
 /**
  * The [start, end) offsets of the lines of `text` that are a table's: a line

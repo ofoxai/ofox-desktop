@@ -8,11 +8,45 @@ const FENCE_OPEN =
 const FENCE_CLOSE = /^[\s>]*(`{3,}|~{3,})\s*$/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
 const INDENTED = /^(?: {4}|\t)/;
-const INLINE_CODE = /`[^`\n]*`/g;
+// What may stand before a `$$` fence on its line.
+const CONTAINERS = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?/;
 
-/** True when a line opens or closes a `$$` block: it holds an odd number of `$$`. */
-const togglesMath = (line: string) =>
-  line.replace(INLINE_CODE, "").split("$$").length % 2 === 0;
+/** Where `line` holds `$$`: not escaped, not in a longer run of dollars, not in code. */
+function doubleDollars(line: string): number[] {
+  const found: number[] = [];
+  for (let at = 0; at < line.length; ) {
+    const char = line[at];
+    if (char === "`") {
+      at = codeSpanEnd(line, at);
+    } else if (char === "\\") {
+      at += 2;
+    } else if (char === "$") {
+      let end = at;
+      while (line[end] === "$") end += 1;
+      if (end - at === 2) found.push(at);
+      at = end;
+    } else {
+      at += 1;
+    }
+  }
+  return found;
+}
+
+/**
+ * Whether `line` closes the `$$` block it is in (`inMath`), or opens one: it
+ * holds an odd number of `$$`, and, to open, one stands at the start of the
+ * line or ends it. A lone `$$` inside a sentence opens nothing.
+ */
+function flipsMath(line: string, inMath: boolean): boolean {
+  const dollars = doubleDollars(line);
+  if (dollars.length % 2 === 0) return false;
+  if (inMath) return true;
+  const start = CONTAINERS.exec(line)?.[0].length ?? 0;
+  return (
+    dollars[0] === start ||
+    dollars[dollars.length - 1] === line.trimEnd().length - 2
+  );
+}
 
 /** The most text a rewrite works through; a longer message is left as written. */
 export const MAX_REWRITE = 64 * 1024;
@@ -50,9 +84,9 @@ export function splitCode(content: string): { code: boolean; text: string }[] {
         fence = { char: open[0], length: open.length };
       } else if (!blank && INDENTED.test(line)) {
         code = (afterBlank || afterCode) && !inList && !inMath;
-        if (!code && togglesMath(line)) inMath = !inMath;
+        if (!code && flipsMath(line, inMath)) inMath = !inMath;
       } else if (!blank) {
-        if (togglesMath(line)) inMath = !inMath;
+        if (flipsMath(line, inMath)) inMath = !inMath;
         inList = LIST_ITEM.test(line) || (inList && !afterBlank);
       }
     }
