@@ -7,9 +7,12 @@ import {
 } from "@/lib/markdownMath";
 
 describe("hasMathMarkers", () => {
-  it.each(["$$x^2$$", "a \\(x\\) b", "\\[\nx\n\\]", "序列长度 $n$，维度 $d$"])("sees %j", (content) => {
-    expect(hasMathMarkers(content)).toBe(true);
-  });
+  it.each(["$$x^2$$", "a \\(x\\) b", "\\[\nx\n\\]", "序列长度 $n$，维度 $d$"])(
+    "sees %j",
+    (content) => {
+      expect(hasMathMarkers(content)).toBe(true);
+    },
+  );
 
   it.each([
     "",
@@ -19,19 +22,16 @@ describe("hasMathMarkers", () => {
     "约 $0.014–$0.028 每次",
     "$5,$10",
     "price: $ 5 $",
-  ])(
-    "does not see %j",
-    (content) => {
-      expect(hasMathMarkers(content)).toBe(false);
-    },
-  );
+  ])("does not see %j", (content) => {
+    expect(hasMathMarkers(content)).toBe(false);
+  });
 });
 
 describe("rewriteMathDelimiters", () => {
   it("writes $…$ as text math, as Pandoc reads it", () => {
-    expect(rewriteMathDelimiters("长度 $n$，输入 $X\\in\\mathbb{R}^{n\\times d}$。")).toBe(
-      "长度 $$n$$，输入 $$X\\in\\mathbb{R}^{n\\times d}$$。",
-    );
+    expect(
+      rewriteMathDelimiters("长度 $n$，输入 $X\\in\\mathbb{R}^{n\\times d}$。"),
+    ).toBe("长度 $$n$$，输入 $$X\\in\\mathbb{R}^{n\\times d}$$。");
     expect(rewriteMathDelimiters("若 $X' = PX$（$P$ 为置换）")).toBe(
       "若 $$X' = PX$$（$$P$$ 为置换）",
     );
@@ -162,6 +162,70 @@ describe("rewriteMathDelimiters", () => {
   it("leaves a lone backtick and plain text as they were", () => {
     const text = "a ` b and (c) [d] $5";
     expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+});
+
+describe("rewriteMathDelimiters: $$ blocks", () => {
+  it("puts the fences of a formula that shares their lines on lines of their own", () => {
+    expect(rewriteMathDelimiters("由\n\n$$a<b\n\\Rightarrow\nc$$\n\n后")).toBe(
+      "由\n\n$$\na<b\n\\Rightarrow\nc\n$$\n\n后",
+    );
+  });
+
+  it("writes a $$ formula alone on its line as a block", () => {
+    expect(rewriteMathDelimiters("$$E=mc^2$$")).toBe("$$\nE=mc^2\n$$");
+    expect(rewriteMathDelimiters("前文\n$$E=mc^2$$\n后文")).toBe(
+      "前文\n$$\nE=mc^2\n$$\n后文",
+    );
+  });
+
+  it("puts the words after a closing $$ on a line after the block", () => {
+    expect(rewriteMathDelimiters("$$a+b\n=c$$ 所以成立。")).toBe(
+      "$$\na+b\n=c\n$$\n所以成立。",
+    );
+  });
+
+  it("keeps a quote's marker and a list item's indent on every line", () => {
+    expect(rewriteMathDelimiters("> $$a\n> =b$$\n\n后文")).toBe(
+      "> $$\n> a\n> =b\n> $$\n\n后文",
+    );
+    expect(rewriteMathDelimiters("1. 推导：\n\n   $$a\n   =b$$")).toBe(
+      "1. 推导：\n\n   $$\n   a\n   =b\n   $$",
+    );
+  });
+
+  it("leaves a block whose fences stand alone as it was, blank lines and all", () => {
+    for (const text of ["$$\nx\n$$", "a\n\n$$\na\n\nb\n$$\n\nb"])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("keeps a $$ formula inside a sentence inline", () => {
+    for (const text of ["面积 $$\\pi r^2$$ 即可", "$$a$$ 与 $$b$$ 相等"])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("shows a $$ that never closes as text", () => {
+    expect(rewriteMathDelimiters("$$x+1\n\n## 标题")).toBe(
+      "\\$\\$x+1\n\n## 标题",
+    );
+    expect(rewriteMathDelimiters("a $$x")).toBe("a \\$\\$x");
+  });
+
+  it("does not close a $$ that has words after it across a blank line", () => {
+    expect(rewriteMathDelimiters("$$x\n\n正文 $$y$$")).toBe(
+      "\\$\\$x\n\n正文 $$y$$",
+    );
+  });
+
+  it("writes the vertical bars of a formula in a table row as \\vert", () => {
+    expect(
+      rewriteMathDelimiters(
+        "| 式 | 义 |\n|---|---|\n| $|x|$ | 绝对值 |\n| $\\|v\\|$ | 范数 |",
+      ),
+    ).toBe(
+      "| 式 | 义 |\n|---|---|\n| $$\\vert x\\vert $$ | 绝对值 |\n| $$\\Vert v\\Vert $$ | 范数 |",
+    );
+    expect(rewriteMathDelimiters("$|x|$")).toBe("$$|x|$$");
   });
 });
 

@@ -27,7 +27,7 @@ AionUi 只做了 `\[ \]` 改写。我们保持 react-markdown，借用思路，�
 | # | 改动 | 位置 |
 |---|---|---|
 | A | 加 `remark-cjk-friendly@2.3.4`、`remark-cjk-friendly-gfm-strikethrough@2.3.3`（锁版本，MIT），所有 SessionMarkdown 都用（助手、会话页、资源库） | `SessionMarkdown.tsx` |
-| B | 解析前切断网址：正文里（代码外、链接目标外）的裸网址遇到全角标点即止，去掉其前的 `*_~` 与 ASCII 句末标点，写成 `<url>`（`www.` 写成 `[www…](http://www…)`）；没有全角标点紧跟的网址不动 | `markdownNormalize.ts` |
+| B | 解析前切断网址：正文里（代码外、链接目标外）的裸网址遇到全角标点即止，去掉其前的 `*_~` 与 ASCII 句末标点，写成 `<url>`（`www.` 写成 `[www…](http://www…)`）；没有全角标点紧跟的网址不动 | `markdownUrls.ts`（与公式共用 `markdownSource.ts` 的代码识别） |
 | C | `$$` 整理：开头 `$$` 在行首（前面只有空白、`>`）且公式跨行、或收尾 `$$` 后到行尾只有空白 → 改成开头、收尾各占一行的公式块（保留引用/缩进前缀）；收尾后还有文字时，文字另起一段；行中的 `$$…$$` 仍是行内公式 | `markdownMath.ts` |
 | D | 找不到收尾的 `$$` 原样显示为文字（`\$\$`），不吞后文 | `markdownMath.ts` |
 | E | GFM 表格行里公式中的 `\|` 写成 `\Vert `、`|` 写成 `\vert ` | `markdownMath.ts` |
@@ -39,7 +39,7 @@ AionUi 只做了 `\[ \]` 改写。我们保持 react-markdown，借用思路，�
 
 - `tests/components/MarkdownRenderRegressions.test.tsx`：每类一条以上真实形态的样例（合成文本，不含用户内容），在 jsdom 里渲染 SessionMarkdown，断言：
   正文里没有残留的 `**`/`~~`、加粗数量、公式块数量、无 `.katex-error`、公式后的标题/表格/段落仍在、网址 `href` 不含 `*` 和全角标点。
-- `tests/lib/markdownMath.test.ts`、`tests/lib/markdownNormalize.test.ts`：每条规则的边界（代码里不改、引用块、列表缩进、货币 `$`、已规范的输入不变）。
+- `tests/lib/markdownMath.test.ts`、`tests/lib/markdownUrls.test.ts`：每条规则的边界（代码里不改、引用块、列表缩进、货币 `$`、已规范的输入不变）。
 - `tests/markdown/renderAudit.test.tsx` + `pnpm render:audit`：设 `RENDER_AUDIT_DIR` 时扫描本机助手会话逐条渲染并报告，修复后应为零。
 
 ## 验收

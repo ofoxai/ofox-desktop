@@ -5,7 +5,8 @@
  * 〆, 〇) are part of a name, like ideographs and kana, so an IRI such as
  * /wiki/佐々木 stays whole.
  */
-const FULL_WIDTH_PUNCTUATION = /(?![\p{L}\p{N}])[…　-〿！-／：-＠［-｀｛-･]/u;
+export const FULL_WIDTH_PUNCTUATION =
+  /(?![\p{L}\p{N}])[…　-〿！-／：-＠［-｀｛-･]/u;
 const ASCII_SENTENCE_END = /[.,;:!?]+$/;
 /** What closes a quote, bracket or emphasis around a URL in running text. */
 const ASCII_CLOSERS = /[.,;:!?"'*_~\]]+$/;
