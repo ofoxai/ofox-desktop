@@ -303,7 +303,9 @@ fn python_code(content: &Value, format: DocumentFormat) -> Result<Option<String>
 
 /// The `sandbox-exec` an engine runs under, kept once a probe showed the
 /// engine works there. A failed probe is not kept: the next document tries
-/// again, and only the first failure is logged.
+/// again, and only the first failure is logged. Python is the exception:
+/// once its probe failed, `python_offered()` stops offering it, so no next
+/// document tries.
 #[derive(Default)]
 pub struct EngineSandbox {
     works: tokio::sync::OnceCell<PathBuf>,
@@ -9300,7 +9302,7 @@ esac
     async fn previews_do_not_count_toward_the_document_limit() {
         let f = preview_fixture();
         let mut previews = vec![];
-        for name in ["A", "B", "C", "D"] {
+        for name in ["A", "B", "C"] {
             previews.push(f.call(&id(), preview_args(name)).await.unwrap());
         }
         for name in ["E", "F", "G"] {
@@ -9311,6 +9313,9 @@ esac
             .await
             .unwrap();
         }
+        // Made after the pptx deliveries, so none of them stands for it: the
+        // end of the reply would deliver it if the limit allowed.
+        previews.push(f.call(&id(), preview_args("D")).await.unwrap());
         let error = f
             .call(
                 &id(),
@@ -9323,7 +9328,7 @@ esac
         // Delivering a preview is a document like any other, at the end of
         // the reply too.
         let error = f
-            .call(&id(), from_preview_args(&previews[0]["previewId"]))
+            .call(&id(), from_preview_args(&previews[3]["previewId"]))
             .await
             .unwrap_err();
         assert_eq!(code(&error), LIMIT);
