@@ -345,7 +345,8 @@ This chat-skill increment has macOS sandbox transaction/restart/fault tests, pre
 ## Assistant document engines (2026-11-07)
 
 The assistant's `create_document` tool makes PDF, Word, PowerPoint and Excel
-files (and md, txt, csv, html and json) with two bundled engines. See
+files (and md, txt, csv, html and json) with bundled engines: officecli and
+Typst, and on macOS a Python engine for PowerPoint decks. See
 [document engines](assistant-engines.md) for how it works and for the
 acceptance checklist. Everything below is known and not claimed fixed or
 verified. The engines ran on macOS arm64 only; none of this validates Windows

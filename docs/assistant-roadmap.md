@@ -101,7 +101,7 @@
 |---|---|---|---|
 | P1-2 | Word / Excel 用 Python | 复用 P1 的引擎、隔离与预览；docx / xlsx 辅助库与模板；再往后改用户上传的文件也走它（M3b） | todo |
 | P1-3 | Windows 沙箱 | Windows 上与 macOS `sandbox-exec` 同等的系统级隔离；做完才能在 Windows 开 Python 引擎，到那时 Windows 才不再只走 deck 对象 | todo |
-| P1-4 | officecli / Typst 沙箱加固 | P1 评审时记下：两个引擎的 macOS 沙箱配置比 Python 的松（Typst 只禁了网络）；把 Python 那份的收紧移植过来，并加测试 | todo |
+| P1-4 | officecli / Typst 沙箱加固 | P1 评审时记下：另外两个引擎的 macOS 沙箱比 Python 的松；把 Python 那份的收紧移植过来，并加测试 | todo |
 
 ### 2. 在线预览，只生成一份 — todo
 
@@ -187,7 +187,7 @@
 - 公证：`APPLE_ID` / `APPLE_PASSWORD` / `APPLE_TEAM_ID` 由发布负责人提供，公证后从安装包里实跑两个引擎。
 - Python 引擎（macOS）：公证后从安装包里实跑一次 Python 路线（预览 + 交付）；`python.txt` 补上 `pyodide.asm.wasm`
   内含的 C 库（libffi、expat、libmpdec、bzip2 / xz）的声明；在较老的 macOS 上确认 SVG 图里的中文不退成方块
-  （沙箱不让读每用户的字体缓存，未验证）。
+  （较老的 macOS 上字体可能缺失，未验证）。
 - 网关并行工具调用 bug（`delta.tool_calls[].index` 不递增）重新探测；仍在就按设计稿只对
   chat-completions 请求加 `parallel_tool_calls: false`，并写明移除条件。
 - `docs/assistant-engines.md` 的真实 key 验收表填写；新增文案的 zh / en / ja 齐全。

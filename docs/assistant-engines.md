@@ -1,7 +1,8 @@
 # Assistant document engines
 
-The assistant creates Office files and PDFs with two bundled command-line
-engines, and on macOS makes PowerPoint decks from Python code with a third.
+The assistant makes documents with three bundled engines: officecli for Office
+files, Typst for PDFs and, on macOS only, a Python engine for PowerPoint decks
+written as Python code.
 `pnpm assistant:prepare` downloads, verifies, signs and stages them
 under `assistant-runtime/resources/engines/`, which the application ships as
 `assistant-runtime/engines/` in its resources.
