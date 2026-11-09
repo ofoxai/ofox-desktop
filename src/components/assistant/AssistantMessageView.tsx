@@ -488,6 +488,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   // (`find . \( -name a \)` is a command, not a formula).
                   math={!isUser}
                   previews={!isUser}
+                  streaming={streaming}
                 />
               </AssistantQuote>
             </div>
