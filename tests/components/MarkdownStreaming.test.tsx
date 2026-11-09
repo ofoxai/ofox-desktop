@@ -119,6 +119,62 @@ describe("blocks that hang on the line before them", () => {
   });
 });
 
+describe("review follow-ups", () => {
+  /** Every block but the last, streaming, is the same as the text drawn whole. */
+  async function sameAsWhole(text: string) {
+    const live = render(view(text, true));
+    const fresh = render(view(text, false));
+    await settled(live.container);
+    await settled(fresh.container);
+    const now = blocks(live.container);
+    const then = blocks(fresh.container);
+    expect(now.length).toBe(then.length);
+    for (let index = 0; index < now.length - 1; index += 1)
+      expect(now[index].outerHTML).toBe(then[index].outerHTML);
+    live.unmount();
+    fresh.unmount();
+  }
+
+  it("keeps the indent of a block's first line", async () => {
+    await sameAsWhole("段落 $x$\n\n  ```\n  code\n    deeper\n  ```\n\n后文");
+    await sameAsWhole("段落 $x$\n\n  - a\n   - b\n\n后文");
+  });
+
+  it("draws formulas while a reply with a reference definition streams", async () => {
+    const { container } = render(
+      view(
+        "一 $a$。\n\n二 $b$，见[文档][1]。\n\n三 $c$。\n\n[1]: https://a.example",
+        true,
+      ),
+    );
+    await waitFor(() =>
+      expect(container.querySelectorAll(".katex").length).toBe(3),
+    );
+    expect(container.querySelector("code.language-math")).toBeNull();
+  });
+
+  it("cuts a reply with Windows line breaks into blocks", async () => {
+    const { container } = render(view("一 $a$。\r\n\r\n二 $b$", true));
+    await settled(container);
+    expect(blocks(container)[0].querySelector(".katex")).not.toBeNull();
+  });
+
+  it("shows a \\[ formula still being written as source", async () => {
+    const { container } = render(view("前文 $a$。\n\n\\[\n\\frac12\n", true));
+    await settled(container);
+    const shown = blocks(container);
+    expect(shown[shown.length - 1].tagName).toBe("PRE");
+    expect(shown[shown.length - 1].textContent).toContain("\\frac12");
+  });
+
+  it("keeps a math code block's box and copy button where math is not drawn", () => {
+    const { container } = render(
+      <SessionMarkdown content={"```math\nx^2\n```"} />,
+    );
+    expect(container.querySelector("button[aria-label]")).not.toBeNull();
+  });
+});
+
 describe("a reply whose parts refer to each other", () => {
   it("resolves a reference link defined in another block", () => {
     const { container } = render(

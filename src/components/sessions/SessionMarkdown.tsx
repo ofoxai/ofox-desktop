@@ -55,6 +55,18 @@ function codeLanguage(children: ReactNode): string | null {
   return null;
 }
 
+/**
+ * True for a `$$` formula left as its source (remark-math's `math-display`
+ * code, which KaTeX did not draw); a ```math code block is code.
+ */
+function displayMathSource(children: ReactNode): boolean {
+  return Children.toArray(children).some(
+    (child) =>
+      isValidElement<{ className?: string }>(child) &&
+      /(?:^|\s)math-display(?:\s|$)/.test(child.props.className ?? ""),
+  );
+}
+
 interface MarkdownNode {
   type: string;
   value?: string;
@@ -230,9 +242,13 @@ interface Block {
  * kept, on its own. A block that follows the one before it with no blank
  * line stays with it: what it is can hang on that line (a list after a
  * paragraph is read as interrupting it). A reference or footnote definition
- * belongs to the whole text: then it stays one block.
+ * belongs to the whole text: then it stays one block (`whole`).
  */
-function splitBlocks(source: string, remarkPlugins: PluggableList): Block[] {
+function splitBlocks(
+  source: string,
+  remarkPlugins: PluggableList,
+): { blocks: Block[]; whole: boolean } {
+  const whole = { blocks: [{ start: 0, text: source }], whole: true };
   const tree = unified().use(remarkParse).use(remarkPlugins).parse(source);
   if (
     tree.children.some(
@@ -240,28 +256,35 @@ function splitBlocks(source: string, remarkPlugins: PluggableList): Block[] {
         node.type === "definition" || node.type === "footnoteDefinition",
     )
   )
-    return [{ start: 0, text: source }];
+    return whole;
   const starts: number[] = [];
   let end = 0;
   for (const node of tree.children) {
     const start = node.position?.start.offset ?? end;
-    if (starts.length === 0 || /\n[ \t]*\n/.test(source.slice(end, start)))
-      starts.push(start);
+    // From the start of its line: a block's position leaves out the indent of
+    // its first line, which decides what its lines are (a fence's indent is
+    // taken off each of its lines).
+    if (starts.length === 0 || /\n[ \t\r]*\n/.test(source.slice(end, start)))
+      starts.push(source.lastIndexOf("\n", start - 1) + 1);
     end = node.position?.end.offset ?? start;
   }
-  if (starts.length < 2) return [{ start: 0, text: source }];
-  return starts.map((start, index) => ({
-    start,
-    text: source.slice(
-      index === 0 ? 0 : start,
-      starts[index + 1] ?? source.length,
-    ),
-  }));
+  if (starts.length < 2) return whole;
+  return {
+    blocks: starts.map((start, index) => ({
+      start,
+      text: source.slice(
+        index === 0 ? 0 : start,
+        starts[index + 1] ?? source.length,
+      ),
+    })),
+    whole: false,
+  };
 }
 
-// A `$$` that has not closed yet, which `rewriteMathDelimiters` shows as text.
+// A display formula that has not closed yet: a `$$`, which
+// `rewriteMathDelimiters` shows as text, or a `\[` it leaves as it was.
 const UNCLOSED_FENCE =
-  /^([ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)\\\$\\\$[ \t]*([^\n]*)/;
+  /^([ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(?:\\\$\\\$|\\\[)[ \t]*([^\n]*)/;
 
 /**
  * The block being written, with a display formula it opens and has not
@@ -311,16 +334,14 @@ export function SessionMarkdown({
   highlight?: string;
   /** Colours labelled code blocks; external session transcripts leave it off. */
   syntaxHighlight?: boolean;
-  /**
-   * Draws `$$…$$`, `\(…\)` and `\[…\]` formulas, block by block; external
-   * session transcripts leave it off.
-   */
+  /** Draws `$$…$$`, `\(…\)` and `\[…\]` formulas; external session transcripts leave it off. */
   math?: boolean;
   /** Draws Mermaid diagrams and previews HTML blocks; external session transcripts leave it off. */
   previews?: boolean;
   /**
-   * The text is still arriving: its last block, the one being written, shows
-   * its formulas as their source and is the only block drawn again.
+   * The text is still arriving: a reply is drawn block by block, each block
+   * kept once drawn, and the last block, the one being written, shows its
+   * formulas as their source.
    */
   streaming?: boolean;
 }) {
@@ -363,10 +384,15 @@ export function SessionMarkdown({
     () => [...(mathPlugins?.rehype ?? []), ...textPlugins],
     [mathPlugins, textPlugins],
   );
-  const blocks = useMemo(
+  // Only a reply still arriving is cut into blocks: a finished one is drawn
+  // whole, once, as it was before (the reply is drawn anew when it joins the
+  // history anyway).
+  const split = useMemo(
     () =>
-      math ? splitBlocks(source, remarkPlugins) : [{ start: 0, text: source }],
-    [math, source, remarkPlugins],
+      math && streaming
+        ? splitBlocks(source, remarkPlugins)
+        : { blocks: [{ start: 0, text: source }], whole: true },
+    [math, streaming, source, remarkPlugins],
   );
   const components = useMemo<Components>(
     () => ({
@@ -398,7 +424,7 @@ export function SessionMarkdown({
         ),
       input: ({ checked }) => <span aria-hidden>{checked ? "☑" : "☐"}</span>,
       pre: ({ children }) =>
-        codeLanguage(children) === "math" ? (
+        displayMathSource(children) ? (
           // A display formula shown as its source while it is written.
           <pre className="my-2 overflow-x-auto whitespace-pre-wrap text-ink-muted">
             {children}
@@ -421,8 +447,9 @@ export function SessionMarkdown({
       {/* Blocks sit side by side with no wrapper, a line break between them
           as markdown puts between its blocks, so the page is the same as one
           text drawn whole. */}
-      {blocks.map((block, index) => {
-        const writing = streaming && index === blocks.length - 1;
+      {split.blocks.map((block, index) => {
+        const writing =
+          streaming && !split.whole && index === split.blocks.length - 1;
         return (
           <Fragment key={block.start}>
             {index > 0 && "\n"}
