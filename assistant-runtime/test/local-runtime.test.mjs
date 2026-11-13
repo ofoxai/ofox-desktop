@@ -324,6 +324,71 @@ test("a failed shell repair cannot bypass the original-folder verification gate"
   assert.equal(f.requests.length, 5);
 });
 
+for (const apex of ["ofox.ai", "ofox.io"])
+  for (const platform of ["macos", "windows"])
+    test(`a command-assisted question finishes without a verification turn (${apex}, ${platform})`, async (t) => {
+      const shell = platform === "windows" ? "powershell" : "bash";
+      const f = await fixture(
+        t,
+        [
+          () =>
+            call(shell, { command: 'curl -s "https://example.invalid/rate"' }),
+          reply,
+        ],
+        () => ({ output: "82.85", exitCode: 0, requiresVerification: true }),
+        { apex, prompt: "300,000 卢布是多少美金？" },
+      );
+      f.params.localConfig.platform = platform;
+      const result = await f.run();
+      assert.equal(result.status, "completed");
+      assert.equal(result.errorCode, undefined);
+      assert.equal(
+        f.requests.length,
+        2,
+        "no extra model request to verify tools",
+      );
+      assert.deepEqual(
+        f.calls.map((c) => c.name),
+        [shell],
+      );
+      assert.equal(
+        result.localTaskState,
+        null,
+        "no verification debt on the next run",
+      );
+      assert.equal(
+        f.events.some((e) => e.data?.warning === "verification_required"),
+        false,
+      );
+    });
+
+for (const platform of ["macos", "windows"])
+  test(`a status check followed by a shell repair still needs verification (${platform})`, async (t) => {
+    const shell = platform === "windows" ? "powershell" : "bash";
+    const f = await fixture(
+      t,
+      [
+        () => call("tool_status", { tool: "codex" }),
+        () => call(shell, { command: "repair" }),
+        reply,
+        () => call("verify_in_folder", { tool: "codex" }),
+        reply,
+      ],
+      (name, args) =>
+        name === shell
+          ? { output: "repaired", exitCode: 0, requiresVerification: true }
+          : { folder: args.folder, verified: name === "verify_in_folder" },
+    );
+    f.params.localConfig.platform = platform;
+    const result = await f.run();
+    assert.equal(result.status, "completed");
+    assert.equal(f.requests.length, 5);
+    assert.ok(
+      f.events.some((e) => e.data?.warning === "verification_required"),
+    );
+    assert.equal(result.localTaskState, null);
+  });
+
 for (const [name, usage] of [
   [
     "unknown cache pricing",

@@ -2,6 +2,30 @@
 
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
+## Assistant command verification scope (2026-11-14)
+
+Host-confirmed changes (`changed: true`) always require verification, including
+partial changes and pending repairs restored from the host's task snapshot.
+Commands with uncertain effects (`requiresVerification: true`) require tool
+verification only when the run also inspects or operates on a supported tool
+(status, diagnose, verify, launcher repair, rebind, install, update, uninstall or
+model selection). The tool operation may occur before or after the command.
+An ordinary command-assisted answer creates no pending verification state.
+The Host command read-only allowlist remains unchanged.
+
+Repair intent is not inferred from user prose or model-supplied intent strings.
+A repair performed entirely through shell commands without any supported-tool
+operation or Host-confirmed change therefore does not trigger automatic tool
+verification. Enabling local configuration alone is not evidence of a repair.
+Models must still inspect and verify tool repairs as instructed by the local
+configuration Skill; this runtime gate cannot prove the effects of arbitrary
+shell scripts. Existing pending snapshots retain their conservative verification
+requirement, since they do not record whether a previous command was a lookup.
+
+Regression fixtures exercise both Ofox apex choices and the Bash/PowerShell
+runtime adapters on macOS. They do not establish native Windows execution or
+acceptance in the installed desktop application.
+
 ## Assistant catalog cache (2026-10-30)
 
 Assistant catalog caching is in memory. A restart opens an asynchronous cold
