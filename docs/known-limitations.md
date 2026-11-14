@@ -26,6 +26,13 @@ Regression fixtures exercise both Ofox apex choices and the Bash/PowerShell
 runtime adapters on macOS. They do not establish native Windows execution or
 acceptance in the installed desktop application.
 
+## Presentation thumbnail fonts (2026-11-14)
+
+CJK thumbnail rendering depends on an available font with the required glyphs.
+The English Windows CI image uses a pinned, explicitly selected Noto test font;
+its pixel checks do not establish system-font fallback on installations without
+CJK fonts. No additional font is bundled with the application.
+
 ## Assistant catalog cache (2026-10-30)
 
 Assistant catalog caching is in memory. A restart opens an asynchronous cold

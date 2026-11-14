@@ -377,7 +377,9 @@ test("real MCP clears protocol logs and SDK large-output files before persistenc
     assert.ok(!content.includes("sk-test-123"));
     assert.ok(!content.includes("短密"));
   }
-  assert.equal((await stat(paths[0])).mode & 0o777, 0o600);
+  // Windows stat exposes read/write flags, not POSIX owner-only permissions.
+  if (process.platform !== "win32")
+    assert.equal((await stat(paths[0])).mode & 0o777, 0o600);
 });
 
 test("normal and cancelled pending MCP processes are reaped", async (t) => {

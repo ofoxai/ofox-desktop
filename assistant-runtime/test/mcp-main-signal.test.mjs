@@ -13,9 +13,8 @@ const main = fileURLToPath(
 const fixture = fileURLToPath(
   new URL("./fixtures/mcp-fixture.mjs", import.meta.url),
 );
-const observer = fileURLToPath(
-  new URL("./fixtures/mcp-exit-observer.mjs", import.meta.url),
-);
+const observer = new URL("./fixtures/mcp-exit-observer.mjs", import.meta.url)
+  .href;
 const pause = () => new Promise((resolve) => setTimeout(resolve, 10));
 async function until(fn, ms = 10000) {
   const start = Date.now();

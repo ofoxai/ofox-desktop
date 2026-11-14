@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import {
   benchmarkHash,
   buildExperiment,
@@ -153,7 +154,9 @@ test("offline CLI writes pending model runs and never needs credentials", async 
   await promisify(execFile)(
     process.execPath,
     [
-      new URL("../../scripts/assistant-ppt-eval.mjs", import.meta.url).pathname,
+      fileURLToPath(
+        new URL("../../scripts/assistant-ppt-eval.mjs", import.meta.url),
+      ),
       "--out",
       out,
       "--styles",

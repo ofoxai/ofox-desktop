@@ -28,7 +28,7 @@ if (process.env.MCP_DROP_STOP === "true") {
   const { StdioTransport } = await import(
     import.meta.resolve(
       "@earendil-works/pi-mcp",
-      pathToFileURL(process.env.MCP_MAIN_ENTRY),
+      pathToFileURL(process.env.MCP_MAIN_ENTRY).href,
     )
   );
   const send = StdioTransport.prototype.send;

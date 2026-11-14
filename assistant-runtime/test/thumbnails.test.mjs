@@ -1,12 +1,30 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createCanvas, ImageData, loadImage } from "@napi-rs/canvas";
+import {
+  createCanvas,
+  GlobalFonts,
+  ImageData,
+  loadImage,
+} from "@napi-rs/canvas";
 import {
   contactSheet,
   encodeThumbnail,
   thumbnailFromPng,
   thumbnailFromSvg,
 } from "../src/thumbnails.mjs";
+
+// CI uses a pinned OFL test font; no font is shipped with the application.
+const cjkFamily = process.env.OFOX_TEST_CJK_FONT
+  ? "'Ofox Test CJK'"
+  : "'Arial'";
+if (process.env.OFOX_TEST_CJK_FONT)
+  assert.ok(
+    GlobalFonts.registerFromPath(
+      process.env.OFOX_TEST_CJK_FONT,
+      "Ofox Test CJK",
+    ),
+    "CJK test font must load",
+  );
 
 /** A page-like canvas: a gradient with text and shapes over it. */
 function drawing(width, height) {
@@ -131,7 +149,7 @@ async function lightPixels(thumbnail, [x, y, w, h]) {
 
 // White 60pt text in a box across the middle of a navy 16:9 slide, as
 // officecli draws it: the text in foreignObject, which the canvas skips.
-const navySlide = (text) =>
+const navySlide = (text, family = "'Arial'") =>
   Buffer.from(
     '<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">' +
       '<rect width="1920" height="1080" fill="#1E3A5F"/>' +
@@ -139,7 +157,7 @@ const navySlide = (text) =>
       '<foreignObject x="14.4" y="7.2" width="1627" height="240">' +
       '<div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;overflow:hidden;display:flex;flex-direction:column;justify-content:center;line-height:1">' +
       '<div style="white-space:pre-wrap;margin:0;font-size:60pt;text-align:center;line-height:1.41">' +
-      `<span style="font-family:'Arial';font-weight:bold;color:#FFFFFF">${text}</span>` +
+      `<span style="font-family:${family};font-weight:bold;color:#FFFFFF">${text}</span>` +
       "</div></div></foreignObject></g></svg>",
   );
 
@@ -150,11 +168,11 @@ test("an officecli slide's text, kept in foreignObject, is drawn on the thumbnai
   }
   // The box spans x 58–720 and y 139–242 of the 768 × 432 thumbnail.
   const region = [58, 139, 662, 103];
-  const lit = async (text) =>
-    lightPixels(await thumbnailFromSvg(navySlide(text)), region);
+  const lit = async (text, family) =>
+    lightPixels(await thumbnailFromSvg(navySlide(text, family)), region);
   assert.ok((await lit("Transformer")) > 2000, "Latin text is drawn");
-  // Arial has no CJK glyphs: the canvas falls back to a system font.
-  assert.ok((await lit("入门介绍")) > 2000, "CJK text is drawn");
+  // Local runs use system fallback; CI supplies a known CJK font explicitly.
+  assert.ok((await lit("入门介绍", cjkFamily)) > 2000, "CJK text is drawn");
   assert.equal(await lit(""), 0, "no text, no light pixels");
 });
 
@@ -193,7 +211,11 @@ test("a contact sheet draws every slide, with its text, in two columns", async (
     return;
   }
   const sheet = await contactSheet(
-    numbered(navySlide("Transformer"), navySlide("入门介绍"), navySlide("")),
+    numbered(
+      navySlide("Transformer"),
+      navySlide("入门介绍", cjkFamily),
+      navySlide(""),
+    ),
   );
   assert.equal(sheet.mimeType, "image/jpeg");
   const image = await decoded(sheet);

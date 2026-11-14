@@ -48,6 +48,30 @@ jobs:
           test ! -e assistant-runtime/resources/node/source.json
           node scripts/assistant-prepare.mjs --node-only
 
+      - name: Setup pnpm for presentation maintenance tests
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10.12.3
+          run_install: false
+
+      - name: Install presentation maintenance test dependencies
+        run: pnpm install --frozen-lockfile
+        shell: pwsh
+
+      # The hosted English Windows image has no CJK font. Supply a test-only
+      # Noto font (SIL OFL 1.1), pinned to upstream Sans2.004 and its SHA-256.
+      # License: https://github.com/notofonts/noto-cjk/blob/523d033d6cb47f4a80c58a35753646f5c3608a78/LICENSE
+      - name: Prepare pinned CJK thumbnail test font
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $font = Join-Path $env:RUNNER_TEMP "OfoxTestCJK.otf"
+          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/notofonts/noto-cjk/523d033d6cb47f4a80c58a35753646f5c3608a78/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf" -OutFile $font
+          if ((Get-FileHash -LiteralPath $font -Algorithm SHA256).Hash.ToLowerInvariant() -ne "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b") {
+            throw "CJK test font differs from the pinned upstream bytes"
+          }
+          "OFOX_TEST_CJK_FONT=$font" >> $env:GITHUB_ENV
+
       # pwsh fails a step only on its last native exit code: one command per step.
       - name: Install isolated assistant dependencies
         run: node scripts/assistant-prepare.mjs --install-only
