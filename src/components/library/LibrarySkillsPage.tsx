@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import {
   useEffect,
   useLayoutEffect,
@@ -33,6 +34,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { SearchInput } from "@/components/ui/search-input";
 import { SegmentedControl } from "@/components/ui/segmented";
+import { MenuSelect } from "@/components/ui/menu-select";
 import {
   Dialog,
   DialogContent,
@@ -358,10 +360,15 @@ export function LibrarySkillsPage({
   const skillTargets = data?.skillTargets ?? [];
   const columns = skillColumns(data?.skillTargets, rows);
   const installAgents = skillColumns(data?.skillTargets, []);
+  const defaultInstallAgents = installAgents.filter(
+    (tool) => tool !== "ofox-assistant",
+  );
   const labelFor = (tool: string) =>
-    skillTargets.find((target) => target.id === tool)?.label ??
-    TOOL_LOGOS[tool]?.label ??
-    toolLabel(tool, t);
+    tool === "ofox-assistant"
+      ? toolLabel(tool, t)
+      : (skillTargets.find((target) => target.id === tool)?.label ??
+        TOOL_LOGOS[tool]?.label ??
+        toolLabel(tool, t));
   const inLibrary = (_directory: string, key?: string) =>
     key !== undefined && rows.some((row) => collectedRepositorySkill(row, key));
   const findErrorText = (reason: unknown) =>
@@ -429,7 +436,7 @@ export function LibrarySkillsPage({
             },
           ],
           selected: inLibrary(parsed.leaf) ? [] : [parsed.path],
-          agents: installAgents,
+          agents: defaultInstallAgents,
         });
         return;
       }
@@ -470,7 +477,7 @@ export function LibrarySkillsPage({
         selected: candidates
           .filter((candidate) => !candidate.existing)
           .map((candidate) => candidate.key),
-        agents: installAgents,
+        agents: defaultInstallAgents,
       });
     } catch (reason) {
       if (mounted.current) setFindError(findErrorText(reason));
@@ -513,7 +520,7 @@ export function LibrarySkillsPage({
         },
       ],
       selected: existing ? [] : [skill.key],
-      agents: installAgents,
+      agents: defaultInstallAgents,
     });
   }
   const install = (current: Found) =>
@@ -951,7 +958,7 @@ export function LibrarySkillsPage({
       { count: all.count },
     );
     return (
-      <div className="flex shrink-0 items-center gap-[3px]">
+      <div className="flex shrink-0 flex-wrap items-center gap-[3px]">
         <button
           type="button"
           aria-label={`${row.name} · ${allText}`}
@@ -1025,6 +1032,31 @@ export function LibrarySkillsPage({
             </button>
           );
         })}
+        {row.targets.some(
+          (target) => target.toolId === "ofox-assistant" && target.desired,
+        ) && (
+          <MenuSelect
+            aria-label={`${row.name} · ${t("library.assistantTarget.mode")}`}
+            value={row.assistantSkill?.mode ?? "auto"}
+            disabled={
+              !writable ||
+              !!busy ||
+              !row.assistantSkill ||
+              !!row.assistantSkill.broken
+            }
+            options={[
+              { value: "auto", label: t("library.assistantTarget.auto") },
+              { value: "manual", label: t("library.assistantTarget.manual") },
+            ]}
+            onChange={(mode: "auto" | "manual") => {
+              const actualName = row.assistantSkill?.name;
+              if (actualName)
+                void run(`${row.id}:mode`, () =>
+                  libraryApi.setAssistantSkillMode(actualName, mode),
+                );
+            }}
+          />
+        )}
       </div>
     );
   }
@@ -1045,6 +1077,21 @@ export function LibrarySkillsPage({
         <SkillGlyph />
         <div className="min-w-0 flex-1">
           <p className="truncate text-ui font-medium text-ink">{row.name}</p>
+          {row.origin && row.origin !== "local" && (
+            <span
+              className="text-micro text-ink-muted"
+              title={t("library.assistantTarget.originHint")}
+            >
+              {t(`library.assistantTarget.${row.origin}`)}
+            </span>
+          )}
+          {row.assistantSkill?.broken && (
+            <p className="text-note text-warn">
+              {t("library.assistantTarget.broken", {
+                reason: libraryError(row.assistantSkill.broken, t),
+              })}
+            </p>
+          )}
           {row.description && (
             <p
               className="truncate text-note text-ink-muted"
@@ -1504,7 +1551,27 @@ export function LibrarySkillsPage({
             </p>
           )}
         </div>
+        {query.isPending && <FoxLoader label={t("pages.library.loading")} />}
 
+        {data?.assistantSkillsError && (
+          <p role="status" className="text-ctl text-warn">
+            {libraryError(data.assistantSkillsError, t)}
+          </p>
+        )}
+        {(data?.assistantSkills ?? [])
+          .filter(
+            (skill) =>
+              skill.broken &&
+              !rows.some((row) => row.assistantSkill?.dir === skill.dir),
+          )
+          .map((skill) => (
+            <p key={skill.dir} role="status" className="text-ctl text-warn">
+              {skill.name} ·{" "}
+              {t("library.assistantTarget.broken", {
+                reason: libraryError(skill.broken, t),
+              })}
+            </p>
+          ))}
         {rows.length > 0 && (
           <section
             aria-label={t("library.skillsPage.inLibrary")}

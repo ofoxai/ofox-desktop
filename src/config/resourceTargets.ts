@@ -6,3 +6,5 @@ export const resourceTargetId = (client: string) =>
 export const RESOURCE_TARGET_IDS = [
   ...new Set(TOOL_ORDER.map(resourceTargetId)),
 ];
+/** Builtin resource consumers do not join the account/tool installation catalogue. */
+export const SKILL_TARGET_IDS = [...RESOURCE_TARGET_IDS, "ofox-assistant"];

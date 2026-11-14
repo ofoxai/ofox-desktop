@@ -112,6 +112,21 @@ fn limit(name: &str) -> Result<u64, String> {
         [sid, ATTACHMENTS_DIR, aid] if validate_id(sid).is_ok() && validate_id(aid).is_ok() => {
             Ok(super::super::video::MAX_VIDEO_BYTES)
         }
+        [sid, ATTACHMENTS_DIR, folder, page]
+            if validate_id(sid).is_ok()
+                && folder
+                    .strip_suffix(PAGES_SUFFIX)
+                    .is_some_and(|aid| validate_id(aid).is_ok())
+                && page
+                    .strip_suffix(".jpg")
+                    .and_then(|p| p.parse::<u32>().ok())
+                    .is_some_and(|n| {
+                        (1..=super::super::documents::preview::MAX_PAGE_NUMBER).contains(&n)
+                            && *page == format!("{n}.jpg")
+                    }) =>
+        {
+            Ok(super::super::documents::preview::MAX_JPEG)
+        }
         _ => Err(INVALID.into()),
     }
 }
@@ -378,6 +393,18 @@ fn validate_session(
             return Err(INVALID.into());
         }
         expected.insert(name);
+        for page in super::super::documents::preview::pages(file) {
+            let name = format!(
+                "{sid}/{ATTACHMENTS_DIR}/{}{PAGES_SUFFIX}/{page}.jpg",
+                file.id
+            );
+            let bytes = super::super::documents::preview::read_jpeg(&root.join(&name))
+                .map_err(|_| INVALID)?;
+            if bytes.len() as u64 > super::super::documents::preview::MAX_JPEG {
+                return Err(TOO_LARGE.into());
+            }
+            expected.insert(name);
+        }
     }
     for aid in &record.session.draft_attachment_ids {
         if !attachments.contains_key(aid.as_str()) {
@@ -978,6 +1005,22 @@ impl AssistantStore {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn preview_page_number_whitelist_allows_one_thousand_but_not_aliases_or_overflow() {
+        let (sid, aid) = (
+            crate::services::assistant::types::id(),
+            crate::services::assistant::types::id(),
+        );
+        for page in ["70.jpg", "1000.jpg"] {
+            assert_eq!(
+                super::limit(&format!("{sid}/attachments/{aid}.pages/{page}")).unwrap(),
+                crate::services::assistant::documents::preview::MAX_JPEG
+            );
+        }
+        for page in ["0.jpg", "1001.jpg", "070.jpg", "../70.jpg", "70.svg"] {
+            assert!(super::limit(&format!("{sid}/attachments/{aid}.pages/{page}")).is_err());
+        }
+    }
     use super::*;
     use std::io::{Read, Write};
 
@@ -1426,6 +1469,12 @@ mod tests {
     fn backup_roundtrip_keeps_native_history_drafts_files_usage_and_operation_prices() {
         let (_source, store, sid, attachment) = seeded();
         let output = tempfile::tempdir().unwrap();
+        store
+            .mutate(&sid, |record| {
+                record.messages[0].skill = Some("historical-skill".into());
+                Ok(())
+            })
+            .unwrap();
         let archive = output.path().join("完整备份.zip");
         let report = store.backup(&archive, &[], || Ok(())).unwrap();
         assert_eq!((report.sessions, report.skipped), (1, 0));
@@ -1447,6 +1496,12 @@ mod tests {
         let report = restored.restore(&archive, &[], || Ok(())).unwrap();
         assert_eq!(report.imported, 1);
         assert!(report.warning.is_none());
+        assert_eq!(
+            restored.load_record(&sid).unwrap().messages[0]
+                .skill
+                .as_deref(),
+            Some("historical-skill")
+        );
         assert_eq!(
             restored.load_record(&sid).unwrap().usage,
             store.load_record(&sid).unwrap().usage

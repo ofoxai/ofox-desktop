@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -176,6 +177,7 @@ export function LibraryMcpTable({
       .join(", "),
   });
   const searchRef = useRef<HTMLInputElement>(null);
+  const discoverSearchRef = useRef<HTMLInputElement>(null);
   const retryScan = () => {
     searchRef.current?.focus();
     native.rescan();
@@ -185,7 +187,17 @@ export function LibraryMcpTable({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [dialog, setDialog] = useState<DialogState | null>(null);
-  const dialogTrigger = useRef<HTMLButtonElement | null>(null);
+  const dialogTrigger = useRef<HTMLElement | null>(null);
+  const currentDialog = useRef(dialog);
+  currentDialog.current = dialog;
+  const restoreDialogFocus = (event: Event) => {
+    event.preventDefault();
+    // A recipe can replace discovery with an editor in the same commit.
+    if (!active || currentDialog.current) return;
+    const trigger = dialogTrigger.current;
+    if (trigger?.isConnected && !trigger.matches(":disabled")) trigger.focus();
+    else searchRef.current?.focus();
+  };
   const [checking, setChecking] = useState(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -204,7 +216,11 @@ export function LibraryMcpTable({
     [registerRefresh, query.refetch, native.rescan],
   );
   useEffect(
-    () => registerDiscover("mcp", () => setDialog({ type: "discover" })),
+    () =>
+      registerDiscover("mcp", (trigger) => {
+        dialogTrigger.current = trigger;
+        setDialog({ type: "discover" });
+      }),
     [registerDiscover],
   );
   async function run(key: string, action: () => Promise<string | void>) {
@@ -409,6 +425,8 @@ export function LibraryMcpTable({
         <p role="alert" className="text-ctl text-danger">
           {libraryError(query.error, t)}
         </p>
+      ) : query.isPending ? (
+        <FoxLoader label={t("pages.library.loading")} />
       ) : !rows.length && !query.isLoading ? (
         <p className="rounded-list border border-dashed border-line px-4 py-10 text-center text-ctl text-ink-muted">
           {t("library.mcpTable.empty")}
@@ -663,13 +681,7 @@ export function LibraryMcpTable({
         <DialogContent
           className="sm:max-w-2xl"
           aria-describedby={undefined}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            if (!active) return;
-            const trigger = dialogTrigger.current;
-            if (trigger?.isConnected && !trigger.disabled) trigger.focus();
-            else searchRef.current?.focus();
-          }}
+          onCloseAutoFocus={restoreDialogFocus}
         >
           <DialogHeader className="flex-row items-center justify-between gap-3">
             <DialogTitle className="min-w-0 flex-1">
@@ -892,13 +904,35 @@ export function LibraryMcpTable({
           if (!open) setDialog(null);
         }}
       >
-        <DialogContent className="sm:max-w-3xl">
-          <DialogHeader>
-            <DialogTitle>{t("library.mcpTable.discover")}</DialogTitle>
+        <DialogContent
+          className="sm:max-w-3xl"
+          onOpenAutoFocus={(event) => {
+            // Start in search, not on the header close button.
+            event.preventDefault();
+            discoverSearchRef.current?.focus();
+          }}
+          onCloseAutoFocus={restoreDialogFocus}
+        >
+          <DialogHeader className="flex-row items-center justify-between gap-3">
+            <DialogTitle className="min-w-0 flex-1">
+              {t("library.mcpTable.discover")}
+            </DialogTitle>
+            <DialogClose asChild>
+              <Button
+                type="button"
+                variant="icon"
+                size="icon"
+                aria-label={t("common.close")}
+              >
+                <X aria-hidden className="h-4 w-4" />
+              </Button>
+            </DialogClose>
           </DialogHeader>
           <div className="min-h-0 flex-1 overflow-y-auto px-[18px] py-4">
             <LibraryDiscover
               kind="mcp"
+              maxColumns={2}
+              searchInputRef={discoverSearchRef}
               busy={!!busy}
               onChoose={(recipe) => {
                 if (recipe.kind !== "mcp") return;

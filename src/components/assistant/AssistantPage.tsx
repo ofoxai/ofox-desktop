@@ -18,12 +18,13 @@ import {
   ArrowUp,
   Download,
   Ellipsis,
-  Globe,
   ListPlus,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
+  Presentation,
+  ChevronDown,
   Minimize2,
   Mic,
   Pin,
@@ -41,22 +42,32 @@ import {
   type AssistantMessage,
   type AssistantAttachment,
   type AssistantGenerationKind,
+  type AssistantPresentationStyleId,
 } from "@/lib/api/assistant";
+import { presentationStyleName } from "@/lib/assistantPresentationStyles";
 import { isMac } from "@/lib/platform";
 import { useAssistant } from "./useAssistant";
 import {
   LocalApprovalCard,
   LocalChangesLine,
   PermissionControl,
-  LocalTaskProgress,
 } from "./AssistantLocalConfig";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
+import { SkillPicker } from "./SkillPicker";
 import { ComposerPlus } from "./ComposerPlus";
+import { PresentationStylePicker } from "./PresentationStylePicker";
 import { generationModels } from "./MediaDefaultsFields";
 import { GenerationCards } from "./GenerationCards";
+import { AssistantFileWorkspace } from "./AssistantFileWorkspace";
+import { PresentationVisualSettings } from "./PresentationVisualSettings";
+import {
+  canPreviewAssistantFile,
+  type FilePageReference,
+} from "@/lib/api/assistantPreview";
 import { useReadAloud } from "./useReadAloud";
 import { AssistantMessageView } from "./AssistantMessageView";
+import { AssistantRunProgress } from "./AssistantRunProgress";
 import { AssistantContextUsage } from "./AssistantContextUsage";
 import { AssistantAudioHistory } from "./AssistantAudioHistory";
 import { AssistantAudioInput } from "./AssistantAudioInput";
@@ -70,6 +81,7 @@ import {
 } from "./AssistantSidebar";
 import { InlineRename } from "./InlineRename";
 import { ThinkingMenu } from "./ThinkingMenu";
+import { WebSearchMenu, searchPriceNote } from "./WebSearchMenu";
 import { useConversationActions } from "./useConversationActions";
 import { useFileDrop } from "./useFileDrop";
 import { usePendingFocus } from "./usePendingFocus";
@@ -83,7 +95,6 @@ import { AssistantRequestDetails } from "./AssistantRequestDetails";
 import { usageSummary } from "@/utils/assistantUsage";
 import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -111,6 +122,8 @@ interface Starter {
   id: string;
   /** The generation chip it turns on. */
   kind?: AssistantGenerationKind;
+  /** Offered only where the runtime can make documents (a deck needs pptx). */
+  requires?: "documents";
 }
 
 /**
@@ -121,6 +134,7 @@ const SCENARIO_STARTERS: Starter[] = [
   { id: "image", kind: "image" },
   { id: "video", kind: "video" },
   { id: "speech", kind: "speech" },
+  { id: "deck", kind: undefined, requires: "documents" },
   { id: "localCheck" },
 ];
 /** For a model without tools, or an account with none of the above. */
@@ -129,6 +143,8 @@ const TEXT_STARTERS: Starter[] = [
   { id: "writing" },
   { id: "explain" },
 ];
+/** A short scenario list is filled up from the text starters. */
+const MIN_STARTERS = 3;
 
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
@@ -153,29 +169,6 @@ function saveSidebarCollapsed(collapsed: boolean) {
   } catch {
     // See readSidebarCollapsed.
   }
-}
-
-const usd = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  maximumSignificantDigits: 3,
-});
-
-/** The most web searches the runtime lets one reply make (its MAX_SEARCHES). */
-const MAX_SEARCHES_PER_REPLY = 3;
-
-/**
- * What one web search may cost: the gateway bills each search call, and one
- * search can make one or two (a search, then opening a page). A reply makes
- * at most MAX_SEARCHES_PER_REPLY searches.
- */
-function searchPriceNote(unitPriceUsd: string) {
-  const price = Number(unitPriceUsd);
-  return {
-    low: usd.format(price),
-    high: usd.format(price * 2),
-    max: MAX_SEARCHES_PER_REPLY,
-  };
 }
 
 interface AssistantPageProps {
@@ -280,12 +273,24 @@ function AssistantWorkspace() {
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(readSidebarCollapsed);
   const sidebarId = useId();
+  const searchNoteId = useId();
   const blockedHint = useId();
   const visionHint = useId();
-  const searchNoteId = useId();
   const lengthHintId = useId();
   const queueHintId = useId();
   const interactionActive = useInteractionActive();
+  const presentationScope = `${bootstrap?.owner}:${bootstrap?.authorityGeneration}:${assistant.selectedId ?? "new"}:${assistant.selectionKey}`;
+  const presentationScopeRef = useRef(presentationScope);
+  presentationScopeRef.current = presentationScope;
+  const interactionActiveRef = useRef(interactionActive);
+  interactionActiveRef.current = interactionActive;
+  const [presentationDialog, setPresentationDialog] = useState<{
+    scope: string;
+  } | null>(null);
+  const presentationDialogRef = useRef(presentationDialog);
+  const presentationReturnFocus = useRef<HTMLElement | null>(null);
+  const presentationFocusScope = useRef<string | null>(null);
+  const presentationFocusComposer = useRef(false);
   useEffect(() => {
     if (!interactionActive) setAudioDialog(null);
   }, [interactionActive]);
@@ -337,6 +342,40 @@ function AssistantWorkspace() {
   );
   const sessionTrashed = session?.deletedAt != null;
   const trashed = assistant.showTrash || sessionTrashed;
+  const fileScope = `${requestScopeKey}:${assistant.selectionKey}`;
+  const fileScopeRef = useRef(fileScope);
+  fileScopeRef.current = fileScope;
+  const [fileSelection, setFileSelection] = useState<{
+    scope: string;
+    id: string;
+    expectedVersion?: string;
+  } | null>(null);
+  const selectedFileId =
+    fileSelection?.scope === fileScope && !trashed && interactionActive
+      ? fileSelection.id
+      : null;
+  const selectedFileRef = useRef(selectedFileId);
+  selectedFileRef.current = selectedFileId;
+  const workspaceFiles = Array.from(
+    new Map(
+      [
+        ...(detail?.messages.flatMap((message) => message.attachments ?? []) ??
+          []),
+        ...(assistant.stream?.attachments ?? []),
+        ...(detail?.attachments ?? []),
+      ].map((file) => [file.id, file]),
+    ).values(),
+  ).filter(canPreviewAssistantFile);
+  const openArtifact = (file: AssistantAttachment) => {
+    if (
+      fileScopeRef.current !== fileScope ||
+      !interactionActiveRef.current ||
+      trashed ||
+      !canPreviewAssistantFile(file)
+    )
+      return;
+    setFileSelection({ scope: fileScope, id: file.id });
+  };
   // Closes with the conversation it asks about, e.g. once only its files are
   // left to delete.
   const deleteDialogOpen = confirmDelete && session !== undefined;
@@ -349,18 +388,35 @@ function AssistantWorkspace() {
     t,
   );
   const keyMissing = bootstrap?.key.status === "missing";
-  // Runs can search only while the catalog prices a search; a backend
-  // without search says nothing about it.
+  // Ofox search runs only while the catalog prices it; Exa's is free, and
+  // offered by a backend that reports the account's provider.
   const searchPrice = bootstrap?.search?.available
     ? bootstrap.search.unitPriceUsd
     : null;
+  const exaOffered = bootstrap?.search?.provider !== undefined;
+  const searchViaExa = exaOffered && assistant.searchProvider === "exa";
+  // What the account's search costs, or why there is none.
   const searchNote = !bootstrap
     ? null
-    : searchPrice !== null
-      ? t("assistant.webSearchPrice", searchPriceNote(searchPrice))
-      : t("assistant.webSearchUnavailable");
-  // What a search costs, or why there is none, whether search is on or not.
+    : searchViaExa
+      ? t("assistant.webSearchMenu.exaNote")
+      : searchPrice !== null
+        ? t("assistant.webSearchPrice", searchPriceNote(searchPrice))
+        : exaOffered
+          ? t("assistant.webSearchMenu.ofoxUnavailableNote")
+          : t("assistant.webSearchUnavailable");
   const showSearchNote = available && searchNote !== null;
+  // Under a reply whose free search was refused: the way to Ofox search,
+  // while there is one.
+  const { setSearchProvider } = assistant;
+  const pickOfox = useCallback(
+    () => void setSearchProvider("ofox"),
+    [setSearchProvider],
+  );
+  const switchToOfoxSearch =
+    searchPrice !== null && assistant.searchProvider !== "ofox"
+      ? pickOfox
+      : undefined;
   // A conversation still loading (or whose load failed) has no setting to
   // change yet; none is changed in the trash.
   const settingsLocked =
@@ -369,14 +425,6 @@ function AssistantWorkspace() {
     busy ||
     assistant.loading ||
     Boolean(assistant.selectedId && session?.id !== assistant.selectedId);
-  // Search can be turned on only while it is offered, and always off, so a
-  // conversation never keeps it on when it can't be seen to work.
-  const searchLocked =
-    settingsLocked || (!assistant.webSearch && searchPrice === null);
-  // The chip is lit only for a search that will happen: a conversation
-  // saved with search on while it is unavailable still shows it (so it can
-  // be turned off), but doesn't look on.
-  const searchLit = assistant.webSearch && searchPrice !== null;
   // Tool, system and other internal records stay out of the transcript, and
   // so do the versions of a turn that are not the one shown: the switcher
   // under the shown one brings them back.
@@ -391,8 +439,57 @@ function AssistantWorkspace() {
       ),
     [detailMessages],
   );
-  const versions = useMemo(() => turnVersions(turns), [turns]);
-  const messages = turns.filter((message) => !message.superseded);
+  const messages = useMemo(
+    () => turns.filter((message) => !message.superseded),
+    [turns],
+  );
+  const liveMessage =
+    assistant.stream && ["assistant", "media"].includes(assistant.stream.role)
+      ? assistant.stream
+      : null;
+  // A reply keeps the same React parent and key when saved history replaces
+  // its live record. A refresh can briefly contain both copies of that ID.
+  const transcript = liveMessage
+    ? [
+        ...messages.filter((message) => message.id !== liveMessage.id),
+        liveMessage,
+      ]
+    : messages;
+  const transcriptScope = `${session?.id}:${bootstrap?.owner}:${bootstrap?.authorityGeneration}`;
+  const liveRun = useRef<{
+    scope: string;
+    messageId: string;
+    runId: string;
+  } | null>(null);
+  const liveRunId =
+    liveMessage?.runId ??
+    assistant.run?.runId ??
+    (liveRun.current?.scope === transcriptScope &&
+    liveRun.current.messageId === liveMessage?.id
+      ? liveRun.current.runId
+      : undefined);
+  useLayoutEffect(() => {
+    liveRun.current =
+      liveMessage && liveRunId
+        ? {
+            scope: transcriptScope,
+            messageId: liveMessage.id,
+            runId: liveRunId,
+          }
+        : null;
+  }, [transcriptScope, liveMessage?.id, liveRunId]);
+  const versions = useMemo(() => {
+    // Until run_start identifies its saved message, a provisional placeholder
+    // cannot take the version switcher from a reply already in history.
+    if (!liveMessage || liveMessage.id === `stream-${liveRunId}`)
+      return turnVersions(turns);
+    // Older live records have no runId. Keep a versioned reply's carrier key
+    // during run_end's gap between clearing the run and reading its history.
+    return turnVersions([
+      ...turns.filter((message) => message.id !== liveMessage.id),
+      { ...liveMessage, runId: liveRunId },
+    ]);
+  }, [turns, liveMessage, liveRunId]);
   const emptyTranscript = !messages.length && !assistant.stream;
   // The newest reply keeps its actions in view; only a reply has them there.
   const newest =
@@ -457,19 +554,76 @@ function AssistantWorkspace() {
     [bootstrap?.models, bootstrap?.audioModels],
   );
   const localDefinition = Boolean(bootstrap?.localConfigDefinition);
+  const deckAvailable = Boolean(
+    bootstrap?.runtime.documents?.formats.includes("pptx"),
+  );
+  const canPresentation =
+    writable &&
+    deckAvailable &&
+    composerModel?.tools !== false &&
+    !session?.audioOnly;
+  const canPresentationRef = useRef(canPresentation);
+  canPresentationRef.current = canPresentation;
+  const closePresentation = useCallback(() => {
+    presentationDialogRef.current = null;
+    setPresentationDialog(null);
+  }, []);
+  const openPresentation = (trigger?: HTMLElement | null) => {
+    if (!canPresentationRef.current || !interactionActiveRef.current) return;
+    const ticket = { scope: presentationScopeRef.current };
+    presentationDialogRef.current = ticket;
+    presentationReturnFocus.current = trigger ?? composer.current;
+    presentationFocusScope.current = ticket.scope;
+    presentationFocusComposer.current = false;
+    setPresentationDialog(ticket);
+  };
+  const choosePresentation = (choice: AssistantPresentationStyleId) => {
+    if (
+      !presentationDialog ||
+      presentationDialogRef.current !== presentationDialog ||
+      presentationDialog.scope !== presentationScopeRef.current ||
+      !canPresentationRef.current ||
+      !interactionActiveRef.current
+    )
+      return;
+    assistant.setPresentationStyleId(choice);
+    presentationFocusComposer.current = true;
+    closePresentation();
+  };
+  useEffect(() => {
+    if (
+      presentationDialog &&
+      (presentationDialog.scope !== presentationScope ||
+        !canPresentation ||
+        !interactionActive)
+    )
+      closePresentation();
+  }, [
+    presentationDialog,
+    presentationScope,
+    canPresentation,
+    interactionActive,
+    closePresentation,
+  ]);
   const starters = useMemo(() => {
+    const offered = (starter: Starter) =>
+      starter.kind
+        ? generationModels(generationCatalog, starter.kind).length > 0
+        : starter.requires === "documents"
+          ? deckAvailable
+          : localDefinition;
     const scenario =
-      composerModel?.tools === false
-        ? []
-        : SCENARIO_STARTERS.filter((starter) =>
-            starter.kind
-              ? generationModels(generationCatalog, starter.kind).length > 0
-              : localDefinition,
-          );
-    return scenario.length > 0
-      ? [...scenario, { id: "summary" }]
-      : TEXT_STARTERS;
-  }, [composerModel?.tools, generationCatalog, localDefinition]);
+      composerModel?.tools === false ? [] : SCENARIO_STARTERS.filter(offered);
+    if (scenario.length === 0) return TEXT_STARTERS;
+    const offeredStarters: Starter[] = [...scenario, { id: "summary" }];
+    for (const starter of TEXT_STARTERS)
+      if (
+        offeredStarters.length < MIN_STARTERS &&
+        !offeredStarters.some(({ id }) => id === starter.id)
+      )
+        offeredStarters.push(starter);
+    return offeredStarters;
+  }, [composerModel?.tools, generationCatalog, localDefinition, deckAvailable]);
   const queueCount = assistant.queue?.messages.length ?? 0;
   const queueMode = !session?.audioOnly && Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
@@ -479,7 +633,9 @@ function AssistantWorkspace() {
     files.some((file) => file.mimeType.startsWith("image/"));
   // Generation needs a model that takes tools.
   const generationNeedsTools =
-    (assistant.media.hints?.length ?? 0) > 0 && composerModel?.tools === false;
+    ((assistant.media.hints?.length ?? 0) > 0 ||
+      assistant.presentationStyleId !== undefined) &&
+    composerModel?.tools === false;
   // The API's reference limits, shown on the files before anything is sent.
   const referenceOverflow =
     assistant.media.hints?.includes("video") &&
@@ -568,6 +724,7 @@ function AssistantWorkspace() {
     assistant.localApprovals.length,
     assistant.localPlan,
     assistant.localIntent,
+    assistant.runProgress?.activities,
   ]);
   useLayoutEffect(() => {
     const input = composer.current;
@@ -694,6 +851,16 @@ function AssistantWorkspace() {
             expectedGeneration: bootstrap.authorityGeneration,
           })
         }
+        onSaveAndOpen={(file) =>
+          assistantApi.saveMedia({
+            sessionId: session.id,
+            attachmentId: file.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+            open: true,
+          })
+        }
+        onOpenArtifact={openArtifact}
         onCancelVideo={(item) =>
           item.status === "submitting"
             ? assistant.stop()
@@ -824,8 +991,19 @@ function AssistantWorkspace() {
     modelId: session?.modelId,
   };
   const editMessage = useCallback(
-    (editMessageId: string, text: string, attachments: AssistantAttachment[]) =>
-      actions.current.send({ text, attachments, editMessageId }),
+    (
+      editMessageId: string,
+      text: string,
+      attachments: AssistantAttachment[],
+      skill?: string,
+    ) =>
+      actions.current.send({
+        text,
+        attachments,
+        editMessageId,
+        skill,
+        replaceSkill: true,
+      }),
     [],
   );
   const regenerateMessage = useCallback(
@@ -896,6 +1074,67 @@ function AssistantWorkspace() {
       input.setSelectionRange(next.cursor, next.cursor);
     });
   }, []);
+  const addFileTarget = (reference: FilePageReference) => {
+    if (
+      fileScopeRef.current !== fileScope ||
+      !interactionActiveRef.current ||
+      trashed ||
+      reference.attachmentId !== selectedFileRef.current ||
+      !composer.current ||
+      composer.current.disabled ||
+      !session ||
+      !bootstrap?.owner
+    )
+      return false;
+    return assistant.addFileReference(
+      {
+        attachmentId: reference.attachmentId,
+        version: reference.version,
+        page: reference.page,
+      },
+      {
+        sessionId: session.id,
+        expectedOwner: bootstrap.owner,
+        expectedGeneration: bootstrap.authorityGeneration,
+        selectionKey: assistant.selectionKey,
+      },
+    );
+  };
+  const quoteFile = (reference: FilePageReference) => {
+    if (!addFileTarget(reference)) return;
+    const label =
+      reference.page === null
+        ? t("assistant.workspace.referenceFile", { name: reference.name })
+        : t("assistant.workspace.referencePage", {
+            name: reference.name,
+            page: reference.page,
+          });
+    quoteText(
+      `${label} (${t("assistant.workspace.version", { version: reference.version.slice(0, 12) })})`,
+    );
+  };
+  const prepareFileAction = (
+    reference: FilePageReference,
+    action: "optimize" | "replace-image",
+  ) => {
+    if (reference.page === null || !addFileTarget(reference)) return;
+    const input = composer.current!;
+    const text = t(
+      action === "optimize"
+        ? "assistant.workspace.optimizePrompt"
+        : "assistant.workspace.replaceImagePrompt",
+      { name: reference.name, page: reference.page },
+    );
+    const body = actions.current.draft;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const insert = `${start > 0 ? "\n\n" : ""}${text}\n`;
+    actions.current.setDraft(body.slice(0, start) + insert + body.slice(end));
+    requestAnimationFrame(() => {
+      input.focus();
+      input.setSelectionRange(start + insert.length, start + insert.length);
+    });
+  };
   const toggleSidebar = () => {
     const collapsed = !sidebarCollapsed;
     setSidebarCollapsed(collapsed);
@@ -966,27 +1205,23 @@ function AssistantWorkspace() {
     searchHighlight(assistant.search),
   );
 
-  const webSearchToggle = (
-    <Button
-      variant="ghost"
-      aria-pressed={assistant.webSearch}
-      aria-describedby={showSearchNote ? searchNoteId : undefined}
-      disabled={searchLocked}
-      onClick={() => assistant.setWebSearch(!assistant.webSearch)}
-      className={cn(
-        "shrink-0 px-2",
-        searchLit &&
-          "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
-      )}
-    >
-      <Globe aria-hidden className="h-3.5 w-3.5" />
-      {t("assistant.webSearch")}
-    </Button>
+  const webSearchMenu = (
+    <WebSearchMenu
+      on={assistant.webSearch}
+      provider={assistant.searchProvider}
+      ofoxPrice={searchPrice}
+      exaOffered={exaOffered}
+      disabled={settingsLocked}
+      describedBy={showSearchNote ? searchNoteId : undefined}
+      onChange={(choice) => void assistant.chooseWebSearch(choice)}
+    />
   );
 
-  const column = wide
-    ? "w-[clamp(840px,72%,1040px)] max-w-full"
-    : "w-full max-w-[760px]";
+  const column = selectedFileId
+    ? "w-full max-w-full"
+    : wide
+      ? "w-[clamp(840px,72%,1040px)] max-w-full"
+      : "w-full max-w-[760px]";
   // A new conversation of a wide window starts with its composer in the
   // middle of the page, the starters under it.
   const centred = wide && emptyTranscript && !assistant.loading && !trashed;
@@ -1021,7 +1256,11 @@ function AssistantWorkspace() {
           key={id}
           variant="pill"
           className="h-8 px-3.5 text-ctl"
-          onClick={() => {
+          onClick={(event) => {
+            if (id === "deck") {
+              openPresentation(event.currentTarget);
+              return;
+            }
             focusStarter.current = true;
             const hints = assistant.media.hints ?? [];
             if (kind && !hints.includes(kind))
@@ -1408,623 +1647,810 @@ function AssistantWorkspace() {
         )}
         {/* The drop overlay covers what the files would be added to: the
             transcript and the composer. */}
-        <div
-          data-centred={centred ? "true" : "false"}
-          className={cn(
-            "relative flex min-h-0 flex-1 flex-col",
-            centred && "justify-center pb-[12vh]",
-          )}
+        <AssistantFileWorkspace
+          files={trashed ? [] : workspaceFiles}
+          authority={
+            session && bootstrap?.owner
+              ? {
+                  sessionId: session.id,
+                  expectedOwner: bootstrap.owner,
+                  expectedGeneration: bootstrap.authorityGeneration,
+                }
+              : null
+          }
+          selectedId={selectedFileId}
+          expectedVersion={
+            fileSelection?.scope === fileScope
+              ? fileSelection.expectedVersion
+              : undefined
+          }
+          onSelect={(id, expectedVersion) => {
+            if (fileScopeRef.current === fileScope)
+              setFileSelection(
+                id ? { scope: fileScope, id, expectedVersion } : null,
+              );
+          }}
+          onQuote={quoteFile}
+          onPrepare={prepareFileAction}
+          active={interactionActive && !trashed}
         >
           <div
+            data-centred={centred ? "true" : "false"}
             className={cn(
-              "relative flex min-h-0 flex-col",
-              centred ? "flex-none" : "flex-1",
+              "relative flex min-h-0 flex-1 flex-col",
+              centred && "justify-center pb-[12vh]",
             )}
           >
             <div
-              ref={scroll}
-              onScroll={trackScroll}
-              onWheel={endJump}
-              onTouchMove={endJump}
-              onPointerDown={endJump}
-              onKeyDown={endJump}
               className={cn(
-                "min-h-0 overflow-y-auto overscroll-contain px-4",
+                "relative flex min-h-0 flex-col",
                 centred ? "flex-none" : "flex-1",
               )}
-              aria-busy={assistant.loading}
             >
-              {opening.loading ? (
-                opening.fox
-              ) : (
-                <>
-                  {emptyTranscript && (
+              <div
+                ref={scroll}
+                onScroll={trackScroll}
+                onWheel={endJump}
+                onTouchMove={endJump}
+                onPointerDown={endJump}
+                onKeyDown={endJump}
+                className={cn(
+                  "min-h-0 overflow-y-auto overscroll-contain px-4",
+                  centred ? "flex-none" : "flex-1",
+                )}
+                aria-busy={assistant.loading}
+              >
+                {opening.loading ? (
+                  opening.fox
+                ) : (
+                  <>
+                    {emptyTranscript && (
+                      <div
+                        className={cn(
+                          "mx-auto flex max-w-lg flex-col items-center justify-center text-center",
+                          centred ? "pb-2" : "min-h-full py-8",
+                        )}
+                      >
+                        <h2 className="text-title font-semibold">
+                          {t(trashed ? "assistant.trash" : "assistant.welcome")}
+                        </h2>
+                        {/* A trashed conversation says so below, where its composer
+                        would be. */}
+                        {trashed && !session && (
+                          <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
+                            {t("assistant.trashSelect")}
+                          </p>
+                        )}
+                        {!centred && starterButtons}
+                        {!trashed && (
+                          <p className="mt-4 text-balance text-note text-ink-muted">
+                            {t(
+                              assistant.localConfig
+                                ? "assistant.local.boundary"
+                                : "assistant.emptyBoundary",
+                            )}
+                          </p>
+                        )}
+                        {!trashed && keyMissing && (
+                          <p className="mt-2 text-note text-ink-muted">
+                            {t("assistant.keyMissingHint")}
+                          </p>
+                        )}
+                      </div>
+                    )}
                     <div
                       className={cn(
-                        "mx-auto flex max-w-lg flex-col items-center justify-center text-center",
-                        centred ? "pb-2" : "min-h-full py-8",
+                        "mx-auto py-2",
+                        wide ? column : "max-w-[760px]",
                       )}
                     >
-                      <h2 className="text-title font-semibold">
-                        {t(trashed ? "assistant.trash" : "assistant.welcome")}
-                      </h2>
-                      {/* A trashed conversation says so below, where its composer
-                        would be. */}
-                      {trashed && !session && (
-                        <p className="mt-2 max-w-sm text-ctl leading-relaxed text-ink-muted">
-                          {t("assistant.trashSelect")}
-                        </p>
-                      )}
-                      {!centred && starterButtons}
-                      {!trashed && (
-                        <p className="mt-4 text-balance text-note text-ink-muted">
-                          {t(
-                            assistant.localConfig
-                              ? "assistant.local.boundary"
-                              : "assistant.emptyBoundary",
-                          )}
-                        </p>
-                      )}
-                      {!trashed && keyMissing && (
-                        <p className="mt-2 text-note text-ink-muted">
-                          {t("assistant.keyMissingHint")}
+                      {transcript.map((message) => {
+                        const live = message.id === liveMessage?.id;
+                        const turn = versions.get(message.id);
+                        return (
+                          <AssistantMessageView
+                            onEnableLocal={
+                              !assistant.localConfig &&
+                              !settingsLocked &&
+                              !assistant.run
+                                ? () => void assistant.setLocalConfig(true)
+                                : undefined
+                            }
+                            // The message that carries a switcher keeps its place
+                            // when another version is shown, and the keyboard
+                            // focus on the switcher with it.
+                            key={turn ? `versions:${turn.group}` : message.id}
+                            message={message}
+                            taskProgress={
+                              live ? (
+                                <AssistantRunProgress
+                                  startedAt={
+                                    assistant.runProgress?.startedAt ??
+                                    message.createdAt
+                                  }
+                                  lastEventAt={
+                                    assistant.runProgress?.lastEventAt
+                                  }
+                                  activities={assistant.runProgress?.activities}
+                                  activity={assistant.activity}
+                                  intent={assistant.localIntent}
+                                  warning={assistant.localWarning}
+                                  plan={assistant.localPlan}
+                                  approvals={assistant.localApprovals.length}
+                                  retryAttempt={assistant.retryAttempt}
+                                  thinking={assistant.thinking?.since != null}
+                                  onFinish={focusComposer}
+                                />
+                              ) : undefined
+                            }
+                            retryAttempt={
+                              live ? assistant.retryAttempt : undefined
+                            }
+                            activity={live ? assistant.activity : undefined}
+                            thinking={live ? assistant.thinking : undefined}
+                            immutable={Boolean(
+                              message.runId &&
+                                messages.some(
+                                  (item) =>
+                                    item.runId === message.runId && item.media,
+                                ),
+                            )}
+                            mediaBlock={
+                              message.media?.kind === "video" ? (
+                                videoBlock(message, live)
+                              ) : message.media &&
+                                session &&
+                                bootstrap?.owner ? (
+                                <MediaBlock
+                                  message={message}
+                                  sessionId={session.id}
+                                  owner={bootstrap.owner}
+                                  generation={bootstrap.authorityGeneration}
+                                  disabled={live || !writable}
+                                  onSave={(file) =>
+                                    live
+                                      ? Promise.resolve(false)
+                                      : assistantApi.saveMedia({
+                                          sessionId: session.id,
+                                          attachmentId: file.id,
+                                          expectedOwner: bootstrap.owner!,
+                                          expectedGeneration:
+                                            bootstrap.authorityGeneration,
+                                        })
+                                  }
+                                />
+                              ) : undefined
+                            }
+                            generations={generationCards(message, live)}
+                            onOpenFile={openArtifact}
+                            models={bootstrap?.models}
+                            currentModelId={session?.modelId}
+                            versions={live ? undefined : turn}
+                            searchUnavailable={assistant.searchSkipped.has(
+                              message.id,
+                            )}
+                            searchLimited={assistant.searchLimited.get(
+                              message.id,
+                            )}
+                            onUseOfoxSearch={switchToOfoxSearch}
+                            latest={message.id === latestReplyId}
+                            highlight={live ? undefined : transcriptHighlight}
+                            disabled={live || !writable}
+                            onEdit={live ? noEdit : editMessage}
+                            onEditingChange={live ? undefined : trackEdit}
+                            onRegenerate={
+                              live ? noRegenerate : regenerateMessage
+                            }
+                            onRetry={
+                              !live && retryable(message)
+                                ? retryReply
+                                : undefined
+                            }
+                            onSwitchVersion={live ? undefined : switchVersion}
+                            onFork={live ? undefined : forkMessage}
+                            onSpeak={
+                              !live && readAloud.available
+                                ? (messageId, text) =>
+                                    void readAloud.speak(messageId, text)
+                                : undefined
+                            }
+                            onQuote={
+                              !live && !assistant.busy && !assistant.showTrash
+                                ? quoteText
+                                : undefined
+                            }
+                          />
+                        );
+                      })}
+                      {assistant.localApprovals.map((approval) => (
+                        <LocalApprovalCard
+                          key={approval.approvalId}
+                          approval={approval}
+                          onRespond={assistant.respondLocalApproval}
+                        />
+                      ))}
+                      {assistant.localConfig &&
+                        !assistant.stream &&
+                        messages.length > 0 && (
+                          <LocalChangesLine
+                            key={session?.id ?? "new"}
+                            changes={assistant.localChanges}
+                            disabled={settingsLocked || !!assistant.run}
+                            onRestore={assistant.restoreLocalChanges}
+                          />
+                        )}
+                      {assistant.compacting && (
+                        <p
+                          role="status"
+                          className="py-2 text-note text-ink-muted"
+                        >
+                          {t("assistant.compacting")}
                         </p>
                       )}
                     </div>
-                  )}
-                  <div
-                    className={cn(
-                      "mx-auto py-2",
-                      wide ? column : "max-w-[760px]",
-                    )}
-                  >
-                    {messages.map((message) => {
-                      const turn = versions.get(message.id);
-                      return (
-                        <AssistantMessageView
-                          onEnableLocal={
-                            !assistant.localConfig &&
-                            !settingsLocked &&
-                            !assistant.run
-                              ? () => void assistant.setLocalConfig(true)
-                              : undefined
-                          }
-                          // The message that carries a switcher keeps its place
-                          // when another version is shown, and the keyboard
-                          // focus on the switcher with it.
-                          key={turn ? `versions:${turn.group}` : message.id}
-                          message={message}
-                          immutable={Boolean(
-                            message.runId &&
-                              messages.some(
-                                (item) =>
-                                  item.runId === message.runId && item.media,
-                              ),
-                          )}
-                          mediaBlock={
-                            message.media?.kind === "video" ? (
-                              videoBlock(message)
-                            ) : message.media && session && bootstrap?.owner ? (
-                              <MediaBlock
-                                message={message}
-                                sessionId={session.id}
-                                owner={bootstrap.owner}
-                                generation={bootstrap.authorityGeneration}
-                                disabled={!writable}
-                                onSave={(file) =>
-                                  assistantApi.saveMedia({
-                                    sessionId: session.id,
-                                    attachmentId: file.id,
-                                    expectedOwner: bootstrap.owner!,
-                                    expectedGeneration:
-                                      bootstrap.authorityGeneration,
-                                  })
-                                }
-                              />
-                            ) : undefined
-                          }
-                          generations={generationCards(message)}
-                          models={bootstrap?.models}
-                          currentModelId={session?.modelId}
-                          versions={turn}
-                          searchUnavailable={assistant.searchSkipped.has(
-                            message.id,
-                          )}
-                          latest={message.id === latestReplyId}
-                          highlight={transcriptHighlight}
-                          disabled={!writable}
-                          onEdit={editMessage}
-                          onEditingChange={trackEdit}
-                          onRegenerate={regenerateMessage}
-                          onRetry={retryable(message) ? retryReply : undefined}
-                          onSwitchVersion={switchVersion}
-                          onFork={forkMessage}
-                          onSpeak={
-                            readAloud.available
-                              ? (messageId, text) =>
-                                  void readAloud.speak(messageId, text)
-                              : undefined
-                          }
-                          onQuote={
-                            !assistant.busy && !assistant.showTrash
-                              ? quoteText
-                              : undefined
-                          }
-                        />
-                      );
-                    })}
-                    {assistant.stream &&
-                      ["assistant", "media"].includes(
-                        assistant.stream.role,
-                      ) && (
-                        <AssistantMessageView
-                          onEnableLocal={
-                            !assistant.localConfig &&
-                            !settingsLocked &&
-                            !assistant.run
-                              ? () => void assistant.setLocalConfig(true)
-                              : undefined
-                          }
-                          message={assistant.stream}
-                          taskProgress={
-                            <LocalTaskProgress
-                              intent={assistant.localIntent}
-                              warning={assistant.localWarning}
-                              plan={assistant.localPlan}
-                            />
-                          }
-                          mediaBlock={
-                            assistant.stream.media?.kind === "video" ? (
-                              videoBlock(assistant.stream, true)
-                            ) : assistant.stream.media &&
-                              session &&
-                              bootstrap?.owner ? (
-                              <MediaBlock
-                                message={assistant.stream}
-                                sessionId={session.id}
-                                owner={bootstrap.owner}
-                                generation={bootstrap.authorityGeneration}
-                                disabled
-                                onSave={async () => false}
-                              />
-                            ) : undefined
-                          }
-                          generations={generationCards(assistant.stream, true)}
-                          activity={assistant.activity}
-                          thinking={assistant.thinking}
-                          searchUnavailable={assistant.searchSkipped.has(
-                            assistant.stream.id,
-                          )}
-                          latest={assistant.stream.id === latestReplyId}
-                          disabled
-                          onEdit={noEdit}
-                          onRegenerate={noRegenerate}
-                        />
-                      )}
-                    {assistant.localApprovals.map((approval) => (
-                      <LocalApprovalCard
-                        key={approval.approvalId}
-                        approval={approval}
-                        onRespond={assistant.respondLocalApproval}
-                      />
-                    ))}
-                    {assistant.localConfig &&
-                      !assistant.stream &&
-                      messages.length > 0 && (
-                        <LocalChangesLine
-                          key={session?.id ?? "new"}
-                          changes={assistant.localChanges}
-                          disabled={settingsLocked || !!assistant.run}
-                          onRestore={assistant.restoreLocalChanges}
-                        />
-                      )}
-                    {assistant.compacting && (
-                      <p
-                        role="status"
-                        className="py-2 text-note text-ink-muted"
-                      >
-                        {t("assistant.compacting")}
-                      </p>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
-            {awayFromEnd && !assistant.loading && (
-              <Button
-                variant="secondary"
-                size="icon"
-                // A mid-grey ring: the card's own border is too faint to see
-                // against the transcript in the dark theme.
-                className="absolute bottom-3 left-1/2 h-8 w-8 -translate-x-1/2 rounded-full border-ink-muted text-ink shadow-md"
-                aria-label={t(
-                  unseenBelow
-                    ? "assistant.scrollToEndNew"
-                    : "assistant.scrollToEnd",
+                  </>
                 )}
-                title={t("assistant.scrollToEnd")}
-                onClick={(event) =>
-                  jumpToEnd(document.activeElement === event.currentTarget)
-                }
-              >
-                <ArrowDown aria-hidden className="h-4 w-4" />
-                {unseenBelow && (
-                  <span
-                    aria-hidden
-                    data-testid="scroll-to-end-dot"
-                    className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full border-2 border-card bg-brand"
-                  />
-                )}
-              </Button>
-            )}
-          </div>
-          <footer className="flex max-h-[50%] min-h-0 shrink-0 flex-col bg-card px-4 pb-3 pt-2">
-            {session && sessionTrashed ? (
-              // Read-only until restored: no composer, and the way back.
-              <div
-                role="status"
-                className={cn(
-                  "mx-auto flex flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4",
-                  column,
-                )}
-              >
-                <p className="text-center text-ctl text-ink-2">
-                  {t("assistant.trashHint")}
-                </p>
+              </div>
+              {awayFromEnd && !assistant.loading && (
                 <Button
                   variant="secondary"
-                  disabled={busy || Boolean(run)}
-                  onClick={(event) => restore(event.currentTarget)}
+                  size="icon"
+                  // A mid-grey ring: the card's own border is too faint to see
+                  // against the transcript in the dark theme.
+                  className="absolute bottom-3 left-1/2 h-8 w-8 -translate-x-1/2 rounded-full border-ink-muted text-ink shadow-md"
+                  aria-label={t(
+                    unseenBelow
+                      ? "assistant.scrollToEndNew"
+                      : "assistant.scrollToEnd",
+                  )}
+                  title={t("assistant.scrollToEnd")}
+                  onClick={(event) =>
+                    jumpToEnd(document.activeElement === event.currentTarget)
+                  }
                 >
-                  <RotateCcw aria-hidden className="h-3.5 w-3.5" />
-                  {t("assistant.restore")}
-                </Button>
-              </div>
-            ) : (
-              <div className={cn("mx-auto flex min-h-0 flex-col", column)}>
-                <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
-                  {queueCount > 0 && assistant.queue && (
-                    <AssistantQueue
-                      key={assistant.selectedId}
-                      queue={assistant.queue}
-                      canResume={assistant.queueAvailable && !run}
-                      onPause={assistant.pauseQueue}
-                      onResume={() => {
-                        // Move focus while the user is still here, never in a
-                        // delayed completion that could follow navigation.
-                        focusComposer();
-                        void assistant.resumeQueue();
-                      }}
-                      onClear={assistant.clearQueue}
-                      onEdit={assistant.editQueued}
-                      onRemove={assistant.removeQueued}
-                      focusComposer={focusComposer}
+                  <ArrowDown aria-hidden className="h-4 w-4" />
+                  {unseenBelow && (
+                    <span
+                      aria-hidden
+                      data-testid="scroll-to-end-dot"
+                      className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full border-2 border-card bg-brand"
                     />
                   )}
-                  {/* Kept mounted: its live region announces the warnings, and
+                </Button>
+              )}
+            </div>
+            <footer className="flex max-h-[50%] min-h-0 shrink-0 flex-col bg-card px-4 pb-3 pt-2">
+              {session && sessionTrashed ? (
+                // Read-only until restored: no composer, and the way back.
+                <div
+                  role="status"
+                  className={cn(
+                    "mx-auto flex flex-col items-center gap-3 rounded-list border border-line bg-card-2 px-4 py-4",
+                    column,
+                  )}
+                >
+                  <p className="text-center text-ctl text-ink-2">
+                    {t("assistant.trashHint")}
+                  </p>
+                  <Button
+                    variant="secondary"
+                    disabled={busy || Boolean(run)}
+                    onClick={(event) => restore(event.currentTarget)}
+                  >
+                    <RotateCcw aria-hidden className="h-3.5 w-3.5" />
+                    {t("assistant.restore")}
+                  </Button>
+                </div>
+              ) : (
+                <div className={cn("mx-auto flex min-h-0 flex-col", column)}>
+                  <div className="flex min-h-0 flex-col rounded-list border border-line bg-card shadow-[0_1px_3px_rgba(0,0,0,.04)] transition-[border-color,box-shadow] focus-within:border-brand/60 focus-within:ring-2 focus-within:ring-brand/10">
+                    {queueCount > 0 && assistant.queue && (
+                      <AssistantQueue
+                        key={assistant.selectedId}
+                        queue={assistant.queue}
+                        canResume={assistant.queueAvailable && !run}
+                        onPause={assistant.pauseQueue}
+                        onResume={() => {
+                          // Move focus while the user is still here, never in a
+                          // delayed completion that could follow navigation.
+                          focusComposer();
+                          void assistant.resumeQueue();
+                        }}
+                        onClear={assistant.clearQueue}
+                        onEdit={assistant.editQueued}
+                        onRemove={assistant.removeQueued}
+                        focusComposer={focusComposer}
+                      />
+                    )}
+                    {/* Kept mounted: its live region announces the warnings, and
                   the list hands focus back once its last file is removed.
                   Only the list scrolls: the warnings that explain why Send
                   is disabled stay in view below it. */}
-                  <div
-                    className={cn(
-                      "min-h-0",
-                      files.length > 0 && "max-h-36 overflow-y-auto px-3 pt-3",
-                    )}
-                  >
-                    <AttachmentList
-                      files={files}
-                      onRemove={assistant.removeAttachment}
-                      onAllRemoved={focusComposer}
-                      removeDisabled={busy || Boolean(run) || trashed}
-                    />
-                  </div>
-                  <div aria-live="polite" className="shrink-0 px-3">
-                    {queueMode && (queueFull || files.length > 0) && (
-                      <p
-                        id={queueHintId}
-                        className="mt-1.5 text-note text-warn"
-                      >
-                        {t(
-                          queueFull
-                            ? "assistant.queue.full"
-                            : "assistant.queue.textOnly",
-                          { max: MAX_QUEUED_MESSAGES },
-                        )}
-                      </p>
-                    )}
-                    {referenceOverflow && (
-                      <p className="mt-1.5 text-note text-danger">
-                        {t("assistant.generation.overLimit")}
-                      </p>
-                    )}
-                    {generationNeedsTools && (
-                      <p className="mt-1.5 text-note text-warn">
-                        {t("assistant.generation.needsTools")}
-                      </p>
-                    )}
-                    {blockedFiles && (
-                      <p
-                        id={blockedHint}
-                        className="mt-1.5 text-note text-danger"
-                      >
-                        {t("assistant.attachmentsBlocked")}
-                      </p>
-                    )}
-                    {imagesNeedVision && (
-                      <p id={visionHint} className="mt-1.5 text-note text-warn">
-                        {t("assistant.imagesNeedVision")}
-                      </p>
-                    )}
-                    {overLength && (
-                      <p
-                        id={lengthHintId}
-                        className="mt-1.5 text-note text-danger"
-                      >
-                        {t("assistant.lengthExceeded")}
-                      </p>
-                    )}
-                  </div>
-                  <Textarea
-                    ref={composer}
-                    rows={3}
-                    className={cn(
-                      "shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0",
-                      wide
-                        ? "max-h-[200px] min-h-[96px]"
-                        : "max-h-40 min-h-[76px]",
-                    )}
-                    aria-label={t("assistant.message")}
-                    placeholder={t("assistant.composerPlaceholder")}
-                    value={assistant.draft}
-                    disabled={!available}
-                    readOnly={busy || trashed}
-                    onChange={(event) => assistant.setDraft(event.target.value)}
-                    onPaste={(event) => {
-                      const pasted = pastedFiles(event.clipboardData);
-                      if (!pasted) return;
-                      // Files and no words of their own: the field has
-                      // nothing to paste.
-                      event.preventDefault();
-                      if (!writable || queueCount > 0) return;
-                      // The skipped files are told once the import is under
-                      // way, not for a paste that was refused.
-                      void assistant.pasteAttachments(
-                        pasted.files,
-                        pasted.skipped > 0
-                          ? () =>
-                              toast.warning(
-                                t("assistant.pasteSkipped", {
-                                  count: pasted.skipped,
-                                  max: MAX_PASTED_FILES,
-                                }),
-                              )
-                          : undefined,
-                      );
-                    }}
-                    onKeyDown={(event) => {
-                      // WKWebView reports the Enter that confirms an IME candidate
-                      // with isComposing false but keyCode 229.
-                      if (
-                        event.key === "Enter" &&
-                        !event.shiftKey &&
-                        !event.nativeEvent.isComposing &&
-                        event.keyCode !== 229
-                      ) {
-                        event.preventDefault();
-                        if ((queueMode ? canQueue : writable) && !overLength)
-                          send();
-                      }
-                    }}
-                  />
-                  <div className="flex shrink-0 items-center justify-between gap-2 pb-2 pl-2 pr-3">
-                    <div className="flex min-w-0 items-center gap-1.5">
-                      <ComposerPlus
-                        models={generationCatalog}
-                        media={assistant.media}
-                        onMedia={assistant.setMedia}
-                        canAttach={writable && queueCount === 0}
-                        onAttach={() =>
-                          // The dialog leaves focus on a button disabled while
-                          // it was open: the message takes it back.
-                          void assistant.pickAttachments().then(focusComposer)
-                        }
-                        disabled={!available || trashed}
+                    <div
+                      className={cn(
+                        "min-h-0",
+                        files.length > 0 &&
+                          "max-h-36 overflow-y-auto px-3 pt-3",
+                      )}
+                    >
+                      <AttachmentList
+                        files={files}
+                        onOpenFile={openArtifact}
+                        onRemove={assistant.removeAttachment}
+                        onAllRemoved={focusComposer}
+                        removeDisabled={busy || Boolean(run) || trashed}
                       />
-                      {bootstrap?.audioModels?.some(
-                        (model) =>
-                          model.kind === "transcription" && model.audio,
-                      ) && (
-                        <Button
-                          variant="icon"
-                          aria-label={t("assistant.audio.title")}
-                          title={t("assistant.audio.title")}
-                          disabled={!writable || queueCount > 0}
-                          onClick={() => {
-                            void assistant.prepareAudio().then((target) => {
-                              if (target) setAudioDialog(target);
-                            });
-                          }}
-                        >
-                          <Mic aria-hidden className="h-3.5 w-3.5" />
-                        </Button>
-                      )}
-                      {showSearchNote ? (
-                        <Tooltip>
-                          {/* The wrapper takes the hover while the switch is off. */}
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex shrink-0">
-                              {webSearchToggle}
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent side="top">
-                            {searchNote}
-                          </TooltipContent>
-                        </Tooltip>
-                      ) : (
-                        webSearchToggle
-                      )}
-                      {showSearchNote && (
-                        <span id={searchNoteId} className="sr-only">
-                          {searchNote}
-                        </span>
-                      )}
-                      {composerModel?.tools !== false && (
-                        <PermissionControl
-                          key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
-                          mode={assistant.localMode}
-                          disabled={settingsLocked || !!assistant.run}
-                          onMode={assistant.setLocalPermission}
-                        />
-                      )}
-                      {/* A reply under way goes on as it began: the choice is
-                      for the next message. */}
-                      {
-                        <ThinkingMenu
-                          model={composerModel}
-                          level={assistant.thinkingLevel}
-                          disabled={settingsLocked}
-                          onChange={assistant.setThinkingLevel}
-                        />
-                      }
                     </div>
-                    <div className="flex shrink-0 items-center gap-2">
-                      {showLength && (
-                        <span className="text-note tabular-nums text-ink-muted">
-                          {t("assistant.lengthHint", {
-                            percent: lengthPercent,
-                          })}
-                        </span>
-                      )}
-                      {
-                        <AssistantContextUsage
-                          modelId={session?.modelId ?? ""}
-                          usage={
-                            assistant.compacting
-                              ? undefined
-                              : session?.contextUsage
-                          }
-                        />
-                      }
-                      {run && queueMode && (
-                        <Button
-                          variant="ghost"
-                          className="h-7 px-2 text-note"
-                          disabled={
-                            assistant.compacting ||
-                            !assistant.queueAvailable ||
-                            !assistant.draft.trim() ||
-                            files.length > 0 ||
-                            overLength
-                          }
-                          onClick={() =>
-                            void assistant.steer().then((sent) => {
-                              if (sent) focusComposer();
-                            })
-                          }
+                    <div aria-live="polite" className="shrink-0 px-3">
+                      {queueMode && (queueFull || files.length > 0) && (
+                        <p
+                          id={queueHintId}
+                          className="mt-1.5 text-note text-warn"
                         >
-                          {t("assistant.queue.interrupt")}
-                        </Button>
+                          {t(
+                            queueFull
+                              ? "assistant.queue.full"
+                              : "assistant.queue.textOnly",
+                            { max: MAX_QUEUED_MESSAGES },
+                          )}
+                        </p>
                       )}
-                      {run && (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              variant="secondary"
-                              size="icon"
-                              className="h-7 w-7 rounded-full"
-                              aria-label={t("assistant.stop")}
-                              aria-keyshortcuts="Escape"
-                              onClick={stop}
+                      {referenceOverflow && (
+                        <p className="mt-1.5 text-note text-danger">
+                          {t("assistant.generation.overLimit")}
+                        </p>
+                      )}
+                      {generationNeedsTools && (
+                        <p className="mt-1.5 text-note text-warn">
+                          {t("assistant.generation.needsTools")}
+                        </p>
+                      )}
+                      {blockedFiles && (
+                        <p
+                          id={blockedHint}
+                          className="mt-1.5 text-note text-danger"
+                        >
+                          {t("assistant.attachmentsBlocked")}
+                        </p>
+                      )}
+                      {imagesNeedVision && (
+                        <p
+                          id={visionHint}
+                          className="mt-1.5 text-note text-warn"
+                        >
+                          {t("assistant.imagesNeedVision")}
+                        </p>
+                      )}
+                      {overLength && (
+                        <p
+                          id={lengthHintId}
+                          className="mt-1.5 text-note text-danger"
+                        >
+                          {t("assistant.lengthExceeded")}
+                        </p>
+                      )}
+                    </div>
+                    {assistant.fileReferences.length > 0 && (
+                      <ul
+                        role="list"
+                        aria-label={t("assistant.workspace.references")}
+                        className="flex max-h-24 flex-wrap gap-1 overflow-y-auto px-3 pt-2"
+                      >
+                        {assistant.fileReferences.map((reference) => {
+                          const file = workspaceFiles.find(
+                            (file) => file.id === reference.attachmentId,
+                          );
+                          const label =
+                            reference.page === null
+                              ? t("assistant.workspace.referenceFile", {
+                                  name: file?.name ?? reference.attachmentId,
+                                })
+                              : t("assistant.workspace.referencePage", {
+                                  name: file?.name ?? reference.attachmentId,
+                                  page: reference.page,
+                                });
+                          return (
+                            <li
+                              key={`${reference.attachmentId}:${reference.version}:${reference.page}`}
+                              className="inline-flex max-w-full items-center gap-1 rounded-ctl bg-pill px-2 py-1 text-note text-ink-muted"
                             >
-                              <Square
-                                aria-hidden
-                                className="h-3 w-3 fill-current"
-                              />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent
-                            side="top"
-                            onEscapeKeyDown={stopOnTooltipEscape}
+                              <span className="truncate" title={label}>
+                                {label}
+                              </span>
+                              <button
+                                type="button"
+                                aria-label={t(
+                                  "assistant.workspace.removeReference",
+                                  { name: label },
+                                )}
+                                className="shrink-0 rounded-ctl hover:text-ink"
+                                onClick={() => {
+                                  assistant.removeFileReference(reference);
+                                  focusComposer();
+                                }}
+                              >
+                                <X aria-hidden className="h-3 w-3" />
+                              </button>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                    {assistant.presentationStyleId !== undefined && (
+                      <div className="flex flex-wrap items-center gap-1 px-3 pt-2">
+                        <span className="inline-flex max-w-full items-center rounded-ctl bg-brand-soft text-brand-ink">
+                          <Button
+                            variant="ghost"
+                            aria-label={t("assistant.presentation.change")}
+                            disabled={!canPresentation}
+                            onClick={(event) =>
+                              openPresentation(event.currentTarget)
+                            }
+                            className="h-7 min-w-0 gap-1 px-2 text-brand-ink hover:bg-transparent hover:text-ink"
                           >
-                            {t("assistant.stopTooltip")}
-                          </TooltipContent>
-                        </Tooltip>
+                            <Presentation
+                              aria-hidden
+                              className="h-3.5 w-3.5 shrink-0"
+                            />
+                            <span className="truncate">
+                              {t("assistant.presentation.chip", {
+                                name: presentationStyleName(
+                                  assistant.presentationStyleId,
+                                  t,
+                                  i18n.language,
+                                ),
+                              })}
+                            </span>
+                            <ChevronDown
+                              aria-hidden
+                              className="h-3 w-3 shrink-0 opacity-60"
+                            />
+                          </Button>
+                          <button
+                            type="button"
+                            aria-label={t("assistant.presentation.remove")}
+                            disabled={!writable}
+                            onClick={() => {
+                              assistant.setPresentationStyleId(undefined);
+                              focusComposer();
+                            }}
+                            className="mr-1 rounded-ctl p-0.5 hover:text-ink disabled:opacity-50"
+                          >
+                            <X aria-hidden className="h-3 w-3" />
+                          </button>
+                        </span>
+                        <PresentationVisualSettings
+                          key={presentationScope}
+                          value={assistant.presentationVisualPolicy}
+                          onChange={(value) => {
+                            if (
+                              presentationScopeRef.current ===
+                                presentationScope &&
+                              interactionActiveRef.current
+                            )
+                              assistant.setPresentationVisualPolicy(value);
+                          }}
+                          disabled={!writable}
+                        />
+                      </div>
+                    )}
+                    {assistant.presentationStyleId === undefined &&
+                      assistant.fileReferences.some(
+                        (reference) =>
+                          workspaceFiles.find(
+                            (file) => file.id === reference.attachmentId,
+                          )?.mimeType ===
+                          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                      ) && (
+                        <div className="px-3 pt-1">
+                          <PresentationVisualSettings
+                            key={presentationScope}
+                            value={assistant.presentationVisualPolicy}
+                            onChange={(value) => {
+                              if (
+                                presentationScopeRef.current ===
+                                  presentationScope &&
+                                interactionActiveRef.current
+                              )
+                                assistant.setPresentationVisualPolicy(value);
+                            }}
+                            disabled={!writable}
+                          />
+                        </div>
                       )}
-                      {(!run || queueMode) && (
-                        <Tooltip>
-                          {/* The wrapper takes the hover while Send is disabled:
-                          a disabled button gets no pointer events. */}
-                          <TooltipTrigger asChild>
-                            <span className="inline-flex shrink-0">
+                    <SkillPicker
+                      scope={`${bootstrap?.owner}:${bootstrap?.authorityGeneration}:${assistant.selectedId}`}
+                      skill={assistant.skill}
+                      onSkill={assistant.setSkill}
+                      ref={composer}
+                      rows={3}
+                      className={cn(
+                        "shrink-0 resize-none border-0 bg-transparent px-3 py-3 text-ui focus:ring-0",
+                        wide
+                          ? "max-h-[200px] min-h-[96px]"
+                          : "max-h-40 min-h-[76px]",
+                      )}
+                      aria-label={t("assistant.message")}
+                      placeholder={t(
+                        assistant.presentationStyleId !== undefined &&
+                          !queueMode
+                          ? "assistant.presentation.promptPlaceholder"
+                          : "assistant.composerPlaceholder",
+                      )}
+                      value={assistant.draft}
+                      disabled={!available}
+                      readOnly={busy || trashed}
+                      onTextChange={assistant.setDraft}
+                      onPaste={(event) => {
+                        const pasted = pastedFiles(event.clipboardData);
+                        if (!pasted) return;
+                        // Files and no words of their own: the field has
+                        // nothing to paste.
+                        event.preventDefault();
+                        if (!writable || queueCount > 0) return;
+                        // The skipped files are told once the import is under
+                        // way, not for a paste that was refused.
+                        void assistant.pasteAttachments(
+                          pasted.files,
+                          pasted.skipped > 0
+                            ? () =>
+                                toast.warning(
+                                  t("assistant.pasteSkipped", {
+                                    count: pasted.skipped,
+                                    max: MAX_PASTED_FILES,
+                                  }),
+                                )
+                            : undefined,
+                        );
+                      }}
+                      onKeyDown={(event) => {
+                        // WKWebView reports the Enter that confirms an IME candidate
+                        // with isComposing false but keyCode 229.
+                        if (
+                          event.key === "Enter" &&
+                          !event.shiftKey &&
+                          !event.nativeEvent.isComposing &&
+                          event.keyCode !== 229
+                        ) {
+                          event.preventDefault();
+                          if ((queueMode ? canQueue : writable) && !overLength)
+                            send();
+                        }
+                      }}
+                    />
+                    <div className="flex shrink-0 items-end justify-between gap-2 pb-2 pl-2 pr-3">
+                      {/* A narrow composer (beside the file workspace) wraps
+                      the controls onto a second row; none may shrink under
+                      its own width and slide beneath its neighbour. */}
+                      <div
+                        data-testid="composer-controls"
+                        className="flex min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-1 [&>*]:shrink-0"
+                      >
+                        <ComposerPlus
+                          models={generationCatalog}
+                          media={assistant.media}
+                          onMedia={assistant.setMedia}
+                          canPresentation={canPresentation}
+                          onPresentation={openPresentation}
+                          canAttach={writable && queueCount === 0}
+                          onAttach={() =>
+                            // The dialog leaves focus on a button disabled while
+                            // it was open: the message takes it back.
+                            void assistant.pickAttachments().then(focusComposer)
+                          }
+                          disabled={!available || trashed}
+                        />
+                        {bootstrap?.audioModels?.some(
+                          (model) =>
+                            model.kind === "transcription" && model.audio,
+                        ) && (
+                          <Button
+                            variant="icon"
+                            aria-label={t("assistant.audio.title")}
+                            title={t("assistant.audio.title")}
+                            disabled={!writable || queueCount > 0}
+                            onClick={() => {
+                              void assistant.prepareAudio().then((target) => {
+                                if (target) setAudioDialog(target);
+                              });
+                            }}
+                          >
+                            <Mic aria-hidden className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                        {showSearchNote ? (
+                          <Tooltip>
+                            {/* The wrapper takes the hover while the menu is
+                          locked. */}
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex shrink-0">
+                                {webSearchMenu}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              {searchNote}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          webSearchMenu
+                        )}
+                        {showSearchNote && (
+                          <span id={searchNoteId} className="sr-only">
+                            {searchNote}
+                          </span>
+                        )}
+                        {composerModel?.tools !== false && (
+                          <PermissionControl
+                            key={`${assistant.selectedId ?? "new"}:${bootstrap?.authorityGeneration ?? 0}`}
+                            mode={assistant.localMode}
+                            disabled={settingsLocked || !!assistant.run}
+                            onMode={assistant.setLocalPermission}
+                          />
+                        )}
+                        {/* A reply under way goes on as it began: the choice is
+                      for the next message. */}
+                        {
+                          <ThinkingMenu
+                            model={composerModel}
+                            level={assistant.thinkingLevel}
+                            disabled={settingsLocked}
+                            onChange={assistant.setThinkingLevel}
+                          />
+                        }
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {showLength && (
+                          <span className="text-note tabular-nums text-ink-muted">
+                            {t("assistant.lengthHint", {
+                              percent: lengthPercent,
+                            })}
+                          </span>
+                        )}
+                        {
+                          <AssistantContextUsage
+                            modelId={session?.modelId ?? ""}
+                            usage={
+                              assistant.compacting
+                                ? undefined
+                                : session?.contextUsage
+                            }
+                          />
+                        }
+                        {run && queueMode && (
+                          <Button
+                            variant="ghost"
+                            className="h-7 px-2 text-note"
+                            disabled={
+                              assistant.compacting ||
+                              !assistant.queueAvailable ||
+                              !assistant.draft.trim() ||
+                              files.length > 0 ||
+                              Boolean(assistant.skill) ||
+                              assistant.presentationStyleId !== undefined ||
+                              assistant.fileReferences.length > 0 ||
+                              overLength
+                            }
+                            onClick={() =>
+                              void assistant.steer().then((sent) => {
+                                if (sent) focusComposer();
+                              })
+                            }
+                          >
+                            {t("assistant.queue.interrupt")}
+                          </Button>
+                        )}
+                        {run &&
+                          (assistant.skill ||
+                            assistant.presentationStyleId !== undefined) && (
+                            <p className="max-w-48 text-note text-ink-muted">
+                              {t(
+                                assistant.skill
+                                  ? "assistant.skills.queueOnly"
+                                  : "assistant.presentation.queueOnly",
+                              )}
+                            </p>
+                          )}
+                        {run && (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
                               <Button
+                                variant="secondary"
                                 size="icon"
                                 className="h-7 w-7 rounded-full"
-                                aria-label={t(
-                                  queueMode
-                                    ? "assistant.queue.add"
-                                    : "assistant.send",
-                                )}
-                                aria-describedby={sendHints}
-                                disabled={
-                                  !(queueMode ? canQueue : writable) ||
-                                  blockedFiles ||
-                                  referenceOverflow ||
-                                  overLength ||
-                                  (!assistant.draft.trim() && !files.length)
-                                }
-                                onClick={send}
+                                aria-label={t("assistant.stop")}
+                                aria-keyshortcuts="Escape"
+                                onClick={stop}
                               >
-                                {queueMode ? (
-                                  <ListPlus
-                                    aria-hidden
-                                    className="h-3.5 w-3.5"
-                                  />
-                                ) : (
-                                  <ArrowUp
-                                    aria-hidden
-                                    className="h-3.5 w-3.5"
-                                  />
-                                )}
+                                <Square
+                                  aria-hidden
+                                  className="h-3 w-3 fill-current"
+                                />
                               </Button>
-                            </span>
-                          </TooltipTrigger>
-                          <TooltipContent side="top">
-                            {t(
-                              queueMode
-                                ? "assistant.queue.addTooltip"
-                                : "assistant.sendTooltip",
-                            )}
-                          </TooltipContent>
-                        </Tooltip>
-                      )}
+                            </TooltipTrigger>
+                            <TooltipContent
+                              side="top"
+                              onEscapeKeyDown={stopOnTooltipEscape}
+                            >
+                              {t("assistant.stopTooltip")}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                        {(!run || queueMode) && (
+                          <Tooltip>
+                            {/* The wrapper takes the hover while Send is disabled:
+                          a disabled button gets no pointer events. */}
+                            <TooltipTrigger asChild>
+                              <span className="inline-flex shrink-0">
+                                <Button
+                                  size="icon"
+                                  className="h-7 w-7 rounded-full"
+                                  aria-label={t(
+                                    queueMode
+                                      ? "assistant.queue.add"
+                                      : "assistant.send",
+                                  )}
+                                  aria-describedby={sendHints}
+                                  disabled={
+                                    !(queueMode ? canQueue : writable) ||
+                                    blockedFiles ||
+                                    referenceOverflow ||
+                                    overLength ||
+                                    (!assistant.draft.trim() && !files.length)
+                                  }
+                                  onClick={send}
+                                >
+                                  {queueMode ? (
+                                    <ListPlus
+                                      aria-hidden
+                                      className="h-3.5 w-3.5"
+                                    />
+                                  ) : (
+                                    <ArrowUp
+                                      aria-hidden
+                                      className="h-3.5 w-3.5"
+                                    />
+                                  )}
+                                </Button>
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top">
+                              {t(
+                                queueMode
+                                  ? "assistant.queue.addTooltip"
+                                  : "assistant.sendTooltip",
+                              )}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
+                      </div>
                     </div>
                   </div>
+                  {assistant.webSearchWaits && (
+                    <p
+                      role="status"
+                      className="mt-2 shrink-0 text-note text-ink-muted"
+                    >
+                      {t("assistant.webSearchNextMessage")}
+                    </p>
+                  )}
+                  {centred && starterButtons}
                 </div>
-                {assistant.webSearchWaits && (
-                  <p
-                    role="status"
-                    className="mt-2 shrink-0 text-note text-ink-muted"
-                  >
-                    {t("assistant.webSearchNextMessage")}
-                  </p>
-                )}
-                {centred && starterButtons}
+              )}
+            </footer>
+            {dragging && (
+              <div
+                aria-hidden
+                data-testid="assistant-drop-overlay"
+                className="pointer-events-none absolute inset-0 z-20 grid animate-fade place-items-center rounded-card border-2 border-dashed border-brand bg-card/85"
+              >
+                <p className="flex items-center gap-2 text-ui font-medium text-brand-ink">
+                  <Upload aria-hidden className="h-4 w-4" />
+                  {t("assistant.dropOverlay")}
+                </p>
               </div>
             )}
-          </footer>
-          {dragging && (
-            <div
-              aria-hidden
-              data-testid="assistant-drop-overlay"
-              className="pointer-events-none absolute inset-0 z-20 grid animate-fade place-items-center rounded-card border-2 border-dashed border-brand bg-card/85"
-            >
-              <p className="flex items-center gap-2 text-ui font-medium text-brand-ink">
-                <Upload aria-hidden className="h-4 w-4" />
-                {t("assistant.dropOverlay")}
-              </p>
-            </div>
-          )}
-        </div>
+          </div>
+        </AssistantFileWorkspace>
       </section>
       {interactionActive &&
         audioDialog &&
@@ -2116,6 +2542,37 @@ function AssistantWorkspace() {
         open={requestScope === requestScopeKey}
         onOpenChange={(open) => {
           if (!open) setRequestScope(null);
+        }}
+      />
+      <PresentationStylePicker
+        open={Boolean(
+          presentationDialog &&
+            presentationDialog.scope === presentationScope &&
+            canPresentation &&
+            interactionActive,
+        )}
+        value={assistant.presentationStyleId ?? "auto"}
+        onOpenChange={(open) => {
+          if (!open) closePresentation();
+        }}
+        onSelect={choosePresentation}
+        returnFocusRef={presentationReturnFocus}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          if (
+            !interactionActiveRef.current ||
+            presentationFocusScope.current !== presentationScopeRef.current
+          )
+            return;
+          const target = presentationFocusComposer.current
+            ? composer.current
+            : presentationReturnFocus.current;
+          if (
+            target?.isConnected &&
+            !(target instanceof HTMLButtonElement && target.disabled)
+          )
+            target.focus();
+          else focusComposer();
         }}
       />
       <ConfirmDialog

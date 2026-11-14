@@ -127,7 +127,10 @@ test("a model without a style option offers no style argument", () => {
     tool(tools, "generate_speech").parameters.properties.style,
     undefined,
   );
-  const styled = fixture({ ...MEDIA, speech: { ...MEDIA.speech, style: true } });
+  const styled = fixture({
+    ...MEDIA,
+    speech: { ...MEDIA.speech, style: true },
+  });
   assert.ok(tool(styled.tools, "generate_speech").parameters.properties.style);
 });
 

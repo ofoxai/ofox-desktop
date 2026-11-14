@@ -10,6 +10,46 @@ fn tool_call(data: &Value) -> Result<(&str, &str), String> {
     }
 }
 
+/// Argument streaming is presentation only: fixed tool identity and a bounded
+/// provider call id, never generated code, arguments, intent or a tool result.
+pub(crate) fn tool_preparing_event(data: &Value) -> Result<Value, String> {
+    let (name, call) = tool_call(data)?;
+    if !matches!(
+        name,
+        "web_search"
+            | "web_fetch"
+            | "read_attachment"
+            | "read"
+            | "stat"
+            | "ls"
+            | "find"
+            | "grep"
+            | "write"
+            | "edit"
+            | "bash"
+            | "powershell"
+            | "tool_status"
+            | "diagnose_in_folder"
+            | "verify_in_folder"
+            | "get_presentation_style"
+            | "get_presentation_candidates"
+            | "freeze_presentation_plan"
+            | "use_skill"
+            | "create_document"
+    ) || call.len() > 200
+        || !call
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || b"_.:|/-".contains(&value))
+    {
+        return Err(PROTOCOL.into());
+    }
+    let mut shown = json!({"name":name,"toolCallId":call});
+    if let Some(active) = data.get("active") {
+        shown["active"] = json!(active.as_bool().ok_or(PROTOCOL)?);
+    }
+    Ok(shown)
+}
+
 /// The `tool_start` the renderer is shown: the tool, its call and the one
 /// argument worth showing (the query, the page, the attachment).
 pub(crate) fn tool_start_event(data: &Value) -> Result<Value, String> {

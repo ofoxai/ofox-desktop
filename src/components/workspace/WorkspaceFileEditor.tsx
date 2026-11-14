@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import React, { useState, useEffect, useCallback } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -76,8 +77,8 @@ const WorkspaceFileEditor: React.FC<WorkspaceFileEditorProps> = ({
       }
     >
       {loading ? (
-        <div className="flex items-center justify-center h-64 text-muted-foreground">
-          {t("prompts.loading")}
+        <div className="flex items-center justify-center h-64">
+          <FoxLoader size="block" label={t("prompts.loading")} />
         </div>
       ) : (
         <MarkdownEditor

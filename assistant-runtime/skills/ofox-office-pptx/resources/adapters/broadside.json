@@ -1,0 +1,327 @@
+{
+  "id": "broadside",
+  "family": "poster",
+  "names": {
+    "zh": "Broadside 橙黑大字报",
+    "en": "Broadside",
+    "ja": "Broadside 号外ポスター"
+  },
+  "intro": {
+    "zh": "近黑画布与火橙画布交替，超大小写无衬线标题配等宽小字；适合品牌宣言、创始人愿景、设计演讲和需要戏剧感的发布。",
+    "en": "Near-black and fire-orange canvases alternate under huge lowercase grotesque headlines with mono captions; for manifestos, founder vision decks, design talks and dramatic launches.",
+    "ja": "黒に近い画面と炎のようなオレンジの画面が交互に現れ、巨大な小文字グロテスク見出しと等幅キャプションで構成。マニフェストやビジョン発表、デザイントーク向け。"
+  },
+  "routing": {
+    "scenarios": ["product-launch", "creative", "general"],
+    "density": "medium",
+    "scheme": "dark",
+    "tone": ["graphic", "punchy", "dramatic"],
+    "suits": { "data": 1, "formulas": 0, "images": 1, "longText": 0 },
+    "avoid": "Quiet, warm or institutionally traditional material; the dark canvas and fire orange commit to drama."
+  },
+  "theme": {
+    "colors": {
+      "background": "111111",
+      "card": "111111",
+      "primary": "F0ECE5",
+      "secondary": "E85D26",
+      "accent": "E85D26",
+      "text": "F0ECE5",
+      "textSecondary": "A3A39A",
+      "textMuted": "888880",
+      "line": "33332F",
+      "accentTint": "EF6E37",
+      "dark": "111111",
+      "onDark": "F0ECE5",
+      "onDarkMuted": "888880",
+      "surface": "1A1A18",
+      "chart": ["E85D26", "888880", "F0ECE5", "505048", "B84A1E", "C8C4BC"]
+    },
+    "fonts": {
+      "latin": { "title": "Arial", "body": "Arial", "data": "Arial" },
+      "zh": { "title": "Microsoft YaHei", "body": "Microsoft YaHei" },
+      "ja": { "title": "Yu Gothic", "body": "Yu Gothic" }
+    },
+    "sizes": {
+      "hero": [120, 96, 80, 66, 54],
+      "statement": [66, 60, 54, 44, 36],
+      "title": [36, 32, 28, 24],
+      "subtitle": [22, 20, 18],
+      "body": [20, 18, 16],
+      "card": [16, 15, 14, 13],
+      "caption": [14, 12, 11],
+      "kpi": [96, 80, 66]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "orange": {
+            "bg": "E85D26",
+            "title": "111111",
+            "body": "111111",
+            "muted": "2A1810",
+            "faint": "4A2210",
+            "accent": "111111",
+            "line": "B8481C",
+            "card": "E85D26",
+            "surface": "F07A48",
+            "accentTint": "111111",
+            "chart": [
+              "111111",
+              "6B2A10",
+              "F0ECE5",
+              "9A3C16",
+              "2A1810",
+              "F7C4AE"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "orange",
+          "section": "orange",
+          "statement": "base",
+          "content": ["base", "base", "base", "base", "orange"],
+          "closing": "orange"
+        },
+        "cover": {
+          "title": { "x": 0.72, "y": 0.95, "w": 11.9, "h": 4.3 },
+          "kicker": { "x": 0.72, "y": 0.4, "w": 6, "size": 11 },
+          "meta": { "x": 0.72, "y": 6.75, "w": 11.9 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.6,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "line",
+              "name": "rule"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 0.72,
+            "y": 2.9,
+            "w": 11.9,
+            "h": 2.4,
+            "sizes": [80, 66, 54, 44]
+          },
+          "number": { "x": 0.72, "y": 2.3, "w": 6, "h": 0.4, "size": 14 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.6,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "line",
+              "name": "rule"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 0.72,
+            "y": 2.7,
+            "w": 9.6,
+            "h": 3.4,
+            "color": "accent"
+          },
+          "kicker": { "x": 0.72, "y": 2.0, "w": 6, "size": 11 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 2.38,
+              "w": 0.3,
+              "h": 0.02,
+              "fill": "accent",
+              "name": "kicker rule"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.6,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "line",
+              "name": "rule"
+            }
+          ]
+        },
+        "content": {
+          "title": { "x": 0.72, "y": 0.75, "w": 11.9, "h": 0.8 },
+          "body": { "x": 0.72, "y": 1.9, "w": 11.9, "h": 4.75 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "line",
+              "name": "rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 0.72,
+            "y": 1.4,
+            "w": 11.9,
+            "h": 4.2,
+            "anchor": "bottom",
+            "sizes": [150, 120, 96, 80]
+          },
+          "meta": { "x": 0.72, "y": 6.75, "w": 11.9 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.6,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "line",
+              "name": "rule"
+            }
+          ]
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "card",
+          "line": "none",
+          "bar": "top",
+          "barColor": "accent",
+          "barW": 0.03
+        },
+        "kpi": { "style": "bare" },
+        "steps": { "style": "numbered", "arrow": true, "numberColor": "accent" }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Huge lowercase grotesque headlines set top-left; near-black pages alternate with full fire-orange pages (cover, chapters, closing and every few content pages); one hairline rule and small mono labels as the only chrome.",
+    "components": "Open blocks under a thin orange top rule, bare oversized numerals, numbered steps joined by arrows; the highlighted block inverts to a solid orange (or black on orange) panel. No rounded card grids, no second accent colour.",
+    "narrative": "Headline claim, chapter, thesis, evidence with numbers, before/after, how it works, ask.",
+    "nativeCoverage": "Cover, chapter, statement, quote, split text with image region, stat row, list, comparison, bar chart, numbered process and closing as native text, shapes and chart. Pie is a native pie (no donut hole or side legend), the stepped hierarchy becomes a centred pyramid, the vertical timeline becomes horizontal, the 2x2 loop becomes a row with a callout; the fading right-aligned word stack, Barlow / IBM Plex Mono and slide transitions are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 3,
+      "archetype": "statement",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 4,
+      "archetype": "split-image",
+      "native": "content_slide + bullets + image",
+      "status": "approximate",
+      "differences": "Image region is filled only by a planned asset; the source's slash bullet markers become standard bullets."
+    },
+    {
+      "page": 5,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source has no page title and hangs the three figures under a full-width rule at mid page; native adds a title line and places the figures in the body area."
+    },
+    {
+      "page": 6,
+      "archetype": "list",
+      "native": "",
+      "status": "unsupported",
+      "differences": "Right-aligned stack of display words fading in opacity above a giant title; there is no native display-size fading list."
+    },
+    {
+      "page": 7,
+      "archetype": "list",
+      "native": "content_slide + bullets",
+      "status": "approximate",
+      "differences": "Source sets the title in a left column beside the list; native stacks the title above the list."
+    },
+    {
+      "page": 8,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "approximate",
+      "differences": "Source quote is cream text with an orange attribution; the native statement page sets the quote itself in orange with a muted attribution."
+    },
+    {
+      "page": 9,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "adapted",
+      "differences": "Native adds a page title above the two panels."
+    },
+    {
+      "page": 10,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source greys every bar except an orange last bar and labels each bar; the native chart colours the whole series orange."
+    },
+    {
+      "page": 11,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 12,
+      "archetype": "chart-pie",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source is a donut with a side legend table of percentages; native is a full pie with a bottom legend."
+    },
+    {
+      "page": 13,
+      "archetype": "hierarchy",
+      "native": "content_slide + pyramid",
+      "status": "approximate",
+      "differences": "Source bars are left-aligned steps in graded orange; native is a centred pyramid with one orange top level."
+    },
+    {
+      "page": 14,
+      "archetype": "timeline",
+      "native": "content_slide + timeline",
+      "status": "approximate",
+      "differences": "Source timeline runs vertically with dates in a left gutter; native runs horizontally."
+    },
+    {
+      "page": 15,
+      "archetype": "cycle",
+      "native": "content_slide + relation + callout",
+      "status": "approximate",
+      "differences": "Source is a 2x2 grid of numbered cells with arrows looping back; native is one row of linked boxes with a callout for the return step."
+    },
+    {
+      "page": 16,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": ""
+    }
+  ]
+}

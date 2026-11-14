@@ -54,6 +54,8 @@ export interface MenuSelectProps<T extends string> {
   align?: "start" | "end";
   triggerClassName?: string;
   "aria-label": string;
+  /** Text that describes the trigger to assistive tech, such as a cost. */
+  "aria-describedby"?: string;
   id?: string;
   disabled?: boolean;
   /** Replaces the chosen option's label on the trigger. */
@@ -203,6 +205,7 @@ export function MenuSelect<T extends string>({
   align = "start",
   triggerClassName,
   "aria-label": ariaLabel,
+  "aria-describedby": ariaDescribedBy,
   id,
   disabled = false,
   valueLabel,
@@ -396,6 +399,7 @@ export function MenuSelect<T extends string>({
           id={id}
           role="combobox"
           aria-label={ariaLabel}
+          aria-describedby={ariaDescribedBy}
           aria-expanded={open}
           aria-haspopup="listbox"
           title={triggerTitle}

@@ -1,8 +1,19 @@
 import { createInterface } from "node:readline";
+import { readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { AssistantRuntime } from "./runtime.mjs";
 import { LINE_LIMIT, oversizedReplyId } from "./ipc.mjs";
 import { errorMessage, redact, scrubSecrets } from "./security.mjs";
+
+const { version: sdkVersion } = JSON.parse(
+  await readFile(
+    new URL(
+      "../node_modules/@earendil-works/pi-coding-agent/package.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+);
 
 const pending = new Map();
 // Frames carry conversation content: only the exact run credentials go.
@@ -33,6 +44,7 @@ const runtime = new AssistantRuntime({
       }
       signal?.addEventListener("abort", cancel, { once: true });
       pending.set(id, {
+        acceptSecrets: (values) => runtime.addHostSecrets(params, values),
         resolve: (result) => {
           signal?.removeEventListener("abort", cancel);
           resolve(result);
@@ -66,18 +78,42 @@ const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
 input.on("line", (line) => {
   void handle(line);
 });
-input.on("close", () => {
-  void runtime.close().finally(() => {
+let terminating;
+function terminate() {
+  return (terminating ??= (async () => {
+    const closing = runtime.close().catch(() => false);
     for (const request of pending.values())
       request.reject(new Error("Host disconnected"));
     pending.clear();
-  });
+    const confirmed = await closing;
+    if (confirmed) {
+      process.exit(0);
+    } else {
+      // Do not run the SDK's process-exit hook with live cached process-group
+      // IDs. Only this live process is targeted; launcher EOF / the Host's
+      // owned JobObject performs descendant teardown.
+      process.stderr.write(
+        "MCP cleanup incomplete; terminating runtime safely\n",
+      );
+      try {
+        process.kill(process.pid, "SIGKILL");
+      } catch {
+        // If the OS refuses even self-termination, remain alive for the Host's
+        // owned process/job teardown rather than run unsafe exit hooks.
+        process.stderr.write("Runtime awaiting owned Host termination\n");
+        setInterval(() => {}, 1000);
+      }
+    }
+  })());
+}
+input.on("close", () => {
+  void terminate();
 });
 process.on("SIGTERM", () => {
-  void runtime.close().finally(() => process.exit(0));
+  void terminate();
 });
 process.on("SIGINT", () => {
-  void runtime.close().finally(() => process.exit(0));
+  void terminate();
 });
 
 async function handle(line) {
@@ -103,6 +139,21 @@ async function handle(line) {
     if (!request.method && pending.has(request.id)) {
       const call = pending.get(request.id);
       pending.delete(request.id);
+      // The sideband belongs to this already-pending private operation. It
+      // must be accepted before resolving content or formatting an error;
+      // it is never passed to the tool's result/details or the model.
+      if (
+        Object.hasOwn(request, "knownSecrets") &&
+        !call.acceptSecrets(request.knownSecrets)
+      ) {
+        call.reject(
+          Object.assign(new Error("Invalid private Host redaction update"), {
+            code: "assistant_protocol_error",
+            outcomeUnknown: true,
+          }),
+        );
+        return;
+      }
       if (request.error)
         call.reject(
           Object.assign(
@@ -122,7 +173,7 @@ async function handle(line) {
     }
     let result;
     if (request.method === "health")
-      result = { protocolVersion: 1, sdkVersion: "1.4.0" };
+      result = { protocolVersion: 1, sdkVersion };
     else if (request.method === "load")
       result = await runtime.load(request.params ?? {});
     else if (request.method === "run")

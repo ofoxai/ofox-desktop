@@ -3,7 +3,11 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { UNUSED_PACKAGE_PATHS } from "./assistant-prune.mjs";
+import {
+  PYTHON_PACKAGE_PATHS,
+  UNUSED_PACKAGE_PATHS,
+} from "./assistant-prune.mjs";
+import { pythonEngineOffered } from "./python-assets.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const resources = path.join(root, "assistant-runtime/resources");
@@ -21,7 +25,10 @@ const environment = Object.fromEntries(
 // Run the actual copied production tree with no user credentials or SDK config.
 async function productionSmoke() {
   const assert = (await import("node:assert/strict")).default;
-  const { mkdtemp, readFile, rm, writeFile } = await import("node:fs/promises");
+  const { mkdir, mkdtemp, readFile, rm, writeFile } = await import(
+    "node:fs/promises"
+  );
+  const { execFileSync } = await import("node:child_process");
   const { tmpdir } = await import("node:os");
   const path = (await import("node:path")).default;
   const { pathToFileURL } = await import("node:url");
@@ -35,7 +42,7 @@ async function productionSmoke() {
       name,
       "package.json",
     );
-    assert.equal(JSON.parse(await readFile(manifest, "utf8")).version, "1.4.0");
+    assert.equal(JSON.parse(await readFile(manifest, "utf8")).version, "1.5.0");
   }
   // The native canvas addon loads in the bundled Node and encodes images.
   const require = createRequire(path.join(production, "package.json"));
@@ -306,8 +313,66 @@ async function productionSmoke() {
     assert.deepEqual(tool.details.sources, [
       { title: "example.com", url: "https://example.com/smoke" },
     ]);
+
+    // The document engines run from the prepared resources with a throwaway
+    // HOME: officecli must not touch the real ~/.officecli, start a resident
+    // process or update itself.
+    const { engines } = JSON.parse(
+      await readFile(path.join(process.argv[3], "manifest.json"), "utf8"),
+    );
+    assert.ok(
+      engines?.officecli && engines?.typst,
+      "manifest.json must list both engines; run pnpm assistant:prepare",
+    );
+    const home = path.join(directory, "engine-home");
+    const work = path.join(directory, "engine-work");
+    await mkdir(home);
+    await mkdir(work);
+    const engineEnvironment = {
+      ...process.env,
+      OFFICECLI_NO_AUTO_RESIDENT: "1",
+      OFFICECLI_SKIP_UPDATE: "1",
+      HOME: home,
+      USERPROFILE: home,
+      TMPDIR: home,
+      TEMP: home,
+      TMP: home,
+    };
+    const engine = (name, ...args) =>
+      execFileSync(path.join(process.argv[3], engines[name].path), args, {
+        cwd: work,
+        env: engineEnvironment,
+        encoding: "utf8",
+        timeout: 60_000,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+    assert.ok(
+      engine("officecli", "--version").includes(engines.officecli.version),
+    );
+    engine("officecli", "create", "t.docx");
+    engine(
+      "officecli",
+      "add",
+      "t.docx",
+      "/body",
+      "--type",
+      "paragraph",
+      "--prop",
+      "text=smoke",
+    );
+    assert.equal(
+      (await readFile(path.join(work, "t.docx"))).subarray(0, 2).toString(),
+      "PK",
+    );
+    assert.ok(engine("typst", "--version").includes(engines.typst.version));
+    await writeFile(path.join(work, "main.typ"), "= Smoke\n");
+    engine("typst", "compile", "main.typ", "main.pdf");
+    assert.equal(
+      (await readFile(path.join(work, "main.pdf"))).subarray(0, 4).toString(),
+      "%PDF",
+    );
     process.stdout.write(
-      `Production smoke passed (${process.version}; Pi SDK, native canvas, PDF text and rendering, native JSONL, search server)\n`,
+      `Production smoke passed (${process.version}; Pi SDK, native canvas, PDF text and rendering, native JSONL, search server, officecli ${engines.officecli.version}, typst ${engines.typst.version})\n`,
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -331,6 +396,17 @@ for (const unused of UNUSED_PACKAGE_PATHS)
     existsSync(path.join(production, "node_modules", unused)),
     false,
     `${unused} must be pruned; run pnpm assistant:prepare`,
+  );
+// The pyodide package ships exactly where the Python engine is offered.
+const pythonOffered = pythonEngineOffered(
+  `${process.platform}-${process.arch}`,
+  readJson(path.join(root, "scripts", "python-downloads.json")),
+);
+for (const python of PYTHON_PACKAGE_PATHS)
+  assert.equal(
+    existsSync(path.join(production, "node_modules", python)),
+    pythonOffered,
+    `${python} must ${pythonOffered ? "ship" : "be pruned"}; run pnpm assistant:prepare`,
   );
 for (const kept of [
   "node_modules/pdfjs-dist/legacy/build/pdf.mjs",
@@ -366,6 +442,9 @@ for (const notice of [
   "pdfjs-dist.txt",
   "ofox-search-mcp.txt",
   "office.txt",
+  "officecli.txt",
+  "typst.txt",
+  "python.txt",
 ])
   assert.ok(
     existsSync(path.join(resources, "notices", notice)),
@@ -380,6 +459,7 @@ const result = spawnSync(
     `(${productionSmoke.toString()})().catch(error => { console.error(error); process.exitCode = 1; });`,
     path.join(resources, "runtime"),
     path.join(root, "assistant-runtime/test/fixtures/office"),
+    resources,
   ],
   { env: environment, stdio: "inherit" },
 );

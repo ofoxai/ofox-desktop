@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useTranslation } from "react-i18next";
 import {
   Dialog,
@@ -156,7 +157,7 @@ export function RequestDetailPanel({
         </DialogHeader>
         <div className="max-h-[70vh] overflow-y-auto p-4">
           {result.isPending ? (
-            <p role="status">{t("common.loading")}</p>
+            <FoxLoader size="block" label={t("common.loading")} />
           ) : result.isError ? (
             <div role="alert" className="space-y-2 text-sub text-warn">
               <p>{t("usageWorkbench.detailFailed")}</p>

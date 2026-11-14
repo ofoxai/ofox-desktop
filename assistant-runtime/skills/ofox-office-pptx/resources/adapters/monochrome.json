@@ -1,0 +1,444 @@
+{
+  "id": "monochrome",
+  "family": "editorial",
+  "names": {
+    "zh": "Monochrome 墨色账页",
+    "en": "Monochrome",
+    "ja": "Monochrome 墨一色"
+  },
+  "intro": {
+    "zh": "象牙色纸面上只有墨黑文字和细线，没有任何彩色；适合用户研究综述、白皮书、长篇报告和政策简报。",
+    "en": "Ink-black type and hairline rules on ivory paper, with no colour at all; for research synthesis, white papers, long reports and policy briefs.",
+    "ja": "象牙色の紙面に墨色の文字と細い罫線だけで構成し、色は使わない。調査のまとめ、ホワイトペーパー、長文レポート向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "research",
+      "academic",
+      "consulting"
+    ],
+    "density": "high",
+    "scheme": "light",
+    "tone": [
+      "restrained",
+      "archival"
+    ],
+    "suits": {
+      "data": 2,
+      "formulas": 1,
+      "images": 1,
+      "longText": 2
+    },
+    "avoid": "Decks that need visual personality, brand colour or colour-led storytelling."
+  },
+  "theme": {
+    "colors": {
+      "background": "FAFADF",
+      "card": "F2F2D2",
+      "primary": "1A1A16",
+      "secondary": "5E5E54",
+      "accent": "1A1A16",
+      "text": "1A1A16",
+      "textSecondary": "5E5E54",
+      "textMuted": "8A8A80",
+      "line": "1A1A16",
+      "accentTint": "F0F0D4",
+      "dark": "1A1A16",
+      "onDark": "FAFADF",
+      "onDarkMuted": "C4C4B0",
+      "surface": "F2F2D2",
+      "chart": [
+        "1A1A16",
+        "5E5E54",
+        "8A8A80",
+        "B4B4A0",
+        "3C3C36",
+        "C8C8B2"
+      ]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Arial",
+        "body": "Arial",
+        "data": "Arial"
+      },
+      "zh": {
+        "title": "Microsoft YaHei",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Gothic",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [
+        60,
+        54,
+        48,
+        40
+      ],
+      "statement": [
+        40,
+        36,
+        32,
+        28
+      ],
+      "title": [
+        28,
+        26,
+        24
+      ],
+      "subtitle": [
+        18,
+        16
+      ],
+      "body": [
+        18,
+        16,
+        14
+      ],
+      "card": [
+        14,
+        13
+      ],
+      "caption": [
+        12,
+        11
+      ],
+      "kpi": [
+        48
+      ]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "base": {
+            "chart": [
+              "1A1A16",
+              "B4B4A0",
+              "5E5E54",
+              "8A8A80",
+              "C8C8B2",
+              "3C3C36"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 1.5,
+            "y": 2.2,
+            "w": 8.6,
+            "h": 2.6,
+            "anchor": "bottom"
+          },
+          "kicker": {
+            "x": 7.2,
+            "y": 0.6,
+            "w": 4.63,
+            "align": "right",
+            "size": 10,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 1.5,
+            "y": 6.92,
+            "w": 10.33,
+            "size": 10,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 6.78,
+              "w": 10.33,
+              "h": 0.008,
+              "fill": "line",
+              "name": "foot rule"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 1.5,
+            "y": 3.05,
+            "w": 8,
+            "h": 1.5,
+            "sizes": [
+              36,
+              32,
+              28
+            ]
+          },
+          "number": {
+            "x": 1.5,
+            "y": 2.35,
+            "w": 4,
+            "size": 11,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 2.78,
+              "w": 0.28,
+              "h": 0.008,
+              "fill": "line",
+              "name": "dash"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 1.5,
+            "y": 2.3,
+            "w": 8.4,
+            "h": 3.3
+          },
+          "kicker": {
+            "x": 1.5,
+            "y": 1.75,
+            "w": 8,
+            "size": 10,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 0.78,
+              "w": 10.33,
+              "h": 0.008,
+              "fill": "line",
+              "name": "head rule"
+            },
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 6.78,
+              "w": 10.33,
+              "h": 0.008,
+              "fill": "line",
+              "name": "foot rule"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 1.5,
+            "y": 0.98,
+            "w": 10.33,
+            "h": 0.7
+          },
+          "body": {
+            "x": 1.5,
+            "y": 2.05,
+            "w": 10.33,
+            "h": 4.6
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 0.78,
+              "w": 10.33,
+              "h": 0.008,
+              "fill": "line",
+              "name": "head rule"
+            },
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 6.78,
+              "w": 10.33,
+              "h": 0.008,
+              "fill": "line",
+              "name": "foot rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.5,
+            "y": 3,
+            "w": 8,
+            "h": 1.7,
+            "sizes": [
+              44,
+              40,
+              36
+            ]
+          },
+          "meta": {
+            "x": 1.5,
+            "y": 6.2,
+            "w": 10.33,
+            "size": 10,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 2.78,
+              "w": 0.28,
+              "h": 0.008,
+              "fill": "line",
+              "name": "dash"
+            }
+          ]
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "none",
+          "line": "none",
+          "bar": "top",
+          "barColor": "line",
+          "barW": 0.008
+        },
+        "kpi": {
+          "style": "rule"
+        },
+        "steps": {
+          "style": "numbered",
+          "numberColor": "title",
+          "arrow": false
+        },
+        "titleBold": false
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Ivory paper, black ink only. A hairline at the head and foot of each page, a plain sans heading set left with wide margins, and open type; nothing is filled or coloured.",
+    "components": "Hairline-topped open columns, numerals over a rule, numbered steps in a row, grey-to-black charts. No filled cards, no accent colour, no rounded shapes.",
+    "narrative": "Title, context, key finding, evidence, numbers, recommendations, before/after, a participant quotation, analysis, charts, method, hierarchy, next steps.",
+    "nativeCoverage": "Cover, chapter, statement, split text with image region, stat row, list, comparison, quotation, text columns, bar chart, numbered method, pie chart, timeline, cycle, pyramid and closing as native text, hairline shapes, charts and table; light-weight Jost headings, the Lora serif quotation, the donut legend list, the vertical timeline and the 2×2 cycle grid are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Heading is bold; the source sets it in a light weight."
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 3,
+      "archetype": "statement",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 4,
+      "archetype": "split-image",
+      "native": "content_slide + bullets + image",
+      "status": "approximate",
+      "differences": "Source sets the heading and a paragraph beside the image; native keeps the heading at the top, and the image region is filled only by a planned asset."
+    },
+    {
+      "page": 5,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "adapted",
+      "differences": "Source draws one rule above the row of numerals; native draws a rule under each numeral block."
+    },
+    {
+      "page": 6,
+      "archetype": "list",
+      "native": "content_slide + bullets",
+      "status": "approximate",
+      "differences": "Source places the heading in a left column beside the list with dash markers; native puts the heading above a bulleted list."
+    },
+    {
+      "page": 7,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source has no page heading and a vertical hairline between the two columns; native adds a heading and draws only the hairline above each column."
+    },
+    {
+      "page": 8,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "approximate",
+      "differences": "Source sets the quotation in Lora serif without rules; native uses the sans heading font between the head and foot rules."
+    },
+    {
+      "page": 9,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is two columns of running paragraphs under mono labels; native shows short hairline-topped blocks, three across in the sample."
+    },
+    {
+      "page": 10,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "adapted",
+      "differences": "Native chart with editable data; the black highlighted last bar is not styled separately."
+    },
+    {
+      "page": 11,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "adapted",
+      "differences": "Source numerals are light grey; native numerals are black."
+    },
+    {
+      "page": 12,
+      "archetype": "chart-pie",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source is a donut ring beside a ruled percentage list; native is a pie chart with its own legend."
+    },
+    {
+      "page": 13,
+      "archetype": "timeline",
+      "native": "content_slide + timeline",
+      "status": "approximate",
+      "differences": "Source timeline runs down the page with week labels in the left margin; native timeline runs left to right."
+    },
+    {
+      "page": 14,
+      "archetype": "cycle",
+      "native": "content_slide + relation + callout",
+      "status": "approximate",
+      "differences": "Source arranges four steps in a 2×2 grid with arrows around the loop; native shows one row of four boxes and a note that the last step feeds the first."
+    },
+    {
+      "page": 15,
+      "archetype": "hierarchy",
+      "native": "content_slide + pyramid",
+      "status": "adapted",
+      "differences": "Source shades the five levels from black to pale grey; native fills only the top level."
+    },
+    {
+      "page": 16,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": ""
+    }
+  ]
+}

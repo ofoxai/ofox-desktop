@@ -153,6 +153,24 @@ impl ForkStage {
             }
             output.flush().map_err(|_| FORK_FAILED)?;
             output.sync_all().map_err(|_| FORK_FAILED)?;
+            let pages = super::super::documents::preview::pages(attachment);
+            if !pages.is_empty() {
+                let target_dir =
+                    private_subdir(&destination, &format!("{}{PAGES_SUFFIX}", attachment.id))?;
+                for page in pages {
+                    let source = source
+                        .join(format!("{}{PAGES_SUFFIX}", attachment.id))
+                        .join(format!("{page}.jpg"));
+                    let bytes = super::super::documents::preview::read_jpeg(&source)
+                        .map_err(|_| FORK_FAILED)?;
+                    crate::config::atomic_write_with(
+                        &target_dir.join(format!("{page}.jpg")),
+                        &bytes,
+                        crate::config::AtomicOpts { mode: Some(0o600) },
+                    )
+                    .map_err(|_| FORK_FAILED)?;
+                }
+            }
         }
         record.session.id = self.sid.clone();
         record.session.context_usage = None;
@@ -371,8 +389,51 @@ mod tests {
     }
 
     #[test]
+    fn fork_preserves_only_recorded_bounded_document_rasters() {
+        let (_temp, store, mut record, entries) = fixture();
+        let attachment = &mut record.attachments[0];
+        attachment.origin = Some("generated".into());
+        attachment.name = "deck.pptx".into();
+        attachment.mime_type =
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation".into();
+        attachment.details = Some(json!({"documentPreview":{"mimeType":"image/jpeg","pages":[1]}}));
+        let file = attachment.clone();
+        record.messages[0].attachments = vec![file.clone()];
+        store
+            .mutate(&record.session.id, |r| {
+                *r = record.clone();
+                Ok(())
+            })
+            .unwrap();
+        let dir = private_subdir(
+            &store.attachment_root(&record.session.id).unwrap(),
+            &format!("{}{PAGES_SUFFIX}", file.id),
+        )
+        .unwrap();
+        let jpeg=b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9";
+        write_bytes(&dir.join("1.jpg"), jpeg).unwrap();
+        write_bytes(&dir.join("2.jpg"), b"unrecorded").unwrap();
+        let stage = store.stage_fork(&record.session.id).unwrap();
+        write_bytes(&stage.native_path(), b"native copy\n").unwrap();
+        let fork = stage
+            .publish(record, &entries, "fork preview", || Ok(()))
+            .unwrap();
+        let target = store
+            .attachment_root(&fork.session.id)
+            .unwrap()
+            .join(format!("{}{PAGES_SUFFIX}", file.id));
+        assert_eq!(fs::read(target.join("1.jpg")).unwrap(), jpeg);
+        assert!(!target.join("2.jpg").exists());
+        assert_eq!(
+            super::super::super::documents::preview::pages(&fork.attachments[0]),
+            [1]
+        );
+    }
+
+    #[test]
     fn fork_stage_copies_context_files_ledger_and_deduplicates_inherited_cost() {
-        let (_temp, store, record, entries) = fixture();
+        let (_temp, store, mut record, entries) = fixture();
+        record.messages[0].skill = Some("historical-skill".into());
         let original = fs::read(store.root.join(&record.session.id).join(SESSION_FILE)).unwrap();
         let stage = store.stage_fork(&record.session.id).unwrap();
         write_bytes(&stage.native_path(), b"native copy\n").unwrap();
@@ -383,6 +444,7 @@ mod tests {
         assert_eq!(fork.session.assistant_id, "ofox");
         assert_eq!(fork.session.capabilities, record.session.capabilities);
         assert_eq!(fork.messages.len(), 2);
+        assert_eq!(fork.messages[0].skill.as_deref(), Some("historical-skill"));
         assert!(fork.session.draft.is_empty());
         assert!(fork.session.context_usage.is_none());
         assert_eq!(fork.operations, record.operations);

@@ -1,3 +1,6 @@
+import { McpSteps } from "./McpSteps";
+import { SkillResultCards } from "./SkillResultCards";
+import { SkillChip, SkillPicker } from "./SkillPicker";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -17,13 +20,16 @@ import type {
   AssistantSource,
 } from "@/lib/api/assistant";
 import { assistantErrorKey } from "@/lib/api/assistant";
+import {
+  isPresentationStyleAvailable,
+  presentationStyleName,
+} from "@/lib/assistantPresentationStyles";
 import { settingsApi } from "@/lib/api/settings";
 import { splitUrlTail } from "@/lib/urlTail";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { CopyButton } from "@/components/ui/copy-button";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { isSendable } from "@/utils/assistantAttachments";
 import type { TurnVersions } from "@/utils/assistantVersions";
@@ -203,7 +209,9 @@ function SourceList({
  * reply is doing while one of its tools runs; `thinking` times the reasoning
  * it is streaming; `taskProgress`, what its local configuration run is at,
  * shows under it while it streams. `searchUnavailable` marks a reply whose
- * run went without the web search its conversation asked for. `highlight`
+ * run went without the web search its conversation asked for;
+ * `searchLimited`, one whose free (Exa) search was refused, with
+ * `onUseOfoxSearch` to switch the account to Ofox search. `highlight`
  * marks what a conversation search looks for in the text. `latest` marks the
  * newest reply, whose actions stay in view; the others show theirs while the
  * pointer or keyboard focus is on the message.
@@ -211,8 +219,11 @@ function SourceList({
 export const AssistantMessageView = memo(function AssistantMessageView({
   message,
   activity = null,
+  retryAttempt = null,
   thinking = null,
   searchUnavailable = false,
+  searchLimited = null,
+  onUseOfoxSearch,
   latest = false,
   highlight = "",
   models = NO_MODELS,
@@ -226,6 +237,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onSwitchVersion,
   onFork,
   onQuote,
+  onOpenFile,
   onSpeak,
   onEnableLocal,
   immutable = false,
@@ -241,9 +253,13 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   /** A local configuration run's step, warning and plan, while it streams. */
   taskProgress?: React.ReactNode;
   activity?: AssistantActivity | null;
+  retryAttempt?: 1 | 2 | null;
   /** A streaming reply's thinking so far, for its live timer. */
   thinking?: AssistantThinking | null;
   searchUnavailable?: boolean;
+  searchLimited?: "search_rate_limited" | "search_blocked" | null;
+  /** Absent while Ofox search is unavailable or already the provider. */
+  onUseOfoxSearch?: () => void;
   latest?: boolean;
   /** What the sidebar's search looks for: marked wherever the text has it. */
   highlight?: string;
@@ -252,6 +268,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     messageId: string,
     text: string,
     attachments: AssistantAttachment[],
+    skill?: string,
   ) => Promise<boolean>;
   /** Tells the page whether this message is being edited. */
   onEditingChange?: (editing: boolean) => void;
@@ -269,12 +286,14 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onSwitchVersion?: (messageId: string) => void;
   onFork?: (messageId: string) => void;
   onQuote?: (text: string) => void;
+  onOpenFile?: (file: AssistantAttachment) => void;
   onSpeak?: (messageId: string, text: string) => void;
   onEnableLocal?: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(message.content);
+  const [editSkill, setEditSkill] = useState(message.skill);
   const [editFiles, setEditFiles] = useState<AssistantAttachment[]>([]);
   // The reply's usage popover is open: its row stays in view meanwhile.
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -293,6 +312,18 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     return () => onEditingChange?.(false);
   }, [editing, onEditingChange]);
   const isUser = message.role === "user";
+  const designDecision = !isUser ? message.presentationPlan : undefined;
+  const decisionStyle = isPresentationStyleAvailable(
+    designDecision?.effectiveStyle,
+  )
+    ? designDecision.effectiveStyle
+    : isPresentationStyleAvailable(designDecision?.styleId)
+      ? designDecision.styleId
+      : undefined;
+  const decisionSummary =
+    typeof designDecision?.decisionSummary === "string"
+      ? designDecision.decisionSummary.trim().slice(0, 2000)
+      : "";
   const streaming = message.status === "streaming";
   // A generation's files show on its card, not in the reply's file list.
   const generated = new Set(
@@ -302,8 +333,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     (file) => !generated.has(file.id),
   );
   const sources = (message.sources ?? []).flatMap(shownSource);
+  const hasTaskProgress = streaming && Boolean(taskProgress);
   const progress =
-    streaming && activity ? t(`assistant.activity.${activity}`) : null;
+    streaming && !hasTaskProgress && activity
+      ? t(`assistant.activity.${activity}`)
+      : null;
   const statusLine = (text: string, className?: string) => (
     <p
       role="status"
@@ -363,26 +397,68 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       data-message-id={message.id}
     >
       <h2 className="sr-only">{role}</h2>
-      <ReasoningBlock
-        reasoning={message.reasoning}
-        reasoningMs={message.reasoningMs}
-        thinking={thinking}
-      />
+      {isUser && isPresentationStyleAvailable(message.presentationStyleId) && (
+        <span className="mb-1 inline-flex max-w-[80%] rounded-ctl bg-brand-soft px-2 py-1 text-note text-brand-ink">
+          {t("assistant.presentation.chip", {
+            name: presentationStyleName(
+              message.presentationStyleId,
+              t,
+              i18n.language,
+            ),
+          })}
+        </span>
+      )}
+      {!isUser && hasTaskProgress && taskProgress}
+      {!isUser && (decisionStyle || decisionSummary) && (
+        <section
+          aria-label={t("assistant.visual.decisionTitle")}
+          className="mb-2 max-w-full space-y-1 rounded-ctl border border-line bg-card-2 px-3 py-2 text-note text-ink-muted"
+        >
+          {decisionStyle && (
+            <p className="font-medium text-ink-2">
+              {t("assistant.visual.chosenStyle", {
+                name: presentationStyleName(decisionStyle, t, i18n.language),
+              })}
+            </p>
+          )}
+          {decisionSummary && (
+            <p className="whitespace-pre-wrap break-words">{decisionSummary}</p>
+          )}
+        </section>
+      )}
+      {!isUser && !!message.mcpSteps?.length && (
+        <McpSteps steps={message.mcpSteps} />
+      )}
+      {!isUser && !!message.skillResults?.length && (
+        <SkillResultCards groups={message.skillResults} />
+      )}
+      {!isUser && (
+        <ReasoningBlock
+          reasoning={message.reasoning}
+          reasoningMs={message.reasoningMs}
+          thinking={thinking}
+          compact={hasTaskProgress}
+        />
+      )}
       {message.media && mediaBlock ? (
         mediaBlock
       ) : editing ? (
         <div className="w-full space-y-2">
-          <Textarea
+          <SkillPicker
+            scope={message.id}
+            skill={editSkill}
+            onSkill={setEditSkill}
             ref={editor}
             autoFocus
             aria-label={t("assistant.editMessage")}
             value={text}
-            onChange={(event) => setText(event.target.value)}
+            onTextChange={setText}
           />
           {files.length > 0 && (
             <>
               <AttachmentList
                 files={editFiles}
+                onOpenFile={onOpenFile}
                 onRemove={(id) =>
                   setEditFiles((current) =>
                     current.filter((file) => file.id !== id),
@@ -409,7 +485,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
             <Button
               disabled={disabled || (!text.trim() && !editFiles.length)}
               onClick={() => {
-                void onEdit(message.id, text, editFiles).then((sent) => {
+                void (
+                  editSkill
+                    ? onEdit(message.id, text, editFiles, editSkill)
+                    : onEdit(message.id, text, editFiles)
+                ).then((sent) => {
                   if (sent) setEditing(false);
                 });
               }}
@@ -423,11 +503,18 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         </div>
       ) : streaming && !message.content ? (
         // The thinking caption above already says so, with its timer.
-        thinking?.since != null && !progress ? null : (
+        hasTaskProgress ||
+        retryAttempt ||
+        (thinking?.since != null && !progress) ? null : (
           statusLine(progress || t("assistant.typing"))
         )
       ) : (
         <>
+          {isUser && message.skill && (
+            <div className="mb-1 max-w-full">
+              <SkillChip name={message.skill} />
+            </div>
+          )}
           {/* A question sent with files alone has no words to show. */}
           {(message.content || !files.length) && (
             <div
@@ -457,6 +544,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   // (`find . \( -name a \)` is a command, not a formula).
                   math={!isUser}
                   previews={!isUser}
+                  streaming={streaming}
                 />
               </AssistantQuote>
             </div>
@@ -464,6 +552,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {files.length > 0 && (
             <AttachmentList
               files={files}
+              onOpenFile={onOpenFile}
               className={cn(
                 message.content && "mt-2",
                 isUser && "max-w-[80%] justify-end",
@@ -487,7 +576,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         </>
       )}
       {generations}
-      {streaming && taskProgress}
+      {streaming && !hasTaskProgress && retryAttempt && (
+        <p role="status" className="mt-2 text-ctl text-ink-muted">
+          {t("assistant.retrying", { attempt: retryAttempt })}
+        </p>
+      )}
       {retryCard ? (
         <RetryCard
           key={message.id}
@@ -510,6 +603,20 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       {searchUnavailable && !isUser && (
         <p className="mt-2 text-note text-ink-muted">
           {t("assistant.searchSkipped")}
+        </p>
+      )}
+      {searchLimited && !isUser && (
+        <p className="mt-2 flex flex-wrap items-center gap-x-2 text-note text-ink-muted">
+          <span>{t(`assistant.searchLimited.${searchLimited}`)}</span>
+          {onUseOfoxSearch && (
+            <button
+              type="button"
+              className="font-medium text-brand-ink underline-offset-2 hover:underline"
+              onClick={onUseOfoxSearch}
+            >
+              {t("assistant.searchLimited.useOfox")}
+            </button>
+          )}
         </p>
       )}
       {sources.length > 0 && (
@@ -558,6 +665,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
                   disabled={disabled}
                   onClick={() => {
                     setText(message.content);
+                    setEditSkill(message.skill);
                     setEditFiles(resendable);
                     setEditing(true);
                   }}

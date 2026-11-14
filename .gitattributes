@@ -37,3 +37,6 @@
 *.ttf binary
 *.exe binary
 *.dll binary
+
+# Upstream presentation assets are verified against their original byte hashes.
+assistant-runtime/skills/ofox-office-pptx/resources/vendor/** -text

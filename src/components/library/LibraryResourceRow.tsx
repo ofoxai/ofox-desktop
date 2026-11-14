@@ -1,12 +1,6 @@
 import { useRef } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  ChevronDown,
-  FileText,
-  MoreHorizontal,
-  Plug,
-  Sparkles,
-} from "lucide-react";
+import { ChevronDown, MoreHorizontal } from "lucide-react";
 import type { LibraryKind, ResourceTarget } from "@/lib/api/library";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -78,8 +72,6 @@ export function LibraryResourceRow({
   }>();
   const latestAction = useRef(onAction);
   latestAction.current = onAction;
-  const Icon =
-    kind === "instructions" ? FileText : kind === "mcp" ? Plug : Sparkles;
   const summary =
     "content" in row
       ? row.content
@@ -135,20 +127,12 @@ export function LibraryResourceRow({
           onCheckedChange={(checked) => onSelected(checked === true)}
         />
       )}
-      <span
-        aria-hidden
-        className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-pill text-ink-muted"
-      >
-        {kind !== "instructions" ? (
-          <LibraryResourceIcon
-            recipeId={"iconId" in row ? row.iconId || recipeId : recipeId}
-            kind={kind}
-            className="h-9 w-9"
-          />
-        ) : (
-          <Icon className="h-5 w-5" />
-        )}
-      </span>
+      <LibraryResourceIcon
+        recipeId={"iconId" in row ? row.iconId || recipeId : recipeId}
+        kind={kind}
+        name={row.name}
+        className="h-9 w-9"
+      />
       <div className="min-w-0 flex-1 basis-[180px]">
         <button
           type="button"

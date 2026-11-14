@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -99,7 +99,7 @@ test("sidecar accepts private JSON-RPC without logging credentials or loading us
   const wire = fixture.spawnSidecar();
   assert.deepEqual(await wire.start("health"), {
     protocolVersion: 1,
-    sdkVersion: "1.4.0",
+    sdkVersion: "1.5.0",
   });
   const malformed = wire.waitFor(
     (message) => message.id === null && message.error,
@@ -605,5 +605,133 @@ test(
     );
     await wire.close();
     await fixture.assertClean([params.apiKey]);
+  },
+);
+
+test(
+  "private Host scrub updates protect native persistence without entering tool content or model authentication",
+  { timeout: 30000 },
+  async (t) => {
+    const original = "synthetic-private-ofox-original-credential";
+    const rotated = "synthetic-private-ofox-rotated-credential";
+    const mcp = "synthetic-private-mcp-scrub-credential";
+    const fixture = await createStdioAcceptance(
+      t,
+      (_request, response, number) => {
+        if (number === 1)
+          writeModelToolCall(response, probeToolName, { command: "write" });
+        else
+          writeModelStream(
+            response,
+            `Readable final reply ${original} ${rotated} ${mcp}`,
+          );
+      },
+    );
+    const wire = fixture.spawnSidecar("restricted", { probeTool: true });
+    const params = fixture.params("rotated-private-scrub", original, {
+      knownSecrets: [original, mcp],
+    });
+    const running = wire.start("run", params);
+    const call = await wire.waitFor((message) => message.method === "tool");
+    wire.write({
+      id: call.id,
+      knownSecrets: [rotated],
+      result: { output: "Verified host operation" },
+    });
+    const result = await running;
+    assert.equal(result.status, "completed");
+    assert.equal(fixture.requests.length, 2);
+    assert.ok(
+      fixture.requests.every(
+        (request) => request.authorization === `Bearer ${original}`,
+      ),
+      "the private redaction update must not replace the model Authorization key",
+    );
+    const modelInput = JSON.stringify(fixture.requests[1].body.messages);
+    assert.match(modelInput, /Verified host operation/);
+    assert.equal(
+      modelInput.includes("knownSecrets"),
+      false,
+      "private metadata is not model tool content",
+    );
+    const native = await readFile(params.sessionFile, "utf8");
+    assert.match(native, /Readable final reply/);
+    for (const secret of [original, rotated, mcp])
+      assert.equal(native.includes(secret), false);
+    await wire.close();
+    await fixture.assertClean([original, rotated, mcp]);
+  },
+);
+
+test(
+  "a longer private Host scrub key stays redacted across streamed deltas",
+  { timeout: 30000 },
+  async (t) => {
+    const original = "synthetic-original-key-for-long-rotation";
+    const rotated = "synthetic-rotated-key-" + "R".repeat(180) + "-end";
+    const fixture = await createStdioAcceptance(
+      t,
+      (_request, response, number) => {
+        if (number === 1)
+          return writeModelToolCall(response, probeToolName, {
+            command: "write",
+          });
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        for (const content of [
+          "Readable answer " + rotated.slice(0, 130),
+          rotated.slice(130) + " done",
+        ])
+          response.write(
+            "data: " +
+              JSON.stringify({
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: "assistant", content },
+                    finish_reason: null,
+                  },
+                ],
+              }) +
+              "\n\n",
+          );
+        response.end(
+          "data: " +
+            JSON.stringify({
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              usage: {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+              },
+            }) +
+            "\n\ndata: [DONE]\n\n",
+        );
+      },
+    );
+    const wire = fixture.spawnSidecar("restricted", { probeTool: true });
+    const params = fixture.params("long-rotated-scrub", original);
+    const running = wire.start("run", params);
+    const call = await wire.waitFor((message) => message.method === "tool");
+    wire.write({
+      id: call.id,
+      knownSecrets: [rotated],
+      result: { output: "Verified operation" },
+    });
+    assert.equal((await running).status, "completed");
+    const shown = wire.messages
+      .filter(
+        (message) =>
+          message.method === "event" && message.params.type === "text_delta",
+      )
+      .map((message) => message.params.data.delta)
+      .join("");
+    assert.match(shown, /Readable answer/);
+    assert.equal(
+      shown.includes(rotated),
+      false,
+      "a longer rotated key must not escape through partial text events",
+    );
+    await wire.close();
+    await fixture.assertClean([original, rotated]);
   },
 );

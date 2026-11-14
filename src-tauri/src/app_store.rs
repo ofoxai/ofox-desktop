@@ -133,3 +133,36 @@ pub fn migrate_app_config_dir_from_settings(app: &tauri::AppHandle) -> Result<()
     let _ = refresh_app_config_dir_override(app);
     Ok(())
 }
+
+#[cfg(test)]
+mod assistant_target_tests {
+    use super::*;
+    #[test]
+    #[serial_test::serial]
+    fn assistant_target_follows_custom_root_and_restart_readers() {
+        let sandbox = crate::test_sandbox::sandbox();
+        struct Restore(Option<PathBuf>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                update_cached_override(self.0.take());
+            }
+        }
+        let _restore = Restore(get_app_config_dir_override());
+        let custom = sandbox.home().join("custom-data");
+        update_cached_override(Some(custom.clone()));
+        use crate::services::library::assistant_target as assistant;
+        assert_eq!(assistant::skills_dir(), custom.join("assistant/skills"));
+        assert_eq!(
+            assistant::mcp_config_path(),
+            custom.join("assistant/mcp.json")
+        );
+        assistant::set_skill_mode("custom", assistant::SkillMode::Manual).unwrap();
+        update_cached_override(None);
+        assert!(assistant::skill_modes().unwrap().is_empty());
+        update_cached_override(Some(custom));
+        assert_eq!(
+            assistant::skill_modes().unwrap()["custom"],
+            assistant::SkillMode::Manual
+        );
+    }
+}

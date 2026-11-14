@@ -1,0 +1,366 @@
+{
+  "id": "vellum",
+  "family": "editorial",
+  "names": {
+    "zh": "Vellum 书卷蓝",
+    "en": "Vellum",
+    "ja": "Vellum 書物ブルー"
+  },
+  "intro": {
+    "zh": "深蓝底配暖黄衬线字，标题与正文居中、留白很多；适合研究结论、白皮书、学术报告和安静的观点陈述。",
+    "en": "Warm-yellow serif type centred on a deep blue canvas with wide margins; for research findings, white papers, academic talks and quiet reflective decks.",
+    "ja": "深い青の背景に暖かい黄色のセリフ体を中央に置き、余白を広く取る。研究報告、ホワイトペーパー、学術発表向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "academic",
+      "research"
+    ],
+    "density": "low",
+    "scheme": "dark",
+    "tone": [
+      "scholarly",
+      "quiet"
+    ],
+    "suits": {
+      "data": 1,
+      "formulas": 1,
+      "images": 0,
+      "longText": 1
+    },
+    "avoid": "Energetic launches, colour-led storytelling or pages that need many figures at once."
+  },
+  "theme": {
+    "colors": {
+      "background": "2A3870",
+      "card": "343F80",
+      "primary": "E8D85C",
+      "secondary": "3A7878",
+      "accent": "F5E168",
+      "text": "E8D85C",
+      "textSecondary": "B4AC66",
+      "textMuted": "8A8C6A",
+      "line": "50586C",
+      "accentTint": "3D4A8C",
+      "dark": "222D5E",
+      "onDark": "E8D85C",
+      "onDarkMuted": "B4AC66",
+      "surface": "343F80",
+      "chart": [
+        "E8D85C",
+        "8E94A8",
+        "4F9A9A",
+        "B4AC66",
+        "6B7390",
+        "F5E168"
+      ]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Georgia",
+        "body": "Arial",
+        "data": "Georgia"
+      },
+      "zh": {
+        "title": "SimSun",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Mincho",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [
+        72,
+        60,
+        54,
+        44
+      ],
+      "statement": [
+        48,
+        44,
+        36,
+        30
+      ],
+      "title": [
+        32,
+        28,
+        26,
+        24
+      ],
+      "subtitle": [
+        18,
+        16
+      ],
+      "body": [
+        18,
+        16,
+        14
+      ],
+      "card": [
+        15,
+        14,
+        13
+      ],
+      "caption": [
+        13
+      ],
+      "kpi": [
+        56
+      ]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "base": {
+            "chart": [
+              "E8D85C",
+              "8E94A8",
+              "4F9A9A",
+              "B4AC66",
+              "6B7390",
+              "F5E168"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 1.87,
+            "y": 1.9,
+            "w": 9.6,
+            "h": 2.3,
+            "align": "center",
+            "anchor": "bottom"
+          },
+          "kicker": {
+            "x": 1.87,
+            "y": 1.55,
+            "w": 9.6,
+            "size": 11,
+            "color": "faint"
+          },
+          "meta": {
+            "x": 0.9,
+            "y": 6.55,
+            "w": 5,
+            "align": "left",
+            "color": "faint"
+          },
+          "shapes": []
+        },
+        "section": {
+          "title": {
+            "x": 1.87,
+            "y": 2.55,
+            "w": 9.6,
+            "h": 1.5,
+            "align": "center",
+            "anchor": "bottom",
+            "sizes": [
+              40,
+              36,
+              32,
+              28
+            ]
+          },
+          "number": {
+            "x": 1.9,
+            "y": 1.75,
+            "w": 9.53,
+            "size": 12,
+            "color": "faint"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.9,
+              "y": 0.72,
+              "w": 11.53,
+              "h": 0.01,
+              "fill": "line",
+              "name": "top rule"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 1.87,
+            "y": 1.9,
+            "w": 9.6,
+            "h": 3.4,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "kicker": {
+            "x": 1.9,
+            "y": 1.3,
+            "w": 9.53,
+            "size": 11,
+            "color": "faint"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 6.42,
+              "y": 1.02,
+              "w": 0.5,
+              "h": 0.03,
+              "fill": "secondary",
+              "name": "teal mark"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 1.87,
+            "y": 1.05,
+            "w": 9.6,
+            "h": 0.75,
+            "align": "center"
+          },
+          "body": {
+            "x": 2.2,
+            "y": 2.15,
+            "w": 8.93,
+            "h": 4.55
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.9,
+              "y": 0.6,
+              "w": 11.53,
+              "h": 0.01,
+              "fill": "line",
+              "name": "top rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.87,
+            "y": 2,
+            "w": 9.6,
+            "h": 2.3,
+            "align": "center",
+            "anchor": "bottom",
+            "sizes": [
+              60,
+              54,
+              44
+            ]
+          },
+          "meta": {
+            "x": 0.9,
+            "y": 6.55,
+            "w": 5,
+            "align": "left",
+            "color": "faint"
+          },
+          "shapes": []
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "none",
+          "line": "none",
+          "bar": "top",
+          "barColor": "line",
+          "barW": 0.012
+        },
+        "kpi": {
+          "style": "bare",
+          "valueColor": "accent"
+        },
+        "steps": {
+          "style": "numbered",
+          "numberColor": "accent",
+          "arrow": false
+        },
+        "titleBold": false
+      }
+    }
+  },
+  "recipe": {
+    "composition": "One deep blue canvas on every page. Serif titles in warm yellow are centred with generous empty space; content sits in a narrow centred column under a single hairline.",
+    "components": "Bare serif numerals, open blocks under a hairline and numbered steps. Teal appears only as one small mark. No bright accent colours, no card grids.",
+    "narrative": "Title, one claim, supporting text, three findings, rules, a quotation, before/after, one chart, sign-off.",
+    "nativeCoverage": "Cover, statement, text page, stat row, list, quotation, two-panel comparison, bar chart and closing as native text, shapes and chart; Cormorant Garamond, the teal quotation glyph, centred stat columns and the full-bleed two-tone split are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Title uses a bold system serif instead of regular Cormorant Garamond."
+    },
+    {
+      "page": 2,
+      "archetype": "statement",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 3,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "approximate",
+      "differences": "Source is a text page: a centred heading over a short paragraph. The native page carries the paragraph as a one-line subtitle and adds a small section number."
+    },
+    {
+      "page": 4,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source centres each numeral in its column with vertical hairline dividers; native numerals are left-aligned in their columns with no dividers."
+    },
+    {
+      "page": 5,
+      "archetype": "list",
+      "native": "content_slide + bullets",
+      "status": "adapted",
+      "differences": "Source centres the heading and list vertically; the native heading stays at the top."
+    },
+    {
+      "page": 6,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": "The teal quotation glyph becomes a short teal rule."
+    },
+    {
+      "page": 7,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source splits the whole page into a darker and a lighter half with no title; native keeps a page title above two open columns under hairlines."
+    },
+    {
+      "page": 8,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "adapted",
+      "differences": "Native chart with editable data; the highlighted last bar is not styled separately."
+    },
+    {
+      "page": 9,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": ""
+    }
+  ]
+}

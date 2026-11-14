@@ -37,6 +37,8 @@ mod ofox_secret;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+#[cfg(debug_assertions)]
+pub mod preview_eval;
 mod prompt;
 mod prompt_files;
 mod provider;
@@ -78,8 +80,8 @@ pub use mcp::{
 pub use provider::{Provider, ProviderMeta};
 pub use services::assistant;
 pub use services::library::{
-    apply_operation as apply_resource_operation, delete_mcp_draft, preview_mcp_resource,
-    recover_operation as recover_resource_operation, save_mcp_draft,
+    apply_operation as apply_resource_operation, assistant_target, delete_mcp_draft,
+    preview_mcp_resource, recover_operation as recover_resource_operation, save_mcp_draft,
     skill_resource::preview as preview_skills_resource, Operation as ResourceOperation,
 };
 pub use services::{
@@ -150,6 +152,9 @@ mod assistant_wiring_tests {
                 "assistant_discard_audio",
                 "assistant_empty_trash",
                 "assistant_export_markdown",
+                "assistant_file_preview",
+                "assistant_file_preview_html",
+                "assistant_file_preview_page",
                 "assistant_fork",
                 "assistant_get_preferences",
                 "assistant_get_session",
@@ -157,6 +162,7 @@ mod assistant_wiring_tests {
                 "assistant_import_drop",
                 "assistant_import_pasted",
                 "assistant_list_sessions",
+                "assistant_list_skills",
                 "assistant_local_changes",
                 "assistant_pick_attachments",
                 "assistant_pick_audio",
@@ -170,6 +176,7 @@ mod assistant_wiring_tests {
                 "assistant_send",
                 "assistant_set_permission",
                 "assistant_set_preferences",
+                "assistant_set_search_provider",
                 "assistant_steer",
                 "assistant_stop",
                 "assistant_switch_version",
@@ -1561,6 +1568,8 @@ pub fn run() {
             commands::import_library_instruction,
             commands::delete_library_instruction,
             commands::get_library_skills,
+            commands::library_assistant_skill_modes,
+            commands::library_set_assistant_skill_mode,
             commands::preview_library_skill_distribution,
             commands::preview_library_skill_replacement,
             commands::keep_library_skill_native,
@@ -1879,6 +1888,7 @@ pub fn run() {
             commands::assistant_backup,
             commands::assistant_restore,
             commands::assistant_bootstrap,
+            commands::assistant_list_skills,
             commands::assistant_list_sessions,
             commands::assistant_create_session,
             commands::assistant_get_session,
@@ -1886,6 +1896,7 @@ pub fn run() {
             commands::assistant_usage_summary,
             commands::assistant_get_preferences,
             commands::assistant_set_preferences,
+            commands::assistant_set_search_provider,
             commands::assistant_delete_session,
             commands::assistant_empty_trash,
             commands::assistant_export_markdown,
@@ -1902,6 +1913,9 @@ pub fn run() {
             commands::assistant_local_changes,
             commands::assistant_restore_local_changes,
             commands::assistant_switch_version,
+            commands::assistant_file_preview,
+            commands::assistant_file_preview_html,
+            commands::assistant_file_preview_page,
             commands::assistant_fork,
             commands::assistant_compact,
             commands::assistant_pick_attachments,
@@ -1915,7 +1929,7 @@ pub fn run() {
         ]);
 
     let app = builder
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
@@ -2276,4 +2290,10 @@ fn show_database_init_error_dialog(
             exit_text.to_string(),
         ))
         .blocking_show()
+}
+
+/// Shared context construction keeps macOS embedded Info.plist emitted once,
+/// including when the debug-only preview evaluation window is built.
+pub(crate) fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }

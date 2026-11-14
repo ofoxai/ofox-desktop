@@ -118,6 +118,18 @@ pub(crate) fn mcp_display(spec: &Value) -> (Option<String>, Option<String>) {
         };
         let icon = match host.as_str() {
             "mcp.context7.com" => Some("context7"),
+            "mcp.exa.ai" => Some("exa"),
+            "mcp.sentry.dev" => Some("sentry"),
+            "mcp.linear.app" => Some("linear"),
+            "mcp.notion.com" => Some("notion"),
+            "mcp.atlassian.com" => Some("atlassian"),
+            "mcp.supabase.com" => Some("supabase"),
+            "mcp.stripe.com" => Some("stripe"),
+            "mcp.vercel.com" => Some("vercel"),
+            "mcp.neon.tech" => Some("neon"),
+            "docs.mcp.cloudflare.com" => Some("cloudflare-docs"),
+            "huggingface.co" => Some("huggingface"),
+
             "mcp.deepwiki.com" => Some("deepwiki"),
             "learn.microsoft.com" => Some("microsoft-learn"),
             "api.githubcopilot.com" => Some("github"),
@@ -159,6 +171,17 @@ pub(crate) fn mcp_display(spec: &Value) -> (Option<String>, Option<String>) {
             ("npx", "@playwright/mcp") => Some((name, "playwright")),
             ("npx", "@modelcontextprotocol/server-filesystem") => Some((name, "filesystem")),
             ("uvx", "mcp-server-fetch") => Some((name, "fetch")),
+            ("npx", "exa-mcp-server") => Some((name, "exa")),
+            ("npx", "@modelcontextprotocol/server-memory") => Some((name, "memory")),
+            ("npx", "@modelcontextprotocol/server-sequential-thinking") => {
+                Some((name, "sequential-thinking"))
+            }
+            ("uvx", "mcp-server-git") => Some((name, "git")),
+            ("uvx", "mcp-server-time") => Some((name, "time")),
+            ("npx", "@brave/brave-search-mcp-server") => Some((name, "brave-search")),
+            ("npx", "firecrawl-mcp") => Some((name, "firecrawl")),
+            ("npx", "tavily-mcp") => Some((name, "tavily")),
+
             _ => None,
         }
     });
@@ -173,6 +196,62 @@ pub(crate) fn mcp_display(spec: &Value) -> (Option<String>, Option<String>) {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn mcp_display_matches_new_vendor_hosts() {
+        for (host, icon) in [
+            ("mcp.exa.ai", "exa"),
+            ("mcp.sentry.dev", "sentry"),
+            ("mcp.linear.app", "linear"),
+            ("mcp.notion.com", "notion"),
+            ("mcp.atlassian.com", "atlassian"),
+            ("mcp.supabase.com", "supabase"),
+            ("mcp.stripe.com", "stripe"),
+            ("mcp.vercel.com", "vercel"),
+            ("mcp.neon.tech", "neon"),
+            ("docs.mcp.cloudflare.com", "cloudflare-docs"),
+            ("huggingface.co", "huggingface"),
+        ] {
+            let (_, actual) = mcp_display(&json!({"url":format!("https://{host}/mcp")}));
+            assert_eq!(actual.as_deref(), Some(icon), "{host}");
+            let (_, spoofed) =
+                mcp_display(&json!({"url":format!("https://{host}.example.com/mcp")}));
+            assert!(spoofed.is_none());
+        }
+        for (runner, package, icon) in [
+            ("npx", "exa-mcp-server", "exa"),
+            ("npx", "@modelcontextprotocol/server-memory", "memory"),
+            (
+                "npx",
+                "@modelcontextprotocol/server-sequential-thinking",
+                "sequential-thinking",
+            ),
+            ("uvx", "mcp-server-git", "git"),
+            ("uvx", "mcp-server-time", "time"),
+            ("npx", "@brave/brave-search-mcp-server", "brave-search"),
+            ("npx", "firecrawl-mcp", "firecrawl"),
+            ("npx", "tavily-mcp", "tavily"),
+        ] {
+            let args = if runner == "npx" {
+                vec!["-y", package]
+            } else {
+                vec![package]
+            };
+            let (_, actual) = mcp_display(&json!({"command":runner,"args":args}));
+            assert_eq!(actual.as_deref(), Some(icon), "{package}");
+            let (_, spoofed) =
+                mcp_display(&json!({"command":runner,"args":[format!("{package}-evil")]}));
+            assert!(spoofed.is_none());
+        }
+    }
+    #[test]
+    fn mcp_display_keeps_unknown_servers_plain() {
+        for spec in [
+            json!({"command":"node","args":["./server.js"]}),
+            json!({"url":"https://example.com/mcp"}),
+        ] {
+            assert!(mcp_display(&spec).1.is_none());
+        }
+    }
     #[test]
     fn does_not_mistake_paths_shells_flags_or_names_for_a_package_identity() {
         for spec in [

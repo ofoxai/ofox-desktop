@@ -205,11 +205,22 @@ describe("auto-linked URLs in text without spaces", () => {
   });
 
   it.each([
+    ["_https://a.example/x_。后", "em"],
+    ["**https://a.example/x**。后", "strong"],
+  ])("keeps the emphasis around %s", (text, tag) => {
+    const { container } = render(message(text));
+    expect(container.querySelectorAll("a")).toHaveLength(1);
+    expect(container.querySelector(`${tag} > a`)).toHaveAttribute(
+      "href",
+      "https://a.example/x",
+    );
+    expect(paragraph(container)).toHaveTextContent("https://a.example/x。后");
+  });
+
+  it.each([
     ["(https://a.example/x)。后", ")。后"],
     ["(见 https://a.example/x)，然后", ")，然后"],
     ['"https://a.example/x"。后', '"。后'],
-    ["_https://a.example/x_。后", "_。后"],
-    ["**https://a.example/x**。后", "**。后"],
   ])(
     "leaves the brackets and quotes around %s out of the link",
     (text, tail) => {

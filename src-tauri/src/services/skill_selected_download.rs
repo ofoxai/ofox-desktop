@@ -46,7 +46,14 @@ impl HttpRequester for HttpTransport {
             });
         }
         if !response.status().is_success() {
-            return Err(failure("skillDownloadFailed"));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_secs())
+                .unwrap_or_default();
+            return Err(
+                rate_limited(response.status().as_u16(), response.headers(), now)
+                    .unwrap_or_else(|| failure("skillDownloadFailed")),
+            );
         }
         if response
             .content_length()
@@ -208,6 +215,29 @@ struct TreeEntry {
 fn failure(key: &str) -> anyhow::Error {
     anyhow!("library.{key}")
 }
+/// GitHub lets an anonymous IP make 60 API requests an hour, shared with every
+/// other app behind that IP. Name the limit and its reset (`@<unix seconds>`)
+/// instead of calling the repository unreadable.
+fn rate_limited(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    now: u64,
+) -> Option<anyhow::Error> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let number = |name: &str| header(name).and_then(|value| value.trim().parse::<u64>().ok());
+    let used_up = header("x-ratelimit-remaining") == Some("0");
+    let retry_after = number("retry-after");
+    if status != 429 && !(status == 403 && (used_up || retry_after.is_some())) {
+        return None;
+    }
+    let reset = number("x-ratelimit-reset")
+        .filter(|_| used_up)
+        .or_else(|| retry_after.map(|seconds| now.saturating_add(seconds)));
+    Some(match reset {
+        Some(at) => anyhow!("library.githubRateLimited@{at}"),
+        None => failure("githubRateLimited"),
+    })
+}
 fn valid_sha(sha: &str) -> bool {
     sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -246,8 +276,11 @@ fn endpoint(host: &str, segments: &[&str]) -> Result<Url> {
 }
 async fn read<T: Transport>(transport: &T, url: Url, limit: u64) -> Result<Vec<u8>> {
     let bytes = transport.read(url, limit).await.map_err(|error| {
-        if error.to_string() == "library.skillTooLarge" {
+        let message = error.to_string();
+        if message == "library.skillTooLarge" {
             failure("skillTooLarge")
+        } else if message.starts_with("library.githubRateLimited") {
+            error
         } else {
             failure("skillDownloadFailed")
         }
@@ -458,9 +491,23 @@ pub(super) async fn catalog(repo: &SkillRepo) -> Result<Vec<super::DiscoverableS
     );
     catalog_with(repo, &transport).await
 }
+pub(super) async fn assistant_catalog(repo: &SkillRepo) -> Result<Vec<super::DiscoverableSkill>> {
+    let transport = HttpTransport(
+        crate::proxy::http_client::mcp_check_client()
+            .map_err(|_| failure("skillDownloadFailed"))?,
+    );
+    catalog_mode(repo, &transport, true).await
+}
 async fn catalog_with<T: Transport>(
     repo: &SkillRepo,
     transport: &T,
+) -> Result<Vec<super::DiscoverableSkill>> {
+    catalog_mode(repo, transport, false).await
+}
+async fn catalog_mode<T: Transport>(
+    repo: &SkillRepo,
+    transport: &T,
+    strict: bool,
 ) -> Result<Vec<super::DiscoverableSkill>> {
     use futures::{stream, StreamExt, TryStreamExt};
     let reference = validate_repo(repo)?;
@@ -541,7 +588,13 @@ async fn catalog_with<T: Transport>(
             return Err(failure("skillRepositoryInvalid"));
         }
         let content = std::str::from_utf8(&bytes).map_err(|_| failure("skillRepositoryInvalid"))?;
-        let meta = super::SkillService::parse_skill_metadata_content(content);
+        let mut meta = super::SkillService::parse_skill_metadata_content(content);
+        if strict {
+            let (name, description) = crate::assistant_target::metadata_bytes(&bytes)
+                .map_err(|_| failure("skillSourceAmbiguous"))?;
+            meta.name = Some(name);
+            meta.description = Some(description);
+        }
         let path = entry.path.strip_suffix("/SKILL.md").unwrap_or_default();
         let directory = if path.is_empty() {
             repo.name.as_str()
@@ -1296,5 +1349,56 @@ mod tests {
             .unwrap();
         assert!(downloaded.path().join("skills/chosen/SKILL.md").is_file());
         assert!(!downloaded.path().join("other").exists());
+    }
+    fn headers(pairs: &[(&'static str, &str)]) -> reqwest::header::HeaderMap {
+        pairs
+            .iter()
+            .map(|(name, value)| {
+                (
+                    reqwest::header::HeaderName::from_static(name),
+                    value.parse().unwrap(),
+                )
+            })
+            .collect()
+    }
+    #[test]
+    fn github_rate_limits_are_named_with_their_reset_time() {
+        let used_up = headers(&[
+            ("x-ratelimit-remaining", "0"),
+            ("x-ratelimit-reset", "1793901507"),
+        ]);
+        assert_eq!(
+            rate_limited(403, &used_up, 1_793_900_000).map(|e| e.to_string()),
+            Some("library.githubRateLimited@1793901507".into())
+        );
+        assert_eq!(
+            rate_limited(429, &headers(&[("retry-after", "60")]), 1_793_900_000)
+                .map(|e| e.to_string()),
+            Some("library.githubRateLimited@1793900060".into())
+        );
+        assert_eq!(
+            rate_limited(429, &headers(&[]), 1).map(|e| e.to_string()),
+            Some("library.githubRateLimited".into())
+        );
+        // A private or missing repository is not a rate limit.
+        assert!(rate_limited(403, &headers(&[("x-ratelimit-remaining", "12")]), 1).is_none());
+        assert!(rate_limited(404, &used_up, 1).is_none());
+    }
+    struct RateLimited;
+    impl Transport for RateLimited {
+        async fn read(&self, _url: Url, _max_bytes: u64) -> Result<Vec<u8>> {
+            Err(anyhow!("library.githubRateLimited@1793901507"))
+        }
+    }
+    #[tokio::test]
+    async fn a_rate_limit_reaches_the_caller_instead_of_a_generic_failure() {
+        let error = catalog_with(&repo(), &RateLimited).await.unwrap_err();
+        assert_eq!(error.to_string(), "library.githubRateLimited@1793901507");
+        let Err(error) =
+            download_with(&repo(), "skills/chosen", &RateLimited, Limits::default()).await
+        else {
+            panic!("a rate-limited download must fail");
+        };
+        assert_eq!(error.to_string(), "library.githubRateLimited@1793901507");
     }
 }

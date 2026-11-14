@@ -6,7 +6,7 @@ use super::{
 };
 use std::{
     io::{Read, Seek, SeekFrom},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 use tauri::http::{Method, Request, Response};
@@ -17,6 +17,43 @@ pub struct SaveMediaRequest {
     #[serde(flatten)]
     pub authority: DeleteRequest,
     pub attachment_id: String,
+    /// Open the saved copy with the OS default app. Only the destination the
+    /// user chose in the native dialog is ever opened.
+    #[serde(default)]
+    pub open: bool,
+}
+const OPEN_FAILED: &str = "assistant_open_failed";
+/// Documents the assistant generated: Office files, PDF and plain-text formats.
+const DOCUMENT_MIMES: [&str; 9] = [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/markdown",
+    "text/plain",
+    "text/csv",
+    "text/html",
+    "application/json",
+];
+const MAX_DOCUMENT_BYTES: u64 = 25 * 1024 * 1024;
+fn is_document(mime: &str) -> bool {
+    DOCUMENT_MIMES.contains(&mime)
+}
+/// What "save and open" may launch: the file types this protocol serves. The
+/// dialog's name can be changed, and a name the model chose must never start
+/// a script or program, so any other extension is saved but not opened.
+const OPENABLE_EXTENSIONS: [&str; 18] = [
+    "pdf", "docx", "pptx", "xlsx", "md", "txt", "csv", "html", "json", "png", "jpg", "jpeg",
+    "webp", "gif", "mp4", "wav", "mp3", "ogg",
+];
+fn is_openable(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            OPENABLE_EXTENSIONS
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
 }
 fn empty(status: u16) -> Response<Vec<u8>> {
     Response::builder()
@@ -39,6 +76,7 @@ fn open_file(
         .find(|f| {
             f.id == aid
                 && (f.origin.as_deref() == Some("generated")
+                    || (is_document(&f.mime_type) && f.selectable())
                     || (f.origin.as_deref() == Some("audio-input")
                         && matches!(f.mime_type.as_str(), "audio/wav" | "audio/mpeg")
                         && record.operations.iter().any(|op| {
@@ -48,7 +86,7 @@ fn open_file(
                                     && media.input_ids.contains(&f.id)
                             })
                         })))
-                && matches!(
+                && (matches!(
                     f.mime_type.as_str(),
                     "image/png"
                         | "image/jpeg"
@@ -58,7 +96,7 @@ fn open_file(
                         | "audio/wav"
                         | "audio/mpeg"
                         | "audio/ogg"
-                )
+                ) || is_document(&f.mime_type))
         })
         .ok_or("assistant_attachment_not_found")?;
     let fail = || "assistant_attachment_read_failed".to_string();
@@ -89,6 +127,8 @@ fn open_file(
     let meta = handle.metadata().map_err(|_| fail())?;
     let cap = if file.mime_type.starts_with("video/") {
         200 * 1024 * 1024
+    } else if is_document(&file.mime_type) {
+        MAX_DOCUMENT_BYTES
     } else if file.mime_type.starts_with("audio/") {
         super::speech::MAX_OUTPUT_BYTES as u64
     } else {
@@ -149,12 +189,20 @@ fn serve(
         return empty(403);
     }
     let parts: Vec<_> = url.path().trim_start_matches('/').split('/').collect();
+    if parts.len() == 4 && parts[2] == "preview" {
+        return document_preview(store, parts[0], parts[1], parts[3], request.method());
+    }
     if parts.len() != 2 {
         return empty(400);
     }
     let Ok((file, mut handle, len)) = open_file(store, parts[0], parts[1]) else {
         return empty(404);
     };
+    // The renderer shows a document as a card and saves it; it never loads
+    // one here. Served, a model-written HTML file would run in this origin.
+    if is_document(&file.mime_type) {
+        return empty(404);
+    }
     let range = request.headers().get("range");
     let (start, end, status) = if let Some(header) = range {
         let Some((start, end)) = header.to_str().ok().and_then(|h| byte_range(h, len)) else {
@@ -190,6 +238,56 @@ fn serve(
     }
     response.body(bytes).unwrap()
 }
+
+fn document_preview(
+    store: &AssistantStore,
+    sid: &str,
+    aid: &str,
+    page: &str,
+    method: &Method,
+) -> Response<Vec<u8>> {
+    use super::documents::preview;
+    let Some(page) = page
+        .parse::<u32>()
+        .ok()
+        .filter(|n| n.to_string() == page && (1..=preview::MAX_PAGE_NUMBER).contains(n))
+    else {
+        return empty(404);
+    };
+    let Ok((file, _, _)) = open_file(store, sid, aid) else {
+        return empty(404);
+    };
+    if !preview::pages(&file).contains(&page)
+        || !store
+            .load_record(sid)
+            .is_ok_and(|r| r.session.deleted_at.is_none())
+    {
+        return empty(404);
+    }
+    let Ok(directory) = store.attachment_root(sid) else {
+        return empty(404);
+    };
+    let Ok(bytes) = preview::read_jpeg(
+        &directory
+            .join(format!("{aid}.pages"))
+            .join(format!("{page}.jpg")),
+    ) else {
+        return empty(404);
+    };
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "image/jpeg")
+        .header("Content-Length", bytes.len())
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Content-Security-Policy", "default-src 'none'; sandbox")
+        .body(if method == Method::HEAD {
+            vec![]
+        } else {
+            bytes
+        })
+        .unwrap()
+}
 impl AssistantHost {
     pub async fn media_response(self: &Arc<Self>, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
         let Ok(identity) = self.identity().await else {
@@ -210,7 +308,7 @@ impl AssistantHost {
         self: &Arc<Self>,
         request: SaveMediaRequest,
         pick: impl FnOnce(String) -> Result<Option<PathBuf>, String> + Send + 'static,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<PathBuf>, String> {
         let identity = self.identity().await?;
         let generation = self.generation();
         let authority = request.authority;
@@ -229,7 +327,7 @@ impl AssistantHost {
         .await?;
         self.ensure_current(&identity, generation).await?;
         let Some(path) = blocking(move || pick(name)).await? else {
-            return Ok(false);
+            return Ok(None);
         };
         self.ensure_current(&identity, generation).await?;
         let host = self.clone();
@@ -243,19 +341,43 @@ impl AssistantHost {
             if bytes.len() as u64 != len {
                 return Err("assistant_attachment_read_failed".into());
             }
-            let path = super::transfers::destination(&path, &host.env.config_dir())?;
+            let target = super::transfers::destination(&path, &host.env.config_dir())?;
             if host.generation() != generation {
                 return Err(IDENTITY_CHANGED.into());
             }
             crate::config::atomic_write_with(
-                &path,
+                &target,
                 &bytes,
                 crate::config::AtomicOpts { mode: Some(0o600) },
             )
             .map_err(|_| "assistant_export_failed".to_string())?;
-            Ok(true)
+            // The picker's own path, not the canonical one: on Windows the
+            // latter is a `\\?\` path the shell may refuse to open.
+            Ok(Some(path))
         })
         .await
+    }
+    /// Save, then hand the saved path (never another) to `open` when the
+    /// request asks for it and its extension is a known document or media
+    /// type. `false` means the dialog was cancelled. A refused or failed open
+    /// is reported without its OS detail: the copy is already saved.
+    pub async fn save_and_open(
+        self: &Arc<Self>,
+        request: SaveMediaRequest,
+        pick: impl FnOnce(String) -> Result<Option<PathBuf>, String> + Send + 'static,
+        open: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+    ) -> Result<bool, String> {
+        let wants_open = request.open;
+        let Some(path) = self.save_media(request, pick).await? else {
+            return Ok(false);
+        };
+        if wants_open {
+            if !is_openable(&path) {
+                return Err(OPEN_FAILED.into());
+            }
+            blocking(move || open(&path).map_err(|_| OPEN_FAILED.to_string())).await?;
+        }
+        Ok(true)
     }
 }
 
@@ -292,6 +414,191 @@ mod tests {
             ))
             .body(vec![])
             .unwrap()
+    }
+    #[test]
+    fn document_preview_is_scoped_and_serves_only_recorded_raster_pages() {
+        let (_root, store, owner, sid, aid) = fixture();
+        store
+            .mutate(&sid, |record| {
+                let file = &mut record.attachments[0];
+                file.mime_type =
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        .into();
+                file.name = "deck.pptx".into();
+                file.details =
+                    Some(json!({"documentPreview":{"mimeType":"image/jpeg","pages":[1]}}));
+                Ok(())
+            })
+            .unwrap();
+        let dir = store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{aid}.pages"));
+        std::fs::create_dir(&dir).unwrap();
+        let jpeg = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9";
+        std::fs::write(dir.join("1.jpg"), jpeg).unwrap();
+        std::fs::write(dir.join("2.jpg"), jpeg).unwrap();
+        let preview = |page: &str| {
+            Request::builder().uri(format!("assistant-media://localhost/{sid}/{aid}/preview/{page}?owner={owner}&generation=7")).body(vec![]).unwrap()
+        };
+        let response = serve(&store, &owner, 7, &preview("1"));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/jpeg");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.body(), jpeg);
+        let mut head = preview("1");
+        *head.method_mut() = Method::HEAD;
+        assert!(serve(&store, &owner, 7, &head).body().is_empty());
+        let other_sid = store.create("test/model", false).unwrap().session.id;
+        let other = Request::builder().uri(format!("assistant-media://localhost/{other_sid}/{aid}/preview/1?owner={owner}&generation=7")).body(vec![]).unwrap();
+        assert_eq!(serve(&store, &owner, 7, &other).status(), 404);
+        std::fs::write(dir.join("1.jpg"), b"<svg onload='alert(1)'/>").unwrap();
+        assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+        std::fs::write(dir.join("1.jpg"), jpeg).unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.join("1.jpg")).unwrap();
+            std::os::unix::fs::symlink(dir.join("2.jpg"), dir.join("1.jpg")).unwrap();
+            assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+            std::fs::remove_file(dir.join("1.jpg")).unwrap();
+            std::fs::write(dir.join("1.jpg"), jpeg).unwrap();
+        }
+        for page in ["0", "2", "61", "../1", "%2e%2e", "1.svg"] {
+            assert!(serve(&store, &owner, 7, &preview(page))
+                .status()
+                .is_client_error());
+        }
+        assert_eq!(serve(&store, &owner, 8, &preview("1")).status(), 403);
+        assert_eq!(
+            serve(&store, &"cd".repeat(32), 7, &preview("1")).status(),
+            403
+        );
+        assert_eq!(
+            serve(&store, &owner, 7, &request(&owner, &sid, &aid)).status(),
+            404
+        );
+        store
+            .mutate(&sid, |record| {
+                record.attachments[0].details = None;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+        store
+            .mutate(&sid, |record| {
+                record.attachments.clear();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+    }
+    #[test]
+    fn preview_page_number_seventy_is_served_only_when_recorded_and_current() {
+        let (_root, store, owner, sid, aid) = fixture();
+        store
+            .mutate(&sid, |record| {
+                let file = &mut record.attachments[0];
+                file.mime_type =
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        .into();
+                file.origin = Some("generated".into());
+                file.details =
+                    Some(json!({"documentPreview":{"mimeType":"image/jpeg","pages":[70]}}));
+                Ok(())
+            })
+            .unwrap();
+        let directory = store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{aid}.pages"));
+        std::fs::create_dir(&directory).unwrap();
+        let jpeg = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9";
+        for page in [70, 71, 1001] {
+            std::fs::write(directory.join(format!("{page}.jpg")), jpeg).unwrap();
+        }
+        let request = |page: &str| {
+            Request::builder().uri(format!("assistant-media://localhost/{sid}/{aid}/preview/{page}?owner={owner}&generation=7")).body(vec![]).unwrap()
+        };
+        let response = serve(&store, &owner, 7, &request("70"));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), jpeg);
+        for page in ["071", "71", "1001"] {
+            assert!(serve(&store, &owner, 7, &request(page))
+                .status()
+                .is_client_error());
+        }
+        assert_eq!(serve(&store, &owner, 8, &request("70")).status(), 403);
+        assert_eq!(
+            serve(&store, &"ef".repeat(32), 7, &request("70")).status(),
+            403
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit private runtime + real OfficeCLI SVG fixture; no network"]
+    async fn document_preview_real_raster_persist_protocol_roundtrip() {
+        let (root, store, owner, sid, aid) = fixture();
+        let runtime = PathBuf::from(std::env::var("OFOX_PREVIEW_RUNTIME").unwrap());
+        let svg = PathBuf::from(std::env::var("OFOX_PREVIEW_SVG").unwrap());
+        let input = root.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let source = input.join("1.svg");
+        std::fs::copy(svg, &source).unwrap();
+        let images = super::super::documents::preview::raster(
+            &runtime,
+            &input,
+            &[source],
+            Some(Path::new("/usr/bin/sandbox-exec")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            images.len(),
+            1,
+            "actual OfficeCLI SVG must produce a raster"
+        );
+        let mid = id();
+        store.mutate(&sid,|record| {
+            record.attachments[0].mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation".into();
+            record.attachments[0].name="deck.pptx".into();
+            record.attachments[0].details=Some(json!({"format":"pptx","slides":1}));
+            record.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"completed","attachments":record.attachments})).unwrap());Ok(())
+        }).unwrap();
+        let media = super::super::types::MediaRecord {
+            kind: "document".into(),
+            tool_call_id: Some(id()),
+            params: json!({"documentPreview":{"mimeType":"image/jpeg","pages":[1]}}),
+            status: "completed".into(),
+            outputs: vec![aid.clone()],
+            ..Default::default()
+        };
+        super::super::attachments::keep_document_preview(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &images,
+            &media,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let req = Request::builder()
+            .uri(format!(
+                "assistant-media://localhost/{sid}/{aid}/preview/1?owner={owner}&generation=7"
+            ))
+            .body(vec![])
+            .unwrap();
+        let response = serve(&store, &owner, 7, &req);
+        assert_eq!(response.status(), 200);
+        assert!(!response.body().is_empty());
+        assert_eq!(response.body(), &images[0].1);
+        assert_eq!(serve(&store, &owner, 8, &req).status(), 403);
+        let snapshot = store.load_record(&sid).unwrap();
+        assert_eq!(
+            super::super::documents::preview::pages(&snapshot.attachments[0]),
+            [1]
+        );
+        println!("real OfficeCLI SVG -> sandboxed raster -> persisted cache -> authorized JPEG response: {} bytes",response.body().len());
     }
     #[test]
     fn protocol_serves_only_current_owner_generation_and_valid_media_ids() {
@@ -501,6 +808,7 @@ mod tests {
                     expected_generation: host.generation(),
                 },
                 attachment_id: aid.clone(),
+                open: false,
             };
             let output = tempfile::tempdir().unwrap();
             let destination = output.path().join("speech.wav");
@@ -511,7 +819,8 @@ mod tests {
                     Ok(Some(target))
                 })
                 .await
-                .unwrap());
+                .unwrap()
+                .is_some());
             assert_eq!(std::fs::read(&destination).unwrap(), bytes);
             #[cfg(unix)]
             {
@@ -525,7 +834,11 @@ mod tests {
                     0o600
                 );
             }
-            assert!(!host.save_media(make(), |_| Ok(None)).await.unwrap());
+            assert!(host
+                .save_media(make(), |_| Ok(None))
+                .await
+                .unwrap()
+                .is_none());
             let mut stale = make();
             stale.authority.expected_generation += 1;
             assert_eq!(
@@ -570,5 +883,304 @@ mod tests {
             })
             .unwrap();
         assert_eq!(serve(&store, &owner, 7, &req).status(), 404);
+    }
+    const DOCUMENT_MIMES: [&str; 9] = [
+        "application/pdf",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "text/markdown",
+        "text/plain",
+        "text/csv",
+        "text/html",
+        "application/json",
+    ];
+    #[test]
+    fn open_file_allows_owned_input_and_generated_documents() {
+        for mime in DOCUMENT_MIMES {
+            let (_root, store, _owner, sid, aid) = fixture();
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].mime_type = mime.into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(open_file(&store, &sid, &aid).is_ok(), "{mime}");
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].origin = Some("user".into());
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                open_file(&store, &sid, &aid).is_ok(),
+                "Owned input {mime} can be saved via the dialog"
+            );
+            store
+                .mutate(&sid, |record| {
+                    record.attachments[0].status = "missing".into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                open_file(&store, &sid, &aid).is_err(),
+                "Missing input {mime} cannot be opened"
+            );
+        }
+        let (_root, store, _owner, sid, aid) = fixture();
+        store
+            .mutate(&sid, |r| {
+                r.attachments[0].mime_type = "text/x-rust".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            open_file(&store, &sid, &aid).err().as_deref(),
+            Some("assistant_attachment_not_found")
+        );
+    }
+    #[test]
+    fn documents_are_saved_but_never_served() {
+        for mime in DOCUMENT_MIMES {
+            let (_root, store, owner, sid, aid) = fixture();
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].mime_type = mime.into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(open_file(&store, &sid, &aid).is_ok(), "{mime}");
+            let response = serve(&store, &owner, 7, &request(&owner, &sid, &aid));
+            assert_eq!(response.status(), 404, "{mime}");
+            assert!(response.body().is_empty(), "{mime}");
+        }
+    }
+    #[test]
+    fn documents_are_capped_at_twenty_five_mib() {
+        let (_root, store, _owner, sid, aid) = fixture();
+        let path = store.attachment_root(&sid).unwrap().join(&aid);
+        let cap = 25 * 1024 * 1024u64;
+        for (size, readable) in [(cap, true), (cap + 1, false)] {
+            std::fs::File::create(&path).unwrap().set_len(size).unwrap();
+            store
+                .mutate(&sid, |r| {
+                    r.attachments[0].mime_type = "application/pdf".into();
+                    r.attachments[0].size_bytes = size;
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(open_file(&store, &sid, &aid).is_ok(), readable, "{size}");
+        }
+    }
+
+    struct SavedDocument {
+        _root: tempfile::TempDir,
+        host: Arc<AssistantHost>,
+        owner: String,
+        sid: String,
+        aid: String,
+        bytes: Vec<u8>,
+    }
+    impl SavedDocument {
+        fn request(&self, open: bool) -> SaveMediaRequest {
+            SaveMediaRequest {
+                authority: DeleteRequest {
+                    session_id: self.sid.clone(),
+                    expected_owner: self.owner.clone(),
+                    expected_generation: self.host.generation(),
+                },
+                attachment_id: self.aid.clone(),
+                open,
+            }
+        }
+    }
+    fn pdf_attachment() -> SavedDocument {
+        let (root, store, owner, sid, aid) = fixture();
+        let bytes = b"%PDF-1.7\n%generated report\n".to_vec();
+        std::fs::write(store.attachment_root(&sid).unwrap().join(&aid), &bytes).unwrap();
+        store
+            .mutate(&sid, |r| {
+                let f = &mut r.attachments[0];
+                f.mime_type = "application/pdf".into();
+                f.size_bytes = bytes.len() as u64;
+                f.name = "report.pdf".into();
+                Ok(())
+            })
+            .unwrap();
+        let env = Arc::new(ReadEnv {
+            root: root.path().into(),
+            identity: std::sync::Mutex::new(super::super::host::Identity {
+                owner: owner.clone(),
+                apex: "ofox.ai".into(),
+            }),
+        });
+        SavedDocument {
+            _root: root,
+            host: AssistantHost::new(env),
+            owner,
+            sid,
+            aid,
+            bytes,
+        }
+    }
+    #[test]
+    fn save_requests_do_not_open_unless_asked() {
+        let body = |extra: &str| {
+            format!(
+                r#"{{"sessionId":"s","expectedOwner":"o","expectedGeneration":3,"attachmentId":"a"{extra}}}"#
+            )
+        };
+        let plain: SaveMediaRequest = serde_json::from_str(&body("")).unwrap();
+        assert!(!plain.open);
+        let open: SaveMediaRequest = serde_json::from_str(&body(r#","open":true"#)).unwrap();
+        assert!(open.open);
+    }
+    #[tokio::test]
+    async fn save_media_returns_the_chosen_path() {
+        let doc = pdf_attachment();
+        let output = tempfile::tempdir().unwrap();
+        let target = output.path().join("report.pdf");
+        let chosen = target.clone();
+        let saved = doc
+            .host
+            .save_media(doc.request(false), move |name| {
+                assert_eq!(name, "report.pdf");
+                Ok(Some(chosen))
+            })
+            .await
+            .unwrap();
+        assert_eq!(saved, Some(target.clone()));
+        assert_eq!(std::fs::read(&target).unwrap(), doc.bytes);
+        let cancelled = doc
+            .host
+            .save_media(doc.request(false), |_| Ok(None))
+            .await
+            .unwrap();
+        assert_eq!(cancelled, None);
+    }
+    #[tokio::test]
+    async fn assistant_save_media_opens_only_the_saved_path() {
+        let doc = pdf_attachment();
+        let output = tempfile::tempdir().unwrap();
+        let opened = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let recorder = |opened: &Arc<std::sync::Mutex<Vec<PathBuf>>>, bytes: &[u8]| {
+            let opened = opened.clone();
+            let bytes = bytes.to_vec();
+            move |path: &Path| {
+                // The file is complete before it is handed to the OS.
+                assert_eq!(std::fs::read(path).unwrap(), bytes);
+                opened.lock().unwrap().push(path.to_path_buf());
+                Ok(())
+            }
+        };
+
+        let target = output.path().join("report.pdf");
+        let chosen = target.clone();
+        let saved = doc
+            .host
+            .save_and_open(
+                doc.request(true),
+                move |_| Ok(Some(chosen)),
+                recorder(&opened, &doc.bytes),
+            )
+            .await
+            .unwrap();
+        assert!(saved);
+        assert_eq!(*opened.lock().unwrap(), vec![target.clone()]);
+
+        let copy = output.path().join("copy.pdf");
+        let chosen = copy.clone();
+        assert!(doc
+            .host
+            .save_and_open(
+                doc.request(false),
+                move |_| Ok(Some(chosen)),
+                recorder(&opened, &doc.bytes),
+            )
+            .await
+            .unwrap());
+        assert!(copy.is_file());
+        assert_eq!(opened.lock().unwrap().len(), 1, "open:false never opens");
+
+        let saved = doc
+            .host
+            .save_and_open(
+                doc.request(true),
+                |_| Ok(None),
+                recorder(&opened, &doc.bytes),
+            )
+            .await
+            .unwrap();
+        assert!(!saved, "a cancelled dialog reports false");
+        assert_eq!(opened.lock().unwrap().len(), 1, "cancel never opens");
+    }
+    #[tokio::test]
+    async fn a_failed_open_is_reported_after_the_file_was_saved() {
+        let doc = pdf_attachment();
+        let output = tempfile::tempdir().unwrap();
+        let target = output.path().join("report.pdf");
+        let chosen = target.clone();
+        let error = doc
+            .host
+            .save_and_open(
+                doc.request(true),
+                move |_| Ok(Some(chosen)),
+                |_| Err("os detail /Users/someone/secret".into()),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error, "assistant_open_failed");
+        assert_eq!(std::fs::read(&target).unwrap(), doc.bytes);
+    }
+    #[tokio::test]
+    async fn only_documents_and_media_are_opened_whatever_name_was_chosen() {
+        let doc = pdf_attachment();
+        let output = tempfile::tempdir().unwrap();
+        let opened = Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+        let attempt = async |name: String| {
+            let target = output.path().join(&name);
+            let chosen = target.clone();
+            let seen = opened.clone();
+            let result = doc
+                .host
+                .save_and_open(
+                    doc.request(true),
+                    move |_| Ok(Some(chosen)),
+                    move |path| {
+                        seen.lock().unwrap().push(path.to_path_buf());
+                        Ok(())
+                    },
+                )
+                .await;
+            // Saved either way: only the opening is withheld.
+            assert_eq!(std::fs::read(&target).unwrap(), doc.bytes, "{name}");
+            (result, target)
+        };
+        for extension in [
+            "pdf", "docx", "pptx", "xlsx", "md", "txt", "csv", "html", "json", "png", "jpg",
+            "jpeg", "webp", "gif", "mp4", "wav", "mp3", "ogg", "PPTX", "Pdf",
+        ] {
+            let (result, target) = attempt(format!("deliverable.{extension}")).await;
+            assert!(result.unwrap(), "{extension}");
+            assert_eq!(opened.lock().unwrap().pop(), Some(target), "{extension}");
+        }
+        for name in [
+            "run.bat",
+            "run.BAT",
+            "run.ps1",
+            "run.cmd",
+            "run.command",
+            "run.sh",
+            "run.exe",
+            "run.app",
+            "run.lnk",
+            "run.js",
+            "report.pdf.bat",
+            "no-extension",
+        ] {
+            let (result, _) = attempt(name.into()).await;
+            assert_eq!(result.unwrap_err(), "assistant_open_failed", "{name}");
+            assert!(opened.lock().unwrap().is_empty(), "{name} was opened");
+        }
     }
 }

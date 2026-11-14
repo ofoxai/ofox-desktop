@@ -1,0 +1,114 @@
+{
+  "id": "offline-document-retrieval",
+  "version": "2026-11-10.1",
+  "provenance": {
+    "kind": "self-authored-synthetic",
+    "author": "Ofox Desktop contributors",
+    "notice": "独立编写的合成演示，不代表实际业务或系统性能；不含闭源示例或模板厂商样例内容。"
+  },
+  "language": "zh-CN",
+  "aspectRatio": "16:9",
+  "density": "balanced",
+  "minimumBodyPt": 12,
+  "minimumLabelPt": 10,
+  "data": [
+    { "batch": "甲", "input": 100, "valid": 90, "seconds": 12 },
+    { "batch": "乙", "input": 200, "valid": 180, "seconds": 24 },
+    { "batch": "丙", "input": 300, "valid": 270, "seconds": 36 }
+  ],
+  "slides": [
+    {
+      "title": "将离线文档整理为可检索资料",
+      "body": [
+        "合成演示，不代表实际业务或系统性能。",
+        "目标：比较资料整理方案。"
+      ],
+      "requiredText": ["合成演示", "比较资料整理方案"],
+      "relation": "cover-and-goal"
+    },
+    {
+      "title": "先去重，再建立索引",
+      "body": ["采集 → 去重 → 索引 → 检索", "去重在索引之前。"],
+      "requiredText": ["采集", "去重", "索引", "检索", "去重在索引之前"],
+      "relation": "ordered-process"
+    },
+    {
+      "title": "两种方案有不同的状态维护要求",
+      "body": [
+        "方案 A：每批全量重建，不维护增量状态。",
+        "方案 B：仅处理变更，需维护变更记录。",
+        "本例尚未测量两者性能。"
+      ],
+      "requiredText": [
+        "每批全量重建",
+        "不维护增量状态",
+        "仅处理变更",
+        "维护变更记录",
+        "尚未测量两者性能"
+      ],
+      "relation": "comparison-with-limitation"
+    },
+    {
+      "title": "三批合成数据用于检验展示能力",
+      "body": [
+        "合成数据，不代表方案 A 或 B 的性能。",
+        "批次甲：输入 100 条，有效 90 条，索引耗时 12 秒。",
+        "批次乙：输入 200 条，有效 180 条，索引耗时 24 秒。",
+        "批次丙：输入 300 条，有效 270 条，索引耗时 36 秒。"
+      ],
+      "requiredText": [
+        "合成数据",
+        "甲",
+        "乙",
+        "丙",
+        "100",
+        "200",
+        "300",
+        "90",
+        "180",
+        "270",
+        "12",
+        "24",
+        "36",
+        "秒"
+      ],
+      "relation": "table-and-native-chart"
+    },
+    {
+      "title": "乙批次有效率为 90%",
+      "body": [
+        "有效率 = 有效条目 ÷ 输入条目 × 100%",
+        "乙批次：180 ÷ 200 × 100% = 90%"
+      ],
+      "requiredText": [
+        "有效率",
+        "有效条目",
+        "输入条目",
+        "180",
+        "200",
+        "100%",
+        "90%"
+      ],
+      "relation": "equation-and-worked-example"
+    },
+    {
+      "title": "将方案 B 作为待测试候选",
+      "body": [
+        "方案 B 是待测试候选，尚未验证真实更新负载。",
+        "不能据这些批次数据宣称 B 优于 A。",
+        "下一步：比较相同负载下的耗时与维护成本。"
+      ],
+      "requiredText": [
+        "待测试候选",
+        "尚未验证真实更新负载",
+        "不能",
+        "B",
+        "A",
+        "相同负载",
+        "耗时",
+        "维护成本"
+      ],
+      "relation": "conclusion-with-next-test"
+    }
+  ]
+}

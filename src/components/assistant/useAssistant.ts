@@ -8,7 +8,13 @@ import {
 import {
   assistantApi,
   assistantErrorCode,
+  type AssistantPresentationStyleId,
+  type AssistantPresentationVisualPolicy,
+  DEFAULT_PRESENTATION_VISUAL_POLICY,
+  isAssistantPresentationTextBudget,
+  PRESENTATION_MAX_IMAGES,
   type AssistantAttachment,
+  type AssistantFileReference,
   type AssistantPermissionMode,
   type AssistantApprovalChoice,
   type AssistantLocalChange,
@@ -23,6 +29,7 @@ import {
   type AssistantPreferences,
   type AssistantRunRef,
   type AssistantRestoreReport,
+  type AssistantSearchProvider,
   type AssistantSession,
   type AssistantSessionDetail,
   type AssistantThinkingLevel,
@@ -33,7 +40,9 @@ import {
   type AssistantMediaDefaults,
   type AssistantRegenerateResult,
 } from "@/lib/api/assistant";
+import { isPresentationStyleAvailable } from "@/lib/assistantPresentationStyles";
 import { asDraftFile, isSendable } from "@/utils/assistantAttachments";
+
 import { currentThinking, type ThinkingChoice } from "@/utils/assistantModels";
 import { useFinishNotice } from "./useFinishNotice";
 import { useInteractionActive } from "@/components/ui/interaction-scope";
@@ -42,6 +51,15 @@ import {
   MAX_MESSAGE_BYTES,
   type QueueTicket,
 } from "./useMessageQueue";
+
+export interface FileReferenceTarget {
+  sessionId: string;
+  expectedOwner: string;
+  expectedGeneration: number;
+  selectionKey: number;
+}
+const cloneFileReferences = (references: AssistantFileReference[]) =>
+  references.map((reference) => ({ ...reference }));
 
 function subscriptionReadiness() {
   let resolve!: () => void;
@@ -82,12 +100,93 @@ export type AssistantTransferResult =
   | ({ kind: "restore" } & AssistantRestoreReport);
 
 /** What a running reply is doing, as the user is told; never a tool's name. */
-export type AssistantActivity = "searching" | "readingPage" | "readingFile";
+export type AssistantActivity =
+  | "searching"
+  | "readingPage"
+  | "readingFile"
+  | "editingFile"
+  | "runningCommand"
+  | "checkingResult"
+  | "preparingToolRequest"
+  | "confirmingPlan"
+  | "selectingStyle"
+  | "readingGuidance"
+  | "makingDocument";
 
 const TOOL_ACTIVITY = new Map<string, AssistantActivity>([
   ["web_search", "searching"],
   ["web_fetch", "readingPage"],
   ["read_attachment", "readingFile"],
+  ...["read", "stat", "ls", "find", "grep"].map(
+    (name): [string, AssistantActivity] => [name, "readingFile"],
+  ),
+  ["write", "editingFile"],
+  ["edit", "editingFile"],
+  ["bash", "runningCommand"],
+  ["powershell", "runningCommand"],
+  ["tool_status", "checkingResult"],
+  ["diagnose_in_folder", "checkingResult"],
+  ["verify_in_folder", "checkingResult"],
+  ["get_presentation_style", "selectingStyle"],
+  ["get_presentation_candidates", "selectingStyle"],
+  ["freeze_presentation_plan", "confirmingPlan"],
+  ["use_skill", "readingGuidance"],
+  ["create_document", "makingDocument"],
+]);
+
+/** Observed run timing and bounded tool outcomes, never estimated completion. */
+export interface AssistantRunProgressState {
+  runId: string;
+  /** The saved reply's creation time, or when this view began following it. */
+  startedAt: number;
+  /** Renderer receipt time of the latest semantic event; excludes tokens. */
+  lastEventAt: number;
+  activities: {
+    id: string;
+    activity: AssistantActivity;
+    status: "running" | "completed" | "failed";
+  }[];
+}
+
+interface RunProgressScope extends AssistantRunRef {
+  sessionId: string | null;
+  epoch: number;
+  owner: string | undefined;
+  authority: number | undefined;
+}
+
+const preparationScopeKey = (scope: RunProgressScope) =>
+  JSON.stringify([
+    scope.owner,
+    scope.authority,
+    scope.sessionId,
+    scope.runId,
+    scope.operationId,
+  ]);
+
+const PROGRESS_EVENTS = new Set<AssistantEvent["type"]>([
+  "run_start",
+  "thinking_start",
+  "thinking_end",
+  "tool_start",
+  "tool_preparing",
+  "tool_end",
+  "approval",
+  "approval_end",
+  "task_plan",
+  "task_status",
+  "retrying",
+  "generation",
+  "presentation_plan",
+  "attachment",
+  "mcp_step",
+  "skill_results",
+  "sources",
+  "compaction_start",
+  "compaction_end",
+  "steer_applied",
+  "message",
+  "error",
 ]);
 
 /** A tool call of the followed run that has not ended, by its call id. */
@@ -219,6 +318,7 @@ export function useAssistant(enabled: boolean) {
   const [localChanges, setLocalChanges] = useState<AssistantLocalChange[]>([]);
   const [localPlan, setLocalPlan] = useState<PlanStep[]>([]);
   const [localIntent, setLocalIntent] = useState<string | null>(null);
+  const localIntentCall = useRef<string | null>(null);
   const [localWarning, setLocalWarning] = useState<string | null>(null);
   const [localModelNotice, setLocalModelNotice] = useState<string | null>(null);
   // Thinking for the conversation the first message creates: it belongs to
@@ -236,18 +336,113 @@ export function useAssistant(enabled: boolean) {
   // For a search: the first message each listed conversation matches.
   const [matches, setMatches] = useState<Record<string, string>>({});
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [fileReferences, setFileReferencesState] = useState<
+    AssistantFileReference[]
+  >([]);
+  const fileReferencesRef = useRef(fileReferences);
+  const fileReferencesVersion = useRef(0);
+  const setFileReferences = useCallback(
+    (references: AssistantFileReference[]) => {
+      fileReferencesVersion.current += 1;
+      fileReferencesRef.current = cloneFileReferences(references);
+      setFileReferencesState(fileReferencesRef.current);
+    },
+    [],
+  );
   const [detail, setDetail] = useState<AssistantSessionDetail | null>(null);
   const detailRef = useRef(detail);
   detailRef.current = detail;
   const [draft, setDraftState] = useState("");
+  const [skill, setSkillState] = useState<string | undefined>();
+  const skillRef = useRef<string | undefined>();
+  const skillDrafts = useRef(new Map<string, string | undefined>());
+  const skillVersion = useRef(0);
+  const skillVersions = useRef(new Map<string, number>());
+  const setSkill = useCallback((value: string | undefined) => {
+    skillVersion.current += 1;
+    skillRef.current = value;
+    skillDrafts.current.set(selectedRef.current ?? "", value);
+    skillVersions.current.set(selectedRef.current ?? "", skillVersion.current);
+    setSkillState(value);
+  }, []);
+  const [presentationVisualPolicy, setVisualPolicyState] =
+    useState<AssistantPresentationVisualPolicy>({
+      ...DEFAULT_PRESENTATION_VISUAL_POLICY,
+    });
+  const visualPolicyRef = useRef(presentationVisualPolicy);
+  const visualPolicyDrafts = useRef(
+    new Map<string, AssistantPresentationVisualPolicy>(),
+  );
+  const visualPolicyVersion = useRef(0);
+  const visualPolicyVersions = useRef(new Map<string, number>());
+  const setPresentationVisualPolicy = useCallback(
+    (value: AssistantPresentationVisualPolicy) => {
+      if (
+        !["off", "auto", "illustration", "exact"].includes(value.mode) ||
+        !Number.isInteger(value.maxImages) ||
+        value.maxImages < 0 ||
+        value.maxImages > PRESENTATION_MAX_IMAGES ||
+        (value.textMaxCostUsd !== undefined &&
+          !isAssistantPresentationTextBudget(value.textMaxCostUsd)) ||
+        !(value.maxCostUsd === "count-only"
+          ? value.mode !== "off" && value.maxImages > 0
+          : /^(?:0|[1-9]\d{0,2})(?:\.\d{1,6})?$/.test(value.maxCostUsd))
+      )
+        return;
+      const frozen = { ...value };
+      visualPolicyVersion.current += 1;
+      visualPolicyRef.current = frozen;
+      visualPolicyDrafts.current.set(selectedRef.current ?? "", frozen);
+      visualPolicyVersions.current.set(
+        selectedRef.current ?? "",
+        visualPolicyVersion.current,
+      );
+      setVisualPolicyState(frozen);
+    },
+    [],
+  );
+  const [presentationStyleId, setPresentationStyleState] =
+    useState<AssistantPresentationStyleId>();
+  const presentationStyleRef = useRef<AssistantPresentationStyleId>();
+  const presentationStyleDrafts = useRef(
+    new Map<string, AssistantPresentationStyleId | undefined>(),
+  );
+  const presentationStyleVersion = useRef(0);
+  const presentationStyleVersions = useRef(new Map<string, number>());
+  const setPresentationStyleId = useCallback(
+    (value: AssistantPresentationStyleId | undefined) => {
+      if (value !== undefined && !isPresentationStyleAvailable(value)) return;
+      presentationStyleVersion.current += 1;
+      presentationStyleRef.current = value;
+      presentationStyleDrafts.current.set(selectedRef.current ?? "", value);
+      presentationStyleVersions.current.set(
+        selectedRef.current ?? "",
+        presentationStyleVersion.current,
+      );
+      setPresentationStyleState(value);
+    },
+    [],
+  );
   const [attachments, setAttachmentsState] = useState<AssistantAttachment[]>(
     [],
   );
   const [stream, setStream] = useState<AssistantMessage | null>(null);
+  const streamRef = useRef(stream);
+  streamRef.current = stream;
   const [thinking, setThinking] = useState<AssistantThinking | null>(null);
   const thinkingRef = useRef<AssistantThinking | null>(null);
   const [run, setRunState] = useState<AssistantRunRef | null>(null);
+  const [runProgress, setRunProgress] =
+    useState<AssistantRunProgressState | null>(null);
+  const progressScope = useRef<RunProgressScope | null>(null);
   const [tools, setTools] = useState<RunningTool[]>([]);
+  const [preparingTools, setPreparingTools] = useState<string[]>([]);
+  const observedPreparations = useRef(new Set<string>());
+  const finishedPreparations = useRef(new Set<string>());
+  const preparationClosed = useRef(false);
+  // A saved activeRun can lag cancellation while navigating away and back.
+  // Keep bounded identity-scoped tombstones so queued old drafts stay closed.
+  const closedPreparationScopes = useRef(new Set<string>());
   // The files a run this window sent reads before its model request: those
   // whose outcome has not come in yet.
   const [reading, setReading] = useState<{
@@ -261,7 +456,13 @@ export function useAssistant(enabled: boolean) {
   const [searchSkipped, setSearchSkipped] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // Replies whose free (Exa) search was refused, by message id: rate-limited
+  // for this network, or blocked (a proxy or IPv6).
+  const [searchLimited, setSearchLimited] = useState<
+    ReadonlyMap<string, "search_rate_limited" | "search_blocked">
+  >(() => new Map());
   const [compacting, setCompacting] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState<1 | 2 | null>(null);
   const listenerReady = useRef<ReturnType<typeof subscriptionReadiness> | null>(
     null,
   );
@@ -414,17 +615,124 @@ export function useAssistant(enabled: boolean) {
     setRunSearchState(value);
   }, []);
 
-  const setRun = useCallback((value: AssistantRunRef | null) => {
-    // Another run, or none: the tools the last one started are not followed.
-    if (value?.runId !== runRef.current?.runId) {
-      setTools([]);
-      setLocalApprovals([]);
-      setLocalIntent(null);
-      setLocalPlan([]);
-      setLocalWarning(null);
+  const closePreparation = useCallback(() => {
+    const scope = progressScope.current;
+    if (scope) {
+      const closed = closedPreparationScopes.current;
+      closed.add(preparationScopeKey(scope));
+      if (closed.size > 32) closed.delete(closed.values().next().value!);
     }
-    runRef.current = value;
-    setRunState(value);
+    preparationClosed.current = true;
+    setPreparingTools([]);
+  }, []);
+
+  const setRun = useCallback(
+    (value: AssistantRunRef | null, startedAt?: number) => {
+      const identity = bootstrapRef.current;
+      const scope = progressScope.current;
+      const same =
+        value &&
+        scope &&
+        value.runId === scope.runId &&
+        value.operationId === scope.operationId &&
+        scope.epoch === epoch.current &&
+        scope.sessionId === selectedRef.current &&
+        scope.owner === identity?.owner &&
+        scope.authority === identity?.authorityGeneration;
+      // Another run, or none: the tools the last one started are not followed.
+      if (!same) {
+        setRetryAttempt(null);
+        setTools([]);
+        setPreparingTools([]);
+        observedPreparations.current.clear();
+        finishedPreparations.current.clear();
+        setLocalApprovals([]);
+        localIntentCall.current = null;
+        setLocalIntent(null);
+        setLocalPlan([]);
+        setLocalWarning(null);
+        progressScope.current = value
+          ? {
+              ...value,
+              sessionId: selectedRef.current,
+              epoch: epoch.current,
+              owner: identity?.owner,
+              authority: identity?.authorityGeneration,
+            }
+          : null;
+        preparationClosed.current =
+          progressScope.current !== null &&
+          closedPreparationScopes.current.has(
+            preparationScopeKey(progressScope.current),
+          );
+        const now = Date.now();
+        setRunProgress(
+          value
+            ? {
+                runId: value.runId,
+                startedAt:
+                  typeof startedAt === "number" &&
+                  Number.isFinite(startedAt) &&
+                  startedAt >= 0 &&
+                  startedAt <= now
+                    ? startedAt
+                    : now,
+                lastEventAt: now,
+                activities: [],
+              }
+            : null,
+        );
+      }
+      runRef.current = value;
+      setRunState(value);
+    },
+    [],
+  );
+
+  const observeProgress = useCallback((event: AssistantEvent) => {
+    if (!PROGRESS_EVENTS.has(event.type)) return;
+    const scope = progressScope.current;
+    const identity = bootstrapRef.current;
+    if (
+      !scope ||
+      scope.epoch !== epoch.current ||
+      scope.owner !== identity?.owner ||
+      scope.authority !== identity?.authorityGeneration ||
+      scope.sessionId !== selectedRef.current ||
+      scope.sessionId !== event.sessionId ||
+      scope.runId !== event.runId ||
+      scope.operationId !== event.operationId
+    )
+      return;
+    const now = Date.now();
+    setRunProgress((old) => {
+      if (!old || old.runId !== event.runId) return old;
+      let activities = old.activities;
+      if (event.type === "tool_start") {
+        const activity = TOOL_ACTIVITY.get(event.data.name);
+        if (activity)
+          activities = [
+            ...activities.filter((item) => item.id !== event.data.toolCallId),
+            { id: event.data.toolCallId, activity, status: "running" as const },
+          ].slice(-4);
+      } else if (event.type === "tool_end") {
+        activities = activities.map((item) =>
+          item.id === event.data.toolCallId
+            ? {
+                ...item,
+                status: event.data.success
+                  ? ("completed" as const)
+                  : ("failed" as const),
+              }
+            : item,
+        );
+      }
+      return {
+        ...old,
+        lastEventAt: Math.max(old.lastEventAt, now),
+        activities,
+      };
+    });
   }, []);
 
   // Words stream in many times a second: they are gathered here and put on
@@ -567,8 +875,21 @@ export function useAssistant(enabled: boolean) {
             previous &&
             (previous.owner !== value.owner ||
               previous.authorityGeneration !== value.authorityGeneration)
-          )
+          ) {
             messageQueue.clear();
+            setFileReferences([]);
+            skillDrafts.current.clear();
+            skillVersions.current.clear();
+            setSkill(undefined);
+            presentationStyleDrafts.current.clear();
+            visualPolicyDrafts.current.clear();
+            visualPolicyVersions.current.clear();
+            setPresentationVisualPolicy({
+              ...DEFAULT_PRESENTATION_VISUAL_POLICY,
+            });
+            presentationStyleVersions.current.clear();
+            setPresentationStyleId(undefined);
+          }
           if (
             previous?.owner === value.owner &&
             previous.authorityGeneration === value.authorityGeneration &&
@@ -859,7 +1180,7 @@ export function useAssistant(enabled: boolean) {
         });
         if (resumed && !alreadyFollowing) setStream(resumed);
         if (!preparing) {
-          setRun(value.session.activeRun);
+          setRun(value.session.activeRun, resumed?.createdAt);
           setLocalApprovals(value.pendingApprovals ?? []);
         }
         setCompacting(
@@ -916,7 +1237,17 @@ export function useAssistant(enabled: boolean) {
       listSequence.current += 1;
       detailSequence.current += 1;
       selectedRef.current = null;
+      setFileReferences([]);
       drafts.current.clear();
+      skillDrafts.current.clear();
+      skillVersions.current.clear();
+      setSkill(undefined);
+      presentationStyleDrafts.current.clear();
+      visualPolicyDrafts.current.clear();
+      visualPolicyVersions.current.clear();
+      setPresentationVisualPolicy({ ...DEFAULT_PRESENTATION_VISUAL_POLICY });
+      presentationStyleVersions.current.clear();
+      setPresentationStyleId(undefined);
       attachmentDrafts.current.clear();
       savedDrafts.current.clear();
       draftScopes.current.clear();
@@ -956,6 +1287,7 @@ export function useAssistant(enabled: boolean) {
       setNewThinking(null);
       setRunSearch(null);
       setSearchSkipped(new Set());
+      setSearchLimited(new Map());
       setPreferences(null);
       setError(null);
     };
@@ -992,6 +1324,7 @@ export function useAssistant(enabled: boolean) {
     setDraft,
     setNewThinking,
     setNewWebSearch,
+    setPresentationStyleId,
     setRun,
     setRunSearch,
     showError,
@@ -1120,6 +1453,7 @@ export function useAssistant(enabled: boolean) {
         // The identity generation this event arrived under: a list read it
         // asks for is fenced on it.
         const generation = epoch.current;
+        observeProgress(event);
         if (event.type === "catalog_state") {
           const { owner, generation: authority, catalog } = event.data;
           const current = bootstrapRef.current;
@@ -1472,7 +1806,66 @@ export function useAssistant(enabled: boolean) {
           flushDeltas();
         // session and event types this build does not know change nothing
         // on screen: the transcript and session are read again at run_end.
+        // A retry notice belongs only to the followed live request. Model or
+        // tool progress, a replacement turn, failure and completion clear it.
+        if (
+          [
+            "thinking_start",
+            "text_delta",
+            "thinking_delta",
+            "tool_start",
+            "tool_preparing",
+            "message",
+            "error",
+            "run_end",
+            "steer_applied",
+          ].includes(event.type)
+        )
+          setRetryAttempt(null);
         switch (event.type) {
+          case "retrying":
+            for (const id of observedPreparations.current)
+              finishedPreparations.current.add(id);
+            setPreparingTools([]);
+            if (event.data.attempt === 1 || event.data.attempt === 2)
+              setRetryAttempt(event.data.attempt);
+            return;
+          case "skill_results": {
+            const { messageId, group } = event.data;
+            if (
+              !Array.isArray(group?.results) ||
+              group.results.length > 8 ||
+              typeof group.toolCallId !== "string"
+            )
+              return;
+            const apply = (message: AssistantMessage): AssistantMessage => ({
+              ...message,
+              skillResults: [
+                ...(message.skillResults ?? []).filter(
+                  (g) => g.toolCallId !== group.toolCallId,
+                ),
+                group,
+              ],
+            });
+            setStream((previous) =>
+              apply(
+                previous?.id === messageId
+                  ? previous
+                  : { ...blankReply(event.runId), id: messageId },
+              ),
+            );
+            setDetail((previous) =>
+              previous
+                ? {
+                    ...previous,
+                    messages: previous.messages.map((m) =>
+                      m.id === messageId ? apply(m) : m,
+                    ),
+                  }
+                : previous,
+            );
+            return;
+          }
           case "approval":
             setLocalApprovals((old) => [
               ...old.filter((a) => a.data.approvalId !== event.data.approvalId),
@@ -1513,6 +1906,9 @@ export function useAssistant(enabled: boolean) {
             return;
           }
           case "steer_applied": {
+            for (const id of observedPreparations.current)
+              finishedPreparations.current.add(id);
+            setPreparingTools([]);
             endThinking(event.runId);
             writeThinking(null);
             const { messages, messageId } = event.data;
@@ -1596,8 +1992,66 @@ export function useAssistant(enabled: boolean) {
             );
             return;
           }
+          case "mcp_step": {
+            const { step, messageId } = event.data;
+            const update = (items: AssistantMessage["mcpSteps"]) => [
+              ...(items ?? []).filter((item) => item.id !== step.id),
+              step,
+            ];
+            setStream((previous) => ({
+              ...(previous ?? blankReply(event.runId)),
+              mcpSteps: update(previous?.mcpSteps),
+            }));
+            setDetail((old) =>
+              old
+                ? {
+                    ...old,
+                    messages: old.messages.map((message) =>
+                      message.id === messageId
+                        ? { ...message, mcpSteps: update(message.mcpSteps) }
+                        : message,
+                    ),
+                  }
+                : old,
+            );
+            return;
+          }
+          case "tool_preparing": {
+            const { name, toolCallId, active } = event.data;
+            if (
+              !TOOL_ACTIVITY.has(name) ||
+              typeof toolCallId !== "string" ||
+              !/^[A-Za-z0-9_.:|/-]{1,200}$/.test(toolCallId) ||
+              (active !== undefined && typeof active !== "boolean")
+            )
+              return;
+            if (active === false) {
+              finishedPreparations.current.add(toolCallId);
+              setPreparingTools((calls) =>
+                calls.filter((id) => id !== toolCallId),
+              );
+            } else if (
+              !preparationClosed.current &&
+              !finishedPreparations.current.has(toolCallId)
+            ) {
+              observedPreparations.current.add(toolCallId);
+              doneReading(event.runId);
+              endThinking(event.runId);
+              setPreparingTools((calls) =>
+                calls.includes(toolCallId)
+                  ? calls
+                  : [...calls, toolCallId].slice(-4),
+              );
+            }
+            return;
+          }
           case "tool_start": {
             const { name, toolCallId } = event.data;
+            finishedPreparations.current.add(toolCallId);
+            setPreparingTools((calls) =>
+              calls.filter((id) => id !== toolCallId),
+            );
+            localIntentCall.current = toolCallId;
             setLocalIntent(event.data.intent ?? null);
             doneReading(event.runId);
             endThinking(event.runId);
@@ -1611,10 +2065,24 @@ export function useAssistant(enabled: boolean) {
             return;
           }
           case "tool_end": {
-            const { toolCallId } = event.data;
+            const { toolCallId, name, code, messageId } = event.data;
+            finishedPreparations.current.add(toolCallId);
+            setPreparingTools((calls) =>
+              calls.filter((id) => id !== toolCallId),
+            );
+            if (localIntentCall.current === toolCallId) {
+              localIntentCall.current = null;
+              setLocalIntent(null);
+            }
             setTools((running) =>
               running.filter((tool) => tool.id !== toolCallId),
             );
+            if (
+              name === "web_search" &&
+              typeof messageId === "string" &&
+              (code === "search_rate_limited" || code === "search_blocked")
+            )
+              setSearchLimited((old) => new Map(old).set(messageId, code));
             return;
           }
           case "sources": {
@@ -1633,6 +2101,39 @@ export function useAssistant(enabled: boolean) {
           case "compaction_end":
             setCompacting(false);
             return;
+          case "presentation_plan": {
+            const { messageId, plan } = event.data;
+            if (
+              typeof messageId !== "string" ||
+              !plan ||
+              typeof plan.decisionSummary !== "string"
+            )
+              return;
+            setStream((old) =>
+              old?.id === messageId
+                ? { ...old, presentationPlan: plan }
+                : (old ?? {
+                    id: messageId,
+                    role: "assistant",
+                    content: "",
+                    createdAt: Date.now(),
+                    presentationPlan: plan,
+                  }),
+            );
+            setDetail((old) =>
+              old
+                ? {
+                    ...old,
+                    messages: old.messages.map((message) =>
+                      message.id === messageId
+                        ? { ...message, presentationPlan: plan }
+                        : message,
+                    ),
+                  }
+                : old,
+            );
+            return;
+          }
           case "message": {
             // The saved reply; anything but an assistant message is internal.
             const { message } = event.data;
@@ -1648,12 +2149,14 @@ export function useAssistant(enabled: boolean) {
             return;
           }
           case "error":
+            closePreparation();
             // A stop sends no error; a failure is shown by its code alone.
             messageQueue.pause(event.sessionId);
             endThinking(event.runId);
             showError(event.data);
             return;
           case "run_end": {
+            closePreparation();
             if (event.data.status !== "completed" || event.data.stopped)
               messageQueue.pause(event.sessionId);
             writeThinking(null);
@@ -1705,10 +2208,12 @@ export function useAssistant(enabled: boolean) {
     };
   }, [
     enabled,
+    closePreparation,
     endThinking,
     flushDeltas,
     messageQueue,
     notifyFinish,
+    observeProgress,
     queueDelta,
     refreshDetail,
     setRun,
@@ -1742,6 +2247,7 @@ export function useAssistant(enabled: boolean) {
           attachmentDrafts.current.get(previous)?.map((file) => file.id),
         ).catch(showError);
       selectedRef.current = id;
+      setFileReferences([]);
       newLocalConfigRef.current = false;
       setNewLocalConfig(false);
       setLocalModelNotice(null);
@@ -1773,6 +2279,20 @@ export function useAssistant(enabled: boolean) {
       );
       draftRef.current = id ? (drafts.current.get(id) ?? "") : "";
       setDraftState(draftRef.current);
+      skillRef.current = skillDrafts.current.get(id ?? "");
+      setSkillState(skillRef.current);
+      skillVersion.current += 1;
+      presentationStyleRef.current = presentationStyleDrafts.current.get(
+        id ?? "",
+      );
+      setPresentationStyleState(presentationStyleRef.current);
+      visualPolicyRef.current = {
+        ...(visualPolicyDrafts.current.get(id ?? "") ??
+          DEFAULT_PRESENTATION_VISUAL_POLICY),
+      };
+      setVisualPolicyState(visualPolicyRef.current);
+      visualPolicyVersion.current += 1;
+      presentationStyleVersion.current += 1;
       attachmentsRef.current = id
         ? (attachmentDrafts.current.get(id) ?? [])
         : [];
@@ -1876,6 +2396,19 @@ export function useAssistant(enabled: boolean) {
     createdSession.current = value.id;
     setNewWebSearch(lastWebSearch.current);
     drafts.current.set(value.id, draftRef.current);
+    skillDrafts.current.set(value.id, skillRef.current);
+    skillVersions.current.set(value.id, skillVersion.current);
+    skillDrafts.current.delete("");
+    presentationStyleDrafts.current.set(value.id, presentationStyleRef.current);
+    presentationStyleVersions.current.set(
+      value.id,
+      presentationStyleVersion.current,
+    );
+    presentationStyleDrafts.current.delete("");
+    visualPolicyDrafts.current.set(value.id, { ...visualPolicyRef.current });
+    visualPolicyVersions.current.set(value.id, visualPolicyVersion.current);
+    visualPolicyDrafts.current.delete("");
+    visualPolicyVersions.current.delete("");
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
@@ -2456,6 +2989,62 @@ export function useAssistant(enabled: boolean) {
     [update, setNewWebSearch],
   );
 
+  /**
+   * Where the account's web searches go, from the next message on. Saved on
+   * its own, so the settings editor cannot overwrite it; resolves with the
+   * saved provider, or null when it could not be saved.
+   */
+  const setSearchProvider = useCallback(
+    async (provider: AssistantSearchProvider) => {
+      const generation = epoch.current;
+      try {
+        const saved = await assistantApi.setSearchProvider({
+          provider,
+          ...expectedIdentity(bootstrapRef.current),
+        });
+        const current = bootstrapRef.current;
+        if (mounted.current && generation === epoch.current && current) {
+          const next = {
+            ...current,
+            search: current.search && { ...current.search, provider: saved },
+          };
+          bootstrapRef.current = next;
+          setBootstrap(next);
+        }
+        return saved;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        if (assistantErrorCode(reason) === IDENTITY_CHANGED)
+          reloadAuthority.current();
+        return null;
+      }
+    },
+    [showError],
+  );
+
+  /**
+   * The composer's search menu: off, or on through one provider. The
+   * provider is the account's; the switch is the conversation's.
+   */
+  const chooseWebSearch = useCallback(
+    async (choice: "off" | AssistantSearchProvider) => {
+      if (choice === "off") {
+        setWebSearch(false);
+        return;
+      }
+      if (choice !== (bootstrapRef.current?.search?.provider ?? "ofox")) {
+        if (!(await setSearchProvider(choice))) return;
+      }
+      const sessionId = selectedRef.current;
+      const on = sessionId
+        ? detailRef.current?.session.id === sessionId &&
+          detailRef.current.session.webSearch
+        : newWebSearchRef.current;
+      if (!on) setWebSearch(true);
+    },
+    [setSearchProvider, setWebSearch],
+  );
+
   const setLocalConfig = useCallback(
     async (on: boolean) => {
       if (busy || loading || runRef.current) return false;
@@ -2672,6 +3261,14 @@ export function useAssistant(enabled: boolean) {
       /** A failed or stopped reply to ask again for, with `text` and `attachments`. */
       retryMessageId?: string;
       text?: string;
+      skill?: string;
+      replaceSkill?: boolean;
+      presentationStyleId?: AssistantPresentationStyleId;
+      presentationVisualPolicy?: AssistantPresentationVisualPolicy;
+      replacePresentationVisualPolicy?: boolean;
+      replacePresentationStyle?: boolean;
+      fileReferences?: AssistantFileReference[];
+      replaceFileReferences?: boolean;
       attachments?: AssistantAttachment[];
       media?: AssistantImageRequest;
       video?: AssistantVideoRequest;
@@ -2681,8 +3278,27 @@ export function useAssistant(enabled: boolean) {
     }) => {
       const { editMessageId, regenerateMessageId, retryMessageId } =
         options ?? {};
-      const text = options?.text ?? draftRef.current;
-      const fromComposer = options?.text === undefined;
+      let text = options?.text ?? draftRef.current;
+      const fromComposer =
+        options?.text === undefined &&
+        !editMessageId &&
+        !regenerateMessageId &&
+        !retryMessageId;
+      const chosenSkill = fromComposer ? skillRef.current : options?.skill;
+      const chosenPresentationStyle = fromComposer
+        ? presentationStyleRef.current
+        : options?.presentationStyleId;
+      const chosenVisualPolicy = fromComposer
+        ? { ...visualPolicyRef.current }
+        : options?.presentationVisualPolicy
+          ? { ...options.presentationVisualPolicy }
+          : undefined;
+      const originalPresentationStyle = presentationStyleRef.current;
+      const originalVisualPolicy = { ...visualPolicyRef.current };
+      let clearedVisualPolicyVersion: number | undefined;
+      let clearedPresentationVersion: number | undefined;
+      const originalSkill = skillRef.current;
+      let clearedSkillVersion: number | undefined;
       const revision = Boolean(editMessageId || regenerateMessageId);
       // A regenerate reads its turn's own files again. An edit or a question
       // sent again carries the files its caller chose, leaving out those that
@@ -2709,6 +3325,37 @@ export function useAssistant(enabled: boolean) {
           )
         : undefined;
       const read = regenerated ? (question?.attachments ?? []) : files;
+      const inheritedReply = retryMessageId
+        ? detail?.messages.find((message) => message.id === retryMessageId)
+        : undefined;
+      const inheritedQuestion = editMessageId
+        ? detail?.messages.find(
+            (message) =>
+              message.id === editMessageId && message.role === "user",
+          )
+        : (question ??
+          (inheritedReply?.runId
+            ? detail?.messages.find(
+                (message) =>
+                  message.role === "user" &&
+                  message.runId === inheritedReply.runId,
+              )
+            : undefined));
+      if (!fromComposer && options?.text === undefined)
+        text = regenerateMessageId ? "" : (inheritedQuestion?.content ?? "");
+      const chosenFileReferences = cloneFileReferences(
+        fromComposer
+          ? fileReferencesRef.current
+          : options?.replaceFileReferences
+            ? (options.fileReferences ?? [])
+            : (options?.fileReferences ??
+              inheritedQuestion?.fileReferences ??
+              []),
+      );
+      const originalFileReferences = cloneFileReferences(
+        fileReferencesRef.current,
+      );
+      let clearedFileReferenceVersion: number | undefined;
       if (
         busy ||
         operationBusyRef.current ||
@@ -2822,7 +3469,17 @@ export function useAssistant(enabled: boolean) {
         });
         if (fromComposer) {
           setDraft("");
+          setSkill(undefined);
+          clearedSkillVersion = skillVersion.current;
+          setPresentationStyleId(undefined);
+          clearedPresentationVersion = presentationStyleVersion.current;
+          setPresentationVisualPolicy({
+            ...DEFAULT_PRESENTATION_VISUAL_POLICY,
+          });
+          clearedVisualPolicyVersion = visualPolicyVersion.current;
           setAttachments([]);
+          setFileReferences([]);
+          clearedFileReferenceVersion = fileReferencesVersion.current;
         }
         if (!regenerateMessageId)
           setDetail((old) =>
@@ -2835,6 +3492,15 @@ export function useAssistant(enabled: boolean) {
                       id: `pending-${reference.operationId}`,
                       role: "user",
                       content: text,
+                      skill: chosenSkill,
+                      presentationStyleId: chosenPresentationStyle,
+                      presentationVisualPolicy: chosenVisualPolicy,
+                      ...(chosenFileReferences.length
+                        ? {
+                            fileReferences:
+                              cloneFileReferences(chosenFileReferences),
+                          }
+                        : {}),
                       createdAt: Date.now(),
                       revisionOf: editMessageId,
                       attachments: files,
@@ -2855,10 +3521,31 @@ export function useAssistant(enabled: boolean) {
         if (!queueCurrent()) preparation.cancelled = true;
         if (preparation.cancelled) throw new Error("assistant_cancelled");
         await assistantApi.send({
+          presentationWorkflowVersion: 1,
           sessionId,
           ...reference,
           ...authority,
           text,
+          ...(chosenSkill ? { skill: chosenSkill } : {}),
+          ...(chosenPresentationStyle
+            ? { presentationStyleId: chosenPresentationStyle }
+            : {}),
+          ...(chosenVisualPolicy
+            ? { presentationVisualPolicy: chosenVisualPolicy }
+            : {}),
+          ...(chosenFileReferences.length || options?.replaceFileReferences
+            ? { fileReferences: cloneFileReferences(chosenFileReferences) }
+            : {}),
+          ...(options?.replaceFileReferences
+            ? { replaceFileReferences: true }
+            : {}),
+          ...(options?.replacePresentationVisualPolicy
+            ? { replacePresentationVisualPolicy: true }
+            : {}),
+          ...(options?.replacePresentationStyle
+            ? { replacePresentationStyle: true }
+            : {}),
+          ...(options?.replaceSkill ? { replaceSkill: true } : {}),
           attachmentIds: files.map((file) => file.id),
           ...(options?.media ? { media: options.media } : {}),
           ...(options?.video
@@ -2912,8 +3599,30 @@ export function useAssistant(enabled: boolean) {
         if (fromComposer && sessionId && generation === epoch.current) {
           if (!drafts.current.get(sessionId))
             drafts.current.set(sessionId, originalDraft);
+          if (
+            clearedSkillVersion !== undefined &&
+            skillVersions.current.get(sessionId) === clearedSkillVersion
+          )
+            skillDrafts.current.set(sessionId, originalSkill);
+          if (
+            clearedPresentationVersion !== undefined &&
+            presentationStyleVersions.current.get(sessionId) ===
+              clearedPresentationVersion
+          )
+            presentationStyleDrafts.current.set(
+              sessionId,
+              originalPresentationStyle,
+            );
           if (!attachmentDrafts.current.get(sessionId)?.length)
             attachmentDrafts.current.set(sessionId, originalFiles);
+          if (
+            clearedVisualPolicyVersion !== undefined &&
+            visualPolicyVersions.current.get(sessionId) ===
+              clearedVisualPolicyVersion
+          )
+            visualPolicyDrafts.current.set(sessionId, {
+              ...originalVisualPolicy,
+            });
         }
         if (
           mounted.current &&
@@ -2935,8 +3644,38 @@ export function useAssistant(enabled: boolean) {
               : old,
           );
           if (fromComposer && !draftRef.current) setDraft(originalDraft);
+          if (
+            fromComposer &&
+            sessionId &&
+            clearedSkillVersion !== undefined &&
+            skillVersions.current.get(sessionId) === clearedSkillVersion
+          )
+            setSkill(originalSkill);
+          if (
+            fromComposer &&
+            sessionId &&
+            clearedPresentationVersion !== undefined &&
+            presentationStyleVersions.current.get(sessionId) ===
+              clearedPresentationVersion
+          )
+            setPresentationStyleId(originalPresentationStyle);
           if (fromComposer && !attachmentsRef.current.length)
             setAttachments(originalFiles);
+          if (
+            fromComposer &&
+            sessionId &&
+            clearedVisualPolicyVersion !== undefined &&
+            visualPolicyVersions.current.get(sessionId) ===
+              clearedVisualPolicyVersion
+          )
+            setPresentationVisualPolicy(originalVisualPolicy);
+          if (
+            fromComposer &&
+            selection === selectionSequence.current &&
+            clearedFileReferenceVersion !== undefined &&
+            fileReferencesVersion.current === clearedFileReferenceVersion
+          )
+            setFileReferences(originalFileReferences);
           if (!preparation?.cancelled) showError(reason);
         }
         return false;
@@ -2964,6 +3703,7 @@ export function useAssistant(enabled: boolean) {
       setDraft,
       setRun,
       setRunSearch,
+      setPresentationStyleId,
       showError,
       persistDraft,
       releaseDraft,
@@ -3004,10 +3744,24 @@ export function useAssistant(enabled: boolean) {
       (!runRef.current && !messageQueue.get(sid)?.messages.length)
     )
       return false;
-    if (!messageQueue.enqueue(sid, draftRef.current)) return false;
+    if (
+      !messageQueue.enqueue(
+        sid,
+        draftRef.current,
+        skillRef.current,
+        presentationStyleRef.current,
+        { ...visualPolicyRef.current },
+        cloneFileReferences(fileReferencesRef.current),
+      )
+    )
+      return false;
     setDraft("");
+    setSkill(undefined);
+    setPresentationStyleId(undefined);
+    setFileReferences([]);
+    setPresentationVisualPolicy({ ...DEFAULT_PRESENTATION_VISUAL_POLICY });
     return true;
-  }, [queueAvailable, messageQueue, setDraft]);
+  }, [queueAvailable, messageQueue, setDraft, setPresentationStyleId]);
 
   const steerSending = useRef(false);
   const steer = useCallback(async () => {
@@ -3021,6 +3775,9 @@ export function useAssistant(enabled: boolean) {
       !queueAvailable ||
       steerSending.current ||
       attachmentsRef.current.length ||
+      skillRef.current ||
+      presentationStyleRef.current ||
+      fileReferencesRef.current.length ||
       !text.trim() ||
       new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES
     )
@@ -3105,6 +3862,12 @@ export function useAssistant(enabled: boolean) {
     if (!ticket) return;
     void send({
       text: ticket.message.text,
+      skill: ticket.message.skill,
+      presentationStyleId: ticket.message.presentationStyleId,
+      presentationVisualPolicy: ticket.message.presentationVisualPolicy,
+      fileReferences: ticket.message.fileReferences
+        ? cloneFileReferences(ticket.message.fileReferences)
+        : undefined,
       attachments: [],
       queueTicket: ticket,
     }).then((sent) => messageQueue.settle(ticket, sent));
@@ -3341,6 +4104,7 @@ export function useAssistant(enabled: boolean) {
     const active = runRef.current;
     const sessionId = selectedRef.current;
     if (!active || !sessionId) return;
+    closePreparation();
     messageQueue.pause(sessionId);
     const generation = epoch.current;
     const preparing = pendingSends.current.get(active.runId);
@@ -3353,7 +4117,7 @@ export function useAssistant(enabled: boolean) {
       if (generation === epoch.current && selectedRef.current === sessionId)
         showError(reason);
     }
-  }, [showError, messageQueue]);
+  }, [showError, messageQueue, closePreparation]);
   useEffect(() => {
     stopRef.current = stop;
   }, [stop]);
@@ -3571,9 +4335,11 @@ export function useAssistant(enabled: boolean) {
   // model request, a run reads the files it was sent with.
   const activity =
     tools[tools.length - 1]?.activity ??
-    (reading?.runId === run?.runId && reading?.ids.length
-      ? "readingFile"
-      : null);
+    (preparingTools.length
+      ? "preparingToolRequest"
+      : reading?.runId === run?.runId && reading?.ids.length
+        ? "readingFile"
+        : null);
   // The open conversation's setting; off while it loads.
   const webSearch = selectedId
     ? detail?.session.id === selectedId && detail.session.webSearch
@@ -3582,6 +4348,8 @@ export function useAssistant(enabled: boolean) {
   // what it got: the change waits for the next message.
   const followedSearch =
     runSearch && runSearch.runId === run?.runId ? runSearch : null;
+  const searchProvider: AssistantSearchProvider =
+    bootstrap?.search?.provider ?? "ofox";
   const webSearchWaits = Boolean(
     followedSearch &&
       webSearch !== followedSearch.requested &&
@@ -3596,6 +4364,99 @@ export function useAssistant(enabled: boolean) {
       ? (detail.session.thinkingLevel ?? null)
       : null
     : newThinkingLevel;
+
+  const referenceOwner = bootstrap?.owner;
+  const referenceGeneration = bootstrap?.authorityGeneration;
+  const referenceSelection = selectionSequence.current;
+  const addFileReference = useCallback(
+    (reference: AssistantFileReference, target?: FileReferenceTarget) => {
+      if (
+        !enabled ||
+        !selectedId ||
+        !referenceOwner ||
+        referenceGeneration === undefined
+      )
+        return false;
+      const bound = target ?? {
+        sessionId: selectedId,
+        expectedOwner: referenceOwner,
+        expectedGeneration: referenceGeneration,
+        selectionKey: referenceSelection,
+      };
+      const identity = bootstrapRef.current;
+      const record = detailRef.current;
+      if (
+        signedOut.current ||
+        !activeRef.current ||
+        showTrashRef.current ||
+        selectedRef.current !== bound.sessionId ||
+        selectionSequence.current !== bound.selectionKey ||
+        identity?.owner !== bound.expectedOwner ||
+        identity.authorityGeneration !== bound.expectedGeneration ||
+        bound.sessionId !== selectedId ||
+        bound.expectedOwner !== referenceOwner ||
+        bound.expectedGeneration !== referenceGeneration ||
+        bound.selectionKey !== referenceSelection ||
+        record?.session.id !== bound.sessionId ||
+        record.session.deletedAt != null ||
+        !/^[a-f0-9]{64}$/.test(reference.version) ||
+        (reference.page !== null &&
+          (!Number.isInteger(reference.page) ||
+            reference.page < 1 ||
+            reference.page > 10000))
+      )
+        return false;
+      // Match the workspace's materialized file order, including a saved reply
+      // snapshot that can arrive before the session history is refreshed.
+      // The session's canonical status still overrides older message copies.
+      const file = new Map(
+        [
+          ...record.messages.flatMap((message) => message.attachments ?? []),
+          ...(streamRef.current?.attachments ?? []),
+          ...record.attachments,
+        ].map((item) => [item.id, item]),
+      ).get(reference.attachmentId);
+      if (
+        !file ||
+        file.status === "missing" ||
+        (file.mimeType === "text/html"
+          ? reference.page !== null
+          : file.mimeType !==
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation" ||
+            reference.page === null)
+      )
+        return false;
+      const next = fileReferencesRef.current.filter(
+        (item) =>
+          item.attachmentId !== reference.attachmentId ||
+          item.version === reference.version,
+      );
+      if (
+        next.some(
+          (item) =>
+            item.attachmentId === reference.attachmentId &&
+            item.version === reference.version &&
+            item.page === reference.page,
+        )
+      )
+        return true;
+      if (next.length >= 20) {
+        showError("assistant_preview_limit");
+        return false;
+      }
+      setFileReferences([...next, { ...reference }]);
+      return true;
+    },
+    [
+      enabled,
+      selectedId,
+      referenceOwner,
+      referenceGeneration,
+      referenceSelection,
+      setFileReferences,
+      showError,
+    ],
+  );
 
   return {
     bootstrap,
@@ -3612,6 +4473,9 @@ export function useAssistant(enabled: boolean) {
     thinking: liveThinking,
     webSearch,
     setWebSearch,
+    searchProvider,
+    setSearchProvider,
+    chooseWebSearch,
     localConfig,
     setLocalConfig,
     startLocalConfig,
@@ -3627,6 +4491,7 @@ export function useAssistant(enabled: boolean) {
     restoreLocalChanges,
     webSearchWaits,
     searchSkipped,
+    searchLimited,
     search,
     setSearch,
     showTrash,
@@ -3648,6 +4513,23 @@ export function useAssistant(enabled: boolean) {
     detail,
     draft,
     setDraft,
+    skill,
+    setSkill,
+    presentationStyleId,
+    setPresentationStyleId,
+    presentationVisualPolicy,
+    setPresentationVisualPolicy,
+    fileReferences,
+    addFileReference,
+    removeFileReference: (reference: AssistantFileReference) =>
+      setFileReferences(
+        fileReferencesRef.current.filter(
+          (item) =>
+            item.attachmentId !== reference.attachmentId ||
+            item.version !== reference.version ||
+            item.page !== reference.page,
+        ),
+      ),
     queue,
     queueAvailable,
     enqueue,
@@ -3674,7 +4556,15 @@ export function useAssistant(enabled: boolean) {
     stream,
     activity,
     run,
+    runProgress:
+      progressScope.current?.epoch === epoch.current &&
+      progressScope.current?.owner === bootstrap?.owner &&
+      progressScope.current?.authority === bootstrap?.authorityGeneration &&
+      progressScope.current?.sessionId === selectedId
+        ? runProgress
+        : null,
     compacting,
+    retryAttempt,
     error,
     errorDetail,
     setError,

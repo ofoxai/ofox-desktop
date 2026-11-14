@@ -1,15 +1,19 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const output = execFileSync(
+execFileSync(
   process.execPath,
-  [path.join(root, "scripts/assistant-prepare.mjs"), "--node-only"],
-  { encoding: "utf8" },
+  [path.join(root, "scripts/assistant-prepare.mjs")],
+  { stdio: "inherit" },
 );
-const node = output.trim().split(/\r?\n/).at(-1);
+const resources = path.join(root, "assistant-runtime/resources");
+const manifest = JSON.parse(
+  readFileSync(path.join(resources, "manifest.json"), "utf8"),
+);
+const node = path.join(resources, manifest.node);
 const run = (args, directory) =>
   spawnSync(node, args, {
     cwd: path.join(root, directory),

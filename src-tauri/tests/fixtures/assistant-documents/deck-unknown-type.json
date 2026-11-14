@@ -1,0 +1,10 @@
+{
+  "kind": "deck",
+  "title": "季度复盘",
+  "language": "zh",
+  "slides": [
+    {"type": "hero", "title": "季度复盘", "subtitle": "Q1 收入与下一步"},
+    {"type": "bullets", "title": "本季要点", "bullets": ["收入增长 18%", "新增 GPU 训练集群", "RNN 模型全部下线"]},
+    {"type": "cta", "title": "谢谢", "subtitle": "欢迎提问"}
+  ]
+}

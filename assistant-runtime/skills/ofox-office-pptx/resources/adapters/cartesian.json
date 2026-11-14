@@ -1,0 +1,105 @@
+{
+  "id": "cartesian",
+  "family": "editorial",
+  "names": {
+    "zh": "Cartesian",
+    "en": "Cartesian",
+    "ja": "Cartesian"
+  },
+  "intro": {
+    "zh": "暖中性色纸面、衬线标题、细线与大量留白，安静克制；适合学术研究、论文答辩和需要从容叙述的汇报。",
+    "en": "Warm neutral paper, serif titles, fine rules and open space; quiet and unhurried, for academic research, thesis defences and measured narratives.",
+    "ja": "温かい中間色の紙面、セリフ体見出し、細い罫線と余白。学術研究や論文発表など落ち着いた説明向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "academic",
+      "research"
+    ],
+    "density": "low",
+    "scheme": "light",
+    "tone": [
+      "quiet",
+      "classical"
+    ],
+    "suits": {
+      "data": 2,
+      "formulas": 1,
+      "images": 1,
+      "longText": 1
+    },
+    "avoid": "Loud product launches or dense dashboards that need saturated colour."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Same left-aligned kicker, serif title and subtitle on paper; the two thin concentric circles and the edge dot pager are not drawn, and the kicker sits at the top of the page instead of directly above the title."
+    },
+    {
+      "page": 2,
+      "archetype": "agenda",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source is a two-column page: title and intro on the left, four numbered rows separated by hairlines on the right; native is a top title with one row of four outlined rounded boxes joined by arrows."
+    },
+    {
+      "page": 3,
+      "archetype": "statement",
+      "native": "statement_slide",
+      "status": "approximate",
+      "differences": "Source centres the sentence under a quote glyph with a small-caps label below and a large faint circle; native is left-aligned with the label above and no glyph or circle."
+    },
+    {
+      "page": 4,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source puts title and description in a left column beside the chart and pairs solid black bars with outlined target bars; native puts the title on top with a full-width editable chart of one filled series."
+    },
+    {
+      "page": 5,
+      "archetype": "split-image",
+      "native": "content_slide + bullets + image",
+      "status": "approximate",
+      "differences": "Source has the image on the left, title and two paragraphs on the right, and a ruled row of three figures; native has the title on top, bullets on the left, the image region on the right and no figure row."
+    },
+    {
+      "page": 6,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source centres the title over three bordered, filled cards each with a small circled roman numeral; native has a left title and three open blocks with a leading vertical rule and no numerals."
+    },
+    {
+      "page": 7,
+      "archetype": "chart-line",
+      "native": "content_slide + native_chart",
+      "status": "adapted",
+      "differences": "Native two-series line chart with editable data under a top title; the area fill under the main line, the dotted comparison series and the right-aligned description are not reproduced."
+    },
+    {
+      "page": 8,
+      "archetype": "timeline",
+      "native": "content_slide + timeline",
+      "status": "approximate",
+      "differences": "Source is four left-aligned text columns under one hairline, each with a small-caps phase label; native draws a line with a dot per phase and centred labels."
+    },
+    {
+      "page": 9,
+      "archetype": "team",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source shows four circular initial avatars with centred name and role under a centred title; native shows four open text blocks with a leading rule and no avatars."
+    },
+    {
+      "page": 10,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "Source is centred inside two large concentric circles; native reuses the left-aligned cover layout without circles."
+    }
+  ]
+}

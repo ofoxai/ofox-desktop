@@ -273,8 +273,11 @@ fn verify_native_headers(server: &Value, tool: &str) -> Result<(), AppError> {
 }
 
 pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
-    if !super::mcp_targets::TOOLS.contains(&tool) {
+    if !super::mcp_targets::supported(tool) {
         return Err(error("targetUnsupported"));
+    }
+    if tool == super::assistant_target::ID {
+        super::mcp_targets::validate_assistant_server(spec)?;
     }
     let obj = spec.as_object().ok_or_else(|| error("invalidMcp"))?;
     if obj.get("type").is_some_and(|value| !value.is_string()) {
@@ -289,7 +292,7 @@ pub fn native_spec(tool: &str, spec: &Value) -> Result<Value, AppError> {
             "stdio"
         });
     if !["stdio", "http", "sse"].contains(&transport)
-        || (["codex", "pi", "dsh"].contains(&tool) && transport == "sse")
+        || (["codex", "pi", "dsh", "ofox-assistant"].contains(&tool) && transport == "sse")
     {
         return Err(error("transportUnsupported"));
     }
@@ -521,6 +524,7 @@ fn valid_name(id: &str, max: usize) -> bool {
 }
 pub fn native_server(tool: &str, id: &str, spec: &Value) -> Result<Value, AppError> {
     if (tool == "pi" && !valid_name(id, 256))
+        || (tool == "ofox-assistant" && !valid_name(id, 128))
         || (tool == "dsh"
             && !valid_name(
                 spec.get("serverName").and_then(Value::as_str).unwrap_or(id),
@@ -854,7 +858,7 @@ pub fn parse_native(text: &str, tool: &str) -> Result<Value, AppError> {
         match tool {
             "claude" => super::native_json::parse(body, false, false, true)?,
             "workbuddy" => super::native_json::parse(body, false, false, false)?,
-            "pi" => super::native_json::parse(body, false, false, false)?,
+            "pi" | "ofox-assistant" => super::native_json::parse(body, false, false, false)?,
             "openclaw" => {
                 let value = json5::from_str::<Value>(body).map_err(|_| error("nativeInvalid"))?;
                 // Traversing each managed path later rejects duplicate keys. Reject routing expressions/includes here.
@@ -903,7 +907,7 @@ fn flatten(value: &Value, path: Vec<String>, fields: &mut Vec<(Vec<String>, Valu
     }
 }
 pub fn validate_owned(owned: &OwnedFields) -> Result<(), AppError> {
-    if !super::mcp_targets::TOOLS.contains(&owned.tool.as_str())
+    if !super::mcp_targets::supported(&owned.tool)
         || owned.server_id.is_empty()
         || owned.fields.is_empty()
     {
@@ -1032,7 +1036,7 @@ pub fn patch_server(
     owned: Option<&OwnedFields>,
     spec: Option<&Value>,
 ) -> Result<(String, Option<OwnedFields>), AppError> {
-    if id.is_empty() || id.len() > 256 || !super::mcp_targets::TOOLS.contains(&tool) {
+    if id.is_empty() || id.len() > 256 || !super::mcp_targets::supported(tool) {
         return Err(error("invalidMcp"));
     }
     let empty = match tool {
@@ -1045,7 +1049,7 @@ pub fn patch_server(
     if owned.is_none() && leaf(&root, &server_path(tool, id)).is_some() {
         return Err(error("mcpNameConflict"));
     }
-    if tool == "pi"
+    if ["pi", "ofox-assistant"].contains(&tool)
         && servers(&root, tool).as_object().is_some_and(|map| {
             map.keys()
                 .any(|key| key != id && key.replace('-', "_") == id.replace('-', "_"))

@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <defs>
+    <marker id="arrow0" markerWidth="9" markerHeight="9" refX="0" refY="4.5" orient="auto">
+      <polygon points="0,0 9,4.5 0,9" fill="#18293B"/>
+    </marker>
+    <marker id="arrow1" markerWidth="9" markerHeight="9" refX="0" refY="4.5" orient="auto">
+      <polygon points="0,0 9,4.5 0,9" fill="#18293B"/>
+    </marker>
+    <marker id="arrow2" markerWidth="9" markerHeight="9" refX="0" refY="4.5" orient="auto">
+      <polygon points="0,0 9,4.5 0,9" fill="#18293B"/>
+    </marker>
+  </defs>
+  <rect width="1920" height="1080" fill="#ffffff"/>
+  <line x1="437.76" y1="489.6" x2="483.84" y2="489.6" stroke="#18293B" stroke-width="3" marker-end="url(#arrow0)"/>
+  <line x1="797.76" y1="489.6" x2="843.84" y2="489.6" stroke="#18293B" stroke-width="3" marker-end="url(#arrow1)"/>
+  <line x1="1157.76" y1="489.6" x2="1203.84" y2="489.6" stroke="#18293B" stroke-width="3" marker-end="url(#arrow2)"/>
+</svg>

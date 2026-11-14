@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
@@ -411,9 +412,7 @@ const UnifiedSkillsPanel = React.forwardRef<
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
         {isLoading ? (
-          <div className="text-center py-12 text-muted-foreground">
-            {t("skills.loading")}
-          </div>
+          <FoxLoader size="block" label={t("skills.loading")} />
         ) : !skills || skills.length === 0 ? (
           <div className="text-center py-12">
             <div className="w-16 h-16 mx-auto mb-4 bg-muted rounded-full flex items-center justify-center">
@@ -655,9 +654,7 @@ const RestoreSkillsDialog: React.FC<RestoreSkillsDialogProps> = ({
 
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {isLoading ? (
-            <div className="py-10 text-center text-sm text-muted-foreground">
-              {t("common.loading")}
-            </div>
+            <FoxLoader size="block" label={t("common.loading")} />
           ) : backups.length === 0 ? (
             <div className="py-10 text-center text-sm text-muted-foreground">
               {t("skills.restoreFromBackup.empty")}

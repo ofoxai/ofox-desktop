@@ -92,6 +92,7 @@ export function LibraryNativeSources({
       <ListRow key={entry.entryId} className="flex-wrap gap-3 py-3">
         <LibraryResourceIcon
           kind={entry.kind}
+          name={entry.name}
           recipeId={entry.iconId ?? undefined}
           className="h-9 w-9"
         />
