@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
 import { StdioTransport } from "@earendil-works/pi-mcp";
 import { AssistantRuntime } from "../src/runtime.mjs";
+import { isProcessRunning } from "./fixtures/process-state.mjs";
 const limits = {
   repeatWarning: 3,
   repeatStop: 5,
@@ -382,7 +383,7 @@ test("real MCP clears protocol logs and SDK large-output files before persistenc
     assert.equal((await stat(paths[0])).mode & 0o777, 0o600);
 });
 
-test("normal and cancelled pending MCP processes are reaped", async (t) => {
+test("normal and cancelled pending MCP processes stop without unsafe SDK signals", async (t) => {
   const unsafeClosePids = [],
     negativeGroupSignals = [];
   const originalClose = StdioTransport.prototype.close;
@@ -464,9 +465,12 @@ test("normal and cancelled pending MCP processes are reaped", async (t) => {
       const childPid = Number(
         await readFile(path.join(f.root, "child-pid"), "utf8"),
       );
-      assert.throws(
-        () => process.kill(childPid, 0),
-        (error) => error.code === "ESRCH",
+      // An orphaned grandchild may await init's reaping on Linux. It must no
+      // longer execute; the directly owned server below must still be reaped.
+      assert.equal(
+        isProcessRunning(childPid),
+        false,
+        "the process-group descendant must no longer execute",
       );
     }
     assert.throws(
@@ -565,15 +569,21 @@ test("MCP repeats and configured tool limits stop before extra host admission", 
 test("HTTP authentication stays on the transport and remote failures remain safe and readable", async (t) => {
   for (const denied of [false, true]) {
     const secret = "Bearer local-http-secret";
+    const querySecret = "synthetic-http-query +/汉";
+    const encodedQuery = encodeURIComponent(querySecret);
     const received = [];
+    const receivedQuery = [];
     const server = createServer(async (req, res) => {
       received.push(req.headers.authorization);
+      receivedQuery.push(
+        new URL(req.url, "http://localhost").searchParams.get("api_key"),
+      );
       if (denied) {
         res.writeHead(401, {
           "www-authenticate":
             'Bearer resource_metadata="https://invalid.example/oauth"',
         });
-        res.end(`Sign-in required ${secret}`);
+        res.end(`Sign-in required ${secret} ${querySecret} ${encodedQuery}`);
         return;
       }
       if (req.method !== "POST") {
@@ -609,7 +619,7 @@ test("HTTP authentication stays on the transport and remote failures remain safe
                 content: [
                   {
                     type: "text",
-                    text: `Readable HTTP result ${secret} token ${secret.slice(7)}`,
+                    text: `Readable HTTP result ${secret} token ${secret.slice(7)} query ${querySecret} ${encodedQuery}`,
                   },
                 ],
               };
@@ -638,7 +648,7 @@ test("HTTP authentication stays on the transport and remote failures remain safe
       limits,
       servers: {
         remote: {
-          url: `http://127.0.0.1:${server.address().port}/mcp`,
+          url: `http://127.0.0.1:${server.address().port}/mcp?api_key=${encodedQuery}&lang=zh`,
           headers: { Authorization: secret },
         },
       },
@@ -646,13 +656,17 @@ test("HTTP authentication stays on the transport and remote failures remain safe
     assert.equal((await f.run()).status, "completed");
     assert.ok(received.length > 0);
     assert.ok(received.every((value) => value === secret));
+    assert.ok(receivedQuery.every((value) => value === querySecret));
     const outputs = JSON.stringify([
       f.events,
       f.requests,
       await readFile(f.params.sessionFile, "utf8"),
       await readFile(path.join(f.root, "runtime-settings/mcp.log"), "utf8"),
+      await readFile(path.join(f.root, "runtime-settings/mcp.json"), "utf8"),
     ]);
     assert.ok(!outputs.includes(secret));
+    assert.ok(!outputs.includes(querySecret));
+    assert.ok(!outputs.includes(encodedQuery));
     assert.ok(
       !outputs.includes(secret.slice(7)),
       "bare authentication token must be scrubbed too",
