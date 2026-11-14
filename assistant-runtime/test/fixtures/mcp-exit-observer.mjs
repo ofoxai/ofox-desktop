@@ -1,6 +1,7 @@
 // Test-only observation of public process/transport APIs, never SDK internals.
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { isProcessRunning } from "./process-state.mjs";
 const record = (value) =>
   appendFileSync(process.env.MCP_EXIT_TRACE, JSON.stringify(value) + "\n");
 const originalKill = process.kill.bind(process),
@@ -18,8 +19,7 @@ process.exit = (code) => {
   let childAlive = false;
   try {
     const pid = Number(readFileSync(process.env.MCP_EXIT_CHILD_FILE, "utf8"));
-    originalKill(pid, 0);
-    childAlive = true;
+    childAlive = isProcessRunning(pid);
   } catch {}
   record({ kind: "ordinary_exit", code, childAlive });
   return originalExit(code);
