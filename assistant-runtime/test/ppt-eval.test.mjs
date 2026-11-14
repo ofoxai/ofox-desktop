@@ -170,6 +170,10 @@ test("offline CLI writes pending model runs and never needs credentials", async 
     await readFile(path.join(out, "experiment.json"), "utf8"),
   );
   assert.ok(
+    Object.keys(plan.generationFiles).every((file) => !file.includes("\\")),
+    "Snapshot file identifiers use portable repository-relative paths",
+  );
+  assert.ok(
     plan.generationFiles[
       "src-tauri/src/services/assistant/documents/create.rs"
     ],

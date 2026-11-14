@@ -581,7 +581,8 @@ async function generationSnapshot() {
       return;
     }
     for (const entry of entries) {
-      const name = path.join(directory, entry.name);
+      // Snapshot keys are repository-relative identifiers on every platform.
+      const name = path.posix.join(directory, entry.name);
       if (entry.isDirectory()) await walk(name);
       else if (entry.isFile()) files.push(name);
     }
