@@ -281,11 +281,7 @@ impl AssistantHost {
             serde_json::from_value(media.params.clone()).map_err(|_| media::INVALID)?;
         let gateway = self.env.gateway_base(&control.identity.apex)?;
         let client = crate::proxy::http_client::assistant_media_client()?;
-        let key = control
-            .secrets()
-            .last()
-            .cloned()
-            .ok_or("assistant_key_rejected")?;
+        let key = control.ofox_key()?;
         let mut result =
             media_http::request(&client, &gateway, &key, &model.id, prompt, &params, input).await;
         let (receipt, usage) = match &result {
@@ -301,7 +297,6 @@ impl AssistantHost {
                 .key_for_retry(control, &json!({"apiKey":key}))
                 .await
                 .map_err(Failure::unsent)?;
-            control.add_secret(&key);
             self.remember_key(&key);
             self.validate_run(control).map_err(Failure::unsent)?;
             result =

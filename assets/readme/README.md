@@ -24,6 +24,13 @@ example, not a benchmark. The tour is an edited four-scene illustration.
   choice and completion components with synthetic UI state; the button never
   invokes real binding. The compact 6.8-second video reaches setup completion within its first second; it then shows actual MCP preview and Skills configuration controls; it uses H.264 with fast start.
 
+- `presentation-styles.webp`, `presentation-pages.webp`: covers of real decks
+  the assistant generated in each presentation style, and inner pages of three
+  of them, from one-sentence requests with fictional content (DeepSeek V4.1
+  Flash, GPT Image 2). Slides look the same in light and dark themes, so these
+  have no `-light` pair. The full decks and their requests are kept outside the
+  repository.
+
 GIFs are 1200×750 at 12 fps; MP4s are 1440×900 at 30 fps. Short dissolves, gentle
 camera motion, and a progress line give the edited loops a faster rhythm.
 

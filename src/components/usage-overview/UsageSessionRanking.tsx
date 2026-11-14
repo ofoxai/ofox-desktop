@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -248,7 +249,7 @@ export function UsageSessionRanking({
             <p className="text-note text-ink-faint">
               {t("usageExperience.listSearchHint")}
             </p>
-            {loading && <p role="status">{t("common.loading")}</p>}
+            {loading && <FoxLoader size="block" label={t("common.loading")} />}
             {error && (
               <p role="alert" className="text-warn">
                 {t("usageExperience.expired")}

@@ -348,6 +348,12 @@ export interface AssistantLocalChange {
  * commands and installs; `fullAuto` never asks.
  */
 export type AssistantPermissionMode = "default" | "autoEdit" | "fullAuto";
+/**
+ * `auto` asks for a PPTX without fixing its style; absence keeps ordinary chat.
+ * Every other id comes from the bundled style catalog, so it is checked at
+ * runtime with `isPresentationStyleAvailable` rather than listed here.
+ */
+export type AssistantPresentationStyleId = string;
 export type AssistantApprovalChoice = "once" | "session" | "deny";
 
 export interface AssistantCapabilityRef {
@@ -499,6 +505,42 @@ export interface AssistantAttachment {
   details: Record<string, unknown> | null;
 }
 
+/** Derived, persisted raster pages. No file path or provider URL is exposed. */
+export interface AssistantDocumentPreview {
+  mimeType: "image/jpeg";
+  pages: number[];
+}
+
+export function assistantDocumentPreview(
+  attachment: AssistantAttachment,
+): AssistantDocumentPreview | null {
+  if (
+    attachment.origin !== "generated" ||
+    attachment.status === "missing" ||
+    attachment.mimeType !==
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  )
+    return null;
+  const value = attachment.details?.documentPreview;
+  if (!value || typeof value !== "object") return null;
+  const preview = value as { mimeType?: unknown; pages?: unknown };
+  if (
+    preview.mimeType !== "image/jpeg" ||
+    !Array.isArray(preview.pages) ||
+    preview.pages.length === 0 ||
+    preview.pages.length > 60 ||
+    !preview.pages.every(
+      (page) => Number.isInteger(page) && page >= 1 && page <= 1000,
+    ) ||
+    new Set(preview.pages).size !== preview.pages.length
+  )
+    return null;
+  return {
+    mimeType: "image/jpeg",
+    pages: [...preview.pages].sort((a, b) => a - b),
+  };
+}
+
 /**
  * The backend always sends every field. Those marked optional are left out
  * only by the renderer's own placeholders (a question being sent, a reply
@@ -536,7 +578,24 @@ export interface AssistantMcpStep {
   reason?: "needs_node" | "needs_uv" | "unavailable";
   recipeId?: string | null;
 }
+export interface AssistantFileReference {
+  attachmentId: string;
+  version: string;
+  page: number | null;
+}
+
 export interface AssistantMessage {
+  fileReferences?: AssistantFileReference[];
+  presentationPlan?: {
+    planId?: string;
+    revision?: number;
+    effectiveStyle?: string;
+    styleId?: AssistantPresentationStyleId;
+    decisionSummary?: string;
+    [key: string]: unknown;
+  };
+  presentationStyleId?: AssistantPresentationStyleId;
+  presentationVisualPolicy?: AssistantPresentationVisualPolicy;
   mcpSteps?: AssistantMcpStep[];
   skillResults?: AssistantSkillResultGroup[];
   skill?: string;
@@ -717,7 +776,99 @@ export interface AssistantUpdateRequest {
   media?: AssistantMediaDefaults;
 }
 
+export interface AssistantPresentationVisualPolicy {
+  /** `auto`: up to maxImages, the model's choice. `exact`: that many. */
+  mode: "off" | "auto" | "illustration" | "exact";
+  maxImages: number;
+  /** Decimal USD ceiling, or explicitly selected "count-only". Zero authorizes no paid images. */
+  maxCostUsd: string;
+  /** Explicit next-run text-cost pause threshold (USD 0.01–1); omitted retains existing behavior. Not a server-side hard cap. */
+  textMaxCostUsd?: string;
+}
+export function isAssistantPresentationTextBudget(
+  value: unknown,
+): value is string {
+  return (
+    typeof value === "string" &&
+    /^(?:0|1)(?:\.\d{1,6})?$/.test(value) &&
+    Number(value) >= 0.01 &&
+    Number(value) <= 1
+  );
+}
+export const DEFAULT_PRESENTATION_VISUAL_POLICY: AssistantPresentationVisualPolicy =
+  {
+    mode: "off",
+    maxImages: 0,
+    maxCostUsd: "0",
+  };
+
+/**
+ * How a deck gets its images: none, as many as the model finds useful up to a
+ * ceiling, or exactly the number asked for.
+ */
+export type PresentationImageChoice = "off" | "auto" | "exact";
+/** The most images one deck may generate (the Host refuses more). */
+export const PRESENTATION_MAX_IMAGES = 8;
+const DEFAULT_IMAGES: Record<
+  Exclude<PresentationImageChoice, "off">,
+  number
+> = { auto: 3, exact: 2 };
+/**
+ * USD held per image: above the most one GPT Image 2 generation can cost
+ * (about US$0.34 at high quality with a long prompt). Fixed-price models cost
+ * far less; actual usage is what is billed.
+ */
+export const PRESENTATION_IMAGE_CEILING_USD = 0.4;
+
+/** The choice an existing policy reads as, including older detailed drafts. */
+export function presentationImageChoice(
+  policy: AssistantPresentationVisualPolicy,
+): PresentationImageChoice {
+  if (policy.mode === "off" || policy.maxImages === 0) return "off";
+  return policy.mode === "exact" ? "exact" : "auto";
+}
+
+/**
+ * The policy a choice stands for. `count` is the ceiling (auto) or the number
+ * asked for (exact); without one the current count is kept, else the
+ * choice's default. An explicit text threshold is kept.
+ */
+export function presentationImagePolicy(
+  choice: PresentationImageChoice,
+  previous?: AssistantPresentationVisualPolicy,
+  count?: number,
+): AssistantPresentationVisualPolicy {
+  let policy: AssistantPresentationVisualPolicy;
+  if (choice === "off") policy = { ...DEFAULT_PRESENTATION_VISUAL_POLICY };
+  else {
+    const kept =
+      previous && presentationImageChoice(previous) !== "off"
+        ? previous.maxImages
+        : DEFAULT_IMAGES[choice];
+    const maxImages = Math.min(
+      PRESENTATION_MAX_IMAGES,
+      Math.max(1, Math.round(count ?? kept)),
+    );
+    policy = {
+      mode: choice,
+      maxImages,
+      maxCostUsd: (maxImages * PRESENTATION_IMAGE_CEILING_USD).toFixed(2),
+    };
+  }
+  if (previous?.textMaxCostUsd !== undefined)
+    policy.textMaxCostUsd = previous.textMaxCostUsd;
+  return policy;
+}
+
 export interface AssistantSendRequest extends AssistantRunRef {
+  fileReferences?: AssistantFileReference[];
+  replaceFileReferences?: boolean;
+  presentationWorkflowVersion?: 1;
+  presentationVisualPolicy?: AssistantPresentationVisualPolicy;
+  replacePresentationVisualPolicy?: boolean;
+  presentationStyleId?: AssistantPresentationStyleId;
+  /** An edit explicitly replaces or clears the original PPT choice. */
+  replacePresentationStyle?: boolean;
   skill?: string;
   replaceSkill?: boolean;
   /** Frozen before admission; the host rejects work left by an old account or region. */
@@ -1110,6 +1261,20 @@ export type AssistantRunEvent =
       };
     }
   /**
+   * The model is streaming arguments for a known tool, before execution.
+   * No arguments or source are published; active:false clears this request
+   * even when SDK validation prevents a real tool_start/tool_end pair.
+   */
+  | {
+      type: "tool_preparing";
+      data: {
+        messageId: string;
+        name: string;
+        toolCallId: string;
+        active?: boolean;
+      };
+    }
+  /**
    * A tool call of the run's reply. `args` holds only what may be shown:
    * `query` (web_search), `url` (web_fetch) or `id` (read_attachment).
    */
@@ -1149,6 +1314,13 @@ export type AssistantRunEvent =
   | { type: "compaction_start"; data: Record<string, never> }
   | { type: "compaction_end"; data: { success: boolean; willRetry?: boolean } }
   /** The run's saved assistant message. */
+  | {
+      type: "presentation_plan";
+      data: {
+        messageId: string;
+        plan: NonNullable<AssistantMessage["presentationPlan"]>;
+      };
+    }
   | { type: "message"; data: { message: AssistantMessage } }
   /**
    * The saved session; its `activeRun` is null. A generated title's event
@@ -1637,6 +1809,19 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_declined: "mediaDeclined",
   assistant_media_speech_turn_limit: "mediaSpeechTurnLimit",
   assistant_document_failed: "documentFailed",
+  assistant_preview_unavailable: "mediaReadFailed",
+  assistant_presentation_plan_invalid: "presentationPlanInvalid",
+  assistant_presentation_source_unavailable: "presentationSourceUnavailable",
+  assistant_presentation_source_changed: "presentationSourceChanged",
+  assistant_presentation_asset_invalid: "presentationAssetInvalid",
+  assistant_presentation_asset_missing: "presentationAssetMissing",
+  assistant_presentation_asset_limit: "presentationAssetLimit",
+  assistant_presentation_image_budget: "presentationImageBudget",
+  assistant_preview_version_changed: "previewVersionChanged",
+  assistant_preview_limit: "previewLimit",
+  assistant_preview_page_invalid: "previewPageInvalid",
+  assistant_preview_sandbox_unavailable: "previewSandboxUnavailable",
+  assistant_preview_port_unavailable: "previewPortUnavailable",
   assistant_document_limit: "documentLimit",
   assistant_document_too_large: "documentTooLarge",
   assistant_vision_model_required: "visionModelRequired",
@@ -1707,4 +1892,19 @@ export function assistantMediaUrl(
     ? "http://assistant-media.localhost"
     : "assistant-media://localhost";
   return `${base}/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachmentId)}?owner=${encodeURIComponent(owner)}&generation=${generation}`;
+}
+
+export function assistantDocumentPreviewUrl(
+  sessionId: string,
+  attachmentId: string,
+  owner: string,
+  generation: number,
+  page: number,
+): string {
+  if (!Number.isInteger(page) || page < 1 || page > 1000)
+    throw new Error("Invalid document preview page");
+  return assistantMediaUrl(sessionId, attachmentId, owner, generation).replace(
+    "?",
+    `/preview/${page}?`,
+  );
 }

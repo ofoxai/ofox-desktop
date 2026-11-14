@@ -3,6 +3,8 @@
 pub mod create;
 pub mod engines;
 mod fix;
+pub(crate) mod math_preview;
+pub(crate) mod preview;
 pub mod runner;
 
 /// The tool a chat model makes a document with.

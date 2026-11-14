@@ -120,6 +120,14 @@ These sample screens show model and parameter selection; no generation request w
 
 </details>
 
+**Make presentations.** Describe the deck in a sentence. The assistant picks one of 25 styles or uses the one you choose, plans every page, builds charts, formulas and diagrams as objects you can edit in PowerPoint, adds generated pictures when you allow them, and lets you preview every page before you keep the PPTX.
+
+<img src="assets/readme/presentation-styles.webp" alt="Cover slides of presentations the assistant made in 25 styles" width="1440">
+
+<img src="assets/readme/presentation-pages.webp" alt="Inner pages of three generated presentations: a paper talk with a formula, a product launch with generated pictures, and a classroom lesson" width="1440">
+
+_Every slide shown comes from a deck the assistant generated from a one-sentence request with fictional content (DeepSeek V4.1 Flash for text, GPT Image 2 for pictures). Layout quality varies by style. Editable formulas, chart data and figures drawn in code currently need macOS._
+
 **A fallback when setup goes wrong.** One click on “Not working? Ask the assistant” opens a prepared diagnosis request for that tool. After you send it, the assistant can troubleshoot configuration, environment, and Ofox bindings, make changes under your selected permissions, and verify the result. Unresolved problems remain explicit.
 
 <picture>

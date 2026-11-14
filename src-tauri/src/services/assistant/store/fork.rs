@@ -153,6 +153,24 @@ impl ForkStage {
             }
             output.flush().map_err(|_| FORK_FAILED)?;
             output.sync_all().map_err(|_| FORK_FAILED)?;
+            let pages = super::super::documents::preview::pages(attachment);
+            if !pages.is_empty() {
+                let target_dir =
+                    private_subdir(&destination, &format!("{}{PAGES_SUFFIX}", attachment.id))?;
+                for page in pages {
+                    let source = source
+                        .join(format!("{}{PAGES_SUFFIX}", attachment.id))
+                        .join(format!("{page}.jpg"));
+                    let bytes = super::super::documents::preview::read_jpeg(&source)
+                        .map_err(|_| FORK_FAILED)?;
+                    crate::config::atomic_write_with(
+                        &target_dir.join(format!("{page}.jpg")),
+                        &bytes,
+                        crate::config::AtomicOpts { mode: Some(0o600) },
+                    )
+                    .map_err(|_| FORK_FAILED)?;
+                }
+            }
         }
         record.session.id = self.sid.clone();
         record.session.context_usage = None;
@@ -368,6 +386,48 @@ mod tests {
             })
             .unwrap();
         (temp, store, record, entries)
+    }
+
+    #[test]
+    fn fork_preserves_only_recorded_bounded_document_rasters() {
+        let (_temp, store, mut record, entries) = fixture();
+        let attachment = &mut record.attachments[0];
+        attachment.origin = Some("generated".into());
+        attachment.name = "deck.pptx".into();
+        attachment.mime_type =
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation".into();
+        attachment.details = Some(json!({"documentPreview":{"mimeType":"image/jpeg","pages":[1]}}));
+        let file = attachment.clone();
+        record.messages[0].attachments = vec![file.clone()];
+        store
+            .mutate(&record.session.id, |r| {
+                *r = record.clone();
+                Ok(())
+            })
+            .unwrap();
+        let dir = private_subdir(
+            &store.attachment_root(&record.session.id).unwrap(),
+            &format!("{}{PAGES_SUFFIX}", file.id),
+        )
+        .unwrap();
+        let jpeg=b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9";
+        write_bytes(&dir.join("1.jpg"), jpeg).unwrap();
+        write_bytes(&dir.join("2.jpg"), b"unrecorded").unwrap();
+        let stage = store.stage_fork(&record.session.id).unwrap();
+        write_bytes(&stage.native_path(), b"native copy\n").unwrap();
+        let fork = stage
+            .publish(record, &entries, "fork preview", || Ok(()))
+            .unwrap();
+        let target = store
+            .attachment_root(&fork.session.id)
+            .unwrap()
+            .join(format!("{}{PAGES_SUFFIX}", file.id));
+        assert_eq!(fs::read(target.join("1.jpg")).unwrap(), jpeg);
+        assert!(!target.join("2.jpg").exists());
+        assert_eq!(
+            super::super::super::documents::preview::pages(&fork.attachments[0]),
+            [1]
+        );
     }
 
     #[test]

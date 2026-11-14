@@ -117,6 +117,10 @@ pub struct CreateDocumentArgs {
     /// `previewId` (see [`AssistantHost::deliver_preview`]).
     #[serde(default, rename = "fromPreview")]
     pub from_preview: Option<String>,
+    #[serde(default, rename = "planId")]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub revision: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -2112,6 +2116,9 @@ fn preview_result(
         "status": "completed", "preview": true, "previewId": doc_id,
         "issues": issues, "pagePaths": pages,
     });
+    if made.preview_uses_math_fallback {
+        result["previewUsesMathFallback"] = json!(true);
+    }
     if let (Some(key), Some(count)) = (format.count(), made.count) {
         result[key] = json!(count);
     }
@@ -2221,6 +2228,7 @@ struct Made {
     /// The layout fixes the host applied after the checks (see
     /// [`fix_layout`]).
     fixed: usize,
+    preview_uses_math_fallback: bool,
 }
 
 /// A document made as a preview (see [`AssistantHost::preview_document`]),
@@ -2307,7 +2315,7 @@ const TYPST_SANDBOX: &str = r#"(version 1)
 ///   (`cfprefsd`, which would hand out what the file rules hide), user and
 ///   group lookups, notifications, CoreServices, the system log.
 /// - No signal to another process.
-const PYTHON_SANDBOX: &str = r#"(version 1)
+pub(crate) const PYTHON_SANDBOX: &str = r#"(version 1)
 (allow default)
 (deny network*)
 (deny file-read-data (subpath "/Users") (subpath "/Volumes") (subpath "/private/tmp") (subpath "/private/var/tmp") (subpath "/private/var/folders") (regex #"^/dev/(tty|pty|cu\.)"))
@@ -2369,6 +2377,16 @@ fn officecli_scratch() -> Result<PathBuf, String> {
 /// An absolute path outside the document's folder in engine text: a drive,
 /// a share, or one under a file system's own first folder. Element paths
 /// (`/slide[1]`) are not among them.
+static EMBEDDED_IMAGE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(
+        r"(?i)data:image/[a-z0-9.+-]+;base64,[a-z0-9+/]+={0,2}(?:[\r\n]+[a-z0-9+/]+={0,2})*",
+    )
+    .expect("embedded image diagnostic pattern")
+});
+static INLINE_BYTES: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+    regex::Regex::new(r"[A-Za-z0-9+/]{128,}={0,2}").expect("large binary diagnostic pattern")
+});
+
 static OUTSIDE_PATH: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
     regex::Regex::new(
         r#"(?i)(?P<lead>^|[\s'"(=,:\[`])(?:[a-z]:[\\/]|\\\\|/(?:users|volumes|private|var|tmp|home|root|etc|opt|usr|applications|library|system|windows|programdata|mnt|media|dev|proc|sys|srv|run|snap|nix|sbin|bin|lib|cores|boot)\b)[^\s'"`<>|]*"#,
@@ -2497,7 +2515,10 @@ impl Work<'_> {
         }
         // The longer first: the real path may contain the other.
         folders.sort_by_key(|folder| std::cmp::Reverse(folder.len()));
-        let mut text = text.to_owned();
+        let text = EMBEDDED_IMAGE.replace_all(text, "<embedded image>");
+        let mut text = INLINE_BYTES
+            .replace_all(&text, "<embedded data>")
+            .into_owned();
         for folder in folders.iter().filter(|folder| !folder.is_empty()) {
             text = text
                 .replace(&format!("{folder}{}", std::path::MAIN_SEPARATOR), "")
@@ -2546,7 +2567,7 @@ async fn make_office(work: &Work<'_>, format: DocumentFormat) -> Result<Made, St
         .run(&["batch", file, "--input", BATCH, "--json"])
         .await?;
     let issues = batch_issues(work, &batch)?;
-    check_office(work, format, issues).await
+    check_office(work, format, issues, None).await
 }
 
 /// Check the Office file officecli finds in the document's folder, with
@@ -2556,6 +2577,7 @@ async fn check_office(
     work: &Work<'_>,
     format: DocumentFormat,
     mut issues: Vec<Issue>,
+    source_pages: Option<&[u32]>,
 ) -> Result<Made, String> {
     let file = format.file();
     let file = file.as_str();
@@ -2564,6 +2586,11 @@ async fn check_office(
     }
     let mut fixed = 0;
     match view_report(work, file).await {
+        Some(report) if source_pages.is_some() => {
+            // Editing a source deck must never apply global automatic fixes
+            // to pages outside the explicitly authorized selection.
+            issues.extend(view_issues(work, &report));
+        }
         Some(report) => {
             let (found, applied) = fix_layout(work, file, format, &report).await?;
             issues.extend(found);
@@ -2578,11 +2605,36 @@ async fn check_office(
             .and_then(|report| data(&report)[key].as_u64()),
         None => None,
     };
+    let mut preview_uses_math_fallback = false;
     let (preview, pages) = if format == DocumentFormat::Pptx {
+        let source = work.dir.join(file);
+        let target = work.dir.join("preview-compatible.pptx");
+        let math = blocking(move || super::math_preview::make_copy(&source, &target)).await;
+        let render_file = match math {
+            Ok(report) => {
+                preview_uses_math_fallback = report.uses_fallback;
+                if report.unverified {
+                    issues.push(Issue::warning("Math preview is unverified: no rendered fallback is available for every native equation".into(),None));
+                }
+                if report.uses_fallback {
+                    "preview-compatible.pptx"
+                } else {
+                    file
+                }
+            }
+            Err(_) => {
+                issues.push(Issue::warning("Math preview inspection was unavailable; visual rendering and equation editing remain unverified".into(),None));
+                file
+            }
+        };
         // Without a count, the first slide still makes the thumbnail.
-        let (pages, found) = svg_pages(work, file, count.unwrap_or(1)).await;
+        let (pages, found) = svg_pages(work, render_file, count.unwrap_or(1), source_pages).await;
         issues.extend(found);
-        let first = work.dir.join(PAGES).join("1.svg");
+        let first_page = source_pages
+            .and_then(|pages| pages.first())
+            .copied()
+            .unwrap_or(1);
+        let first = work.dir.join(PAGES).join(format!("{first_page}.svg"));
         (pages.contains(&first).then_some(first), pages)
     } else {
         (None, vec![])
@@ -2594,6 +2646,7 @@ async fn check_office(
         count,
         issues: finished(issues),
         fixed,
+        preview_uses_math_fallback,
     })
 }
 
@@ -2613,17 +2666,62 @@ async fn make_python(
     office: &Work<'_>,
     engine: &PythonEngine,
     broken: &std::sync::atomic::AtomicBool,
+    selected_style: Option<&str>,
+    media_manifest: bool,
+    source_pages: Option<&[u32]>,
 ) -> Result<Made, String> {
     let file = DocumentFormat::Pptx.file();
     let (runner, assets) = (
         engine.runner.to_string_lossy(),
         engine.assets.to_string_lossy(),
     );
-    let output = python
-        .run(&[
-            &runner, "--assets", &assets, "--code", CODE, "--out", &file, "--lint", LINT,
-        ])
-        .await?;
+    let mut args = vec![
+        runner.as_ref(),
+        "--assets",
+        assets.as_ref(),
+        "--code",
+        CODE,
+        "--out",
+        file.as_str(),
+        "--lint",
+        LINT,
+    ];
+    if let Some(style) = selected_style {
+        super::super::types::validate_presentation_style(Some(style))?;
+        if style != "auto" {
+            args.extend(["--selected-style", style]);
+        }
+    }
+    // Private runner inputs require canonical absolute paths. The runner
+    // rejects relative paths and symlinks instead of resolving model paths.
+    let private_path = |name: &str| -> Result<String, String> {
+        let path = python.dir.join(name);
+        let limit = if name == "media-manifest.json" {
+            28 * 1024 * 1024
+        } else {
+            attachments::MAX_FILE_BYTES
+        };
+        attachments::open_written(&path, limit)?;
+        path.canonicalize()
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|_| PROTOCOL.into())
+    };
+    let media_path = media_manifest
+        .then(|| private_path("media-manifest.json"))
+        .transpose()?;
+    let source_path = source_pages
+        .map(|_| private_path("source-deck.pptx"))
+        .transpose()?;
+    let source_meta = source_pages
+        .map(|_| private_path("source-meta.json"))
+        .transpose()?;
+    if let Some(path) = &media_path {
+        args.extend(["--media-manifest", path]);
+    }
+    if let (Some(path), Some(meta)) = (&source_path, &source_meta) {
+        args.extend(["--source-deck", path, "--source-meta", meta]);
+    }
+    let output = python.run(&args).await?;
     if output.status == Some(ENGINE_BROKEN) {
         broken.store(true, std::sync::atomic::Ordering::Relaxed);
         log::warn!("[Assistant] the Python engine could not start the code; it is off until the app restarts");
@@ -2650,7 +2748,7 @@ async fn make_python(
             .collect(),
         None => vec![Issue::warning(LINT_UNAVAILABLE.into(), None)],
     };
-    check_office(office, DocumentFormat::Pptx, issues).await
+    check_office(office, DocumentFormat::Pptx, issues, source_pages).await
 }
 
 /// Copy the deck the Python engine wrote at `from` to `to`, a new file, as
@@ -2734,6 +2832,9 @@ fn python_broken(work: &Work<'_>, output: &EngineOutput) -> String {
 /// printed more than the runner keeps of stderr, that it lost the report.
 fn python_failure(work: &Work<'_>, output: &EngineOutput) -> String {
     let stderr = output.stderr.trim_end();
+    if stderr.contains("assistant_presentation_source_unavailable") {
+        return "assistant_presentation_source_unavailable".into();
+    }
     let report = report_at(stderr);
     // The runner keeps at most OUTPUT_LIMIT bytes: the report came after.
     if report.is_none() && output.stderr.len() + 4 >= OUTPUT_LIMIT {
@@ -3142,7 +3243,12 @@ const MAX_SVG_PAGES: u64 = 60;
 /// can write the document's folder: a page is never written through a link
 /// in place of `pages`, and once the engine is done only the pages that are
 /// still regular files are returned (see `attachments::open_page`).
-async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Vec<Issue>) {
+async fn svg_pages(
+    work: &Work<'_>,
+    file: &str,
+    count: u64,
+    source_pages: Option<&[u32]>,
+) -> (Vec<PathBuf>, Vec<Issue>) {
     if count == 0 {
         return (vec![], vec![]);
     }
@@ -3161,7 +3267,11 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
     }
     let (mut drawn, mut issues) = (vec![], vec![]);
     let mut stopped = false;
-    for n in 1..=count.min(MAX_SVG_PAGES) {
+    let requested: Vec<u64> = match source_pages {
+        Some(pages) => pages.iter().map(|page| u64::from(*page)).collect(),
+        None => (1..=count.min(MAX_SVG_PAGES)).collect(),
+    };
+    for n in requested {
         let at = n.to_string();
         let view = ["view", file, "svg", "--start", &at, "--end", &at];
         let Ok(output) = work.run_limited(&view, SVG_OUTPUT_LIMIT).await else {
@@ -3193,7 +3303,7 @@ async fn svg_pages(work: &Work<'_>, file: &str, count: u64) -> (Vec<PathBuf>, Ve
             issues.push(no_preview(n, n));
         }
     }
-    if !stopped && count > MAX_SVG_PAGES {
+    if !stopped && source_pages.is_none() && count > MAX_SVG_PAGES {
         issues.push(no_preview(MAX_SVG_PAGES + 1, count));
     }
     let paths: Vec<PathBuf> = drawn.iter().map(|(_, path)| path.clone()).collect();
@@ -3286,6 +3396,7 @@ async fn make_pdf(work: &Work<'_>, body: &str) -> Result<Made, String> {
         count: pages,
         issues: finished(issues),
         fixed: 0,
+        preview_uses_math_fallback: false,
     })
 }
 
@@ -3418,6 +3529,19 @@ impl AssistantHost {
                 "unknown or malformed arguments: name, format (pptx, docx, xlsx, pdf, md, txt, csv, html or json) and content are expected",
             )
         })?;
+        if args.format == DocumentFormat::Pptx && run.presentation_enabled {
+            run.presentation
+                .lock()
+                .map_err(|_| "assistant_state_unavailable")?
+                .validate_document_plan(
+                    args.plan_id
+                        .as_deref()
+                        .ok_or("assistant_presentation_plan_invalid")?,
+                    args.revision.ok_or("assistant_presentation_plan_invalid")?,
+                )?;
+        } else if args.plan_id.is_some() || args.revision.is_some() {
+            return Err("assistant_presentation_plan_invalid".into());
+        }
         if args.from_preview.is_some() {
             return self.deliver_preview(run, media, call_id, args).await;
         }
@@ -3475,7 +3599,10 @@ impl AssistantHost {
         media.record_preview(&document.name, doc_id)?;
         let previewed = async {
             let made = self.make_file(run, doc_id, document, engine).await?;
-            let result = preview_result(doc_id, document.format, &made, &self.known_keys())?;
+            let mut result = preview_result(doc_id, document.format, &made, &self.known_keys())?;
+            if let Some(source) = Self::source_snapshot(run)? {
+                result["targetPageNumbers"] = json!(source.page_numbers);
+            }
             Ok((made, result))
         }
         .await;
@@ -3693,7 +3820,12 @@ impl AssistantHost {
     /// A deck from the model's Python code (see [`make_python`]), checked by
     /// `office`: each in its own sandbox, or not at all (officecli reads what
     /// the code wrote), and one deck at a time.
-    async fn python_deck(&self, office: &Work<'_>) -> Result<Made, String> {
+    async fn python_deck(
+        &self,
+        office: &Work<'_>,
+        selected_style: Option<&str>,
+        run: &Arc<RunControl>,
+    ) -> Result<Made, String> {
         let no_python = || refuse(FAILED, NO_PYTHON);
         if office.sandbox.is_none() {
             return Err(no_python());
@@ -3715,8 +3847,75 @@ impl AssistantHost {
         };
         let sandbox = self.python_engine(&python).await.ok_or_else(no_python)?;
         python.sandbox = Some(&sandbox);
+        let frozen = run
+            .presentation
+            .lock()
+            .map_err(|_| "assistant_state_unavailable")?
+            .current()
+            .cloned();
+        let media_manifest = run.presentation_enabled && frozen.is_some();
+        if let Some(plan) = frozen.filter(|_| media_manifest) {
+            let requests = run
+                .presentation
+                .lock()
+                .map_err(|_| "assistant_state_unavailable")?
+                .required_assets();
+            let available = run
+                .presentation
+                .lock()
+                .map_err(|_| "assistant_state_unavailable")?
+                .assets();
+            let ids: Vec<String> = requests
+                .iter()
+                .filter(|request| {
+                    request.kind == "user-image"
+                        || available
+                            .iter()
+                            .any(|asset| asset.asset_id == request.asset_id)
+                })
+                .map(|request| request.asset_id.clone())
+                .collect();
+            let mut manifest = self
+                // Twelve pictures of a few megabytes each.
+                .presentation_assets(run, &plan.plan_id, plan.revision, &ids, 48 * 1024 * 1024)
+                .await?;
+            manifest["planPageNumbers"] = json!(Self::source_snapshot(run)?
+                .map(|source| source.page_numbers)
+                .unwrap_or_else(|| (1..=plan.slides.len() as u32).collect()));
+            manifest["pageAssetIds"] = json!(plan
+                .slides
+                .iter()
+                .map(|slide| slide["visual"]["assetId"].clone())
+                .collect::<Vec<_>>());
+            manifest["pageFallbacks"] = json!(plan
+                .slides
+                .iter()
+                .map(|slide| slide["visual"]["fallback"].clone())
+                .collect::<Vec<_>>());
+            write_new(
+                &dir.join("media-manifest.json"),
+                &serde_json::to_vec(&manifest).map_err(|_| PROTOCOL)?,
+            )?;
+        }
+        let source = Self::source_snapshot(run)?;
+        if let Some(source) = &source {
+            write_new(&dir.join("source-deck.pptx"), source.bytes.as_slice())?;
+            write_new(
+                &dir.join("source-meta.json"),
+                &serde_json::to_vec(&source.meta()).map_err(|_| PROTOCOL)?,
+            )?;
+        }
         let _turn = self.python_turn.lock().await;
-        make_python(&python, office, &engine, &self.python_broken).await
+        make_python(
+            &python,
+            office,
+            &engine,
+            &self.python_broken,
+            selected_style,
+            media_manifest,
+            source.as_ref().map(|source| source.page_numbers.as_slice()),
+        )
+        .await
     }
 
     /// Make `document`'s file with `engine` (none for text) in the new
@@ -3763,7 +3962,16 @@ impl AssistantHost {
                 let sandbox = self.engine_sandbox(&self.office_sandbox, &work).await;
                 work.sandbox = sandbox.as_deref();
                 match content {
-                    Content::Python(_) => self.python_deck(&work).await?,
+                    Content::Python(_) => {
+                        let selected = run
+                            .presentation
+                            .lock()
+                            .map_err(|_| "assistant_state_unavailable")?
+                            .effective_style()
+                            .map(str::to_owned)
+                            .or_else(|| run.presentation_style_id.clone());
+                        self.python_deck(&work, selected.as_deref(), run).await?
+                    }
                     _ => make_office(&work, format).await?,
                 }
             }
@@ -3790,9 +3998,34 @@ impl AssistantHost {
                 count: None,
                 issues: vec![],
                 fixed: 0,
+                preview_uses_math_fallback: false,
             },
             _ => return Err(DISABLED.into()),
         };
+        if format == DocumentFormat::Pptx && run.presentation_enabled {
+            let slides = run
+                .presentation
+                .lock()
+                .map_err(|_| "assistant_state_unavailable")?
+                .current()
+                .map(|plan| plan.slides.clone())
+                .ok_or("assistant_presentation_plan_invalid")?;
+            let source = Self::source_snapshot(run)?;
+            let path = made.file.clone();
+            blocking(move || {
+                if let Some(source) = &source {
+                    crate::services::assistant::presentation_edit::validate_preserved_source(
+                        source, &path,
+                    )?;
+                }
+                crate::services::assistant::file_preview::validate_native_pages(
+                    &path,
+                    &slides,
+                    source.as_ref().map(|source| source.page_numbers.as_slice()),
+                )
+            })
+            .await?;
+        }
         Ok(made)
     }
 
@@ -3811,9 +4044,40 @@ impl AssistantHost {
         made: &Made,
     ) -> Result<Value, String> {
         let mid = run.reply_id();
+        // Only a current owned run may start a raster worker or read pages.
+        self.load(run).await?;
+        let rasters = if format == DocumentFormat::Pptx && !made.pages.is_empty() {
+            match self.env.runtime_dir() {
+                Ok(runtime) => super::preview::raster(
+                    &runtime,
+                    made.file.parent().ok_or(PROTOCOL)?,
+                    &made.pages,
+                    self.env.sandbox_exec().as_deref(),
+                )
+                .await
+                .unwrap_or_default(),
+                Err(_) => vec![],
+            }
+        } else {
+            vec![]
+        };
         let store = self.store(&run.identity.owner)?;
         let issues = serde_json::to_value(&made.issues).map_err(|_| PROTOCOL)?;
         let mut params = json!({"name": name, "format": format.extension(), "issues": issues});
+        if format == DocumentFormat::Pptx {
+            if let Some(source) = Self::source_snapshot(run)? {
+                params["presentationRevision"] = source.revision(doc_id);
+            }
+            if let Some(plan) = run
+                .presentation
+                .lock()
+                .map_err(|_| "assistant_state_unavailable")?
+                .current()
+            {
+                params["presentationPlanId"] = json!(plan.plan_id);
+                params["presentationStyleId"] = json!(plan.effective_style);
+            }
+        }
         if let (Some(key), Some(count)) = (format.count(), made.count) {
             params[key] = json!(count);
         }
@@ -3822,6 +4086,9 @@ impl AssistantHost {
         }
         if format == DocumentFormat::Pptx {
             params["svgPages"] = json!(made.pages.len());
+        }
+        if made.preview_uses_math_fallback {
+            params["previewUsesMathFallback"] = json!(true);
         }
         scrub_secrets_in(&mut params, &self.known_keys());
         let mut record = MediaRecord {
@@ -3836,14 +4103,14 @@ impl AssistantHost {
             ..Default::default()
         };
         // The attachment takes the id of the folder it was made in.
-        let (attachment, kept) = blocking({
+        let (attachment, kept, preview_pages) = blocking({
             let (sid, mid, run) = (run.session_id.clone(), mid.clone(), run.clone());
             let (path, name, record) = (made.file.clone(), name.to_owned(), record.clone());
             let (doc_id, pages) = (doc_id.to_owned(), made.pages.clone());
             move || {
                 let mut file = std::fs::File::open(&path)
                     .map_err(|_| refuse(FAILED, "the engine finished without writing the file"))?;
-                let attachment = attachments::generated_file(
+                let mut attachment = attachments::generated_file(
                     &store,
                     &sid,
                     &mid,
@@ -3876,22 +4143,57 @@ impl AssistantHost {
                     )
                 };
                 if kept != pages.len() {
-                    let mut record = record;
-                    record.params["svgPages"] = json!(kept);
-                    record.outputs = vec![attachment.id.clone()];
-                    if let Err(error) =
-                        attachments::record_kept_pages(&store, &sid, &mid, &attachment.id, &record)
-                    {
+                    let mut kept_record = record.clone();
+                    kept_record.params["svgPages"] = json!(kept);
+                    kept_record.outputs = vec![attachment.id.clone()];
+                    if let Err(error) = attachments::record_kept_pages(
+                        &store,
+                        &sid,
+                        &mid,
+                        &attachment.id,
+                        &kept_record,
+                    ) {
                         log::warn!("[Assistant] could not record the kept slide pictures: {error}");
                     }
                 }
-                Ok((attachment, kept))
+                let mut preview_pages = vec![];
+                if !rasters.is_empty() {
+                    let mut preview_record = record.clone();
+                    preview_record.params["svgPages"] = json!(kept);
+                    preview_record.outputs = vec![attachment.id.clone()];
+                    let pages: Vec<_> = rasters.iter().map(|(page, _)| *page).collect();
+                    let metadata = json!({"mimeType":"image/jpeg","pages":pages});
+                    preview_record.params["documentPreview"] = metadata.clone();
+                    if attachments::keep_document_preview(
+                        &store,
+                        &sid,
+                        &mid,
+                        &attachment.id,
+                        &rasters,
+                        &preview_record,
+                        |saved| still_running(saved, &run),
+                    )
+                    .is_ok()
+                    {
+                        if let Some(details) =
+                            attachment.details.as_mut().and_then(Value::as_object_mut)
+                        {
+                            details.insert("documentPreview".into(), metadata);
+                        }
+                        preview_pages = pages;
+                    }
+                }
+                Ok((attachment, kept, preview_pages))
             }
         })
         .await?;
         record.outputs = vec![attachment.id.clone()];
         if format == DocumentFormat::Pptx {
             record.params["svgPages"] = json!(kept);
+        }
+        if !preview_pages.is_empty() {
+            record.params["documentPreview"] =
+                json!({"mimeType":"image/jpeg","pages":preview_pages});
         }
         self.publish_generation(run, &mid, &record, std::slice::from_ref(&attachment));
         let mut file = json!({
@@ -3923,6 +4225,31 @@ impl AssistantHost {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[test]
+    fn presentation_regression_engine_diagnostics_do_not_echo_private_image_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let work = super::Work {
+            exe: std::path::Path::new("unused"),
+            dir: temp.path(),
+            home: temp.path(),
+            name: "fixture",
+            sandbox: None,
+            profile: super::OFFICE_SANDBOX,
+            scratch: None,
+            read_root: None,
+            timeout: std::time::Duration::from_secs(1),
+        };
+        let payload = "aW1hZ2UgbWFya2VyIHByaXZhdGUgNDI=";
+        let shown = work.shown(&format!(
+            "Invalid image data:image/png;base64,{payload} at /slide[2]"
+        ));
+        assert!(
+            !shown.contains(payload),
+            "Private image bytes must not be quoted back to the language model on an engine error"
+        );
+        assert!(shown.contains("/slide[2]"));
+    }
+
     use super::*;
     use crate::services::assistant::{
         catalog,
@@ -4006,6 +4333,8 @@ mod tests {
         sid: String,
     }
 
+    const STUB_CONTAINER: &[u8] = b"\x50\x4b\x03\x04\x14\x00\x00\x00\x00\x00\xab\x5d\x6a\x5d\x25\x9d\xc2\xfa\x04\x00\x00\x00\x04\x00\x00\x00\x0b\x00\x00\x00\x66\x69\x78\x74\x75\x72\x65\x2e\x74\x78\x74\x73\x74\x75\x62\x50\x4b\x01\x02\x14\x03\x14\x00\x00\x00\x00\x00\xab\x5d\x6a\x5d\x25\x9d\xc2\xfa\x04\x00\x00\x00\x04\x00\x00\x00\x0b\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x80\x01\x00\x00\x00\x00\x66\x69\x78\x74\x75\x72\x65\x2e\x74\x78\x74\x50\x4b\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x39\x00\x00\x00\x2d\x00\x00\x00\x10\x00\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30\x30";
+
     /// A stand-in engine with the shell body `script`, or `link:<path>` to
     /// a real one.
     fn engine(dir: &Path, name: &str, script: &str) -> String {
@@ -4015,6 +4344,14 @@ mod tests {
         if let Some(target) = script.strip_prefix("link:") {
             std::os::unix::fs::symlink(target, &path).unwrap();
         } else {
+            let container = path.parent().unwrap().join("stub.pptx");
+            std::fs::write(&container, STUB_CONTAINER).unwrap();
+            let script = script.replace(
+                r#"printf 'PK\003\004stub'"#,
+                &format!("cat '{}'", container.display()),
+            );
+            let unique = format!("cp '{}' \"$2\"; printf '%016d' \"$$\" | dd of=\"$2\" bs=1 seek={} conv=notrunc 2>/dev/null",container.display(),STUB_CONTAINER.len()-16);
+            let script = script.replace(r#"printf 'PK\003\004%s' "$$" > "$2""#, &unique);
             std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -4031,6 +4368,15 @@ mod tests {
         officecli: Option<&str>,
         typst: Option<&str>,
         sandbox: impl FnOnce(&Path) -> Option<PathBuf>,
+    ) -> Fixture {
+        fixture_in_selected(officecli, typst, sandbox, None)
+    }
+
+    fn fixture_in_selected(
+        officecli: Option<&str>,
+        typst: Option<&str>,
+        sandbox: impl FnOnce(&Path) -> Option<PathBuf>,
+        selected: Option<&str>,
     ) -> Fixture {
         let root = tempfile::tempdir().unwrap();
         let sandbox = sandbox(root.path());
@@ -4056,7 +4402,7 @@ mod tests {
         let host = AssistantHost::new(env.clone());
         let store = host.store(&identity().owner).unwrap();
         let sid = store.create("test/chat", false).unwrap().session.id;
-        let run = start_run(&host, &sid);
+        let run = start_run_selected(&host, &sid, selected);
         Fixture {
             root,
             env,
@@ -4069,9 +4415,17 @@ mod tests {
     /// A new chat run of conversation `sid`, with its reply, as the
     /// conversation's live run.
     fn start_run(host: &Arc<AssistantHost>, sid: &str) -> Arc<RunControl> {
+        start_run_selected(host, sid, None)
+    }
+
+    fn start_run_selected(
+        host: &Arc<AssistantHost>,
+        sid: &str,
+        selected: Option<&str>,
+    ) -> Arc<RunControl> {
         let store = host.store(&identity().owner).unwrap();
         let send: SendRequest = serde_json::from_value(json!({
-            "sessionId": sid, "runId": id(), "operationId": id(), "text": "make a file",
+            "sessionId": sid, "runId": id(), "operationId": id(), "text": "make a file", "presentationStyleId":selected,
         }))
         .unwrap();
         let mut control = RunControl::new(identity(), &send, SECRET.into());
@@ -4522,6 +4876,27 @@ esac"#
             .unwrap();
         assert_eq!(result["status"], "completed", "{result}");
         (f, result)
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn math_preview_inspection_failure_is_reported_without_blocking_the_document() {
+        let script = officecli_drawing(
+            r#"{"results":[{"index":0,"success":true}]}"#,
+            NO_ISSUES,
+            r#"{"slides":1}"#,
+            r#"echo '<svg/>'"#,
+        )
+        .replace(r"PK\003\004stub", r"PK\003\004broken");
+        let (_fixture, result) = made_deck(&script).await;
+        assert_eq!(result["status"], "completed");
+        assert!(result["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|issue| issue["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("Math preview inspection was unavailable"))));
     }
 
     #[tokio::test]
@@ -6103,6 +6478,8 @@ esac"#,
             content: Some(Value::Array(items.to_vec())),
             preview: false,
             from_preview: None,
+            plan_id: None,
+            revision: None,
         })
         .map(drop)
     }
@@ -6119,6 +6496,8 @@ esac"#,
             content: Some(Value::Array(items.to_vec())),
             preview: false,
             from_preview: None,
+            plan_id: None,
+            revision: None,
         })
         .map(drop)
     }
@@ -6692,6 +7071,7 @@ esac"#,
             content: Some(json!([{"command": "add", "parent": "/body", "type": "equation", "props": {"formula": r"|x| \\ y"}}])),
             preview: false,
             from_preview: None,
+            plan_id: None, revision: None,
         })
         .unwrap();
     }
@@ -8219,7 +8599,7 @@ connect(port).then((connected) => console.log(JSON.stringify({
         "slide 1: card Plan: the box is 3.00 in tall but its text needs 1.20 in; lower h or add content";
     /// The deck the stand-in runner copies to `out.pptx`.
     #[cfg(target_os = "macos")]
-    const PYTHON_DECK: &[u8] = b"PK\x03\x04a deck from python";
+    const PYTHON_DECK: &[u8] = STUB_CONTAINER;
 
     /// A [`fixture_in`] whose runtime also holds the Python engine, under the
     /// stand-in `sandbox-exec` that `sandbox` gives for the fixture's folder.
@@ -8234,8 +8614,18 @@ connect(port).then((connected) => console.log(JSON.stringify({
         runner: &str,
         sandbox: impl FnOnce(&Path) -> PathBuf,
     ) -> Fixture {
+        python_fixture_selected(officecli, runner, sandbox, None)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn python_fixture_selected(
+        officecli: &str,
+        runner: &str,
+        sandbox: impl FnOnce(&Path) -> PathBuf,
+        selected: Option<&str>,
+    ) -> Fixture {
         use std::os::unix::fs::PermissionsExt;
-        let f = fixture_in(Some(officecli), None, |dir| Some(sandbox(dir)));
+        let f = fixture_in_selected(Some(officecli), None, |dir| Some(sandbox(dir)), selected);
         let runtime = f.env.runtime.clone();
         let write = |path: &str, bytes: &[u8], mode: u32| {
             let path = runtime.join(path);
@@ -8391,6 +8781,44 @@ connect(port).then((connected) => console.log(JSON.stringify({
         let result = f.call("call-2", text).await.unwrap();
         assert_eq!(result["status"], "completed");
         assert_eq!(result["issues"][0]["message"], LINT_LINE);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[serial_test::serial(document_engines)]
+    async fn presentation_selection_reaches_the_python_runner_from_the_frozen_run() {
+        for selected in [Some("cartesian"), Some("navy"), Some("auto"), None] {
+            let officecli = officecli_drawing(
+                r#"{"results":[]}"#,
+                NO_ISSUES,
+                r#"{"slides":2}"#,
+                r#"echo "<svg>$5</svg>""#,
+            );
+            let f = python_fixture_selected(
+                &officecli,
+                &deck_runner(),
+                |dir| stub_sandbox(dir, true),
+                selected,
+            );
+            let result = f
+                .call(
+                    "selection-call",
+                    python_args("prs = new_deck(style='product-launch')"),
+                )
+                .await
+                .unwrap();
+            let output = PathBuf::from(result["filePath"].as_str().unwrap());
+            let args = std::fs::read_to_string(output.parent().unwrap().join("python/runner.log"))
+                .unwrap();
+            if let Some(style) = selected.filter(|style| *style != "auto") {
+                assert!(
+                    args.contains(&format!("--selected-style {style}")),
+                    "{args}"
+                );
+            } else {
+                assert!(!args.contains("--selected-style"), "{args}");
+            }
+        }
     }
 
     #[cfg(target_os = "macos")]
@@ -9696,5 +10124,319 @@ exit 1"#
             .unwrap();
         eprintln!("md: {md:#}");
         assert_eq!(md["file"]["mimeType"], "text/markdown");
+    }
+
+    #[cfg(target_os = "macos")]
+    mod source_pipeline_regressions {
+        use super::*;
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
+        use std::io::{Cursor, Read};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        fn folders(root: &Path, name: &str) -> (PathBuf, PathBuf) {
+            let dir = root.join(name);
+            let home = dir.join(HOME);
+            crate::config::create_private_dir_all(&home).unwrap();
+            (dir, home)
+        }
+
+        fn python_work<'a>(
+            engine: &'a PythonEngine,
+            runtime: &'a Path,
+            dir: &'a Path,
+            home: &'a Path,
+            sandbox: &'a Path,
+        ) -> Work<'a> {
+            Work {
+                exe: &engine.node,
+                dir,
+                home,
+                name: "Python",
+                sandbox: Some(sandbox),
+                profile: PYTHON_SANDBOX,
+                scratch: None,
+                read_root: Some(runtime),
+                timeout: PYTHON_TIMEOUT,
+            }
+        }
+
+        fn office_work<'a>(
+            exe: &'a Path,
+            runtime: &'a Path,
+            dir: &'a Path,
+            home: &'a Path,
+            sandbox: &'a Path,
+            scratch: &'a Path,
+        ) -> Work<'a> {
+            Work {
+                exe,
+                dir,
+                home,
+                name: "officecli",
+                sandbox: Some(sandbox),
+                profile: OFFICE_SANDBOX,
+                scratch: Some(scratch),
+                read_root: Some(runtime),
+                timeout: ENGINE_TIMEOUT,
+            }
+        }
+
+        fn source_inputs(dir: &Path, bytes: &[u8]) {
+            write_new(&dir.join("source-deck.pptx"), bytes).unwrap();
+            let version = format!("{:x}", Sha256::digest(bytes));
+            write_new(
+                &dir.join("source-meta.json"),
+                &serde_json::to_vec(&json!({
+                    "version": version, "totalPages": 70, "pageNumbers": [70],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            write_new(
+                &dir.join("media-manifest.json"),
+                &serde_json::to_vec(&json!({
+                    "planId": "host-source-fixture", "revision": 1,
+                    "assets": [], "planPageNumbers": [70], "pageAssetIds": [null],
+                    "pageFallbacks": ["omit"],
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn zip_parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+            let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+            let mut parts = BTreeMap::new();
+            for n in 0..zip.len() {
+                let mut entry = zip.by_index(n).unwrap();
+                if entry.is_dir() {
+                    continue;
+                }
+                let mut bytes = Vec::new();
+                entry.read_to_end(&mut bytes).unwrap();
+                assert!(parts
+                    .insert(entry.name().unwrap().into_owned(), bytes)
+                    .is_none());
+            }
+            parts
+        }
+
+        #[cfg(target_os = "macos")]
+        #[tokio::test]
+        #[serial_test::serial(document_engines)]
+        async fn source_host_make_python_uses_absolute_inputs_and_never_fixes_untargeted_pages() {
+            let overflow = overflow_issues();
+            let script = officecli_rounds(&[&overflow, NO_ISSUES], r#"{"slides":70}"#, GEOMETRY)
+                .replace(
+                    "svg) echo '<svg/>'",
+                    r#"svg) echo "$5" >> svg-targets.log; echo "<svg>$5</svg>""#,
+                );
+            let f = python_fixture(&script, &deck_runner(), |dir| stub_sandbox(dir, true));
+            let engines = super::super::super::engines::engines_at(&f.env.runtime);
+            let engine = engines.python.unwrap();
+            let office_exe = engines.officecli.unwrap();
+            let (python_dir, python_home) = folders(f.root.path(), "source-python");
+            let (office_dir, office_home) = folders(f.root.path(), "source-office");
+            write_new(&python_dir.join(CODE), b"prs=source_deck()").unwrap();
+            source_inputs(&python_dir, PYTHON_DECK);
+            let sandbox = f.env.sandbox.as_ref().unwrap();
+            let python = python_work(&engine, &f.env.runtime, &python_dir, &python_home, sandbox);
+            let office = office_work(
+                &office_exe,
+                &f.env.runtime,
+                &office_dir,
+                &office_home,
+                sandbox,
+                &office_dir,
+            );
+            let broken = AtomicBool::new(false);
+            let made = make_python(&python, &office, &engine, &broken, None, true, Some(&[70]))
+                .await
+                .unwrap();
+            assert_eq!(made.count, Some(70));
+            assert_eq!(made.fixed, 0);
+            assert_eq!(
+                made.preview.as_ref().unwrap().file_name().unwrap(),
+                "70.svg"
+            );
+            assert_eq!(made.pages.len(), 1);
+            assert_eq!(
+                std::fs::read_to_string(office_dir.join("svg-targets.log")).unwrap(),
+                "70\n"
+            );
+            assert!(made
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains(OVERFLOW_MESSAGE)));
+            assert!(!office_dir.join("fix-1.json").exists());
+            assert!(!office_dir.join("gets.log").exists());
+            assert!(!office_dir.join("batches.log").exists());
+            assert!(!broken.load(Ordering::Relaxed));
+            let args = std::fs::read_to_string(python_dir.join("runner.log")).unwrap();
+            for (flag, file) in [
+                ("--source-deck", "source-deck.pptx"),
+                ("--source-meta", "source-meta.json"),
+                ("--media-manifest", "media-manifest.json"),
+            ] {
+                let expected = python_dir.join(file).canonicalize().unwrap();
+                assert!(expected.is_absolute());
+                assert!(
+                    args.contains(&format!("{flag} {}", expected.display())),
+                    "{args}"
+                );
+                assert!(!args.contains(&format!("{flag} {file}")), "{args}");
+            }
+        }
+
+        /// Explicit local opt-in only. The runtime must be a private copy
+        /// containing the current source and an existing ad-hoc Node; this
+        /// never updates, signs, downloads or installs any runtime.
+        #[cfg(target_os = "macos")]
+        #[tokio::test]
+        #[serial_test::serial(document_engines)]
+        #[ignore = "set OFOX_PPT_PRIVATE_RUNTIME to an explicit private current-source runtime"]
+        async fn source_host_real_make_python_edits_only_page_70_and_previews_that_page() {
+            let supplied = std::env::var_os("OFOX_PPT_PRIVATE_RUNTIME")
+                .expect("set OFOX_PPT_PRIVATE_RUNTIME explicitly; no default runtime is used");
+            let supplied = PathBuf::from(supplied);
+            assert!(supplied.is_absolute());
+            let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap();
+            let private_root = repository.join(".real-eval").canonicalize().unwrap();
+            let runtime = supplied.canonicalize().unwrap();
+            assert!(
+                runtime.starts_with(&private_root),
+                "runtime must be a private evaluation copy"
+            );
+            let engines = super::super::super::engines::engines_at(&runtime);
+            let engine = engines
+                .python
+                .expect("private runtime must contain the existing Python engine");
+            let office_exe = engines
+                .officecli
+                .expect("private runtime must contain OfficeCLI");
+            for file in [&engine.node, &engine.runner, &office_exe] {
+                assert!(file.canonicalize().unwrap().starts_with(&runtime));
+            }
+            let current = repository.join("assistant-runtime/src/python");
+            assert_eq!(
+                std::fs::read(&engine.runner).unwrap(),
+                std::fs::read(current.join("runner.mjs")).unwrap(),
+                "refresh the private source snapshot; do not edit installed/staged engines"
+            );
+            assert_eq!(
+                std::fs::read(engine.runner.with_file_name("deck.py")).unwrap(),
+                std::fs::read(current.join("deck.py")).unwrap()
+            );
+            let sandbox = Path::new("/usr/bin/sandbox-exec");
+            assert!(sandbox.is_file());
+            let root = tempfile::tempdir().unwrap();
+            let (seed_dir, seed_home) = folders(root.path(), "seed");
+            let seed = python_work(&engine, &runtime, &seed_dir, &seed_home, sandbox);
+            write_new(
+                &seed_dir.join(CODE),
+                b"prs=new_deck(title=\"Host source fixture\")\nfor page in range(1,71):\n    s=content_slide(prs,f\"Host source page {page}\",notes=f\"Preserve note {page}\")\n    text(s,f\"HOST_SOURCE_PAGE_{page:03}\",1,2,10,1,size=24)\n",
+            )
+            .unwrap();
+            let file = DocumentFormat::Pptx.file();
+            let seed_result = seed
+                .run(&[
+                    engine.runner.to_str().unwrap(),
+                    "--assets",
+                    engine.assets.to_str().unwrap(),
+                    "--code",
+                    CODE,
+                    "--out",
+                    &file,
+                    "--lint",
+                    LINT,
+                ])
+                .await
+                .unwrap();
+            assert_eq!(seed_result.status, Some(0), "{}", seed_result.stderr);
+            let source_path = seed_dir.join(&file);
+            let source = std::fs::read(&source_path).unwrap();
+            let original = zip_parts(&source);
+            assert_eq!(
+                original
+                    .keys()
+                    .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
+                    .count(),
+                70
+            );
+            let (python_dir, python_home) = folders(root.path(), "edit-python");
+            let (office_dir, office_home) = folders(root.path(), "edit-office");
+            source_inputs(&python_dir, &source);
+            write_new(
+                &python_dir.join(CODE),
+                b"prs=source_deck()\ntarget_slides(prs)[0].shapes.title.text='EDITED_HOST_PAGE_070'\n",
+            )
+            .unwrap();
+            let python = python_work(&engine, &runtime, &python_dir, &python_home, sandbox);
+            let scratch = officecli_scratch().unwrap();
+            let office = office_work(
+                &office_exe,
+                &runtime,
+                &office_dir,
+                &office_home,
+                sandbox,
+                &scratch,
+            );
+            let broken = AtomicBool::new(false);
+            let started = std::time::Instant::now();
+            let made = make_python(
+                &python,
+                &office,
+                &engine,
+                &broken,
+                Some("navy"),
+                true,
+                Some(&[70]),
+            )
+            .await
+            .unwrap();
+            assert!(!broken.load(Ordering::Relaxed));
+            assert_eq!(made.count, Some(70));
+            assert_eq!(made.fixed, 0);
+            assert_eq!(made.pages.len(), 1);
+            let preview = made.preview.as_ref().unwrap();
+            assert_eq!(preview.file_name().unwrap(), "70.svg");
+            assert_eq!(&made.pages[0], preview);
+            assert!(std::fs::read_to_string(preview)
+                .unwrap()
+                .contains("EDITED_HOST_PAGE_070"));
+            let output = std::fs::read(&made.file).unwrap();
+            let edited = zip_parts(&output);
+            assert_eq!(
+                original.keys().collect::<Vec<_>>(),
+                edited.keys().collect::<Vec<_>>()
+            );
+            let changed: Vec<_> = original
+                .iter()
+                .filter(|(name, bytes)| edited.get(*name) != Some(*bytes))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            assert_eq!(changed, ["ppt/slides/slide70.xml"]);
+            assert_eq!(std::fs::read(&source_path).unwrap(), source);
+            assert_eq!(
+                std::fs::read(python_dir.join("source-deck.pptx")).unwrap(),
+                source
+            );
+            assert!(!office_dir.join("fix-1.json").exists());
+            eprintln!(
+                "PRIVATE_SOURCE_HOST_ACCEPTANCE {}",
+                json!({
+                    "totalPages":made.count, "targetPages":[70], "previewPage":70,
+                    "sourceSha256":format!("{:x}",Sha256::digest(&source)),
+                    "outputSha256":format!("{:x}",Sha256::digest(&output)),
+                    "changedParts":changed, "makePythonMs":started.elapsed().as_millis(),
+                    "modelCalls":0,"imageCalls":0,"nativeEditingAcceptance":false,
+                })
+            );
+        }
     }
 }

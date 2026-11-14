@@ -439,6 +439,10 @@ pub(super) fn merge_native(
             }
         } else {
             record.messages.push(Message {
+                file_references: vec![],
+                presentation_visual_policy: None,
+                presentation_plan: None,
+                presentation_style_id: None,
                 skill_results: vec![],
                 mcp_steps: vec![],
                 skill: None,

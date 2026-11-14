@@ -1,0 +1,497 @@
+{
+  "id": "block-frame",
+  "family": "color-block",
+  "names": {
+    "zh": "BlockFrame 新粗野主义",
+    "en": "BlockFrame",
+    "ja": "BlockFrame ネオブルータリズム"
+  },
+  "intro": {
+    "zh": "每页换一种粉彩满版底色，白色方框配粗黑边和硬朗的错位阴影，标题用粗重无衬线大写；适合创意机构提案、独立产品发布和品牌焕新。",
+    "en": "Pastel canvases that change page by page, white boxes with thick black borders and hard offset shadows, heavy uppercase titles; for agency pitches, indie launches and brand redesigns.",
+    "ja": "ページごとに変わるパステルの全面背景に、太い黒枠と硬いずらし影の白いボックス、太い大文字グロテスク見出し。クリエイティブ提案やインディー製品の発表向け。"
+  },
+  "routing": {
+    "scenarios": ["creative", "product-launch", "workshop", "general"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["bold", "playful", "graphic"],
+    "suits": { "data": 1, "formulas": 0, "images": 1, "longText": 1 },
+    "avoid": "Quiet institutional or regulated material such as formal disclosures and legal briefs."
+  },
+  "theme": {
+    "colors": {
+      "background": "FFFDF5",
+      "card": "FFFFFF",
+      "primary": "000000",
+      "secondary": "FE90E8",
+      "accent": "000000",
+      "text": "000000",
+      "textSecondary": "2B2B2B",
+      "textMuted": "4D4D4D",
+      "line": "000000",
+      "accentTint": "F7CB46",
+      "dark": "000000",
+      "onDark": "FFFFFF",
+      "onDarkMuted": "F7CB46",
+      "surface": "FFFFFF",
+      "palette": ["C0F7FE", "FE90E8", "99E885", "F7CB46", "FFDC8B"],
+      "chart": ["FE90E8", "99E885", "F7CB46", "000000", "C0F7FE", "FFDC8B"]
+    },
+    "fonts": {
+      "latin": { "title": "Arial", "body": "Arial", "data": "Arial" },
+      "zh": { "title": "Microsoft YaHei", "body": "Microsoft YaHei" },
+      "ja": { "title": "Yu Gothic", "body": "Yu Gothic" }
+    },
+    "sizes": {
+      "hero": [54, 48, 44, 40, 36],
+      "statement": [32, 28, 24, 20],
+      "title": [32, 28, 24],
+      "subtitle": [18, 16, 14],
+      "body": [18, 16, 15],
+      "card": [15, 14, 13],
+      "caption": [13, 12, 11],
+      "kpi": [60, 54, 48]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": true,
+        "canvases": {
+          "cream": {
+            "bg": "FFDC8B",
+            "accentTint": "FE90E8",
+            "line": "000000",
+            "chart": [
+              "FE90E8",
+              "000000",
+              "99E885",
+              "C0F7FE",
+              "FFFDF5",
+              "F7CB46"
+            ]
+          },
+          "blue": {
+            "bg": "C0F7FE",
+            "chart": [
+              "FE90E8",
+              "000000",
+              "F7CB46",
+              "99E885",
+              "FFFDF5",
+              "FFDC8B"
+            ]
+          },
+          "green": {
+            "bg": "99E885",
+            "chart": [
+              "FE90E8",
+              "000000",
+              "FFFDF5",
+              "F7CB46",
+              "C0F7FE",
+              "FFDC8B"
+            ]
+          },
+          "pink": {
+            "bg": "FE90E8",
+            "chart": [
+              "000000",
+              "F7CB46",
+              "C0F7FE",
+              "99E885",
+              "FFFDF5",
+              "FFDC8B"
+            ]
+          },
+          "ink": {
+            "bg": "000000",
+            "title": "FFFFFF",
+            "body": "FFFFFF",
+            "muted": "F7CB46",
+            "faint": "F7CB46",
+            "accent": "F7CB46",
+            "line": "FFFFFF",
+            "card": "000000",
+            "surface": "000000",
+            "accentTint": "F7CB46"
+          }
+        },
+        "tones": {
+          "cover": "cream",
+          "section": "green",
+          "statement": "pink",
+          "content": [
+            "cream",
+            "blue",
+            "base",
+            "green",
+            "pink",
+            "base",
+            "base",
+            "blue",
+            "cream",
+            "base"
+          ],
+          "closing": "ink"
+        },
+        "cover": {
+          "title": { "x": 4.0, "y": 2.55, "w": 5.5, "h": 1.75 },
+          "kicker": { "x": 4.0, "y": 2.05, "w": 5.5, "size": 12 },
+          "meta": { "x": 4.0, "y": 5.3, "w": 5.5, "size": 11, "color": "body" },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 3.62,
+              "y": 1.72,
+              "w": 6.3,
+              "h": 4.3,
+              "fill": "000000",
+              "name": "box shadow"
+            },
+            {
+              "kind": "rect",
+              "x": 3.5,
+              "y": 1.6,
+              "w": 6.3,
+              "h": 4.3,
+              "fill": "FFFDF5",
+              "line": "000000",
+              "lineW": 3,
+              "name": "box"
+            },
+            {
+              "kind": "rect",
+              "x": 9.3,
+              "y": 1.25,
+              "w": 0.75,
+              "h": 0.75,
+              "fill": "FE90E8",
+              "line": "000000",
+              "lineW": 2.5,
+              "rot": 12,
+              "name": "pink square"
+            },
+            {
+              "kind": "oval",
+              "x": 8.95,
+              "y": 5.1,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "99E885",
+              "line": "000000",
+              "lineW": 2.5,
+              "name": "green dot"
+            },
+            {
+              "kind": "rect",
+              "x": 4.0,
+              "y": 5.76,
+              "w": 1.0,
+              "h": 0.28,
+              "fill": "F7CB46",
+              "line": "000000",
+              "lineW": 2.5,
+              "rot": -4,
+              "name": "yellow chip"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 1.35,
+            "y": 3.25,
+            "w": 8.3,
+            "h": 1.5,
+            "sizes": [48, 44, 40, 36, 32]
+          },
+          "number": { "x": 1.35, "y": 2.0, "w": 4, "h": 1.15, "size": 60 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.04,
+              "y": 1.74,
+              "w": 9.2,
+              "h": 4.3,
+              "fill": "000000",
+              "name": "box shadow"
+            },
+            {
+              "kind": "rect",
+              "x": 0.92,
+              "y": 1.62,
+              "w": 9.2,
+              "h": 4.3,
+              "fill": "FFFDF5",
+              "line": "000000",
+              "lineW": 3,
+              "name": "box"
+            },
+            {
+              "kind": "rect",
+              "x": 10.9,
+              "y": 1.2,
+              "w": 1.2,
+              "h": 1.2,
+              "fill": "FE90E8",
+              "line": "000000",
+              "lineW": 3,
+              "rot": 12,
+              "name": "pink square"
+            },
+            {
+              "kind": "oval",
+              "x": 11.5,
+              "y": 5.3,
+              "w": 0.7,
+              "h": 0.7,
+              "fill": "F7CB46",
+              "line": "000000",
+              "lineW": 3,
+              "name": "yellow dot"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 3.3,
+            "y": 2.75,
+            "w": 6.7,
+            "h": 1.95,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "kicker": {
+            "x": 3.3,
+            "y": 2.3,
+            "w": 6.7,
+            "size": 12,
+            "color": "body"
+          },
+          "attribution": {
+            "x": 3.3,
+            "y": 4.85,
+            "w": 6.7,
+            "size": 12,
+            "color": "body"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 3.02,
+              "y": 2.12,
+              "w": 7.3,
+              "h": 3.4,
+              "fill": "000000",
+              "name": "box shadow"
+            },
+            {
+              "kind": "rect",
+              "x": 2.9,
+              "y": 2.0,
+              "w": 7.3,
+              "h": 3.4,
+              "fill": "FFFDF5",
+              "line": "000000",
+              "lineW": 3,
+              "name": "box"
+            },
+            {
+              "kind": "rect",
+              "x": 3.1,
+              "y": 1.84,
+              "w": 0.5,
+              "h": 0.32,
+              "fill": "F7CB46",
+              "line": "000000",
+              "lineW": 2.5,
+              "name": "quote chip"
+            },
+            {
+              "kind": "rect",
+              "x": 12.2,
+              "y": 6.4,
+              "w": 0.55,
+              "h": 0.55,
+              "fill": "99E885",
+              "line": "000000",
+              "lineW": 2.5,
+              "name": "green square"
+            }
+          ]
+        },
+        "content": {
+          "title": { "x": 0.72, "y": 0.8, "w": 11.9, "h": 0.7 },
+          "body": { "x": 0.72, "y": 1.95, "w": 11.8, "h": 4.7 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 0.42,
+              "w": 1.2,
+              "h": 0.24,
+              "fill": "F7CB46",
+              "line": "000000",
+              "lineW": 2.5,
+              "name": "tag chip"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 3.6,
+            "y": 2.55,
+            "w": 6.1,
+            "h": 1.5,
+            "align": "center",
+            "anchor": "middle",
+            "sizes": [48, 44, 40, 36, 32]
+          },
+          "subtitle": {
+            "x": 3.6,
+            "y": 4.2,
+            "w": 6.1,
+            "size": 14,
+            "color": "F7CB46"
+          },
+          "meta": {
+            "x": 3.6,
+            "y": 4.85,
+            "w": 6.1,
+            "size": 11,
+            "color": "FFFFFF"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 3.42,
+              "y": 2.12,
+              "w": 6.7,
+              "h": 3.4,
+              "fill": "F7CB46",
+              "name": "box shadow"
+            },
+            {
+              "kind": "rect",
+              "x": 3.3,
+              "y": 2.0,
+              "w": 6.7,
+              "h": 3.4,
+              "fill": "000000",
+              "line": "FFFFFF",
+              "lineW": 3,
+              "name": "box"
+            },
+            {
+              "kind": "rect",
+              "x": 9.55,
+              "y": 1.75,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FE90E8",
+              "rot": 45,
+              "name": "pink star"
+            }
+          ]
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "card",
+          "line": "000000",
+          "lineW": 3,
+          "shadow": [0.1, 0.1, "000000"],
+          "bar": "none"
+        },
+        "kpi": { "style": "box" },
+        "steps": {
+          "style": "block",
+          "fill": "palette",
+          "line": "000000",
+          "lineW": 3,
+          "shadow": [0.1, 0.1, "000000"],
+          "gap": 0
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Each page takes one flat pastel canvas (cream yellow, sky blue, off-white, lime, hot pink) and the closing turns black; cover, quote and closing put the text inside one centred box with a thick black border and a hard offset shadow; a small yellow tag chip sits above heavy uppercase titles.",
+    "components": "White square-cornered boxes with 3pt black borders and hard black offset shadows for cards and figures; phases as adjoining pastel blocks in one bordered strip; the highlighted box turns yellow. No rounded corners, gradients or soft shadows.",
+    "narrative": "Hook, what we deliver, features, numbers, principle, method, timeline, impact, team, call to action.",
+    "nativeCoverage": "Cover box, boxed quote, feature cards, stat boxes, phase strip, bar chart and boxed closing as native shapes, text and chart. Tilted stat boxes, letter and initial badges, dot-grid and hatch ornaments, the black image half of the split page, buttons, and Space Grotesk / mono label type are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "The tag outline around the kicker and the 'get started' label text are omitted; the chip is drawn empty."
+    },
+    {
+      "page": 2,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source keeps the title, paragraph and two chips in a left column with three cards stacked on the right; native puts the title on top and the three cards in one row."
+    },
+    {
+      "page": 3,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "adapted",
+      "differences": "Letter badges and yellow corner squares on the cards are omitted; native adds a page title."
+    },
+    {
+      "page": 4,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source frames the chart in a white bordered box with three yellow stat chips beside it and outlines every bar; native draws the chart directly on the canvas."
+    },
+    {
+      "page": 5,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": "Hatched corner ornament is drawn as a plain green square."
+    },
+    {
+      "page": 6,
+      "archetype": "split-image",
+      "native": "content_slide + bullets + image",
+      "status": "approximate",
+      "differences": "Source puts the image on a black left half and a numbered list with a button on the right; native keeps one canvas with text left and the image region right."
+    },
+    {
+      "page": 7,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 8,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "adapted",
+      "differences": "The slight tilt of each stat box and its corner dot are not reproduced."
+    },
+    {
+      "page": 9,
+      "archetype": "team",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is a 2x3 grid with a coloured initials badge on each card; native is one row of cards without badges."
+    },
+    {
+      "page": 10,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "The yellow button is omitted; contact text sits as a plain line in the box."
+    }
+  ]
+}

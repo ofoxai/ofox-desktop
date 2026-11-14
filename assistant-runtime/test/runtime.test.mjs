@@ -2712,6 +2712,190 @@ test("reasoning start is signalled at once, before its held-back text", async (t
   );
 });
 
+test("tool preparation is visible while arguments stream, before any execution and without their source", async (t) => {
+  const events = [];
+  const calls = [];
+  const encoder = new TextEncoder();
+  const chunk = (delta, finish = null) =>
+    encoder.encode(
+      `data: ${JSON.stringify({ id: "preparing", choices: [{ index: 0, delta, finish_reason: finish }], ...(finish ? { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } } : {}) })}\n\n`,
+    );
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  let requestCount = 0;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        status: "completed",
+        file: {
+          id: "notes",
+          name: "notes.md",
+          mimeType: "text/markdown",
+          bytes: 7,
+        },
+        issues: [],
+      };
+    },
+    fetch: async () =>
+      ++requestCount > 1
+        ? stream("done")
+        : new Response(
+            new ReadableStream({
+              async start(controller) {
+                controller.enqueue(
+                  chunk({
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call-preparing",
+                        type: "function",
+                        function: {
+                          name: "create_document",
+                          arguments:
+                            '{"name":"notes.md","format":"md","content":"',
+                        },
+                      },
+                    ],
+                  }),
+                );
+                await blocked;
+                controller.enqueue(
+                  chunk({
+                    tool_calls: [
+                      {
+                        index: 0,
+                        function: { arguments: 'private-source-code"}' },
+                      },
+                    ],
+                  }),
+                );
+                controller.enqueue(chunk({}, "tool_calls"));
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                controller.close();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+  });
+  t.after(() => runtime.close());
+  const running = runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md"] },
+  });
+  try {
+    for (
+      let i = 0;
+      i < 50 && !events.some((event) => event.type === "tool_preparing");
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const preparing = events.filter((event) => event.type === "tool_preparing");
+    assert.equal(
+      preparing.length,
+      1,
+      "preparation must arrive before complete arguments",
+    );
+    assert.deepEqual(preparing[0].data, {
+      name: "create_document",
+      toolCallId: "call-preparing",
+    });
+    assert.equal(
+      events.some((event) => event.type === "tool_start"),
+      false,
+    );
+    assert.equal(calls.length, 0, "the Host has not executed a tool");
+  } finally {
+    release();
+    await running;
+  }
+  const observed = events.filter((event) =>
+    ["tool_preparing", "tool_start", "tool_end"].includes(event.type),
+  );
+  assert.deepEqual(
+    observed.map((event) => event.type),
+    ["tool_preparing", "tool_start", "tool_end", "tool_preparing"],
+  );
+  assert.deepEqual(observed.at(-1).data, {
+    name: "create_document",
+    toolCallId: "call-preparing",
+    active: false,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.content, "private-source-code");
+  assert.doesNotMatch(
+    JSON.stringify(observed[0]),
+    /arguments|private-source-code|content|format/,
+  );
+});
+
+test("tool preparation clears after SDK validation without inventing an execution", async (t) => {
+  const events = [];
+  let hostCalls = 0;
+  let requests = 0;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async () => {
+      hostCalls++;
+      throw new Error("must not execute");
+    },
+    fetch: async () =>
+      ++requests === 1
+        ? toolStream("create_document", { format: "md" })
+        : stream("done"),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md"] },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(hostCalls, 0);
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "tool_preparing")
+      .map((event) => event.data),
+    [
+      { name: "create_document", toolCallId: "call-one" },
+      { name: "create_document", toolCallId: "call-one", active: false },
+    ],
+  );
+  assert.equal(
+    events.some(
+      (event) => event.type === "tool_start" || event.type === "tool_end",
+    ),
+    false,
+  );
+});
+
+test("tool preparation never publishes arbitrary registered tool names", async (t) => {
+  const events = [];
+  let requests = 0;
+  let hostCalls = 0;
+  const runtime = new ProbeRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async () => {
+      hostCalls++;
+      return { status: "completed", output: "ok" };
+    },
+    fetch: async () =>
+      ++requests === 1
+        ? toolStream(probeToolName, { command: "private command" })
+        : stream("done"),
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(await sandbox(t))).status, "completed");
+  assert.equal(hostCalls, 1, "ordinary execution is unchanged");
+  assert.equal(
+    events.some((event) => event.type === "tool_preparing"),
+    false,
+  );
+});
+
 test("live input prioritizes steering over follow-up and fences authority without replay", async (t) => {
   const params = await sandbox(t);
   const events = [];
@@ -3222,7 +3406,7 @@ test("honours Retry-After up to 10 seconds on 429 and stops after two retries", 
   }
 });
 
-test("retries reliable connection failures but never timeouts, aborts, ambiguous networks or other HTTP errors", async (t) => {
+test("retries connection failures and drops but never timeouts, aborts or other HTTP errors", async (t) => {
   const cases = [
     [
       () => {
@@ -3246,7 +3430,7 @@ test("retries reliable connection failures but never timeouts, aborts, ambiguous
       () => {
         throw networkError(systemError("ECONNRESET", "read"));
       },
-      1,
+      3,
     ],
     [
       () => {

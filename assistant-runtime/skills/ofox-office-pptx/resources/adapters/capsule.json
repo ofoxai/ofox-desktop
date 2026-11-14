@@ -1,0 +1,680 @@
+{
+  "id": "capsule",
+  "family": "playful",
+  "names": {
+    "zh": "Capsule 彩色胶囊",
+    "en": "Capsule",
+    "ja": "Capsule カプセル"
+  },
+  "intro": {
+    "zh": "米白底上居中的衬线标题，四周散落彩色胶囊和圆点，卡片为黑色细描边的大圆角；适合品牌、创作者作品和轻松的产品介绍。",
+    "en": "Centred serif titles on warm off-white with scattered multicolour pills and dots, and rounded cards with a thin ink outline; for brand, creator and light product decks.",
+    "ja": "オフホワイトに中央揃えのセリフ見出し、まわりにカラフルなカプセルとドット、細い黒線の角丸カード。ブランドや作品紹介、軽やかな製品紹介向け。"
+  },
+  "routing": {
+    "scenarios": ["product-launch", "creative", "teaching"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["playful", "modern", "approachable"],
+    "suits": {
+      "data": 1,
+      "formulas": 0,
+      "images": 1,
+      "longText": 0
+    },
+    "avoid": "Material that needs institutional weight or dense text; the pills and pastel colours soften authority."
+  },
+  "theme": {
+    "colors": {
+      "background": "F5F5F0",
+      "card": "FFFFFF",
+      "primary": "1A1A1A",
+      "secondary": "A06CE8",
+      "accent": "E85D4E",
+      "text": "1A1A1A",
+      "textSecondary": "4D4D4A",
+      "textMuted": "6E6E69",
+      "line": "1E1E1E",
+      "accentTint": "FBEFC4",
+      "dark": "1A1A1A",
+      "onDark": "F5F5F0",
+      "onDarkMuted": "C9C9C2",
+      "surface": "FFFFFF",
+      "palette": ["F2D160", "8BB4F7", "C4D94E", "C5B5E0", "F5B895", "A8E6CF"],
+      "chart": ["E85D4E", "8BB4F7", "C4D94E", "A06CE8", "F2D160", "C5B5E0"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Georgia",
+        "body": "Arial",
+        "data": "Georgia"
+      },
+      "zh": {
+        "title": "SimSun",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Mincho",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [66, 54, 44, 36],
+      "statement": [40, 36, 32, 28],
+      "title": [32, 28, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [13, 12, 11],
+      "kpi": [48, 40, 32]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 1.2,
+            "y": 2.95,
+            "w": 10.9,
+            "h": 1.5,
+            "align": "center"
+          },
+          "kicker": {
+            "x": 5.07,
+            "y": 2.3,
+            "w": 3.2,
+            "align": "center",
+            "size": 12,
+            "color": "body"
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.6,
+            "w": 8.9,
+            "align": "center",
+            "size": 16,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 6.7,
+            "w": 8.9,
+            "align": "center"
+          },
+          "shapes": [
+            {
+              "kind": "round",
+              "x": 5.07,
+              "y": 2.2,
+              "w": 3.2,
+              "h": 0.46,
+              "radius": 0.23,
+              "fill": "palette:0",
+              "name": "kicker pill",
+              "line": "1E1E1E",
+              "lineW": 1.0
+            },
+            {
+              "kind": "round",
+              "x": 1.1,
+              "y": 0.95,
+              "w": 1.05,
+              "h": 0.4,
+              "radius": 0.2,
+              "fill": "E85D4E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -12
+            },
+            {
+              "kind": "oval",
+              "x": 6.2,
+              "y": 0.95,
+              "w": 0.56,
+              "h": 0.56,
+              "fill": "F5B895",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "name": "dot"
+            },
+            {
+              "kind": "round",
+              "x": 10.5,
+              "y": 1.3,
+              "w": 1.05,
+              "h": 0.4,
+              "radius": 0.2,
+              "fill": "C5B5E0",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 8
+            },
+            {
+              "kind": "round",
+              "x": 11.3,
+              "y": 4.8,
+              "w": 1.05,
+              "h": 0.4,
+              "radius": 0.2,
+              "fill": "FFFFFF",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 12
+            },
+            {
+              "kind": "round",
+              "x": 9.9,
+              "y": 5.9,
+              "w": 1.05,
+              "h": 0.4,
+              "radius": 0.2,
+              "fill": "C4D94E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -8
+            },
+            {
+              "kind": "round",
+              "x": 2.0,
+              "y": 5.3,
+              "w": 1.05,
+              "h": 0.4,
+              "radius": 0.2,
+              "fill": "8BB4F7",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 5
+            },
+            {
+              "kind": "oval",
+              "x": 0.85,
+              "y": 5.75,
+              "w": 0.6,
+              "h": 0.6,
+              "fill": "A06CE8",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "name": "dot"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 1.3,
+            "y": 2.5,
+            "w": 6.2,
+            "h": 2.0,
+            "sizes": [44, 40, 36, 32]
+          },
+          "number": {
+            "x": 9.3,
+            "y": 3.2,
+            "w": 1.6,
+            "align": "center",
+            "size": 36,
+            "color": "body"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.3,
+              "y": 2.2,
+              "w": 0.5,
+              "h": 0.04,
+              "fill": "E85D4E",
+              "name": "rule"
+            },
+            {
+              "kind": "oval",
+              "x": 9.3,
+              "y": 2.75,
+              "w": 1.6,
+              "h": 1.6,
+              "fill": "C4D94E",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "name": "dot"
+            },
+            {
+              "kind": "round",
+              "x": 8.2,
+              "y": 2.1,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "E85D4E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -15
+            },
+            {
+              "kind": "round",
+              "x": 11.0,
+              "y": 2.0,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "C4D94E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 10
+            },
+            {
+              "kind": "round",
+              "x": 7.9,
+              "y": 3.5,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "F2D160",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 20
+            },
+            {
+              "kind": "round",
+              "x": 11.4,
+              "y": 3.3,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "A06CE8",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -12
+            },
+            {
+              "kind": "round",
+              "x": 8.4,
+              "y": 4.7,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "8BB4F7",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 8
+            },
+            {
+              "kind": "round",
+              "x": 10.8,
+              "y": 4.7,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "C5B5E0",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -8
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 2.4,
+            "y": 2.3,
+            "w": 8.5,
+            "h": 2.6,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "shapes": [
+            {
+              "kind": "round",
+              "x": 1.5,
+              "y": 0.9,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "E85D4E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -10
+            },
+            {
+              "kind": "oval",
+              "x": 5.5,
+              "y": 0.7,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "A06CE8",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "name": "dot"
+            },
+            {
+              "kind": "round",
+              "x": 10.6,
+              "y": 1.1,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "C5B5E0",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 10
+            },
+            {
+              "kind": "round",
+              "x": 10.7,
+              "y": 5.9,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "C4D94E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -8
+            },
+            {
+              "kind": "round",
+              "x": 1.8,
+              "y": 6.1,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "8BB4F7",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 6
+            },
+            {
+              "kind": "round",
+              "x": 6.0,
+              "y": 6.45,
+              "w": 0.8,
+              "h": 0.32,
+              "radius": 0.16,
+              "fill": "F5B895",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -14
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 0.72,
+            "y": 0.95,
+            "w": 11.9,
+            "h": 0.75,
+            "align": "center",
+            "sizes": [32, 28, 24]
+          },
+          "subtitle": {
+            "x": 0.72,
+            "y": 1.62,
+            "w": 11.9,
+            "align": "center",
+            "size": 13,
+            "color": "muted"
+          },
+          "body": {
+            "x": 1.4,
+            "y": 2.1,
+            "w": 10.5,
+            "h": 4.6
+          },
+          "shapes": []
+        },
+        "closing": {
+          "title": {
+            "x": 1.7,
+            "y": 2.4,
+            "w": 9.9,
+            "h": 1.8,
+            "align": "center",
+            "anchor": "bottom",
+            "sizes": [60, 54, 44, 36]
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.65,
+            "w": 8.9,
+            "align": "center",
+            "size": 16,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 6.7,
+            "w": 8.9,
+            "align": "center"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 6.37,
+              "y": 4.42,
+              "w": 0.6,
+              "h": 0.04,
+              "fill": "E85D4E",
+              "name": "rule"
+            },
+            {
+              "kind": "round",
+              "x": 1.3,
+              "y": 1.1,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "C4D94E",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -8
+            },
+            {
+              "kind": "round",
+              "x": 6.4,
+              "y": 0.6,
+              "w": 0.8,
+              "h": 0.32,
+              "radius": 0.16,
+              "fill": "F5B895",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 6
+            },
+            {
+              "kind": "round",
+              "x": 10.8,
+              "y": 1.5,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "8BB4F7",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 14
+            },
+            {
+              "kind": "round",
+              "x": 11.3,
+              "y": 3.4,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "F2D160",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 16
+            },
+            {
+              "kind": "round",
+              "x": 0.7,
+              "y": 3.7,
+              "w": 0.95,
+              "h": 0.36,
+              "radius": 0.18,
+              "fill": "A06CE8",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": -18
+            },
+            {
+              "kind": "round",
+              "x": 1.5,
+              "y": 5.8,
+              "w": 1.05,
+              "h": 0.4,
+              "radius": 0.2,
+              "fill": "C5B5E0",
+              "name": "pill",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "rot": 12
+            },
+            {
+              "kind": "oval",
+              "x": 10.7,
+              "y": 5.9,
+              "w": 0.56,
+              "h": 0.56,
+              "fill": "E85D4E",
+              "line": "1E1E1E",
+              "lineW": 1.0,
+              "name": "dot"
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.24,
+          "fill": "FFFFFF",
+          "line": "1E1E1E",
+          "lineW": 1.25,
+          "shadow": [0.05, 0.06, "E3E3DB"],
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.24,
+          "fill": "none",
+          "line": "1E1E1E",
+          "lineW": 1.25,
+          "shadow": [0, 0, "FFFFFF"],
+          "valueColor": "accent"
+        },
+        "steps": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.5,
+          "fill": "palette",
+          "line": "1E1E1E",
+          "lineW": 1.25,
+          "gap": 0.3
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Centred didone-style serif titles on warm off-white; cover, quote, chapter and closing pages scatter outlined multicolour pills and dots around the text, content pages stay clean with one centred block.",
+    "components": "Rounded white cards with a thin ink outline, outlined white stat capsules with coral serif numerals, pill-shaped palette step blocks; flat fills only, at most three or four blocks per page.",
+    "narrative": "Idea, principles, indicators, quote, phased plan, key numbers, system view, vision, thanks.",
+    "nativeCoverage": "Cover, chapter, three-card page, bar chart, quote, timeline, stat row, process blocks, text with image region and closing as native text, shapes and chart. Not reproduced: labels inside the scattered pills, the soft background colour blurs, highlighted words inside the quote, per-value stat colours, Bodoni Moda and Space Grotesk, navigation dots."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Scattered pills carry no word labels; background colour blurs are not drawn."
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "approximate",
+      "differences": "Source has two body paragraphs beside the pill cluster; the native chapter page has a title, one subtitle line and the numbered circle with unlabelled pills."
+    },
+    {
+      "page": 3,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "adapted",
+      "differences": "Roman-numeral colour badges inside the cards and the kicker pill above the title are not drawn."
+    },
+    {
+      "page": 4,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source draws five horizontal pill-shaped progress bars in different colours inside a rounded card; native is an editable column chart in one series colour without the card."
+    },
+    {
+      "page": 5,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "approximate",
+      "differences": "The lime and sky pill highlights behind two phrases and the large coral quote mark are not reproduced; scattered pills carry no labels."
+    },
+    {
+      "page": 6,
+      "archetype": "timeline",
+      "native": "content_slide + timeline",
+      "status": "approximate",
+      "differences": "Numbered outlined circles on the line become small filled dots with period labels above them."
+    },
+    {
+      "page": 7,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Each source value has its own colour and a short coloured underline; native values share the coral accent and have no underline."
+    },
+    {
+      "page": 8,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source connects four outlined pills with a line and adds three tagged notes below; native draws numbered pill blocks in palette colours without connectors or the note row."
+    },
+    {
+      "page": 9,
+      "archetype": "split-image",
+      "native": "content_slide + bullets + image",
+      "status": "approximate",
+      "differences": "Image sits on the left with a lavender-to-mint gradient placeholder and a tag-pill row under the text; native puts the image region on the right, flat, without tags."
+    },
+    {
+      "page": 10,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "Kicker pill above the title is omitted; pills carry no labels."
+    }
+  ]
+}

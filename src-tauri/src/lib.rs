@@ -37,6 +37,8 @@ mod ofox_secret;
 mod openclaw_config;
 mod opencode_config;
 mod panic_hook;
+#[cfg(debug_assertions)]
+pub mod preview_eval;
 mod prompt;
 mod prompt_files;
 mod provider;
@@ -150,6 +152,9 @@ mod assistant_wiring_tests {
                 "assistant_discard_audio",
                 "assistant_empty_trash",
                 "assistant_export_markdown",
+                "assistant_file_preview",
+                "assistant_file_preview_html",
+                "assistant_file_preview_page",
                 "assistant_fork",
                 "assistant_get_preferences",
                 "assistant_get_session",
@@ -1908,6 +1913,9 @@ pub fn run() {
             commands::assistant_local_changes,
             commands::assistant_restore_local_changes,
             commands::assistant_switch_version,
+            commands::assistant_file_preview,
+            commands::assistant_file_preview_html,
+            commands::assistant_file_preview_page,
             commands::assistant_fork,
             commands::assistant_compact,
             commands::assistant_pick_attachments,
@@ -1921,7 +1929,7 @@ pub fn run() {
         ]);
 
     let app = builder
-        .build(tauri::generate_context!())
+        .build(app_context())
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
@@ -2282,4 +2290,10 @@ fn show_database_init_error_dialog(
             exit_text.to_string(),
         ))
         .blocking_show()
+}
+
+/// Shared context construction keeps macOS embedded Info.plist emitted once,
+/// including when the debug-only preview evaluation window is built.
+pub(crate) fn app_context() -> tauri::Context<tauri::Wry> {
+    tauri::generate_context!()
 }

@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+import diagnostics from "node:diagnostics_channel";
 import { mkdir, stat, lstat, open, rm } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -24,6 +26,24 @@ import {
 } from "./search.mjs";
 import { errorMessage, modelForOfox, scrubSecrets } from "./security.mjs";
 
+// Whether a request was handed to its socket, from undici's own events (the
+// built-in fetch and the proxied one publish the same channels). A drop while
+// the connection is still being opened — a TLS handshake reset looks like any
+// other ECONNRESET — then has a known cost of zero. A proxy's CONNECT is not
+// the request.
+const attempts = new AsyncLocalStorage();
+const attemptOf = new WeakMap();
+diagnostics.subscribe("undici:request:create", ({ request }) => {
+  const attempt = attempts.getStore();
+  if (!attempt || request.method === "CONNECT") return;
+  attempt.created = true;
+  attemptOf.set(request, attempt);
+});
+diagnostics.subscribe("undici:client:sendHeaders", ({ request }) => {
+  const attempt = attemptOf.get(request);
+  if (attempt) attempt.written = true;
+});
+
 // Side-effect-free tools that may still run after another operation's outcome
 // became unknown.
 const READ_TOOLS = new Set([
@@ -41,6 +61,32 @@ const READ_TOOLS = new Set([
 // Tools whose result details the host reads from native history.
 const WEB_TOOLS = new Set(["web_search", "web_fetch"]);
 const MAX_TOOL_CALLS = 20;
+// Only fixed public tool identities may describe a streamed request. Never
+// forward the argument delta (which can contain an entire generated source).
+const PREPARING_TOOLS = new Set([
+  "web_search",
+  "web_fetch",
+  "read_attachment",
+  "read",
+  "stat",
+  "ls",
+  "find",
+  "grep",
+  "write",
+  "edit",
+  "bash",
+  "powershell",
+  "tool_status",
+  "diagnose_in_folder",
+  "verify_in_folder",
+  "get_presentation_style",
+  "get_presentation_candidates",
+  "freeze_presentation_plan",
+  "use_skill",
+  "create_document",
+]);
+const safeToolCallId = (value) =>
+  typeof value === "string" && /^[A-Za-z0-9_.:|/-]{1,200}$/.test(value);
 
 function contentText(content) {
   if (typeof content === "string") return content;
@@ -139,9 +185,9 @@ function networkFailure(error) {
   };
 }
 
-// Retry policy is deliberately narrower than the cost classification: even a
-// connect timeout is never retried. Inspect wrapped causes without trusting
-// free-form diagnostic text (which may contain credentials).
+// A timeout or an abort is never retried, not even a connect timeout: the
+// wait was already long, or someone asked to stop. Inspect wrapped causes
+// without trusting free-form diagnostic text (which may contain credentials).
 function timeoutOrAbort(error, seen = new Set()) {
   if (!error || typeof error !== "object" || seen.has(error)) return false;
   seen.add(error);
@@ -169,7 +215,10 @@ function retryDelay(response, attempt) {
 
 // Retry only before returning an HTTP response to the provider SDK. Once a
 // success stream is handed over, no read, parse or partial-output failure can
-// re-enter this loop. Tools and conversation turns are never replayed.
+// re-enter this loop. Tools and conversation turns are never replayed. A
+// connection that dropped with no answer is asked again whether or not the
+// request had been written: nothing was received, and losing the whole task
+// costs more than a second request (its receipt keeps the cost unknown).
 async function modelRequest(input, init, outcome, options) {
   const signal = AbortSignal.any(
     [options.signal, init?.signal].filter(Boolean),
@@ -185,7 +234,7 @@ async function modelRequest(input, init, outcome, options) {
     }
     const retryable = response
       ? [429, 502, 503].includes(response.status)
-      : current.network?.sent === false && !timeoutOrAbort(failure);
+      : Boolean(current.network) && !timeoutOrAbort(failure);
     if (signal.aborted || attempt >= 2 || !retryable) {
       Object.assign(outcome, current);
       if (failure) throw failure;
@@ -280,6 +329,18 @@ function toolFields(message) {
         ? message.details
         : undefined,
   };
+}
+
+// The most a request can have cost when its usage never arrived: every byte
+// of its body as an input token, and an answer of full length. Rates are per
+// million tokens.
+function costCeiling(target, rates, body) {
+  const input =
+    typeof body === "string" ? Buffer.byteLength(body) : target.contextWindow;
+  return (
+    (input * Number(rates?.input) + target.maxTokens * Number(rates?.output)) /
+    1e6
+  );
 }
 
 function knownPrice(value) {
@@ -420,14 +481,16 @@ function credentialFetch({ baseUrl, apiKey, providerFetch, signal }) {
     headers.set("Authorization", `Bearer ${apiKey}`);
     outcome.requested = true;
     let response;
+    const attempt = {};
     try {
-      response = await providerFetch(input, {
-        ...options,
-        headers,
-        redirect: "error",
-      });
+      response = await attempts.run(attempt, () =>
+        providerFetch(input, { ...options, headers, redirect: "error" }),
+      );
     } catch (error) {
-      if (!signal.aborted) outcome.network = networkFailure(error);
+      if (!signal.aborted) {
+        outcome.network = networkFailure(error);
+        if (attempt.created && !attempt.written) outcome.network.sent = false;
+      }
       throw error;
     }
     outcome.responseStatus = response.status;
@@ -873,6 +936,28 @@ export class AssistantRuntime {
     this.closePromise = undefined;
     this.mcpCleanupConfirmed = true;
     this.secrets = new Set();
+  }
+
+  // Only the private pending Host reply supplies these values. Keep the
+  // same array captured by native persistence/model/event scrub callbacks.
+  // This changes redaction, never the model's Authorization credential.
+  addHostSecrets(authority, values) {
+    const context = this.runs.get(authority?.runId);
+    if (
+      !context ||
+      context.abort.signal.aborted ||
+      context.params.sessionId !== authority?.sessionId ||
+      context.params.operationId !== authority?.operationId ||
+      !Array.isArray(context.secrets) ||
+      !Array.isArray(values) ||
+      values.some((value) => typeof value !== "string" || value.length === 0)
+    )
+      return false;
+    for (const value of values) {
+      if (!context.secrets.includes(value)) context.secrets.push(value);
+      this.secrets.add(value);
+    }
+    return true;
   }
 
   notify(context, type, data = {}) {
@@ -1510,6 +1595,7 @@ export class AssistantRuntime {
     for (const secret of secrets) this.secrets.add(secret);
     const context = {
       params,
+      secrets,
       attachments,
       abort: new AbortController(),
       callCount: 0,
@@ -1681,6 +1767,12 @@ export class AssistantRuntime {
         if (compactOnly) context.compactionRequestSent = true;
         const summaryRequest = options?.sessionId !== manager.getSessionId();
         const outcome = {};
+        // An unknown cost never ends the task: it counts toward the user's
+        // limit at the most it can have been, and the receipt stays unknown.
+        const ceiling = (body) => ({
+          cost: { total: costCeiling(target, params.model.cost, body) },
+        });
+        let sentBody;
         context.localRequests = (context.localRequests ?? 0) + 1;
         const source = originalStream(
           target,
@@ -1690,8 +1782,9 @@ export class AssistantRuntime {
             ...(context.localTask?.finalStep ? { toolChoice: "none" } : {}),
             maxRetries: 0,
             timeoutMs: 900000,
-            fetch: (input, init) =>
-              summaryRequest
+            fetch: (input, init) => {
+              sentBody = init?.body;
+              return summaryRequest
                 ? safeFetch(input, init, outcome)
                 : modelRequest(input, init, outcome, {
                     fetch: safeFetch,
@@ -1709,13 +1802,11 @@ export class AssistantRuntime {
                         attempt,
                         secrets,
                       );
-                      // Keep the permitted retries of this HTTP request, but
-                      // stop subsequent tools/requests when its cost is unknown.
-                      if (status === "unknown" && context.localTask)
-                        context.localTask.stopped ??=
-                          "assistant_cost_unavailable";
+                      if (status === "unknown")
+                        context.localTask?.addUsage(ceiling(init?.body));
                     },
-                  }),
+                  });
+            },
             env: {},
             headers: { ...options?.headers, Authorization: `Bearer ${apiKey}` },
             identity: { attribution: { name: "Ofox Desktop" } },
@@ -1748,20 +1839,27 @@ export class AssistantRuntime {
               secrets,
             );
             if (summaryRequest) recordSummaryUsage(target, result.usage);
-            if (
-              context.localTask &&
-              !unbilled(result) &&
-              (usageCoverage(result.usage) !== "complete" ||
-                (result.usage?.cacheRead > 0 &&
-                  !knownPrice(params.model.cost?.cacheRead)) ||
-                (result.usage?.cacheWrite > 0 &&
-                  !knownPrice(params.model.cost?.cacheWrite)) ||
-                !knownPrice(result.usage?.cost?.total))
-            )
-              // Do not throw after recording a request: the stream catch path
-              // records transport failures and would duplicate this receipt.
-              context.localTask.stopped ??= "assistant_cost_unavailable";
-            context.localTask?.addUsage(result.usage);
+            if (context.localTask) {
+              const { usage } = result;
+              const rates = params.model.cost;
+              const counted =
+                unbilled(result) ||
+                (usageCoverage(usage) === "complete" &&
+                  knownPrice(usage?.cost?.total));
+              context.localTask.addUsage(counted ? usage : ceiling(sentBody));
+              // Cached tokens without a price count at no less than the input
+              // rate (a cache write at twice it).
+              for (const [tokens, rate, factor] of [
+                [usage?.cacheRead, rates?.cacheRead, 1],
+                [usage?.cacheWrite, rates?.cacheWrite, 2],
+              ])
+                if (counted && tokens > 0 && !knownPrice(rate))
+                  context.localTask.addUsage({
+                    cost: {
+                      total: (tokens * factor * Number(rates?.input)) / 1e6,
+                    },
+                  });
+            }
             if (context.localTask)
               this.notify(context, "task_status", {
                 cost: context.localTask.cost,
@@ -1928,11 +2026,12 @@ export class AssistantRuntime {
       let thinkingStarted = false;
       // Hold back a tail long enough to hold any credential split across
       // deltas until the rest of it arrives and it can be replaced whole.
-      const retain = Math.max(
-        64,
-        ...secrets.map((secret) => secret.length - 1),
-      );
       const flush = (type, final = false) => {
+        // A Host tool may accept a longer replacement key mid-run.
+        const retain = Math.max(
+          64,
+          ...secrets.map((secret) => secret.length - 1),
+        );
         const source = type === "text_delta" ? pendingText : pendingThinking;
         const safe = scrubSecrets(source, secrets);
         const length = final ? safe.length : Math.max(0, safe.length - retain);
@@ -1951,6 +2050,38 @@ export class AssistantRuntime {
         thinkingStarted = false;
         flush("thinking_delta", true);
         this.notify(context, "thinking_end");
+      };
+      const preparations = new Map();
+      const prepareTool = (update) => {
+        if (
+          context.abort.signal.aborted ||
+          this.runs.get(params.runId) !== context
+        )
+          return;
+        const call = update.partial?.content?.[update.contentIndex];
+        if (
+          call?.type !== "toolCall" ||
+          !PREPARING_TOOLS.has(call.name) ||
+          !customTools.some((tool) => tool.name === call.name) ||
+          !safeToolCallId(call.id) ||
+          preparations.has(call.id)
+        )
+          return;
+        preparations.set(call.id, { name: call.name, active: true });
+        this.notify(context, "tool_preparing", {
+          name: call.name,
+          toolCallId: call.id,
+        });
+      };
+      const endPreparation = (toolCallId) => {
+        const call = preparations.get(toolCallId);
+        if (!call?.active) return;
+        call.active = false;
+        this.notify(context, "tool_preparing", {
+          name: call.name,
+          toolCallId,
+          active: false,
+        });
       };
       unsubscribe = session.subscribe((event) => {
         if (event.type === "message_start" && event.message.role === "user") {
@@ -1997,8 +2128,13 @@ export class AssistantRuntime {
             endThinking();
             pendingText += update.delta;
             flush("text_delta");
-          } else if (update.type === "toolcall_start") endThinking();
-          else if (update.type === "thinking_delta") {
+          } else if (
+            update.type === "toolcall_start" ||
+            update.type === "toolcall_delta"
+          ) {
+            endThinking();
+            prepareTool(update);
+          } else if (update.type === "thinking_delta") {
             // Said with the block's first reasoning, before its text is held
             // back for key scrubbing, so the host can time it from here.
             if (!thinkingStarted && update.delta) {
@@ -2027,6 +2163,12 @@ export class AssistantRuntime {
           });
           if (event.message.usage)
             this.notify(context, "usage", { usage: event.message.usage });
+          if (event.message.stopReason !== "toolUse")
+            for (const id of preparations.keys()) endPreparation(id);
+        } else if (event.type === "tool_execution_end") {
+          // SDK validation or a budget refusal may finish without wrapTool's
+          // execution event. Clear only this request, never invent a result.
+          endPreparation(event.toolCallId);
         } else if (event.type === "compaction_start")
           this.notify(context, "compaction_start");
         else if (event.type === "compaction_end")
@@ -2094,6 +2236,44 @@ export class AssistantRuntime {
         projection(manager, secrets)
           .entries.filter((entry) => entry.active && entry.role === "assistant")
           .at(-1)?.stopReason === "error";
+      // A reply that spent its whole output on reasoning said and did nothing
+      // (no text, no tool call). Ending there would look complete while
+      // nothing was delivered: ask again, twice at most.
+      const cutShort = () => {
+        const last = projection(manager, secrets)
+          .entries.filter((entry) => entry.active && entry.role === "assistant")
+          .at(-1);
+        return last?.stopReason === "length" && !last.content?.trim();
+      };
+      for (
+        let again = 1;
+        again <= 2 &&
+        !compactOnly &&
+        !context.unknownOutcome &&
+        !context.abort.signal.aborted &&
+        !context.localTask?.stopped &&
+        cutShort();
+        again++
+      ) {
+        try {
+          context.localTask?.beforeRequest();
+        } catch {
+          break;
+        }
+        this.notify(context, "retrying", { attempt: again });
+        await session.sendCustomMessage(
+          {
+            customType: "ofox-output-limit",
+            content:
+              "Your last reply reached the output limit while still reasoning, before any answer or tool call, so nothing was done. Reason briefly now and go straight to the next step: make the tool call, or give the answer. For a long tool call, write it at once rather than planning it in thought first.",
+            display: false,
+            details: {},
+          },
+          { triggerTurn: true },
+        );
+        await session.waitForIdle();
+      }
+      const outOfOutput = !compactOnly && cutShort();
       if (
         !compactOnly &&
         context.localTask &&
@@ -2137,7 +2317,11 @@ export class AssistantRuntime {
               (!compactOnly && last?.stopReason === "error")
             ? "error"
             : "completed";
-      if (result.status === "error") {
+      if (result.status === "completed" && outOfOutput) {
+        result.status = "error";
+        result.errorMessage =
+          "The model reached its output limit before giving an answer";
+      } else if (result.status === "error") {
         result.errorMessage =
           context.unknownMessage ??
           last?.errorMessage ??

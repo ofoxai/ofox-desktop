@@ -6,7 +6,7 @@
 // runs from large to small so text.mjs `fitSize` can take it as it is.
 // Rounded cards keep officecli's default corner: the host refuses the `adj`
 // that would set another one, so a theme has no corner radius.
-// This module imports nothing, so schema.mjs can read the theme names from it.
+import { ADAPTED_STYLES } from "./catalog.mjs";
 
 const navy = {
   name: "navy",
@@ -42,7 +42,15 @@ const navy = {
   decor: { titleRule: "bar", pageNumber: true },
 };
 
-export const THEMES = { navy };
+export const THEMES = {
+  navy,
+  ...Object.fromEntries(
+    ADAPTED_STYLES.map((style) => [
+      style.id,
+      { name: style.id, ...style.theme },
+    ]),
+  ),
+};
 export const THEME_NAMES = Object.keys(THEMES);
 export const DEFAULT_THEME = "navy";
 

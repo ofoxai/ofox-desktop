@@ -1762,7 +1762,10 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
         env.signed_in("ofox.ai");
 
         // Sent, then the connection closed without an answer: maybe billed.
-        gateway.reply(Reply::Drop);
+        // A drop is asked again, three attempts in all.
+        for _ in 0..3 {
+            gateway.reply(Reply::Drop);
+        }
         let usage = assert_failed("assistant_network_error").await;
         assert!(usage["estimatedCostUsd"].is_null(), "{usage}");
         assert_eq!(usage["usageCoverage"], "incomplete");
@@ -3266,7 +3269,8 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "find_skills",
                 "install_skill",
                 "save_skill",
-                "create_document"
+                "create_document",
+                "get_presentation_style"
             ]
         );
         // The run says it could not search, although the switch is on.
@@ -3293,7 +3297,8 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "find_skills",
                 "install_skill",
                 "save_skill",
-                "create_document"
+                "create_document",
+                "get_presentation_style"
             ]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
@@ -3309,6 +3314,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "install_skill",
                 "save_skill",
                 "create_document",
+                "get_presentation_style",
                 "web_search",
                 "web_fetch"
             ]
@@ -3390,6 +3396,7 @@ fn exa_search_is_offered_without_a_price_and_the_choice_is_kept_per_account() {
                 "install_skill",
                 "save_skill",
                 "create_document",
+                "get_presentation_style",
                 "web_search",
                 "web_fetch"
             ]
@@ -7772,10 +7779,11 @@ mod documents {
         let told = outcome.sent_of(preview);
         assert!(
             told.contains(&format!(
-                "Previewed cache.pptx (pptx, 4 slides) as previewId {preview_id}; nothing is delivered yet. Issues: 0."
+                "Previewed cache.pptx (pptx, 4 slides) as previewId {preview_id}; nothing is delivered yet. Automated check findings: 0."
             )),
             "{told}"
         );
+        assert!(told.contains("not visual or formula acceptance"), "{told}");
         assert!(!told.contains("attachment"), "{told}");
 
         // One document, published by the delivering call: the preview made
@@ -7805,7 +7813,8 @@ mod documents {
         assert_eq!(report["data"]["errors"], json!([]), "{report}");
         let sent = outcome.sent();
         assert!(
-            sent.contains("Created cache.pptx (pptx, ") && sent.contains("Issues: 0."),
+            sent.contains("Created cache.pptx (pptx, ")
+                && sent.contains("Automated check findings: 0."),
             "{sent}"
         );
         assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
@@ -8000,6 +8009,316 @@ mod documents {
             assert_eq!(gateway.requests().len(), 1, "no model turn after the stop");
             host.shutdown().await;
         });
+        assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
+    }
+}
+
+/// Workflow v1 across the real runtime and HostCall bridge, with a local
+/// scripted gateway and the existing local OfficeCLI. No real provider/key.
+mod presentation_workflow {
+    use super::*;
+
+    fn plan() -> Value {
+        let editing = json!({"text":true,"charts":false,"formulas":false,"diagrams":false});
+        let slides: Vec<Value> = ["opening", "evidence", "closing"]
+            .into_iter()
+            .map(|id| {
+                json!({
+                    "id":id,"claim":"An independently authored fixture claim","evidence":[],
+                    "relationship":"single-claim","composition":"Editorial native text",
+                    "editing":editing,
+                    "visual":{"kind":"none","purpose":"Native text is sufficient","fallback":"omit"}
+                })
+            })
+            .collect();
+        json!({
+            "styleId":"cartesian",
+            "decisionSummary":"Preserve the user's manual Cartesian choice; no image spending.",
+            "requirements":{
+                "audience":"Reviewers","purpose":"Explain a short local fixture","scenario":"academic",
+                "language":"en","slideCount":3,"aspectRatio":"16:9","density":"low",
+                "nativeEditing":editing,"visualNeeds":["none"],"roundTrip":"unverifiedAllowed",
+                "durationMinutes":3,"contentMix":{"data":0,"formulas":0,"images":0},"brand":null
+            },
+            "slides":slides
+        })
+    }
+
+    fn deck() -> Value {
+        json!({
+            "kind":"deck","title":"Workflow fixture","theme":"navy","language":"en",
+            "slides":[
+                {"type":"hero","title":"A controlled fixture"},
+                {"type":"statement","title":"One claim","statement":"Self-authored evidence"},
+                {"type":"cta","title":"Review the result"}
+            ]
+        })
+    }
+
+    fn create_after_freeze(request: &Request) -> Reply {
+        let Some(frozen) = tool_results(request)
+            .into_iter()
+            .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+            .find(|value| value["status"] == "frozen" && value["planId"].is_string())
+        else {
+            return Reply::Stream("The freeze did not return a usable plan.".into());
+        };
+        let revision = frozen["revision"].as_u64().unwrap();
+        let args = |name: &str, plan_id: Value, revision: u64| {
+            json!({
+                "name":name,"format":"pptx","content":deck(),
+                "planId":plan_id,"revision":revision
+            })
+        };
+        Reply::ToolCalls(vec![
+            (
+                "create_document",
+                args("wrong-plan.pptx", json!("not-the-frozen-plan"), revision),
+            ),
+            (
+                "create_document",
+                args(
+                    "wrong-revision.pptx",
+                    frozen["planId"].clone(),
+                    revision + 1,
+                ),
+            ),
+            (
+                "create_document",
+                args("planned-cartesian.pptx", frozen["planId"].clone(), revision),
+            ),
+        ])
+    }
+
+    #[test]
+    fn workflow_host_reports_authorized_image_budget_without_sending_images() {
+        let Some(bundle) = runtime_dir() else {
+            return;
+        };
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        let mut proposed = plan();
+        proposed["slides"][0]["visual"] = json!({
+            "kind":"generated-image", "assetId":"cover_gen_1",
+            "purpose":"An optional concept illustration", "fallback":"native-summary"
+        });
+        let run = runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "freeze_presentation_plan",
+                proposed,
+            )]));
+            gateway.reply(Reply::Stream("The budget snapshot is available.".into()));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Make a concept presentation; at most one image, USD0.03.",
+                    json!({
+                        "presentationWorkflowVersion":1,
+                        "presentationStyleId":"cartesian",
+                        "presentationVisualPolicy":{"mode":"auto","maxImages":1,"maxCostUsd":"0.03"}
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            host.shutdown().await;
+            run
+        });
+        let plans = of_type(&env, &run, "presentation_plan");
+        assert_eq!(plans.len(), 1);
+        assert_eq!(
+            plans[0]["plan"]["visualBudget"],
+            json!({
+                "mode":"auto", "maxImages":1, "maxCostUsd":"0.03",
+                "remainingImages":1, "remainingCostUsd":"0.03",
+                "canAttempt":true, "reason":"authorized-price-check-required",
+                "scope":"freeze-snapshot-not-reservation"
+            }),
+            "Explicit authorization must remain visible without authorizing a provider call"
+        );
+        assert_eq!(gateway.requests().len(), 2);
+        assert!(gateway
+            .requests()
+            .iter()
+            .all(|request| !request.path.contains("/images/")));
+    }
+
+    #[test]
+    fn workflow_one_freezes_via_host_and_binds_only_the_valid_manual_style_document() {
+        let Some(bundle) = runtime_dir() else {
+            return;
+        };
+        let engines = cc_switch_lib::assistant::documents::engines::engines_at(&bundle);
+        if engines.officecli.is_none() {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "CI must prepare the local OfficeCLI"
+            );
+            eprintln!("skipping: the local OfficeCLI is not prepared");
+            return;
+        }
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        let (sid, run, detail) =
+            runtime().block_on(async {
+                let sid = create(&host).await;
+                gateway.reply(Reply::ToolCalls(vec![
+                    ("use_skill", json!({"name":"ofox-office-pptx"})),
+                    ("freeze_presentation_plan", plan()),
+                ]));
+                gateway.reply(Reply::Answer(create_after_freeze));
+                gateway.reply(Reply::Stream("The planned local document is ready.".into()));
+                let (run,end) = turn(&host,&env,request(&sid,"Make the three-slide fixture",json!({
+                "presentationWorkflowVersion":1,
+                "presentationStyleId":"cartesian",
+                "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
+            }))).await;
+                assert_eq!(
+                    end.data["status"],
+                    "completed",
+                    "{:?} {:?}",
+                    of_type(&env, &run, "error"),
+                    gateway
+                        .requests()
+                        .iter()
+                        .map(tool_results)
+                        .collect::<Vec<_>>()
+                );
+                let detail = host.get_session(&sid).await.unwrap();
+                host.shutdown().await;
+                (sid, run, detail)
+            });
+        let requests = gateway.requests();
+        assert_eq!(
+            requests.len(),
+            3,
+            "freeze, planned document calls, final response"
+        );
+        let offered = tool_names(&requests[0]);
+        assert!(offered.contains(&"freeze_presentation_plan".to_owned()));
+        assert!(offered.contains(&"get_presentation_candidates".to_owned()));
+        assert!(requests
+            .iter()
+            .all(|request| !request.path.contains("/images/")));
+        let plans = of_type(&env, &run, "presentation_plan");
+        assert_eq!(
+            plans.len(),
+            1,
+            "the runtime freeze reached HostCall dispatch"
+        );
+        let frozen = &plans[0]["plan"];
+        assert_eq!(frozen["effectiveStyle"], "cartesian");
+        assert_eq!(frozen["styleId"], "cartesian");
+        assert_eq!(
+            frozen["visualBudget"],
+            json!({
+                "mode":"off", "maxImages":0, "maxCostUsd":"0",
+                "remainingImages":0, "remainingCostUsd":"0",
+                "canAttempt":false, "reason":"disabled",
+                "scope":"freeze-snapshot-not-reservation"
+            }),
+            "The model must receive the Host's actual budget summary, not infer absent authorization"
+        );
+        let user = detail
+            .messages
+            .iter()
+            .find(|message| message.role == "user")
+            .unwrap();
+        assert_eq!(user.presentation_style_id.as_deref(), Some("cartesian"));
+        assert_eq!(
+            serde_json::to_value(&user.presentation_visual_policy).unwrap(),
+            json!({"mode":"off","maxImages":0,"maxCostUsd":"0"})
+        );
+        let reply = detail
+            .messages
+            .iter()
+            .find(|message| message.presentation_plan.is_some())
+            .expect("the plan remains attached to the saved assistant reply");
+        assert_eq!(reply.role, "assistant");
+        assert_eq!(reply.presentation_plan.as_ref().unwrap(), frozen);
+        let disk = saved(config.path(), &sid);
+        let kept = disk["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["id"] == reply.id)
+            .unwrap();
+        assert_eq!(
+            kept["presentationPlan"], *frozen,
+            "the frozen plan persists after run completion"
+        );
+        let results: Vec<_> =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|entry| entry["type"] == "message")
+                .map(|entry| entry["message"].clone())
+                .filter(|message| {
+                    message["role"] == "toolResult" && message["toolName"] == "create_document"
+                })
+                .collect();
+        assert_eq!(results.len(), 3);
+        assert_eq!(
+            results[0]["isError"], true,
+            "wrong plan must not create a document"
+        );
+        assert_eq!(
+            results[1]["isError"], true,
+            "wrong revision must not create a document"
+        );
+        assert_ne!(results[2]["isError"], true, "{}", results[2]);
+        assert!(text_of(&results[0]["content"]).contains("frozen"));
+        assert!(text_of(&results[1]["content"]).contains("frozen"));
+        assert_eq!(
+            detail.attachments.len(),
+            1,
+            "invalid tuples delivered no attachments"
+        );
+        let attachment = &detail.attachments[0];
+        assert_eq!(attachment.name, "planned-cartesian.pptx");
+        assert_eq!(attachment.origin.as_deref(), Some("generated"));
+        let generations = of_type(&env, &run, "generation");
+        assert_eq!(generations.len(), 1);
+        let generation = &generations[0]["generation"];
+        assert_eq!(generation["kind"], "document");
+        assert_eq!(generation["params"]["presentationPlanId"], frozen["planId"]);
+        assert_eq!(generation["params"]["presentationStyleId"], "cartesian");
+        assert_eq!(generation["outputs"], json!([attachment.id]));
+        assert_eq!(reply.generations.len(), 1);
+        assert_eq!(
+            reply.generations[0].params["presentationPlanId"],
+            frozen["planId"]
+        );
+        assert_eq!(reply.attachments.len(), 1);
+        assert_eq!(reply.attachments[0].id, attachment.id);
+        let bytes = std::fs::read(
+            session_dir(config.path(), &sid)
+                .join("attachments")
+                .join(&attachment.id),
+        )
+        .unwrap();
+        let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let mut xml = String::new();
+        zip.by_name("ppt/slides/slide1.xml")
+            .unwrap()
+            .read_to_string(&mut xml)
+            .unwrap();
+        let xml = xml.to_ascii_uppercase();
+        assert!(
+            xml.contains("EDE8E0") && xml.contains("GEORGIA"),
+            "manual Cartesian theme must override the model's navy deck"
+        );
+        let ended = of_type(&env, &run, "tool_end");
+        assert!(!ended.iter().any(|event| event["name"] == "generate_image"));
+        assert_no_secret_in_events(&env, &[KEY, NEW_KEY]);
         assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
     }
 }
@@ -8709,5 +9028,788 @@ mod real_eval {
             .map(|text| (*text).to_owned())
             .or_else(|| panic.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "no message".into())
+    }
+}
+
+/// One live case, exclusively behind the task-private guarded loopback
+/// forwarder. The real production credential never enters this process.
+#[cfg(target_os = "macos")]
+mod ppt_live_acceptance {
+    use super::*;
+    use cc_switch_lib::assistant::catalog::{Kind, Protocol};
+    use cc_switch_lib::assistant::documents::{engines::engines_at, runner};
+    use rust_decimal::Decimal;
+    use std::str::FromStr;
+
+    const TEXT: &str = "deepseek/deepseek-v4.1-flash";
+    const IMAGE: &str = "qwen/qwen-image-3.0";
+    /// The image model a library-round case may name instead of [`IMAGE`].
+    const LIBRARY_IMAGE: &str = "openai/gpt-image-2";
+
+    /// The catalog styles a user may select, in catalog order, plus navy.
+    fn selectable_styles() -> Vec<String> {
+        let catalog: Value = serde_json::from_str(include_str!(
+            "../../assistant-runtime/skills/ofox-office-pptx/resources/catalog.json"
+        ))
+        .unwrap();
+        std::iter::once("navy".to_owned())
+            .chain(
+                catalog["styles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|style| style["enabled"] == true && style["status"] == "enabled")
+                    .map(|style| style["id"].as_str().unwrap().to_owned()),
+            )
+            .collect()
+    }
+    const PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
+    // Pure receipt rules can be sampled without a runtime, model or credential.
+    mod receipt_contract {
+        pub(super) struct Facts<'a> {
+            pub status: &'a str,
+            pub pptx_count: usize,
+            pub has_plan: bool,
+            pub expected: u64,
+            pub declared: Option<u64>,
+            pub actual: Option<u64>,
+            pub requested_style: &'a str,
+            pub effective_style: Option<&'a str>,
+        }
+        pub(super) fn manual_style_valid(case: &str, style: &str) -> bool {
+            if case == "academic-manual" {
+                ["cartesian", "blue-professional"].contains(&style)
+            } else if case.starts_with("library-") && case.ends_with("-manual") {
+                style != "auto" && super::selectable_styles().iter().any(|id| id == style)
+            } else {
+                style == "auto"
+            }
+        }
+        pub(super) fn layout_checked(attempted: usize, valid_reports: usize) -> bool {
+            attempted > 0 && valid_reports == attempted
+        }
+        pub(super) fn delivery_accepted(facts: Facts<'_>) -> bool {
+            let style_valid = facts.effective_style.is_some_and(|style| {
+                super::selectable_styles().iter().any(|id| id == style)
+                    && (facts.requested_style == "auto" || style == facts.requested_style)
+            });
+            facts.status == "completed"
+                && facts.pptx_count == 1
+                && facts.has_plan
+                && facts.declared == Some(facts.expected)
+                && facts.actual == Some(facts.expected)
+                && style_valid
+        }
+
+        #[test]
+        fn manual_case_never_accepts_auto() {
+            assert!(!manual_style_valid("academic-manual", "auto"));
+            assert!(manual_style_valid("academic-manual", "cartesian"));
+            assert!(manual_style_valid("academic-manual", "blue-professional"));
+        }
+        #[test]
+        fn unavailable_or_invalid_layout_reports_are_not_checked() {
+            assert!(!layout_checked(2, 0));
+            assert!(!layout_checked(2, 1));
+            assert!(!layout_checked(0, 0));
+            assert!(layout_checked(2, 2));
+        }
+        fn complete() -> Facts<'static> {
+            Facts {
+                status: "completed",
+                pptx_count: 1,
+                has_plan: true,
+                expected: 6,
+                declared: Some(6),
+                actual: Some(6),
+                requested_style: "cartesian",
+                effective_style: Some("cartesian"),
+            }
+        }
+        #[test]
+        fn delivery_uses_actual_opc_count_without_declared_fallback() {
+            let mut wrong = complete();
+            wrong.actual = Some(5);
+            assert!(!delivery_accepted(wrong));
+            let mut missing = complete();
+            missing.actual = None;
+            assert!(!delivery_accepted(missing));
+            assert!(delivery_accepted(complete()));
+        }
+        #[test]
+        fn delivery_requires_manual_effective_style() {
+            let mut wrong = complete();
+            wrong.effective_style = Some("blue-professional");
+            assert!(!delivery_accepted(wrong));
+            let mut missing = complete();
+            missing.effective_style = None;
+            assert!(!delivery_accepted(missing));
+        }
+    }
+
+    fn task_path(name: &str, private: &Path) -> PathBuf {
+        let path = PathBuf::from(
+            std::env::var_os(name).unwrap_or_else(|| panic!("set {name} explicitly")),
+        );
+        assert!(path.is_absolute(), "{name} must be absolute");
+        assert!(!std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        let path = path.canonicalize().unwrap();
+        assert!(
+            path.starts_with(private),
+            "{name} must stay in the private task directory"
+        );
+        path
+    }
+    fn write_json(path: &Path, value: Value, token: &str) {
+        let bytes = serde_json::to_string_pretty(&value)
+            .unwrap()
+            .replace(token, "[proxy-token-redacted]");
+        std::fs::write(path, bytes + "\n").unwrap();
+    }
+    fn copy_pages(from: &Path, to: &Path) {
+        if !from.is_dir() {
+            return;
+        }
+        std::fs::create_dir_all(to).unwrap();
+        for entry in std::fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name())).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "Root controller only: explicit private snapshot/runtime/catalog and guarded loopback proxy; no real key"]
+    fn one_guarded_case() {
+        let ack = std::env::var("OFOX_PPT_LIVE_ACK").unwrap();
+        assert!(
+            ack == "USD3_ONE_IMAGE_ROOT_CONTROLLER" || ack == "USD4_LIBRARY_ROUND_ROOT_CONTROLLER",
+            "unknown live acknowledgement"
+        );
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .canonicalize()
+            .unwrap();
+        let private = repository.join(".real-eval").canonicalize().unwrap();
+        let case_path = task_path("OFOX_PPT_LIVE_CASE", &private);
+        let bundle = task_path("OFOX_PPT_LIVE_RUNTIME", &private);
+        let catalog_path = task_path("OFOX_PPT_LIVE_CATALOG", &private);
+        let out = task_path("OFOX_PPT_LIVE_OUT", &private);
+        assert!(out.is_dir());
+        assert!(
+            !out.join("outcome.json").exists(),
+            "never overwrite an earlier paid attempt"
+        );
+        let case: Value = serde_json::from_slice(&std::fs::read(&case_path).unwrap()).unwrap();
+        let id = case["id"].as_str().unwrap();
+        let library = id.starts_with("library-");
+        assert!(
+            ([
+                "academic-auto",
+                "academic-manual",
+                "business-auto",
+                "product-auto",
+                "library-product-auto",
+                "library-academic-manual",
+                "library-teaching-auto",
+                "library-short-images",
+                "library-short-noimages",
+                "library-short-askedcover",
+                "library-short-weekly-manual",
+                "library-short-studio-manual",
+                "library-short-daisy-manual",
+                "library-short-hermes-manual",
+                "library-short-block-manual",
+                "library-short-course-manual",
+            ]
+            .contains(&id)
+                // 2026-11-13: one manual case per catalog style, by style id.
+                || (id.starts_with("library-style-") && id.ends_with("-manual")))
+                && library == (ack == "USD4_LIBRARY_ROUND_ROOT_CONTROLLER")
+        );
+        // A user's own short request names no page count: the deck's own
+        // count is accepted when it is a plausible deck and file and record agree.
+        let free_count = id.starts_with("library-short-") || id.starts_with("library-style-");
+        let expected_slides = if free_count {
+            assert!(case["slideCount"].is_null());
+            0
+        } else if library {
+            case["slideCount"]
+                .as_u64()
+                .filter(|n| (4..=10).contains(n))
+                .unwrap()
+        } else if id.starts_with("academic-") {
+            6
+        } else {
+            8
+        };
+        if !free_count {
+            assert_eq!(case["slideCount"], expected_slides);
+        }
+        let image_id = if library {
+            case["imageModel"].as_str().unwrap()
+        } else {
+            IMAGE
+        };
+        assert!(image_id == IMAGE || (library && image_id == LIBRARY_IMAGE));
+        let style = case["presentationStyleId"].as_str().unwrap();
+        assert!(receipt_contract::manual_style_valid(id, style));
+        let policy = &case["presentationVisualPolicy"];
+        if library {
+            // A bounded per-case image and text ceiling, checked again by the
+            // Host on every attempt and by the controller's forwarder.
+            let usd = |key: &str| Decimal::from_str(policy[key].as_str().unwrap()).unwrap();
+            assert!(["auto", "off", "exact"].contains(&policy["mode"].as_str().unwrap()));
+            assert!(policy["maxImages"].as_u64().unwrap() <= 4);
+            assert!(usd("maxCostUsd") <= Decimal::ONE);
+            assert!(usd("textMaxCostUsd") <= Decimal::ONE);
+        } else if id == "product-auto" {
+            assert_eq!(
+                *policy,
+                json!({"mode":"auto","maxImages":1,"maxCostUsd":"0.03"})
+            );
+        } else {
+            assert_eq!(
+                *policy,
+                json!({"mode":"off","maxImages":0,"maxCostUsd":"0"})
+            );
+        }
+        let apex = case["selectedApex"].as_str().unwrap();
+        assert!(["ofox.ai", "ofox.io"].contains(&apex));
+        let prompt = case["prompt"].as_str().unwrap();
+        assert!(!prompt.is_empty() && prompt.len() < 100_000);
+        let proxy = std::env::var("OFOX_PPT_PROXY_BASE").unwrap();
+        let url = reqwest::Url::parse(&proxy).unwrap();
+        assert_eq!(url.scheme(), "http");
+        // The runtime accepts only a plain `http://localhost:<port>` gateway
+        // in a debug build; the older controller used 127.0.0.1.
+        assert!(matches!(url.host_str(), Some("127.0.0.1" | "localhost")));
+        assert!(url.port().is_some() && url.username().is_empty() && url.password().is_none());
+        assert!(url.query().is_none() && url.fragment().is_none() && url.path() == "/");
+        let token = std::env::var("OFOX_PPT_PROXY_TOKEN").unwrap();
+        assert!(token.starts_with("live-proxy-") && token.len() >= 32);
+        let catalog: Value =
+            serde_json::from_slice(&std::fs::read(&catalog_path).unwrap()).unwrap();
+        assert!(
+            catalog["data"].is_array(),
+            "supply the actual raw V1 catalog, never test_model fallback"
+        );
+        let models = parse_models(catalog, Source::V1);
+        let mut text = models
+            .iter()
+            .find(|model| model.id == TEXT && model.kind == Kind::Chat)
+            .unwrap()
+            .clone();
+        let image = models
+            .iter()
+            .find(|model| model.id == image_id && model.kind == Kind::Image)
+            .unwrap()
+            .clone();
+        assert_eq!(
+            Decimal::from_str(text.input_price_per_million.as_deref().unwrap()).unwrap(),
+            Decimal::new(3, 1)
+        );
+        assert_eq!(
+            Decimal::from_str(text.output_price_per_million.as_deref().unwrap()).unwrap(),
+            Decimal::new(12, 1)
+        );
+        assert!(
+            text.tools
+                && text
+                    .supported_endpoints
+                    .iter()
+                    .any(|path| path == "/v1/chat/completions")
+        );
+        let caps = image.image.as_ref().unwrap();
+        if image_id == IMAGE {
+            assert_eq!(
+                Decimal::from_str(caps.per_image_price.as_deref().unwrap()).unwrap(),
+                Decimal::new(3, 2)
+            );
+            assert!(caps.n && caps.sizes.is_empty() && caps.qualities.is_empty());
+        } else {
+            // Token-priced: the Host computes each attempt's upper bound.
+            assert!(caps.per_image_price.is_none() && caps.token_pricing.is_some());
+            assert!(!caps.sizes.is_empty());
+        }
+        text.max_output_tokens = if library { 32000 } else { 6000 };
+        text.supports_images = false;
+        text.input_modalities = vec!["text".into()];
+        text.protocol = Some(Protocol::OpenAiCompletions);
+        text.supported_endpoints = vec!["/v1/chat/completions".into()];
+        let engines = engines_at(&bundle);
+        let office = engines
+            .officecli
+            .expect("private runtime must contain OfficeCLI");
+        assert!(
+            engines.python.is_some(),
+            "native math/chart acceptance requires the private Python engine"
+        );
+        let config = tempfile::tempdir().unwrap();
+        let placeholder = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &placeholder)]);
+        env.route(apex, proxy);
+        env.set_key(token.clone());
+        *env.catalog.lock().unwrap() = vec![text, image];
+        let host = AssistantHost::new(env.clone());
+        let started = Instant::now();
+        let (sid, run, end, detail, manifests) =
+            runtime().block_on(async {
+                host.set_preferences(
+                    serde_json::from_value(json!({
+                        "instructions":"","autoTitle":false,"notifyOnFinish":false,
+                        "expectedOwner":owner(),"expectedGeneration":host.generation()
+                    }))
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                let sid = host
+                    .create_session(
+                        serde_json::from_value(json!({
+                            "modelId":TEXT,"modelPicked":true,"webSearch":false
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+                    .id;
+                host.update_session(serde_json::from_value(json!({
+                "sessionId":sid,"expectedOwner":owner(),"expectedGeneration":host.generation(),
+                "media":{"image":{"model":image_id,"n":1}}
+            })).unwrap()).await.unwrap();
+                let run = host
+                    .send(request(
+                        &sid,
+                        prompt,
+                        json!({
+                            "presentationWorkflowVersion":1,"presentationStyleId":style,
+                            "presentationVisualPolicy":policy,"expectedOwner":owner(),
+                            "expectedGeneration":host.generation(),"uiLanguage":"zh"
+                        }),
+                    ))
+                    .await
+                    .unwrap()
+                    .run_id;
+                let deadline = Instant::now() + Duration::from_secs(15 * 60);
+                let end = loop {
+                    if let Some(end) = env
+                        .events(&run)
+                        .into_iter()
+                        .find(|event| event.r#type == "run_end")
+                    {
+                        break Some(end);
+                    }
+                    if Instant::now() >= deadline {
+                        host.cancel_all();
+                        break None;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                };
+                let detail = host.get_session(&sid).await.unwrap();
+                let mut manifests = Vec::new();
+                for file in &detail.attachments {
+                    if file.mime_type == PPTX {
+                        // Read the actual file through the Host's bounded OPC
+                        // parser. Generation metadata is not a page count.
+                        let request = serde_json::from_value(json!({
+                            "sessionId":sid,"attachmentId":file.id,
+                            "expectedOwner":owner(),"expectedGeneration":host.generation()
+                        }))
+                        .unwrap();
+                        let manifest = host.file_preview(request).await;
+                        manifests.push(match manifest {
+                            Ok(manifest) => json!({"fileId":file.id,"manifest":manifest}),
+                            Err(_) => json!({"fileId":file.id,"unavailable":true}),
+                        });
+                    }
+                }
+                host.shutdown().await;
+                (sid, run, end, detail, manifests)
+            });
+        let store = session_dir(config.path(), &sid).join("attachments");
+        let mut files = Vec::new();
+        let mut checks = Vec::new();
+        let mut pptx_count = 0;
+        let rt = runtime();
+        for file in &detail.attachments {
+            let name = Path::new(&file.name).file_name().unwrap().to_string_lossy();
+            let destination = out.join(format!("{}-{name}", file.id));
+            std::fs::copy(store.join(&file.id), &destination).unwrap();
+            copy_pages(
+                &store.join(format!("{}.pages", file.id)),
+                &out.join(format!("{}.pages", file.id)),
+            );
+            files.push(json!({"id":file.id,"name":name,"path":destination,"mimeType":file.mime_type,"bytes":file.size_bytes}));
+            if file.mime_type == PPTX {
+                pptx_count += 1;
+                for args in [
+                    vec!["validate", destination.to_str().unwrap(), "--json"],
+                    vec!["view", destination.to_str().unwrap(), "issues", "--json"],
+                ] {
+                    let home = tempfile::tempdir().unwrap();
+                    let result = rt.block_on(runner::run_engine(
+                        &office,
+                        &args,
+                        home.path(),
+                        home.path(),
+                        runner::ENGINE_TIMEOUT,
+                    ));
+                    checks.push(match result {
+                        Ok(output)=>json!({"fileId":file.id,"command":args[0],"status":output.status,
+                            "report":serde_json::from_str::<Value>(&output.stdout).unwrap_or(Value::Null)}),
+                        Err(_)=>json!({"fileId":file.id,"command":args[0],"unavailable":true}),
+                    });
+                }
+            }
+        }
+        let plan = detail
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| message.presentation_plan.clone())
+            .unwrap_or(Value::Null);
+        let documents: Vec<_> = detail
+            .messages
+            .iter()
+            .flat_map(|message| &message.generations)
+            .filter(|record| record.kind == "document")
+            .collect();
+        let declared_slides = documents
+            .last()
+            .and_then(|record| record.params["slides"].as_u64());
+        let actual_slides = if manifests.len() == 1 {
+            manifests[0]["manifest"]["totalPages"].as_u64()
+        } else {
+            None
+        };
+        let expected_slides = if free_count {
+            declared_slides
+                .filter(|count| (4..=20).contains(count))
+                .unwrap_or(0)
+        } else {
+            expected_slides
+        };
+        let status = end
+            .as_ref()
+            .and_then(|event| event.data["status"].as_str())
+            .unwrap_or("timeout");
+        let delivery_accepted = receipt_contract::delivery_accepted(receipt_contract::Facts {
+            status,
+            pptx_count,
+            has_plan: plan["planId"].is_string(),
+            expected: expected_slides,
+            declared: declared_slides,
+            actual: actual_slides,
+            requested_style: style,
+            effective_style: plan["effectiveStyle"].as_str(),
+        });
+        let layout_checked = receipt_contract::layout_checked(
+            checks.len(),
+            checks
+                .iter()
+                .filter(|check| check["status"].as_i64() == Some(0) && check["report"].is_object())
+                .count(),
+        );
+        let outcome = json!({
+            "caseId":id,"status":status,"effectiveStyle":plan["effectiveStyle"],"planId":plan["planId"],
+            "slideCount":actual_slides,"declaredSlideCount":declared_slides,"actualFileManifests":manifests,
+            "artifactFiles":files,"usage":detail.usage,"layoutChecks":checks,
+            "layoutAttempted":!checks.is_empty(),"layoutChecked":layout_checked,"deliveryAccepted":delivery_accepted,
+            "modelVisionReview":false,"nativeAppEditingVerified":false,"invoiceReconciled":false,
+            "seconds":started.elapsed().as_secs_f64(),"contentSha256":case["contentSha256"],
+            "rawPromptSha256":case["rawPromptSha256"],"frozenPlan":plan,
+            "realCredentialInHost":false,"globalBudgetAuthority":"external shared forwarder ledger"
+        });
+        write_json(
+            &out.join("detail.json"),
+            serde_json::to_value(&detail).unwrap(),
+            &token,
+        );
+        write_json(
+            &out.join("events.json"),
+            serde_json::to_value(env.events(&run)).unwrap(),
+            &token,
+        );
+        write_json(&out.join("outcome.json"), outcome, &token);
+        let native =
+            std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                .unwrap_or_default();
+        std::fs::write(
+            out.join("native-history.jsonl"),
+            native.replace(&token, "[proxy-token-redacted]"),
+        )
+        .unwrap();
+        println!(
+            "PPT_LIVE_CASE_RECEIPT {}",
+            json!({"caseId":id,"status":status,"deliveryAccepted":delivery_accepted,"outcome":out.join("outcome.json")})
+        );
+        assert!(
+            delivery_accepted,
+            "inspect task-private outcome; run completion is not visual/editing acceptance"
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn ofox_key_slot_mcp_scrub_secret_cannot_authenticate_chat_images_on_both_apexes() {
+    let bundle = runtime_dir().expect("prepared Node/Pi is required for key-slot wire tests");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    const MCP_SECRET: &str = "synthetic-mcp-bearer-must-not-be-ofox-auth";
+    for apex in ["ofox.ai", "ofox.io"] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(config.path().join("assistant")).unwrap();
+        std::fs::write(
+            config.path().join("assistant/mcp.json"),
+            json!({
+                "mcpServers": {"fixture": {"command": node, "args": [fixture],
+                    "env": {"MCP_API_KEY": MCP_SECRET}}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        env.catalog.lock().unwrap().push(image_model());
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            host.update_session(
+                serde_json::from_value(json!({"sessionId": sid,
+                "media": {"image": {"model": "test/image"}}}))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            gateway.reply(Reply::ToolCalls(vec![(
+                "generate_image",
+                json!({"prompt": "a synthetic blue square"}),
+            )]));
+            gateway.reply(Reply::Json(200, json!({"data": [{"b64_json": PNG_1X1}]})));
+            gateway.reply(Reply::Stream(format!("Synthetic image finished: {KEY} {MCP_SECRET}")));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Draw a synthetic blue square", json!({})),
+            )
+            .await;
+            assert_eq!(
+                end.data["status"],
+                "completed",
+                "{:?}",
+                of_type(&env, &run, "error")
+            );
+            let calls = gateway.requests();
+            let image = calls
+                .iter()
+                .find(|call| call.path == "/v1/images/generations")
+                .expect("the fake provider received the image request");
+            assert_eq!(
+                image.authorization,
+                format!("Bearer {KEY}"),
+                "MCP credentials are scrub-only, never the Ofox bearer ({apex})"
+            );
+            assert!(!image.authorization.contains(MCP_SECRET));
+            let public = serde_json::to_string(&host.get_session(&sid).await.unwrap()).unwrap();
+            assert!(!public.contains(MCP_SECRET));
+            assert!(!public.contains(KEY));
+            let native = std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl")).unwrap();
+            assert!(!native.contains(KEY), "the initial Ofox credential must be scrubbed before native persistence");
+            assert!(!native.contains(MCP_SECRET), "the run's initial MCP scrub credential must be private even without a 401 or MCP tool call");
+            host.shutdown().await;
+            host.shutdown().await;
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn ofox_key_slot_rotated_chat_image_key_survives_mcp_scrub_credentials() {
+    let bundle = runtime_dir().expect("prepared Node/Pi is required for key-slot wire tests");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    const MCP_SECRET: &str = "synthetic-mcp-token-not-an-ofox-bearer";
+    for apex in ["ofox.ai", "ofox.io"] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let config = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(config.path().join("assistant")).unwrap();
+        std::fs::write(
+            config.path().join("assistant/mcp.json"),
+            json!({
+                "mcpServers": {"fixture": {"command": node, "args": [fixture],
+                    "env": {"MCP_API_KEY": MCP_SECRET}}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        env.catalog.lock().unwrap().push(image_model());
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            host.update_session(
+                serde_json::from_value(json!({"sessionId": sid,
+                "media": {"image": {"model": "test/image"}}}))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            gateway.reply(Reply::ToolCalls(vec![(
+                "generate_image",
+                json!({"prompt": "first synthetic square"}),
+            )]));
+            gateway.reply(Reply::Error(401, invalid_key()));
+            gateway.reply(Reply::Json(200, json!({"data": [{"b64_json": PNG_1X1}]})));
+            gateway.reply(Reply::ToolCalls(vec![(
+                "generate_image",
+                json!({"prompt": "second synthetic square"}),
+            )]));
+            gateway.reply(Reply::Json(200, json!({"data": [{"b64_json": PNG_1X1}]})));
+            gateway.reply(Reply::Stream(format!(
+                "Finished safely: {KEY} {NEW_KEY} {MCP_SECRET}"
+            )));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Draw two synthetic squares", json!({})),
+            )
+            .await;
+            assert_eq!(
+                end.data["status"],
+                "completed",
+                "{:?}",
+                of_type(&env, &run, "error")
+            );
+            let calls = gateway.requests();
+            let images: Vec<_> = calls
+                .iter()
+                .filter(|call| call.path == "/v1/images/generations")
+                .collect();
+            assert_eq!(
+                images.len(),
+                3,
+                "one refused attempt, one retry, one later image"
+            );
+            assert_eq!(images[0].authorization, format!("Bearer {KEY}"));
+            assert_eq!(images[1].authorization, format!("Bearer {NEW_KEY}"));
+            assert_eq!(images[2].authorization, format!("Bearer {NEW_KEY}"));
+            assert_eq!(env.state.lock().unwrap().rejected, [KEY]);
+            let detail = host.get_session(&sid).await.unwrap();
+            let public = serde_json::to_string(&detail).unwrap();
+            let emitted = serde_json::to_string(&env.events(&run)).unwrap();
+            let native =
+                std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl"))
+                    .unwrap();
+            for secret in [KEY, NEW_KEY, MCP_SECRET] {
+                assert!(
+                    !public.contains(secret),
+                    "session must redact every credential"
+                );
+                assert!(
+                    !emitted.contains(secret),
+                    "events must redact every credential"
+                );
+                assert!(
+                    !native.contains(secret),
+                    "native history must redact every synthetic fixture credential ({secret})"
+                );
+            }
+            assert!(detail
+                .messages
+                .iter()
+                .any(|m| m.content.contains("Finished safely:")));
+            host.shutdown().await;
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn ofox_key_slot_mcp_scrub_credentials_never_authenticate_video_or_speech_on_both_apexes() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    let bundle =
+        runtime_dir().expect("prepared Node/Pi is required for sibling key-slot wire tests");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    const MCP_SECRET: &str = "synthetic-mcp-token-not-a-media-bearer";
+    for apex in ["ofox.ai", "ofox.io"] {
+        for kind in ["video", "speech"] {
+            let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+            let config = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(config.path().join("assistant")).unwrap();
+            std::fs::write(
+                config.path().join("assistant/mcp.json"),
+                json!({
+                    "mcpServers": {"fixture": {"command": node, "args": [fixture],
+                        "env": {"MCP_API_KEY": MCP_SECRET}}}
+                })
+                .to_string(),
+            )
+            .unwrap();
+            let gateway = Gateway::start();
+            let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+            if kind == "video" {
+                env.catalog.lock().unwrap().push(video_model());
+            } else {
+                env.catalog.lock().unwrap().push(parse_models(json!({"data": [{
+                    "id": "elevenlabs/eleven_v4", "supported_endpoints": ["/v1/audio/speech"],
+                    "pricing": {"input_text_per_character": "0.0002"}
+                }]}), Source::V1).remove(0));
+            }
+            let host = AssistantHost::new(env.clone());
+            runtime().block_on(async {
+                let sid = create(&host).await;
+                let defaults = if kind == "video" {
+                    json!({"video": {"model": "test/video", "duration": 4, "resolution": "480p"}})
+                } else {
+                    json!({"speech": {"model": "elevenlabs/eleven_v4", "voice": "21m00Tcm4TlvDq8ikWAM", "format": "wav"}})
+                };
+                host.update_session(serde_json::from_value(json!({"sessionId": sid, "media": defaults})).unwrap()).await.unwrap();
+                if kind == "video" {
+                    gateway.reply(Reply::ToolCalls(vec![("generate_video", json!({"prompt": "a synthetic blue square spins", "duration": 4}))]));
+                    gateway.reply(Reply::Json(202, json!({"id": types::id(), "status": "pending"})));
+                } else {
+                    gateway.reply(Reply::ToolCalls(vec![("generate_speech", json!({"text": "Synthetic welcome"}))]));
+                    gateway.reply(Reply::Bytes("audio/wav", wav(1)));
+                }
+                gateway.reply(Reply::Stream("Synthetic media finished.".into()));
+                let run = host.send(request(&sid, "Make synthetic media", json!({}))).await.unwrap();
+                if kind == "video" {
+                    let approval = wait_for(&env, &run.run_id, "approval").await;
+                    assert_eq!(approval.data["name"], "generate_video");
+                    host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({
+                        "sessionId": sid, "runId": run.run_id, "operationId": run.operation_id,
+                        "approvalId": approval.data["approvalId"], "choice": "once",
+                        "expectedOwner": owner(), "expectedGeneration": host.generation()
+                    })).unwrap()).await.unwrap();
+                }
+                let end = wait_for(&env, &run.run_id, "run_end").await;
+                assert_eq!(end.data["status"], "completed", "{:?}", of_type(&env, &run.run_id, "error"));
+                let path = if kind == "video" { "/v1/videos" } else { "/v1/audio/speech" };
+                let calls = gateway.requests();
+                let media = calls.iter().find(|call| call.path == path).expect("fake provider received media POST");
+                assert_eq!(media.authorization, format!("Bearer {KEY}"), "{kind} on {apex} must never authenticate with the MCP scrub credential");
+                host.shutdown().await;
+            });
+        }
     }
 }

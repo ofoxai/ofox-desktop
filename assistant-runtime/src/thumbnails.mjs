@@ -55,10 +55,33 @@ export async function thumbnailFromPng(bytes, options) {
 // slide-text.mjs); rejects when the canvas cannot read the SVG or the SVG
 // is not XML: a slide drawn without its words would tell the model it is
 // blank.
+// officecli writes chart labels as native <text> with no font family. The
+// canvas's SVG reader then uses one default font and no per-glyph fallback,
+// so Chinese or Japanese labels drew as missing-glyph boxes. It takes the
+// first installed family of a list, so name CJK-capable system fonts first.
+export const SVG_TEXT_FONTS =
+  "'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Yu Gothic', 'Noto Sans CJK SC', sans-serif";
+// One pass, bounded by the next angle bracket. A tag whose attributes hold an
+// unbalanced quote (a ">" inside a value) is left as it is.
+const SVG_TEXT_TAG = /<text(\s[^<>]*)?>/g;
+const withTextFonts = (source) =>
+  source.replace(SVG_TEXT_TAG, (tag, attributes = "") =>
+    /\sfont-family\s*=/.test(attributes) ||
+    (attributes.match(/"/g) || []).length % 2 ||
+    (attributes.match(/'/g) || []).length % 2
+      ? tag
+      : `<text font-family="${SVG_TEXT_FONTS}"${attributes}>`,
+  );
+
 async function loadSlide(bytes) {
   const { loadImage } = await import("@napi-rs/canvas");
-  const text = slideText(Buffer.from(bytes).toString("utf8"));
-  return { image: await loadImage(bytes), text };
+  const source = Buffer.from(bytes).toString("utf8");
+  const text = slideText(source);
+  const drawn = withTextFonts(source);
+  return {
+    image: await loadImage(drawn === source ? bytes : Buffer.from(drawn)),
+    text,
+  };
 }
 
 // Draws a loaded slide over white in the box at (x, y), its shapes first and

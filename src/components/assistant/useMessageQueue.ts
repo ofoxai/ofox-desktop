@@ -1,4 +1,9 @@
 import { useMemo, useRef, useState } from "react";
+import type {
+  AssistantPresentationStyleId,
+  AssistantPresentationVisualPolicy,
+  AssistantFileReference,
+} from "@/lib/api/assistant";
 
 /** The host's UTF-8 message limit, also used for unsent queue entries. */
 export const MAX_MESSAGE_BYTES = 128_000;
@@ -6,6 +11,9 @@ export const MAX_QUEUED_MESSAGES = 10;
 
 export interface QueuedMessage {
   skill?: string;
+  presentationStyleId?: AssistantPresentationStyleId;
+  presentationVisualPolicy?: AssistantPresentationVisualPolicy;
+  fileReferences?: AssistantFileReference[];
   id: string;
   text: string;
 }
@@ -87,7 +95,14 @@ export function useMessageQueue() {
         if (current.current.get(sid)?.messages.length) pause(sid);
         else clear(sid);
       },
-      enqueue: (sid: string, text: string, skill?: string) => {
+      enqueue: (
+        sid: string,
+        text: string,
+        skill?: string,
+        presentationStyleId?: AssistantPresentationStyleId,
+        presentationVisualPolicy?: AssistantPresentationVisualPolicy,
+        fileReferences?: AssistantFileReference[],
+      ) => {
         const queue = current.current.get(sid) ?? emptyQueue();
         if (
           !validQueuedText(text) ||
@@ -98,7 +113,22 @@ export function useMessageQueue() {
           ...queue,
           messages: [
             ...queue.messages,
-            { id: crypto.randomUUID(), text, ...(skill ? { skill } : {}) },
+            {
+              id: crypto.randomUUID(),
+              text,
+              ...(skill ? { skill } : {}),
+              ...(presentationStyleId ? { presentationStyleId } : {}),
+              ...(presentationVisualPolicy
+                ? { presentationVisualPolicy: { ...presentationVisualPolicy } }
+                : {}),
+              ...(fileReferences?.length
+                ? {
+                    fileReferences: fileReferences.map((reference) => ({
+                      ...reference,
+                    })),
+                  }
+                : {}),
+            },
           ],
         });
         return true;
@@ -147,7 +177,23 @@ export function useMessageQueue() {
           return null;
         const ticket: QueueTicket = {
           sessionId: sid,
-          message: queue.messages[0],
+          message: {
+            ...queue.messages[0],
+            ...(queue.messages[0].fileReferences
+              ? {
+                  fileReferences: queue.messages[0].fileReferences.map(
+                    (reference) => ({ ...reference }),
+                  ),
+                }
+              : {}),
+            ...(queue.messages[0].presentationVisualPolicy
+              ? {
+                  presentationVisualPolicy: {
+                    ...queue.messages[0].presentationVisualPolicy,
+                  },
+                }
+              : {}),
+          },
           cancelled: false,
         };
         put(sid, { ...queue, ready: false, sending: ticket });

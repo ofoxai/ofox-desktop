@@ -1095,3 +1095,26 @@ pub async fn assistant_restore_local_changes(
 ) -> Result<Vec<crate::services::assistant::tools::journal::Change>, String> {
     host.local_changes(request, true).await
 }
+
+/// Read-only, version-bound file workspace; never starts a model request.
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_file_preview(
+    host: Host<'_>,
+    request: crate::services::assistant::file_preview::FileRequest,
+) -> Result<Value, String> {
+    host.file_preview(request).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_file_preview_page(
+    host: Host<'_>,
+    request: crate::services::assistant::file_preview::PageRequest,
+) -> Result<Value, String> {
+    host.file_preview_page(request).await
+}
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_file_preview_html(
+    host: Host<'_>,
+    request: crate::services::assistant::file_preview::VersionRequest,
+) -> Result<Value, String> {
+    host.file_preview_html(request).await
+}

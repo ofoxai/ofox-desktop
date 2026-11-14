@@ -419,10 +419,13 @@ background(s, "000000")
   },
 );
 
-test("validates clean", options, async (t) => {
-  const result = await build(
-    t,
-    `
+test(
+  "validates structurally and reports the legacy formula text panel",
+  options,
+  async (t) => {
+    const result = await build(
+      t,
+      `
 prs = new_deck(title="Clean", footer="Ofox quarterly")
 cover_slide(prs, "A cover", subtitle="With a subtitle", kicker="KICKER", meta="Prepared for the team", notes="Open with the claim.")
 section_slide(prs, "A section", number="01", subtitle="Where it starts", notes="Pause here.")
@@ -465,14 +468,19 @@ data.categories = ["A", "B", "C"]
 data.add_series("Sales", (1, 2, 3))
 s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(6.72), Inches(4.9), Inches(5.893), Inches(1.95), data)
 `,
-  );
-  const lint = JSON.parse(await readFile(result.lint, "utf8"));
-  assert.deepEqual(lint, []);
-  const validation = await office(t, "validate", result.out);
-  assert.deepEqual(validation.errors, []);
-  const issues = await office(t, "view", result.out, "issues");
-  assert.deepEqual(issues.issues, []);
-});
+    );
+    const lint = JSON.parse(await readFile(result.lint, "utf8"));
+    assert.equal(lint.length, 1);
+    assert.match(
+      lint[0],
+      /slide 3: legacy formula: ordinary text, not typeset mathematics/,
+    );
+    const validation = await office(t, "validate", result.out);
+    assert.deepEqual(validation.errors, []);
+    const issues = await office(t, "view", result.out, "issues");
+    assert.deepEqual(issues.issues, []);
+  },
+);
 
 test("validates the template itself", options, async (t) => {
   await requireEngine(officecli);
@@ -514,7 +522,7 @@ plot(s, fig, 0.72, 4.7, 5, 2, alt="small ticks")
   const lint = lines.join("\n");
   // Each helper line names its slide: the content slide is the second.
   assert.match(lint, /^slide 2: card "A card": text needs/m);
-  assert.match(lint, /^slide 2: steps: .*lower h/m);
+  assert.match(lint, /^slide 2: steps: .*drawn at/m);
   assert.match(lint, /^slide 2: figure "small figure": smallest text/m);
   // The model's own need() names a slide when it is given one.
   assert.deepEqual(

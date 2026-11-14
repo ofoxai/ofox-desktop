@@ -1,0 +1,84 @@
+{
+  "id": "course-module",
+  "family": "teaching",
+  "names": {
+    "zh": "课程模块",
+    "en": "Course Module",
+    "ja": "コースモジュール"
+  },
+  "intro": {
+    "zh": "暖白阅读底色、衬线标题、左侧学习目标栏，配绿色与橙色标记；适合课程讲授、技术培训和带练习的教学单元。",
+    "en": "Warm off-white reading pages, serif headings and a learning-objective rail with green and orange markers; for lessons, technical training and units with exercises.",
+    "ja": "温かいオフホワイトの紙面、セリフ体見出し、学習目標レール、緑とオレンジのマーカー。授業や技術研修向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "teaching",
+      "technical"
+    ],
+    "density": "medium",
+    "scheme": "light",
+    "tone": [
+      "academic",
+      "friendly"
+    ],
+    "suits": {
+      "data": 1,
+      "formulas": 1,
+      "images": 1,
+      "longText": 2
+    },
+    "avoid": "Executive pitches or brand launches that need large display statements."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "Source is a full-width page: kicker, large serif title with an italic phrase, description, three mono tag chips and a footer line; native adds a tinted left band with an orange rule, puts the title to its right and has no italic emphasis or chips."
+    },
+    {
+      "page": 2,
+      "archetype": "lesson",
+      "native": "lesson_slide + bullets",
+      "status": "approximate",
+      "differences": "Source rail is a narrow text column (course mark, five objectives with progress dots, module progress) split off by a hairline, and the main area holds four numbered white cards; native rail is a tinted box with an orange top rule holding one objective sentence, and the main area is a plain bullet list."
+    },
+    {
+      "page": 3,
+      "archetype": "lesson",
+      "native": "lesson_slide + bullets",
+      "status": "approximate",
+      "differences": "Source main area has an intro paragraph, a rule-of-thumb callout with an orange bar and two white cards with inline code chips beside the progress rail; the native lesson page has a single-objective tinted rail and a plain bullet list."
+    },
+    {
+      "page": 4,
+      "archetype": "code",
+      "native": "content_slide + code",
+      "status": "approximate",
+      "differences": "Source keeps the objective rail beside a dark code block with syntax colours and a trace callout below; the native code page has no rail, a full-width dark-green code block in one text colour and no callout."
+    },
+    {
+      "page": 5,
+      "archetype": "lesson",
+      "native": "lesson_slide + bullets",
+      "status": "approximate",
+      "differences": "Source shows the exercise as an orange-tinted bordered box with a numbered task list, a hint line and a time note in the rail; the native lesson page has a single-objective rail and a plain bullet list, no exercise box or numbering."
+    },
+    {
+      "page": 6,
+      "archetype": "lesson",
+      "native": "lesson_slide + bullets",
+      "status": "approximate",
+      "differences": "Source is a knowledge check: three lettered answer rows with the correct one highlighted green and an explanation; the native lesson page shows a plain bullet list with no answer rows or highlighted answer."
+    },
+    {
+      "page": 7,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is a full-width summary: large serif title, a 2 x 2 grid of white check-marked cards and an up-next callout; native is a content title with an orange marker and one row of three square tinted cards with a top bar, no check marks or callout."
+    }
+  ]
+}

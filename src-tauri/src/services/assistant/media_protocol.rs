@@ -76,6 +76,7 @@ fn open_file(
         .find(|f| {
             f.id == aid
                 && (f.origin.as_deref() == Some("generated")
+                    || (is_document(&f.mime_type) && f.selectable())
                     || (f.origin.as_deref() == Some("audio-input")
                         && matches!(f.mime_type.as_str(), "audio/wav" | "audio/mpeg")
                         && record.operations.iter().any(|op| {
@@ -188,6 +189,9 @@ fn serve(
         return empty(403);
     }
     let parts: Vec<_> = url.path().trim_start_matches('/').split('/').collect();
+    if parts.len() == 4 && parts[2] == "preview" {
+        return document_preview(store, parts[0], parts[1], parts[3], request.method());
+    }
     if parts.len() != 2 {
         return empty(400);
     }
@@ -233,6 +237,56 @@ fn serve(
         response = response.header("Content-Range", format!("bytes {start}-{end}/{len}"));
     }
     response.body(bytes).unwrap()
+}
+
+fn document_preview(
+    store: &AssistantStore,
+    sid: &str,
+    aid: &str,
+    page: &str,
+    method: &Method,
+) -> Response<Vec<u8>> {
+    use super::documents::preview;
+    let Some(page) = page
+        .parse::<u32>()
+        .ok()
+        .filter(|n| n.to_string() == page && (1..=preview::MAX_PAGE_NUMBER).contains(n))
+    else {
+        return empty(404);
+    };
+    let Ok((file, _, _)) = open_file(store, sid, aid) else {
+        return empty(404);
+    };
+    if !preview::pages(&file).contains(&page)
+        || !store
+            .load_record(sid)
+            .is_ok_and(|r| r.session.deleted_at.is_none())
+    {
+        return empty(404);
+    }
+    let Ok(directory) = store.attachment_root(sid) else {
+        return empty(404);
+    };
+    let Ok(bytes) = preview::read_jpeg(
+        &directory
+            .join(format!("{aid}.pages"))
+            .join(format!("{page}.jpg")),
+    ) else {
+        return empty(404);
+    };
+    Response::builder()
+        .status(200)
+        .header("Content-Type", "image/jpeg")
+        .header("Content-Length", bytes.len())
+        .header("Cache-Control", "no-store")
+        .header("X-Content-Type-Options", "nosniff")
+        .header("Content-Security-Policy", "default-src 'none'; sandbox")
+        .body(if method == Method::HEAD {
+            vec![]
+        } else {
+            bytes
+        })
+        .unwrap()
 }
 impl AssistantHost {
     pub async fn media_response(self: &Arc<Self>, request: Request<Vec<u8>>) -> Response<Vec<u8>> {
@@ -360,6 +414,191 @@ mod tests {
             ))
             .body(vec![])
             .unwrap()
+    }
+    #[test]
+    fn document_preview_is_scoped_and_serves_only_recorded_raster_pages() {
+        let (_root, store, owner, sid, aid) = fixture();
+        store
+            .mutate(&sid, |record| {
+                let file = &mut record.attachments[0];
+                file.mime_type =
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        .into();
+                file.name = "deck.pptx".into();
+                file.details =
+                    Some(json!({"documentPreview":{"mimeType":"image/jpeg","pages":[1]}}));
+                Ok(())
+            })
+            .unwrap();
+        let dir = store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{aid}.pages"));
+        std::fs::create_dir(&dir).unwrap();
+        let jpeg = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9";
+        std::fs::write(dir.join("1.jpg"), jpeg).unwrap();
+        std::fs::write(dir.join("2.jpg"), jpeg).unwrap();
+        let preview = |page: &str| {
+            Request::builder().uri(format!("assistant-media://localhost/{sid}/{aid}/preview/{page}?owner={owner}&generation=7")).body(vec![]).unwrap()
+        };
+        let response = serve(&store, &owner, 7, &preview("1"));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.headers()["content-type"], "image/jpeg");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert_eq!(response.body(), jpeg);
+        let mut head = preview("1");
+        *head.method_mut() = Method::HEAD;
+        assert!(serve(&store, &owner, 7, &head).body().is_empty());
+        let other_sid = store.create("test/model", false).unwrap().session.id;
+        let other = Request::builder().uri(format!("assistant-media://localhost/{other_sid}/{aid}/preview/1?owner={owner}&generation=7")).body(vec![]).unwrap();
+        assert_eq!(serve(&store, &owner, 7, &other).status(), 404);
+        std::fs::write(dir.join("1.jpg"), b"<svg onload='alert(1)'/>").unwrap();
+        assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+        std::fs::write(dir.join("1.jpg"), jpeg).unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::remove_file(dir.join("1.jpg")).unwrap();
+            std::os::unix::fs::symlink(dir.join("2.jpg"), dir.join("1.jpg")).unwrap();
+            assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+            std::fs::remove_file(dir.join("1.jpg")).unwrap();
+            std::fs::write(dir.join("1.jpg"), jpeg).unwrap();
+        }
+        for page in ["0", "2", "61", "../1", "%2e%2e", "1.svg"] {
+            assert!(serve(&store, &owner, 7, &preview(page))
+                .status()
+                .is_client_error());
+        }
+        assert_eq!(serve(&store, &owner, 8, &preview("1")).status(), 403);
+        assert_eq!(
+            serve(&store, &"cd".repeat(32), 7, &preview("1")).status(),
+            403
+        );
+        assert_eq!(
+            serve(&store, &owner, 7, &request(&owner, &sid, &aid)).status(),
+            404
+        );
+        store
+            .mutate(&sid, |record| {
+                record.attachments[0].details = None;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+        store
+            .mutate(&sid, |record| {
+                record.attachments.clear();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(serve(&store, &owner, 7, &preview("1")).status(), 404);
+    }
+    #[test]
+    fn preview_page_number_seventy_is_served_only_when_recorded_and_current() {
+        let (_root, store, owner, sid, aid) = fixture();
+        store
+            .mutate(&sid, |record| {
+                let file = &mut record.attachments[0];
+                file.mime_type =
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                        .into();
+                file.origin = Some("generated".into());
+                file.details =
+                    Some(json!({"documentPreview":{"mimeType":"image/jpeg","pages":[70]}}));
+                Ok(())
+            })
+            .unwrap();
+        let directory = store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{aid}.pages"));
+        std::fs::create_dir(&directory).unwrap();
+        let jpeg = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9";
+        for page in [70, 71, 1001] {
+            std::fs::write(directory.join(format!("{page}.jpg")), jpeg).unwrap();
+        }
+        let request = |page: &str| {
+            Request::builder().uri(format!("assistant-media://localhost/{sid}/{aid}/preview/{page}?owner={owner}&generation=7")).body(vec![]).unwrap()
+        };
+        let response = serve(&store, &owner, 7, &request("70"));
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), jpeg);
+        for page in ["071", "71", "1001"] {
+            assert!(serve(&store, &owner, 7, &request(page))
+                .status()
+                .is_client_error());
+        }
+        assert_eq!(serve(&store, &owner, 8, &request("70")).status(), 403);
+        assert_eq!(
+            serve(&store, &"ef".repeat(32), 7, &request("70")).status(),
+            403
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "explicit private runtime + real OfficeCLI SVG fixture; no network"]
+    async fn document_preview_real_raster_persist_protocol_roundtrip() {
+        let (root, store, owner, sid, aid) = fixture();
+        let runtime = PathBuf::from(std::env::var("OFOX_PREVIEW_RUNTIME").unwrap());
+        let svg = PathBuf::from(std::env::var("OFOX_PREVIEW_SVG").unwrap());
+        let input = root.path().join("input");
+        std::fs::create_dir(&input).unwrap();
+        let source = input.join("1.svg");
+        std::fs::copy(svg, &source).unwrap();
+        let images = super::super::documents::preview::raster(
+            &runtime,
+            &input,
+            &[source],
+            Some(Path::new("/usr/bin/sandbox-exec")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            images.len(),
+            1,
+            "actual OfficeCLI SVG must produce a raster"
+        );
+        let mid = id();
+        store.mutate(&sid,|record| {
+            record.attachments[0].mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation".into();
+            record.attachments[0].name="deck.pptx".into();
+            record.attachments[0].details=Some(json!({"format":"pptx","slides":1}));
+            record.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"completed","attachments":record.attachments})).unwrap());Ok(())
+        }).unwrap();
+        let media = super::super::types::MediaRecord {
+            kind: "document".into(),
+            tool_call_id: Some(id()),
+            params: json!({"documentPreview":{"mimeType":"image/jpeg","pages":[1]}}),
+            status: "completed".into(),
+            outputs: vec![aid.clone()],
+            ..Default::default()
+        };
+        super::super::attachments::keep_document_preview(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &images,
+            &media,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let req = Request::builder()
+            .uri(format!(
+                "assistant-media://localhost/{sid}/{aid}/preview/1?owner={owner}&generation=7"
+            ))
+            .body(vec![])
+            .unwrap();
+        let response = serve(&store, &owner, 7, &req);
+        assert_eq!(response.status(), 200);
+        assert!(!response.body().is_empty());
+        assert_eq!(response.body(), &images[0].1);
+        assert_eq!(serve(&store, &owner, 8, &req).status(), 403);
+        let snapshot = store.load_record(&sid).unwrap();
+        assert_eq!(
+            super::super::documents::preview::pages(&snapshot.attachments[0]),
+            [1]
+        );
+        println!("real OfficeCLI SVG -> sandboxed raster -> persisted cache -> authorized JPEG response: {} bytes",response.body().len());
     }
     #[test]
     fn protocol_serves_only_current_owner_generation_and_valid_media_ids() {
@@ -657,7 +896,7 @@ mod tests {
         "application/json",
     ];
     #[test]
-    fn open_file_allows_generated_documents() {
+    fn open_file_allows_owned_input_and_generated_documents() {
         for mime in DOCUMENT_MIMES {
             let (_root, store, _owner, sid, aid) = fixture();
             store
@@ -673,10 +912,19 @@ mod tests {
                     Ok(())
                 })
                 .unwrap();
-            assert_eq!(
-                open_file(&store, &sid, &aid).err().as_deref(),
-                Some("assistant_attachment_not_found"),
-                "{mime} must stay generated-only"
+            assert!(
+                open_file(&store, &sid, &aid).is_ok(),
+                "Owned input {mime} can be saved via the dialog"
+            );
+            store
+                .mutate(&sid, |record| {
+                    record.attachments[0].status = "missing".into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(
+                open_file(&store, &sid, &aid).is_err(),
+                "Missing input {mime} cannot be opened"
             );
         }
         let (_root, store, _owner, sid, aid) = fixture();

@@ -1,0 +1,345 @@
+{
+  "id": "weekly-report",
+  "family": "business",
+  "names": {
+    "zh": "周报仪表盘",
+    "en": "Weekly Report",
+    "ja": "週次レポート"
+  },
+  "intro": {
+    "zh": "干净的浅色仪表盘：蓝色小标记和小字眉题，深蓝黑粗标题，指标卡片左侧有一条彩色竖线，适合周报、项目进展和团队例会。",
+    "en": "A clean light dashboard: a small blue mark and kicker, bold navy titles, KPI tiles with a coloured bar on the left edge and plain status lists; for weekly reports, project updates and team reviews.",
+    "ja": "すっきりした明るいダッシュボード。小さな青いマークとキッカー、濃紺の太い見出し、左端に色のバーが付いた KPI タイル。週報、進捗報告、チーム定例向け。"
+  },
+  "routing": {
+    "scenarios": ["business-review", "general", "consulting"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["clear", "neutral", "operational"],
+    "suits": {
+      "data": 2,
+      "formulas": 0,
+      "images": 0,
+      "longText": 1
+    },
+    "avoid": "Launch keynotes, emotional storytelling and brand-led creative decks."
+  },
+  "theme": {
+    "colors": {
+      "background": "FAFBFC",
+      "card": "FFFFFF",
+      "primary": "161E37",
+      "secondary": "0EA5B5",
+      "accent": "2E63EB",
+      "text": "161E37",
+      "textSecondary": "50586B",
+      "textMuted": "6F778A",
+      "line": "E5E7EA",
+      "accentTint": "EAF0FD",
+      "dark": "161E37",
+      "onDark": "FFFFFF",
+      "onDarkMuted": "C9CEDA",
+      "surface": "FFFFFF",
+      "palette": ["FFFFFF", "F3F5F9"],
+      "chart": ["2E63EB", "0EA5B5", "F59E0B", "10B981", "EF4444", "8B92A5"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Arial",
+        "body": "Arial",
+        "data": "Arial"
+      },
+      "zh": {
+        "title": "Microsoft YaHei",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Gothic",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [54, 48, 40, 36],
+      "statement": [44, 40, 36, 30],
+      "title": [28, 26, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [14, 13, 12],
+      "kpi": [44, 36, 30]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 0.72,
+            "y": 2.75,
+            "w": 9.5,
+            "h": 2.0
+          },
+          "kicker": {
+            "x": 0.72,
+            "y": 2.3,
+            "w": 8,
+            "size": 12,
+            "color": "accent"
+          },
+          "meta": {
+            "x": 9.72,
+            "y": 1.61,
+            "w": 2.9,
+            "align": "center",
+            "size": 11,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.68,
+              "w": 0.16,
+              "h": 0.16,
+              "fill": "2E63EB",
+              "name": "brand square"
+            },
+            {
+              "kind": "round",
+              "x": 9.72,
+              "y": 1.5,
+              "w": 2.9,
+              "h": 0.44,
+              "radius": 0.08,
+              "fill": "FFFFFF",
+              "name": "week chip",
+              "line": "E5E7EA",
+              "lineW": 1.0
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 0.72,
+            "y": 2.75,
+            "w": 10.5,
+            "h": 2.0,
+            "sizes": [54, 48, 40, 36]
+          },
+          "number": {
+            "x": 0.72,
+            "y": 2.3,
+            "w": 4,
+            "size": 14,
+            "color": "accent"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.68,
+              "w": 0.16,
+              "h": 0.16,
+              "fill": "2E63EB",
+              "name": "brand square"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 0.72,
+            "y": 2.4,
+            "w": 10.8,
+            "h": 2.6
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.68,
+              "w": 0.16,
+              "h": 0.16,
+              "fill": "2E63EB",
+              "name": "brand square"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 0.72,
+            "y": 0.78,
+            "w": 11.9,
+            "h": 0.65
+          },
+          "body": {
+            "x": 0.72,
+            "y": 1.9,
+            "w": 11.9,
+            "h": 4.85
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "2E63EB",
+              "name": "brand square"
+            },
+            {
+              "kind": "rect",
+              "x": 0.98,
+              "y": 0.555,
+              "w": 0.9,
+              "h": 0.03,
+              "fill": "2E63EB",
+              "name": "kicker rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.7,
+            "y": 2.3,
+            "w": 9.9,
+            "h": 1.7,
+            "align": "center",
+            "anchor": "bottom",
+            "sizes": [66, 54, 44]
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.2,
+            "w": 8.9,
+            "align": "center",
+            "size": 18,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 4.47,
+            "y": 5.01,
+            "w": 4.4,
+            "align": "center",
+            "size": 11,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 6.2,
+              "y": 1.95,
+              "w": 0.9,
+              "h": 0.03,
+              "fill": "2E63EB",
+              "name": "kicker rule"
+            },
+            {
+              "kind": "round",
+              "x": 4.47,
+              "y": 4.9,
+              "w": 4.4,
+              "h": 0.44,
+              "radius": 0.08,
+              "fill": "FFFFFF",
+              "name": "chip",
+              "line": "E5E7EA",
+              "lineW": 1.0
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.06,
+          "fill": "card",
+          "line": "line",
+          "lineW": 1.0,
+          "bar": "left",
+          "barColor": "accent",
+          "barW": 0.05
+        },
+        "kpi": {
+          "style": "box"
+        },
+        "steps": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.06,
+          "fill": "card",
+          "line": "line",
+          "lineW": 1.0,
+          "bar": "left",
+          "barColor": "accent",
+          "barW": 0.05,
+          "gap": 0.25
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Clean near-white dashboard canvas; a small blue square and short blue rule sit above a bold navy title at the top left; content follows on one grid. The cover puts the period in a white chip at the top right; the closing is centred.",
+    "components": "White tiles with a hairline border and a blue bar on the left edge for KPIs, blockers and steps; values in bold navy; editable tables for owner lists; blue-first chart colours. No decoration beyond the mark and rule.",
+    "narrative": "Headline of the week, KPIs, shipped, metric deep-dive, blockers, next week, thanks.",
+    "nativeCoverage": "Cover, KPI tiles, list, bar chart, blocker cards, owner table and closing as native text, shapes, chart and table. Not reproduced: per-status bar colours (green, amber, red), delta chips inside tiles, tag chips and owner handles on list rows, the accent-coloured number inside the cover title, the gradient chart bars, emoji, Inter and JetBrains Mono."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "The blue-coloured figure inside the title is not coloured separately; the brand name next to the blue square is not drawn."
+    },
+    {
+      "page": 2,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Eight tiles in two rows with green, blue, amber and red bars and delta chips become one row of three tiles with blue bars and a note line."
+    },
+    {
+      "page": 3,
+      "archetype": "list",
+      "native": "content_slide + bullets",
+      "status": "approximate",
+      "differences": "Source rows have a coloured tag chip, a bold title with a description line, an owner handle and hairline separators; native is a plain bullet list."
+    },
+    {
+      "page": 4,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source chart sits in a white bordered card with its own heading, a target chip and a note line, with gradient bars; native is an editable chart on the canvas."
+    },
+    {
+      "page": 5,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Three stacked full-width blocker cards with red left bars and mono meta lines become a row of three cards with blue left bars."
+    },
+    {
+      "page": 6,
+      "archetype": "table",
+      "native": "content_slide + table",
+      "status": "approximate",
+      "differences": "Borderless owner rows with hairline separators become an editable table with a navy header row."
+    },
+    {
+      "page": 7,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "The emoji after the title is not drawn; two mono chips become one chip holding the meta line."
+    }
+  ]
+}

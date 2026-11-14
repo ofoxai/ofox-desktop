@@ -118,6 +118,15 @@ function titleRuleY(title, size) {
   return Math.min(TITLE_RULE_LOWEST, foot + TITLE_RULE_GAP_CM);
 }
 
+// A declarative ("spec") style draws its canvases, decoration shapes and block
+// styles in the Python helper only. This deck renderer gives it the open
+// editorial composition on the style's base canvas, with its own colours,
+// fonts and type sizes.
+function compositionOf(theme) {
+  const composition = theme.decor.composition;
+  return composition === "spec" ? "editorial" : composition;
+}
+
 // A content page opens with its title, sized to one line when it can be,
 // and the theme's rule under it. renderDeck adds the page number.
 function contentPage(ctx, title) {
@@ -125,8 +134,38 @@ function contentPage(ctx, title) {
   const heading = titleCommands(n, title, { theme, fonts });
   const commands = [
     slideCommand(n, { background: theme.colors.background, title }),
-    ...heading,
   ];
+  const composition = compositionOf(theme);
+  if (composition === "blueprint")
+    commands.push(
+      textboxCommand(n, `s${n}-alternating-panel`, undefined, {
+        x: n % 2 ? CANVAS.wCm - 13 : 0,
+        y: 0,
+        w: 13,
+        h: CANVAS.hCm,
+        fill: theme.colors.card,
+      }),
+    );
+  commands.push(...heading);
+  if (composition) {
+    const vertical = composition === "split" || composition === "blueprint";
+    commands.push(
+      textboxCommand(
+        n,
+        `s${n}-style-rule`,
+        undefined,
+        vertical
+          ? { x: 1.4, y: 1.1, w: 0.15, h: 3.25, fill: theme.colors.accent }
+          : {
+              x: CONTENT.x,
+              y: 4.45,
+              w: composition === "editorial" ? CONTENT.w : 5.5,
+              h: 0.06,
+              fill: theme.colors.accent,
+            },
+      ),
+    );
+  }
   if (theme.decor.titleRule === "bar")
     commands.push(
       textboxCommand(n, `s${n}-title-rule`, undefined, {
@@ -171,6 +210,7 @@ function fitCards(items, w, { headingSizes, bodySizes, bodyRoom, minH = 0 }) {
 // with a card on it made no file at all.
 function cardCommands(ctx, i, item, { x, y, w }, fitted) {
   const { colors } = ctx.theme;
+  const composition = compositionOf(ctx.theme);
   const inner = { x: x + CARD_PAD_CM, w: w - 2 * CARD_PAD_CM };
   const top = y + CARD_PAD_CM;
   return [
@@ -179,9 +219,20 @@ function cardCommands(ctx, i, item, { x, y, w }, fitted) {
       y,
       w,
       h: fitted.h,
-      fill: colors.card,
-      radius: true,
+      fill: composition === "editorial" ? colors.background : colors.card,
+      radius: composition ? undefined : true,
     }),
+    ...(composition
+      ? [
+          textboxCommand(ctx.n, `s${ctx.n}-card-rule-${i}`, undefined, {
+            x,
+            y,
+            w: composition === "course" ? 0.12 : w,
+            h: composition === "course" ? fitted.h : 0.045,
+            fill: colors.accent,
+          }),
+        ]
+      : []),
     textBox(
       ctx,
       `heading-${i}`,
@@ -214,6 +265,7 @@ const COVER_SMALL_PT = 16;
 function cover(ctx, title, lines) {
   const { n, theme, fonts } = ctx;
   const { colors, sizes } = theme;
+  if (compositionOf(theme)) return composedCover(ctx, title, lines);
   const size = oneLineSize(title, COVER_TITLE.w, sizes.hero, TITLE_FONT);
   const [heading] = titleCommands(n, title, {
     theme,
@@ -238,6 +290,129 @@ function cover(ctx, title, lines) {
         text,
         { x: CONTENT.x, y, w: CONTENT.w, h },
         { size: pt, color: colors.onDarkMuted, align: "center" },
+      ),
+    );
+    y += h + COVER_GAP_CM;
+  }
+  return commands;
+}
+
+// Native, bounded compositions adapted from the public resources recorded
+// in catalog.json. These preserve the source's hierarchy and asymmetry;
+// they do not interpret HTML or load its fonts, scripts or remote assets.
+function composedCover(ctx, title, lines) {
+  const { n, theme, fonts } = ctx;
+  const { colors, sizes } = theme;
+  const composition = compositionOf(theme);
+  const dark = ["launch", "blueprint"].includes(composition);
+  const boxes = {
+    split: { x: CONTENT.x, y: 4.7, w: 19, h: 5.4 },
+    editorial: { x: CONTENT.x, y: 5.4, w: CONTENT.w, h: 5 },
+    course: { x: CONTENT.x + 1.2, y: 4.3, w: 23, h: 5.8 },
+    launch: { x: CONTENT.x, y: 4.1, w: CONTENT.w, h: 6 },
+    blueprint: { x: n % 2 ? CONTENT.x : 14.5, y: 6.1, w: 17, h: 5.8 },
+  };
+  const box = boxes[composition];
+  const align = composition === "launch" ? "center" : "left";
+  const [heading] = titleCommands(n, title, {
+    theme,
+    fonts,
+    dark,
+    align,
+    box,
+    size: fitBox(title, box.w, box.h, sizes.hero).size,
+  });
+  const commands = [
+    slideCommand(n, {
+      background: dark ? colors.dark : colors.background,
+      title,
+    }),
+  ];
+  const ornament = (role, bounds, fill) =>
+    textboxCommand(n, `s${n}-${role}`, undefined, {
+      ...bounds,
+      fill,
+      preset: "rect",
+    });
+  if (composition === "split")
+    commands.push(
+      ornament(
+        "brand-panel",
+        { x: 25, y: 0, w: CANVAS.wCm - 25, h: CANVAS.hCm },
+        colors.primary,
+      ),
+    );
+  if (composition === "course")
+    commands.push(
+      ornament(
+        "lesson-rail",
+        { x: CONTENT.x, y: 3, w: 0.28, h: 12 },
+        colors.accent,
+      ),
+    );
+  if (composition === "editorial")
+    commands.push(
+      ornament(
+        "editorial-rule",
+        { x: CONTENT.x, y: 3.7, w: CONTENT.w, h: 0.05 },
+        colors.primary,
+      ),
+    );
+  if (composition === "launch")
+    commands.push(
+      ornament(
+        "launch-mark",
+        { x: 14, y: 2.8, w: 5.8, h: 0.13 },
+        colors.accent,
+      ),
+    );
+  if (composition === "blueprint") {
+    const panelX = n % 2 ? CANVAS.wCm - 13 : 0;
+    commands.push(
+      ornament(
+        "alternating-panel",
+        { x: panelX, y: 0, w: 13, h: CANVAS.hCm },
+        colors.card,
+      ),
+    );
+    for (const x of [panelX + 2, panelX + 6, panelX + 10])
+      commands.push(
+        ornament(`grid-${x}`, { x, y: 2, w: 0.025, h: 14 }, colors.primary),
+      );
+    for (const y of [3, 7, 11, 15])
+      commands.push(
+        ornament(
+          `grid-${y}-h`,
+          { x: panelX + 1, y, w: 11, h: 0.025 },
+          colors.primary,
+        ),
+      );
+    commands.push(
+      textBox(
+        ctx,
+        "navigation",
+        String(n).padStart(2, "0"),
+        { x: box.x, y: 2, w: 3, h: 1.5 },
+        { size: 28, color: colors.accent, font: fonts.data },
+      ),
+    );
+  }
+  commands.push({ ...heading, props: { ...heading.props, valign: "bottom" } });
+  let y = box.y + box.h + 0.5;
+  for (const { role, text, size } of lines) {
+    if (text === undefined) continue;
+    const h = fitBox(text, box.w, Infinity, [size]).h;
+    commands.push(
+      textBox(
+        ctx,
+        role,
+        text,
+        { x: box.x, y, w: box.w, h },
+        {
+          size,
+          align,
+          color: dark ? colors.onDarkMuted : colors.textSecondary,
+        },
       ),
     );
     y += h + COVER_GAP_CM;
@@ -361,6 +536,48 @@ const PILLAR_MIN_CM = 6;
 
 export function renderPillars(ctx, slide) {
   const { sizes } = ctx.theme;
+  if (compositionOf(ctx.theme) === "course") {
+    const [objective, ...topics] = slide.pillars;
+    const sidebarW = 7;
+    const w = CONTENT.w - sidebarW - GAP_CM;
+    const fitted = fitCards(topics, w, {
+      headingSizes: sizes.subtitle,
+      bodySizes: sizes.card,
+      bodyRoom: 1.8,
+      minH: 2,
+    });
+    const total = topics.length * fitted.h + (topics.length - 1) * 0.4;
+    const y = contentTop(total);
+    const goalFit = fitCards([objective], sidebarW, {
+      headingSizes: sizes.subtitle,
+      bodySizes: sizes.card,
+      bodyRoom: 8,
+      minH: Math.max(6, total),
+    });
+    return [
+      ...contentPage(ctx, slide.title),
+      ...cardCommands(
+        ctx,
+        1,
+        objective,
+        { x: CONTENT.x, w: sidebarW, y },
+        goalFit,
+      ),
+      ...topics.flatMap((item, index) =>
+        cardCommands(
+          ctx,
+          index + 2,
+          item,
+          {
+            x: CONTENT.x + sidebarW + GAP_CM,
+            w,
+            y: y + index * (fitted.h + 0.4),
+          },
+          fitted,
+        ),
+      ),
+    ];
+  }
   const slots = columns(slide.pillars.length);
   const fitted = fitCards(slide.pillars, slots[0].w, {
     headingSizes: sizes.subtitle,
@@ -882,7 +1099,9 @@ function assertOnPage(ctx, type, page) {
     const [x, y, w, h] = [props.x, props.y, props.width, props.height].map(
       (length) => Number.parseFloat(length),
     );
-    return x < 0 || y < 0 || x + w > CANVAS.wCm || y + h > CANVAS.hCm;
+    return (
+      x < 0 || y < 0 || x + w > CANVAS.wCm + 1e-9 || y + h > CANVAS.hCm + 1e-9
+    );
   });
   if (off)
     throw new Error(`slide ${ctx.n} (${type}): content does not fit the page`);

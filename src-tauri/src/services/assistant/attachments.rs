@@ -8,6 +8,7 @@ use super::{
     types::*,
 };
 use crate::config::FileTxn;
+use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -750,6 +751,73 @@ pub(super) fn keep_pages(
                 Err(error)
             }
         }
+    })
+}
+
+/// Publish derived JPEGs only after their bounded bytes are checked. The
+/// attachment record and copies roll back together; SVGs are never served.
+pub(super) fn keep_document_preview(
+    store: &AssistantStore,
+    sid: &str,
+    mid: &str,
+    aid: &str,
+    images: &[(u32, Vec<u8>)],
+    media: &MediaRecord,
+    precondition: impl FnOnce(&SessionRecord) -> Result<(), String>,
+) -> Result<(), String> {
+    use super::documents::preview;
+    validate_id(aid)?;
+    if images.is_empty() || images.len() > preview::MAX_PAGES as usize {
+        return Err(UNREADABLE.into());
+    }
+    store.with_attachment_lock(sid, || {
+        let dir = private_subdir(&store.attachment_dir(sid)?, &format!("{aid}{PAGES_SUFFIX}"))?;
+        let mut txn = FileTxn::new();
+        let saved = (|| {
+            let mut pages = vec![];
+            for (page, bytes) in images {
+                if !(1..=preview::MAX_PAGE_NUMBER).contains(page)
+                    || pages.contains(page)
+                    || !preview::valid_jpeg(bytes)
+                {
+                    return Err(UNREADABLE.into());
+                }
+                pages.push(*page);
+                let target = dir.join(format!("{page}.jpg"));
+                if fs::symlink_metadata(&target).is_ok() {
+                    return Err(WRITE_FAILED.into());
+                }
+                txn.write_with_mode(&target, bytes, 0o600)
+                    .map_err(|_| WRITE_FAILED)?;
+            }
+            store.mutate(sid, |record| {
+                precondition(record)?;
+                let update = |file: &mut Attachment| {
+                    if file.id == aid {
+                        if let Some(details) = file.details.as_mut().and_then(Value::as_object_mut)
+                        {
+                            details.insert(
+                                "documentPreview".into(),
+                                json!({"mimeType":"image/jpeg","pages":pages}),
+                            );
+                        }
+                    }
+                };
+                record.attachments.iter_mut().for_each(update);
+                let message = record
+                    .messages
+                    .iter_mut()
+                    .find(|m| m.id == mid)
+                    .ok_or("assistant_message_not_found")?;
+                message.attachments.iter_mut().for_each(update);
+                message.put_generation(media.clone());
+                Ok(())
+            })
+        })();
+        if saved.is_err() {
+            let _ = txn.rollback();
+        }
+        saved
     })
 }
 
@@ -2005,6 +2073,183 @@ mod tests {
         fs::create_dir(&unknown).unwrap();
         store.cleanup_orphan_attachments(&sid).unwrap();
         assert!(unknown.is_dir());
+    }
+
+    #[test]
+    fn preview_page_number_seventy_persists_and_roundtrips_backup() {
+        use std::io::Write;
+        let (_config, store, sid) = fixture();
+        let (mid, aid) = (id(), id());
+        store.mutate(&sid, |record| {
+            record.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"completed"})).unwrap());
+            Ok(())
+        }).unwrap();
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"PK\x03\x04 synthetic long deck").unwrap();
+        let mut media = MediaRecord {
+            tool_call_id: Some(id()),
+            kind: "document".into(),
+            params: json!({"name":"long-deck.pptx","format":"pptx","slides":70}),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        generated_file(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &mut source,
+            "long-deck.pptx",
+            media.clone(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let jpeg = b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9".to_vec();
+        let too_many: Vec<_> = (1..=61).map(|page| (page, jpeg.clone())).collect();
+        assert!(
+            keep_document_preview(&store, &sid, &mid, &aid, &too_many, &media, |_| Ok(())).is_err(),
+            "a high page-number limit must never increase the sixty-image publication bound"
+        );
+        assert!(keep_document_preview(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &[(1001, jpeg.clone())],
+            &media,
+            |_| Ok(())
+        )
+        .is_err());
+        media.params["documentPreview"] = json!({"mimeType":"image/jpeg","pages":[70]});
+        media.outputs = vec![aid.clone()];
+        keep_document_preview(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &[(70, jpeg.clone())],
+            &media,
+            |_| Ok(()),
+        )
+        .expect("one JPEG belonging to actual page seventy is a bounded batch");
+        let record = store.load_record(&sid).unwrap();
+        assert_eq!(
+            super::super::documents::preview::pages(&record.attachments[0]),
+            [70]
+        );
+        assert_eq!(
+            record.messages[0].attachments[0].details,
+            record.attachments[0].details
+        );
+        let archive = tempfile::tempdir().unwrap();
+        let path = archive.path().join("private-backup.zip");
+        assert_eq!(store.backup(&path, &[], || Ok(())).unwrap().sessions, 1);
+        let destination = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(destination.path(), &"ef".repeat(32)).unwrap();
+        assert_eq!(restored.restore(&path, &[], || Ok(())).unwrap().imported, 1);
+        assert_eq!(
+            fs::read(
+                restored
+                    .attachment_root(&sid)
+                    .unwrap()
+                    .join(format!("{aid}.pages/70.jpg"))
+            )
+            .unwrap(),
+            jpeg
+        );
+        assert_eq!(
+            super::super::documents::preview::pages(
+                &restored.load_record(&sid).unwrap().attachments[0]
+            ),
+            [70]
+        );
+    }
+
+    #[test]
+    fn document_preview_rolls_back_cancelled_publication_and_survives_backup() {
+        use std::io::Write;
+        let (_config, store, sid) = fixture();
+        let mid = id();
+        let aid = id();
+        store.mutate(&sid,|r| { r.messages.push(serde_json::from_value(json!({"id":mid,"role":"assistant","content":"","createdAt":1,"status":"completed"})).unwrap()); Ok(()) }).unwrap();
+        let mut source = tempfile::tempfile().unwrap();
+        source.write_all(b"PK\x03\x04 deck").unwrap();
+        let mut media = MediaRecord {
+            tool_call_id: Some(id()),
+            kind: "document".into(),
+            params: json!({"name":"deck.pptx","format":"pptx","slides":1}),
+            status: "completed".into(),
+            ..Default::default()
+        };
+        generated_file(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &mut source,
+            "deck.pptx",
+            media.clone(),
+            |_| Ok(()),
+        )
+        .unwrap();
+        let jpeg=b"\xff\xd8\xff\xc0\x00\x11\x08\x00\x01\x00\x01\x03\x01\x11\x00\x02\x11\x00\x03\x11\x00\xff\xd9".to_vec();
+        media.params["documentPreview"] = json!({"mimeType":"image/jpeg","pages":[1]});
+        media.outputs = vec![aid.clone()];
+        assert_eq!(
+            keep_document_preview(
+                &store,
+                &sid,
+                &mid,
+                &aid,
+                &[(1, jpeg.clone())],
+                &media,
+                |_| Err("cancelled".into())
+            )
+            .unwrap_err(),
+            "cancelled"
+        );
+        let path = store
+            .attachment_root(&sid)
+            .unwrap()
+            .join(format!("{aid}.pages"))
+            .join("1.jpg");
+        assert!(!path.exists());
+        keep_document_preview(
+            &store,
+            &sid,
+            &mid,
+            &aid,
+            &[(1, jpeg.clone())],
+            &media,
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), jpeg);
+        let record = store.load_record(&sid).unwrap();
+        assert_eq!(
+            record.attachments[0].details.as_ref().unwrap()["documentPreview"]["pages"],
+            json!([1])
+        );
+        assert_eq!(
+            record.messages[0].attachments[0].details,
+            record.attachments[0].details
+        );
+        let archive = tempfile::tempdir().unwrap();
+        let zip = archive.path().join("backup.zip");
+        assert_eq!(store.backup(&zip, &[], || Ok(())).unwrap().sessions, 1);
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &"ef".repeat(32)).unwrap();
+        assert_eq!(restored.restore(&zip, &[], || Ok(())).unwrap().imported, 1);
+        assert_eq!(
+            fs::read(
+                restored
+                    .attachment_root(&sid)
+                    .unwrap()
+                    .join(format!("{aid}.pages/1.jpg"))
+            )
+            .unwrap(),
+            jpeg
+        );
     }
 
     #[test]

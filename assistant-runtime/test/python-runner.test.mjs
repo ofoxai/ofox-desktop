@@ -51,14 +51,14 @@ test("starts its report on a line of its own", options, async (t) => {
 });
 
 // Exit 2 means the engine itself is broken (the host stops offering it);
-// exit 1 is the code's own failure.
-test("exits 2 when it is started wrongly", options, async () => {
+// exit 1 is a recoverable code or private-input failure.
+test("exits 1 when it is started with missing arguments", options, async () => {
   await requireEngine();
   const result = spawnSync(staged, [runner, "--assets", assets], {
     env: { PATH: process.env.PATH },
     encoding: "utf8",
   });
-  assert.equal(result.status, 2);
+  assert.equal(result.status, 1);
   assert.match(result.stderr, /^\nRunnerError: usage: /);
 });
 

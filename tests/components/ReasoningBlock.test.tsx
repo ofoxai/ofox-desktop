@@ -36,6 +36,22 @@ const live = (
 const after = (ms: number) => act(() => void vi.advanceTimersByTime(ms));
 
 describe("a reply's reasoning block", () => {
+  it("keeps reasoning secondary when a task card already presents progress", () => {
+    render(
+      <ReasoningBlock
+        compact
+        reasoning="Compare possible layouts"
+        thinking={live()}
+      />,
+    );
+    expect(
+      screen.getByText("Reasoning details").closest("summary"),
+    ).not.toBeNull();
+    expect(screen.queryByText(/Thinking for/)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText("Compare possible layouts")).not.toBeVisible();
+  });
+
   describe("while the reply is thinking", () => {
     beforeEach(() =>
       vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] }),
@@ -126,12 +142,28 @@ describe("a reply's reasoning block", () => {
       expect(screen.getByText("Thought for 4 seconds")).toBeVisible();
     });
 
-    it("counts a span that ended at once as one second", () => {
-      render(
+    it("hides a zero-duration finished span with no reasoning text", () => {
+      const { container } = render(
         <ReasoningBlock thinking={{ runId: "run", doneMs: 0, since: null }} />,
       );
-      expect(screen.getByText("Thought for 1 second")).toBeVisible();
+      expect(container).toBeEmptyDOMElement();
     });
+
+    it.each([1, 400, 1499])(
+      "keeps a positive %i ms finished span as a compact one-second caption",
+      (doneMs) => {
+        render(
+          <ReasoningBlock thinking={{ runId: "run", doneMs, since: null }} />,
+        );
+        expect(screen.getByText("Thought for 1 second")).toBeVisible();
+        expect(
+          screen
+            .getByText("Thought for 1 second")
+            .closest('[data-reasoning="caption"]'),
+        ).not.toBeNull();
+        expect(document.querySelector("details")).toBeNull();
+      },
+    );
   });
 
   describe("when there is nothing to say", () => {

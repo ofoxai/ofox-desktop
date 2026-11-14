@@ -317,3 +317,40 @@ test("bytes that are no image are refused, for the caller to skip", async () => 
   await assert.rejects(thumbnailFromSvg(Buffer.from("not an svg")));
   await assert.rejects(thumbnailFromPng(Buffer.from("not a png")));
 });
+
+test("native SVG text without a font family still draws CJK glyphs, not identical missing-glyph boxes", async () => {
+  // officecli writes chart tick labels as bare <text> elements. Missing
+  // glyphs draw the same box for every character, so two different
+  // characters must not produce the same picture.
+  const page = (label) =>
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120" viewBox="0 0 240 120"><rect width="240" height="120" fill="#FFFFFF"/><text x="120" y="80" fill="#000000" font-size="64" text-anchor="middle">${label}</text></svg>`,
+    );
+  const [first, second] = await Promise.all(
+    ["季", "度"].map((label) =>
+      thumbnailFromSvg(page(label), { maxEdge: 240, maxBytes: 64 * 1024 }),
+    ),
+  );
+  assert.notEqual(first.data, second.data);
+});
+
+test("font families are added to bare SVG text only, in time linear in the input", async () => {
+  const page = (inner) =>
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="120" viewBox="0 0 240 120"><rect width="240" height="120" fill="#FFFFFF"/>${inner}</svg>`,
+    );
+  // A ">" inside an attribute value must not produce a duplicate attribute.
+  const quoted = await thumbnailFromSvg(
+    page(
+      '<text data-l="a&gt;b" x="120" y="80" font-family="Arial" font-size="40" text-anchor="middle">Aa</text>',
+    ),
+    { maxEdge: 240, maxBytes: 64 * 1024 },
+  );
+  assert.equal(quoted.mimeType, "image/jpeg");
+  const started = Date.now();
+  await thumbnailFromSvg(page(`<!-- ${"<text ".repeat(120000)} -->`), {
+    maxEdge: 240,
+    maxBytes: 64 * 1024,
+  }).catch(() => {});
+  assert.ok(Date.now() - started < 3000, "no quadratic scan");
+});

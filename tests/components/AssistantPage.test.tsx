@@ -14,9 +14,11 @@ import en from "@/i18n/locales/en.json";
 import zh from "@/i18n/locales/zh.json";
 import ja from "@/i18n/locales/ja.json";
 import { AssistantPage } from "@/components/assistant/AssistantPage";
+import { PRESENTATION_STYLES } from "@/lib/assistantPresentationStyles";
 import { chipNotes } from "../utils/chipNotes";
 import { useAssistant } from "@/components/assistant/useAssistant";
 import { ShellProvider, useShell } from "@/components/shell/ShellContext";
+import { InteractionScope } from "@/components/ui/interaction-scope";
 import type {
   AssistantAttachment,
   AssistantBootstrap,
@@ -29,6 +31,16 @@ import type {
   AssistantSessionList,
 } from "@/lib/api/assistant";
 
+const previewMocks = vi.hoisted(() => ({
+  manifest: vi.fn(),
+  page: vi.fn(),
+  html: vi.fn(),
+}));
+vi.mock("@/lib/api/assistantPreview", async (original) => ({
+  ...(await original<typeof import("@/lib/api/assistantPreview")>()),
+  assistantPreviewApi: previewMocks,
+}));
+
 const mocks = vi.hoisted(() => ({
   bootstrap: vi.fn(),
   localChanges: vi.fn(),
@@ -36,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   setPermission: vi.fn(),
   respondApproval: vi.fn(),
   listSessions: vi.fn(),
+  listSkills: vi.fn(),
   createSession: vi.fn(),
   getSession: vi.fn(),
   updateSession: vi.fn(),
@@ -500,6 +513,7 @@ beforeEach(async () => {
   });
   mocks.setSearchProvider.mockImplementation(async (r) => r.provider);
   mocks.listSessions.mockImplementation(async () => listOf([current.session]));
+  mocks.listSkills.mockResolvedValue([]);
   mocks.createSession.mockImplementation(async () => current.session);
   mocks.getSession.mockImplementation(async () => current);
   mocks.updateSession.mockImplementation(async (patch) => {
@@ -1455,7 +1469,7 @@ describe("internal records", () => {
       } as object),
     };
     await openConversation();
-    expect(await screen.findByText("Thinking…")).toBeVisible();
+    expect(await screen.findByText("Working on your request")).toBeVisible();
     act(() => {
       // Event types this build does not know are ignored.
       mocks.listener?.({
@@ -1606,7 +1620,7 @@ describe("running a reply", () => {
     );
     expect(await screen.findByText("Hi there")).toBeVisible();
     expect(await screen.findByRole("button", { name: "Send" })).toBeVisible();
-    expect(screen.queryByText("Thinking…")).toBeNull();
+    expect(screen.queryByText("Working on your request")).toBeNull();
   });
 
   it("keeps original messages visible while submitting an edited version", async () => {
@@ -2372,7 +2386,9 @@ describe("attachments", () => {
       "Reading a file…",
     );
     read("file-png");
-    expect(within(reply()).getByRole("status")).toHaveTextContent("Thinking…");
+    expect(within(reply()).getByRole("status")).toHaveTextContent(
+      "Working on your request",
+    );
   });
 
   describe("stops saying it reads the files once the model is at work, even without their outcome", () => {
@@ -2416,20 +2432,24 @@ describe("attachments", () => {
         success: true,
         details: {},
       });
-      expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Working on your request",
+      );
     });
 
-    it("on a create_document tool_start, says it is making the document", async () => {
+    it.each([
+      ["create_document", "Generating a document…"],
+      ["get_presentation_style", "Querying presentation styles…"],
+      ["use_skill", "Reading skill guidance…"],
+    ])("on %s, shows the actual tool activity", async (name, label) => {
       const emit = await sendFiles();
       emit("tool_start", {
         messageId: "reply",
-        name: "create_document",
+        name,
         toolCallId: "c1",
-        args: { name: "deck.pptx", format: "pptx", content: [] },
+        args: {},
       });
-      expect(screen.getByRole("status")).toHaveTextContent(
-        "Generating a document…",
-      );
+      expect(screen.getByRole("status")).toHaveTextContent(label);
     });
   });
 
@@ -3378,7 +3398,7 @@ describe("run edges", () => {
       }),
     );
     expect(document.body).not.toHaveTextContent("assistant_request");
-    expect(screen.getByText("Thinking…")).toBeVisible();
+    expect(screen.getByText("Working on your request")).toBeVisible();
     act(() =>
       mocks.listener?.({
         ...sent,
@@ -4107,7 +4127,7 @@ describe("web search", () => {
     // status of its own).
     const status = () =>
       [
-        "Thinking…",
+        "Working on your request",
         "Searching the web…",
         "Reading a page…",
         "Reading a file…",
@@ -4136,7 +4156,7 @@ describe("web search", () => {
     start("web_search", "c1", { query: "pi release" });
     expect(status()).toEqual(["Searching the web…"]);
     end("web_search", "c1", "search_failed");
-    expect(status()).toEqual(["Thinking…"]);
+    expect(status()).toEqual(["Working on your request"]);
     act(() =>
       mocks.listener?.({
         ...sent,
@@ -4151,10 +4171,10 @@ describe("web search", () => {
     end("read_attachment", "c3");
     expect(status()).toEqual(["Reading a page…"]);
     end("web_fetch", "c2");
-    expect(status()).toEqual([]);
-    // A tool this build doesn't know shows nothing.
+    expect(status()).toEqual(["Working on your request"]);
+    // An unknown tool keeps the safe generic task status.
     start("shell_exec", "c4");
-    expect(status()).toEqual([]);
+    expect(status()).toEqual(["Working on your request"]);
     for (const internal of [
       "web_search",
       "web_fetch",
@@ -4245,7 +4265,7 @@ describe("web search", () => {
     expect(screen.queryByRole("list", { name: "Sources" })).toBeNull();
     expect(screen.queryByRole("button", { name: /source/ })).toBeNull();
     expect(screen.queryByText(/Web search was unavailable/)).toBeNull();
-    expect(screen.getByText("Thinking…")).toBeVisible();
+    expect(screen.getByText("Working on your request")).toBeVisible();
   });
 
   it("can't be turned on, and says why, when search is unavailable", async () => {
@@ -6557,6 +6577,38 @@ describe("scrolling to the end of a conversation", () => {
     expect(other).toHaveFocus();
   });
 
+  it.each([true, false])(
+    "updates scrolling when no-intent repeated operation records change (following=%s)",
+    async (following) => {
+      const area = await openRunning();
+      const startRead = (toolCallId: string) =>
+        act(() =>
+          mocks.listener?.({
+            sessionId: "session-a",
+            ...run,
+            type: "tool_start",
+            data: { messageId: "a", name: "read", toolCallId, args: {} },
+          }),
+        );
+      startRead("first-read");
+      const activity = screen.getByRole("list", { name: "Recent operations" });
+      expect(within(activity).getAllByRole("listitem")).toHaveLength(1);
+      scrollToTop(area, following ? 2500 : 1000);
+      expect(screen.queryByTestId("scroll-to-end-dot")).toBeNull();
+      geometry.height = 3400;
+      startRead("second-read");
+      expect(within(activity).getAllByRole("listitem")).toHaveLength(1);
+      expect(within(activity).getByText("2 recent calls")).toBeVisible();
+      if (following) {
+        expect(geometry.top).toBe(3400);
+        expect(toEnd()).toBeNull();
+      } else {
+        expect(geometry.top).toBe(1000);
+        expect(screen.getByTestId("scroll-to-end-dot")).toBeInTheDocument();
+      }
+    },
+  );
+
   it("follows a reply the reader has not left", async () => {
     const area = await openRunning();
     scrollToTop(area, 2500);
@@ -7009,59 +7061,94 @@ describe("thinking", () => {
   describe("the live timer", () => {
     afterEach(() => vi.useRealTimers());
 
-    it("counts from the first sign of thinking to the first text, then says how long it thought", async () => {
+    it("shows one task timer while reasoning stays secondary, then restores the saved reasoning duration", async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       await openConversation();
       const emit = emitFor(await startRun());
       const reply = () => screen.getByRole("article", { name: "Assistant" });
       expect(within(reply()).getByRole("status")).toHaveTextContent(
-        "Thinking…",
+        "Working on your request",
       );
-      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       emit("thinking_start", { messageId: "reply" });
-      // The caption takes the place of the plain "Thinking…" line: that is
-      // said once, to assistive tech only.
-      expect(within(reply()).getByRole("status")).toHaveClass("sr-only");
-      // Never less than a second, as the finished reply says it.
-      expect(screen.getByText("Thinking for 1 second")).toBeVisible();
+      const progress = within(reply()).getByRole("region", {
+        name: "Task progress",
+      });
+      expect(within(progress).getByRole("status")).toHaveTextContent(
+        "Organizing the next steps",
+      );
+      expect(within(progress).getByRole("status")).not.toHaveClass("sr-only");
+      expect(screen.queryByText(/Thinking for/)).toBeNull();
+      expect(screen.getByText("Elapsed 00:00")).toBeVisible();
       act(() => void vi.advanceTimersByTime(3000));
-      expect(screen.getByText("Thinking for 3 seconds")).toBeVisible();
+      expect(screen.getByText("Elapsed 00:03")).toBeVisible();
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       act(() => void vi.advanceTimersByTime(1000));
-      expect(screen.getByText("Thinking for 4 seconds")).toBeVisible();
+      expect(screen.getByText("Elapsed 00:04")).toBeVisible();
+      expect(screen.getByText("Reasoning details")).toBeVisible();
       emit("text_delta", { messageId: "reply", delta: "Answer" });
       act(() => void vi.advanceTimersByTime(10_000));
+      expect(screen.getByText("Elapsed 00:14")).toBeVisible();
+      emit("message", {
+        message: {
+          id: "reply",
+          role: "assistant",
+          content: "Answer",
+          reasoning: "Hmm",
+          reasoningMs: 4000,
+          status: "completed",
+          createdAt: 2,
+        },
+      });
       expect(screen.getByText("Thought for 4 seconds")).toBeVisible();
+      expect(
+        screen.queryByRole("region", { name: "Task progress" }),
+      ).toBeNull();
       expect(screen.queryByText(/Thinking for/)).toBeNull();
     });
 
-    it("rounds the live seconds as the finished caption does", async () => {
+    it("keeps task elapsed time distinct from rounded saved reasoning seconds", async () => {
+      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       await openConversation();
       const emit = emitFor(await startRun());
-      vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       emit("thinking_start", { messageId: "reply" });
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       act(() => void vi.advanceTimersByTime(4600));
-      expect(screen.getByText("Thinking for 5 seconds")).toBeVisible();
+      expect(screen.getByText("Elapsed 00:04")).toBeVisible();
+      expect(screen.getByText("Reasoning details")).toBeVisible();
       emit("thinking_end", { messageId: "reply" });
       act(() => void vi.advanceTimersByTime(10_000));
+      expect(screen.getByText("Elapsed 00:14")).toBeVisible();
+      emit("message", {
+        message: {
+          id: "reply",
+          role: "assistant",
+          content: "Answer",
+          reasoning: "Hmm",
+          reasoningMs: 4600,
+          status: "completed",
+          createdAt: 2,
+        },
+      });
       expect(screen.getByText("Thought for 5 seconds")).toBeVisible();
     });
 
-    it("draws the live caption in the box the finished reasoning keeps", async () => {
+    it("shows a disclosure only after reasoning text arrives", async () => {
       await openConversation();
       const emit = emitFor(await startRun());
       vi.useFakeTimers({ toFake: ["Date", "setInterval", "clearInterval"] });
       emit("thinking_start", { messageId: "reply" });
-      const box = () =>
-        screen
-          .getByText(/Thinking for|Thought for/)
-          .closest("[data-reasoning]");
-      const before = box();
-      expect(before).not.toBeNull();
+      expect(screen.getByText("Organizing the next steps")).toBeVisible();
+      expect(document.querySelector("[data-reasoning]")).toBeNull();
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
-      expect(box()?.className).toBe(before?.className);
+      // A non-delta event flushes the animation-frame batch first.
       emit("thinking_end", { messageId: "reply" });
-      expect(box()?.className).toBe(before?.className);
+      const disclosure = screen
+        .getByText("Hmm")
+        .closest("details[data-reasoning]");
+      expect(disclosure).not.toBeNull();
+      expect(disclosure).not.toHaveAttribute("open");
+      expect(disclosure).not.toHaveClass("bg-card-2");
+      expect(screen.getByText("Reasoning details")).toBeVisible();
     });
 
     it("keeps the saved duration once the reply is saved and the transcript is read again", async () => {
@@ -7366,6 +7453,72 @@ describe("generation tools", () => {
     expect(screen.queryByRole("radio", { name: /Image/ })).toBeNull();
   });
 
+  it.each(["history", "draft"] as const)(
+    "opens an uploaded attachment from its %s chip without sending or creating a conversation",
+    async (where) => {
+      const file: AssistantAttachment = {
+        id: "input-deck",
+        name: "Input-deck.pptx",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        sizeBytes: 100,
+        status: "ready",
+        reason: null,
+        details: null,
+      };
+      current.attachments = [file];
+      if (where === "history")
+        current.messages = [
+          {
+            id: "question",
+            role: "user",
+            content: "Read this",
+            createdAt: 1,
+            attachments: [file],
+          },
+        ];
+      else current.session.draftAttachmentIds = [file.id];
+      previewMocks.manifest.mockResolvedValue({
+        attachmentId: file.id,
+        name: file.name,
+        version: "a".repeat(64),
+        kind: "pptx",
+        totalPages: 70,
+        width: 1280,
+        height: 720,
+        readyPages: [],
+        limits: { maxPagesPerRequest: 1, maxPage: null },
+        warnings: [],
+      });
+      previewMocks.page.mockImplementation(async (request) => ({
+        attachmentId: file.id,
+        version: request.version,
+        page: request.page,
+        mimeType: "image/jpeg",
+        dataBase64: "/9j/2Q==",
+        width: 1280,
+        height: 720,
+      }));
+      await openConversation();
+      await userEvent.click(
+        screen.getByRole("button", { name: "Preview Input-deck.pptx" }),
+      );
+      expect(
+        await screen.findByRole("complementary", { name: "File workspace" }),
+      ).toBeVisible();
+      await waitFor(() =>
+        expect(previewMocks.manifest).toHaveBeenCalledWith({
+          sessionId: session.id,
+          attachmentId: file.id,
+          expectedOwner: capabilities.owner,
+          expectedGeneration: capabilities.authorityGeneration,
+        }),
+      );
+      expect(mocks.send).not.toHaveBeenCalled();
+      expect(mocks.createSession).not.toHaveBeenCalled();
+    },
+  );
+
   it("starts a generation from the empty state with its chip on and an example to edit", async () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
@@ -7399,6 +7552,303 @@ describe("generation tools", () => {
     expect(screen.queryByRole("button", { name: "Polish writing" })).toBeNull();
   });
 
+  it("opens the PPT style library without changing the draft or sending a request", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    const trigger = await screen.findByRole("button", { name: "Make a deck" });
+    const input = composer();
+    await userEvent.click(trigger);
+    expect(input).toHaveValue("");
+    const dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    expect(
+      within(
+        within(dialog).getByRole("radiogroup", {
+          name: i18n.t("assistant.presentation.options"),
+        }),
+      ).getAllByRole("radio"),
+    ).toHaveLength(PRESENTATION_STYLES.length + 1);
+    expect(
+      within(dialog).getByRole("radio", { name: "Automatic" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    expect(mocks.quoteMedia).not.toHaveBeenCalled();
+    expect(mocks.regenerateMedia).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Cancel" }),
+    );
+    expect(composer()).toHaveValue("");
+    expect(trigger).toHaveFocus();
+  });
+
+  it("offers opt-in presentation visual settings beside the PPT style without starting generation", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Use this style" }),
+    );
+    // A narrow composer wraps its controls rather than letting them overlap.
+    const controls = screen.getByTestId("composer-controls");
+    expect(controls).toHaveClass("flex-wrap", "[&>*]:shrink-0");
+    const images = screen.getByRole("combobox", { name: "Slide images" });
+    expect(images).toHaveTextContent("Images: No images");
+    await userEvent.click(images);
+    expect(screen.getByRole("option", { name: /Set number/ })).toBeVisible();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(composer()).toHaveValue("");
+  });
+
+  it("selects a PPT style without a canned topic and sends the chosen ID only on Send", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    const dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.click(
+      within(dialog).getByRole("radio", { name: "Cartesian" }),
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Use this style" }),
+    );
+    expect(composer()).toHaveValue("");
+    expect(composer()).toHaveFocus();
+    expect(composer()).toHaveAttribute(
+      "placeholder",
+      i18n.t("assistant.presentation.promptPlaceholder"),
+    );
+    expect(
+      screen.getByRole("button", { name: "Change PPT style" }),
+    ).toHaveTextContent("PPT · Cartesian");
+    expect(mocks.send).not.toHaveBeenCalled();
+    await userEvent.type(composer(), "Transformer for students, 10 slides");
+    await userEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+    expect(mocks.send).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        text: "Transformer for students, 10 slides",
+        presentationStyleId: "cartesian",
+      }),
+    );
+  });
+
+  it("keeps an existing draft, files and selected skill when PPT styles are cancelled or changed", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    const source: AssistantAttachment = {
+      id: "style-reference",
+      name: "reference.txt",
+      mimeType: "text/plain",
+      sizeBytes: 32,
+      status: "ready",
+      reason: null,
+      previewUrl: null,
+      details: null,
+    };
+    current.attachments = [source];
+    current.session.draftAttachmentIds = [source.id];
+    mocks.listSkills.mockResolvedValue([
+      {
+        name: "research-notes",
+        description: "Use attached research notes",
+        mode: "manual",
+        reviewed: false,
+        origin: "local",
+      },
+    ]);
+    await openConversation();
+    await userEvent.type(composer(), "/research");
+    await userEvent.click(
+      await screen.findByRole("option", { name: /research-notes/ }),
+    );
+    const draft = "Keep my topic, audience and existing references.";
+    await userEvent.type(composer(), draft);
+    const trigger = plusButton();
+    await choosePlus("PPT styles");
+    let dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(trigger).toHaveFocus();
+    expect(composer()).toHaveValue(draft);
+    expect(
+      screen.getByRole("button", { name: "Remove reference.txt" }),
+    ).toBeVisible();
+    expect(screen.getByText("Skill: research-notes")).toBeVisible();
+    await choosePlus("PPT styles");
+    dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.click(
+      within(dialog).getByRole("radio", { name: "Cartesian" }),
+    );
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Use this style" }),
+    );
+    expect(composer()).toHaveValue(draft);
+    expect(
+      screen.getByRole("button", { name: "Remove reference.txt" }),
+    ).toBeVisible();
+    expect(screen.getByText("Skill: research-notes")).toBeVisible();
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.quoteMedia).not.toHaveBeenCalled();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Change PPT style" }),
+    );
+    dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.click(
+      within(dialog).getByRole("radio", { name: "Automatic" }),
+    );
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Use this style" }),
+    );
+    expect(
+      screen.getByRole("button", { name: "Change PPT style" }),
+    ).toHaveTextContent("PPT · Automatic");
+    expect(composer()).toHaveValue(draft);
+    await userEvent.click(
+      screen.getByRole("button", { name: "Remove PPT style" }),
+    );
+    expect(
+      screen.queryByRole("button", { name: "Change PPT style" }),
+    ).toBeNull();
+    expect(composer()).toHaveValue(draft);
+    expect(composer()).toHaveFocus();
+    expect(composer()).toHaveAttribute(
+      "placeholder",
+      i18n.t("assistant.composerPlaceholder"),
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("discards an open PPT style dialog when its retained page is hidden", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    const view = render(<InteractionScope active>{page()}</InteractionScope>);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    expect(
+      screen.getByRole("dialog", {
+        name: i18n.t("assistant.presentation.title"),
+      }),
+    ).toBeVisible();
+    view.rerender(<InteractionScope active={false}>{page()}</InteractionScope>);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    view.rerender(<InteractionScope active>{page()}</InteractionScope>);
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Change PPT style" }),
+    ).toBeNull();
+    expect(composer()).toHaveValue("");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it("closes the PPT style library across account authority changes and starts with Automatic", async () => {
+    const runtime = {
+      ...capabilities.runtime,
+      documents: { formats: ["pptx"] },
+    };
+    mocks.bootstrap.mockResolvedValue({ ...capabilities, runtime });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    let dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.click(
+      within(dialog).getByRole("radio", { name: "Cartesian" }),
+    );
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Use this style" }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Change PPT style" }),
+    );
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime,
+      owner: "b".repeat(64),
+      authorityGeneration: 2,
+    });
+    await act(async () => mocks.auth?.("restored"));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(
+      screen.queryByRole("button", { name: "Change PPT style" }),
+    ).toBeNull();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    expect(
+      within(dialog).getByRole("radio", { name: "Automatic" }),
+    ).toHaveAttribute("aria-checked", "true");
+    expect(mocks.send).not.toHaveBeenCalled();
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it.each(["no-pptx", "no-tools", "running"] as const)(
+    "does not open PPT style selection when %s makes it unavailable",
+    async (state) => {
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        models: capabilities.models.map((model) => ({
+          ...model,
+          tools: state !== "no-tools",
+        })),
+        runtime: {
+          ...capabilities.runtime,
+          documents: { formats: state === "no-pptx" ? ["pdf"] : ["pptx"] },
+        },
+      });
+      if (state === "running")
+        current.session.activeRun = {
+          runId: "existing-run",
+          operationId: "existing-op",
+        };
+      await openConversation();
+      const item = await plusItem("PPT styles");
+      expect(item).toHaveAttribute("aria-disabled", "true");
+      await userEvent.click(item);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(mocks.send).not.toHaveBeenCalled();
+    },
+  );
+
   it("shows the deck starter only when pptx is available", async () => {
     const withFormats = (formats?: string[]) =>
       mocks.bootstrap.mockResolvedValue({
@@ -7420,12 +7870,22 @@ describe("generation tools", () => {
     }
     withFormats(["pdf", "pptx"]);
     render(page());
+    await screen.findByRole("button", { name: "Make a deck" });
+    const input = composer();
     await userEvent.click(
       await screen.findByRole("button", { name: "Make a deck" }),
     );
-    expect(composer()).toHaveValue(
-      "Make a presentation: a 6-slide introduction to remote-work habits for new teammates, clean layout, one key idea per slide.",
+    expect(input).toHaveValue("");
+    const dialog = screen.getByRole("dialog", {
+      name: i18n.t("assistant.presentation.title"),
+    });
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Use this style" }),
     );
+    expect(composer()).toHaveValue("");
+    expect(
+      screen.getByRole("button", { name: "Change PPT style" }),
+    ).toHaveTextContent("PPT · Automatic");
     expect(mocks.send).not.toHaveBeenCalled();
   });
 
@@ -7455,6 +7915,197 @@ describe("generation tools", () => {
       "Polish writing",
     ]);
   });
+
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    "keeps an open document preview and its page when a streamed reply becomes saved history (versioned=%s, savedSnapshot=%s)",
+    async (versioned, savedSnapshot) => {
+      previewMocks.manifest.mockImplementation(async (request) => ({
+        attachmentId: request.attachmentId,
+        name: "live-deck.pptx",
+        version: "a".repeat(64),
+        kind: "pptx",
+        totalPages: 70,
+        width: 1280,
+        height: 720,
+        readyPages: [1, 4],
+        limits: { maxPagesPerRequest: 1, maxPage: null },
+        warnings: [],
+      }));
+      previewMocks.page.mockImplementation(async (request) => ({
+        attachmentId: request.attachmentId,
+        version: request.version,
+        page: request.page,
+        mimeType: "image/jpeg",
+        dataBase64: "/9j/2Q==",
+        width: 1280,
+        height: 720,
+      }));
+      await openConversation();
+      const emit = await startRun();
+      const sent = mocks.send.mock.calls[0][0];
+      const questions: AssistantMessage[] = versioned
+        ? [
+            {
+              id: "old-question",
+              role: "user",
+              content: "Old request",
+              nativeEntryId: "old-native",
+              branchFrom: null,
+              superseded: true,
+              createdAt: 1,
+            },
+            {
+              id: "question",
+              role: "user",
+              content: "Current request",
+              nativeEntryId: "current-native",
+              branchFrom: null,
+              runId: sent.runId,
+              createdAt: 2,
+            },
+          ]
+        : [];
+      if (versioned)
+        emit("steer_applied", { messages: questions, messageId: "reply" });
+      const file: AssistantAttachment = {
+        id: "deck-live",
+        name: "live-deck.pptx",
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        sizeBytes: 482_000,
+        status: "ready",
+        reason: null,
+        origin: "generated",
+        sourceMessageId: "reply",
+        details: {
+          documentPreview: { mimeType: "image/jpeg", pages: [1, 4] },
+        },
+      };
+      const generation = {
+        toolCallId: "live-document",
+        kind: "document" as const,
+        model: "",
+        params: { name: "live-deck", format: "pptx", slides: 4 },
+        inputIds: [],
+        status: "completed" as const,
+        outputs: [file.id],
+        cost: "0",
+      };
+      emit("generation", {
+        messageId: "reply",
+        generation,
+        attachments: [file],
+      });
+      await userEvent.click(
+        screen.getByRole("button", { name: "Preview live-deck.pptx" }),
+      );
+      const dialog = await screen.findByRole("complementary", {
+        name: "File workspace",
+      });
+      await within(dialog).findByRole("figure", { name: "Page 1" });
+      await userEvent.click(
+        within(dialog).getByRole("button", { name: "Next page" }),
+      );
+      expect(
+        await within(dialog).findByRole("img", { name: "Page 2" }),
+      ).toBeVisible();
+      const reply: AssistantMessage = {
+        id: "reply",
+        role: "assistant",
+        content: "Your deck is ready.",
+        status: "completed",
+        createdAt: 3,
+        runId: sent.runId,
+        attachments: [file],
+        generations: [generation as never],
+      };
+      if (savedSnapshot) {
+        emit("message", { message: reply });
+        expect(dialog).toBeVisible();
+        expect(
+          within(dialog).getByRole("img", { name: "Page 2" }),
+        ).toBeVisible();
+      }
+      let finishRefresh!: (detail: AssistantSessionDetail) => void;
+      mocks.getSession.mockReturnValueOnce(
+        new Promise<AssistantSessionDetail>((resolve) => {
+          finishRefresh = resolve;
+        }),
+      );
+      emit("run_end", { status: "completed", stopped: false });
+      // The run is already cleared while persisted history is still loading.
+      expect(dialog).toBeVisible();
+      expect(
+        await within(dialog).findByRole("img", { name: "Page 2" }),
+      ).toBeVisible();
+      await act(async () => {
+        finishRefresh({ ...current, messages: [...questions, reply] });
+      });
+      expect(
+        screen.getByRole("complementary", { name: "File workspace" }),
+      ).toBe(dialog);
+      expect(
+        await within(dialog).findByRole("img", { name: "Page 2" }),
+      ).toBeVisible();
+      expect(
+        screen.getAllByRole("button", {
+          name: "Preview live-deck.pptx",
+          hidden: true,
+        }),
+      ).toHaveLength(1);
+      await userEvent.type(composer(), "Please revise ");
+      const sends = mocks.send.mock.calls.length;
+      await userEvent.click(
+        within(dialog).getByRole("button", { name: "More preview actions" }),
+      );
+      await userEvent.click(
+        screen.getByRole("menuitem", { name: "Quote current page" }),
+      );
+      expect(composer().value).toContain("Please revise");
+      expect(composer().value).toContain("live-deck.pptx · Page 2");
+      expect(mocks.send).toHaveBeenCalledTimes(sends);
+      expect(
+        screen.getByRole("list", { name: "Referenced files and pages" }),
+      ).toHaveTextContent("live-deck.pptx · Page 2");
+      expect(
+        screen.getByRole("combobox", { name: "Slide images" }),
+      ).toBeVisible();
+      await userEvent.click(
+        within(dialog).getByRole("button", { name: "More preview actions" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("menuitem", { name: "Optimize page visuals" }),
+      );
+      expect(composer().value).toContain(
+        "Optimize the visual layout of page 2",
+      );
+      await userEvent.click(
+        within(dialog).getByRole("button", { name: "More preview actions" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("menuitem", { name: "Replace page image" }),
+      );
+      expect(composer().value).toContain("Replace the illustration on page 2");
+      expect(mocks.send).toHaveBeenCalledTimes(sends);
+      await userEvent.click(
+        within(dialog).getByRole("button", { name: "Close file workspace" }),
+      );
+      expect(
+        screen.queryByRole("complementary", { name: "File workspace" }),
+      ).toBeNull();
+      expect(screen.getByRole("button", { name: "Files (1)" })).toHaveFocus();
+      await userEvent.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(mocks.send).toHaveBeenCalledTimes(sends + 1));
+      expect(mocks.send.mock.calls.at(-1)![0].fileReferences).toEqual([
+        { attachmentId: file.id, version: "a".repeat(64), page: 2 },
+      ]);
+    },
+  );
 
   it("saves a generated document and opens it from its card", async () => {
     mocks.saveMedia.mockReset().mockResolvedValue(true);
@@ -8859,6 +9510,35 @@ describe("local configuration in the conversation", () => {
     ).toBeVisible();
   });
 
+  it("shows a useful task surface before a plan and separates waiting for approval from execution", async () => {
+    localSession();
+    await openConversation();
+    const emit = await startRun();
+    const progress = screen.getByRole("region", { name: "Task progress" });
+    expect(progress).toHaveTextContent("Working on your request");
+    expect(within(progress).queryByRole("progressbar")).toBeNull();
+    emit("tool_start", {
+      messageId: "reply",
+      name: "read",
+      toolCallId: "read-guidance",
+      intent: "Inspect content_slide/panel_slide internals",
+    });
+    expect(
+      screen.getByText("Inspect content_slide/panel_slide internals"),
+    ).not.toBeVisible();
+    emit("approval", approval);
+    expect(within(progress).getByRole("status")).toHaveTextContent(
+      "Waiting for your approval",
+    );
+    expect(progress).toHaveTextContent(
+      "Review the operation below to continue.",
+    );
+    emit("approval_end", { approvalId: approval.approvalId });
+    expect(within(progress).getByRole("status")).not.toHaveTextContent(
+      "Waiting for your approval",
+    );
+  });
+
   it("shows the run's step and plan inside the streaming reply, and an approval card after it", async () => {
     localSession();
     await openConversation();
@@ -9003,4 +9683,80 @@ it("shows request retry progress only for the followed run and clears it when te
   await waitFor(() =>
     expect(screen.queryByText("Retrying… (2/2)")).not.toBeInTheDocument(),
   );
+});
+
+describe("text cost pause threshold copy", () => {
+  const locales = [
+    [
+      "zh",
+      zh,
+      "已达到本轮设置的费用暂停阈值，后续请求已暂停。已发出的请求及其重试仍可能产生额外费用。",
+    ],
+    [
+      "en",
+      en,
+      "The cost pause threshold set for this run has been reached. Further requests are paused. Requests already sent and their retries may add charges.",
+    ],
+    [
+      "ja",
+      ja,
+      "この実行に設定した費用の一時停止しきい値に達したため、以降のリクエストを停止しました。送信済みのリクエストとその再試行には追加料金が発生する場合があります。",
+    ],
+  ] as const;
+
+  describe.each(locales)("in %s", (language, resource, expected) => {
+    it.each(["0.10", "1", undefined])(
+      "does not invent an amount for banner or saved-message threshold %s",
+      async (threshold) => {
+        current.messages = [
+          {
+            id: "threshold-question",
+            role: "user",
+            runId: "old-threshold-run",
+            content: "Create a presentation",
+            createdAt: 1,
+            ...(threshold === undefined
+              ? {}
+              : {
+                  presentationVisualPolicy: {
+                    mode: "off",
+                    maxImages: 0,
+                    maxCostUsd: "0",
+                    textMaxCostUsd: threshold,
+                  },
+                }),
+          },
+          {
+            id: "threshold-reply",
+            role: "assistant",
+            runId: "old-threshold-run",
+            content: "",
+            createdAt: 2,
+            status: "error",
+            errorCode: "assistant_cost_limit",
+          },
+        ];
+        mocks.send.mockRejectedValueOnce("assistant_cost_limit");
+        await openConversation();
+        i18n.addResourceBundle(language, "translation", resource, true, true);
+        await act(async () => {
+          await i18n.changeLanguage(language);
+        });
+        await userEvent.type(
+          screen.getByRole("textbox", { name: i18n.t("assistant.message") }),
+          "Continue",
+        );
+        await userEvent.click(
+          screen.getByRole("button", { name: i18n.t("assistant.send") }),
+        );
+        const alert = await screen.findByRole("alert");
+        expect(alert).toHaveTextContent(expected);
+        expect(screen.getAllByText(expected)).toHaveLength(2);
+        expect(alert).not.toHaveTextContent(
+          /\$1|USD\s*1|1\s*(?:美元|ドル)|hard (?:spending )?cap|费用上限/,
+        );
+        expect(mocks.send).toHaveBeenCalledTimes(1);
+      },
+    );
+  });
 });

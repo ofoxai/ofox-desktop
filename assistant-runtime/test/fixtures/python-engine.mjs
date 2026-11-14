@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { lstatSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,7 +13,19 @@ import yauzl from "yauzl";
 // code file, and the staged Python engine assets. Where the engine is offered
 // (macOS) a missing asset fails the test; elsewhere the test cannot run.
 export const root = fileURLToPath(new URL("../../", import.meta.url));
-export const staged = path.join(root, "resources/node/node");
+const testNode = process.env.OFOX_PYTHON_TEST_NODE;
+if (testNode !== undefined) {
+  assert.ok(
+    path.isAbsolute(testNode),
+    "OFOX_PYTHON_TEST_NODE must be absolute",
+  );
+  const metadata = lstatSync(testNode);
+  assert.ok(
+    metadata.isFile() && !metadata.isSymbolicLink(),
+    "OFOX_PYTHON_TEST_NODE must be a regular file",
+  );
+}
+export const staged = testNode ?? path.join(root, "resources/node/node");
 export const assets = path.join(root, "resources/engines/python");
 export const officecli = path.join(
   root,
@@ -102,3 +115,10 @@ export async function zipEntries(file) {
   });
   return entries;
 }
+
+/**
+ * Lint lines without the advisory "content stops in the upper half" finding,
+ * for tests whose small sample pages are about something else.
+ */
+export const withoutDensity = (lines) =>
+  lines.filter((line) => !/the lower part is empty/.test(line));

@@ -33,3 +33,9 @@ copilot-api
 CODEBUDDY.md
 latest.json
 .real-eval/
+
+# Pinned, licensed dependency used only by the isolated source-deck preview.
+!assistant-runtime/skills/ofox-office-pptx/resources/preview-dependencies/chartjs/4.6.1/chart.umd.min.js
+
+# Local officecli updater state (backed up outside Git).
+.officecli/

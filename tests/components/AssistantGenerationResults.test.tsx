@@ -1,4 +1,10 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "i18next";
@@ -216,38 +222,42 @@ describe("a generated document", () => {
       message: `Problem ${index + 1}`,
       path: `/slide[${index + 1}]`,
     }));
-  const documentCards = (
+  const documentView = (
     item: AssistantGeneration,
     handlers: {
       onSave?: (file: AssistantAttachment) => Promise<unknown>;
       onSaveAndOpen?: (file: AssistantAttachment) => Promise<unknown>;
+      files?: AssistantAttachment[];
+      owner?: string;
+      generation?: number;
+      onOpenArtifact?: (file: AssistantAttachment) => void;
     } = {},
-  ) =>
-    render(
-      <GenerationCards
-        message={
-          {
-            id: "reply",
-            role: "assistant",
-            content: "",
-            createdAt: 0,
-            attachments: [deck],
-            generations: [item],
-          } as unknown as AssistantMessage
-        }
-        sessionId="s1"
-        owner="o"
-        generation={1}
-        models={models}
-        onSave={handlers.onSave ?? vi.fn().mockResolvedValue(true)}
-        onSaveAndOpen={
-          handlers.onSaveAndOpen ?? vi.fn().mockResolvedValue(true)
-        }
-        onCancelVideo={vi.fn()}
-        onResumeVideo={vi.fn()}
-        onRegenerate={vi.fn()}
-      />,
-    );
+  ) => (
+    <GenerationCards
+      message={
+        {
+          id: "reply",
+          role: "assistant",
+          content: "",
+          createdAt: 0,
+          attachments: handlers.files ?? [deck],
+          generations: [item],
+        } as unknown as AssistantMessage
+      }
+      sessionId="s1"
+      owner={handlers.owner ?? "o"}
+      generation={handlers.generation ?? 1}
+      models={models}
+      onSave={handlers.onSave ?? vi.fn().mockResolvedValue(true)}
+      onSaveAndOpen={handlers.onSaveAndOpen ?? vi.fn().mockResolvedValue(true)}
+      onCancelVideo={vi.fn()}
+      onResumeVideo={vi.fn()}
+      onRegenerate={vi.fn()}
+      onOpenArtifact={handlers.onOpenArtifact}
+    />
+  );
+  const documentCards = (...args: Parameters<typeof documentView>) =>
+    render(documentView(...args));
 
   it("renders a document card with counts and both buttons", () => {
     documentCards(document());
@@ -265,6 +275,135 @@ describe("a generated document", () => {
     ).toBeNull();
     expect(card.querySelector("img, audio, video")).toBeNull();
     expect(within(card).queryByRole("button", { name: /issue/ })).toBeNull();
+  });
+
+  it("states the scope of PPTX checks without claiming visual or formula acceptance", () => {
+    documentCards(document({ issues: [] }));
+    const card = screen.getByRole("region", { name: "Document" });
+    expect(card).toHaveTextContent("Automatic checks: structure and layout");
+    expect(card).toHaveTextContent(
+      "Visual appearance and formula correctness remain unverified.",
+    );
+    expect(card).not.toHaveTextContent(/0 issues|all checks passed/i);
+  });
+
+  it("keeps existing issues beside the PPTX check scope", () => {
+    documentCards(document({ issues: issues(2) }));
+    expect(screen.getByRole("button", { name: "2 issues" })).toBeVisible();
+    expect(
+      screen.getByText("Automatic checks: structure and layout"),
+    ).toBeVisible();
+  });
+
+  it("does not add presentation checks to other document formats", () => {
+    documentCards(document({ format: "md", slides: undefined }));
+    expect(
+      screen.queryByText(/Automatic checks|formula correctness/),
+    ).toBeNull();
+  });
+
+  const previewDeck: AssistantAttachment = {
+    ...deck,
+    details: { documentPreview: { mimeType: "image/jpeg", pages: [1, 4] } },
+  };
+
+  it("opens a generated document in the file workspace without opening a second modal", async () => {
+    const onOpenArtifact = vi.fn();
+    documentCards(document(), { files: [previewDeck], onOpenArtifact });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Preview q3-review.pptx" }),
+    );
+    expect(onOpenArtifact).toHaveBeenCalledExactlyOnceWith(previewDeck);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it.each([true, false, undefined, "true"])(
+    "labels a math compatibility preview only for an explicit true flag (%s)",
+    async (previewUsesMathFallback) => {
+      documentCards(document(), {
+        files: [
+          {
+            ...previewDeck,
+            details: { ...previewDeck.details, previewUsesMathFallback },
+          },
+        ],
+      });
+      const hint = "Compatibility preview: formula editing remains unverified.";
+      expect(screen.queryByText(hint) !== null).toBe(
+        previewUsesMathFallback === true,
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Preview q3-review.pptx" }),
+      );
+      expect(
+        within(screen.getByRole("dialog")).queryByText(hint) !== null,
+      ).toBe(previewUsesMathFallback === true);
+    },
+  );
+
+  it("previews only persisted page numbers through the account-scoped route", async () => {
+    documentCards(document(), { files: [previewDeck] });
+    const trigger = screen.getByRole("button", {
+      name: "Preview q3-review.pptx",
+    });
+    const cover = within(trigger).getByRole("img", { name: "Page 1" });
+    expect(cover.getAttribute("src")).toContain(
+      "/s1/deck-1/preview/1?owner=o&generation=1",
+    );
+    await userEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "q3-review.pptx" });
+    await userEvent.click(
+      within(dialog).getByRole("button", { name: "Next page" }),
+    );
+    expect(within(dialog).getByRole("img", { name: "Page 4" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("/preview/4?owner=o&generation=1"),
+    );
+    expect(within(dialog).getByRole("status")).toHaveTextContent("Page 4");
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("keeps saving available if the document thumbnail cannot load", async () => {
+    const onSave = vi.fn().mockResolvedValue(true);
+    documentCards(document(), { files: [previewDeck], onSave });
+    fireEvent.error(screen.getByRole("img", { name: "Page 1" }));
+    expect(
+      screen.getByText("Preview unavailable. You can still save the file."),
+    ).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Save…" }));
+    expect(onSave).toHaveBeenCalledExactlyOnceWith(previewDeck);
+  });
+
+  it("does not treat an old attachment preview URL as a document preview", () => {
+    documentCards(document(), {
+      files: [
+        { ...deck, previewUrl: "https://invalid.example/private-preview" },
+      ],
+    });
+    expect(screen.queryByRole("img")).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Preview/ })).toBeNull();
+  });
+
+  it("closes an old preview when account authority changes", async () => {
+    const shown = documentCards(document(), { files: [previewDeck] });
+    await userEvent.click(
+      screen.getByRole("button", { name: "Preview q3-review.pptx" }),
+    );
+    expect(screen.getByRole("dialog")).toBeVisible();
+    shown.rerender(
+      documentView(document(), {
+        files: [previewDeck],
+        owner: "another-owner",
+        generation: 2,
+      }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("img", { name: "Page 1" })).toHaveAttribute(
+      "src",
+      expect.stringContaining("owner=another-owner&generation=2"),
+    );
   });
 
   it.each([
@@ -431,10 +570,9 @@ describe("regenerating with other parameters", () => {
     const dialog = await screen.findByRole("dialog", {
       name: "Regenerate with other parameters",
     });
-    expect(within(dialog).getByRole("img", { name: "First frame" })).toHaveAttribute(
-      "src",
-      expect.stringContaining("frame-1"),
-    );
+    expect(
+      within(dialog).getByRole("img", { name: "First frame" }),
+    ).toHaveAttribute("src", expect.stringContaining("frame-1"));
     expect(
       within(dialog).getByRole("textbox", { name: "Prompt sent" }),
     ).toHaveValue("the girl raises her hand");
@@ -477,7 +615,11 @@ describe("a finished video", () => {
               image({
                 kind: "video",
                 model: "video/test",
-                params: { duration: 5, resolution: "720p", firstFrameId: "frame-1" },
+                params: {
+                  duration: 5,
+                  resolution: "720p",
+                  firstFrameId: "frame-1",
+                },
                 outputs: ["movie-1"],
               } as never),
             ],

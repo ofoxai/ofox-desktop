@@ -44,6 +44,7 @@ const runtime = new AssistantRuntime({
       }
       signal?.addEventListener("abort", cancel, { once: true });
       pending.set(id, {
+        acceptSecrets: (values) => runtime.addHostSecrets(params, values),
         resolve: (result) => {
           signal?.removeEventListener("abort", cancel);
           resolve(result);
@@ -138,6 +139,21 @@ async function handle(line) {
     if (!request.method && pending.has(request.id)) {
       const call = pending.get(request.id);
       pending.delete(request.id);
+      // The sideband belongs to this already-pending private operation. It
+      // must be accepted before resolving content or formatting an error;
+      // it is never passed to the tool's result/details or the model.
+      if (
+        Object.hasOwn(request, "knownSecrets") &&
+        !call.acceptSecrets(request.knownSecrets)
+      ) {
+        call.reject(
+          Object.assign(new Error("Invalid private Host redaction update"), {
+            code: "assistant_protocol_error",
+            outcomeUnknown: true,
+          }),
+        );
+        return;
+      }
       if (request.error)
         call.reject(
           Object.assign(

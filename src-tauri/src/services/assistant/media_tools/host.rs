@@ -83,6 +83,60 @@ struct AskedPreview {
     made_at: Option<u64>,
 }
 
+/// Ordinary images one presentation reply may make while the deck's image
+/// setting is off.
+const UNPLANNED_DECK_IMAGES: usize = 2;
+
+/// Whether an image call may go on in a presentation turn. With the deck's
+/// images on, every picture goes through the plan's budget (`complete`: it
+/// names the plan, revision and asset). With them off, a picture the user's
+/// message asks for is still made, as an ordinary image the plan then places
+/// (`user-image`): a small fixed number, since no budget covers it. `total`
+/// is the reply's images so far plus this call's.
+fn deck_image_gate(
+    requires_plan: bool,
+    complete: bool,
+    planned: bool,
+    images_on: bool,
+    total: usize,
+) -> Result<(), String> {
+    if requires_plan && !planned && !images_on {
+        return if total > UNPLANNED_DECK_IMAGES {
+            Err(format!("assistant_presentation_image_budget: slide images are off; at most {UNPLANNED_DECK_IMAGES} pictures the user's message asks for can be made in one reply"))
+        } else {
+            Ok(())
+        };
+    }
+    if (planned || requires_plan) && !complete {
+        return Err("assistant_presentation_image_budget: freeze a page plan and explicitly authorize an image budget before image generation".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn with_deck_images_off_an_asked_for_picture_is_made_but_only_a_couple() {
+        // Outside a presentation turn nothing changes.
+        assert!(deck_image_gate(false, false, false, false, 8).is_ok());
+        // Images off: the picture the message asks for, without a plan.
+        assert!(deck_image_gate(true, false, false, false, 1).is_ok());
+        assert!(deck_image_gate(true, false, false, false, 2).is_ok());
+        let refused = deck_image_gate(true, false, false, false, 3).unwrap_err();
+        assert!(refused.contains("slide images are off"), "{refused}");
+        // Images on: only through the plan and its budget.
+        assert!(deck_image_gate(true, false, false, true, 1)
+            .unwrap_err()
+            .contains("freeze a page plan"));
+        assert!(deck_image_gate(true, true, true, true, 1).is_ok());
+        // A half-named plan is refused whatever the setting.
+        assert!(deck_image_gate(true, false, true, false, 1).is_err());
+        assert!(deck_image_gate(false, false, true, false, 1).is_err());
+    }
+}
+
 impl MediaRun {
     pub fn new(defaults: MediaDefaults) -> Self {
         Self {
@@ -415,8 +469,35 @@ impl AssistantHost {
         media: &MediaRun,
         mid: &str,
         call_id: &str,
-        args: ImageArgs,
+        mut args: ImageArgs,
     ) -> Result<Value, String> {
+        let planned = args.presentation_asset_id.is_some()
+            || args.plan_id.is_some()
+            || args.revision.is_some();
+        if planned && args.n.is_none() {
+            // A planned asset is one image; generic composer batch defaults
+            // must not silently multiply its budget or outputs.
+            args.n = Some(1);
+        }
+        let requires_plan = run.presentation_enabled
+            && (run.presentation_context
+                || run.presentation_style_id.is_some()
+                || run
+                    .presentation
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .current()
+                    .is_some());
+        let images_on = run.presentation.lock().map_err(|_| STATE)?.images_on();
+        deck_image_gate(
+            requires_plan,
+            args.presentation_asset_id.is_some()
+                && args.plan_id.is_some()
+                && args.revision.is_some(),
+            planned,
+            images_on,
+            media.images.load(Ordering::SeqCst) + args.n.map_or(1, usize::from),
+        )?;
         let defaults = media.defaults.image.as_ref();
         let catalog = self.models(&run.identity.apex).await?;
         let model = pick_model(
@@ -427,28 +508,105 @@ impl AssistantHost {
         )?
         .clone();
         let (prompt, request) = image_request(&model, defaults, &args, 0)?;
+        let prompt = if let Some(asset) = args.presentation_asset_id.as_deref() {
+            format!(
+                "{}\n{}",
+                run.presentation
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .image_guidance(asset)
+                    .chars()
+                    .take(1000)
+                    .collect::<String>(),
+                prompt
+            )
+        } else {
+            prompt
+        };
         let prompt = scrub_secrets(&prompt, &run.secrets());
+        if prompt.chars().count() > MAX_PROMPT_CHARS {
+            return Err(refuse(INVALID,"Image prompt plus presentation style guidance exceeds the 4000-character limit; shorten the prompt"));
+        }
         let count = request.count();
-        media.reserve_images(count)?;
+        let reservation = if planned {
+            // A per-image price is held as it is; a token-priced model holds
+            // the most this generation can cost.
+            let quote = model.image.as_ref().and_then(|caps| {
+                caps.per_image_price.clone().or_else(|| {
+                    media::token_upper_bound(caps, &prompt, &request).map(|bound| {
+                        bound
+                            .round_dp_with_strategy(6, rust_decimal::RoundingStrategy::AwayFromZero)
+                            .normalize()
+                            .to_string()
+                    })
+                })
+            });
+            let token = run.presentation.lock().map_err(|_| STATE)?.reserve_image(
+                args.plan_id.as_deref().ok_or(INVALID)?,
+                args.revision.ok_or(INVALID)?,
+                args.presentation_asset_id.as_deref().ok_or(INVALID)?,
+                count,
+                quote.as_deref(),
+            )?;
+            Some(token)
+        } else {
+            None
+        };
+        if let Err(error) = media.reserve_images(count) {
+            if let Some(token) = &reservation {
+                run.presentation
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .release_image(token, true);
+            }
+            return Err(error);
+        }
         let outcome = self
-            .make_image(run, mid, call_id, &model, &prompt, &request)
+            .make_image(
+                run,
+                (mid, call_id),
+                &model,
+                &prompt,
+                &request,
+                planned.then_some(&args),
+            )
             .await;
         if outcome.as_ref().is_err_and(|(_, unbilled)| *unbilled) {
             media.release_images(count);
+            if let Some(token) = &reservation {
+                run.presentation
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .release_image(token, true);
+            }
         }
-        outcome.map_err(|(error, _)| error)
+        let mut outcome = outcome.map_err(|(error, _)| error)?;
+        if let Some(token) = &reservation {
+            let aid = outcome["files"]
+                .as_array()
+                .filter(|files| files.len() == 1)
+                .and_then(|files| files[0]["id"].as_str())
+                .ok_or("assistant_presentation_asset_invalid")?;
+            let asset = args.presentation_asset_id.as_deref().ok_or(INVALID)?;
+            self.bind_presentation_image(run, token, asset, aid).await?;
+            outcome["presentationAssetId"] = json!(asset);
+            outcome["planId"] = json!(args.plan_id);
+            outcome["revision"] = json!(args.revision);
+        }
+        Ok(outcome)
     }
 
     /// Generate and save the images of one call: `Err((code, unbilled))`.
     async fn make_image(
         &self,
         run: &Arc<RunControl>,
-        mid: &str,
-        call_id: &str,
+        origin: (&str, &str),
         model: &Model,
         prompt: &str,
         request: &ImageRequest,
+        presentation: Option<&ImageArgs>,
     ) -> Result<Value, (String, bool)> {
+        let (mid, call_id) = origin;
         let unsent = |error: String| (error, true);
         let record = self.load(run).await.map_err(unsent)?;
         attachments::tool_room(
@@ -489,16 +647,17 @@ impl AssistantHost {
             status: "submitting".into(),
             ..Default::default()
         };
+        if let Some(plan) = presentation {
+            record_media.params["presentationPlanId"] = json!(plan.plan_id);
+            record_media.params["presentationRevision"] = json!(plan.revision);
+            record_media.params["presentationAssetId"] = json!(plan.presentation_asset_id);
+        }
         self.save_generation(run, mid, &record_media)
             .await
             .map_err(unsent)?;
         let gateway = self.env.gateway_base(&run.identity.apex).map_err(unsent)?;
         let client = crate::proxy::http_client::assistant_media_client().map_err(unsent)?;
-        let mut key = run
-            .secrets()
-            .last()
-            .cloned()
-            .ok_or_else(|| unsent("assistant_key_rejected".into()))?;
+        let mut key = run.ofox_key().map_err(unsent)?;
         let mut result = media_http::request(
             &client,
             &gateway,
@@ -528,7 +687,6 @@ impl AssistantHost {
                 .key_for_retry(run, &json!({ "apiKey": key }))
                 .await
                 .map_err(unsent)?;
-            run.add_secret(&key);
             self.remember_key(&key);
             self.validate_run(run).map_err(unsent)?;
             result = media_http::request(
@@ -674,11 +832,7 @@ impl AssistantHost {
         let (frames, references) = encode_materials(&plan, &files);
         let gateway = self.env.gateway_base(&run.identity.apex)?;
         let client = crate::proxy::http_client::assistant_media_client()?;
-        let mut key = run
-            .secrets()
-            .last()
-            .cloned()
-            .ok_or("assistant_key_rejected")?;
+        let mut key = run.ofox_key()?;
         let frames: Vec<(&str, String)> = frames.iter().map(|(k, v)| (*k, v.clone())).collect();
         let references: Vec<(&str, String)> =
             references.iter().map(|(k, v)| (*k, v.clone())).collect();
@@ -709,7 +863,6 @@ impl AssistantHost {
                 break;
             }
             key = self.key_for_retry(run, &json!({ "apiKey": key })).await?;
-            run.add_secret(&key);
             self.remember_key(&key);
             self.validate_run(run)?;
             result = video_http::create(
@@ -835,18 +988,13 @@ impl AssistantHost {
         })
         .await?;
         let gateway = self.env.gateway_base(&run.identity.apex)?;
-        let key = run
-            .secrets()
-            .last()
-            .cloned()
-            .ok_or("assistant_key_rejected")?;
+        let key = run.ofox_key()?;
         let mut result = speech::http::synthesize(&client, &gateway, &key, &model, &request).await;
         if result
             .as_ref()
             .is_err_and(|e| e.code == "assistant_key_rejected")
         {
             let key = self.key_for_retry(run, &json!({ "apiKey": key })).await?;
-            run.add_secret(&key);
             self.remember_key(&key);
             self.validate_run(run)?;
             result = speech::http::synthesize(&client, &gateway, &key, &model, &request).await;
@@ -1530,6 +1678,9 @@ fn regeneration_args(
     let model = Some(request.model.clone());
     Ok(match source.kind.as_str() {
         "image" => Regeneration::Image(ImageArgs {
+            presentation_asset_id: None,
+            plan_id: None,
+            revision: None,
             prompt: request.prompt.clone(),
             model,
             size: text("size"),

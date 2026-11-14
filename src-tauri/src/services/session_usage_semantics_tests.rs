@@ -85,8 +85,14 @@ fn c(id: &str, tokens: [u64; 4]) -> Value {
 fn claude_path(home: &Path) -> PathBuf {
     home.join(".claude/projects/p/s.jsonl")
 }
+// Reconciliation accepts recent events only. Keep one stable day per test
+// process so fixture rewrites remain identical without aging out of retention.
+static RECENT_CODEX_DAY: std::sync::LazyLock<chrono::NaiveDate> =
+    std::sync::LazyLock::new(|| (chrono::Utc::now() - chrono::Duration::days(1)).date_naive());
 fn x(n: u32, info: Value) -> Value {
-    json!({"type":"event_msg","timestamp":format!("2026-10-15T00:00:{n:02}Z"),
+    let at = RECENT_CODEX_DAY.and_hms_opt(0, 0, 0).unwrap().and_utc()
+        + chrono::Duration::seconds(i64::from(n));
+    json!({"type":"event_msg","timestamp":at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         "payload":{"type":"token_count","info":info}})
 }
 fn total(input: u64, output: u64, cached: u64) -> Value {

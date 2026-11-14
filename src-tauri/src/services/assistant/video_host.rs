@@ -360,11 +360,7 @@ impl AssistantHost {
         let gateway = self.env.gateway_base(&run.identity.apex)?;
         let params: VideoRequest =
             serde_json::from_value(media.params.clone()).map_err(|_| media::INVALID)?;
-        let key = run
-            .secrets()
-            .last()
-            .cloned()
-            .ok_or("assistant_key_rejected")?;
+        let key = run.ofox_key()?;
         self.validate_run(run).map_err(Failure::unsent)?;
         let mut result = video_http::create(
             &client,
@@ -390,7 +386,6 @@ impl AssistantHost {
                 .key_for_retry(run, &json!({"apiKey":key}))
                 .await
                 .map_err(Failure::unsent)?;
-            run.add_secret(&key);
             self.remember_key(&key);
             self.validate_run(run).map_err(Failure::unsent)?;
             result = video_http::create(
@@ -748,7 +743,6 @@ impl AssistantHost {
                 .is_err_and(|error| error.code == "assistant_key_rejected")
             {
                 let key = self.key_for_retry(&control, &json!({"apiKey":key})).await?;
-                control.add_secret(&key);
                 self.remember_key(&key);
                 self.ensure_current(&identity, generation).await?;
                 result = video_http::query(&client, &gateway, &key, job).await;
@@ -956,9 +950,10 @@ impl AssistantHost {
             .env
             .api_key(&control.identity, None, &|| self.admit(generation))
             .await?;
-        self.remember_key(&key);
-        control.add_secret(&key);
         self.ensure_current(&control.identity, generation).await?;
+        self.validate_run(&control)?;
+        control.set_ofox_key(&key)?;
+        self.remember_key(&key);
         let mut result = video_http::cancel(&client, &gateway, &key, job).await;
         if result
             .as_ref()
@@ -968,9 +963,10 @@ impl AssistantHost {
                 .env
                 .api_key(&control.identity, Some(&key), &|| self.admit(generation))
                 .await?;
-            self.remember_key(&key);
-            control.add_secret(&key);
             self.ensure_current(&control.identity, generation).await?;
+            self.validate_run(&control)?;
+            control.set_ofox_key(&key)?;
+            self.remember_key(&key);
             result = video_http::cancel(&client, &gateway, &key, job).await;
         }
         self.ensure_current(&control.identity, generation).await?;

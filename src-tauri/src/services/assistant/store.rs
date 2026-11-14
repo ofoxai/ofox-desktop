@@ -1599,6 +1599,13 @@ mod tests {
 
     fn send(sid: &str, edit: Option<&str>, regenerate: Option<&str>) -> SendRequest {
         SendRequest {
+            file_references: vec![],
+            replace_file_references: false,
+            presentation_workflow_version: None,
+            presentation_visual_policy: None,
+            replace_presentation_visual_policy: false,
+            presentation_style_id: None,
+            replace_presentation_style: false,
             skill: None,
             replace_skill: false,
             ui_language: None,

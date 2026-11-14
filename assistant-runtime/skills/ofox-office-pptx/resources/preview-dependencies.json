@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "dependencies": [
+    {
+      "id": "chartjs-preview",
+      "version": "4.6.1",
+      "license": "MIT",
+      "repository": "https://github.com/chartjs/Chart.js",
+      "revision": "76d8cf895a7485dc838c90ef37e2bc9d9e388fcb",
+      "scope": "offline-source-preview-only",
+      "originalAuthorVersionKnown": false,
+      "originalUrl": "https://cdn.jsdelivr.net/npm/chart.js",
+      "path": "preview-dependencies/chartjs/4.6.1/chart.umd.min.js",
+      "sha256": "87364cc2b2a76a6684929e7d6b80b18a897794db38400caff1fcf1791c6925d2",
+      "licenseFile": "preview-dependencies/chartjs/4.6.1/LICENSE.md",
+      "bundledComponents": [
+        {
+          "name": "@kurkle/color",
+          "version": "0.3.2",
+          "license": "MIT",
+          "repository": "https://github.com/kurkle/color",
+          "revision": "eb0d1db26a35704553c93782bad8c3ac2d971597",
+          "licenseFile": "preview-dependencies/chartjs/4.6.1/KURKLE-COLOR-LICENSE.md",
+          "evidence": "Exact version/copyright retained in the downloaded UMD banner and Chart.js pinned pnpm-lock.yaml."
+        }
+      ],
+      "files": [
+        {
+          "path": "preview-dependencies/chartjs/4.6.1/chart.umd.min.js",
+          "sha256": "87364cc2b2a76a6684929e7d6b80b18a897794db38400caff1fcf1791c6925d2",
+          "sourceUrl": "https://cdn.jsdelivr.net/npm/chart.js@4.6.1/dist/chart.umd.min.js",
+          "bytes": 210082
+        },
+        {
+          "path": "preview-dependencies/chartjs/4.6.1/LICENSE.md",
+          "sha256": "41a84aa2caba645f966a18d9c2056b73e6d3a81d80bc0046bc0011a2634d4cce",
+          "sourceUrl": "https://raw.githubusercontent.com/chartjs/Chart.js/76d8cf895a7485dc838c90ef37e2bc9d9e388fcb/LICENSE.md",
+          "bytes": 1093
+        },
+        {
+          "path": "preview-dependencies/chartjs/4.6.1/package.json",
+          "sha256": "7c2ba274b47a8606a6db7730df328a7875bfbd92744f31fb425509c2e8d8191e",
+          "sourceUrl": "https://raw.githubusercontent.com/chartjs/Chart.js/76d8cf895a7485dc838c90ef37e2bc9d9e388fcb/package.json",
+          "bytes": 4899
+        },
+        {
+          "path": "preview-dependencies/chartjs/4.6.1/KURKLE-COLOR-LICENSE.md",
+          "sha256": "2859c50313bad2ba77b081410c477beaf92b60ca13a77a248d89859a6dd6ac81",
+          "sourceUrl": "https://raw.githubusercontent.com/kurkle/color/eb0d1db26a35704553c93782bad8c3ac2d971597/LICENSE.md",
+          "bytes": 1085
+        }
+      ],
+      "note": "The original HTML uses an unversioned CDN URL. This reviewed current dependency is substituted only in the isolated offline preview; historical author version and exact font fidelity are unknown. No npm package was installed; no runtime integration is implied."
+    }
+  ]
+}

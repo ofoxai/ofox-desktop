@@ -575,6 +575,14 @@ describe("assistant error messages", () => {
       { code: "assistant_search_outcome_unknown" },
       "assistant.errors.searchOutcomeUnknown",
     ],
+    [
+      "assistant_presentation_source_unavailable",
+      "assistant.errors.presentationSourceUnavailable",
+    ],
+    [
+      { code: "assistant_presentation_source_changed" },
+      "assistant.errors.presentationSourceChanged",
+    ],
   ])("maps %o to its own message", (error, key) => {
     expect(assistantErrorKey(error)).toBe(key);
   });

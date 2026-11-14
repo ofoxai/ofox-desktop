@@ -402,7 +402,7 @@ for (const [name, usage] of [
   ],
   ["missing token usage", undefined],
 ])
-  test(`${name} stops the local task without duplicating its request receipt`, async (t) => {
+  test(`${name} counts toward the limit at its ceiling and lets the task finish, with one receipt`, async (t) => {
     const f = await fixture(
       t,
       [() => reply(usage === undefined ? {} : usage)],
@@ -419,35 +419,32 @@ for (const [name, usage] of [
       },
     );
     const result = await f.run();
-    assert.equal(result.errorCode, "assistant_cost_unavailable");
+    assert.equal(result.status, "completed");
+    assert.equal(result.errorCode, undefined);
     assert.equal(f.requests.length, 1);
     assert.equal(result.entries.filter((e) => e.role === "request").length, 1);
+    // Never less than all 15 tokens at the input rate: unpriced cached
+    // tokens count as input, an unreported request at its ceiling.
+    const spent = f.events
+      .filter((e) => e.type === "task_status" && "cost" in e.data)
+      .at(-1).data.cost;
+    assert.ok(spent > 14.9 / 1e6, `${spent}`);
   });
 
-test("unknown retry receipts allow the current request to finish but stop local tools and further model requests", async (t) => {
+test("unknown retry receipts stay unknown while the task goes on to its tools and finishes", async (t) => {
   for (const status of [502, 503]) {
     const refused = () =>
       Response.json({ error: { message: "upstream unavailable" } }, { status });
     const f = await fixture(
       t,
-      [
-        refused,
-        refused,
-        () =>
-          call("write", { path: "/configuration", content: "must not run" }),
-        reply,
-      ],
-      () => ({ changed: true }),
+      [refused, refused, () => call("tool_status", { tool: "codex" }), reply],
+      () => ({ installed: true }),
     );
     const result = await f.run();
-    assert.equal(
-      f.requests.length,
-      3,
-      "the permitted retries finish, with no further model request",
-    );
-    assert.equal(f.calls.length, 0, "no side effect after an unknown cost");
-    assert.equal(result.status, "error");
-    assert.equal(result.errorCode, "assistant_cost_unavailable");
+    assert.equal(f.requests.length, 4);
+    assert.equal(f.calls.length, 1, "an unknown cost does not block the task");
+    assert.equal(result.status, "completed");
+    assert.equal(result.errorCode, undefined);
     assert.deepEqual(
       f.events.filter((e) => e.type === "retrying").map((e) => e.data.attempt),
       [1, 2],
@@ -456,7 +453,7 @@ test("unknown retry receipts allow the current request to finish but stop local 
       result.entries
         .filter((e) => e.role === "request")
         .map((e) => e.request.status),
-      ["unknown", "unknown", "completed"],
+      ["unknown", "unknown", "completed", "completed"],
     );
     const success = result.entries.find((e) => e.role === "assistant");
     assert.equal(success.usage.input, 10);
@@ -493,7 +490,7 @@ test("rejected and reliably unsent retry receipts do not block local tools or th
   }
 });
 
-test("unknown OFox retry cost stops use_skill through the Pi hook as well", async (t) => {
+test("an unknown OFox retry cost does not block use_skill", async (t) => {
   const skills = [
     {
       name: "sample",
@@ -514,7 +511,7 @@ test("unknown OFox retry cost stops use_skill through the Pi hook as well", asyn
     ],
     () => ({
       name: "sample",
-      body: "must not load",
+      body: "loaded",
       dir: "/skills/sample",
       files: [],
       truncated: false,
@@ -522,7 +519,8 @@ test("unknown OFox retry cost stops use_skill through the Pi hook as well", asyn
     { skills },
   );
   const result = await f.run();
-  assert.equal(f.requests.length, 2);
-  assert.equal(f.calls.length, 0);
-  assert.equal(result.errorCode, "assistant_cost_unavailable");
+  assert.equal(f.requests.length, 3);
+  assert.equal(f.calls.length, 1);
+  assert.equal(result.status, "completed");
+  assert.equal(result.usageCoverage, "incomplete");
 });

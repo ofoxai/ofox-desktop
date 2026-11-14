@@ -4,8 +4,18 @@ import { Type } from "typebox";
 import { withPdf } from "./attachments.mjs";
 import { deckOf, parseDeck } from "./deck/schema.mjs";
 import { renderDeck } from "./deck/render.mjs";
-import { themeFor } from "./deck/theme.mjs";
+import { themeFor, THEME_NAMES } from "./deck/theme.mjs";
+import { presentationStyleTool } from "./presentation-styles.mjs";
+import {
+  createPresentationPlanning,
+  planDrift,
+} from "./presentation-planning.mjs";
 import { errorMessage } from "./security.mjs";
+import {
+  normalizeOfficeArrowheads,
+  normalizeOfficePatternImages,
+  safeSvg,
+} from "./document-preview.mjs";
 import {
   contactSheet,
   thumbnailFromPng,
@@ -47,8 +57,15 @@ const either = (words) =>
 
 // What the model is told depends on what this machine can make: a format
 // whose engine is missing is one the model says it cannot produce.
-function guidelines(formats, python) {
+function guidelines(
+  formats,
+  python,
+  { planned = false, primedPptx = false } = {},
+) {
   const named = NAMED_FORMATS.filter(([format]) => formats.includes(format));
+  const needSkill = named.filter(
+    ([format]) => format !== "pptx" || !primedPptx,
+  );
   const missing = NAMED_FORMATS.filter(([format]) => !formats.includes(format));
   const words = (list) => either(list.map(([, word]) => word));
   return [
@@ -57,8 +74,16 @@ function guidelines(formats, python) {
       : "When the user asks for a file, produce it with create_document.",
     missing.length &&
       `This machine cannot produce ${words(missing)} files; say so if asked.`,
-    named.length &&
-      `Before the first ${words(named)} document in a conversation, call use_skill on its skill (${either(named.map(([format]) => `ofox-office-${format}`))}) and follow it.`,
+    needSkill.length &&
+      `Before the first ${words(needSkill)} document in a conversation, call use_skill on its skill (${either(needSkill.map(([format]) => `ofox-office-${format}`))}) and follow it.`,
+    primedPptx &&
+      "The Host has already verified and loaded the builtin ofox-office-pptx instructions for this current run. Follow them; do not call use_skill merely to load that same builtin again. No other skill is primed by this marker.",
+    formats.includes("html") &&
+      "Before creating an HTML page, call use_skill on ofox-office-html. Plan the user's task and real interactions, then build a complete responsive page with keyboard access and visible state changes. Saving HTML does not test it in a browser.",
+    formats.includes("pptx") &&
+      (planned
+        ? "For planned PPTX, call get_presentation_candidates first. Choose only an eligible ID, with manual choice taking priority, then call get_presentation_style for that ID's recipe. Reuse the complete candidate requirements when freezing, including the required overall density. Freeze one plan containing every page with freeze_presentation_plan, then create_document. Plan each slide's claim, evidence, visual, composition and editing requirements independently."
+        : "Before designing a pptx, call get_presentation_style to select a coherent style by audience, purpose and density, then read that style's recipe. Plan each slide's claim, evidence, visual, composition and editing requirements independently before writing the deck."),
     formats.includes("pptx") &&
       (python
         ? 'For a pptx, send the Python deck code ({"kind":"python","code":"…"}) or the deck object the skill describes; do not write slide coordinates yourself.'
@@ -66,11 +91,14 @@ function guidelines(formats, python) {
     python &&
       'Send a pptx with preview: true first: look at the overview and the issues, fix what is wrong, then deliver under the same file name by calling again without preview (the code may change) or with fromPreview: "<previewId>" and no content. If you end the reply without delivering, the latest preview is delivered automatically.',
     "Reply with two or three sentences on the structure first, then call the tool; after the result, summarize the file and mention issues.",
+    "Write explanations, status updates and completion summaries in the user's language. Keep tool retries concise. An automated count of zero findings does not verify visual quality, formulas, interactions or editing; state what was actually checked and what remains unverified.",
+    formats.includes("pptx") &&
+      "For PPTX, finish concisely: deliver the file, state the selected style and its reason, then actual checks and remaining issues. Do not include attachment IDs, plan IDs, revisions, internal protocol or helper names unless the user specifically asks for those details. Fix ordinary layout overlaps, clipping and text overflow within the existing task without asking for approval. Do not infer visual quality or target-application editing from structural checks. Use a longer explanation only when requested.",
     "At most 3 documents per reply; retry a failed document at most twice, then explain.",
   ].filter(Boolean);
 }
 
-function description(formats, python) {
+function description(formats, python, planned = false) {
   const office = formats.filter((format) => OFFICE_FORMATS.has(format));
   const text = formats.filter(
     (format) => !OFFICE_FORMATS.has(format) && format !== "pdf",
@@ -78,9 +106,13 @@ function description(formats, python) {
   const batch = office.filter((format) => format !== "pptx");
   const shapes = [
     office.includes("pptx") &&
-      (python
-        ? 'pptx: content is {"kind":"python","code":"…"} (the Python deck code the ofox-office-pptx skill describes), a deck object ({"kind":"deck",…}) or, for experts, an array of officecli batch commands'
-        : 'pptx: content is a deck object ({"kind":"deck",…}, see the ofox-office-pptx skill) or, for experts, an array of officecli batch commands'),
+      (planned
+        ? python
+          ? 'pptx: content is {"kind":"python","code":"…"} or a structured deck object ({"kind":"deck",…}); raw OfficeCLI batches cannot enforce the frozen presentation plan'
+          : 'pptx: content is a structured deck object ({"kind":"deck",…}); raw OfficeCLI batches cannot enforce the frozen presentation plan'
+        : python
+          ? 'pptx: content is {"kind":"python","code":"…"} (the Python deck code the ofox-office-pptx skill describes), a deck object ({"kind":"deck",…}) or, for experts, an array of officecli batch commands'
+          : 'pptx: content is a deck object ({"kind":"deck",…}, see the ofox-office-pptx skill) or, for experts, an array of officecli batch commands'),
     batch.length &&
       `${batch.join(", ")}: content is an array of officecli batch commands`,
     formats.includes("pdf") && "pdf: content is the Typst markup of the body",
@@ -222,7 +254,12 @@ function describe(result, format) {
     result.fixed > 0 ? quantity(result.fixed, "layout issue") : "";
   const fixed = repaired && ` Auto-fixed ${repaired}.`;
   return [
-    `Created ${file.name} (${facts.join(", ")}) as attachment ${file.id}. Issues: ${issues.length}.${fixed}`,
+    `Created ${file.name} (${facts.join(", ")}) as attachment ${file.id}.${OFFICE_FORMATS.has(format) ? ` Automated check findings: ${issues.length}.${fixed}` : ""}`,
+    OFFICE_FORMATS.has(format)
+      ? "Check scope: automated structure/layout checks only. Visual appearance, formulas and editing in the target application are not verified by this count; zero findings do not certify those results."
+      : format === "html"
+        ? "HTML was saved; browser rendering and interactions were not verified. Do not claim buttons, keyboard behavior or layout were tested without actual browser evidence."
+        : "Saving or compiling the file does not certify its visual appearance or content accuracy.",
     ...issues.map(issueLine),
     "Do not repeat the file contents; tell the user what the file contains.",
   ].join("\n");
@@ -239,7 +276,8 @@ function describePreview(result, { name, format }) {
     quantity(result.sheets, "sheet"),
   ].filter(Boolean);
   return [
-    `Previewed ${name} (${facts.join(", ")}) as previewId ${result.previewId}; nothing is delivered yet. Issues: ${issues.length}.`,
+    `Previewed ${name} (${facts.join(", ")}) as previewId ${result.previewId}; nothing is delivered yet. Automated check findings: ${issues.length}.`,
+    "This count covers automated structure/layout findings, not visual or formula acceptance. Inspect the overview; mathematical display and target-application editing need separate verification.",
     ...issues.map(issueLine),
   ].join("\n");
 }
@@ -250,11 +288,33 @@ const previewNext = (previewId) =>
 // What the overview image is, or why there is none; nothing when a model
 // that cannot see images was shown none. `slides` is the deck's count: a
 // slide the host drew no page of is not in the image.
-function overviewNote({ vision, pages, slides, image }) {
+function overviewNote({ vision, pages, slides, image, targetPageNumbers }) {
   if (!vision || pages === 0) return [];
   if (!image)
-    return ["No overview of the slides could be drawn; judge by the issues."];
+    return [
+      "No overview of the slides could be drawn; visual and formula rendering remain unverified. The automated findings alone cannot establish visual quality.",
+    ];
   const total = Number.isSafeInteger(slides) && slides > pages ? slides : pages;
+  if (
+    Array.isArray(targetPageNumbers) &&
+    targetPageNumbers.length > 0 &&
+    targetPageNumbers.length <= 30 &&
+    new Set(targetPageNumbers).size === targetPageNumbers.length &&
+    targetPageNumbers.every(
+      (page) => Number.isInteger(page) && page >= 1 && page <= 1000,
+    )
+  )
+    return [
+      "The image is an overview of targeted source pages: " +
+        targetPageNumbers.join(", ") +
+        ". It contains " +
+        Math.min(pages, OVERVIEW_SLIDES) +
+        " of " +
+        targetPageNumbers.length +
+        " targeted page previews, each under its actual slide number. The original deck has " +
+        total +
+        " slides; untargeted pages are not included.",
+    ];
   const shown =
     pages > OVERVIEW_SLIDES
       ? ` It shows the first ${OVERVIEW_SLIDES} of ${total} slides.`
@@ -295,10 +355,25 @@ async function shown(what, draw) {
 
 const thumbnail = (previewPath) =>
   shown("preview", async () => {
-    const render = PREVIEWS[path.extname(previewPath).toLowerCase()];
+    const extension = path.extname(previewPath).toLowerCase();
+    const render = PREVIEWS[extension];
     if (!render) throw new Error("unsupported preview type");
-    return render(await readFile(previewPath));
+    const bytes = await readFile(previewPath);
+    return render(extension === ".svg" ? modelPreviewSvg(bytes) : bytes);
   });
+
+// Model thumbnails and overviews need the same bounded compatibility adapter
+// as the user's persisted JPEG pages. Never rewrite the host's SVG file.
+const modelPreviewSvg = (bytes) => {
+  const svg = bytes.toString("utf8");
+  if (!safeSvg(svg)) throw new Error("unsafe model preview SVG");
+  const normalized = normalizeOfficeArrowheads(
+    normalizeOfficePatternImages(svg),
+  );
+  if (!safeSvg(normalized))
+    throw new Error("unsafe normalized model preview SVG");
+  return Buffer.from(normalized);
+};
 
 // A page's slide number: the host writes slide n as pages/<n>.svg.
 const slideNumber = (page, index) =>
@@ -312,7 +387,9 @@ const overview = (pagePaths) =>
       await Promise.all(
         pagePaths.slice(0, OVERVIEW_SLIDES).map(async (page, index) => ({
           label: slideNumber(page, index),
-          svg: await readFile(page).catch(() => null),
+          svg: await readFile(page)
+            .then(modelPreviewSvg)
+            .catch(() => null),
         })),
       ),
     ),
@@ -325,6 +402,13 @@ export function documentTools(runtime, context, { vision }) {
   // only when the host can run the engine.
   const python =
     context.params.documents?.python === true && formats.includes("pptx");
+  const planning = createPresentationPlanning(runtime, context);
+  const primedPptx =
+    Boolean(planning) &&
+    Array.isArray(context.params.documents?.primedBuiltinSkills) &&
+    context.params.documents.primedBuiltinSkills.includes("ofox-office-pptx");
+  // Derived per preview, never a mutable shared "last fallback" result.
+  const previewFallbacks = new Map();
   const content = Type.Union([
     Type.String({ maxLength: 2_000_000 }),
     Type.Array(Type.Object({}, { additionalProperties: true }), {
@@ -342,7 +426,7 @@ export function documentTools(runtime, context, { vision }) {
   const tool = runtime.wrapTool(
     context,
     "create_document",
-    description(formats, python),
+    description(formats, python, Boolean(planning)),
     Type.Object({
       name: Type.String({
         minLength: 1,
@@ -351,6 +435,24 @@ export function documentTools(runtime, context, { vision }) {
       }),
       format: Type.String({ enum: formats }),
       content: python ? Type.Optional(content) : content,
+      ...(planning
+        ? {
+            planId: Type.Optional(
+              Type.String({
+                pattern: "^[A-Za-z0-9_-]{1,80}$",
+                description:
+                  "Optional reference to this run's Host-frozen PPTX plan. Omit it to bind the current plan automatically; if supplied it must match. Passing an ID cannot create or replace a plan.",
+              }),
+            ),
+            revision: Type.Optional(
+              Type.Integer({
+                minimum: 1,
+                description:
+                  "Optional revision of this run's Host-frozen PPTX plan. Omit it to bind the current revision automatically; an explicit revision must match.",
+              }),
+            ),
+          }
+        : {}),
       ...(python
         ? {
             preview: Type.Optional(
@@ -368,7 +470,32 @@ export function documentTools(runtime, context, { vision }) {
           }
         : {}),
     }),
-    async (args, signal, toolCallId) => {
+    async (given, signal, toolCallId) => {
+      const args = planning ? planning.bindDocument(given) : given;
+      const planProblem = planning?.problem(args);
+      if (planProblem)
+        return {
+          content: [{ type: "text", text: planProblem }],
+          details: { code: "assistant_presentation_plan_invalid" },
+          isError: true,
+        };
+      // This value is frozen by the Host from the user's picker, never a
+      // create_document argument. Auto retains the model's normal choice.
+      const chosen =
+        planning?.current()?.effectiveStyle ??
+        context.params.documents?.selectedStyle;
+      const selectedStyle = chosen === "auto" ? undefined : chosen;
+      if (selectedStyle !== undefined && !THEME_NAMES.includes(selectedStyle))
+        return {
+          content: [
+            {
+              type: "text",
+              text: "The selected presentation style is unavailable.",
+            },
+          ],
+          details: { code: "assistant_deck_invalid" },
+          isError: true,
+        };
       // The host reads Python code and a preview's file itself: both go to it
       // as they came, with no deck to render and no batch to check here.
       const fromPreview = args.fromPreview !== undefined;
@@ -377,8 +504,37 @@ export function documentTools(runtime, context, { vision }) {
           ? pythonContent(args.content)
           : undefined;
       const hostReads = fromPreview || code !== undefined;
-      const deck =
+      let deck =
         !hostReads && args.format === "pptx" ? deckOf(args.content) : null;
+      let presentationFallbacks = fromPreview
+        ? (previewFallbacks.get(args.fromPreview) ?? [])
+        : [];
+      if (deck && planning) {
+        if (
+          !Array.isArray(deck.slides) ||
+          deck.slides.length !== planning.current().slides.length
+        )
+          throw new Error(
+            "assistant_presentation_plan_invalid: Deck count differs from the frozen page plan",
+          );
+        const hydrated = await planning.hydrate(deck, args, signal, toolCallId);
+        deck = hydrated.deck;
+        presentationFallbacks = hydrated.fallbacks;
+      }
+      if (args.format === "pptx" && selectedStyle && !hostReads && !deck)
+        return {
+          content: [
+            {
+              type: "text",
+              text: planning
+                ? "A frozen presentation plan requires a structured deck object or Python deck code; raw OfficeCLI batches cannot enforce its style and page plan."
+                : "A manually selected style requires a deck object or Python deck code, not raw commands.",
+            },
+          ],
+          details: { code: "assistant_deck_invalid" },
+          isError: true,
+        };
+      if (deck && selectedStyle) deck = { ...deck, theme: selectedStyle };
       const rendered = deck ? renderedDeck(deck) : null;
       if (rendered?.problems)
         return {
@@ -415,13 +571,25 @@ export function documentTools(runtime, context, { vision }) {
       } catch (error) {
         throw rendered ? refusedRender(error) : error;
       }
+      // The deck helper's built-page receipt never reaches the model as an
+      // issue; pages that differ from the frozen plan are reported instead.
+      if (result && Array.isArray(result.issues))
+        result = {
+          ...result,
+          issues: planDrift(result.issues, planning?.current()).issues,
+        };
       if (
         result?.status === "completed" &&
         result.preview === true &&
         typeof result.previewId === "string"
       ) {
+        previewFallbacks.set(result.previewId, presentationFallbacks);
+        if (previewFallbacks.size > 12)
+          previewFallbacks.delete(previewFallbacks.keys().next().value);
         // The paths are for this runtime alone, like a file's.
         const { pagePaths, filePath, previewPath, ...details } = result;
+        if (presentationFallbacks.length)
+          details.presentationFallbacks = presentationFallbacks;
         const pages = Array.isArray(pagePaths)
           ? pagePaths.filter((page) => typeof page === "string")
           : [];
@@ -432,12 +600,17 @@ export function documentTools(runtime, context, { vision }) {
               type: "text",
               text: [
                 ...(rendered?.told ?? []),
+                ...presentationFallbacks.map(
+                  (item) =>
+                    `Page ${item.page}: planned image ${item.assetId} was not supplied; declared ${item.fallback} fallback used. Image requirement is not satisfied.`,
+                ),
                 describePreview(details, args),
                 ...overviewNote({
                   vision,
                   pages: pages.length,
                   slides: details.slides,
                   image,
+                  targetPageNumbers: details.targetPageNumbers,
                 }),
                 previewNext(details.previewId),
               ].join("\n"),
@@ -459,6 +632,8 @@ export function documentTools(runtime, context, { vision }) {
       // The file exists now: what follows reads only local files and does
       // not stop for an abort, so the result reaches the history either way.
       const { filePath, previewPath, ...details } = result;
+      if (presentationFallbacks.length)
+        details.presentationFallbacks = presentationFallbacks;
       if (
         args.format === "pdf" &&
         filePath &&
@@ -474,6 +649,10 @@ export function documentTools(runtime, context, { vision }) {
             type: "text",
             text: [
               ...(rendered?.told ?? []),
+              ...presentationFallbacks.map(
+                (item) =>
+                  `Page ${item.page}: planned image ${item.assetId} was not supplied; declared ${item.fallback} fallback used. Image requirement is not satisfied.`,
+              ),
               describe(details, args.format),
             ].join("\n"),
           },
@@ -483,5 +662,27 @@ export function documentTools(runtime, context, { vision }) {
       };
     },
   );
-  return [{ ...tool, promptGuidelines: guidelines(formats, python) }];
+  return [
+    {
+      ...tool,
+      promptGuidelines: [
+        ...guidelines(formats, python, {
+          planned: Boolean(planning),
+          primedPptx,
+        }),
+        ...(planning
+          ? [
+              "This run uses planned PPTX creation: understand the requirements, call get_presentation_candidates, choose an eligible style with design judgment, and freeze_presentation_plan once with all pages before create_document. Current-run Host-frozen planId and revision bind automatically when omitted, including fromPreview delivery; explicit references must match. Passing references never creates a plan. Do not freeze again after an accepted plan. Manual user style has priority.",
+              "For a frozen source edit, use prs=source_deck() and edit target_slides(prs) only. Source version is the attachment's complete SHA256 and pageNumbers are actual 1-based pages; slideCount is the target count. Preserve the rest of the deck. Do not rebuild with new_deck or a Node deck object.",
+              "Understand purpose, audience, language, speaking duration, density, data/formula/image proportions, brand colors/fonts and native editing needs. Infer reasonable design preferences from the request without an unnecessary questionnaire. Record uncertain duration/contentMix/brand as null, and distinguish unknowns and inferred choices briefly in decisionSummary; never invent facts or spending authorization.",
+              'Plan image visuals only when they explain the page. A plan never authorizes spending; read the frozen result visualBudget, a trusted Host freeze-time snapshot rather than a reservation. If canAttempt=true, the user already authorized the shown limits: do not ask again. Call generate_image for a needed planned asset with its frozen references and the user-named model if any; the Host still checks price, remaining budget and identity on every attempt. If unavailable/refused use native visuals, supplied assets or the declared fallback and disclose the missing image. Node showcase images may use media:{assetId:"planned-id"}; Python uses image(..., asset_id=...). Never put private asset bytes or host paths in your reply.',
+            ]
+          : []),
+      ],
+    },
+    ...(planning?.tools ?? []),
+    ...(formats.includes("pptx")
+      ? [presentationStyleTool(runtime, context)]
+      : []),
+  ];
 }

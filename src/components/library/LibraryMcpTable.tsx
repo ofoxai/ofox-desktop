@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -424,6 +425,8 @@ export function LibraryMcpTable({
         <p role="alert" className="text-ctl text-danger">
           {libraryError(query.error, t)}
         </p>
+      ) : query.isPending ? (
+        <FoxLoader label={t("pages.library.loading")} />
       ) : !rows.length && !query.isLoading ? (
         <p className="rounded-list border border-dashed border-line px-4 py-10 text-center text-ctl text-ink-muted">
           {t("library.mcpTable.empty")}

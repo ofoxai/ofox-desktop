@@ -185,7 +185,7 @@ test("forwards office content as a batch array", async () => {
   assert.notEqual(result.isError, true);
   assert.match(result.content[0].text, /attachment att-deck/);
   assert.match(result.content[0].text, /deck\.pptx \(pptx, [^)]*3 slides\)/);
-  assert.match(result.content[0].text, /Issues: 0\./);
+  assert.match(result.content[0].text, /Automated check findings: 0\./);
   assert.match(result.content[0].text, /Do not repeat the file contents/);
   assert.equal(result.details.file.id, "att-deck");
 });
@@ -388,11 +388,11 @@ test("the host's layout fixes are told to the model", async () => {
   };
   assert.match(
     await text({ fixed: 3 }),
-    /^Created .* Issues: 0\. Auto-fixed 3 layout issues\./,
+    /^Created .* Automated check findings: 0\. Auto-fixed 3 layout issues\./,
   );
   assert.match(
     await text({ fixed: 1 }),
-    /^Created .* Issues: 0\. Auto-fixed 1 layout issue\.\n/,
+    /^Created .* Automated check findings: 0\. Auto-fixed 1 layout issue\.\n/,
   );
   for (const extra of [{}, { fixed: 0 }, { fixed: "3" }])
     assert.doesNotMatch(await text(extra), /Auto-fixed/, JSON.stringify(extra));
@@ -580,7 +580,7 @@ test("the host's issues are listed for the model to mention", async () => {
     content: DECK,
   });
   const text = result.content[0].text;
-  assert.match(text, /Issues: 2\./);
+  assert.match(text, /Automated check findings: 2\./);
   assert.match(
     text,
     /warning at \/slide\[2\]\/shape\[1\]: Text overflows its box/,
@@ -602,7 +602,7 @@ test("malformed issues from the host never fail a created file", async () => {
   assert.equal(calls.length, 1);
   const text = result.content[0].text;
   assert.match(text, /attachment att-deck/);
-  assert.match(text, /Issues: 2\./);
+  assert.match(text, /Automated check findings: 2\./);
   assert.match(text, /- issue: text\n- issue: x\n/);
 });
 
@@ -654,7 +654,7 @@ test("without the engines the guidelines say which files cannot be made", () => 
   );
   assert.doesNotMatch(
     text,
-    /never say you cannot attach|use_skill|ofox-office/,
+    /never say you cannot attach|ofox-office-(pdf|docx|pptx|xlsx)/,
   );
 
   const pdfOnly = fixture({
@@ -1002,7 +1002,7 @@ test("a preview result carries one contact sheet", async (t) => {
   const text = result.content[0].text;
   assert.match(text, /previewId doc-9/);
   assert.match(text, /\(pptx, 3 slides\)/);
-  assert.match(text, /Issues: 1\./);
+  assert.match(text, /Automated check findings: 1\./);
   assert.match(
     text,
     /warning at \/slide\[2\]\/shape\[1\]: Text overflows its box/,
@@ -1042,7 +1042,7 @@ test("a preview shown to a model that cannot see images is text only", async (t)
   const text = result.content[0].text;
   assert.match(text, /previewId doc-9/);
   assert.match(text, /2 slides/);
-  assert.match(text, /Issues: 0\./);
+  assert.match(text, /Automated check findings: 0\./);
   assert.match(text, /deliver with fromPreview: "doc-9"/);
   assert.doesNotMatch(JSON.stringify(result), new RegExp(directory));
   assert.equal(result.details.pagePaths, undefined);
@@ -1153,6 +1153,41 @@ test("the overview labels each slide by its page and counts the deck's slides", 
     ).data;
   assert.equal(result.content[1].data, await labelled(["1", "2", "4"]));
   assert.notEqual(result.content[1].data, await labelled(["1", "2", "3"]));
+});
+
+test("a source overview retains actual page 70 and distinguishes preserved pages", async (t) => {
+  if (!(await readsSvg())) {
+    t.skip("SVG unsupported");
+    return;
+  }
+  const directory = await folder(t);
+  const page = path.join(directory, "70.svg");
+  const source =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540"><rect width="960" height="540" fill="#fff"/><text x="40" y="100" font-size="60">Edited source page 70</text></svg>';
+  await writeFile(page, source);
+  const { tool } = createDocument({
+    python: true,
+    reply: () =>
+      previewed({ pagePaths: [page], slides: 70, targetPageNumbers: [70] }),
+  });
+  const result = await tool.execute("c1", {
+    name: "source-edit.pptx",
+    format: "pptx",
+    content: PYTHON,
+    preview: true,
+  });
+  assert.match(result.content[0].text, /targeted source pages: 70/);
+  assert.match(result.content[0].text, /untargeted pages are not included/);
+  assert.doesNotMatch(
+    result.content[0].text,
+    /issues say which have no picture/,
+  );
+  const labelled = async (label) =>
+    (await contactSheet([{ label, svg: Buffer.from(source) }])).data;
+  assert.equal(result.content[1].data, await labelled("70"));
+  assert.notEqual(result.content[1].data, await labelled("1"));
+  assert.deepEqual(result.details.targetPageNumbers, [70]);
+  assert.doesNotMatch(JSON.stringify(result), /70\.svg|pagePaths/);
 });
 
 test("a page that cannot be drawn leaves a placeholder in the overview", async (t) => {

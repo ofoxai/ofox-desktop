@@ -15,6 +15,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { canPreviewAssistantFile } from "@/lib/api/assistantPreview";
 
 /** The notes of one tone, each on a line of its own. */
 function NoteLines({ notes }: { notes: string[] }) {
@@ -77,10 +78,12 @@ function AttachmentChip({
   file,
   onRemove,
   removeDisabled,
+  onOpenFile,
 }: {
   file: AssistantAttachment;
   onRemove?: (id: string) => void;
   removeDisabled?: boolean;
+  onOpenFile?: (file: AssistantAttachment) => void;
 }) {
   const { t, i18n } = useTranslation();
   const notes = describeAttachmentOutcome(file, t, i18n.language);
@@ -92,9 +95,23 @@ function AttachmentChip({
     <li className="flex min-w-0 max-w-full flex-col rounded-ctl border border-line bg-card-2 px-2 py-1 text-ctl">
       <div className="flex min-w-0 items-center gap-1.5">
         <Icon aria-hidden className="h-3.5 w-3.5 shrink-0 text-ink-muted" />
-        <span className="min-w-0 truncate text-ink" title={file.name}>
-          {file.name}
-        </span>
+        {onOpenFile && canPreviewAssistantFile(file) ? (
+          <button
+            type="button"
+            className="min-w-0 truncate rounded-ctl text-left text-ink underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+            title={file.name}
+            aria-label={t("assistant.document.previewFile", {
+              name: file.name,
+            })}
+            onClick={() => onOpenFile(file)}
+          >
+            {file.name}
+          </button>
+        ) : (
+          <span className="min-w-0 truncate text-ink" title={file.name}>
+            {file.name}
+          </span>
+        )}
         <span className="shrink-0 text-note text-ink-muted">
           {fmtBinaryBytes(file.sizeBytes)}
         </span>
@@ -124,7 +141,8 @@ function AttachmentChip({
 
 /**
  * Files in the composer, on a sent question or in an edit: name, type, size
- * and, once a run has read them, what that read means. No previews. Removing
+ * and, once a run has read them, what that read means. Supported files may
+ * open the workspace through a scoped callback. Removing
  * a file moves focus to the next file's remove button (or the one before);
  * `onAllRemoved` takes it once no file is left.
  */
@@ -134,12 +152,14 @@ export function AttachmentList({
   onAllRemoved,
   removeDisabled,
   className,
+  onOpenFile,
 }: {
   files: AssistantAttachment[];
   onRemove?: (id: string) => void;
   onAllRemoved?: () => void;
   removeDisabled?: boolean;
   className?: string;
+  onOpenFile?: (file: AssistantAttachment) => void;
 }) {
   const { t } = useTranslation();
   const list = useRef<HTMLUListElement>(null);
@@ -178,6 +198,7 @@ export function AttachmentList({
           file={file}
           onRemove={remove}
           removeDisabled={removeDisabled}
+          onOpenFile={onOpenFile}
         />
       ))}
     </ul>

@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import {
   useEffect,
   useLayoutEffect,
@@ -1550,6 +1551,7 @@ export function LibrarySkillsPage({
             </p>
           )}
         </div>
+        {query.isPending && <FoxLoader label={t("pages.library.loading")} />}
 
         {data?.assistantSkillsError && (
           <p role="status" className="text-ctl text-warn">

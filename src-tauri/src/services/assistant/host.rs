@@ -213,6 +213,13 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    pub(super) presentation_enabled: bool,
+    pub(super) presentation_context: bool,
+    pub(super) file_references: Vec<FileReference>,
+    pub(super) presentation_source: Mutex<Option<super::presentation_edit::SourceDocument>>,
+    pub(super) presentation: Mutex<super::presentation::State>,
+    /// Frozen from the original user turn after branch resolution.
+    pub(super) presentation_style_id: Option<String>,
     pub(super) mcp: Value,
     pub(super) mcp_generation: u64,
     pub(super) skill_tools: Mutex<super::skill_tools::State>,
@@ -239,14 +246,27 @@ pub struct RunControl {
     live_input: Mutex<Option<mpsc::Sender<super::live::LiveCommand>>>,
     pub cancel: watch::Sender<bool>,
     pub deadline: tokio::time::Instant,
-    /// Every API key this run has used (a 401 retry adds the new one). Each is
-    /// scrubbed from everything the run shows or saves.
+    /// The accepted Ofox credential, never selected from the scrub list.
+    ofox_api_key: Mutex<String>,
+    /// Every secret this run must redact, including Ofox keys and unrelated
+    /// MCP credentials. This list is never an authentication source.
     secret: Mutex<Vec<String>>,
 }
 
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
+            presentation_style_id: request.presentation_style_id.clone(),
+            presentation_enabled: false,
+            presentation_context: false,
+            file_references: request.file_references.clone(),
+            presentation_source: Mutex::new(None),
+            presentation: Mutex::new(super::presentation::State::new(
+                request
+                    .presentation_visual_policy
+                    .clone()
+                    .unwrap_or_default(),
+            )),
             mcp: Value::Null,
             mcp_generation: 0,
             local_calls: local::Calls::default(),
@@ -269,6 +289,7 @@ impl RunControl {
             live_input: Mutex::new(None),
             cancel: watch::channel(false).0,
             deadline: tokio::time::Instant::now() + RUN_DEADLINE,
+            ofox_api_key: Mutex::new(secret.clone()),
             secret: Mutex::new(vec![secret]),
         }
     }
@@ -295,6 +316,31 @@ impl RunControl {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    pub(super) fn ofox_key(&self) -> Result<String, String> {
+        let key = self
+            .ofox_api_key
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if key.trim().is_empty() {
+            return Err("assistant_key_rejected".into());
+        }
+        Ok(key.clone())
+    }
+
+    /// Called only after the Host accepts a key for this run's identity and
+    /// authority generation. Unrelated secrets use add_secret instead.
+    pub(super) fn set_ofox_key(&self, key: &str) -> Result<(), String> {
+        if key.trim().is_empty() {
+            return Err("assistant_key_rejected".into());
+        }
+        self.add_secret(key);
+        *self
+            .ofox_api_key
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = key.to_owned();
+        Ok(())
     }
 
     pub(super) fn add_secret(&self, key: &str) {
@@ -1594,7 +1640,6 @@ impl AssistantHost {
                 self.remember_key(&key);
                 // The retry's runtime replaces the refused key as well.
                 params["knownSecrets"] = json!(control.secrets());
-                control.add_secret(&key);
                 params["apiKey"] = json!(key);
                 self.run_once(control, &params, false).await
             }
@@ -1609,15 +1654,21 @@ impl AssistantHost {
         control: &Arc<RunControl>,
         params: &Value,
     ) -> Result<String, String> {
+        let generation = self.generation();
         self.validate_run(control)?;
-        if self.identity().await? != control.identity {
-            return Err(IDENTITY_CHANGED.into());
-        }
+        self.ensure_current(&control.identity, generation).await?;
         let rejected = params["apiKey"].as_str().unwrap_or_default();
         let admit = || self.validate_run(control);
-        self.env
+        let key = self
+            .env
             .api_key(&control.identity, Some(rejected), &admit)
-            .await
+            .await?;
+        // The environment may await an OS prompt or key refresh. Accept no
+        // returned credential after account/region/generation/cancel changes.
+        self.ensure_current(&control.identity, generation).await?;
+        self.validate_run(control)?;
+        control.set_ofox_key(&key)?;
+        Ok(key)
     }
 
     pub async fn steer(&self, request: SteerRequest) -> Result<(), String> {
@@ -1830,7 +1881,13 @@ impl AssistantHost {
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
-                let result = if value["params"]["name"] == "authorize_mcp" {
+                let result = if matches!(
+                    value["params"]["name"].as_str(),
+                    Some("freeze_presentation_plan" | "resolve_presentation_assets")
+                ) {
+                    self.dispatch_presentation_tool(control, &value["params"])
+                        .await
+                } else if value["params"]["name"] == "authorize_mcp" {
                     self.authorize_mcp(control, &value["params"]).await
                 } else if value["params"]["name"]
                     .as_str()
@@ -1845,7 +1902,12 @@ impl AssistantHost {
                 } else {
                     self.dispatch_tool(control, &value["params"]).await
                 };
-                let reply = tool_reply(&value["id"], result, &self.known_keys())?;
+                let reply = tool_reply(
+                    &value["id"],
+                    result,
+                    &self.known_keys(),
+                    &[control.ofox_key()?],
+                )?;
                 write_line(input, &reply).await?;
             } else if value["id"] == request_id {
                 attempt.answered = true;
@@ -1920,6 +1982,16 @@ impl AssistantHost {
             }
             "mcp_status" => {
                 self.save_mcp_step(control, &data, "unavailable").await?;
+            }
+            "tool_preparing" => {
+                scrub_secrets_in(&mut data, &control.secrets());
+                let mut shown = super::tools::events::tool_preparing_event(&data)?;
+                // The model has begun a request, not executed a tool. As with
+                // streamed reasoning, do not replay this model attempt.
+                attempt.progressed = true;
+                attempt.projection.end_thinking();
+                shown["messageId"] = json!(control.reply_id());
+                self.emit(control, kind, shown);
             }
             "tool_start" => {
                 // The model's tool call has been answered with tokens, and the
@@ -2339,14 +2411,23 @@ pub(super) fn tool_reply(
     id: &Value,
     result: Result<Value, String>,
     known_keys: &[String],
+    private_scrub_keys: &[String],
 ) -> Result<Vec<u8>, String> {
+    // This is private Host-to-runtime metadata, never domain tool content.
+    // Include it before enforcing the frame bound, and fail closed if even
+    // the error frame cannot carry the accepted run credential safely.
     let error = |code: &str| {
         let code = local::tool_failure(code, known_keys);
-        frame(&json!({"id":id,"error":{"code":code,"message":code}}))
+        let reply = frame(&json!({"id":id,"knownSecrets":private_scrub_keys,
+            "error":{"code":code,"message":code}}))?;
+        if reply.len() > RUNTIME_LINE_LIMIT {
+            return Err("assistant_result_too_large".into());
+        }
+        Ok(reply)
     };
     match result {
         Ok(result) => {
-            let reply = frame(&json!({"id":id,"result":result}))?;
+            let reply = frame(&json!({"id":id,"knownSecrets":private_scrub_keys,"result":result}))?;
             if reply.len() > RUNTIME_LINE_LIMIT {
                 error("assistant_result_too_large")
             } else {
@@ -3745,9 +3826,9 @@ mod tests {
     #[test]
     fn local_tool_replies_over_the_runtime_line_limit_become_an_error() {
         let id = json!("tool-1");
-        let small = super::tool_reply(&id, Ok(json!("short")), &[]).unwrap();
+        let small = super::tool_reply(&id, Ok(json!("short")), &[], &[]).unwrap();
         assert!(String::from_utf8(small).unwrap().contains("short"));
-        let large = super::tool_reply(&id, Ok(json!("中".repeat(400_000))), &[]).unwrap();
+        let large = super::tool_reply(&id, Ok(json!("中".repeat(400_000))), &[], &[]).unwrap();
         assert!(large.len() < 1024);
         let text = String::from_utf8(large).unwrap();
         assert!(text.contains("assistant_result_too_large"), "{text}");
@@ -5269,6 +5350,92 @@ while read line; do :; done"#,
 
     /// Tool calls are shown as progress; a search's sources are saved on the
     /// run's reply before they are published.
+    #[tokio::test]
+    async fn tool_preparation_is_a_bounded_non_execution_event() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let event = |data: Value| {
+            json!({"sessionId": sid, "runId": run.run_id,
+            "operationId": run.operation_id, "type": "tool_preparing", "data": data})
+        };
+        let mut attempt = Attempt::default();
+        host.on_event(
+            &run,
+            &event(
+                json!({"name":"create_document", "toolCallId":"call-preparing",
+            "args":{"source":"private-code"}, "intent":"private-intent"}),
+            ),
+            &mut attempt,
+        )
+        .await
+        .unwrap();
+        let published = env.events.lock().unwrap().clone();
+        assert_eq!(
+            published.len(),
+            1,
+            "preparation is visible before execution"
+        );
+        assert_eq!(published[0].r#type, "tool_preparing");
+        assert_eq!(
+            published[0].data,
+            json!({"messageId":run.message_id,
+            "name":"create_document", "toolCallId":"call-preparing"})
+        );
+        assert!(
+            store.load_detail(&sid).unwrap().messages.is_empty(),
+            "no synthetic tool result or message"
+        );
+        for data in [
+            json!({"name":"unknown_tool", "toolCallId":"call"}),
+            json!({"name":"create_document", "toolCallId":"bad\ncall"}),
+            json!({"name":"create_document", "toolCallId":"x".repeat(201)}),
+            json!({"name":"create_document"}),
+        ] {
+            assert_eq!(
+                host.on_event(&run, &event(data), &mut attempt)
+                    .await
+                    .unwrap_err()
+                    .code,
+                PROTOCOL
+            );
+        }
+        assert_eq!(env.events.lock().unwrap().len(), 1);
+        let mut stale = event(json!({"name":"create_document", "toolCallId":"stale"}));
+        stale["operationId"] = json!(id());
+        assert!(host.on_event(&run, &stale, &mut attempt).await.is_err());
+        assert_eq!(env.events.lock().unwrap().len(), 1);
+        host.on_event(
+            &run,
+            &event(
+                json!({"name":"create_document", "toolCallId":"call-preparing",
+            "active":false, "args":{"source":"still-private"}}),
+            ),
+            &mut attempt,
+        )
+        .await
+        .unwrap();
+        let cleared = env.events.lock().unwrap().last().unwrap().data.clone();
+        assert_eq!(
+            cleared,
+            json!({"messageId":run.message_id,
+            "name":"create_document", "toolCallId":"call-preparing", "active":false})
+        );
+        assert_eq!(
+            host.on_event(
+                &run,
+                &event(json!({"name":"create_document",
+            "toolCallId":"call", "active":"false"})),
+                &mut attempt
+            )
+            .await
+            .unwrap_err()
+            .code,
+            PROTOCOL
+        );
+    }
+
     #[tokio::test]
     async fn tool_progress_is_published_and_search_sources_are_kept_on_the_reply() {
         let (_config, env, host) = fixture_with_env();
@@ -7289,6 +7456,238 @@ while read line; do :; done"#,
         assert_eq!(
             host.bootstrap_cached(false).await.unwrap()["models"][0]["id"],
             "test/model"
+        );
+    }
+}
+
+#[cfg(test)]
+mod ofox_key_slot_regressions {
+    use super::*;
+
+    struct DeferredKeyEnvironment {
+        identity: Mutex<Identity>,
+        requested: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    impl Environment for DeferredKeyEnvironment {
+        fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
+            Box::pin(async { Ok(self.identity.lock().unwrap().clone()) })
+        }
+        fn api_key<'a>(
+            &'a self,
+            _: &'a Identity,
+            _: Option<&'a str>,
+            _: &'a Admit<'a>,
+        ) -> BoxFuture<'a, Result<String, String>> {
+            Box::pin(async move {
+                self.requested.notify_one();
+                self.release.notified().await;
+                // Deliberately return after the wait without consulting admit:
+                // the Host must fence the asynchronous result itself.
+                Ok("synthetic-ofox-replacement-key".into())
+            })
+        }
+        fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
+            Box::pin(async { true })
+        }
+        fn models<'a>(
+            &'a self,
+            _: &'a str,
+            _: catalog::Source,
+        ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn gateway_base(&self, _: &str) -> Result<String, String> {
+            Err("fixture_has_no_network".into())
+        }
+        fn config_dir(&self) -> PathBuf {
+            PathBuf::new()
+        }
+        fn runtime_dir(&self) -> Result<PathBuf, String> {
+            Err("fixture_has_no_runtime".into())
+        }
+        fn emit(&self, _: Event) {}
+    }
+
+    fn fixture() -> (
+        Arc<DeferredKeyEnvironment>,
+        Arc<AssistantHost>,
+        Arc<RunControl>,
+    ) {
+        let identity = Identity {
+            owner: "ab".repeat(32),
+            apex: "ofox.ai".into(),
+        };
+        let env = Arc::new(DeferredKeyEnvironment {
+            identity: Mutex::new(identity.clone()),
+            requested: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let host = AssistantHost::new(env.clone());
+        let request: SendRequest = serde_json::from_value(json!({
+            "sessionId": id(), "runId": id(), "operationId": id(), "text": "fixture"
+        }))
+        .unwrap();
+        let control = Arc::new(RunControl::new(
+            identity,
+            &request,
+            "synthetic-ofox-original-key".into(),
+        ));
+        (env, host, control)
+    }
+
+    #[test]
+    fn ofox_key_slot_retry_rejects_results_after_cancel_identity_or_generation_changes() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for boundary in ["cancel", "identity", "region", "generation"] {
+                    let (env, host, control) = fixture();
+                    let worker = tokio::spawn({
+                        let (host, control) = (host.clone(), control.clone());
+                        async move {
+                            host.key_for_retry(
+                                &control,
+                                &json!({"apiKey": "synthetic-ofox-original-key"}),
+                            )
+                            .await
+                        }
+                    });
+                    env.requested.notified().await;
+                    match boundary {
+                        "cancel" => {
+                            control.cancel.send_replace(true);
+                        }
+                        "identity" => env.identity.lock().unwrap().owner = "cd".repeat(32),
+                        "region" => env.identity.lock().unwrap().apex = "ofox.io".into(),
+                        "generation" => {
+                            host.generation.fetch_add(1, Ordering::SeqCst);
+                        }
+                        _ => unreachable!(),
+                    }
+                    env.release.notify_one();
+                    assert!(
+                        worker.await.unwrap().is_err(),
+                        "a stale key result must be rejected after {boundary}"
+                    );
+                    assert!(
+                        !control
+                            .secrets()
+                            .iter()
+                            .any(|key| key == "synthetic-ofox-replacement-key"),
+                        "a rejected asynchronous key must not be accepted or added to run secrets"
+                    );
+                }
+            });
+    }
+}
+
+#[cfg(test)]
+mod ofox_key_slot_value_regressions {
+    use super::*;
+
+    fn run(key: &str) -> RunControl {
+        let request: SendRequest = serde_json::from_value(json!({
+            "sessionId": id(), "runId": id(), "operationId": id(), "text": "fixture"
+        }))
+        .unwrap();
+        RunControl::new(
+            Identity {
+                owner: "ab".repeat(32),
+                apex: "ofox.io".into(),
+            },
+            &request,
+            key.into(),
+        )
+    }
+
+    #[test]
+    fn ofox_key_slot_scrub_order_and_rotation_do_not_change_authentication() {
+        let control = run("synthetic-ofox-original-key");
+        control.add_secret("synthetic-mcp-initial-secret");
+        assert_eq!(control.ofox_key().unwrap(), "synthetic-ofox-original-key");
+        control
+            .set_ofox_key("synthetic-ofox-replacement-key")
+            .unwrap();
+        control.add_secret("synthetic-mcp-later-secret");
+        assert_eq!(
+            control.ofox_key().unwrap(),
+            "synthetic-ofox-replacement-key"
+        );
+        let secrets = control.secrets();
+        for secret in [
+            "synthetic-ofox-original-key",
+            "synthetic-ofox-replacement-key",
+            "synthetic-mcp-initial-secret",
+            "synthetic-mcp-later-secret",
+        ] {
+            assert!(secrets.iter().any(|saved| saved == secret));
+        }
+        let shown = scrub_secrets("Visible result synthetic-ofox-original-key synthetic-ofox-replacement-key synthetic-mcp-initial-secret synthetic-mcp-later-secret", &secrets);
+        assert!(shown.contains("Visible result"));
+        assert!(
+            !shown.contains("synthetic-"),
+            "every authentication and scrub-only secret remains redacted"
+        );
+    }
+
+    #[test]
+    fn ofox_key_slot_empty_fails_closed_without_scrub_list_fallback() {
+        let control = run("");
+        control.add_secret("synthetic-mcp-only-secret");
+        assert_eq!(control.ofox_key().unwrap_err(), "assistant_key_rejected");
+        assert_eq!(
+            control.set_ofox_key("  ").unwrap_err(),
+            "assistant_key_rejected"
+        );
+        assert_eq!(control.ofox_key().unwrap_err(), "assistant_key_rejected");
+        control.set_ofox_key("synthetic-ofox-valid-key").unwrap();
+        assert!(control.set_ofox_key("").is_err());
+        assert_eq!(control.ofox_key().unwrap(), "synthetic-ofox-valid-key");
+    }
+}
+
+#[cfg(test)]
+mod private_host_scrub_frame_tests {
+    use super::*;
+
+    #[test]
+    fn private_host_scrub_keys_are_top_level_only_and_count_toward_the_frame_bound() {
+        let key = "synthetic-private-ofox-frame-key".to_owned();
+        let content = json!({"status": "completed", "details": {"ordinary": true}});
+        let bytes = tool_reply(
+            &json!("private-call"),
+            Ok(content.clone()),
+            &[],
+            std::slice::from_ref(&key),
+        )
+        .unwrap();
+        let frame: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(frame["knownSecrets"], json!([key]));
+        assert_eq!(frame["result"], content);
+        assert!(frame["result"].get("knownSecrets").is_none());
+        let error = tool_reply(
+            &json!("private-call"),
+            Err("assistant_fixture_error".into()),
+            &[],
+            &[key],
+        )
+        .unwrap();
+        let error: Value = serde_json::from_slice(&error).unwrap();
+        assert!(error["knownSecrets"].is_array());
+        assert!(error["error"].get("knownSecrets").is_none());
+        assert_eq!(
+            tool_reply(
+                &json!("private-call"),
+                Ok(json!("small")),
+                &[],
+                &["x".repeat(RUNTIME_LINE_LIMIT)]
+            )
+            .unwrap_err(),
+            "assistant_result_too_large"
         );
     }
 }

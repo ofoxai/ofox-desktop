@@ -3,6 +3,9 @@ import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
 import {
   Download,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
   FileCode,
   FileJson,
   FileSpreadsheet,
@@ -22,15 +25,22 @@ import type {
   AssistantModel,
   AssistantRegenerateResult,
 } from "@/lib/api/assistant";
-import { assistantErrorKey, assistantMediaUrl } from "@/lib/api/assistant";
+import {
+  assistantDocumentPreview,
+  assistantDocumentPreviewUrl,
+  assistantErrorKey,
+  assistantMediaUrl,
+} from "@/lib/api/assistant";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from "@/components/ui/dialog";
 import {
   Popover,
@@ -39,6 +49,7 @@ import {
 } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
 import { fmtBinaryBytes } from "@/lib/format";
+import { canPreviewAssistantFile } from "@/lib/api/assistantPreview";
 import { MediaBlock, ActivityLink } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
 import { MEDIA_PLACEHOLDER, MediaToolButton, MediaTools } from "./MediaTools";
@@ -257,6 +268,7 @@ export function GenerationCards({
   disabled,
   onSave,
   onSaveAndOpen,
+  onOpenArtifact,
   onCancelVideo,
   onResumeVideo,
   onRegenerate,
@@ -271,6 +283,7 @@ export function GenerationCards({
   onSave: (file: AssistantAttachment) => Promise<unknown>;
   /** Save a copy and open it with the default app. */
   onSaveAndOpen: (file: AssistantAttachment) => Promise<unknown>;
+  onOpenArtifact?: (file: AssistantAttachment) => void;
   onCancelVideo: (item: AssistantGeneration) => Promise<unknown>;
   onResumeVideo: (item: AssistantGeneration) => Promise<unknown>;
   onRegenerate?: (
@@ -295,7 +308,7 @@ export function GenerationCards({
         if (item.kind === "document")
           return (
             <section
-              key={item.toolCallId}
+              key={`${sessionId}:${owner}:${authority}:${item.toolCallId}`}
               aria-label={t("assistant.generation.kinds.document")}
               className="max-w-full"
             >
@@ -305,9 +318,13 @@ export function GenerationCards({
                 <DocumentResult
                   item={item}
                   files={files}
+                  sessionId={sessionId}
+                  owner={owner}
+                  generation={authority}
                   disabled={disabled}
                   onSave={onSave}
                   onSaveAndOpen={onSaveAndOpen}
+                  onOpenArtifact={onOpenArtifact}
                 />
               )}
             </section>
@@ -469,23 +486,215 @@ function DocumentIssues({ issues }: { issues: AssistantDocumentIssue[] }) {
   );
 }
 
+/** Persisted raster pages only; a preview never executes the document. */
+function DocumentPreview({
+  file,
+  sessionId,
+  owner,
+  generation,
+  onOpenArtifact,
+}: {
+  file: AssistantAttachment;
+  sessionId: string;
+  owner: string;
+  generation: number;
+  onOpenArtifact?: (file: AssistantAttachment) => void;
+}) {
+  const { t } = useTranslation();
+  const preview = assistantDocumentPreview(file);
+  const [open, setOpen] = useState(false);
+  const [index, setIndex] = useState(0);
+  const [failed, setFailed] = useState<Set<number>>(() => new Set());
+  const pageCaption = useRef<HTMLParagraphElement>(null);
+  const focusCaption = useRef(false);
+  useLayoutEffect(() => {
+    if (!focusCaption.current) return;
+    focusCaption.current = false;
+    pageCaption.current?.focus();
+  }, [index]);
+  if (onOpenArtifact && canPreviewAssistantFile(file)) {
+    const cover = preview?.pages[0];
+    return (
+      <Button
+        variant="ghost"
+        aria-label={t("assistant.document.previewFile", { name: file.name })}
+        className="h-auto w-full flex-col gap-2 overflow-hidden rounded-ctl border border-line bg-card p-2 hover:bg-pill"
+        onClick={() => onOpenArtifact(file)}
+      >
+        {cover && !failed.has(cover) && (
+          <img
+            src={assistantDocumentPreviewUrl(
+              sessionId,
+              file.id,
+              owner,
+              generation,
+              cover,
+            )}
+            alt={t("assistant.document.previewPage", { page: cover })}
+            loading="lazy"
+            className="aspect-video w-full object-contain"
+            onError={() => setFailed((old) => new Set(old).add(cover))}
+          />
+        )}
+        <span className="flex items-center gap-1.5 text-note text-ink-muted">
+          <Eye aria-hidden className="h-3.5 w-3.5" />
+          {t("assistant.document.previewFile", { name: file.name })}
+        </span>
+      </Button>
+    );
+  }
+  if (!preview) return null;
+  const { pages } = preview;
+  const mathCompatibility = file.details?.previewUsesMathFallback === true;
+  const cover = pages[0];
+  const page = pages[index] ?? cover;
+  const fail = (number: number) => setFailed((old) => new Set(old).add(number));
+  const url = (number: number) =>
+    assistantDocumentPreviewUrl(sessionId, file.id, owner, generation, number);
+  const move = (delta: number) => {
+    const next = Math.max(0, Math.min(pages.length - 1, index + delta));
+    if (next === index) return;
+    // A pager that becomes disabled must not strand keyboard focus.
+    focusCaption.current = next === 0 || next === pages.length - 1;
+    setIndex(next);
+  };
+  const unavailable = t("assistant.document.previewUnavailable");
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (next) setIndex(0);
+      }}
+    >
+      <DialogTrigger asChild>
+        <Button
+          variant="ghost"
+          aria-label={t("assistant.document.previewFile", { name: file.name })}
+          className="h-auto w-full flex-col gap-0 overflow-hidden rounded-ctl border border-line bg-card p-0 hover:bg-card"
+        >
+          {failed.has(cover) ? (
+            <span className="px-3 py-4 text-note text-ink-muted">
+              {unavailable}
+            </span>
+          ) : (
+            <img
+              src={url(cover)}
+              alt={t("assistant.document.previewPage", { page: cover })}
+              loading="lazy"
+              className="aspect-video w-full object-contain"
+              onError={() => fail(cover)}
+            />
+          )}
+          <span className="flex w-full items-center gap-1.5 border-t border-line px-2.5 py-2 text-note text-ink-muted">
+            <Eye aria-hidden className="h-3.5 w-3.5 flex-none" />
+            {t("assistant.document.previewAvailable", { count: pages.length })}
+          </span>
+        </Button>
+      </DialogTrigger>
+      {mathCompatibility && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.document.mathCompatibilityPreview")}
+        </p>
+      )}
+      <DialogContent
+        className="w-[calc(100vw-32px)] max-w-[920px]"
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+          event.preventDefault();
+          move(event.key === "ArrowLeft" ? -1 : 1);
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle className="break-all">{file.name}</DialogTitle>
+          <DialogDescription>
+            {t("assistant.document.previewDescription")}
+            {mathCompatibility && (
+              <span className="mt-1 block">
+                {t("assistant.document.mathCompatibilityPreview")}
+              </span>
+            )}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="min-h-0 overflow-y-auto px-[18px] py-3">
+          <div className="flex aspect-video items-center justify-center rounded-ctl bg-card-2">
+            {failed.has(page) ? (
+              <p className="p-4 text-ctl text-ink-muted">{unavailable}</p>
+            ) : (
+              <img
+                key={page}
+                src={url(page)}
+                alt={t("assistant.document.previewPage", { page })}
+                className="max-h-[55vh] w-full object-contain"
+                onError={() => fail(page)}
+              />
+            )}
+          </div>
+        </div>
+        <DialogFooter className="sm:justify-between">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              aria-label={t("assistant.document.previousPage")}
+              disabled={index === 0}
+              onClick={() => move(-1)}
+            >
+              <ChevronLeft aria-hidden className="h-4 w-4" />
+            </Button>
+            <p
+              ref={pageCaption}
+              tabIndex={-1}
+              role="status"
+              className="text-note tabular-nums text-ink-muted outline-none"
+            >
+              {t("assistant.document.previewPage", { page })}
+              <span className="ml-2 text-ink-faint">
+                {index + 1}/{pages.length}
+              </span>
+            </p>
+            <Button
+              variant="secondary"
+              aria-label={t("assistant.document.nextPage")}
+              disabled={index >= pages.length - 1}
+              onClick={() => move(1)}
+            >
+              <ChevronRight aria-hidden className="h-4 w-4" />
+            </Button>
+          </div>
+          <DialogClose asChild>
+            <Button variant="secondary">{t("common.close")}</Button>
+          </DialogClose>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /**
  * A generated document as a card: what it is, how big, how many pages, slides
  * or sheets, and what its checks found; saved and opened in one step, or only
- * saved. There is nothing to play or preview here.
+ * saved. Persisted page images can be previewed independently of saving.
  */
 function DocumentResult({
   item,
   files,
+  sessionId,
+  owner,
+  generation,
   disabled,
   onSave,
   onSaveAndOpen,
+  onOpenArtifact,
 }: {
   item: Extract<AssistantGeneration, { kind: "document" }>;
   files: AssistantAttachment[];
+  sessionId: string;
+  owner: string;
+  generation: number;
   disabled?: boolean;
   onSave: (file: AssistantAttachment) => Promise<unknown>;
   onSaveAndOpen: (file: AssistantAttachment) => Promise<unknown>;
+  onOpenArtifact?: (file: AssistantAttachment) => void;
 }) {
   const { t } = useTranslation();
   const [saving, setSaving] = useState(false);
@@ -555,6 +764,20 @@ function DocumentResult({
               </div>
               {issues.length > 0 && <DocumentIssues issues={issues} />}
             </div>
+            <DocumentPreview
+              key={file.id}
+              file={file}
+              sessionId={sessionId}
+              owner={owner}
+              generation={generation}
+              onOpenArtifact={onOpenArtifact}
+            />
+            {format === "pptx" && (
+              <div className="space-y-1 border-t border-line pt-2 text-note text-ink-muted">
+                <p>{t("assistant.document.checkScope")}</p>
+                <p>{t("assistant.document.verificationPending")}</p>
+              </div>
+            )}
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 disabled={disabled || saving}

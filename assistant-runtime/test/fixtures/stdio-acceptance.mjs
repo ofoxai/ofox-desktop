@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -208,12 +208,25 @@ function requireBundledNode(node) {
   return node;
 }
 
-export async function createStdioAcceptance(
-  t,
-  handleModel,
-  { node = bundledNode } = {},
-) {
-  const sidecarNode = requireBundledNode(node);
+function environmentNode() {
+  const node = process.env.OFOX_STDIO_TEST_NODE;
+  if (node === undefined) return bundledNode;
+  assert.ok(path.isAbsolute(node), "OFOX_STDIO_TEST_NODE must be absolute");
+  let metadata;
+  try {
+    metadata = lstatSync(node);
+  } catch {
+    assert.fail("OFOX_STDIO_TEST_NODE must be a regular file");
+  }
+  assert.ok(
+    metadata.isFile() && !metadata.isSymbolicLink(),
+    "OFOX_STDIO_TEST_NODE must be a regular file",
+  );
+  return node;
+}
+
+export async function createStdioAcceptance(t, handleModel, { node } = {}) {
+  const sidecarNode = requireBundledNode(node ?? environmentNode());
   const root = await mkdtemp(path.join(tmpdir(), "ofox private stdio "));
   const emptyPath = path.join(root, "empty path");
   await mkdir(emptyPath);

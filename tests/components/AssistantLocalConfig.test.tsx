@@ -217,7 +217,12 @@ describe("a local run's progress", () => {
       within(screen.getByRole("list", { name: "Task steps" }))
         .getAllByRole("listitem")
         .map((item) => item.textContent),
-    ).toEqual(["✓ Inspect", "→ Repair"]);
+    ).toEqual(["Inspect", "Repair"]);
+    expect(screen.getByLabelText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Repair").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
   });
 
   it("is nothing without any of them", () => {

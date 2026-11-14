@@ -20,6 +20,10 @@ import type {
   AssistantSource,
 } from "@/lib/api/assistant";
 import { assistantErrorKey } from "@/lib/api/assistant";
+import {
+  isPresentationStyleAvailable,
+  presentationStyleName,
+} from "@/lib/assistantPresentationStyles";
 import { settingsApi } from "@/lib/api/settings";
 import { splitUrlTail } from "@/lib/urlTail";
 import { SessionMarkdown } from "@/components/sessions/SessionMarkdown";
@@ -233,6 +237,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onSwitchVersion,
   onFork,
   onQuote,
+  onOpenFile,
   onSpeak,
   onEnableLocal,
   immutable = false,
@@ -281,10 +286,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   onSwitchVersion?: (messageId: string) => void;
   onFork?: (messageId: string) => void;
   onQuote?: (text: string) => void;
+  onOpenFile?: (file: AssistantAttachment) => void;
   onSpeak?: (messageId: string, text: string) => void;
   onEnableLocal?: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [editing, setEditing] = useState(false);
   const [text, setText] = useState(message.content);
   const [editSkill, setEditSkill] = useState(message.skill);
@@ -306,6 +312,18 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     return () => onEditingChange?.(false);
   }, [editing, onEditingChange]);
   const isUser = message.role === "user";
+  const designDecision = !isUser ? message.presentationPlan : undefined;
+  const decisionStyle = isPresentationStyleAvailable(
+    designDecision?.effectiveStyle,
+  )
+    ? designDecision.effectiveStyle
+    : isPresentationStyleAvailable(designDecision?.styleId)
+      ? designDecision.styleId
+      : undefined;
+  const decisionSummary =
+    typeof designDecision?.decisionSummary === "string"
+      ? designDecision.decisionSummary.trim().slice(0, 2000)
+      : "";
   const streaming = message.status === "streaming";
   // A generation's files show on its card, not in the reply's file list.
   const generated = new Set(
@@ -315,8 +333,11 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     (file) => !generated.has(file.id),
   );
   const sources = (message.sources ?? []).flatMap(shownSource);
+  const hasTaskProgress = streaming && Boolean(taskProgress);
   const progress =
-    streaming && activity ? t(`assistant.activity.${activity}`) : null;
+    streaming && !hasTaskProgress && activity
+      ? t(`assistant.activity.${activity}`)
+      : null;
   const statusLine = (text: string, className?: string) => (
     <p
       role="status"
@@ -376,17 +397,49 @@ export const AssistantMessageView = memo(function AssistantMessageView({
       data-message-id={message.id}
     >
       <h2 className="sr-only">{role}</h2>
+      {isUser && isPresentationStyleAvailable(message.presentationStyleId) && (
+        <span className="mb-1 inline-flex max-w-[80%] rounded-ctl bg-brand-soft px-2 py-1 text-note text-brand-ink">
+          {t("assistant.presentation.chip", {
+            name: presentationStyleName(
+              message.presentationStyleId,
+              t,
+              i18n.language,
+            ),
+          })}
+        </span>
+      )}
+      {!isUser && hasTaskProgress && taskProgress}
+      {!isUser && (decisionStyle || decisionSummary) && (
+        <section
+          aria-label={t("assistant.visual.decisionTitle")}
+          className="mb-2 max-w-full space-y-1 rounded-ctl border border-line bg-card-2 px-3 py-2 text-note text-ink-muted"
+        >
+          {decisionStyle && (
+            <p className="font-medium text-ink-2">
+              {t("assistant.visual.chosenStyle", {
+                name: presentationStyleName(decisionStyle, t, i18n.language),
+              })}
+            </p>
+          )}
+          {decisionSummary && (
+            <p className="whitespace-pre-wrap break-words">{decisionSummary}</p>
+          )}
+        </section>
+      )}
       {!isUser && !!message.mcpSteps?.length && (
         <McpSteps steps={message.mcpSteps} />
       )}
       {!isUser && !!message.skillResults?.length && (
         <SkillResultCards groups={message.skillResults} />
       )}
-      <ReasoningBlock
-        reasoning={message.reasoning}
-        reasoningMs={message.reasoningMs}
-        thinking={thinking}
-      />
+      {!isUser && (
+        <ReasoningBlock
+          reasoning={message.reasoning}
+          reasoningMs={message.reasoningMs}
+          thinking={thinking}
+          compact={hasTaskProgress}
+        />
+      )}
       {message.media && mediaBlock ? (
         mediaBlock
       ) : editing ? (
@@ -405,6 +458,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
             <>
               <AttachmentList
                 files={editFiles}
+                onOpenFile={onOpenFile}
                 onRemove={(id) =>
                   setEditFiles((current) =>
                     current.filter((file) => file.id !== id),
@@ -449,7 +503,9 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         </div>
       ) : streaming && !message.content ? (
         // The thinking caption above already says so, with its timer.
-        retryAttempt || (thinking?.since != null && !progress) ? null : (
+        hasTaskProgress ||
+        retryAttempt ||
+        (thinking?.since != null && !progress) ? null : (
           statusLine(progress || t("assistant.typing"))
         )
       ) : (
@@ -496,6 +552,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           {files.length > 0 && (
             <AttachmentList
               files={files}
+              onOpenFile={onOpenFile}
               className={cn(
                 message.content && "mt-2",
                 isUser && "max-w-[80%] justify-end",
@@ -519,8 +576,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         </>
       )}
       {generations}
-      {streaming && taskProgress}
-      {streaming && retryAttempt && (
+      {streaming && !hasTaskProgress && retryAttempt && (
         <p role="status" className="mt-2 text-ctl text-ink-muted">
           {t("assistant.retrying", { attempt: retryAttempt })}
         </p>

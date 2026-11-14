@@ -47,7 +47,9 @@ test("navy has every color role and six chart colors", () => {
 
 test("the theme names are the keys of THEMES", () => {
   assert.deepEqual(THEME_NAMES, Object.keys(THEMES));
-  assert.deepEqual(THEME_NAMES, ["navy"]);
+  assert.equal(THEME_NAMES[0], "navy");
+  // The built-in navy plus every enabled catalog style.
+  assert.equal(THEME_NAMES.length, 25);
 });
 
 test("themeFor falls back to navy for a name it does not know", () => {

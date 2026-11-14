@@ -1,0 +1,151 @@
+{
+  "id": "signal",
+  "family": "editorial",
+  "names": { "zh": "Signal 藏蓝金", "en": "Signal", "ja": "Signal ネイビー＆ゴールド" },
+  "intro": {
+    "zh": "深藏蓝页面配骨白衬线标题和金色数字，间或换成纸色浅页；适合投资人材料、董事会汇报、咨询交付和政策简报。",
+    "en": "Bone serif headlines and gold numerals on deep navy, with occasional pale paper pages; for investor decks, board presentations, consulting deliverables and policy briefs.",
+    "ja": "深いネイビーに骨白のセリフ見出しと金色の数字、ところどころ紙色のページを挟む。投資家向け資料、取締役会報告、コンサルティング成果物向け。"
+  },
+  "routing": {
+    "scenarios": ["consulting", "business-review", "academic"],
+    "density": "high",
+    "scheme": "mixed",
+    "tone": ["institutional", "sober"],
+    "suits": { "data": 2, "formulas": 1, "images": 1, "longText": 2 },
+    "avoid": "Playful, fast or intentionally loud material."
+  },
+  "theme": {
+    "colors": {
+      "background": "1C2644",
+      "card": "232F55",
+      "primary": "E2DCD0",
+      "secondary": "8A96A8",
+      "accent": "C8A870",
+      "text": "E2DCD0",
+      "textSecondary": "8A96A8",
+      "textMuted": "6C788C",
+      "line": "2E3D5C",
+      "accentTint": "363A4B",
+      "dark": "1C2644",
+      "onDark": "E2DCD0",
+      "onDarkMuted": "8A96A8",
+      "surface": "232F55",
+      "chart": ["C8A870", "5B6B88", "8A96A8", "44587E", "E2DCD0", "6C788C"]
+    },
+    "fonts": {
+      "latin": { "title": "Georgia", "body": "Arial", "data": "Georgia" },
+      "zh": { "title": "SimSun", "body": "Microsoft YaHei" },
+      "ja": { "title": "Yu Mincho", "body": "Yu Gothic" }
+    },
+    "sizes": {
+      "hero": [72, 66, 54, 44],
+      "statement": [48, 44, 36, 30],
+      "title": [28, 26, 24],
+      "subtitle": [18, 16],
+      "body": [18, 16, 14],
+      "card": [14, 13],
+      "caption": [12, 11],
+      "kpi": [52]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "base": { "chart": ["C8A870", "5B6B88", "8A96A8", "44587E", "E2DCD0", "6C788C"] },
+          "paper": {
+            "bg": "F0ECE3",
+            "title": "1A2030",
+            "body": "1A2030",
+            "muted": "5A6270",
+            "faint": "9AA0A8",
+            "accent": "A88A50",
+            "line": "D6D0C4",
+            "card": "E6E0D4",
+            "surface": "E6E0D4",
+            "accentTint": "EFE3CC",
+            "chart": ["C8A870", "1C2644", "5A6270", "9AA0A8", "44587E", "8A96A8"]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": ["base", "base", "base", "paper", "base", "base", "paper", "base", "base", "base", "base", "base", "base", "paper", "base", "base"],
+          "closing": "base"
+        },
+        "cover": {
+          "title": { "x": 1.0, "y": 1.7, "w": 10.6, "h": 2.9, "anchor": "bottom" },
+          "kicker": { "x": 1.0, "y": 1.35, "w": 8, "size": 10, "color": "muted" },
+          "meta": { "x": 1.0, "y": 6.82, "w": 11.33, "size": 10, "color": "muted" },
+          "shapes": [
+            { "kind": "rect", "x": 1.0, "y": 6.68, "w": 11.33, "h": 0.01, "fill": "line", "name": "foot rule" }
+          ]
+        },
+        "section": {
+          "title": { "x": 1.0, "y": 2.75, "w": 7.6, "h": 2.4, "sizes": [48, 44, 36, 30] },
+          "number": { "x": 1.0, "y": 2.05, "w": 4, "size": 13, "color": "accent" },
+          "shapes": [
+            { "kind": "rect", "x": 1.0, "y": 2.5, "w": 0.3, "h": 0.015, "fill": "accent", "name": "gold dash" }
+          ]
+        },
+        "statement": {
+          "title": { "x": 1.0, "y": 1.75, "w": 9.4, "h": 4.2 },
+          "kicker": { "x": 1.0, "y": 1.1, "w": 8, "size": 10, "color": "accent" },
+          "shapes": [
+            { "kind": "rect", "x": 1.0, "y": 0.72, "w": 11.33, "h": 0.01, "fill": "line", "name": "head rule" },
+            { "kind": "rect", "x": 1.0, "y": 1.45, "w": 0.3, "h": 0.015, "fill": "accent", "name": "gold dash" }
+          ]
+        },
+        "content": {
+          "title": { "x": 1.0, "y": 0.95, "w": 11.33, "h": 0.7 },
+          "body": { "x": 1.0, "y": 2.0, "w": 11.33, "h": 4.6 },
+          "shapes": [
+            { "kind": "rect", "x": 1.0, "y": 0.72, "w": 11.33, "h": 0.01, "fill": "line", "name": "head rule" },
+            { "kind": "rect", "x": 1.0, "y": 6.78, "w": 11.33, "h": 0.01, "fill": "line", "name": "foot rule" }
+          ]
+        },
+        "closing": {
+          "title": { "x": 1.0, "y": 2.3, "w": 7.6, "h": 2.6, "sizes": [48, 44, 36] },
+          "meta": { "x": 1.0, "y": 6.82, "w": 11.33, "size": 10, "color": "muted" },
+          "shapes": [
+            { "kind": "rect", "x": 1.0, "y": 2.05, "w": 0.3, "h": 0.015, "fill": "accent", "name": "gold dash" },
+            { "kind": "rect", "x": 1.0, "y": 6.68, "w": 11.33, "h": 0.01, "fill": "line", "name": "foot rule" }
+          ]
+        },
+        "card": { "shape": "rect", "fill": "none", "line": "none", "bar": "top", "barColor": "accent", "barW": 0.015 },
+        "kpi": { "style": "bare", "valueColor": "accent" },
+        "steps": { "style": "numbered", "numberColor": "accent", "arrow": true }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Deep navy pages with bone serif headlines set left under a hairline; every few content pages switch to a pale paper canvas. Gold is the only accent and is kept for numerals, small dashes and one chart series.",
+    "components": "Bare gold serif numerals, open columns under a thin gold rule, numbered steps joined by arrows, slate-and-gold charts. No filled card grids, no second accent colour.",
+    "narrative": "Title, section, thesis, evidence with image, three metrics, quotation, principles, current versus proposed, analysis, restated thesis, chart, process, breakdown, hierarchy, timeline, cycle, close.",
+    "nativeCoverage": "Cover, chapter, statement, split text with image region, metric row, quotation, list, comparison, text columns, bar chart, numbered process, pie chart, pyramid, timeline, cycle and closing as native text, shapes, charts; Source Serif 4, the faint page grid, the donut legend list, the vertical timeline, the 2×2 cycle and the mixed event-list page are not reproduced."
+  },
+  "pageMapping": [
+    { "page": 1, "archetype": "cover", "native": "cover_slide", "status": "adapted", "differences": "The faint grid over the navy canvas is not drawn." },
+    { "page": 2, "archetype": "chapter", "native": "section_slide", "status": "adapted", "differences": "" },
+    { "page": 3, "archetype": "statement", "native": "statement_slide", "status": "adapted", "differences": "" },
+    { "page": 4, "archetype": "split-image", "native": "content_slide + bullets + image", "status": "approximate", "differences": "Source sets the heading and a paragraph beside the image, vertically centred; native keeps the heading at the top, and the image region is filled only by a planned asset." },
+    { "page": 5, "archetype": "stats", "native": "content_slide + kpi", "status": "adapted", "differences": "Source centres the heading and the metric row vertically; native starts them from the top." },
+    { "page": 6, "archetype": "quote", "native": "statement_slide", "status": "approximate", "differences": "Source sets a smaller regular-weight quotation under a gold quotation glyph, centred vertically; native uses the bold statement size under a gold dash." },
+    { "page": 7, "archetype": "list", "native": "content_slide + bullets", "status": "approximate", "differences": "Source places the heading in a left column beside the list with gold dash markers; native puts the heading above a bulleted list." },
+    { "page": 8, "archetype": "comparison", "native": "content_slide + card", "status": "approximate", "differences": "Source has no page heading and a vertical hairline between the columns; native adds a heading and draws a gold rule above each column." },
+    { "page": 9, "archetype": "stats", "native": "content_slide + bullets + kpi", "status": "approximate", "differences": "Source combines a dated event list, a 2×2 metric grid and an analysis line on one page; the native sample shows only the metric row." },
+    { "page": 10, "archetype": "cards", "native": "content_slide + card", "status": "approximate", "differences": "Source is two columns of running paragraphs under mono labels; native shows short rule-topped blocks, three across in the sample." },
+    { "page": 11, "archetype": "statement", "native": "statement_slide", "status": "adapted", "differences": "" },
+    { "page": 12, "archetype": "closing", "native": "closing_slide", "status": "adapted", "differences": "" },
+    { "page": 13, "archetype": "chart-bar", "native": "content_slide + native_chart", "status": "adapted", "differences": "Native chart with editable data; source bars are slate with only the last bar in gold, native bars are one series colour." },
+    { "page": 14, "archetype": "process", "native": "content_slide + steps", "status": "adapted", "differences": "" },
+    { "page": 15, "archetype": "chart-pie", "native": "content_slide + native_chart", "status": "approximate", "differences": "Source is a donut ring beside a ruled percentage list; native is a pie chart with its own legend." },
+    { "page": 16, "archetype": "hierarchy", "native": "content_slide + pyramid", "status": "adapted", "differences": "Source shades the levels from gold to slate; native fills only the top level in gold." },
+    { "page": 17, "archetype": "timeline", "native": "content_slide + timeline", "status": "approximate", "differences": "Source timeline runs down the page with year labels in the left margin; native timeline runs left to right." },
+    { "page": 18, "archetype": "cycle", "native": "content_slide + relation + callout", "status": "approximate", "differences": "Source arranges four numbered steps in a 2×2 grid with arrows around the loop; native shows one row of four boxes and a note that the last step feeds the first." }
+  ]
+}

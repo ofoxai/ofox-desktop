@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import React, { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { FileText } from "lucide-react";
@@ -108,9 +109,7 @@ const PromptPanel = React.forwardRef<PromptPanelHandle, PromptPanelProps>(
 
         <div className="flex-1 overflow-y-auto pb-16">
           {loading ? (
-            <div className="text-center py-12 text-muted-foreground">
-              {t("prompts.loading")}
-            </div>
+            <FoxLoader size="block" label={t("prompts.loading")} />
           ) : promptEntries.length === 0 ? (
             <div className="text-center py-12">
               <div className="w-16 h-16 mx-auto mb-4 bg-muted rounded-full flex items-center justify-center">

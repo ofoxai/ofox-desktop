@@ -34,6 +34,7 @@ const samples = {
   web_search: { query: "Pi SDK" },
   web_fetch: { url: "https://example.com/" },
   create_document: { name: "notes.md", format: "md", content: "# Notes" },
+  get_presentation_style: { id: "cartesian" },
 };
 
 // create_document's other content shape: an officecli batch.

@@ -21,6 +21,7 @@ use std::{
 };
 
 pub type SkillRead = Box<dyn FnOnce(&VerifiedSkillAccess<'_>) -> Result<Value, AppError> + Send>;
+pub(super) const PPTX_BUILTIN: &str = "ofox-office-pptx";
 pub fn snapshot(db: &Database) -> Result<AssistantSkillSnapshot, String> {
     assistant_target::assistant_skill_snapshot(db, &assistant_target::reviewed_names())
         .map_err(|e| e.to_string())
@@ -150,6 +151,25 @@ fn read_dir(dir: &Path, shown: &Path) -> Result<Value, String> {
         json!({"dir":shown,"body":body.chars().take(60000).collect::<String>(),"files":paths,"truncated":truncated}),
     )
 }
+/// Priming loads only the complete builtin instruction body, not its potentially
+/// large resource inventory. No path or name comes from a model or request.
+fn read_pptx_priming_body(skill: &bundled::BundledSkill) -> Result<Value, String> {
+    if skill.name != PPTX_BUILTIN
+        || std::fs::canonicalize(&skill.dir).map_err(|e| e.to_string())? != skill.dir
+    {
+        return Err("assistant_skill_unavailable".into());
+    }
+    let root = scope::resolve(&skill.dir)?;
+    let scope = Scope::new(root.clone(), vec![root.clone()], vec![])?;
+    let body = files::read_skill(&scope, &root.join("SKILL.md"))?;
+    let (name, _) = assistant_target::metadata_bytes(body.as_bytes()).map_err(|e| e.to_string())?;
+    if name != PPTX_BUILTIN || body.chars().count() > 60000 {
+        return Err("assistant_skill_unavailable".into());
+    }
+    Ok(
+        json!({"name":PPTX_BUILTIN,"dir":skill.dir,"body":body,"files":["SKILL.md"],"truncated":false}),
+    )
+}
 /// The runtime's bundled skills; none when the runtime cannot be found.
 fn bundled_in(env: &dyn super::host::Environment) -> Vec<bundled::BundledSkill> {
     match env.runtime_dir() {
@@ -161,6 +181,49 @@ fn bundled_in(env: &dyn super::host::Environment) -> Vec<bundled::BundledSkill> 
     }
 }
 impl AssistantHost {
+    pub(super) async fn prime_pptx_skill(
+        &self,
+        run: &Arc<RunControl>,
+        selected: Option<&str>,
+        tools: bool,
+    ) -> Result<Option<Value>, String> {
+        if !run.presentation_context
+            || selected.is_some()
+            || !tools
+            || self.runtime().is_err()
+            || !self.engines().formats().contains(&"pptx")
+        {
+            return Ok(None);
+        }
+        self.validate_run(run)?;
+        if self.identity().await? != run.identity {
+            return Err("assistant_identity_changed".into());
+        }
+        let skill = {
+            let state = run
+                .skills
+                .lock()
+                .map_err(|_| "assistant_state_unavailable")?;
+            // Preserve user shadowing, including manual skills. Never fall
+            // through to the user-skill loader during automatic priming.
+            if state.entries.contains_key(PPTX_BUILTIN) {
+                return Ok(None);
+            }
+            state
+                .bundled_skill(PPTX_BUILTIN)
+                .cloned()
+                .ok_or("assistant_skill_unavailable")?
+        };
+        let result = blocking(move || read_pptx_priming_body(&skill)).await;
+        self.validate_run(run)?;
+        if self.identity().await? != run.identity {
+            return Err("assistant_identity_changed".into());
+        }
+        let mut result = result.map_err(|_| "assistant_skill_unavailable")?;
+        result["scriptsUnavailable"] = json!(!run.local_enabled);
+        Ok(Some(result))
+    }
+
     pub async fn list_skills(&self) -> Result<Value, String> {
         let env = self.env.clone();
         let (snapshot, bundled) =
@@ -473,5 +536,336 @@ mod tests {
         )
         .unwrap();
         assert!(read_verified(&db, proof, SkillAccess::AutoUse, Box::new(load)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod primer_tests {
+    use super::*;
+    use crate::services::assistant::{
+        catalog,
+        host::{Admit, BoxFuture, Environment, Identity},
+        types::{id, Event, SendRequest},
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    };
+
+    struct PrimerEnvironment {
+        config: PathBuf,
+        runtime: PathBuf,
+        db: Mutex<Option<Arc<Database>>>,
+        identity_calls: AtomicUsize,
+        stale_at: AtomicUsize,
+        external_reads: AtomicUsize,
+        forbidden_calls: AtomicUsize,
+    }
+
+    fn identity() -> Identity {
+        Identity {
+            owner: "ab".repeat(32),
+            apex: "ofox.ai".into(),
+        }
+    }
+
+    impl Environment for PrimerEnvironment {
+        fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
+            let call = self.identity_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut value = identity();
+            let stale_at = self.stale_at.load(Ordering::SeqCst);
+            if stale_at > 0 && call >= stale_at {
+                value.owner = "cd".repeat(32);
+            }
+            Box::pin(async move { Ok(value) })
+        }
+        fn api_key<'a>(
+            &'a self,
+            _: &'a Identity,
+            _: Option<&'a str>,
+            _: &'a Admit<'a>,
+        ) -> BoxFuture<'a, Result<String, String>> {
+            self.forbidden_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err("fixture_no_key".into()) })
+        }
+        fn key_ready<'a>(&'a self, _: &'a Identity) -> BoxFuture<'a, bool> {
+            self.forbidden_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { false })
+        }
+        fn models<'a>(
+            &'a self,
+            _: &'a str,
+            _: catalog::Source,
+        ) -> BoxFuture<'a, Result<Vec<catalog::Model>, String>> {
+            self.forbidden_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Err("fixture_no_models".into()) })
+        }
+        fn gateway_base(&self, _: &str) -> Result<String, String> {
+            self.forbidden_calls.fetch_add(1, Ordering::SeqCst);
+            Err("fixture_no_gateway".into())
+        }
+        fn config_dir(&self) -> PathBuf {
+            self.config.clone()
+        }
+        fn runtime_dir(&self) -> Result<PathBuf, String> {
+            Ok(self.runtime.clone())
+        }
+        fn emit(&self, _: Event) {
+            self.forbidden_calls.fetch_add(1, Ordering::SeqCst);
+        }
+        fn skill_snapshot(&self) -> Result<AssistantSkillSnapshot, String> {
+            match self.db.lock().unwrap().as_ref() {
+                Some(db) => snapshot(db),
+                None => Ok(Default::default()),
+            }
+        }
+        fn skill_read(
+            &self,
+            _: &AssistantSkillProof,
+            _: SkillAccess,
+            _: SkillRead,
+        ) -> Result<Value, String> {
+            self.external_reads.fetch_add(1, Ordering::SeqCst);
+            Err("fixture_external_read_forbidden".into())
+        }
+    }
+
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        env: Arc<PrimerEnvironment>,
+        host: Arc<AssistantHost>,
+        run: Arc<RunControl>,
+        skill: PathBuf,
+    }
+    impl Fixture {
+        async fn new(context: bool, style: Option<&str>, office: bool) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let runtime = temp.path().join("runtime");
+            for file in ["node/node", "node/node.exe", "runtime/src/main.mjs"] {
+                let path = runtime.join(file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, "fixture, never executed").unwrap();
+            }
+            if office {
+                std::fs::write(runtime.join("officecli"), "fixture").unwrap();
+            }
+            std::fs::write(
+                runtime.join("manifest.json"),
+                serde_json::to_vec(&json!({"engines":{"officecli":{"path":"officecli"}}})).unwrap(),
+            )
+            .unwrap();
+            let skill = bundled::write_skill(
+                &runtime,
+                PPTX_BUILTIN,
+                PPTX_BUILTIN,
+                "Use new_deck, never raw Presentation().",
+            );
+            let env = Arc::new(PrimerEnvironment {
+                config: temp.path().join("config"),
+                runtime,
+                db: Mutex::new(None),
+                identity_calls: AtomicUsize::new(0),
+                stale_at: AtomicUsize::new(0),
+                external_reads: AtomicUsize::new(0),
+                forbidden_calls: AtomicUsize::new(0),
+            });
+            let host = AssistantHost::new(env.clone());
+            let request: SendRequest = serde_json::from_value(json!({"sessionId":id(),"runId":id(),"operationId":id(),"text":"Topic","presentationWorkflowVersion":1,"presentationStyleId":style})).unwrap();
+            let mut run = RunControl::new(identity(), &request, "synthetic-primer-key".into());
+            run.presentation_context = context;
+            let run = Arc::new(run);
+            host.admit_run_skills(&run).await.unwrap();
+            env.identity_calls.store(0, Ordering::SeqCst);
+            Self {
+                _temp: temp,
+                env,
+                host,
+                run,
+                skill,
+            }
+        }
+        fn no_side_effects(&self) {
+            assert_eq!(self.env.forbidden_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(self.env.external_reads.load(Ordering::SeqCst), 0);
+            assert!(self.run.skills.lock().unwrap().selected.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn pptx_primer_only_primes_explicit_ppt_context_with_the_real_capability() {
+        for (context, style, tools, office, selected, expected) in [
+            (false, None, true, true, None, false),
+            (true, Some("auto"), true, true, None, true),
+            (true, Some("cartesian"), true, true, None, true),
+            (true, None, true, true, None, true), // Host-verified PPT page reference.
+            (true, Some("auto"), false, true, None, false),
+            (true, Some("auto"), true, false, None, false),
+            (true, Some("auto"), true, true, Some("chosen-skill"), false),
+            (true, Some("auto"), true, true, Some(PPTX_BUILTIN), false),
+        ] {
+            let f = Fixture::new(context, style, office).await;
+            let result = f
+                .host
+                .prime_pptx_skill(&f.run, selected, tools)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.is_some(),
+                expected,
+                "{context:?} {style:?} {tools:?} {office:?} {selected:?}"
+            );
+            if let Some(result) = result {
+                assert_eq!(result["name"], PPTX_BUILTIN);
+                assert!(result["body"].as_str().unwrap().contains("Use new_deck"));
+                assert_eq!(result["truncated"], false);
+                assert_eq!(result["scriptsUnavailable"], true);
+            }
+            f.no_side_effects();
+        }
+        let f = Fixture::new(true, Some("auto"), true).await;
+        std::fs::remove_file(f.env.runtime.join("runtime/src/main.mjs")).unwrap();
+        assert!(f
+            .host
+            .prime_pptx_skill(&f.run, None, true)
+            .await
+            .unwrap()
+            .is_none());
+        f.no_side_effects();
+    }
+
+    #[tokio::test]
+    async fn pptx_primer_reads_the_complete_body_without_truncating_on_the_resource_inventory() {
+        let f = Fixture::new(true, Some("auto"), true).await;
+        for i in 0..205 {
+            std::fs::write(f.skill.join(format!("resource-{i}.txt")), "asset").unwrap();
+        }
+        let result = f
+            .host
+            .prime_pptx_skill(&f.run, None, true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(result["body"]
+            .as_str()
+            .unwrap()
+            .ends_with("Use new_deck, never raw Presentation()."));
+        assert_eq!(result["files"], json!(["SKILL.md"]));
+        assert_eq!(result["truncated"], false);
+        f.no_side_effects();
+    }
+
+    #[tokio::test]
+    async fn pptx_primer_rejects_missing_changed_invalid_or_truncated_builtin_body() {
+        for case in ["missing", "deleted", "renamed", "truncated", "invalid"] {
+            let f = Fixture::new(true, Some("auto"), true).await;
+            match case {
+                "missing" => {
+                    f.run.skills.lock().unwrap().bundled.clear();
+                }
+                "deleted" => std::fs::remove_file(f.skill.join("SKILL.md")).unwrap(),
+                "renamed" => {
+                    std::fs::write(
+                        f.skill.join("SKILL.md"),
+                        "---\nname: other\ndescription: Other\n---\nOther body",
+                    )
+                    .unwrap();
+                }
+                "truncated" => {
+                    std::fs::write(
+                        f.skill.join("SKILL.md"),
+                        format!(
+                            "---\nname: {PPTX_BUILTIN}\ndescription: Long\n---\n{}",
+                            "a".repeat(60001)
+                        ),
+                    )
+                    .unwrap();
+                }
+                _ => {
+                    std::fs::write(f.skill.join("SKILL.md"), [0xff, 0xfe]).unwrap();
+                }
+            }
+            assert_eq!(
+                f.host
+                    .prime_pptx_skill(&f.run, None, true)
+                    .await
+                    .unwrap_err(),
+                "assistant_skill_unavailable",
+                "{case}"
+            );
+            f.no_side_effects();
+        }
+    }
+
+    #[tokio::test]
+    async fn pptx_primer_rejects_stale_identity_before_and_after_read_and_cancellation() {
+        for stale_at in [1, 2] {
+            let f = Fixture::new(true, Some("auto"), true).await;
+            f.env.stale_at.store(stale_at, Ordering::SeqCst);
+            assert_eq!(
+                f.host
+                    .prime_pptx_skill(&f.run, None, true)
+                    .await
+                    .unwrap_err(),
+                "assistant_identity_changed"
+            );
+            f.no_side_effects();
+        }
+        let f = Fixture::new(true, Some("auto"), true).await;
+        f.run.cancel.send_replace(true);
+        assert_eq!(
+            f.host
+                .prime_pptx_skill(&f.run, None, true)
+                .await
+                .unwrap_err(),
+            "assistant_cancelled"
+        );
+        f.no_side_effects();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pptx_primer_rejects_a_skill_file_replaced_with_an_external_symlink() {
+        let f = Fixture::new(true, Some("auto"), true).await;
+        let outside = f._temp.path().join("outside.md");
+        std::fs::write(
+            &outside,
+            format!("---\nname: {PPTX_BUILTIN}\ndescription: Outside\n---\nExternal body"),
+        )
+        .unwrap();
+        std::fs::remove_file(f.skill.join("SKILL.md")).unwrap();
+        std::os::unix::fs::symlink(outside, f.skill.join("SKILL.md")).unwrap();
+        assert_eq!(
+            f.host
+                .prime_pptx_skill(&f.run, None, true)
+                .await
+                .unwrap_err(),
+            "assistant_skill_unavailable"
+        );
+        f.no_side_effects();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn pptx_primer_never_automatically_reads_a_user_skill_shadow() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let f = Fixture::new(true, Some("auto"), true).await;
+        let db = Arc::new(Database::memory().unwrap());
+        let dir = assistant_target::skills_dir().join(PPTX_BUILTIN);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {PPTX_BUILTIN}\ndescription: User choice\n---\nUser body"),
+        )
+        .unwrap();
+        assistant_target::set_skill_mode(PPTX_BUILTIN, SkillMode::Manual).unwrap();
+        *f.env.db.lock().unwrap() = Some(db);
+        f.host.admit_run_skills(&f.run).await.unwrap();
+        assert!(f
+            .host
+            .prime_pptx_skill(&f.run, None, true)
+            .await
+            .unwrap()
+            .is_none());
+        f.no_side_effects();
     }
 }

@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import React, { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Server } from "lucide-react";
@@ -148,9 +149,7 @@ const UnifiedMcpPanel = React.forwardRef<
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden pb-24">
         {isLoading ? (
-          <div className="text-center py-12 text-muted-foreground">
-            {t("mcp.loading")}
-          </div>
+          <FoxLoader size="block" label={t("mcp.loading")} />
         ) : serverEntries.length === 0 ? (
           <div className="text-center py-12">
             <div className="w-16 h-16 mx-auto mb-4 bg-muted rounded-full flex items-center justify-center">

@@ -39,6 +39,43 @@ const renderList = (ui: React.ReactElement) =>
   render(ui, { wrapper: TooltipProvider });
 
 describe("attachment chips", () => {
+  it("opens uploaded PPTX and HTML attachments by keyboard without removing them or activating missing files", async () => {
+    const onOpenFile = vi.fn();
+    const onRemove = vi.fn();
+    const deck = file({
+      id: "deck",
+      name: "Deck.pptx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    });
+    const html = file({ id: "html", name: "Demo.html", mimeType: "text/html" });
+    renderList(
+      <AttachmentList
+        files={[
+          deck,
+          html,
+          file(),
+          { ...deck, id: "missing", name: "Missing.pptx", status: "missing" },
+        ]}
+        onOpenFile={onOpenFile}
+        onRemove={onRemove}
+      />,
+    );
+    const trigger = screen.getByRole("button", { name: "Preview Deck.pptx" });
+    trigger.focus();
+    await userEvent.keyboard("{Enter}");
+    expect(onOpenFile).toHaveBeenLastCalledWith(deck);
+    screen.getByRole("button", { name: "Preview Demo.html" }).focus();
+    await userEvent.keyboard(" ");
+    expect(onOpenFile).toHaveBeenLastCalledWith(html);
+    expect(onRemove).not.toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: "Preview Missing.pptx" }),
+    ).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: "Preview report.pdf" }),
+    ).toBeNull();
+  });
   it("shows each file's name and size, and no outcome while it is ready", () => {
     renderList(
       <AttachmentList

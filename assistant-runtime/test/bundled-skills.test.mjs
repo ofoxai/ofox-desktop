@@ -7,8 +7,13 @@ import { options, run } from "./fixtures/python-engine.mjs";
 const skillsDir = new URL("../skills/", import.meta.url);
 // The body of each SKILL.md is what use_skill returns to the model.
 // The pptx skill carries two routes (Python deck code, and the deck object
-// where Python is unavailable) and a worked example for each.
-const BODY_LIMITS = { "ofox-office-pdf": 8000, "ofox-office-pptx": 26000 };
+// where Python is unavailable) and a worked example for each. 2026-11-11:
+// raised from 26000 for the statement, closing, table, pyramid and code
+// helpers and the page-canvas rule that the full style library needs.
+// 2026-11-12: raised to 27000 to say again what figure() and plot() are for
+// and how the plan's visual kinds and the slide-image setting reach a page;
+// to 27500 for pictures the conversation already holds and background images.
+const BODY_LIMITS = { "ofox-office-pdf": 8000, "ofox-office-pptx": 27500 };
 const bodyLimit = (name) => BODY_LIMITS[name] ?? 12000;
 // Skills teach create_document content (batch arrays, deck objects), never
 // command-line calls.
@@ -214,6 +219,26 @@ test("the pptx skill describes preview then deliver, and the deck object where P
     body.indexOf("preview: true") <
       body.indexOf("## When Python is unavailable"),
   );
+});
+
+test("the pptx skill distinguishes sequence, independent comparison and parallel branches within the slide region", async () => {
+  const { body } = await pptxSkill();
+  const helpers = section(body, "Helpers");
+  assert.match(helpers, /process[^\n]*sequence/i);
+  assert.match(helpers, /comparison[^\n]*independent/i);
+  assert.match(helpers, /fork_join\([^\n]*parallel/i);
+  assert.match(helpers, /no branch-to-branch arrows/i);
+  const blocks = [...body.matchAll(/```python\n([\s\S]*?)\n```/g)].map(
+    ([, code]) => code,
+  );
+  const example = blocks.find((code) => /\bfork_join\(/.test(code));
+  assert.ok(example, "a runnable native parallel diagram example");
+  assert.match(example, /lesson_slide\(/);
+  assert.match(example, /b = slide_regions\(s\)\["main"\]/);
+  assert.match(example, /fork_join\(s,[^\n]*\*\*b,/);
+  assert.match(example, /source=/);
+  assert.match(example, /merge=/);
+  assert.match(section(body, "Lint lines"), /outside main region/);
 });
 
 test(
