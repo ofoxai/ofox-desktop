@@ -323,8 +323,11 @@ fn assistant_state_and_unmanaged_skills_reject_links() {
 
 #[test]
 #[serial_test::serial]
-fn created_origin_needs_current_receipt_and_survives_unrelated_epoch_changes() {
+fn created_origin_needs_current_source_and_survives_unrelated_epoch_changes() {
     let _sandbox = crate::test_sandbox::sandbox();
+    let mut settings = crate::settings::get_settings();
+    settings.skill_sync_method = crate::services::skill::SyncMethod::Copy;
+    crate::settings::update_settings(settings).unwrap();
     let db = Database::memory().unwrap();
     let row = managed(
         &db,
@@ -374,6 +377,22 @@ fn created_origin_needs_current_receipt_and_survives_unrelated_epoch_changes() {
         body("foreign"),
     )
     .unwrap();
+    // A changed installed copy loses execution proof, while the catalog still
+    // classifies the intact canonical source as assistant-created.
+    assert_eq!(
+        origin_for_resource(&db, &row).unwrap(),
+        SkillOrigin::AssistantCreated
+    );
+    let changed = assistant_skill_snapshot(&db, &reviewed_names()).unwrap();
+    assert!(changed.skills[0]
+        .broken
+        .as_deref()
+        .is_some_and(|reason| reason.contains("skillEntryChanged")));
+    assert!(changed.proof("frontend-design").is_none());
+    assert!(changed.proof("foreign").is_none());
+    let artifact = skill_resource::artifact_for(&db, &row.id).unwrap();
+    fs::write(artifact.join("SKILL.md"), body("foreign source")).unwrap();
+    assert!(skill_resource::artifact_for(&db, &row.id).is_err());
     assert_ne!(
         origin_for_resource(&db, &row).unwrap(),
         SkillOrigin::AssistantCreated

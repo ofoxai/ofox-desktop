@@ -6803,14 +6803,19 @@ while read line; do :; done"#,
         );
     }
 
+    fn fixture_node_path() -> &'static str {
+        if cfg!(windows) {
+            "node/node.exe"
+        } else {
+            "node/node"
+        }
+    }
+
     #[test]
     fn the_runtime_needs_node_and_its_entry_and_reports_its_sdk_version() {
         let base = tempfile::tempdir().unwrap();
         assert_eq!(runtime_at(base.path()).err().unwrap(), RUNTIME_UNAVAILABLE);
-        let node = base
-            .path()
-            .join("node")
-            .join(if cfg!(windows) { "node.exe" } else { "node" });
+        let node = base.path().join(fixture_node_path());
         std::fs::create_dir_all(node.parent().unwrap()).unwrap();
         std::fs::write(&node, "").unwrap();
         assert!(runtime_at(base.path()).is_err());
@@ -6978,7 +6983,11 @@ while read line; do :; done"#,
 
         let (config, env, host) = fixture_with_env();
         let base = config.path().join("runtime-with-engines");
-        for file in ["node/node", "runtime/src/main.mjs", "engines/typst/typst"] {
+        for file in [
+            fixture_node_path(),
+            "runtime/src/main.mjs",
+            "engines/typst/typst",
+        ] {
             std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
             std::fs::write(base.join(file), "").unwrap();
         }
@@ -6997,6 +7006,7 @@ while read line; do :; done"#,
     }
     #[tokio::test]
     async fn bootstrap_reports_python_availability() {
+        let node = fixture_node_path();
         let python = json!({
             "path": "engines/python/assets.json",
             "runner": "runtime/src/python/runner.mjs",
@@ -7005,7 +7015,7 @@ while read line; do :; done"#,
         let boot_with = |files: &[&str], manifest: Value| {
             let (config, env, host) = fixture_with_env();
             let base = config.path().join("runtime-with-engines");
-            for file in ["node/node", "runtime/src/main.mjs"].iter().chain(files) {
+            for file in [node, "runtime/src/main.mjs"].iter().chain(files) {
                 std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
                 // The engine's assets list the files staged beside them.
                 let text = if file.ends_with("assets.json") {
@@ -7024,13 +7034,13 @@ while read line; do :; done"#,
             }
         };
         // No Python engine: not offered.
-        let boot = boot_with(&[], json!({"node": "node/node", "engines": {}})).await;
+        let boot = boot_with(&[], json!({"node": node, "engines": {}})).await;
         assert_eq!(boot["runtime"]["available"], true);
         assert_eq!(boot["runtime"]["documents"]["python"], false);
         // Its runner or assets missing: not offered either.
         let boot = boot_with(
             &["runtime/src/python/runner.mjs"],
-            json!({"node": "node/node", "engines": {"python": python}}),
+            json!({"node": node, "engines": {"python": python}}),
         )
         .await;
         assert_eq!(boot["runtime"]["documents"]["python"], false);
@@ -7041,7 +7051,7 @@ while read line; do :; done"#,
                 "runtime/src/python/runner.mjs",
                 "engines/python/assets.json",
             ],
-            json!({"node": "node/node", "engines": {"python": python}}),
+            json!({"node": node, "engines": {"python": python}}),
         )
         .await;
         assert_eq!(boot["runtime"]["documents"]["python"], false);
@@ -7053,7 +7063,7 @@ while read line; do :; done"#,
                 "engines/python/assets.json",
                 "engines/officecli/officecli",
             ],
-            json!({"node": "node/node", "engines": {
+            json!({"node": node, "engines": {
                 "python": python,
                 "officecli": {"path": "engines/officecli/officecli"},
             }}),

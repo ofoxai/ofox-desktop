@@ -31,6 +31,9 @@ jobs:
   windows-probe:
     name: Windows lifecycle tests + probes
     runs-on: windows-2022
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -102,7 +105,8 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Cargo
-        uses: actions/cache@v5
+        id: cargo-cache
+        uses: actions/cache/restore@v5
         with:
           path: |
             ~/.cargo/registry
@@ -110,8 +114,8 @@ jobs:
             src-tauri/target
           # windows-2022 与 ubuntu 缓存分开——windows 的 target/ 目录里是 .pdb/.lib
           # 与 linux 完全不兼容，共享 cache key 会互相 invalidate。
-          key: windows-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: windows-cargo-
+          key: windows-cargo-debug0-v2-${{ hashFiles('src-tauri/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: windows-cargo-debug0-v2-
 
       # tauri-build 会检查 frontend dist 是否存在（就算这里只 build lib+bins 不装 WebView2
       # 也过一遍 build script）。给个空 dist 占位，与 ci.yml backend job 保持一致。
@@ -187,3 +191,14 @@ jobs:
           path: artifacts/windows-tests/ci/
           retention-days: 30
           if-no-files-found: warn
+
+      # Failed assertions must not discard completed dependency builds.
+      - name: Save Windows build cache after verification
+        if: ${{ always() && !cancelled() && steps.cargo-cache.outcome == 'success' && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
