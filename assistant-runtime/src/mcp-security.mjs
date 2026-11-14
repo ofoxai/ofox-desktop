@@ -28,8 +28,41 @@ export function credentialValue(name, value) {
   return !plainNames.has(name.toLowerCase()) && [...value].length >= 8;
 }
 
+function querySecrets(server) {
+  if (typeof server.url !== "string") return [];
+  let url;
+  try {
+    url = new URL(server.url);
+  } catch {
+    // The Host validates URLs; an unavailable/malformed server has no query.
+    return [];
+  }
+  const raw = url.search.slice(1).split("&").filter(Boolean);
+  const configured = server.url
+    .slice(server.url.indexOf("?") + 1)
+    .split("#")[0]
+    .split("&")
+    .filter(Boolean);
+  return [...url.searchParams].flatMap(([name, value], index) => {
+    if (!credentialValue(name, value)) return [];
+    const pair = raw[index];
+    const encoded = pair.slice(pair.indexOf("=") + 1);
+    const bare = /^(?:Bearer|Basic|Token)\s+(.+)$/i.exec(value)?.[1];
+    return [
+      encoded,
+      configured[index]?.slice(configured[index].indexOf("=") + 1),
+      ...[value, ...(bare ? [bare] : [])].flatMap((credential) => [
+        credential,
+        encodeURIComponent(credential),
+        new URLSearchParams([["", credential]]).toString().slice(1),
+      ]),
+    ].filter(Boolean);
+  });
+}
+
 export function mcpSecrets(params) {
-  return Object.values(params?.servers ?? {})
+  const servers = Object.values(params?.servers ?? {});
+  return servers
     .flatMap((server) =>
       [server.env, server.headers].flatMap((values) =>
         Object.entries(values ?? {}),
@@ -43,7 +76,8 @@ export function mcpSecrets(params) {
       // Servers often echo only the credential, without its HTTP auth scheme.
       const credential = /^(?:Bearer|Basic|Token)\s+(.+)$/i.exec(value)?.[1];
       return credential ? [value, credential] : [value];
-    });
+    })
+    .concat(servers.flatMap(querySecrets));
 }
 
 // Every selected value is private, even a short password. Replace in one pass:

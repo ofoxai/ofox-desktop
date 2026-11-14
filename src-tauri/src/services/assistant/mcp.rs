@@ -180,7 +180,7 @@ pub fn snapshot(root: &Path) -> Result<Value, String> {
 }
 
 pub fn secrets(snapshot: &Value) -> Vec<String> {
-    snapshot["servers"]
+    let mut found: Vec<String> = snapshot["servers"]
         .as_object()
         .into_iter()
         .flat_map(|v| v.values())
@@ -200,7 +200,78 @@ pub fn secrets(snapshot: &Value) -> Vec<String> {
             }
             values
         })
-        .collect()
+        .collect();
+    for server in snapshot["servers"]
+        .as_object()
+        .into_iter()
+        .flat_map(|v| v.values())
+    {
+        if let Some(raw) = server["url"].as_str() {
+            found.extend(query_secrets(raw));
+        }
+    }
+    found
+}
+
+fn query_secrets(raw: &str) -> Vec<String> {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return Vec::new();
+    };
+    let encoded: Vec<_> = parsed
+        .query()
+        .unwrap_or_default()
+        .split('&')
+        .filter(|v| !v.is_empty())
+        .collect();
+    let configured: Vec<_> = raw
+        .split_once('?')
+        .map(|(_, q)| q.split('#').next().unwrap_or_default())
+        .unwrap_or_default()
+        .split('&')
+        .filter(|v| !v.is_empty())
+        .collect();
+    // JavaScript encodeURIComponent's ASCII set; keep both component and form
+    // encodings, as well as the configured spelling (including percent case).
+    const COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'_')
+        .remove(b'.')
+        .remove(b'!')
+        .remove(b'~')
+        .remove(b'*')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')');
+    let mut found = Vec::new();
+    for (index, (name, value)) in parsed.query_pairs().enumerate() {
+        if !credential_value(&name, &value) {
+            continue;
+        }
+        for spelling in [encoded.get(index), configured.get(index)]
+            .into_iter()
+            .flatten()
+        {
+            if let Some((_, value)) = spelling.split_once('=') {
+                found.push(value.to_string());
+            }
+        }
+        let mut credentials = vec![value.to_string()];
+        if let Some((scheme, credential)) = value.split_once(' ') {
+            if ["bearer", "basic", "token"].contains(&scheme.to_ascii_lowercase().as_str())
+                && !credential.trim_start().is_empty()
+            {
+                credentials.push(credential.trim_start().to_string());
+            }
+        }
+        for credential in credentials {
+            found.push(percent_encoding::utf8_percent_encode(&credential, COMPONENT).to_string());
+            let mut form = url::form_urlencoded::Serializer::new(String::new());
+            form.append_pair("", &credential);
+            found.push(form.finish()[1..].to_owned());
+            found.push(credential);
+        }
+    }
+    found
 }
 
 /// Configured values are private by default (a webhook URL or a database URL
@@ -356,6 +427,33 @@ pub(super) fn scrub_native_data(entries: &mut Value, snapshot: &Value) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mcp_query_credentials_scrub_previews_events_and_native_history() {
+        let secret = "synthetic-query !'()~+/汉";
+        let raw = "synthetic-query%20!'()~%2b%2f%e6%b1%89";
+        let component = "synthetic-query%20!'()~%2B%2F%E6%B1%89";
+        let form = "synthetic-query+%21%27%28%29%7E%2B%2F%E6%B1%89";
+        let snapshot = json!({"servers":{"remote":{"url":format!("https://example.invalid/mcp?%61pi_key={raw}&lang=zh&debug=1")}}});
+        let original = snapshot.clone();
+        let body = format!("Readable {secret} {raw} {component} {form}");
+        let (preview, truncated) = arguments_preview(&json!({"body":body}), &snapshot).unwrap();
+        assert!(!truncated);
+        let mut event =
+            json!({"args":{"body":body},"details":body,"message":body,"delta":body,"id":1});
+        scrub_event_data(&mut event, &snapshot).unwrap();
+        let mut native = json!([{"summary":body,"message":{"content":[{"type":"text","text":body}],"details":body}}]);
+        scrub_native_data(&mut native, &snapshot).unwrap();
+        let output = format!("{preview} {event} {native}");
+        assert!(output.contains("Readable"));
+        for value in [secret, raw, component, form] {
+            assert!(
+                !output.contains(value),
+                "query credential leaked to a host surface"
+            );
+        }
+        assert_eq!(event["id"], 1);
+        assert_eq!(snapshot, original, "transport snapshot must stay unchanged");
+    }
     #[test]
     fn final_mcp_preview_scrubs_before_scalar_truncation_and_fails_on_key_collision() {
         let snapshot = json!({"servers":{"fixture":{"env":{"SHORT_SECRET":"xy7","PIN":"418731","BOOL":"false","EMPTY":"null"},"headers":{"Authorization":"Bearer credential"}}}});
