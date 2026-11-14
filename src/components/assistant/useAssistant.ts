@@ -23,6 +23,7 @@ import {
   type AssistantPreferences,
   type AssistantRunRef,
   type AssistantRestoreReport,
+  type AssistantSearchProvider,
   type AssistantSession,
   type AssistantSessionDetail,
   type AssistantThinkingLevel,
@@ -82,12 +83,17 @@ export type AssistantTransferResult =
   | ({ kind: "restore" } & AssistantRestoreReport);
 
 /** What a running reply is doing, as the user is told; never a tool's name. */
-export type AssistantActivity = "searching" | "readingPage" | "readingFile";
+export type AssistantActivity =
+  | "searching"
+  | "readingPage"
+  | "readingFile"
+  | "makingDocument";
 
 const TOOL_ACTIVITY = new Map<string, AssistantActivity>([
   ["web_search", "searching"],
   ["web_fetch", "readingPage"],
   ["read_attachment", "readingFile"],
+  ["create_document", "makingDocument"],
 ]);
 
 /** A tool call of the followed run that has not ended, by its call id. */
@@ -240,6 +246,18 @@ export function useAssistant(enabled: boolean) {
   const detailRef = useRef(detail);
   detailRef.current = detail;
   const [draft, setDraftState] = useState("");
+  const [skill, setSkillState] = useState<string | undefined>();
+  const skillRef = useRef<string | undefined>();
+  const skillDrafts = useRef(new Map<string, string | undefined>());
+  const skillVersion = useRef(0);
+  const skillVersions = useRef(new Map<string, number>());
+  const setSkill = useCallback((value: string | undefined) => {
+    skillVersion.current += 1;
+    skillRef.current = value;
+    skillDrafts.current.set(selectedRef.current ?? "", value);
+    skillVersions.current.set(selectedRef.current ?? "", skillVersion.current);
+    setSkillState(value);
+  }, []);
   const [attachments, setAttachmentsState] = useState<AssistantAttachment[]>(
     [],
   );
@@ -261,7 +279,13 @@ export function useAssistant(enabled: boolean) {
   const [searchSkipped, setSearchSkipped] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
+  // Replies whose free (Exa) search was refused, by message id: rate-limited
+  // for this network, or blocked (a proxy or IPv6).
+  const [searchLimited, setSearchLimited] = useState<
+    ReadonlyMap<string, "search_rate_limited" | "search_blocked">
+  >(() => new Map());
   const [compacting, setCompacting] = useState(false);
+  const [retryAttempt, setRetryAttempt] = useState<1 | 2 | null>(null);
   const listenerReady = useRef<ReturnType<typeof subscriptionReadiness> | null>(
     null,
   );
@@ -417,6 +441,7 @@ export function useAssistant(enabled: boolean) {
   const setRun = useCallback((value: AssistantRunRef | null) => {
     // Another run, or none: the tools the last one started are not followed.
     if (value?.runId !== runRef.current?.runId) {
+      setRetryAttempt(null);
       setTools([]);
       setLocalApprovals([]);
       setLocalIntent(null);
@@ -567,8 +592,12 @@ export function useAssistant(enabled: boolean) {
             previous &&
             (previous.owner !== value.owner ||
               previous.authorityGeneration !== value.authorityGeneration)
-          )
+          ) {
             messageQueue.clear();
+            skillDrafts.current.clear();
+            skillVersions.current.clear();
+            setSkill(undefined);
+          }
           if (
             previous?.owner === value.owner &&
             previous.authorityGeneration === value.authorityGeneration &&
@@ -917,6 +946,9 @@ export function useAssistant(enabled: boolean) {
       detailSequence.current += 1;
       selectedRef.current = null;
       drafts.current.clear();
+      skillDrafts.current.clear();
+      skillVersions.current.clear();
+      setSkill(undefined);
       attachmentDrafts.current.clear();
       savedDrafts.current.clear();
       draftScopes.current.clear();
@@ -956,6 +988,7 @@ export function useAssistant(enabled: boolean) {
       setNewThinking(null);
       setRunSearch(null);
       setSearchSkipped(new Set());
+      setSearchLimited(new Map());
       setPreferences(null);
       setError(null);
     };
@@ -1472,7 +1505,62 @@ export function useAssistant(enabled: boolean) {
           flushDeltas();
         // session and event types this build does not know change nothing
         // on screen: the transcript and session are read again at run_end.
+        // A retry notice belongs only to the followed live request. Model or
+        // tool progress, a replacement turn, failure and completion clear it.
+        if (
+          [
+            "thinking_start",
+            "text_delta",
+            "thinking_delta",
+            "tool_start",
+            "message",
+            "error",
+            "run_end",
+            "steer_applied",
+          ].includes(event.type)
+        )
+          setRetryAttempt(null);
         switch (event.type) {
+          case "retrying":
+            if (event.data.attempt === 1 || event.data.attempt === 2)
+              setRetryAttempt(event.data.attempt);
+            return;
+          case "skill_results": {
+            const { messageId, group } = event.data;
+            if (
+              !Array.isArray(group?.results) ||
+              group.results.length > 8 ||
+              typeof group.toolCallId !== "string"
+            )
+              return;
+            const apply = (message: AssistantMessage): AssistantMessage => ({
+              ...message,
+              skillResults: [
+                ...(message.skillResults ?? []).filter(
+                  (g) => g.toolCallId !== group.toolCallId,
+                ),
+                group,
+              ],
+            });
+            setStream((previous) =>
+              apply(
+                previous?.id === messageId
+                  ? previous
+                  : { ...blankReply(event.runId), id: messageId },
+              ),
+            );
+            setDetail((previous) =>
+              previous
+                ? {
+                    ...previous,
+                    messages: previous.messages.map((m) =>
+                      m.id === messageId ? apply(m) : m,
+                    ),
+                  }
+                : previous,
+            );
+            return;
+          }
           case "approval":
             setLocalApprovals((old) => [
               ...old.filter((a) => a.data.approvalId !== event.data.approvalId),
@@ -1596,6 +1684,30 @@ export function useAssistant(enabled: boolean) {
             );
             return;
           }
+          case "mcp_step": {
+            const { step, messageId } = event.data;
+            const update = (items: AssistantMessage["mcpSteps"]) => [
+              ...(items ?? []).filter((item) => item.id !== step.id),
+              step,
+            ];
+            setStream((previous) => ({
+              ...(previous ?? blankReply(event.runId)),
+              mcpSteps: update(previous?.mcpSteps),
+            }));
+            setDetail((old) =>
+              old
+                ? {
+                    ...old,
+                    messages: old.messages.map((message) =>
+                      message.id === messageId
+                        ? { ...message, mcpSteps: update(message.mcpSteps) }
+                        : message,
+                    ),
+                  }
+                : old,
+            );
+            return;
+          }
           case "tool_start": {
             const { name, toolCallId } = event.data;
             setLocalIntent(event.data.intent ?? null);
@@ -1611,10 +1723,16 @@ export function useAssistant(enabled: boolean) {
             return;
           }
           case "tool_end": {
-            const { toolCallId } = event.data;
+            const { toolCallId, name, code, messageId } = event.data;
             setTools((running) =>
               running.filter((tool) => tool.id !== toolCallId),
             );
+            if (
+              name === "web_search" &&
+              typeof messageId === "string" &&
+              (code === "search_rate_limited" || code === "search_blocked")
+            )
+              setSearchLimited((old) => new Map(old).set(messageId, code));
             return;
           }
           case "sources": {
@@ -1773,6 +1891,9 @@ export function useAssistant(enabled: boolean) {
       );
       draftRef.current = id ? (drafts.current.get(id) ?? "") : "";
       setDraftState(draftRef.current);
+      skillRef.current = skillDrafts.current.get(id ?? "");
+      setSkillState(skillRef.current);
+      skillVersion.current += 1;
       attachmentsRef.current = id
         ? (attachmentDrafts.current.get(id) ?? [])
         : [];
@@ -1876,6 +1997,9 @@ export function useAssistant(enabled: boolean) {
     createdSession.current = value.id;
     setNewWebSearch(lastWebSearch.current);
     drafts.current.set(value.id, draftRef.current);
+    skillDrafts.current.set(value.id, skillRef.current);
+    skillVersions.current.set(value.id, skillVersion.current);
+    skillDrafts.current.delete("");
     attachmentDrafts.current.set(value.id, attachmentsRef.current);
     setSelectedId(value.id);
     setDetail({ session: value, messages: [], attachments: [], usage: {} });
@@ -2456,6 +2580,62 @@ export function useAssistant(enabled: boolean) {
     [update, setNewWebSearch],
   );
 
+  /**
+   * Where the account's web searches go, from the next message on. Saved on
+   * its own, so the settings editor cannot overwrite it; resolves with the
+   * saved provider, or null when it could not be saved.
+   */
+  const setSearchProvider = useCallback(
+    async (provider: AssistantSearchProvider) => {
+      const generation = epoch.current;
+      try {
+        const saved = await assistantApi.setSearchProvider({
+          provider,
+          ...expectedIdentity(bootstrapRef.current),
+        });
+        const current = bootstrapRef.current;
+        if (mounted.current && generation === epoch.current && current) {
+          const next = {
+            ...current,
+            search: current.search && { ...current.search, provider: saved },
+          };
+          bootstrapRef.current = next;
+          setBootstrap(next);
+        }
+        return saved;
+      } catch (reason) {
+        if (generation === epoch.current) showError(reason);
+        if (assistantErrorCode(reason) === IDENTITY_CHANGED)
+          reloadAuthority.current();
+        return null;
+      }
+    },
+    [showError],
+  );
+
+  /**
+   * The composer's search menu: off, or on through one provider. The
+   * provider is the account's; the switch is the conversation's.
+   */
+  const chooseWebSearch = useCallback(
+    async (choice: "off" | AssistantSearchProvider) => {
+      if (choice === "off") {
+        setWebSearch(false);
+        return;
+      }
+      if (choice !== (bootstrapRef.current?.search?.provider ?? "ofox")) {
+        if (!(await setSearchProvider(choice))) return;
+      }
+      const sessionId = selectedRef.current;
+      const on = sessionId
+        ? detailRef.current?.session.id === sessionId &&
+          detailRef.current.session.webSearch
+        : newWebSearchRef.current;
+      if (!on) setWebSearch(true);
+    },
+    [setSearchProvider, setWebSearch],
+  );
+
   const setLocalConfig = useCallback(
     async (on: boolean) => {
       if (busy || loading || runRef.current) return false;
@@ -2672,6 +2852,8 @@ export function useAssistant(enabled: boolean) {
       /** A failed or stopped reply to ask again for, with `text` and `attachments`. */
       retryMessageId?: string;
       text?: string;
+      skill?: string;
+      replaceSkill?: boolean;
       attachments?: AssistantAttachment[];
       media?: AssistantImageRequest;
       video?: AssistantVideoRequest;
@@ -2683,6 +2865,9 @@ export function useAssistant(enabled: boolean) {
         options ?? {};
       const text = options?.text ?? draftRef.current;
       const fromComposer = options?.text === undefined;
+      const chosenSkill = fromComposer ? skillRef.current : options?.skill;
+      const originalSkill = skillRef.current;
+      let clearedSkillVersion: number | undefined;
       const revision = Boolean(editMessageId || regenerateMessageId);
       // A regenerate reads its turn's own files again. An edit or a question
       // sent again carries the files its caller chose, leaving out those that
@@ -2822,6 +3007,8 @@ export function useAssistant(enabled: boolean) {
         });
         if (fromComposer) {
           setDraft("");
+          setSkill(undefined);
+          clearedSkillVersion = skillVersion.current;
           setAttachments([]);
         }
         if (!regenerateMessageId)
@@ -2835,6 +3022,7 @@ export function useAssistant(enabled: boolean) {
                       id: `pending-${reference.operationId}`,
                       role: "user",
                       content: text,
+                      skill: chosenSkill,
                       createdAt: Date.now(),
                       revisionOf: editMessageId,
                       attachments: files,
@@ -2859,6 +3047,8 @@ export function useAssistant(enabled: boolean) {
           ...reference,
           ...authority,
           text,
+          ...(chosenSkill ? { skill: chosenSkill } : {}),
+          ...(options?.replaceSkill ? { replaceSkill: true } : {}),
           attachmentIds: files.map((file) => file.id),
           ...(options?.media ? { media: options.media } : {}),
           ...(options?.video
@@ -2912,6 +3102,11 @@ export function useAssistant(enabled: boolean) {
         if (fromComposer && sessionId && generation === epoch.current) {
           if (!drafts.current.get(sessionId))
             drafts.current.set(sessionId, originalDraft);
+          if (
+            clearedSkillVersion !== undefined &&
+            skillVersions.current.get(sessionId) === clearedSkillVersion
+          )
+            skillDrafts.current.set(sessionId, originalSkill);
           if (!attachmentDrafts.current.get(sessionId)?.length)
             attachmentDrafts.current.set(sessionId, originalFiles);
         }
@@ -2935,6 +3130,13 @@ export function useAssistant(enabled: boolean) {
               : old,
           );
           if (fromComposer && !draftRef.current) setDraft(originalDraft);
+          if (
+            fromComposer &&
+            sessionId &&
+            clearedSkillVersion !== undefined &&
+            skillVersions.current.get(sessionId) === clearedSkillVersion
+          )
+            setSkill(originalSkill);
           if (fromComposer && !attachmentsRef.current.length)
             setAttachments(originalFiles);
           if (!preparation?.cancelled) showError(reason);
@@ -3004,8 +3206,10 @@ export function useAssistant(enabled: boolean) {
       (!runRef.current && !messageQueue.get(sid)?.messages.length)
     )
       return false;
-    if (!messageQueue.enqueue(sid, draftRef.current)) return false;
+    if (!messageQueue.enqueue(sid, draftRef.current, skillRef.current))
+      return false;
     setDraft("");
+    setSkill(undefined);
     return true;
   }, [queueAvailable, messageQueue, setDraft]);
 
@@ -3021,6 +3225,7 @@ export function useAssistant(enabled: boolean) {
       !queueAvailable ||
       steerSending.current ||
       attachmentsRef.current.length ||
+      skillRef.current ||
       !text.trim() ||
       new TextEncoder().encode(text).length > MAX_MESSAGE_BYTES
     )
@@ -3105,6 +3310,7 @@ export function useAssistant(enabled: boolean) {
     if (!ticket) return;
     void send({
       text: ticket.message.text,
+      skill: ticket.message.skill,
       attachments: [],
       queueTicket: ticket,
     }).then((sent) => messageQueue.settle(ticket, sent));
@@ -3582,6 +3788,8 @@ export function useAssistant(enabled: boolean) {
   // what it got: the change waits for the next message.
   const followedSearch =
     runSearch && runSearch.runId === run?.runId ? runSearch : null;
+  const searchProvider: AssistantSearchProvider =
+    bootstrap?.search?.provider ?? "ofox";
   const webSearchWaits = Boolean(
     followedSearch &&
       webSearch !== followedSearch.requested &&
@@ -3612,6 +3820,9 @@ export function useAssistant(enabled: boolean) {
     thinking: liveThinking,
     webSearch,
     setWebSearch,
+    searchProvider,
+    setSearchProvider,
+    chooseWebSearch,
     localConfig,
     setLocalConfig,
     startLocalConfig,
@@ -3627,6 +3838,7 @@ export function useAssistant(enabled: boolean) {
     restoreLocalChanges,
     webSearchWaits,
     searchSkipped,
+    searchLimited,
     search,
     setSearch,
     showTrash,
@@ -3648,6 +3860,8 @@ export function useAssistant(enabled: boolean) {
     detail,
     draft,
     setDraft,
+    skill,
+    setSkill,
     queue,
     queueAvailable,
     enqueue,
@@ -3675,6 +3889,7 @@ export function useAssistant(enabled: boolean) {
     activity,
     run,
     compacting,
+    retryAttempt,
     error,
     errorDetail,
     setError,

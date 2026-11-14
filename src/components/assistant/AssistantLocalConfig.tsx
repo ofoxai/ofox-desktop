@@ -1,7 +1,9 @@
+import { SkillApprovalCard } from "./SkillResultCards";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
   AssistantGenerationApproval,
+  AssistantSkillApproval,
   AssistantApprovalChoice,
   AssistantLocalChange,
   AssistantPermissionMode,
@@ -164,18 +166,37 @@ export function LocalApprovalCard({
     void onRespond(approval.approvalId, choice).finally(() => setBusy(false));
   };
   if (
+    (approval.category === "skillInstall" ||
+      approval.category === "skillSave") &&
+    typeof approval.details === "object"
+  )
+    return (
+      <SkillApprovalCard
+        details={approval.details as AssistantSkillApproval}
+        install={approval.category === "skillInstall"}
+        busy={busy}
+        onRespond={respond}
+      />
+    );
+  if (
     approval.category === "generation" &&
     typeof approval.details === "object"
   )
     return (
       <GenerationApproval
-        details={approval.details}
+        details={approval.details as AssistantGenerationApproval}
         busy={busy}
         allowSession={approval.allowSession}
         onRespond={respond}
       />
     );
   const overwrites = approval.overwrites ?? [];
+  const mcpDetails =
+    approval.category === "mcp" &&
+    typeof approval.details === "object" &&
+    "tool" in approval.details
+      ? approval.details
+      : null;
   return (
     <div
       role="group"
@@ -183,10 +204,37 @@ export function LocalApprovalCard({
       className="mt-2 space-y-2 rounded-list border border-line bg-card-2 px-3 py-2 text-ctl"
     >
       <p className="font-medium text-ink">
-        {t(`assistant.local.operations.${approval.name}`, {
-          defaultValue: approval.name,
-        })}
+        {approval.category === "mcp"
+          ? t("assistant.mcp.approvalTitle")
+          : t(`assistant.local.operations.${approval.name}`, {
+              defaultValue: approval.name,
+            })}
       </p>
+      {mcpDetails && (
+        <p className="break-words text-note text-ink-2">
+          {mcpDetails.server ?? "MCP"} · {mcpDetails.tool}
+        </p>
+      )}
+      {approval.category === "mcp" && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.mcp.approval")}
+        </p>
+      )}
+      {mcpDetails && typeof approval.argumentsPreview === "string" && (
+        <details className="text-note text-ink-muted">
+          <summary className="cursor-default select-none">
+            {t("assistant.mcp.argumentsPreview")}
+          </summary>
+          <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-ctl bg-pill px-2 py-1 font-mono text-ink-2">
+            {approval.argumentsPreview}
+          </pre>
+        </details>
+      )}
+      {mcpDetails && approval.argumentsTruncated === true && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.mcp.argumentsTruncated")}
+        </p>
+      )}
       {overwrites.length > 0 && (
         <div className="text-note text-ink-2">
           <p>{t("assistant.local.overwrites")}</p>

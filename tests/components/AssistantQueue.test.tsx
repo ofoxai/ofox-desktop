@@ -27,6 +27,17 @@ import type {
 } from "@/lib/api/assistant";
 
 const mocks = vi.hoisted(() => ({
+  listSkills: vi
+    .fn()
+    .mockResolvedValue([
+      {
+        name: "manual",
+        description: "Selected instructions",
+        mode: "manual",
+        reviewed: false,
+        origin: "unreviewed",
+      },
+    ]),
   bootstrap: vi.fn(),
   listSessions: vi.fn(),
   getSession: vi.fn(),
@@ -921,4 +932,36 @@ describe("ordinary chat queue", () => {
       expect(hook.result.current.queue?.messages.length ?? 0).toBe(0);
     },
   );
+});
+
+it("freezes a picked skill in the ordinary queue, keeps it on edit and never steers it", async () => {
+  await openConversation();
+  fireEvent.change(composer(), { target: { value: "/man" } });
+  await userEvent.click(await screen.findByRole("option", { name: /manual/ }));
+  fireEvent.change(composer(), { target: { value: "Skilled queued words" } });
+  expect(screen.getByRole("button", { name: "Interrupt" })).toBeDisabled();
+  expect(
+    screen.getByText("Messages with a skill are queued for the next reply."),
+  ).toBeVisible();
+  fireEvent.keyDown(composer(), { key: "Enter" });
+  expect(within(queue()).getByText("Skill: manual")).toBeVisible();
+  await userEvent.click(
+    within(queue()).getByRole("button", { name: "Edit queued message 1" }),
+  );
+  fireEvent.change(
+    screen.getByRole("textbox", { name: "Edit queued message" }),
+    { target: { value: "Changed queued words" } },
+  );
+  await userEvent.click(within(queue()).getByRole("button", { name: "Save" }));
+  finish();
+  await userEvent.click(screen.getByRole("button", { name: "Resume queue" }));
+  await waitFor(() =>
+    expect(mocks.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Changed queued words",
+        skill: "manual",
+      }),
+    ),
+  );
+  expect(mocks.steer).not.toHaveBeenCalled();
 });

@@ -21,13 +21,20 @@ import {
 } from "@/lib/api/skills";
 import type { SkillDefinition } from "@/lib/api/library";
 import { collectedRepositorySkill } from "./skillIdentity";
+import { libraryError } from "./libraryText";
 import { LibraryDiscover } from "./LibraryDiscover";
+import { LibraryResourceIcon } from "./LibraryResourceIcon";
+import { POPULAR_SKILLS, formatInstalls } from "./popularSkills";
 import type { LibraryRecommendation } from "./libraryRecommendations";
 
 const PAGE_SIZE = 40;
 const REPOS_KEY = ["skillDiscoveryRepos"];
+const CONFIRMED_PATHS_KEY = ["skillDiscoveryConfirmedPaths"];
+const upstreamIdentity = (skill: DiscoverableSkill) =>
+  `${skill.repoOwner.toLowerCase()}/${skill.repoName.toLowerCase()}:${skill.directory}`;
 const repoId = (repo: SkillRepo) => `${repo.owner}/${repo.name}`;
 type Source = "repos" | "skillssh" | "featured";
+type SkillCard = DiscoverableSkill & { installs?: number; official?: boolean };
 
 export function LibrarySkillDiscover({
   busy,
@@ -48,7 +55,17 @@ export function LibrarySkillDiscover({
 }) {
   const { t } = useTranslation();
   const client = useQueryClient();
-  const [source, setSource] = useState<Source>("repos");
+  // A skills.sh slug is not a repository path. Only an explicit source choice
+  // links that upstream identity to an exact path, for this app lifetime.
+  const confirmedPaths = useQuery<Record<string, string>>({
+    queryKey: CONFIRMED_PATHS_KEY,
+    queryFn: () => ({}),
+    initialData: {},
+    enabled: false,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const [source, setSource] = useState<Source>("skillssh");
   const [search, setSearch] = useState("");
   const [submitted, setSubmitted] = useState("");
   const [repository, setRepository] = useState("all");
@@ -112,9 +129,10 @@ export function LibrarySkillDiscover({
         repo.name.toLowerCase(),
         repo.branch,
       ],
-      queryFn: () => skillsApi.discoverRepository(repo),
+      queryFn: () => skillsApi.discoverRepositoryCatalog(repo),
       enabled: enabled && source === "repos",
-      staleTime: 300_000,
+      // Each read costs two of GitHub's 60 anonymous requests an hour; Refresh still reads now.
+      staleTime: 1_800_000,
       gcTime: 1_800_000,
       retry: false,
     })),
@@ -139,19 +157,47 @@ export function LibrarySkillDiscover({
     staleTime: 300_000,
     retry: false,
   });
+  const showingPopular = source === "skillssh" && !search.trim();
   const discovered = useMemo(() => {
-    const all =
-      source === "repos"
-        ? catalogs.flatMap((catalog) => catalog.data ?? [])
+    const all: SkillCard[] = showingPopular
+      ? POPULAR_SKILLS.map((skill) => {
+          const [repoOwner, repoName] = skill.source.split("/");
+          return {
+            key: `${skill.source}:${skill.skillId}`,
+            name: skill.name,
+            directory: skill.skillId,
+            description: skill.description ?? "",
+            repoOwner,
+            repoName,
+            repoBranch: "HEAD",
+            installs: skill.installs,
+            official: skill.official,
+          };
+        })
+      : source === "repos"
+        ? catalogs.flatMap((catalog) => catalog.data?.skills ?? [])
         : (online.data?.skills ?? []).map((skill) => ({
             ...skill,
             key: `${skill.repoOwner}/${skill.repoName}:${skill.directory}`,
             description: "",
           }));
-    const unique = new Map<string, DiscoverableSkill>();
+    const unique = new Map<string, SkillCard>();
     for (const skill of all) unique.set(skill.key, skill);
-    return [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
-  }, [source, catalogs, online.data]);
+    return showingPopular
+      ? [...unique.values()]
+      : [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [source, showingPopular, catalogs, online.data]);
+  const collectionKey = (skill: DiscoverableSkill) =>
+    source === "repos"
+      ? skill.key
+      : confirmedPaths.data[upstreamIdentity(skill)];
+  const isCollected = (skill: DiscoverableSkill) => {
+    const key = collectionKey(skill);
+    return (
+      key !== undefined &&
+      rows.some((row) => collectedRepositorySkill(row, key))
+    );
+  };
   const needle = search.trim().toLocaleLowerCase();
   const filtered = discovered.filter((skill) => {
     if (
@@ -160,8 +206,8 @@ export function LibrarySkillDiscover({
       `${skill.repoOwner}/${skill.repoName}` !== repository
     )
       return false;
-    if (onlyNew && rows.some((row) => collectedRepositorySkill(row, skill.key)))
-      return false;
+    // Unconfirmed skills.sh identities stay listed: only known ones are hidden.
+    if (onlyNew && isCollected(skill)) return false;
     return (
       source !== "repos" ||
       !needle ||
@@ -176,28 +222,55 @@ export function LibrarySkillDiscover({
         .includes(needle)
     );
   });
-  const pendingSearch = source === "skillssh" && submitted !== search.trim();
-  const pageCount = Math.max(
-    1,
-    Math.ceil(
-      (source === "repos" ? filtered.length : (online.data?.totalCount ?? 0)) /
-        PAGE_SIZE,
-    ),
-  );
+  const pendingSearch =
+    source === "skillssh" &&
+    search.trim().length >= 2 &&
+    submitted !== search.trim();
+  const pageCount = showingPopular
+    ? 1
+    : Math.max(
+        1,
+        Math.ceil(
+          (source === "repos"
+            ? filtered.length
+            : (online.data?.totalCount ?? 0)) / PAGE_SIZE,
+        ),
+      );
   const currentPage = Math.min(page, pageCount - 1);
-  const visible = pendingSearch
-    ? []
-    : source === "repos"
-      ? filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
-      : filtered;
+  const visible = showingPopular
+    ? filtered
+    : pendingSearch || (source === "skillssh" && search.trim().length < 2)
+      ? []
+      : source === "repos"
+        ? filtered.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE)
+        : filtered;
   const fetching =
     source === "repos"
       ? repos.isFetching || catalogs.some((catalog) => catalog.isFetching)
-      : online.isFetching || pendingSearch;
+      : !showingPopular &&
+        search.trim().length >= 2 &&
+        (online.isFetching || pendingSearch);
   const failures = enabledRepos.filter((_, i) => catalogs[i]?.isError);
+  const failureReasons = [
+    ...new Set(
+      catalogs
+        .filter((catalog) => catalog.isError)
+        .map((catalog) => libraryError(catalog.error, t)),
+    ),
+  ];
+  const saved = enabledRepos.flatMap((repo, i) => {
+    const data = catalogs[i]?.data;
+    return data?.savedAt
+      ? [{ repo, savedAt: data.savedAt, reason: data.reason }]
+      : [];
+  });
+  const savedReasons = [
+    ...new Set(saved.map((entry) => libraryError(entry.reason, t))),
+  ];
   const refresh = () => {
     if (source === "skillssh") {
-      if (submitted.length >= 2) void online.refetch();
+      if (search.trim().length >= 2 && submitted === search.trim())
+        void online.refetch();
     } else {
       void repos.refetch();
       catalogs.forEach((catalog) => void catalog.refetch());
@@ -332,14 +405,20 @@ export function LibrarySkillDiscover({
                 ? t("library.skillDiscover.loading")
                 : t("library.skillDiscover.results", {
                     count:
-                      source === "repos"
+                      source === "repos" || showingPopular
                         ? filtered.length
-                        : (online.data?.totalCount ?? 0),
+                        : search.trim().length < 2
+                          ? 0
+                          : (online.data?.totalCount ?? 0),
                   })}
             </span>
           </div>
           {((repos.isError && source === "repos") ||
-            (online.isError && source === "skillssh")) && (
+            (online.isError &&
+              source === "skillssh" &&
+              !showingPopular &&
+              submitted === search.trim() &&
+              search.trim().length >= 2)) && (
             <p
               role="alert"
               className="flex items-center gap-2 text-note text-danger"
@@ -374,57 +453,109 @@ export function LibrarySkillDiscover({
               >
                 {t("common.retry")}
               </Button>
+              <span className="block">{failureReasons.join(" ")}</span>
             </p>
+          )}
+          {source === "repos" && saved.length > 0 && (
+            <p className="text-note text-ink-muted">
+              {t("library.skillDiscover.saved", {
+                repos: saved.map((entry) => repoId(entry.repo)).join(", "),
+                time: new Date(
+                  Math.min(...saved.map((entry) => entry.savedAt)) * 1000,
+                ).toLocaleString([], {
+                  month: "numeric",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                }),
+              })}{" "}
+              {savedReasons.join(" ")}
+            </p>
+          )}
+          {showingPopular && (
+            <h3 className="text-ui font-medium text-ink">
+              {t("library.skillDiscover.popular")}
+            </h3>
           )}
           <div
             aria-busy={fetching}
-            className="overflow-hidden rounded-list border border-line bg-card"
+            className={
+              showingPopular
+                ? "grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-4"
+                : "overflow-hidden rounded-list border border-line bg-card"
+            }
           >
             {visible.map((skill) => {
-              const collected = rows.some((row) =>
-                collectedRepositorySkill(row, skill.key),
-              );
+              const collected = isCollected(skill);
               return (
                 <article
                   key={skill.key}
                   aria-label={skill.name}
-                  className="flex min-w-0 items-center gap-4 border-b border-line-2 px-4 py-3 last:border-b-0"
+                  className={
+                    showingPopular
+                      ? "flex min-w-0 flex-col gap-3 rounded-list border border-line bg-card p-4"
+                      : "flex min-w-0 items-center gap-4 border-b border-line-2 px-4 py-3 last:border-b-0"
+                  }
                 >
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-                      <h3
-                        className="truncate text-ui font-medium text-ink"
-                        title={skill.name}
-                      >
-                        {skill.name}
-                      </h3>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          onOpenSource(
-                            `https://github.com/${skill.repoOwner}/${skill.repoName}`,
-                          )
-                        }
-                        className="max-w-full truncate rounded border border-line px-2 text-note text-ink-muted hover:text-ink"
-                      >
-                        {skill.repoOwner}/{skill.repoName}
-                      </button>
+                  <div className="flex min-w-0 flex-1 items-start gap-3">
+                    <LibraryResourceIcon
+                      kind="skills"
+                      owner={skill.repoOwner}
+                      name={skill.repoOwner}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+                        <h3
+                          className="truncate text-ui font-medium text-ink"
+                          title={skill.name}
+                        >
+                          {skill.name}
+                        </h3>
+                        {skill.official && (
+                          <span
+                            aria-label={t("library.skillDiscover.official")}
+                            title={t("library.skillDiscover.official")}
+                            className="text-note text-ok"
+                          >
+                            ✓
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenSource(
+                              `https://github.com/${skill.repoOwner}/${skill.repoName}`,
+                            )
+                          }
+                          className="max-w-full truncate rounded border border-line px-2 text-note text-ink-muted hover:text-ink"
+                        >
+                          {skill.repoOwner}/{skill.repoName}
+                        </button>
+                      </div>
+                      {skill.description && (
+                        <p className="mt-1 line-clamp-2 text-note text-ink-muted">
+                          {skill.description}
+                        </p>
+                      )}
+                      {skill.installs !== undefined && (
+                        <p className="mt-2 text-note text-ink-muted">
+                          ↓ {formatInstalls(skill.installs)}
+                        </p>
+                      )}
+                      {!showingPopular && (
+                        <p
+                          className="mt-1 truncate font-mono text-note text-ink-faint"
+                          title={skill.directory}
+                        >
+                          {skill.directory || "SKILL.md"}
+                        </p>
+                      )}
                     </div>
-                    {skill.description && (
-                      <p className="mt-1 line-clamp-2 text-note text-ink-muted">
-                        {skill.description}
-                      </p>
-                    )}
-                    <p
-                      className="mt-1 truncate font-mono text-note text-ink-faint"
-                      title={skill.directory}
-                    >
-                      {skill.directory || "SKILL.md"}
-                    </p>
                   </div>
                   <Button
                     variant="secondary"
                     disabled={busy || collected}
+                    className={showingPopular ? "mt-auto w-full" : undefined}
                     onClick={(event) => {
                       if (source === "skillssh") {
                         resolveTrigger.current = event.currentTarget;
@@ -436,7 +567,9 @@ export function LibrarySkillDiscover({
                     {t(
                       collected
                         ? "library.skillDiscover.collected"
-                        : "library.skillDiscover.choose",
+                        : showingPopular
+                          ? "library.skillDiscover.add"
+                          : "library.skillDiscover.choose",
                     )}
                   </Button>
                 </article>
@@ -446,7 +579,9 @@ export function LibrarySkillDiscover({
               <p className="p-8 text-center text-note text-ink-muted">
                 {fetching
                   ? t("library.skillDiscover.loading")
-                  : source === "skillssh" && submitted.length < 2
+                  : source === "skillssh" &&
+                      search.trim().length < 2 &&
+                      !showingPopular
                     ? t("library.skillDiscover.searchHint")
                     : source === "repos" && !enabledRepos.length
                       ? t("library.skillDiscover.noRepos")
@@ -539,6 +674,15 @@ export function LibrarySkillDiscover({
                   variant="secondary"
                   disabled={busy}
                   onClick={() => {
+                    if (resolving) {
+                      client.setQueryData<Record<string, string>>(
+                        CONFIRMED_PATHS_KEY,
+                        (current) => ({
+                          ...current,
+                          [upstreamIdentity(resolving)]: skill.key,
+                        }),
+                      );
+                    }
                     resolvedSelection.current = true;
                     onChoose(skill);
                     setResolving(null);

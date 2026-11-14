@@ -6,11 +6,13 @@ pub mod audio_input;
 pub mod capabilities;
 pub mod catalog;
 mod context;
+pub mod documents;
 mod download;
 pub mod drops;
 pub mod host;
 mod live;
 pub mod materials;
+mod mcp;
 mod media;
 mod media_host;
 mod media_http;
@@ -20,6 +22,7 @@ pub mod process;
 mod projection;
 mod provenance;
 mod requests;
+pub mod skill_tools;
 pub mod store;
 pub mod thinking;
 mod title;
@@ -33,4 +36,5 @@ mod web;
 
 pub use host::AssistantHost;
 
+pub mod skills;
 pub mod speech;

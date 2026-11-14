@@ -19,8 +19,11 @@ use crate::config::{get_app_config_dir, get_home_dir};
 use crate::database::Database;
 use crate::error::format_skill_error;
 
+#[path = "skill_catalog_cache.rs"]
+mod catalog_cache;
 #[path = "skill_selected_download.rs"]
 mod selected_download;
+pub use catalog_cache::RepositoryCatalog;
 
 type PreparedSkillArchive = (
     crate::services::library::skill_artifact::ExtractedDir,
@@ -1044,14 +1047,34 @@ impl SkillService {
         Ok(skills)
     }
 
-    /// Strict lookup for an explicit source. Never turn offline/timeout into an empty list.
-    pub async fn discover_repository(&self, repo: &SkillRepo) -> Result<Vec<DiscoverableSkill>> {
+    pub(crate) async fn discover_assistant_repository(
+        &self,
+        repo: &SkillRepo,
+    ) -> Result<Vec<DiscoverableSkill>> {
         timeout(
             std::time::Duration::from_secs(30),
-            selected_download::catalog(repo),
+            selected_download::assistant_catalog(repo),
         )
         .await
         .map_err(|_| anyhow!("library.skillDownloadTimeout"))?
+    }
+
+    /// Lookup for an explicit source. Offline or rate-limited, it returns the last
+    /// saved list marked with when and why, never an empty list.
+    pub async fn discover_repository(&self, repo: &SkillRepo) -> Result<RepositoryCatalog> {
+        let live = async {
+            timeout(
+                std::time::Duration::from_secs(30),
+                selected_download::catalog(repo),
+            )
+            .await
+            .map_err(|_| anyhow!("library.skillDownloadTimeout"))?
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or_default();
+        catalog_cache::read_through(&catalog_cache::dir(), repo, now, live).await
     }
 
     /// 从仓库获取技能列表

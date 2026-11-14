@@ -2,6 +2,102 @@
 pub use super::extension_targets::TOOLS;
 use crate::{app_config::BindableTool, error::AppError};
 use std::path::PathBuf;
+
+/// The builtin consumer is deliberately separate from the external agent catalogue.
+pub fn supported(tool: &str) -> bool {
+    tool == super::assistant_target::ID || TOOLS.contains(&tool)
+}
+pub fn all_tools() -> Vec<&'static str> {
+    TOOLS
+        .iter()
+        .copied()
+        .chain([super::assistant_target::ID])
+        .collect()
+}
+pub fn validate_assistant_server(spec: &serde_json::Value) -> Result<(), AppError> {
+    if let Some(raw) = spec.get("url").and_then(serde_json::Value::as_str) {
+        let url =
+            url::Url::parse(raw).map_err(|_| AppError::Config("library.invalidMcp".into()))?;
+        let host = url
+            .host_str()
+            .unwrap_or("")
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if super::assistant_target::SIGN_IN_HOSTS.contains(&host.as_str()) {
+            return Err(AppError::Config(
+                "library.assistantMcpSignInUnsupported".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+/// Revalidate frozen plans as well as new previews, including metadata-only/resumed writes.
+pub(super) fn validate_operation(
+    db: &crate::Database,
+    op: &super::Operation,
+) -> Result<(), AppError> {
+    if op.kind != super::ResourceKind::Mcp {
+        return Ok(());
+    }
+    if op.desired_updates.iter().any(|(key, value)| {
+        key.ends_with(&format!(":{}", super::assistant_target::ID)) && value.is_some()
+    }) {
+        let servers = db.get_all_mcp_servers()?;
+        let server = servers
+            .get(&op.resource_id)
+            .ok_or_else(|| AppError::Config("library.resourceMissing".into()))?;
+        validate_assistant_server(&server.server)?;
+    }
+    for target in &op.targets {
+        if target.path == super::assistant_target::mcp_config_path().to_string_lossy()
+            && !target.after_text.is_empty()
+        {
+            let root =
+                super::mcp_codec::parse_native(&target.after_text, super::assistant_target::ID)?;
+            for server in super::mcp_codec::servers(&root, super::assistant_target::ID)
+                .as_object()
+                .into_iter()
+                .flat_map(|m| m.values())
+            {
+                validate_assistant_server(server)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Assistant MCP JSON has its own private writer; it never touches skill state.
+pub(super) fn write_assistant(text: &str) -> Result<(), AppError> {
+    let path =
+        super::assistant_target::state::private_path(&super::assistant_target::mcp_config_path())?;
+    let root = super::mcp_codec::parse_native(text, super::assistant_target::ID)?;
+    for server in super::mcp_codec::servers(&root, super::assistant_target::ID)
+        .as_object()
+        .into_iter()
+        .flat_map(|v| v.values())
+    {
+        validate_assistant_server(server)?;
+    }
+    crate::config::create_private_dir_all(
+        path.parent()
+            .ok_or_else(|| AppError::Config("library.writeFailed".into()))?,
+    )?;
+    #[cfg(unix)]
+    crate::config::atomic_write_private_with(&path, text.as_bytes(), || {})?;
+    #[cfg(not(unix))]
+    crate::config::atomic_write_with(
+        &path,
+        text.as_bytes(),
+        crate::config::AtomicOpts { mode: Some(0o600) },
+    )?;
+    if super::assistant_target::state::read_regular(&path, 2 * 1024 * 1024)?.as_deref()
+        != Some(text.as_bytes())
+    {
+        return Err(AppError::Config("library.verifyFailed".into()));
+    }
+    Ok(())
+}
+
 fn absolute_env(name: &str) -> Result<Option<PathBuf>, AppError> {
     let Some(value) = std::env::var_os(name).filter(|v| !v.is_empty()) else {
         return Ok(None);
@@ -104,7 +200,7 @@ mod tests {
             std::env::set_var(key, &path);
         }
         let paths = super::super::mcp_resource::native_paths().unwrap();
-        assert_eq!(paths.len(), TOOLS.len());
+        assert_eq!(paths.len(), TOOLS.len() + 1);
         assert!(!paths.contains_key("chatgpt"));
         assert_eq!(
             paths["openclaw"],

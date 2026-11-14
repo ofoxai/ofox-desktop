@@ -61,6 +61,7 @@ const mocks = vi.hoisted(() => ({
   compact: vi.fn(),
   getPreferences: vi.fn(),
   setPreferences: vi.fn(),
+  setSearchProvider: vi.fn(),
   subscribe: vi.fn(),
   onAuthChange: vi.fn(),
   onDrag: vi.fn(),
@@ -497,6 +498,7 @@ beforeEach(async () => {
     autoTitle: true,
     notifyOnFinish: true,
   });
+  mocks.setSearchProvider.mockImplementation(async (r) => r.provider);
   mocks.listSessions.mockImplementation(async () => listOf([current.session]));
   mocks.createSession.mockImplementation(async () => current.session);
   mocks.getSession.mockImplementation(async () => current);
@@ -2169,7 +2171,12 @@ describe("attachments", () => {
     it("leaves no empty conversation behind when the dialog is cancelled", async () => {
       render(page());
       await waitFor(() => expect(plusButton()).toBeEnabled());
-      await userEvent.click(screen.getByRole("button", { name: "Web search" }));
+      await userEvent.click(
+        screen.getByRole("combobox", { name: "Web search" }),
+      );
+      await userEvent.click(
+        await screen.findByRole("option", { name: /^Ofox search/ }),
+      );
       await userEvent.type(composer(), "Compare these");
       await attach();
       await waitFor(trashed);
@@ -2180,8 +2187,8 @@ describe("attachments", () => {
       );
       expect(composer()).toHaveValue("Compare these");
       expect(
-        screen.getByRole("button", { name: "Web search" }),
-      ).toHaveAttribute("aria-pressed", "true");
+        screen.getByRole("combobox", { name: "Web search" }),
+      ).toHaveTextContent("Ofox search");
       expect(screen.queryByRole("alert")).toBeNull();
       expect(mocks.listSessions.mock.calls.length).toBeGreaterThan(1);
     });
@@ -2410,6 +2417,19 @@ describe("attachments", () => {
         details: {},
       });
       expect(screen.getByRole("status")).toHaveTextContent("Thinking…");
+    });
+
+    it("on a create_document tool_start, says it is making the document", async () => {
+      const emit = await sendFiles();
+      emit("tool_start", {
+        messageId: "reply",
+        name: "create_document",
+        toolCallId: "c1",
+        args: { name: "deck.pptx", format: "pptx", content: [] },
+      });
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Generating a document…",
+      );
     });
   });
 
@@ -3609,25 +3629,35 @@ describe("conversation cost", () => {
 });
 
 describe("web search", () => {
-  const toggle = () => screen.getByRole("button", { name: "Web search" });
+  // The composer's search menu: "Web search" while off, the provider's name
+  // while on.
+  const toggle = () => screen.getByRole("combobox", { name: "Web search" });
+  const isOn = (on: boolean) =>
+    expect(toggle()).toHaveTextContent(on ? "Ofox search" : "Web search");
+  // Turn search on (through Ofox) or off, from whatever it is now.
+  const flip = async () => {
+    const on = !toggle().textContent?.includes("Web search");
+    await userEvent.click(toggle());
+    await userEvent.click(
+      await screen.findByRole("option", {
+        name: on ? /^Off/ : /^Ofox search/,
+      }),
+    );
+  };
 
   it("turns web search on and off for the open conversation", async () => {
     await openConversation();
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
-    await userEvent.click(toggle());
-    await waitFor(() =>
-      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-    );
+    isOn(false);
+    await flip();
+    await waitFor(() => isOn(true));
     expect(mocks.updateSession).toHaveBeenLastCalledWith({
       sessionId: "session-a",
       webSearch: true,
       expectedOwner: capabilities.owner,
       expectedGeneration: capabilities.authorityGeneration,
     });
-    await userEvent.click(toggle());
-    await waitFor(() =>
-      expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-    );
+    await flip();
+    await waitFor(() => isOn(false));
     expect(mocks.updateSession).toHaveBeenLastCalledWith(
       expect.objectContaining({ sessionId: "session-a", webSearch: false }),
     );
@@ -3636,21 +3666,21 @@ describe("web search", () => {
   it("shows a conversation's saved setting", async () => {
     current.session.webSearch = true;
     await openConversation();
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    isOn(true);
   });
 
   it.each([
     [
       "en",
-      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 3 searches per reply; one search can bring back several sources.",
+      "About $0.014–$0.028 per search, plus a little for its tokens. Up to 6 searches per reply; one search can bring back several sources.",
     ],
     [
       "ja",
-      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 3 回で、1 回の検索で複数の出典が見つかることがあります。",
+      "検索 1 回あたり約 $0.014〜$0.028（別途わずかなトークン料金）。1 回の返信で検索は最大 6 回で、1 回の検索で複数の出典が見つかることがあります。",
     ],
     [
       "zh",
-      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 3 次，一次搜索可能带回多个来源。",
+      "每次搜索约 $0.014–$0.028，另加少量 Token 费用。每次回复最多搜索 6 次，一次搜索可能带回多个来源。",
     ],
   ])(
     "always describes what a search may cost, one or two billed calls, and how many a reply makes at most, and says it in a tooltip, in %s",
@@ -3662,21 +3692,22 @@ describe("web search", () => {
       await userEvent.click(
         await screen.findByRole("button", { name: /My conversation/ }),
       );
-      const button = await screen.findByRole("button", {
+      const menu = await screen.findByRole("combobox", {
         name: language === "en" ? "Web search" : /Web|联网/,
       });
-      await waitFor(() => expect(button).toBeEnabled());
+      await waitFor(() => expect(menu).toBeEnabled());
       // Described to assistive tech by text that is not shown...
-      expect(button).toHaveAccessibleDescription(price);
+      expect(menu).toHaveAccessibleDescription(price);
       expect(screen.queryByRole("tooltip")).toBeNull();
       // ...and shown in a tooltip that focus opens.
-      act(() => button.focus());
+      act(() => menu.focus());
       expect(await screen.findByRole("tooltip")).toHaveTextContent(price);
-      await userEvent.click(button);
-      await waitFor(() =>
-        expect(button).toHaveAttribute("aria-pressed", "true"),
+      await userEvent.click(menu);
+      await userEvent.click(
+        await screen.findByRole("option", { name: /^Ofox/ }),
       );
-      expect(button).toHaveAccessibleDescription(price);
+      await waitFor(() => expect(menu).toHaveTextContent("Ofox"));
+      expect(menu).toHaveAccessibleDescription(price);
     },
   );
 
@@ -3686,7 +3717,7 @@ describe("web search", () => {
     // Its words are there for assistive tech only.
     expect(within(footer).getByText(/per search/)).toHaveClass("sr-only");
     expect(
-      within(footer).getByRole("button", { name: "Web search" }),
+      within(footer).getByRole("combobox", { name: "Web search" }),
     ).toHaveAccessibleDescription(/per search/);
   });
 
@@ -3707,8 +3738,8 @@ describe("web search", () => {
     mocks.listSessions.mockResolvedValue(listOf([]));
     render(page());
     await waitFor(() => expect(toggle()).toBeEnabled());
-    await userEvent.click(toggle());
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    await flip();
+    isOn(true);
     expect(mocks.createSession).not.toHaveBeenCalled();
     expect(mocks.updateSession).not.toHaveBeenCalled();
     mocks.createSession.mockImplementation(async (request) => ({
@@ -3724,7 +3755,7 @@ describe("web search", () => {
       }),
     );
     await waitFor(() => expect(mocks.send).toHaveBeenCalled());
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    isOn(true);
   });
 
   it("leaves web search off in a new conversation until the switch is used", async () => {
@@ -3744,7 +3775,7 @@ describe("web search", () => {
         webSearch: false,
       }),
     );
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    isOn(false);
   });
 
   describe("for a new conversation", () => {
@@ -3764,10 +3795,8 @@ describe("web search", () => {
       async (on) => {
         current.session.webSearch = !on;
         await openConversation();
-        await userEvent.click(toggle());
-        await waitFor(() =>
-          expect(toggle()).toHaveAttribute("aria-pressed", String(on)),
-        );
+        await flip();
+        await waitFor(() => isOn(on));
         await newConversation();
         await waitFor(() =>
           expect(mocks.createSession).toHaveBeenCalledWith({
@@ -3775,7 +3804,7 @@ describe("web search", () => {
             webSearch: on,
           }),
         );
-        expect(toggle()).toHaveAttribute("aria-pressed", String(on));
+        isOn(on);
       },
     );
 
@@ -3784,9 +3813,9 @@ describe("web search", () => {
       mocks.updateSession.mockRejectedValueOnce(
         "assistant_storage_unavailable",
       );
-      await userEvent.click(toggle());
+      await flip();
       await screen.findByRole("alert");
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      isOn(false);
       await newConversation();
       await waitFor(() =>
         expect(mocks.createSession).toHaveBeenCalledWith({
@@ -3794,20 +3823,18 @@ describe("web search", () => {
           webSearch: false,
         }),
       );
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      isOn(false);
     });
 
     it("starts with search off again once the account changed", async () => {
       await openConversation();
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-      );
+      await flip();
+      await waitFor(() => isOn(true));
       act(() => mocks.auth?.("expired"));
       act(() => mocks.auth?.("restored"));
       await screen.findByRole("button", { name: /My conversation/ });
       await waitFor(() => expect(toggle()).toBeEnabled());
-      expect(toggle()).toHaveAttribute("aria-pressed", "false");
+      isOn(false);
       // Leaving a conversation for a new one starts from the last choice:
       // the old account's must be gone, not only the switch's state.
       await userEvent.click(
@@ -3830,10 +3857,8 @@ describe("web search", () => {
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await screen.findByRole("button", { name: "Stop" });
     expect(toggle()).toBeEnabled();
-    await userEvent.click(toggle());
-    await waitFor(() =>
-      expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-    );
+    await flip();
+    await waitFor(() => isOn(true));
     expect(mocks.stop).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
   });
@@ -3925,11 +3950,11 @@ describe("web search", () => {
       "says turning search %s while it runs applies to the next message",
       async (_, on, got) => {
         const sent = await sendWithSearch(on, got);
-        await userEvent.click(toggle());
+        await flip();
         expect(await screen.findByText(nextMessage)).toBeVisible();
-        await userEvent.click(toggle());
+        await flip();
         await waitFor(() => expect(screen.queryByText(nextMessage)).toBeNull());
-        await userEvent.click(toggle());
+        await flip();
         expect(await screen.findByText(nextMessage)).toBeVisible();
         end(sent);
         await waitFor(() =>
@@ -3941,10 +3966,8 @@ describe("web search", () => {
 
     it("needs no next-message note for turning off search the reply never got", async () => {
       await sendWithSearch(true, false);
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-      );
+      await flip();
+      await waitFor(() => isOn(false));
       expect(screen.queryByText(nextMessage)).toBeNull();
     });
 
@@ -4172,11 +4195,11 @@ describe("web search", () => {
   it("says why a change was refused and keeps the saved setting", async () => {
     await openConversation();
     mocks.updateSession.mockRejectedValueOnce("assistant_storage_unavailable");
-    await userEvent.click(toggle());
+    await flip();
     expect(await screen.findByRole("alert")).not.toHaveTextContent(
       "assistant_",
     );
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    isOn(false);
   });
 
   it("ignores the progress, sources and search flag of a run this view does not follow", async () => {
@@ -4259,12 +4282,10 @@ describe("web search", () => {
       mocks.bootstrap.mockResolvedValue({ ...capabilities, search });
       current.session.webSearch = true;
       await openConversation();
-      expect(toggle()).toHaveAttribute("aria-pressed", "true");
+      isOn(true);
       expect(toggle()).toBeEnabled();
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-      );
+      await flip();
+      await waitFor(() => isOn(false));
       expect(mocks.updateSession).toHaveBeenLastCalledWith(
         expect.objectContaining({ sessionId: "session-a", webSearch: false }),
       );
@@ -4279,10 +4300,8 @@ describe("web search", () => {
     it("is lit while search is on and offered, and plain while it is off", async () => {
       await openConversation();
       unlit();
-      await userEvent.click(toggle());
-      await waitFor(() =>
-        expect(toggle()).toHaveAttribute("aria-pressed", "true"),
-      );
+      await flip();
+      await waitFor(() => isOn(true));
       lit();
     });
 
@@ -4298,13 +4317,11 @@ describe("web search", () => {
         mocks.bootstrap.mockResolvedValue({ ...capabilities, search });
         current.session.webSearch = true;
         await openConversation();
-        expect(toggle()).toHaveAttribute("aria-pressed", "true");
+        isOn(true);
         expect(toggle()).toBeEnabled();
         unlit();
-        await userEvent.click(toggle());
-        await waitFor(() =>
-          expect(toggle()).toHaveAttribute("aria-pressed", "false"),
-        );
+        await flip();
+        await waitFor(() => isOn(false));
         expect(mocks.updateSession).toHaveBeenLastCalledWith(
           expect.objectContaining({ webSearch: false }),
         );
@@ -4340,8 +4357,8 @@ describe("web search", () => {
       </ShellProvider>,
     );
     await waitFor(() => expect(toggle()).toBeEnabled());
-    await userEvent.click(toggle());
-    expect(toggle()).toHaveAttribute("aria-pressed", "true");
+    await flip();
+    isOn(true);
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
       search: {
@@ -4360,8 +4377,8 @@ describe("web search", () => {
       expect(screen.getByText(/Web search is unavailable/)).toBeVisible(),
     );
     expect(mocks.bootstrap).toHaveBeenLastCalledWith(true);
-    await userEvent.click(toggle());
-    expect(toggle()).toHaveAttribute("aria-pressed", "false");
+    await flip();
+    isOn(false);
     expect(toggle()).toBeDisabled();
   });
 
@@ -4389,6 +4406,164 @@ describe("web search", () => {
     await userEvent.type(composer(), "Hello");
     await userEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+  });
+
+  describe("with Exa's free search", () => {
+    const withProvider = (
+      provider: "ofox" | "exa",
+      search: Partial<NonNullable<typeof capabilities.search>> = {},
+    ) =>
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        search: { ...capabilities.search, ...search, provider },
+      });
+    const choose = async (name: RegExp) => {
+      await userEvent.click(toggle());
+      await userEvent.click(await screen.findByRole("option", { name }));
+    };
+    const identity = {
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    };
+
+    it("is not offered by a backend that reports no provider", async () => {
+      await openConversation();
+      await userEvent.click(toggle());
+      await screen.findByRole("option", { name: /^Ofox search/ });
+      expect(screen.queryByRole("option", { name: /Exa/ })).toBeNull();
+    });
+
+    it("saves the account's provider and turns search on, then off", async () => {
+      withProvider("ofox");
+      await openConversation();
+      await choose(/^Exa free search/);
+      await waitFor(() => expect(toggle()).toHaveTextContent("Exa search"));
+      expect(mocks.setSearchProvider).toHaveBeenCalledWith({
+        provider: "exa",
+        ...identity,
+      });
+      expect(mocks.updateSession).toHaveBeenLastCalledWith({
+        sessionId: "session-a",
+        webSearch: true,
+        ...identity,
+      });
+      expect(toggle()).toHaveClass("bg-brand-soft");
+      // Exa's terms are said where it is chosen.
+      expect(toggle()).toHaveAccessibleDescription(/queries go to Exa/);
+      await choose(/^Off/);
+      await waitFor(() => expect(toggle()).toHaveTextContent("Web search"));
+      expect(mocks.setSearchProvider).toHaveBeenCalledTimes(1);
+      expect(mocks.updateSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({ webSearch: false }),
+      );
+    });
+
+    it("changes only the provider while search is already on", async () => {
+      withProvider("exa");
+      current.session.webSearch = true;
+      await openConversation();
+      expect(toggle()).toHaveTextContent("Exa search");
+      await choose(/^Ofox search/);
+      await waitFor(() => expect(toggle()).toHaveTextContent("Ofox search"));
+      expect(mocks.setSearchProvider).toHaveBeenCalledWith({
+        provider: "ofox",
+        ...identity,
+      });
+      expect(mocks.updateSession).not.toHaveBeenCalled();
+    });
+
+    it("stays offered while Ofox search is unavailable, which says why", async () => {
+      withProvider("ofox", { available: false, unitPriceUsd: null });
+      await openConversation();
+      expect(toggle()).toBeEnabled();
+      expect(toggle()).toHaveAccessibleDescription(
+        "Ofox search is unavailable right now; Exa's free search still works.",
+      );
+      await userEvent.click(toggle());
+      expect(
+        await screen.findByRole("option", { name: /^Ofox search/ }),
+      ).toHaveAttribute("aria-disabled", "true");
+      expect(
+        screen.getByRole("option", { name: /^Ofox search/ }),
+      ).toHaveTextContent("Unavailable right now");
+      await userEvent.click(
+        screen.getByRole("option", { name: /^Exa free search/ }),
+      );
+      await waitFor(() => expect(toggle()).toHaveTextContent("Exa search"));
+    });
+
+    it("leaves search off when the provider could not be saved", async () => {
+      withProvider("ofox");
+      mocks.setSearchProvider.mockRejectedValueOnce(
+        "assistant_storage_unavailable",
+      );
+      await openConversation();
+      await choose(/^Exa free search/);
+      expect(await screen.findByRole("alert")).not.toHaveTextContent(
+        "assistant_",
+      );
+      expect(toggle()).toHaveTextContent("Web search");
+      expect(mocks.updateSession).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "search_rate_limited",
+        "Exa's free search reached its limit for this network, so this reply did not search the web.",
+      ],
+      [
+        "search_blocked",
+        "Exa refused a free search from this network (it needs a direct IPv4 connection, not a proxy or IPv6), so this reply did not search the web.",
+      ],
+    ])(
+      "says under a reply when Exa refused its search (%s), with a way to Ofox search",
+      async (code, note) => {
+        withProvider("exa");
+        current.session.webSearch = true;
+        await openConversation();
+        await userEvent.type(composer(), "What's new?");
+        await userEvent.click(screen.getByRole("button", { name: "Send" }));
+        await screen.findByRole("button", { name: "Stop" });
+        const sent = mocks.send.mock.calls[0][0];
+        act(() => {
+          mocks.listener?.({
+            ...sent,
+            type: "run_start",
+            data: {
+              messageId: "reply",
+              webSearch: true,
+              searchProvider: "exa",
+            },
+          });
+          mocks.listener?.({
+            ...sent,
+            type: "tool_end",
+            data: {
+              messageId: "reply",
+              name: "web_search",
+              toolCallId: "c1",
+              success: false,
+              code,
+            },
+          });
+        });
+        expect(await screen.findByText(note)).toBeVisible();
+        await userEvent.click(
+          screen.getByRole("button", { name: "Use Ofox search" }),
+        );
+        expect(mocks.setSearchProvider).toHaveBeenCalledWith({
+          provider: "ofox",
+          ...identity,
+        });
+        await waitFor(() =>
+          expect(
+            screen.queryByRole("button", { name: "Use Ofox search" }),
+          ).toBeNull(),
+        );
+        expect(toggle()).toHaveTextContent("Ofox search");
+        expect(screen.getByText(note)).toBeVisible();
+      },
+    );
   });
 });
 
@@ -7224,6 +7399,120 @@ describe("generation tools", () => {
     expect(screen.queryByRole("button", { name: "Polish writing" })).toBeNull();
   });
 
+  it("shows the deck starter only when pptx is available", async () => {
+    const withFormats = (formats?: string[]) =>
+      mocks.bootstrap.mockResolvedValue({
+        ...capabilities,
+        models: [...capabilities.models, imageModel, videoModel],
+        runtime: {
+          ...capabilities.runtime,
+          ...(formats ? { documents: { formats } } : {}),
+        },
+      });
+    const deck = () => screen.queryByRole("button", { name: "Make a deck" });
+    for (const formats of [undefined, [], ["pdf", "docx", "xlsx"]]) {
+      withFormats(formats);
+      mocks.listSessions.mockResolvedValue(listOf([]));
+      const rendered = render(page());
+      await screen.findByRole("button", { name: "Make an image" });
+      expect(deck(), JSON.stringify(formats)).toBeNull();
+      rendered.unmount();
+    }
+    withFormats(["pdf", "pptx"]);
+    render(page());
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Make a deck" }),
+    );
+    expect(composer()).toHaveValue(
+      "Make a presentation: a 6-slide introduction to remote-work habits for new teammates, clean layout, one key idea per slide.",
+    );
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps three starters when the deck is the only scenario on offer", async () => {
+    mocks.bootstrap.mockResolvedValue({
+      ...capabilities,
+      runtime: { ...capabilities.runtime, documents: { formats: ["pptx"] } },
+    });
+    mocks.listSessions.mockResolvedValue(listOf([]));
+    render(page());
+    await screen.findByRole("button", { name: "Make a deck" });
+    const offered = screen
+      .getAllByRole("button")
+      .map((button) => button.textContent)
+      .filter((name) =>
+        [
+          "Make a deck",
+          "Summarize content",
+          "Polish writing",
+          "Explain a question",
+        ].includes(name ?? ""),
+      );
+    // The deck first, then the text starters in their own order.
+    expect(offered).toEqual([
+      "Make a deck",
+      "Summarize content",
+      "Polish writing",
+    ]);
+  });
+
+  it("saves a generated document and opens it from its card", async () => {
+    mocks.saveMedia.mockReset().mockResolvedValue(true);
+    current.messages = [
+      {
+        id: "reply",
+        role: "assistant",
+        content: "Your deck is ready.",
+        status: "completed",
+        createdAt: 2,
+        runId: "r",
+        attachments: [
+          {
+            id: "deck-1",
+            name: "q3-review.pptx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            sizeBytes: 482_000,
+            status: "ready",
+            reason: null,
+            details: null,
+            origin: "generated",
+            sourceMessageId: "reply",
+          },
+        ],
+        generations: [
+          {
+            toolCallId: "call-doc",
+            kind: "document",
+            model: "",
+            params: { name: "q3-review", format: "pptx", slides: 8 },
+            inputIds: [],
+            status: "completed",
+            outputs: ["deck-1"],
+            cost: "0",
+          } as never,
+        ],
+      },
+    ];
+    await openConversation();
+    const card = screen.getByRole("region", { name: "Document" });
+    const request = {
+      sessionId: "session-a",
+      attachmentId: "deck-1",
+      expectedOwner: capabilities.owner,
+      expectedGeneration: capabilities.authorityGeneration,
+    };
+    await userEvent.click(
+      within(card).getByRole("button", { name: "Save and open" }),
+    );
+    expect(mocks.saveMedia).toHaveBeenLastCalledWith({
+      ...request,
+      open: true,
+    });
+    await userEvent.click(within(card).getByRole("button", { name: "Save…" }));
+    expect(mocks.saveMedia).toHaveBeenLastCalledWith(request);
+  });
+
   it("keeps the writing starters for a chat model without tools", async () => {
     mocks.bootstrap.mockResolvedValue({
       ...capabilities,
@@ -8517,6 +8806,59 @@ describe("local configuration in the conversation", () => {
     expect(permission()).toBeDisabled();
   });
 
+  it("projects MCP host steps through the hook into the streaming reply", async () => {
+    localSession();
+    await openConversation();
+    const emit = await startRun();
+    emit("mcp_step", {
+      messageId: "reply",
+      step: {
+        id: "mcp-1",
+        server: "context7",
+        tool: "query_docs",
+        status: "running",
+        recipeId: "context7",
+      },
+    });
+    expect(
+      screen.getByRole("list", { name: "MCP tool steps" }),
+    ).toHaveTextContent("Running");
+    emit("mcp_step", {
+      messageId: "reply",
+      step: {
+        id: "mcp-1",
+        server: "context7",
+        tool: "query_docs",
+        status: "completed",
+        recipeId: "context7",
+      },
+    });
+    expect(
+      screen.getByRole("list", { name: "MCP tool steps" }),
+    ).toHaveTextContent("Completed");
+    expect(
+      screen
+        .getByRole("list", { name: "MCP tool steps" })
+        .querySelectorAll("li"),
+    ).toHaveLength(1);
+    emit("mcp_step", {
+      messageId: "reply",
+      step: {
+        id: "missing",
+        server: "custom",
+        tool: "",
+        status: "unavailable",
+        reason: "needs_uv",
+      },
+    });
+    expect(screen.getByText("Install uv")).toBeVisible();
+    expect(
+      screen.getByText(
+        "Third-party MCP charges are not included in this estimate.",
+      ),
+    ).toBeVisible();
+  });
+
   it("shows the run's step and plan inside the streaming reply, and an approval card after it", async () => {
     localSession();
     await openConversation();
@@ -8620,4 +8962,45 @@ describe("local configuration in the conversation", () => {
     }
     expect(zh.assistant.local.toolPrompt).toBe("帮我诊断并修复 {{tool}}。");
   });
+});
+
+it("shows request retry progress only for the followed run and clears it when text arrives", async () => {
+  await openConversation();
+  mocks.send.mockReturnValue(new Promise(() => undefined));
+  await userEvent.type(composer(), "Hello{Enter}");
+  await waitFor(() => expect(mocks.send).toHaveBeenCalled());
+  const sent = mocks.send.mock.calls[0][0];
+  const emit = (runId: string, type: string, data: Record<string, unknown>) =>
+    act(() =>
+      mocks.listener?.({
+        ...sent,
+        runId,
+        type,
+        data,
+      } as unknown as AssistantEvent),
+    );
+  emit(sent.runId, "run_start", { messageId: "reply", webSearch: false });
+  emit("another-run", "retrying", { attempt: 1 });
+  expect(screen.queryByText("Retrying… (1/2)")).not.toBeInTheDocument();
+  emit(sent.runId, "retrying", { attempt: 1 });
+  expect(await screen.findByText("Retrying… (1/2)")).toBeVisible();
+  emit(sent.runId, "retrying", { attempt: 2 });
+  expect(await screen.findByText("Retrying… (2/2)")).toBeVisible();
+  for (const [language, resource, expected] of [
+    ["zh", zh, "重试中…（2/2）"],
+    ["ja", ja, "再試行中…（2/2）"],
+  ] as const) {
+    i18n.addResourceBundle(language, "translation", resource, true, true);
+    await act(async () => {
+      await i18n.changeLanguage(language);
+    });
+    expect(screen.getByText(expected)).toBeVisible();
+  }
+  await act(async () => {
+    await i18n.changeLanguage("en");
+  });
+  emit(sent.runId, "text_delta", { delta: "Answer", messageId: "reply" });
+  await waitFor(() =>
+    expect(screen.queryByText("Retrying… (2/2)")).not.toBeInTheDocument(),
+  );
 });

@@ -3,7 +3,7 @@
 //! This module is the only place that knows the layout:
 //!
 //! ```text
-//! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…,"instructions":…,"autoTitle":…,"notifyOnFinish":…}
+//! <app_config_dir>/assistant/<owner>/prefs.json                 {"version":1,"modelId":…,"instructions":…,"autoTitle":…,"notifyOnFinish":…,"searchProvider":…}
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.json   SessionRecord + "version"
 //! <app_config_dir>/assistant/<owner>/<session_id>/session.jsonl  native runtime history
 //! <app_config_dir>/assistant/<owner>/<session_id>/attachments/<attachment_id>  imported files
@@ -37,6 +37,10 @@ const SESSION_FILE: &str = "session.json";
 const NATIVE_HISTORY_FILE: &str = "session.jsonl";
 const PREFS_FILE: &str = "prefs.json";
 const ATTACHMENTS_DIR: &str = "attachments";
+/// What a generated deck's slide pictures are kept in beside its attachment
+/// `<id>`: the folder `<id>.pages` (see `attachments::keep_pages`).
+pub(super) const PAGES_SUFFIX: &str = ".pages";
+const OUTPUTS_DIR: &str = "outputs";
 
 const MAX_TITLE_BYTES: usize = 512;
 const MAX_DRAFT_BYTES: usize = 128_000;
@@ -145,6 +149,10 @@ struct Prefs {
     /// leniently: a value this version cannot use is ignored, not damage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     media_defaults: Option<Value>,
+    /// Where web search searches (`"ofox"` or `"exa"`). Read leniently like
+    /// `media_defaults`: any other value means the default, not damage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    search_provider: Option<Value>,
 }
 
 impl Prefs {
@@ -243,6 +251,14 @@ impl Prefs {
             | fill(&mut self.instructions, &other.instructions)
             | fill(&mut self.auto_title, &other.auto_title)
             | fill(&mut self.notify_on_finish, &other.notify_on_finish)
+            | fill(&mut self.search_provider, &other.search_provider)
+    }
+
+    fn search_provider(&self) -> SearchProvider {
+        match self.search_provider.as_ref().and_then(Value::as_str) {
+            Some("exa") => SearchProvider::Exa,
+            _ => SearchProvider::Ofox,
+        }
     }
 
     fn resolved(&self) -> Preferences {
@@ -509,8 +525,10 @@ impl AssistantStore {
         action()
     }
 
-    /// Remove copies a crashed import never published. Unknown filenames and
-    /// directories are left alone; symlinks are removed, never followed.
+    /// Remove copies a crashed import never published or no record uses,
+    /// with the slide pictures (`<id>.pages`) of such a copy. Unknown
+    /// filenames and directories are left alone; symlinks are removed, never
+    /// followed.
     pub fn cleanup_orphan_attachments(&self, sid: &str) -> Result<usize, String> {
         self.with_attachment_lock(sid, || self.cleanup_orphans_locked(sid))
     }
@@ -568,22 +586,29 @@ impl AssistantStore {
             let Some(name) = name.to_str() else {
                 continue;
             };
-            if validate_id(name).is_err() || known.contains(name) {
+            let (owner, pages) = match name.strip_suffix(PAGES_SUFFIX) {
+                Some(owner) => (owner, true),
+                None => (name, false),
+            };
+            if validate_id(owner).is_err() || known.contains(owner) {
                 continue;
             }
             let kind = entry
                 .file_type()
                 .map_err(|_| "assistant_attachment_cleanup_failed")?;
-            if kind.is_file() || kind.is_symlink() {
-                // One copy that cannot go must not keep the others.
-                match fs::remove_file(entry.path()) {
-                    Ok(()) => removed += 1,
-                    Err(error) => {
-                        log::warn!(
-                            "[Assistant] could not remove an unused attachment copy: {error}"
-                        );
-                        failed = true;
-                    }
+            let removal = if pages && kind.is_dir() {
+                fs::remove_dir_all(entry.path())
+            } else if kind.is_file() || kind.is_symlink() {
+                fs::remove_file(entry.path())
+            } else {
+                continue;
+            };
+            // One copy that cannot go must not keep the others.
+            match removal {
+                Ok(()) => removed += 1,
+                Err(error) => {
+                    log::warn!("[Assistant] could not remove an unused attachment copy: {error}");
+                    failed = true;
                 }
             }
         }
@@ -748,6 +773,27 @@ impl AssistantStore {
         Ok(preferences.clone())
     }
 
+    /// Where this account's web searches go; the default when it never
+    /// chose or the preferences file is damaged (the file is preserved).
+    pub fn search_provider(&self) -> SearchProvider {
+        match self.read_prefs() {
+            Ok(prefs) => prefs.unwrap_or_default().search_provider(),
+            Err(error) => {
+                log::warn!("[Assistant] using the default search provider: {error}");
+                SearchProvider::default()
+            }
+        }
+    }
+
+    /// Save where web searches go; every other setting stays. A damaged or
+    /// unsupported preferences file is preserved and reported.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn save_search_provider(&self, provider: SearchProvider) -> Result<SearchProvider, String> {
+        self.update_prefs(|prefs| prefs.search_provider = Some(json!(provider.as_str())))?;
+        Ok(provider)
+    }
+
     /// Whether a conversation's first answer gets it a generated title.
     pub fn auto_title_enabled(&self) -> bool {
         self.preferences_or_default().auto_title
@@ -893,6 +939,43 @@ impl AssistantStore {
             return Err(NOT_FOUND.into());
         }
         private_subdir(&self.root.join(sid), ATTACHMENTS_DIR)
+    }
+
+    /// `<sid>/outputs/<doc_id>`, the private (0o700) folder where the host
+    /// makes one generated document; a link anywhere on the way is refused.
+    /// The finished file is imported into [`Self::attachment_dir`] from here.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn outputs_dir(&self, sid: &str, doc_id: &str) -> Result<PathBuf, String> {
+        validate_id(sid)?;
+        validate_id(doc_id)?;
+        if !real_dir(&self.root)? || !real_dir(&self.root.join(sid))? {
+            return Err(NOT_FOUND.into());
+        }
+        private_subdir(&private_subdir(&self.root.join(sid), OUTPUTS_DIR)?, doc_id)
+    }
+
+    /// Remove `<sid>/outputs/<doc_id>` with everything in it; a folder that
+    /// is already gone is fine. A link on the way is refused, and one at the
+    /// end is removed as a link, never followed.
+    ///
+    /// Blocking file IO: async callers run it in `spawn_blocking`.
+    pub fn remove_outputs_dir(&self, sid: &str, doc_id: &str) -> Result<(), String> {
+        validate_id(sid)?;
+        validate_id(doc_id)?;
+        let outputs = self.root.join(sid).join(OUTPUTS_DIR);
+        if !real_dir(&self.root)? || !real_dir(&self.root.join(sid))? || !real_dir(&outputs)? {
+            return Ok(());
+        }
+        let dir = outputs.join(doc_id);
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                fs::remove_file(&dir).map_err(|_| UNAVAILABLE.into())
+            }
+            Ok(_) => fs::remove_dir_all(&dir).map_err(|_| UNAVAILABLE.into()),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(UNAVAILABLE.into()),
+        }
     }
 
     fn ensure_root(&self) -> Result<PathBuf, String> {
@@ -1366,7 +1449,7 @@ fn real_dir(path: &Path) -> Result<bool, String> {
 }
 
 /// `parent/name` as a private (0o700 on Unix) real directory, created if needed.
-fn private_subdir(parent: &Path, name: &str) -> Result<PathBuf, String> {
+pub(super) fn private_subdir(parent: &Path, name: &str) -> Result<PathBuf, String> {
     let path = parent.join(name);
     if !real_dir(&path)? {
         crate::config::create_private_dir_all(&path).map_err(|_| UNAVAILABLE)?;
@@ -1516,6 +1599,9 @@ mod tests {
 
     fn send(sid: &str, edit: Option<&str>, regenerate: Option<&str>) -> SendRequest {
         SendRequest {
+            skill: None,
+            replace_skill: false,
+            ui_language: None,
             expected_owner: None,
             expected_generation: None,
             media: None,
@@ -3111,6 +3197,96 @@ mod tests {
             store.attachment_root("../x").unwrap_err(),
             "assistant_invalid_identifier"
         );
+    }
+
+    #[test]
+    fn documents_are_made_in_a_private_folder_of_their_session() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let doc = id();
+        let dir = store.outputs_dir(&sid, &doc).unwrap();
+        assert_eq!(
+            dir,
+            session_file(config.path(), &store, &sid)
+                .with_file_name("outputs")
+                .join(&doc)
+        );
+        assert!(dir.is_dir());
+        #[cfg(unix)]
+        for folder in [&dir, &dir.parent().unwrap().to_path_buf()] {
+            assert_eq!(crate::config::file_mode(folder), Some(0o700));
+        }
+        assert_eq!(
+            store.outputs_dir(&sid, "../x").unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+        assert_eq!(
+            store.outputs_dir(&id(), &doc).unwrap_err(),
+            "assistant_session_not_found"
+        );
+    }
+
+    #[test]
+    fn a_document_folder_is_removed_with_what_is_in_it() {
+        let (_config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let (doc, other) = (id(), id());
+        let dir = store.outputs_dir(&sid, &doc).unwrap();
+        let kept = store.outputs_dir(&sid, &other).unwrap();
+        fs::create_dir_all(dir.join(".home/nested")).unwrap();
+        fs::write(dir.join(".home/nested/out.pdf"), b"%PDF").unwrap();
+
+        store.remove_outputs_dir(&sid, &doc).unwrap();
+        assert!(!dir.exists());
+        // Only that document's folder.
+        assert!(kept.is_dir());
+        // Already gone, or never made: nothing to do.
+        store.remove_outputs_dir(&sid, &doc).unwrap();
+        store.remove_outputs_dir(&id(), &doc).unwrap();
+        assert_eq!(
+            store.remove_outputs_dir(&sid, "../x").unwrap_err(),
+            "assistant_invalid_identifier"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_document_folder_is_unlinked_not_followed() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let doc = id();
+        let outputs = store
+            .outputs_dir(&sid, &id())
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let elsewhere = config.path().join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("keep.txt"), b"mine").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, outputs.join(&doc)).unwrap();
+
+        store.remove_outputs_dir(&sid, &doc).unwrap();
+        assert!(fs::symlink_metadata(outputs.join(&doc)).is_err());
+        assert_eq!(fs::read(elsewhere.join("keep.txt")).unwrap(), b"mine");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_outputs_folder_is_refused_when_removing() {
+        let (config, store) = fixture();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let doc = id();
+        let outputs = session_file(config.path(), &store, &sid).with_file_name("outputs");
+        let elsewhere = config.path().join("elsewhere");
+        fs::create_dir_all(elsewhere.join(&doc)).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &outputs).unwrap();
+
+        assert_eq!(
+            store.remove_outputs_dir(&sid, &doc).unwrap_err(),
+            "assistant_invalid_storage_path"
+        );
+        assert!(elsewhere.join(&doc).is_dir());
     }
 
     #[cfg(unix)]

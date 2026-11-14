@@ -1,3 +1,5 @@
+import type { SkillMode, SkillOrigin } from "@/lib/api/library";
+import i18n from "@/i18n";
 import { isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -254,6 +256,8 @@ export interface AssistantBootstrap {
     available: boolean;
     reason: string | null;
     version: string | null;
+    /** Document formats the runtime can make; absent when it makes none. */
+    documents?: { formats: string[] };
   };
   models: AssistantModel[];
   /** Dedicated tool models, separate from the conversation model picker. */
@@ -284,8 +288,17 @@ export type AssistantCatalogSnapshot = Pick<
 };
 
 /**
- * Whether runs can search the web: only while the catalog prices the search
- * model. A conversation with `webSearch` on runs without web tools otherwise.
+ * Where the account's web searches go: Ofox's paid search through the
+ * gateway, or Exa's free one (queries, and pages that could not be read
+ * locally, go to Exa).
+ */
+export type AssistantSearchProvider = "ofox" | "exa";
+
+/**
+ * Whether runs can search the web through Ofox: only while the catalog
+ * prices the search model. Exa's free search is always offered. A
+ * conversation with `webSearch` on runs without web tools when its account's
+ * provider is unavailable.
  */
 export interface AssistantSearchStatus {
   available: boolean;
@@ -295,6 +308,8 @@ export interface AssistantSearchStatus {
    */
   unitPriceUsd: string | null;
   model: string;
+  /** The account's provider; absent from an older backend (Ofox). */
+  provider?: AssistantSearchProvider;
 }
 
 /** A page a reply's web searches found: always HTTPS on a public host. */
@@ -489,7 +504,42 @@ export interface AssistantAttachment {
  * only by the renderer's own placeholders (a question being sent, a reply
  * being streamed).
  */
+export interface AssistantSkillResult {
+  resultId: string;
+  name: string;
+  source: string;
+  description: string;
+  installs?: number | null;
+  reviewed: boolean;
+  /** Host-confirmed commit fact; never an installation control. */
+  installed?: boolean;
+}
+export interface AssistantSkillResultGroup {
+  toolCallId: string;
+  results: AssistantSkillResult[];
+}
+export interface AssistantSkillApproval {
+  name: string;
+  description?: string;
+  body?: string;
+  source?: string;
+  directory?: string;
+  commitSha?: string;
+  installs?: number | null;
+  reviewed?: boolean;
+}
+export interface AssistantMcpStep {
+  id: string;
+  server: string | null;
+  tool: string;
+  status: "running" | "completed" | "failed" | "unavailable";
+  reason?: "needs_node" | "needs_uv" | "unavailable";
+  recipeId?: string | null;
+}
 export interface AssistantMessage {
+  mcpSteps?: AssistantMcpStep[];
+  skillResults?: AssistantSkillResultGroup[];
+  skill?: string;
   media?: AssistantMedia;
   /** What the reply's generation tools made, one per tool call. */
   generations?: AssistantGeneration[];
@@ -668,6 +718,8 @@ export interface AssistantUpdateRequest {
 }
 
 export interface AssistantSendRequest extends AssistantRunRef {
+  skill?: string;
+  replaceSkill?: boolean;
   /** Frozen before admission; the host rejects work left by an old account or region. */
   expectedOwner?: string;
   expectedGeneration?: number;
@@ -804,6 +856,13 @@ export interface AssistantGenerationApproval {
   estimatedCostUsd?: string | null;
 }
 
+/** One problem a document's checks found, as its record keeps it. */
+export interface AssistantDocumentIssue {
+  severity: string;
+  message: string;
+  path?: string;
+}
+
 /** A generation tool's result on a reply. */
 export type AssistantGeneration = AssistantMediaBase & {
   toolCallId: string;
@@ -824,6 +883,18 @@ export type AssistantGeneration = AssistantMediaBase & {
           instructions?: string | null;
         };
         audio?: { output?: { durationMs?: number; mimeType?: string } };
+      }
+    | {
+        kind: "document";
+        /** Free: made on this computer, so it has no model and no price. */
+        params: {
+          name?: string;
+          format: string;
+          pages?: number;
+          slides?: number;
+          sheets?: number;
+          issues?: AssistantDocumentIssue[];
+        };
       }
   );
 
@@ -935,7 +1006,8 @@ export type AssistantRunEvent =
   /**
    * `messageId` is the run's reply. `webSearch` is whether the run got web
    * search: false with the conversation's switch on means search was
-   * unavailable when it was sent (or the model takes no tools).
+   * unavailable when it was sent (or the model takes no tools);
+   * `searchProvider` is where its searches go when it did.
    * `thinkingLevel` is the level the host sent the run, null for the
    * default. It is one the model's `thinkingLevels` lists, which are Pi's
    * own levels for it, so Pi runs it as sent rather than clamping it.
@@ -945,10 +1017,13 @@ export type AssistantRunEvent =
       data: {
         messageId: string;
         webSearch: boolean;
+        searchProvider?: AssistantSearchProvider;
         thinkingLevel?: AssistantThinkingLevel | null;
         compactOnly?: boolean;
       };
     }
+  /** A model HTTP request is waiting before its first or second retry. */
+  | { type: "retrying"; data: { attempt: 1 | 2 } }
   /**
    * The reply began streaming reasoning, as soon as its first reasoning
    * arrived: the reasoning text itself can follow a little later. It lasts
@@ -988,14 +1063,24 @@ export type AssistantRunEvent =
         toolCallId: string;
         name: string;
         category:
+          | "mcp"
           | "read"
           | "write_config"
           | "exec"
           | "network"
           | "paid"
-          | "generation";
+          | "generation"
+          | "skillInstall"
+          | "skillSave";
         /** Text for a local operation; what will be made for a generation. */
-        details: string | AssistantGenerationApproval;
+        details:
+          | string
+          | AssistantGenerationApproval
+          | AssistantSkillApproval
+          | { server: string | null; tool: string };
+        /** Ephemeral, source-redacted MCP arguments; never execution input. */
+        argumentsPreview?: string;
+        argumentsTruncated?: boolean;
         allowSession: boolean;
         /**
          * The config fields the user changed that the operation sets back to
@@ -1006,6 +1091,11 @@ export type AssistantRunEvent =
         expectedGeneration: number;
       };
     }
+  | {
+      type: "skill_results";
+      data: { messageId: string; group: AssistantSkillResultGroup };
+    }
+  | { type: "mcp_step"; data: { messageId: string; step: AssistantMcpStep } }
   | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A generation tool's result on reply `messageId` changed: made, failed or
@@ -1103,7 +1193,17 @@ export const ASSISTANT_DRAG_EVENT = "assistant:drag";
 export const ASSISTANT_DROP_EVENT = "assistant:drop";
 
 /** The backend derives account, organization and region; callers never supply owner IDs. */
+export interface AssistantSkillChoice {
+  name: string;
+  description: string;
+  mode: SkillMode;
+  reviewed: boolean;
+  /** `bundled`: shipped with the app, listed after the user's own skills. */
+  origin?: SkillOrigin | "bundled" | null;
+}
+
 export const assistantApi = {
+  listSkills: () => invoke<AssistantSkillChoice[]>("assistant_list_skills"),
   bootstrap: (refreshCatalog = false) =>
     refreshCatalog
       ? invoke<AssistantBootstrap>("assistant_bootstrap", {
@@ -1136,6 +1236,18 @@ export const assistantApi = {
       expectedGeneration?: number;
     },
   ) => invoke<AssistantPreferences>("assistant_set_preferences", { request }),
+  /**
+   * Saves where the account's web searches go, for the account and authority
+   * the page shows, from the next message on; returns it as saved.
+   */
+  setSearchProvider: (request: {
+    provider: AssistantSearchProvider;
+    expectedOwner?: string;
+    expectedGeneration?: number;
+  }) =>
+    invoke<AssistantSearchProvider>("assistant_set_search_provider", {
+      request,
+    }),
   createSession: (request: {
     assistantId?: string;
     capabilities?: AssistantCapabilityRef[];
@@ -1210,6 +1322,8 @@ export const assistantApi = {
     attachmentId: string;
     expectedOwner: string;
     expectedGeneration: number;
+    /** Also open the saved copy with the default app. */
+    open?: boolean;
   }) => invoke<boolean>("assistant_save_media", { request }),
   exportMarkdown: (request: {
     sessionId: string;
@@ -1320,7 +1434,16 @@ export const assistantApi = {
       callback(payload),
     ),
   send: (request: AssistantSendRequest) =>
-    invoke<AssistantRunRef>("assistant_send", { request }),
+    invoke<AssistantRunRef>("assistant_send", {
+      request: {
+        ...request,
+        uiLanguage: ["en", "ja"].includes(
+          i18n.resolvedLanguage ?? i18n.language,
+        )
+          ? (i18n.resolvedLanguage ?? i18n.language)
+          : "zh",
+      },
+    }),
   steer: (request: AssistantSteerRequest) =>
     invoke<null>("assistant_steer", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
@@ -1399,6 +1522,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_operation_already_submitted: "runChanged",
   assistant_approval_expired: "approvalExpired",
   assistant_approval_timeout: "approvalTimeout",
+  assistant_approval_once_required: "approvalOnceRequired",
   assistant_capability_disabled: "capabilityDisabled",
   assistant_full_access_confirmation_required: "fullAccessConfirmation",
   assistant_invalid_assistant: "capabilityInvalid",
@@ -1444,6 +1568,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_backup_owner_mismatch: "backupOwnerMismatch",
   assistant_export_failed: "exportFailed",
   assistant_export_destination_invalid: "exportDestinationInvalid",
+  assistant_open_failed: "openFailed",
   assistant_export_too_large: "exportTooLarge",
   assistant_invalid_identifier: "sessionMissing",
   assistant_invalid_session: "sessionUnreadable",
@@ -1456,6 +1581,14 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_version_unavailable: "versionUnavailable",
   assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",
+  assistant_mcp_config_unavailable: "mcpUnavailable",
+  assistant_mcp_data_unavailable: "mcpUnavailable",
+  assistant_mcp_environment_missing: "mcpUnavailable",
+  assistant_mcp_snapshot_changed: "mcpUnavailable",
+  assistant_mcp_unknown_server: "mcpUnavailable",
+  assistant_mcp_unknown_tool: "mcpUnavailable",
+  assistant_tool_pending: "mcpUnavailable",
+  assistant_skill_unavailable: "skillUnavailable",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",
   assistant_instructions_too_long: "instructionsTooLong",
@@ -1503,6 +1636,9 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_image_turn_limit: "mediaImageTurnLimit",
   assistant_media_declined: "mediaDeclined",
   assistant_media_speech_turn_limit: "mediaSpeechTurnLimit",
+  assistant_document_failed: "documentFailed",
+  assistant_document_limit: "documentLimit",
+  assistant_document_too_large: "documentTooLarge",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",

@@ -132,8 +132,11 @@ pub(crate) fn ensure(
     let _io = crate::config_io::lock();
     let mut journal_paths = rc_files(home, shell);
     journal_paths.extend([launcher.clone(), launcher_dir(home).join(PATH_RECORD)]);
-    let _journal =
-        crate::services::assistant::tools::transaction::begin(None, tool, journal_paths)?;
+    let _journal = crate::services::assistant::tools::transaction::begin_launcher(
+        tool,
+        &launcher_dir(home),
+        journal_paths,
+    )?;
 
     let Some(prefix) = pinned_prefix(tool, install) else {
         return prune_locked(&launcher);

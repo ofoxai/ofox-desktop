@@ -427,6 +427,11 @@ fn run_inner(
     if current.machine.epoch != journal.epoch {
         return Err(error("epochChanged"));
     }
+    // Every execution/resumption validates before either metadata-only or
+    // physical-group assignment commits. Corrupt state must leave the plan intact.
+    for operation in &journal.plans {
+        super::assistant_target::validate_operation(operation, db)?;
+    }
     if !journal.metadata_applied && !cancelled.load(Ordering::SeqCst) {
         let mut next = current.clone();
         for operation in journal.plans.iter().filter(|op| op.targets.is_empty()) {

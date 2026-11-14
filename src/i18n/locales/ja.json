@@ -3440,7 +3440,16 @@
       "templates": {
         "coding": "基本のコーディング",
         "chinese": "中国語での会話",
-        "review": "コードレビュー"
+        "review": "コードレビュー",
+        "tdd": "テスト先行",
+        "debugging": "まず根本原因を探す",
+        "git-commits": "コミットと PR の規約",
+        "frontend": "フロントエンド UI",
+        "docs-writing": "ドキュメント執筆",
+        "security": "セキュリティ確認",
+        "refactor": "小さな単位でリファクタリング",
+        "plan-first": "実装前に計画する",
+        "concise": "簡潔に答える"
       },
       "recipes": {
         "context7": "コーディング中にライブラリやフレームワークのドキュメントを参照します。",
@@ -3453,7 +3462,16 @@
         "skill-creator": "スキルの作成、改善、検証を支援します。",
         "coding": "コード変更、テスト、結果報告の方針を定めます。",
         "chinese": "コードや固有名詞を保ちながら、中国語で分かりやすく伝えます。",
-        "review": "検証可能な問題、影響、コード位置に集中します。"
+        "review": "検証可能な問題、影響、コード位置に集中します。",
+        "tdd": "失敗するテストを書き、最小限の実装で通してから整理する。",
+        "debugging": "再現して原因を調べ、同じ問題で三回失敗したら止まって方針を変える。",
+        "git-commits": "小さく Conventional Commits 形式でコミットし、理由と検証を説明する。",
+        "frontend": "既存部品とスタイルを使い、アクセシビリティ、暗色、狭い画面、翻訳に対応する。",
+        "docs-writing": "結論を先に述べ、短い文とそのまま実行できる例で説明する。",
+        "security": "秘密情報を守り、入力、注入、権限、依存バージョンを確認する。",
+        "refactor": "動作を保ち、一度に一つだけ変更して各段階でテストする。",
+        "plan-first": "複雑な作業は手順と受け入れ条件を示し、確認後に実装する。",
+        "concise": "答えを先に示し、前置きと依頼内容の繰り返しを減らす。"
       },
       "requirements": {
         "context7": "ネット接続が必要です。必要に応じて Context7 の API キーを作成し、Authorization ヘッダーに追加してください。",
@@ -3682,6 +3700,8 @@
     "skillSourceUnverified": "元のファイルを検証できません。保持したまま、リモート候補を別名で保存してください。",
     "skillTargetModified": "ツール側のコピーが変更されています。候補を別名で保存するか競合を解消してください。",
     "skillDownloadFailed": "リポジトリを読み込めません。ネットワークや権限を確認するか、後で再試行してください。",
+    "githubRateLimited": "GitHub の匿名アクセス上限（1 時間 60 回、同じネットワークで共有）に達しました。しばらくしてから再試行してください。",
+    "githubRateLimitedUntil": "GitHub の匿名アクセス上限（1 時間 60 回、同じネットワークで共有）に達しました。{{time}} 以降に再試行してください。",
     "skillArtifactHashOccupied": "同じ内容ハッシュの既存データが変更されているため、この候補を安全にコピーできません。ユーザーの変更をバックアップし、元データを手動で修復してください。ツールが参照中の可能性があるディレクトリは置換しません。",
     "skillSourceMissing": "リポジトリに元のスキルのパスがありません。配布元を確認してください。",
     "instructionOverview": "ツール指示の概要",
@@ -4256,7 +4276,8 @@
         "files": "ファイルとウェブ",
         "development": "開発支援",
         "design": "デザイン",
-        "communication": "対話とレビュー"
+        "communication": "対話とレビュー",
+        "search": "検索"
       },
       "details": "設定の詳細",
       "closeDetails": "詳細を閉じる",
@@ -4265,14 +4286,11 @@
       "preparationLabel": "準備するもの",
       "licenseLabel": "ライセンスと利用条件",
       "reviewedAt": "ドキュメント確認日：{{date}}",
-      "reviewBoundary": "ドキュメントの確認は、実際の接続やツールでの実行の検証を意味しません。",
       "selectedSkillNote": "選択したスキルのディレクトリだけを取得し、その中のライセンスファイルを保持して実際のコミットを固定します。",
-      "configurable": "設定可能",
       "nativeAuth": "認証情報またはツール側の認可が必要",
       "checkLabel": "確認方法",
       "checkOfox": "Ofox から接続確認を開始できます",
       "checkNative": "対象ツールで確認してください",
-      "notTested": "実機での接続は未検証",
       "notCollected": "未追加",
       "collected": "マイリソースに追加済み",
       "nativeOther": "別のローカル設定があります",
@@ -4282,7 +4300,6 @@
       "readOnly": "読み取り専用ツールセットのみ",
       "credentialBoundary": "認証情報は別途必要です。実際のアクセス権は認証情報によって決まります。",
       "githubChoice": "公式の読み取り専用ツールセットが初期値です。公式手順に従い、フォームで URL を変更できます。",
-      "compatibilityNote": "以下は既存の書き込みアダプターを持つツールです。読み込み、認可、サービスの互換性は対象バージョンで確認してください。",
       "runtime": {
         "http": "リモート HTTP",
         "node": "ローカルコマンド · Node.js",
@@ -4298,7 +4315,8 @@
         "mitService": "サーバーソース：MIT。ホスト型サービスには別途 GitHub の利用条件が適用されます。",
         "skill": "選択したスキル内のライセンスファイルを保持します。実際のコミットとライセンスは詳細に記録されます。",
         "skillFonts": "スキルと各フォントの個別ライセンスを保持します。フォント使用前に条件を確認してください。",
-        "template": "プロジェクトに合わせて変更できる Ofox のテンプレートです。"
+        "template": "プロジェクトに合わせて変更できる Ofox のテンプレートです。",
+        "sourceTerms": "ソースのライセンスは未確認です。使用するバージョンのライセンスと利用規約を確認してください。"
       },
       "recipes": {
         "microsoft-learn": "Microsoft の公式ドキュメントとコード例を検索します。",
@@ -4416,6 +4434,9 @@
       "showMine": "マイリソースを見る"
     },
     "skillDiscover": {
+      "popular": "人気のスキル",
+      "add": "追加",
+      "official": "公式",
       "source": "検索元",
       "repos": "リポジトリ · {{count}}",
       "featured": "おすすめ",
@@ -4429,6 +4450,7 @@
       "results": "{{count}} 個のスキル",
       "failed": "読み込めませんでした。再試行してください。",
       "partial": "一部のリポジトリを読み込めません：{{repos}}",
+      "saved": "{{repos}} を読み込めないため、{{time}} に保存した一覧を表示しています。",
       "collected": "収録済み",
       "choose": "インストールを選択",
       "searchHint": "2文字以上入力して skills.sh を検索してください。",
@@ -4446,7 +4468,64 @@
       "resolveTitle": "スキルの取得元を確認",
       "resolveHelp": "{{repo}} の実際のスキルパスと既定ブランチを確認して選択してください。",
       "confirmSource": "この取得元を使用"
-    }
+    },
+    "discover3": {
+      "signIn": "ログインが必要",
+      "apiKey": "API キーが必要",
+      "preparation": {
+        "signIn": "ネット接続と、対象ツールでのブラウザーログイン認可が必要です。",
+        "publicHttp": "ネット接続と対象ツールの Streamable HTTP 対応が必要です。",
+        "node": "Node.js と npm が必要です。初回利用時に MCP パッケージを取得します。",
+        "uv": "uv / uvx と互換性のある Python 環境が必要です。",
+        "apiKey": "Node.js、npm、サービス提供元の API キーを用意し、対応する環境変数に入力してください。"
+      },
+      "permissions": {
+        "remote": "リクエストはサービス提供元に送信されます。読み書きできる範囲はツール、アカウント、認可によって決まります。",
+        "local": "ローカルプロセスは実行環境で許可されたデータにアクセスできます。必要最小限の権限だけを付与してください。"
+      },
+      "recipes": {
+        "exa": "エージェント向けのウェブ検索とコード検索で、読みやすいページ内容を取得します。",
+        "memory": "エージェントが会話をまたいで保持する知識グラフです。",
+        "sequential-thinking": "問題を段階的に考え、必要に応じて修正や分岐を行います。",
+        "git": "Git リポジトリを読み取り、検索、変更します。",
+        "time": "各地の現在時刻を取得し、タイムゾーンを変換します。",
+        "sentry": "Sentry の問題、エラー、トレースと Seer による分析を利用します。",
+        "linear": "Linear の Issue、プロジェクト、コメントを検索、作成、更新します。",
+        "notion": "Notion ワークスペース内のページとデータベースを検索、読み書きします。",
+        "atlassian": "Atlassian Cloud の Jira Issue と Confluence ページを利用します。",
+        "supabase": "Supabase のテーブル、SQL、マイグレーション、ログ、Edge Functions を管理します。",
+        "stripe": "顧客、支払い、サブスクリプションと Stripe のドキュメントを利用します。",
+        "vercel": "Vercel のプロジェクト、デプロイ、ログとドキュメントを利用します。",
+        "neon": "Neon のサーバーレス Postgres：プロジェクト、ブランチ、SQL を操作します。",
+        "cloudflare-docs": "Cloudflare のドキュメントを検索します。",
+        "huggingface": "Hugging Face Hub のモデル、データセット、Spaces、論文を検索します。",
+        "brave-search": "Brave 独自のインデックスでウェブ、ニュース、画像、ローカル情報を検索します。",
+        "firecrawl": "ウェブを取得、クロール、検索し、読みやすい Markdown に変換します。",
+        "tavily": "Tavily でウェブ検索とコンテンツ抽出を行います。"
+      }
+    },
+    "assistantTarget": {
+      "label": "Ofox アシスタント",
+      "mode": "アシスタントでの使用方法",
+      "auto": "自動で使用",
+      "manual": "手動のみ",
+      "broken": "読み取れません：{{reason}}",
+      "reviewed": "確認済み",
+      "unreviewed": "未確認",
+      "assistantCreated": "アシスタントが作成",
+      "bundled": "内蔵",
+      "originHint": "カタログの出典表示は内容の安全性を保証するものではありません。"
+    },
+    "assistantSkillStateInvalid": "アシスタントのスキル設定を読み取れません。確認して再試行してください。",
+    "assistantSkillUnreadable": "スキルファイルを読み取れません。",
+    "assistantSkillTooLarge": "SKILL.md が 1 MB を超えています。",
+    "assistantSkillBinary": "SKILL.md は有効なテキストファイルではありません。",
+    "assistantSkillFrontmatter": "SKILL.md の先頭メタデータが存在しないか無効です。",
+    "assistantSkillDescriptionMissing": "スキルの説明がありません。",
+    "assistantSkillNameInvalid": "スキル名が無効です。",
+    "assistantSkillDuplicate": "スキル名が重複しています。一意の名前を使用してください。",
+    "assistantSkillUnavailable": "スキルが変更されたか、アシスタントで有効になっていません。更新して再試行してください。",
+    "assistantMcpSignInUnsupported": "このサービスはログインが必要なため、Ofox アシスタントではまだ利用できません"
   },
   "datePicker": {
     "open": "{{label}}を選択",
@@ -4901,6 +4980,7 @@
     "totalTokens": "合計 Token"
   },
   "assistant": {
+    "retrying": "再試行中…（{{attempt}}/2）",
     "audio": {
       "title": "音声入力",
       "import": "音声を読み込む",
@@ -5008,6 +5088,9 @@
       "mediaImageTurnLimit": "1 回の返答で作れる画像は 4 枚までです。続きはもう一度依頼してください。",
       "mediaDeclined": "この生成を取り消したため、料金は発生していません。",
       "mediaSpeechTurnLimit": "1 回の返答で作れる音声は 3 本までです。続きはもう一度依頼してください。",
+      "documentFailed": "ドキュメントを作成できませんでした。",
+      "documentLimit": "1 回の返答で作れるドキュメントは 3 件までです。続きはもう一度依頼してください。",
+      "documentTooLarge": "このドキュメントは長すぎて一度に作成できません。短くするか、いくつかに分けて依頼してください。",
       "mediaInvalidParams": "このモデルは選択したメディア設定に対応していません。",
       "mediaOutcomeUnknown": "メディアのリクエストは課金された可能性がありますが、結果を確認できませんでした。再送信前に利用履歴を確認してください。",
       "mediaSafetyRejected": "画像リクエストはプロバイダーの安全性チェックで拒否されました。プロンプトまたは入力画像を変更して再試行してください。",
@@ -5031,6 +5114,7 @@
       "deletePending": "会話は削除されましたが、一部のファイルを削除できませんでした。アプリを再起動して再試行してください。",
       "exportFailed": "保存できませんでした。保存先を確認して、もう一度お試しください。",
       "exportDestinationInvalid": "アプリのデータフォルダー以外の通常のファイルを選択してください。",
+      "openFailed": "ファイルは保存されましたが、既定のアプリで開けませんでした。保存先から直接開いてください。",
       "exportTooLarge": "この会話は Markdown エクスポートの上限（64 MiB）を超えています。",
       "backupInvalid": "バックアップが破損しているか、未対応の形式です。競合する既存の会話は置き換えていません。",
       "backupTooLarge": "バックアップが上限を超えています（ZIP 512 MiB、展開後 2 GiB、20,000 ファイル）。",
@@ -5073,7 +5157,10 @@
       "localInvalidPlan": "作業手順の形式が無効です。",
       "localCostUnavailable": "このモデルまたは検索の価格情報がなく、費用上限を確認できません。価格情報のあるモデルを選択してください。",
       "localPartialChange": "修復が失敗する前に一部の変更が行われました。変更を確認してから再試行してください。",
-      "localMutationUnknown": "変更結果を確認できません。再試行する前にファイルを確認してください。"
+      "localMutationUnknown": "変更結果を確認できません。再試行する前にファイルを確認してください。",
+      "mcpUnavailable": "MCP サービスが利用できないか、設定が変更されました。リソースで確認して再試行してください。",
+      "skillUnavailable": "スキルが利用できないか変更されています。/ から選び直すか削除してください。",
+      "approvalOnceRequired": "今回の操作を承認するには「インストール」または「保存」を選んでください。"
     },
     "title": "Ofox アシスタント",
     "loginRequired": "内蔵アシスタントを使うには Ofox にログインしてください。",
@@ -5100,7 +5187,8 @@
     "activity": {
       "searching": "Web を検索中…",
       "readingPage": "ページを読み込み中…",
-      "readingFile": "ファイルを読み込み中…"
+      "readingFile": "ファイルを読み込み中…",
+      "makingDocument": "ドキュメントを生成中…"
     },
     "welcome": "何をお手伝いしましょうか？",
     "emptyBoundary": "アシスタントが読むのは添付したファイルだけです。Web 検索をオンにしたときだけ Web を検索します。",
@@ -5175,6 +5263,26 @@
     "webSearchUnavailable": "現在 Web 検索は利用できません。返信はモデル自身の知識で作成されます。",
     "webSearchNextMessage": "Web 検索の変更は次のメッセージから適用されます。",
     "searchSkipped": "この返信では Web 検索を利用できなかったため、モデル自身の知識で作成されています。",
+    "webSearchMenu": {
+      "head": "返信時に Ofox または Exa で Web 検索します。",
+      "off": "オフ",
+      "ofox": "Ofox 検索",
+      "ofoxNote": "従量課金：1 回あたり約 {{low}}〜{{high}}（別途わずかなトークン料金）",
+      "ofoxUnavailable": "現在利用できません",
+      "ofoxUnavailableNote": "現在 Ofox 検索は利用できません。Exa の無料検索は引き続き使えます。",
+      "exa": "Exa 無料検索",
+      "exaShort": "無料。検索語は Exa に送信されます",
+      "exaNote": "Exa による無料検索です。検索語は Exa に送信され、このコンピューターで読み込めなかったページのアドレスも Exa に送信されます。",
+      "trigger": {
+        "ofox": "Ofox 検索",
+        "exa": "Exa 検索"
+      }
+    },
+    "searchLimited": {
+      "search_rate_limited": "このネットワークでは Exa の無料検索が上限に達したため、この返信では Web 検索を行いませんでした。",
+      "search_blocked": "Exa はこのネットワークからの無料検索を受け付けませんでした（プロキシや IPv6 ではなく、直接の IPv4 接続が必要です）。この返信では Web 検索を行いませんでした。",
+      "useOfox": "Ofox 検索に切り替える"
+    },
     "editKeepsFiles": "選択した添付ファイルを再送信します。不要なファイルは削除できます。",
     "editDropsFiles": "読み取れないファイルは除外されます。",
     "attachmentOutcome": {
@@ -5275,6 +5383,10 @@
       "speech": {
         "label": "ナレーションを付ける",
         "prompt": "落ち着いた温かい声で、次の文をナレーションとして読んで：\n\nOfox へようこそ。ひとつのアカウントで主要な AI モデルを使えます。"
+      },
+      "deck": {
+        "label": "スライドを作る",
+        "prompt": "プレゼン資料を作って：新しいメンバー向けに、リモートワークのコツを紹介する全 6 枚。レイアウトは簡潔に、1 枚につき要点は 1 つだけ。"
       },
       "localCheck": {
         "label": "Claude Code の設定を確認",
@@ -5610,7 +5722,8 @@
       "kinds": {
         "image": "画像を生成",
         "video": "動画を生成",
-        "speech": "音声を生成"
+        "speech": "音声を生成",
+        "document": "ドキュメント"
       },
       "chipLabel": "{{name}}：モデルとパラメータ",
       "remove": "{{name}}を外す",
@@ -5652,6 +5765,56 @@
       "overLimit": "動画に使えるのは参照画像 9 枚、音声 3 本（各 15 秒以内）、動画 1 本までです。余分なファイルを外してください。",
       "needsTools": "このモデルはツールを使えないため、画像・動画・音声を生成できません。別のモデルを選んでください。",
       "readAloudFailed": "読み上げに失敗しました。しばらくしてからもう一度お試しください。"
+    },
+    "document": {
+      "saveAndOpen": "保存して開く",
+      "making": "ドキュメントを生成中…",
+      "issues_one": "{{count}} 件の問題",
+      "issues_other": "{{count}} 件の問題",
+      "pages_one": "{{count}} ページ",
+      "pages_other": "{{count}} ページ",
+      "slides_one": "{{count}} スライド",
+      "slides_other": "{{count}} スライド",
+      "sheets_one": "{{count}} シート",
+      "sheets_other": "{{count}} シート",
+      "severity": {
+        "error": "エラー",
+        "warning": "警告",
+        "info": "情報"
+      }
+    },
+    "skills": {
+      "choose": "スキルを選ぶ",
+      "chip": "スキル：{{name}}",
+      "remove": "スキル {{name}} を削除",
+      "empty": "利用可能なスキルはありません",
+      "unavailable": "スキルを読み込めませんでした。/ を入力し直してください。",
+      "queueOnly": "スキル付きメッセージは次の回答まで待機します。"
+    },
+    "skillTools": {
+      "results": "スキルの検索結果",
+      "installTitle": "スキルをインストール",
+      "saveTitle": "スキルを保存",
+      "install": "インストール",
+      "save": "保存",
+      "preview": "スキルのプレビュー",
+      "installs": "{{count}} 回のインストール",
+      "originHint": "カタログの出典表示は安全性を保証しません。インストールには毎回確認が必要です。",
+      "installed": "インストール済み"
+    },
+    "mcp": {
+      "steps": "MCP ツールの処理",
+      "running": "実行中",
+      "completed": "完了",
+      "failed": "失敗",
+      "unavailable": "サービスを利用できません",
+      "needs_node": "npx を含む Node.js をインストールしてください",
+      "needs_uv": "uv をインストールしてください",
+      "externalCost": "外部 MCP の料金はこの見積もりに含まれません。",
+      "approval": "この MCP ツールはデータを変更する可能性があります。今回のみ、会話中の許可、または拒否を選択してください。",
+      "approvalTitle": "この MCP 操作を許可しますか？",
+      "argumentsPreview": "引数のプレビュー",
+      "argumentsTruncated": "プレビューは省略されています。承認すると、ここに表示されていない引数も含む呼び出し全体が実行されます。"
     }
   },
   "pages": {

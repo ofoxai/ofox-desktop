@@ -1,0 +1,4 @@
+[
+  {"command":"add","parent":"/","type":"slide","props":{"title":"Plan"}},
+  {"command":"explode","path":"/slide[1]"}
+]

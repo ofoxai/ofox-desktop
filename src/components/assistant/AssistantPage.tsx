@@ -18,7 +18,6 @@ import {
   ArrowUp,
   Download,
   Ellipsis,
-  Globe,
   ListPlus,
   MessageSquare,
   PanelLeftClose,
@@ -52,6 +51,7 @@ import {
 } from "./AssistantLocalConfig";
 import { MediaBlock } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
+import { SkillPicker } from "./SkillPicker";
 import { ComposerPlus } from "./ComposerPlus";
 import { generationModels } from "./MediaDefaultsFields";
 import { GenerationCards } from "./GenerationCards";
@@ -70,6 +70,7 @@ import {
 } from "./AssistantSidebar";
 import { InlineRename } from "./InlineRename";
 import { ThinkingMenu } from "./ThinkingMenu";
+import { WebSearchMenu, searchPriceNote } from "./WebSearchMenu";
 import { useConversationActions } from "./useConversationActions";
 import { useFileDrop } from "./useFileDrop";
 import { usePendingFocus } from "./usePendingFocus";
@@ -83,7 +84,6 @@ import { AssistantRequestDetails } from "./AssistantRequestDetails";
 import { usageSummary } from "@/utils/assistantUsage";
 import { turnVersions } from "@/utils/assistantVersions";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -111,6 +111,8 @@ interface Starter {
   id: string;
   /** The generation chip it turns on. */
   kind?: AssistantGenerationKind;
+  /** Offered only where the runtime can make documents (a deck needs pptx). */
+  requires?: "documents";
 }
 
 /**
@@ -121,6 +123,7 @@ const SCENARIO_STARTERS: Starter[] = [
   { id: "image", kind: "image" },
   { id: "video", kind: "video" },
   { id: "speech", kind: "speech" },
+  { id: "deck", kind: undefined, requires: "documents" },
   { id: "localCheck" },
 ];
 /** For a model without tools, or an account with none of the above. */
@@ -129,6 +132,8 @@ const TEXT_STARTERS: Starter[] = [
   { id: "writing" },
   { id: "explain" },
 ];
+/** A short scenario list is filled up from the text starters. */
+const MIN_STARTERS = 3;
 
 /** From this share of the limit the composer says how full the message is. */
 const LENGTH_HINT_FROM = 0.8;
@@ -153,29 +158,6 @@ function saveSidebarCollapsed(collapsed: boolean) {
   } catch {
     // See readSidebarCollapsed.
   }
-}
-
-const usd = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  maximumSignificantDigits: 3,
-});
-
-/** The most web searches the runtime lets one reply make (its MAX_SEARCHES). */
-const MAX_SEARCHES_PER_REPLY = 3;
-
-/**
- * What one web search may cost: the gateway bills each search call, and one
- * search can make one or two (a search, then opening a page). A reply makes
- * at most MAX_SEARCHES_PER_REPLY searches.
- */
-function searchPriceNote(unitPriceUsd: string) {
-  const price = Number(unitPriceUsd);
-  return {
-    low: usd.format(price),
-    high: usd.format(price * 2),
-    max: MAX_SEARCHES_PER_REPLY,
-  };
 }
 
 interface AssistantPageProps {
@@ -280,9 +262,9 @@ function AssistantWorkspace() {
   const [sidebarCollapsed, setSidebarCollapsed] =
     useState(readSidebarCollapsed);
   const sidebarId = useId();
+  const searchNoteId = useId();
   const blockedHint = useId();
   const visionHint = useId();
-  const searchNoteId = useId();
   const lengthHintId = useId();
   const queueHintId = useId();
   const interactionActive = useInteractionActive();
@@ -349,18 +331,35 @@ function AssistantWorkspace() {
     t,
   );
   const keyMissing = bootstrap?.key.status === "missing";
-  // Runs can search only while the catalog prices a search; a backend
-  // without search says nothing about it.
+  // Ofox search runs only while the catalog prices it; Exa's is free, and
+  // offered by a backend that reports the account's provider.
   const searchPrice = bootstrap?.search?.available
     ? bootstrap.search.unitPriceUsd
     : null;
+  const exaOffered = bootstrap?.search?.provider !== undefined;
+  const searchViaExa = exaOffered && assistant.searchProvider === "exa";
+  // What the account's search costs, or why there is none.
   const searchNote = !bootstrap
     ? null
-    : searchPrice !== null
-      ? t("assistant.webSearchPrice", searchPriceNote(searchPrice))
-      : t("assistant.webSearchUnavailable");
-  // What a search costs, or why there is none, whether search is on or not.
+    : searchViaExa
+      ? t("assistant.webSearchMenu.exaNote")
+      : searchPrice !== null
+        ? t("assistant.webSearchPrice", searchPriceNote(searchPrice))
+        : exaOffered
+          ? t("assistant.webSearchMenu.ofoxUnavailableNote")
+          : t("assistant.webSearchUnavailable");
   const showSearchNote = available && searchNote !== null;
+  // Under a reply whose free search was refused: the way to Ofox search,
+  // while there is one.
+  const { setSearchProvider } = assistant;
+  const pickOfox = useCallback(
+    () => void setSearchProvider("ofox"),
+    [setSearchProvider],
+  );
+  const switchToOfoxSearch =
+    searchPrice !== null && assistant.searchProvider !== "ofox"
+      ? pickOfox
+      : undefined;
   // A conversation still loading (or whose load failed) has no setting to
   // change yet; none is changed in the trash.
   const settingsLocked =
@@ -369,14 +368,6 @@ function AssistantWorkspace() {
     busy ||
     assistant.loading ||
     Boolean(assistant.selectedId && session?.id !== assistant.selectedId);
-  // Search can be turned on only while it is offered, and always off, so a
-  // conversation never keeps it on when it can't be seen to work.
-  const searchLocked =
-    settingsLocked || (!assistant.webSearch && searchPrice === null);
-  // The chip is lit only for a search that will happen: a conversation
-  // saved with search on while it is unavailable still shows it (so it can
-  // be turned off), but doesn't look on.
-  const searchLit = assistant.webSearch && searchPrice !== null;
   // Tool, system and other internal records stay out of the transcript, and
   // so do the versions of a turn that are not the one shown: the switcher
   // under the shown one brings them back.
@@ -457,19 +448,28 @@ function AssistantWorkspace() {
     [bootstrap?.models, bootstrap?.audioModels],
   );
   const localDefinition = Boolean(bootstrap?.localConfigDefinition);
+  const deckAvailable = Boolean(
+    bootstrap?.runtime.documents?.formats.includes("pptx"),
+  );
   const starters = useMemo(() => {
+    const offered = (starter: Starter) =>
+      starter.kind
+        ? generationModels(generationCatalog, starter.kind).length > 0
+        : starter.requires === "documents"
+          ? deckAvailable
+          : localDefinition;
     const scenario =
-      composerModel?.tools === false
-        ? []
-        : SCENARIO_STARTERS.filter((starter) =>
-            starter.kind
-              ? generationModels(generationCatalog, starter.kind).length > 0
-              : localDefinition,
-          );
-    return scenario.length > 0
-      ? [...scenario, { id: "summary" }]
-      : TEXT_STARTERS;
-  }, [composerModel?.tools, generationCatalog, localDefinition]);
+      composerModel?.tools === false ? [] : SCENARIO_STARTERS.filter(offered);
+    if (scenario.length === 0) return TEXT_STARTERS;
+    const offeredStarters: Starter[] = [...scenario, { id: "summary" }];
+    for (const starter of TEXT_STARTERS)
+      if (
+        offeredStarters.length < MIN_STARTERS &&
+        !offeredStarters.some(({ id }) => id === starter.id)
+      )
+        offeredStarters.push(starter);
+    return offeredStarters;
+  }, [composerModel?.tools, generationCatalog, localDefinition, deckAvailable]);
   const queueCount = assistant.queue?.messages.length ?? 0;
   const queueMode = !session?.audioOnly && Boolean(run || queueCount);
   const queueFull = queueCount >= MAX_QUEUED_MESSAGES;
@@ -694,6 +694,15 @@ function AssistantWorkspace() {
             expectedGeneration: bootstrap.authorityGeneration,
           })
         }
+        onSaveAndOpen={(file) =>
+          assistantApi.saveMedia({
+            sessionId: session.id,
+            attachmentId: file.id,
+            expectedOwner: bootstrap.owner!,
+            expectedGeneration: bootstrap.authorityGeneration,
+            open: true,
+          })
+        }
         onCancelVideo={(item) =>
           item.status === "submitting"
             ? assistant.stop()
@@ -824,8 +833,19 @@ function AssistantWorkspace() {
     modelId: session?.modelId,
   };
   const editMessage = useCallback(
-    (editMessageId: string, text: string, attachments: AssistantAttachment[]) =>
-      actions.current.send({ text, attachments, editMessageId }),
+    (
+      editMessageId: string,
+      text: string,
+      attachments: AssistantAttachment[],
+      skill?: string,
+    ) =>
+      actions.current.send({
+        text,
+        attachments,
+        editMessageId,
+        skill,
+        replaceSkill: true,
+      }),
     [],
   );
   const regenerateMessage = useCallback(
@@ -966,22 +986,16 @@ function AssistantWorkspace() {
     searchHighlight(assistant.search),
   );
 
-  const webSearchToggle = (
-    <Button
-      variant="ghost"
-      aria-pressed={assistant.webSearch}
-      aria-describedby={showSearchNote ? searchNoteId : undefined}
-      disabled={searchLocked}
-      onClick={() => assistant.setWebSearch(!assistant.webSearch)}
-      className={cn(
-        "shrink-0 px-2",
-        searchLit &&
-          "bg-brand-soft text-brand-ink hover:bg-brand-soft hover:text-brand-ink",
-      )}
-    >
-      <Globe aria-hidden className="h-3.5 w-3.5" />
-      {t("assistant.webSearch")}
-    </Button>
+  const webSearchMenu = (
+    <WebSearchMenu
+      on={assistant.webSearch}
+      provider={assistant.searchProvider}
+      ofoxPrice={searchPrice}
+      exaOffered={exaOffered}
+      disabled={settingsLocked}
+      describedBy={showSearchNote ? searchNoteId : undefined}
+      onChange={(choice) => void assistant.chooseWebSearch(choice)}
+    />
   );
 
   const column = wide
@@ -1530,6 +1544,10 @@ function AssistantWorkspace() {
                           searchUnavailable={assistant.searchSkipped.has(
                             message.id,
                           )}
+                          searchLimited={assistant.searchLimited.get(
+                            message.id,
+                          )}
+                          onUseOfoxSearch={switchToOfoxSearch}
                           latest={message.id === latestReplyId}
                           highlight={transcriptHighlight}
                           disabled={!writable}
@@ -1590,11 +1608,16 @@ function AssistantWorkspace() {
                             ) : undefined
                           }
                           generations={generationCards(assistant.stream, true)}
+                          retryAttempt={assistant.retryAttempt}
                           activity={assistant.activity}
                           thinking={assistant.thinking}
                           searchUnavailable={assistant.searchSkipped.has(
                             assistant.stream.id,
                           )}
+                          searchLimited={assistant.searchLimited.get(
+                            assistant.stream.id,
+                          )}
+                          onUseOfoxSearch={switchToOfoxSearch}
                           latest={assistant.stream.id === latestReplyId}
                           disabled
                           onEdit={noEdit}
@@ -1764,7 +1787,10 @@ function AssistantWorkspace() {
                       </p>
                     )}
                   </div>
-                  <Textarea
+                  <SkillPicker
+                    scope={`${bootstrap?.owner}:${bootstrap?.authorityGeneration}:${assistant.selectedId}`}
+                    skill={assistant.skill}
+                    onSkill={assistant.setSkill}
                     ref={composer}
                     rows={3}
                     className={cn(
@@ -1778,7 +1804,7 @@ function AssistantWorkspace() {
                     value={assistant.draft}
                     disabled={!available}
                     readOnly={busy || trashed}
-                    onChange={(event) => assistant.setDraft(event.target.value)}
+                    onTextChange={assistant.setDraft}
                     onPaste={(event) => {
                       const pasted = pastedFiles(event.clipboardData);
                       if (!pasted) return;
@@ -1850,10 +1876,11 @@ function AssistantWorkspace() {
                       )}
                       {showSearchNote ? (
                         <Tooltip>
-                          {/* The wrapper takes the hover while the switch is off. */}
+                          {/* The wrapper takes the hover while the menu is
+                          locked. */}
                           <TooltipTrigger asChild>
                             <span className="inline-flex shrink-0">
-                              {webSearchToggle}
+                              {webSearchMenu}
                             </span>
                           </TooltipTrigger>
                           <TooltipContent side="top">
@@ -1861,7 +1888,7 @@ function AssistantWorkspace() {
                           </TooltipContent>
                         </Tooltip>
                       ) : (
-                        webSearchToggle
+                        webSearchMenu
                       )}
                       {showSearchNote && (
                         <span id={searchNoteId} className="sr-only">
@@ -1914,6 +1941,7 @@ function AssistantWorkspace() {
                             !assistant.queueAvailable ||
                             !assistant.draft.trim() ||
                             files.length > 0 ||
+                            Boolean(assistant.skill) ||
                             overLength
                           }
                           onClick={() =>
@@ -1924,6 +1952,11 @@ function AssistantWorkspace() {
                         >
                           {t("assistant.queue.interrupt")}
                         </Button>
+                      )}
+                      {run && assistant.skill && (
+                        <p className="max-w-48 text-note text-ink-muted">
+                          {t("assistant.skills.queueOnly")}
+                        </p>
                       )}
                       {run && (
                         <Tooltip>

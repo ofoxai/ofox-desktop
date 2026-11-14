@@ -7,6 +7,10 @@ mod catalog_refresh;
 pub mod local;
 use super::{
     catalog,
+    documents::{
+        create::EngineSandbox,
+        engines::{engines_at, Engines},
+    },
     drops::DropSlot,
     process,
     projection::{
@@ -24,7 +28,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 use tokio::io::{AsyncBufRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -76,6 +80,41 @@ pub struct Identity {
 
 /// What the host needs from the application.
 pub trait Environment: Send + Sync + 'static {
+    fn skill_database(&self) -> Result<Arc<crate::Database>, String> {
+        Err("skill_service_unavailable".into())
+    }
+    fn skill_search<'a>(
+        &'a self,
+        query: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<super::skill_tools::Candidate>, String>> {
+        Box::pin(super::skill_tools::search(query))
+    }
+    fn skill_prepare(
+        &self,
+        db: Arc<crate::Database>,
+        candidate: super::skill_tools::Candidate,
+    ) -> BoxFuture<
+        '_,
+        Result<crate::services::library::assistant_skill_transaction::Prepared, String>,
+    > {
+        Box::pin(super::skill_tools::prepare_install(db, candidate))
+    }
+
+    fn local_private_root(&self) -> PathBuf {
+        self.config_dir()
+    }
+    fn skill_snapshot(&self) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+        Ok(Default::default())
+    }
+    fn skill_read(
+        &self,
+        _proof: &crate::assistant_target::AssistantSkillProof,
+        _access: crate::assistant_target::SkillAccess,
+        _read: super::skills::SkillRead,
+    ) -> Result<Value, String> {
+        Err("not_available: skill service unavailable".into())
+    }
+
     fn local_mutate<'a>(
         &'a self,
         _name: &'a str,
@@ -147,6 +186,11 @@ pub trait Environment: Send + Sync + 'static {
     fn config_dir(&self) -> PathBuf;
     /// The prepared runtime: `node/`, `runtime/src/main.mjs`, `manifest.json`.
     fn runtime_dir(&self) -> Result<PathBuf, String>;
+    /// macOS's `sandbox-exec`, which keeps officecli from the network and
+    /// from the user's files (see `documents::create`); `None` elsewhere.
+    fn sandbox_exec(&self) -> Option<PathBuf> {
+        cfg!(target_os = "macos").then(|| PathBuf::from("/usr/bin/sandbox-exec"))
+    }
     /// Publish an `assistant:event`.
     fn emit(&self, event: Event);
     /// The proxy for model requests, as the app's other requests take it;
@@ -169,11 +213,18 @@ pub(super) struct Runtime {
 }
 
 pub struct RunControl {
+    pub(super) mcp: Value,
+    pub(super) mcp_generation: u64,
+    pub(super) skill_tools: Mutex<super::skill_tools::State>,
+    pub(super) skills: Mutex<super::skills::SkillRunState>,
     local_calls: local::Calls,
     /// The generation tools of a chat run; `None` for a model without tools.
     pub(super) media: Option<super::media_tools::host::MediaRun>,
     /// For a background job of a generation tool: its tool call.
     pub(super) artifact: Option<String>,
+    /// The interface language (`zh`, `en` or `ja`) a chat run was sent in:
+    /// the language its documents are set in.
+    pub(super) ui_language: String,
     pub(super) local_enabled: bool,
     pub identity: Identity,
     pub session_id: String,
@@ -196,9 +247,14 @@ pub struct RunControl {
 impl RunControl {
     pub fn new(identity: Identity, request: &SendRequest, secret: String) -> Self {
         Self {
+            mcp: Value::Null,
+            mcp_generation: 0,
             local_calls: local::Calls::default(),
+            skills: Mutex::new(Default::default()),
+            skill_tools: Mutex::new(Default::default()),
             media: None,
             artifact: None,
+            ui_language: "zh".into(),
             local_enabled: false,
             identity,
             session_id: request.session_id.clone(),
@@ -294,11 +350,28 @@ pub struct AssistantHost {
     /// loses exactly these.
     keys: Mutex<Vec<String>>,
     local_states: Mutex<HashMap<String, local::LocalState>>,
-    local_approvals: super::tools::approval::Broker,
+    pub(super) local_approvals: super::tools::approval::Broker,
     /// Background work at it (see [`Self::track`]), such as a title.
     background: Arc<AtomicU64>,
     /// When shutdown aborts what is still at work, once it began.
     shutdown_deadline: Mutex<Option<tokio::time::Instant>>,
+    /// The bundled document engines; found once, as they never change while
+    /// the app runs.
+    engines: OnceLock<Engines>,
+    /// The `sandbox-exec` officecli runs under, once a probe showed it works
+    /// there (see `documents::create`).
+    pub(super) office_sandbox: EngineSandbox,
+    /// The same for Typst.
+    pub(super) typst_sandbox: EngineSandbox,
+    /// The same for the Python engine, which without it does not run at all.
+    pub(super) python_sandbox: EngineSandbox,
+    /// Whether the Python engine failed before running the code (its runner
+    /// exited 2: the assets, Pyodide or a package did not load): it is off
+    /// until the app restarts.
+    pub(super) python_broken: AtomicBool,
+    /// Python decks take turns, whichever reply makes them: each run of
+    /// the engine is a process of several hundred MB.
+    pub(super) python_turn: tokio::sync::Mutex<()>,
 }
 
 /// How a catalog read uses what each source last returned.
@@ -710,6 +783,12 @@ impl AssistantHost {
             local_approvals: super::tools::approval::Broker::default(),
             background: Arc::default(),
             shutdown_deadline: Mutex::default(),
+            engines: OnceLock::new(),
+            office_sandbox: EngineSandbox::default(),
+            typst_sandbox: EngineSandbox::default(),
+            python_sandbox: EngineSandbox::default(),
+            python_broken: AtomicBool::new(false),
+            python_turn: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -897,6 +976,37 @@ impl AssistantHost {
 
     pub(super) fn runtime(&self) -> Result<Runtime, String> {
         runtime_at(&self.env.runtime_dir()?)
+    }
+
+    /// Where the bundled document engines are. Without a runtime folder
+    /// there are none, and that is not remembered.
+    pub(super) fn engines(&self) -> Engines {
+        if let Some(engines) = self.engines.get() {
+            return engines.clone();
+        }
+        match self.env.runtime_dir() {
+            Ok(base) => self.engines.get_or_init(|| engines_at(&base)).clone(),
+            Err(_) => Engines::default(),
+        }
+    }
+
+    /// Whether Python decks are offered: the engine is there (on macOS
+    /// only), and so are officecli, which checks every deck, and
+    /// `sandbox-exec`; officecli's latest sandbox probe did not fail
+    /// (officecli checks a Python deck only in its sandbox), and the Python
+    /// engine's own probe has not failed. Before a probe has run, Python is
+    /// offered and a call is refused when its sandbox turns out missing. A
+    /// failed Python probe, or a runner that could not start the code (see
+    /// [`Self::python_broken`]), turns it off for the session: Python
+    /// content is then refused before the engine runs again.
+    pub(super) fn python_offered(&self) -> bool {
+        let engines = self.engines();
+        engines.python.is_some()
+            && engines.officecli.is_some()
+            && self.env.sandbox_exec().is_some_and(|path| path.is_file())
+            && !self.office_sandbox.failed()
+            && !self.python_sandbox.failed()
+            && !self.python_broken.load(Ordering::Relaxed)
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
@@ -1312,6 +1422,15 @@ impl AssistantHost {
             .get(&control.session_id)
             .is_some_and(|run| run.run_id == control.run_id)
         {
+            let mut state = control
+                .skill_tools
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            state.closed = true;
+            state.results.clear();
+            state.installed.clear();
+            state.saved.clear();
+            state.epoch += 1;
             runs.remove(&control.session_id);
         }
     }
@@ -1391,6 +1510,10 @@ impl AssistantHost {
     }
 
     pub(super) fn emit(&self, run: &RunControl, kind: &str, mut data: Value) {
+        if super::mcp::scrub_event_data(&mut data, &run.mcp).is_err() {
+            log::warn!("[Assistant] refused unsafe MCP event payload");
+            return;
+        }
         scrub_secrets_in(&mut data, &run.secrets());
         self.env.emit(Event {
             session_id: run.session_id.clone(),
@@ -1401,17 +1524,20 @@ impl AssistantHost {
         });
     }
 
-    /// `web_search`: whether the run was given web search (the session's
-    /// switch may be on while the catalog cannot price it or the model takes
-    /// no tools). `thinking_level`: the level the run was sent, `None` for
-    /// the default.
+    /// `search`: the provider the run was given web search through, `None`
+    /// when it was not (the session's switch may be on while the catalog
+    /// cannot price Ofox search or the model takes no tools).
+    /// `thinking_level`: the level the run was sent, `None` for the default.
     pub(super) fn emit_start(
         &self,
         run: &RunControl,
-        web_search: bool,
+        search: Option<SearchProvider>,
         thinking_level: Option<&str>,
     ) {
-        let mut data = json!({"messageId":run.message_id,"webSearch":web_search,"thinkingLevel":thinking_level});
+        let mut data = json!({"messageId":run.message_id,"webSearch":search.is_some(),"thinkingLevel":thinking_level});
+        if let Some(provider) = search {
+            data["searchProvider"] = json!(provider.as_str());
+        }
         if run.compact_only {
             data["compactOnly"] = json!(true);
         }
@@ -1704,7 +1830,14 @@ impl AssistantHost {
             } else if value["method"] == "tool" {
                 ensure_same_run(control, &value["params"])?;
                 attempt.progressed = true;
-                let result = if value["params"]["name"]
+                let result = if value["params"]["name"] == "authorize_mcp" {
+                    self.authorize_mcp(control, &value["params"]).await
+                } else if value["params"]["name"]
+                    .as_str()
+                    .is_some_and(super::documents::is_document_tool)
+                {
+                    self.dispatch_document_tool(control, &value["params"]).await
+                } else if value["params"]["name"]
                     .as_str()
                     .is_some_and(super::media_tools::is_media_tool)
                 {
@@ -1733,7 +1866,15 @@ impl AssistantHost {
         if !data.is_object() {
             return Err(PROTOCOL.into());
         }
+        super::mcp::scrub_event_data(&mut data, &control.mcp)?;
         match kind {
+            "retrying" => {
+                let retry = data["attempt"]
+                    .as_u64()
+                    .filter(|value| matches!(value, 1 | 2))
+                    .ok_or(PROTOCOL)?;
+                self.emit(control, kind, json!({"attempt": retry}));
+            }
             "steer_applied" => {
                 attempt.projection.end_thinking();
                 self.flush(control, &mut attempt.projection).await?;
@@ -1777,6 +1918,9 @@ impl AssistantHost {
                 let shown = super::tools::events::task_event(kind, &data)?;
                 self.emit(control, kind, shown);
             }
+            "mcp_status" => {
+                self.save_mcp_step(control, &data, "unavailable").await?;
+            }
             "tool_start" => {
                 // The model's tool call has been answered with tokens, and the
                 // tool may cost something: never repeat this attempt.
@@ -1784,6 +1928,9 @@ impl AssistantHost {
                 attempt.projection.end_thinking();
                 // As for text: the query is the model's, the keys are not.
                 scrub_secrets_in(&mut data, &control.secrets());
+                if data.get("mcp").is_some() {
+                    self.save_mcp_step(control, &data, "running").await?;
+                }
                 let mut shown = super::tools::events::tool_start_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 self.emit(control, kind, shown);
@@ -1791,6 +1938,18 @@ impl AssistantHost {
             "tool_end" => {
                 attempt.progressed = true;
                 scrub_secrets_in(&mut data, &control.secrets());
+                if data.get("mcp").is_some() {
+                    self.save_mcp_step(
+                        control,
+                        &data,
+                        if data["success"] == true {
+                            "completed"
+                        } else {
+                            "failed"
+                        },
+                    )
+                    .await?;
+                }
                 let mut shown = super::tools::events::tool_end_event(&data)?;
                 shown["messageId"] = json!(control.reply_id());
                 if data["name"] == "web_search" && data["success"] == true {
@@ -1830,6 +1989,13 @@ impl AssistantHost {
         may_retry: bool,
         attempt: &mut Attempt,
     ) -> Result<Finish, Failure> {
+        let mut value = value.clone();
+        if let Some(error) = value.get_mut("error") {
+            super::mcp::scrub_event_data(error, &control.mcp)?;
+        }
+        if let Some(result) = value.get_mut("result") {
+            super::mcp::scrub_event_data(result, &control.mcp)?;
+        }
         let secrets = control.secrets();
         if let Some(error) = value.get("error") {
             return Err(Failure {
@@ -2024,11 +2190,9 @@ impl AssistantHost {
         entries: &Value,
     ) -> Result<(), String> {
         let store = self.store(&control.identity.owner)?;
-        let (sid, entries, secrets) = (
-            control.session_id.clone(),
-            entries.clone(),
-            control.secrets(),
-        );
+        let mut entries = entries.clone();
+        super::mcp::scrub_native_data(&mut entries, &control.mcp)?;
+        let (sid, secrets) = (control.session_id.clone(), control.secrets());
         blocking(move || store.mutate(&sid, |record| merge_native(record, &entries, &secrets)))
             .await
     }
@@ -2046,6 +2210,10 @@ impl AssistantHost {
             Err(_) => control.cancelled(),
         };
         let completed = matches!(outcome, Ok(Finish::Completed));
+        // A file the reply previewed and never delivered is delivered from
+        // its folder before the folders go.
+        self.deliver_previews(control).await;
+        self.remove_document_folders(control).await;
         // A failure that cost nothing leaves the session's cost known.
         let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);
         let error_code = outcome.as_ref().err().map(|failure| failure.code.clone());
@@ -2091,6 +2259,15 @@ impl AssistantHost {
                 .get(&control.session_id)
                 .is_some_and(|r| r.run_id == control.run_id)
             {
+                let mut state = control
+                    .skill_tools
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                state.closed = true;
+                state.results.clear();
+                state.installed.clear();
+                state.saved.clear();
+                state.epoch += 1;
                 runs.remove(&control.session_id);
             }
         }
@@ -2412,6 +2589,941 @@ mod tests {
             "assistant_operation_denied"
         );
         assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn skill_tools_invalid_search_keeps_the_earlier_results() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        host.store(&identity().owner).unwrap().mutate(&sid,|record|{record.messages.push(serde_json::from_value(json!({"id":run.reply_id(),"role":"assistant","content":"","createdAt":0,"status":"streaming","runId":run.run_id})).unwrap());Ok(())}).unwrap();
+        let call = |id: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"find_skills","args":args});
+        host.dispatch_tool(&run, &call("search", json!({"query":"first"})))
+            .await
+            .unwrap();
+        assert_eq!(
+            host.dispatch_tool(&run, &call("bad", json!({"query":"x"})))
+                .await
+                .unwrap_err(),
+            "invalid_skill_query"
+        );
+        assert!(run
+            .skill_tools
+            .lock()
+            .unwrap()
+            .results
+            .contains_key("first-id"));
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn skill_tools_forged_install_is_rejected_without_approval() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"forged-skill","name":"install_skill","args":{"resultId":"forged"}});
+        assert_eq!(
+            host.dispatch_tool(&run, &call).await.unwrap_err(),
+            "not_in_results"
+        );
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_save_requires_click_all_modes_and_no_local_reads_same_turn() {
+        use super::super::tools::policy::PermissionMode;
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, first) = local_run(&host);
+        host.release_run(&first);
+        for (i, mode) in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.set_permission(super::local::PermissionRequest {
+                session_id: sid.clone(),
+                mode,
+                confirmed_full_access: true,
+                expected_owner: identity().owner,
+                expected_generation: host.generation(),
+            })
+            .await
+            .unwrap();
+            let run = control(&sid);
+            assert!(!run.local_enabled);
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap();
+            let name = format!("fixture-{i}");
+            let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+            let args = json!({"name":name,"description":"Invented fixture","body":"# Invented instructions"});
+            let (card, denied) = dispatch_answering(
+                &host,
+                &env,
+                &run,
+                call("deny", "save_skill", args.clone()),
+                "deny",
+            )
+            .await;
+            assert_eq!(card["allowSession"], false);
+            assert_eq!(card["category"], "skillSave");
+            assert_eq!(denied.unwrap()["saved"], false);
+            assert!(db.get_all_installed_skills().unwrap().is_empty() || i > 0);
+            let (_, saved) = dispatch_answering(
+                &host,
+                &env,
+                &run,
+                call("save", "save_skill", args.clone()),
+                "once",
+            )
+            .await;
+            let saved = saved.unwrap();
+            assert_eq!(saved["saved"], true, "{saved}");
+            assert_eq!(saved["usable"], true, "{saved}");
+            assert!(saved["refresh"]["revision"].as_u64().unwrap() > 0);
+            let body = host
+                .dispatch_tool(&run, &call("use", "use_skill", json!({"name":name})))
+                .await
+                .unwrap();
+            assert!(body["body"]
+                .as_str()
+                .unwrap()
+                .contains("Invented instructions"));
+            assert!(host
+                .dispatch_tool(
+                    &run,
+                    &call(
+                        "terminal",
+                        "bash",
+                        json!({"command":"echo no","folder":env.config,"timeout":1})
+                    )
+                )
+                .await
+                .is_err());
+            crate::assistant_target::set_skill_mode(
+                &name,
+                crate::assistant_target::SkillMode::Manual,
+            )
+            .unwrap();
+            let seen = approvals(&env).len();
+            let (_, again) =
+                dispatch_answering(&host, &env, &run, call("same", "save_skill", args), "deny")
+                    .await;
+            assert_eq!(again.unwrap()["saved"], false);
+            assert_eq!(approvals(&env).len(), seen + 1);
+            assert_eq!(
+                crate::assistant_target::skill_modes().unwrap()[&name],
+                crate::assistant_target::SkillMode::Manual
+            );
+            host.release_run(&run);
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_latest_results_precede_success_cache_and_existing_source_reuses() {
+        use crate::services::library::{assistant_target, skill_resource};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("SKILL.md"),
+            "---\nname: fixture\ndescription: Invented fixture\n---\nOriginal body",
+        )
+        .unwrap();
+        let row = crate::app_config::InstalledSkill {
+            id: "fixture/repo:nested/fixture".into(),
+            name: "User title".into(),
+            description: Some("User description".into()),
+            directory: "fixture".into(),
+            repo_owner: Some("fixture".into()),
+            repo_name: Some("repo".into()),
+            repo_branch: Some("main".into()),
+            readme_url: Some(format!(
+                "https://github.com/fixture/repo/blob/{}/nested/fixture/SKILL.md",
+                "a".repeat(40)
+            )),
+            apps: Default::default(),
+            installed_at: 0,
+            updated_at: 0,
+            content_hash: None,
+        };
+        let row = skill_resource::save_draft(&db, row, source.path(), None).unwrap();
+        let (sid, run) = local_run(&host);
+        host.store(&identity().owner).unwrap().mutate(&sid,|record|{record.messages.push(serde_json::from_value(json!({"id":run.reply_id(),"role":"assistant","content":"","createdAt":0,"status":"streaming","runId":run.run_id})).unwrap());Ok(())}).unwrap();
+        let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        let found = host
+            .dispatch_tool(
+                &run,
+                &call("search", "find_skills", json!({"query":"first"})),
+            )
+            .await
+            .unwrap();
+        let id = found["results"][0]["resultId"].clone();
+        let (_, declined) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call("decline-install", "install_skill", json!({"resultId":id})),
+            "deny",
+        )
+        .await;
+        assert_eq!(declined.unwrap()["installed"], false);
+        let persisted = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert_ne!(
+            persisted.messages[0].skill_results[0]["results"][0]["installed"],
+            true
+        );
+        let (card, installed) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call("install", "install_skill", json!({"resultId":id})),
+            "once",
+        )
+        .await;
+        assert_eq!(card["details"]["directory"], "nested/fixture");
+        assert_eq!(card["details"]["commitSha"], "a".repeat(40));
+        let installed = installed.unwrap();
+        assert_eq!(installed["installed"], true, "{installed}");
+        assert_eq!(installed["usable"], true, "{installed}");
+        let persisted = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert_eq!(
+            persisted.messages[0].skill_results[0]["results"][0]["installed"],
+            true
+        );
+        assert_eq!(db.get_all_installed_skills().unwrap().len(), 1);
+        assert_eq!(
+            serde_json::to_value(db.get_installed_skill(&row.id).unwrap()).unwrap(),
+            serde_json::to_value(Some(row.clone())).unwrap()
+        );
+        assistant_target::set_skill_mode("fixture", assistant_target::SkillMode::Manual).unwrap();
+        let seen = approvals(&env).len();
+        let cached = host
+            .dispatch_tool(
+                &run,
+                &call("again", "install_skill", json!({"resultId":id})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(cached["already"], true);
+        assert_eq!(cached["usable"], false);
+        assert_eq!(approvals(&env).len(), seen);
+        host.dispatch_tool(
+            &run,
+            &call("search2", "find_skills", json!({"query":"second"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            host.dispatch_tool(&run, &call("old", "install_skill", json!({"resultId":id})))
+                .await
+                .unwrap_err(),
+            "not_in_results"
+        );
+        assert_eq!(approvals(&env).len(), seen);
+        env.skill_refresh_fail.store(true, Ordering::SeqCst);
+        let (_, reinstall) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call("install2", "install_skill", json!({"resultId":"second-id"})),
+            "once",
+        )
+        .await;
+        let reinstall = reinstall.unwrap();
+        assert_eq!(reinstall["installed"], true);
+        assert_eq!(reinstall["usable"], false);
+        let persisted = host
+            .store(&identity().owner)
+            .unwrap()
+            .load_record(&sid)
+            .unwrap();
+        assert_eq!(
+            persisted.messages[0].skill_results[1]["results"][0]["installed"],
+            true
+        );
+        assert_eq!(persisted.messages[0].skill_results.len(), 2);
+        env.skill_refresh_fail.store(false, Ordering::SeqCst);
+        let off = skill_resource::preview(&db, &row.id, &[]).unwrap();
+        crate::services::library::apply_operation(&db, &off.id).unwrap();
+        let seen = approvals(&env).len();
+        let off_retry = host
+            .dispatch_tool(
+                &run,
+                &call(
+                    "off-retry",
+                    "install_skill",
+                    json!({"resultId":"second-id"}),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(off_retry["installed"], true);
+        assert_eq!(off_retry["usable"], false);
+        assert_eq!(approvals(&env).len(), seen);
+        assert!(!assistant_target::skills_dir().join("fixture").exists());
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("failed-search", "find_skills", json!({"query":"failure"}))
+            )
+            .await
+            .is_err());
+        let seen = approvals(&env).len();
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call(
+                    "failed-old",
+                    "install_skill",
+                    json!({"resultId":"second-id"})
+                )
+            )
+            .await
+            .unwrap_err(),
+            "not_in_results"
+        );
+        assert_eq!(approvals(&env).len(), seen);
+        host.release_run(&run);
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call("ended", "install_skill", json!({"resultId":"second-id"}))
+            )
+            .await
+            .unwrap_err(),
+            "not_in_results"
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_committed_refresh_failure_retries_without_reinstall_or_reenable() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, run) = local_run(&host);
+        let call = |id: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+        env.skill_refresh_fail.store(true, Ordering::SeqCst);
+        let (_, result) = dispatch_answering(&host, &env, &run, call("first"), "once").await;
+        let result = result.unwrap();
+        assert_eq!(result["saved"], true);
+        assert_eq!(result["usable"], false);
+        assert_eq!(result["code"], "skill_refresh_failed");
+        let before = db.library_snapshot().unwrap();
+        let seen = approvals(&env).len();
+        crate::assistant_target::set_skill_mode(
+            "fixture",
+            crate::assistant_target::SkillMode::Manual,
+        )
+        .unwrap();
+        env.skill_refresh_fail.store(false, Ordering::SeqCst);
+        let again = host.dispatch_tool(&run, &call("retry")).await.unwrap();
+        assert_eq!(again["saved"], true);
+        assert_eq!(again["usable"], false);
+        assert_eq!(db.library_snapshot().unwrap(), before);
+        assert_eq!(approvals(&env).len(), seen);
+        host.release_run(&run);
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_save_recovery_is_consumed_before_later_normal_saves() {
+        use crate::services::library::{assistant_target as target, skill_resource};
+        for mode in ["manual", "off"] {
+            let _sandbox = crate::test_sandbox::sandbox();
+            let (_tmp, env, host) = fixture_with_env();
+            let db = Arc::new(crate::Database::memory().unwrap());
+            *env.skill_db.lock().unwrap() = Some(db.clone());
+            let (sid, run) = local_run(&host);
+            let call = |id: &str, body: &str| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":"save_skill","args":{"name":"fixture","description":"Fixture","body":body}});
+            env.skill_refresh_fail.store(true, Ordering::SeqCst);
+            let (_, first) =
+                dispatch_answering(&host, &env, &run, call("first", "A"), "once").await;
+            assert_eq!(first.unwrap()["code"], "skill_refresh_failed");
+            if mode == "manual" {
+                target::set_skill_mode("fixture", target::SkillMode::Manual).unwrap();
+            } else {
+                let row = db
+                    .get_all_installed_skills()
+                    .unwrap()
+                    .into_values()
+                    .next()
+                    .unwrap();
+                let off = skill_resource::preview(&db, &row.id, &[]).unwrap();
+                crate::services::library::apply_operation(&db, &off.id).unwrap();
+            }
+            let before = db.library_snapshot().unwrap();
+            let files = [
+                "skill-modes.json",
+                "agent-skills.json",
+                "agent-skill-origins.json",
+            ]
+            .map(|f| std::fs::read(target::assistant_dir().join(f)).unwrap());
+            let body_before = std::fs::read(target::skills_dir().join("fixture/SKILL.md")).ok();
+            let state_stamps = [
+                "skill-modes.json",
+                "agent-skills.json",
+                "agent-skill-origins.json",
+            ]
+            .map(|f| {
+                std::fs::metadata(target::assistant_dir().join(f))
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+            });
+            let target_stamp = std::fs::symlink_metadata(target::skills_dir().join("fixture"))
+                .ok()
+                .map(|m| m.modified().unwrap());
+            let seen = approvals(&env).len();
+            env.skill_refresh_fail.store(false, Ordering::SeqCst);
+            let recovered = host
+                .dispatch_tool(&run, &call("recover", "A"))
+                .await
+                .unwrap();
+            assert_eq!(recovered["saved"], true);
+            assert_eq!(recovered["usable"], false);
+            assert!(recovered.get("code").is_none());
+            assert_eq!(approvals(&env).len(), seen);
+            assert_eq!(db.library_snapshot().unwrap(), before);
+            assert_eq!(
+                [
+                    "skill-modes.json",
+                    "agent-skills.json",
+                    "agent-skill-origins.json"
+                ]
+                .map(|f| std::fs::read(target::assistant_dir().join(f)).unwrap()),
+                files
+            );
+            assert_eq!(
+                std::fs::read(target::skills_dir().join("fixture/SKILL.md")).ok(),
+                body_before
+            );
+            assert_eq!(
+                [
+                    "skill-modes.json",
+                    "agent-skills.json",
+                    "agent-skill-origins.json"
+                ]
+                .map(|f| std::fs::metadata(target::assistant_dir().join(f))
+                    .unwrap()
+                    .modified()
+                    .unwrap()),
+                state_stamps
+            );
+            assert_eq!(
+                std::fs::symlink_metadata(target::skills_dir().join("fixture"))
+                    .ok()
+                    .map(|m| m.modified().unwrap()),
+                target_stamp
+            );
+            let (_, normal) =
+                dispatch_answering(&host, &env, &run, call("normal", "A"), "deny").await;
+            assert_eq!(normal.unwrap()["saved"], false);
+            assert_eq!(approvals(&env).len(), seen + 1);
+            let (_, changed) =
+                dispatch_answering(&host, &env, &run, call("revision-b", "B"), "once").await;
+            assert_eq!(changed.unwrap()["usable"], true);
+            let revision_b = db.library_snapshot().unwrap().definitions.skills;
+            let (_, old_args) =
+                dispatch_answering(&host, &env, &run, call("new-a", "A"), "once").await;
+            assert_eq!(old_args.unwrap()["usable"], true);
+            assert_ne!(
+                db.library_snapshot().unwrap().definitions.skills,
+                revision_b
+            );
+            assert!(
+                std::fs::read_to_string(target::skills_dir().join("fixture/SKILL.md"))
+                    .unwrap()
+                    .ends_with('A')
+            );
+            // A different approved revision can also supersede an outstanding (not yet
+            // recovered) receipt. Old arguments must still reach normal approval.
+            env.skill_refresh_fail.store(true, Ordering::SeqCst);
+            let (_, pending) =
+                dispatch_answering(&host, &env, &run, call("pending-c", "C"), "once").await;
+            assert_eq!(pending.unwrap()["code"], "skill_refresh_failed");
+            env.skill_refresh_fail.store(false, Ordering::SeqCst);
+            let (_, newer) =
+                dispatch_answering(&host, &env, &run, call("newer-d", "D"), "once").await;
+            assert_eq!(newer.unwrap()["usable"], true);
+            let (_, stale) =
+                dispatch_answering(&host, &env, &run, call("stale-c", "C"), "once").await;
+            assert_eq!(stale.unwrap()["usable"], true);
+            assert!(
+                std::fs::read_to_string(target::skills_dir().join("fixture/SKILL.md"))
+                    .unwrap()
+                    .ends_with('C')
+            );
+            host.release_run(&run);
+        }
+    }
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_session_approval_rejected_and_epoch_change_fails_closed() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, run) = local_run(&host);
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"save","name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+        let task = tokio::spawn({
+            let host = host.clone();
+            let run = run.clone();
+            async move { host.dispatch_tool(&run, &params).await }
+        });
+        let card = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(c) = approvals(&env).first() {
+                    break c.clone();
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let request = |choice: &str| {
+            serde_json::from_value(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":card["approvalId"],"choice":choice,"expectedOwner":identity().owner,"expectedGeneration":host.generation()})).unwrap()
+        };
+        assert_eq!(
+            host.respond_approval(request("session")).await.unwrap_err(),
+            "assistant_approval_once_required"
+        );
+        assert!(!crate::assistant_target::skills_dir()
+            .join("fixture")
+            .exists());
+        let before = db.library_snapshot().unwrap();
+        let mut changed = before.clone();
+        changed.machine.epoch += 1;
+        db.library_commit(&before, &changed).unwrap();
+        let changed = db.library_snapshot().unwrap();
+        host.respond_approval(request("once")).await.unwrap();
+        assert!(task
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("epochOrRevisionChanged"));
+        assert_eq!(db.library_snapshot().unwrap(), changed);
+        assert!(!crate::assistant_target::skills_dir()
+            .join("fixture")
+            .exists());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn skill_tools_cancel_timeout_and_foreign_name_never_grant() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        let db = Arc::new(crate::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let (sid, first) = local_run(&host);
+        host.release_run(&first);
+        for cancel in [true, false] {
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().deadline =
+                tokio::time::Instant::now() + Duration::from_millis(250);
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap();
+            let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"save","name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+            let seen = approvals(&env).len();
+            let task = tokio::spawn({
+                let host = host.clone();
+                let run = run.clone();
+                async move { host.dispatch_tool(&run, &params).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while approvals(&env).len() == seen {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            if cancel {
+                run.cancel.send_replace(true);
+            }
+            let result = task.await.unwrap().unwrap();
+            assert_eq!(result["saved"], false);
+            assert!(db.get_all_installed_skills().unwrap().is_empty());
+            assert!(
+                crate::assistant_target::assistant_skill_snapshot(&db, &Default::default())
+                    .unwrap()
+                    .skills
+                    .is_empty()
+            );
+            host.release_run(&run);
+        }
+        let run = control(&sid);
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        std::fs::create_dir_all(crate::assistant_target::skills_dir().join("fixture")).unwrap();
+        std::fs::write(
+            crate::assistant_target::skills_dir().join("fixture/SKILL.md"),
+            "---\nname: fixture\ndescription: Foreign\n---\nBody",
+        )
+        .unwrap();
+        let seen = approvals(&env).len();
+        let params = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"foreign","name":"save_skill","args":{"name":"fixture","description":"Fixture","body":"Body"}});
+        assert!(host
+            .dispatch_tool(&run, &params)
+            .await
+            .unwrap_err()
+            .contains("not_agent_created"));
+        assert_eq!(approvals(&env).len(), seen);
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn assistant_private_config_is_not_a_generic_read_grant() {
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, run) = local_run(&host);
+        let file = env
+            .local_private_root()
+            .join("assistant/private-state.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "private-state-marker").unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"private-read","name":"read","args":{"path":file}});
+        assert_eq!(
+            host.dispatch_tool(&run, &call).await.unwrap_err(),
+            "assistant_operation_denied"
+        );
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn private_skill_writes_and_direct_commands_are_denied_in_every_mode() {
+        use super::super::tools::policy::PermissionMode;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, original_run) = local_run(&host);
+        host.release_run(&original_run);
+        let skill = env.local_private_root().join("assistant/skills/sample");
+        std::fs::create_dir_all(&skill).unwrap();
+        let file = skill.join("SKILL.md");
+        std::fs::write(&file, "original").unwrap();
+        for (i, mode) in [
+            PermissionMode::Default,
+            PermissionMode::AutoEdit,
+            PermissionMode::FullAuto,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            host.set_permission(super::local::PermissionRequest {
+                session_id: sid.clone(),
+                mode,
+                confirmed_full_access: true,
+                expected_owner: identity().owner,
+                expected_generation: host.generation(),
+            })
+            .await
+            .unwrap();
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().local_enabled = true;
+            host.register_run(run.clone(), host.generation(), || Ok(()))
+                .unwrap();
+            let shell = if cfg!(windows) { "powershell" } else { "bash" };
+            for (j,(name,args)) in [
+                ("write",json!({"path":file,"content":"changed","expected":null})),
+                ("edit",json!({"path":file,"content":"changed","expected":"original"})),
+                ("write",json!({"path":skill.join("new"),"content":"new","expected":null})),
+                (shell,json!({"folder":env.config,"command":format!("echo changed > '{}'",file.display()),"timeout":1})),
+            ].into_iter().enumerate() {
+                let call=json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":format!("denied-{i}-{j}"),"name":name,"args":args});
+                assert_eq!(host.dispatch_tool(&run,&call).await.unwrap_err(),"assistant_operation_denied");
+            }
+            host.release_run(&run);
+        }
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "original");
+        assert!(!skill.join("new").exists());
+        assert!(approvals(&env).is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn local_config_may_read_and_run_in_the_skills_dir_but_not_write() {
+        use crate::assistant_target::{self, SkillMode};
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        *env.skill_db.lock().unwrap() = Some(Arc::new(crate::Database::memory().unwrap()));
+        let dir = assistant_target::skills_dir().join("sample");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sample\ndescription: Fixture\n---\nBody",
+        )
+        .unwrap();
+        let (sid, run) = local_run(&host);
+        host.refresh_run_skills(&run).await.unwrap();
+        let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":id,"name":name,"args":args});
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("read-auto", "read", json!({"path":dir.join("SKILL.md")}))
+            )
+            .await
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("Body"));
+        let (shell, command) = if cfg!(windows) {
+            ("powershell", "Get-Content SKILL.md")
+        } else {
+            ("bash", "cat SKILL.md")
+        };
+        let (_, result) = dispatch_answering(
+            &host,
+            &env,
+            &run,
+            call(
+                "run-auto",
+                shell,
+                json!({"folder":dir,"command":command,"timeout":5}),
+            ),
+            "once",
+        )
+        .await;
+        assert_eq!(result.unwrap()["exitCode"], 0);
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call(
+                    "write-auto",
+                    "write",
+                    json!({"path":dir.join("new"),"content":"bad","expected":null})
+                )
+            )
+            .await
+            .unwrap_err(),
+            "assistant_operation_denied"
+        );
+        assistant_target::set_skill_mode("sample", SkillMode::Manual).unwrap();
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("stale-auto", "use_skill", json!({"name":"sample"}))
+            )
+            .await
+            .unwrap_err()
+            .contains("not_available"));
+        host.refresh_run_skills(&run).await.unwrap();
+        assert_eq!(
+            host.dispatch_tool(
+                &run,
+                &call("manual-read", "read", json!({"path":dir.join("SKILL.md")}))
+            )
+            .await
+            .unwrap_err(),
+            "assistant_operation_denied"
+        );
+        let selected = host.select_run_skill(&run, "sample").await.unwrap();
+        assert_eq!(selected["dir"], json!(dir));
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call(
+                    "selected-read",
+                    "read",
+                    json!({"path":dir.join("SKILL.md")})
+                )
+            )
+            .await
+            .is_ok());
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("manual-tool", "use_skill", json!({"name":"sample"}))
+            )
+            .await
+            .unwrap_err()
+            .contains("not_available"));
+        std::fs::rename(&dir, dir.with_file_name("old")).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: sample\ndescription: Fixture\n---\nBody",
+        )
+        .unwrap();
+        assert!(host
+            .dispatch_tool(
+                &run,
+                &call("replaced", "read", json!({"path":dir.join("SKILL.md")}))
+            )
+            .await
+            .is_err());
+        host.release_run(&run);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_auto_rejects_qualified_and_chained_ancestor_mutations_before_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, env, host) = fixture_with_env();
+        let (sid, initial) = local_run(&host);
+        host.release_run(&initial);
+        host.set_permission(super::local::PermissionRequest {
+            session_id: sid.clone(),
+            mode: super::super::tools::policy::PermissionMode::FullAuto,
+            confirmed_full_access: true,
+            expected_owner: identity().owner,
+            expected_generation: host.generation(),
+        })
+        .await
+        .unwrap();
+        let private = env.local_private_root();
+        std::fs::create_dir_all(&private).unwrap();
+        let bytes = private.join("SKILL.md");
+        std::fs::write(&bytes, "unchanged").unwrap();
+        let bin = env.config.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let executable = bin.join("rm");
+        let marker = env.config.join("spawned");
+        // Harmless stand-in: even a broken guard cannot delete anything. A
+        // real /bin/rm is never executed by this regression.
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\nprintf spawned > '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().local_enabled = true;
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let mut outcomes = vec![];
+        for (i, command) in [
+            format!("'{}' -rf .", executable.display()),
+            format!("echo ok && '{}' -rf .", executable.display()),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":format!("qualified-{i}"),"name":"bash","args":{"folder":env.config,"command":command,"timeout":2}});
+            outcomes.push(host.dispatch_tool(&run, &call).await);
+        }
+        assert!(
+            outcomes.iter().all(|r| r
+                .as_ref()
+                .err()
+                .is_some_and(|e| e == "assistant_operation_denied")),
+            "{outcomes:?}"
+        );
+        assert!(!marker.exists());
+        assert_eq!(std::fs::read_to_string(bytes).unwrap(), "unchanged");
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    /// A runtime dir holding one bundled `ofox-office-pdf` skill.
+    fn bundled_runtime(env: &FixedEnvironment, body: &str) -> tempfile::TempDir {
+        let runtime = tempfile::tempdir().unwrap();
+        super::super::skills::bundled::write_skill(
+            runtime.path(),
+            "ofox-office-pdf",
+            "ofox-office-pdf",
+            body,
+        );
+        *env.runtime.lock().unwrap() = Some(runtime.path().into());
+        runtime
+    }
+
+    /// A plain chat session, without local configuration, with one registered run.
+    fn chat_run(host: &Arc<AssistantHost>) -> (String, Arc<RunControl>) {
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let run = control(&sid);
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        (sid, run)
+    }
+
+    #[tokio::test]
+    async fn load_run_skill_reads_bundled_without_proof() {
+        let (_tmp, env, host) = fixture_with_env();
+        let _runtime = bundled_runtime(&env, "Write the Typst body.");
+        let (sid, run) = chat_run(&host);
+        let admitted = host.admit_run_skills(&run).await.unwrap();
+        assert_eq!(admitted["skills"][0]["name"], "ofox-office-pdf");
+        assert_eq!(admitted["skills"][0]["bundled"], true);
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"bundled","name":"use_skill","args":{"name":"ofox-office-pdf"}});
+        let result = host.dispatch_tool(&run, &call).await.unwrap();
+        assert!(result["body"]
+            .as_str()
+            .unwrap()
+            .contains("Write the Typst body."));
+        assert_eq!(result["name"], "ofox-office-pdf");
+        assert_eq!(result["files"], json!(["SKILL.md"]));
+        assert_eq!(result["scriptsUnavailable"], true);
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn admitted_runs_keep_bundled_skills_when_the_library_is_unavailable() {
+        let (_tmp, env, host) = fixture_with_env();
+        let _runtime = bundled_runtime(&env, "Body");
+        env.skill_refresh_fail.store(true, Ordering::SeqCst);
+        let (_sid, run) = chat_run(&host);
+        let admitted = host.admit_run_skills(&run).await.unwrap();
+        assert_eq!(admitted["skills"].as_array().unwrap().len(), 1);
+        assert_eq!(admitted["skills"][0]["name"], "ofox-office-pdf");
+        host.release_run(&run);
+    }
+
+    #[tokio::test]
+    async fn list_skills_marks_bundled_origin() {
+        let (_tmp, env, host) = fixture_with_env();
+        let _runtime = bundled_runtime(&env, "Body");
+        assert_eq!(
+            host.list_skills().await.unwrap(),
+            json!([{"name":"ofox-office-pdf","description":"Use for ofox-office-pdf","mode":"auto","reviewed":true,"origin":"bundled"}])
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn a_user_skill_shadows_the_bundled_one_of_the_same_name() {
+        let _sandbox = crate::test_sandbox::sandbox();
+        let (_tmp, env, host) = fixture_with_env();
+        *env.skill_db.lock().unwrap() = Some(Arc::new(crate::Database::memory().unwrap()));
+        let _runtime = bundled_runtime(&env, "Bundled body");
+        let dir = crate::assistant_target::skills_dir().join("ofox-office-pdf");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: ofox-office-pdf\ndescription: Mine\n---\nUser body",
+        )
+        .unwrap();
+        let listed = host.list_skills().await.unwrap();
+        assert_eq!(listed.as_array().unwrap().len(), 1);
+        assert_eq!(listed[0]["description"], "Mine");
+        let (sid, run) = chat_run(&host);
+        host.admit_run_skills(&run).await.unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"shadowed","name":"use_skill","args":{"name":"ofox-office-pdf"}});
+        let body = host.dispatch_tool(&run, &call).await.unwrap()["body"].clone();
+        assert!(body.as_str().unwrap().contains("User body"));
+        assert!(!body.as_str().unwrap().contains("Bundled body"));
         host.release_run(&run);
     }
 
@@ -2825,6 +3937,8 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        skill_refresh_fail: AtomicBool,
+        skill_db: Mutex<Option<Arc<crate::Database>>>,
         apex: Mutex<String>,
         catalog_apexes: Mutex<Vec<String>>,
         config: PathBuf,
@@ -2845,6 +3959,84 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn skill_database(&self) -> Result<Arc<crate::Database>, String> {
+            self.skill_db
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or("skill_service_unavailable".into())
+        }
+        fn skill_search<'a>(
+            &'a self,
+            query: &'a str,
+        ) -> BoxFuture<'a, Result<Vec<super::super::skill_tools::Candidate>, String>> {
+            Box::pin(async move {
+                if query == "failure" {
+                    return Err("fixture_search_failed".into());
+                }
+                Ok(vec![super::super::skill_tools::Candidate {
+                    result: super::super::skill_tools::SkillResult {
+                        result_id: format!("{query}-id"),
+                        name: "fixture".into(),
+                        source: "fixture/repo".into(),
+                        description: "Invented fixture".into(),
+                        installs: Some(1),
+                        reviewed: false,
+                        installed: None,
+                    },
+                    skill_id: "fixture".into(),
+                    directory: Some("nested/fixture".into()),
+                }])
+            })
+        }
+        fn skill_prepare(
+            &self,
+            db: Arc<crate::Database>,
+            candidate: super::super::skill_tools::Candidate,
+        ) -> BoxFuture<
+            '_,
+            Result<crate::services::library::assistant_skill_transaction::Prepared, String>,
+        > {
+            Box::pin(async move {
+                crate::services::library::assistant_skill_transaction::prepare_existing(
+                    &db,
+                    &candidate.result.source,
+                    &candidate.skill_id,
+                    candidate.directory.as_deref(),
+                    serde_json::to_value(&candidate.result).unwrap(),
+                )
+                .map_err(|e| e.to_string())?
+                .ok_or("fixture_source_missing".into())
+            })
+        }
+
+        fn local_private_root(&self) -> PathBuf {
+            if self.skill_db.lock().unwrap().is_some() {
+                crate::config::get_app_config_dir()
+            } else {
+                self.config.join("private-app")
+            }
+        }
+        fn skill_snapshot(
+            &self,
+        ) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+            if self.skill_refresh_fail.load(Ordering::SeqCst) {
+                return Err("fixture_refresh_failed".into());
+            }
+            match self.skill_db.lock().unwrap().as_ref() {
+                Some(db) => super::super::skills::snapshot(db),
+                None => Ok(Default::default()),
+            }
+        }
+        fn skill_read(
+            &self,
+            proof: &crate::assistant_target::AssistantSkillProof,
+            access: crate::assistant_target::SkillAccess,
+            read: super::super::skills::SkillRead,
+        ) -> Result<Value, String> {
+            let db = self.skill_db.lock().unwrap().clone().ok_or("no skill db")?;
+            super::super::skills::read_verified(&db, proof, access, read)
+        }
         fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
             Box::pin(async { Ok(zeroize::Zeroizing::new([7; 32])) })
         }
@@ -2946,6 +4138,8 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            skill_refresh_fail: AtomicBool::new(false),
+            skill_db: Mutex::new(None),
             apex: Mutex::new("ofox.ai".into()),
             catalog_apexes: Mutex::default(),
             config: config.path().to_path_buf(),
@@ -3366,6 +4560,69 @@ mod tests {
             .request_stop(&store, &other, &sid, &run.run_id, &run.operation_id)
             .is_err());
         assert!(!run.cancelled());
+    }
+
+    #[tokio::test]
+    async fn final_mcp_preview_collision_fails_before_any_broker_approval() {
+        let (_tmp, env, host) = fixture_with_env();
+        let source = env.config.join("assistant/mcp.json");
+        crate::config::create_private_dir_all(source.parent().unwrap()).unwrap();
+        crate::config::atomic_write(
+            &source,
+            br#"{"mcpServers":{"fixture":{"command":"node","env":{"PIN":"418731"}}}}"#,
+        )
+        .unwrap();
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp = super::super::mcp::snapshot(&env.config).unwrap();
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"toolCallId":"preview-collision","name":"authorize_mcp","args":{"server":"fixture","toolName":"mcp__fixture__write","identity":"a".repeat(64),"readOnly":false,"snapshot":run.mcp["snapshot"],"args":{"418731":1,"***":2}}});
+        let outcome = host.authorize_mcp(&run, &call).await;
+        assert_eq!(outcome.unwrap_err(), "assistant_mcp_data_unavailable");
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
+    #[test]
+    fn assistant_mcp_host_event_payload_scrubs_numeric_short_secrets_without_rewriting_controls() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp =
+            json!({"servers":{"fixture":{"env":{"PIN":"418731","BOOL":"false","NULL":"null"}}}});
+        host.emit(&run,"tool_end",json!({"name":"mcp__fixture__read_fixture","toolCallId":"safe-id","success":false,"details":{"pin":418731,"flag":false,"empty":null,"safe":"Readable Host payload"}}));
+        let events = env.events.lock().unwrap();
+        let shown = &events.last().unwrap().data;
+        assert_eq!(shown["details"]["pin"], "***");
+        // BOOL/NULL are plain settings, not credentials: values stay intact.
+        assert_eq!(shown["details"]["flag"], false);
+        assert_eq!(shown["details"]["empty"], Value::Null);
+        assert_eq!(shown["details"]["safe"], "Readable Host payload");
+        assert_eq!(shown["success"], false);
+        assert_eq!(shown["toolCallId"], "safe-id");
+        let mut entries = json!([{"type":"message","id":"native-id","message":{"role":"toolResult","toolCallId":"safe-id","isError":false,"content":[{"type":"text","text":"Readable 418731 payload"}],"details":{"pin":418731}}},{"type":"custom","data":{"version":1}}]);
+        super::super::mcp::scrub_native_data(&mut entries, &run.mcp).unwrap();
+        assert_eq!(entries[0]["message"]["details"]["pin"], "***");
+        assert_eq!(
+            entries[0]["message"]["content"][0]["text"],
+            "Readable *** payload"
+        );
+        assert_eq!(entries[0]["message"]["isError"], false);
+        assert_eq!(entries[0]["id"], "native-id");
+        assert!(entries[1].get("message").is_none());
+        let mut collision = json!({"details":{"418731":1,"***":2}});
+        assert_eq!(
+            super::super::mcp::scrub_event_data(&mut collision, &run.mcp).unwrap_err(),
+            "assistant_mcp_data_unavailable"
+        );
     }
 
     #[test]
@@ -3896,6 +5153,47 @@ while read line; do :; done"#,
             env.events.lock().unwrap().is_empty(),
             "nothing was published"
         );
+    }
+
+    #[tokio::test]
+    async fn assistant_retry_events_validate_attempt_and_identity_and_publish_only_public_data() {
+        let (_config, env, host) = fixture_with_env();
+        let run = control(&id());
+        let event = |data| {
+            json!({"sessionId":run.session_id, "runId":run.run_id,
+            "operationId":run.operation_id, "type":"retrying", "data":data})
+        };
+        for retry in [1, 2] {
+            let mut attempt = Attempt::default();
+            host.on_event(
+                &run,
+                &event(json!({"attempt":retry,"diagnostic":"secret"})),
+                &mut attempt,
+            )
+            .await
+            .unwrap();
+            assert!(!attempt.progressed);
+        }
+        for retry in [json!(0), json!(3), json!("1"), json!(null)] {
+            assert!(host
+                .on_event(
+                    &run,
+                    &event(json!({"attempt":retry})),
+                    &mut Attempt::default()
+                )
+                .await
+                .is_err());
+        }
+        let mut foreign = event(json!({"attempt":1}));
+        foreign["runId"] = json!(id());
+        assert!(host
+            .on_event(&run, &foreign, &mut Attempt::default())
+            .await
+            .is_err());
+        let events = env.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data, json!({"attempt":1}));
+        assert_eq!(events[1].data, json!({"attempt":2}));
     }
 
     #[tokio::test]
@@ -5501,6 +6799,102 @@ while read line; do :; done"#,
         assert_eq!(
             host.create_session(create).await.unwrap_err(),
             MODEL_UNAVAILABLE
+        );
+    }
+    #[tokio::test]
+    async fn bootstrap_reports_document_formats() {
+        let (_config, host) = fixture();
+        let boot = host.bootstrap().await.unwrap();
+        // No runtime: nothing could register the tool, so no formats.
+        assert_eq!(boot["runtime"]["available"], false);
+        assert!(boot["runtime"].get("documents").is_none());
+
+        let (config, env, host) = fixture_with_env();
+        let base = config.path().join("runtime-with-engines");
+        for file in ["node/node", "runtime/src/main.mjs", "engines/typst/typst"] {
+            std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
+            std::fs::write(base.join(file), "").unwrap();
+        }
+        std::fs::write(
+            base.join("manifest.json"),
+            json!({"engines": {"typst": {"path": "engines/typst/typst"}}}).to_string(),
+        )
+        .unwrap();
+        *env.runtime.lock().unwrap() = Some(base);
+        let boot = host.bootstrap().await.unwrap();
+        assert_eq!(boot["runtime"]["available"], true);
+        let formats = boot["runtime"]["documents"]["formats"].as_array().unwrap();
+        assert!(formats.contains(&json!("pdf")));
+        assert!(formats.contains(&json!("md")));
+        assert!(!formats.contains(&json!("docx")));
+    }
+    #[tokio::test]
+    async fn bootstrap_reports_python_availability() {
+        let python = json!({
+            "path": "engines/python/assets.json",
+            "runner": "runtime/src/python/runner.mjs",
+            "version": "314.0.7",
+        });
+        let boot_with = |files: &[&str], manifest: Value| {
+            let (config, env, host) = fixture_with_env();
+            let base = config.path().join("runtime-with-engines");
+            for file in ["node/node", "runtime/src/main.mjs"].iter().chain(files) {
+                std::fs::create_dir_all(base.join(file).parent().unwrap()).unwrap();
+                // The engine's assets list the files staged beside them.
+                let text = if file.ends_with("assets.json") {
+                    r#"{"files": []}"#
+                } else {
+                    ""
+                };
+                std::fs::write(base.join(file), text).unwrap();
+            }
+            std::fs::write(base.join("manifest.json"), manifest.to_string()).unwrap();
+            *env.runtime.lock().unwrap() = Some(base);
+            async move {
+                let boot = host.bootstrap().await.unwrap();
+                drop(config);
+                boot
+            }
+        };
+        // No Python engine: not offered.
+        let boot = boot_with(&[], json!({"node": "node/node", "engines": {}})).await;
+        assert_eq!(boot["runtime"]["available"], true);
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        // Its runner or assets missing: not offered either.
+        let boot = boot_with(
+            &["runtime/src/python/runner.mjs"],
+            json!({"node": "node/node", "engines": {"python": python}}),
+        )
+        .await;
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        // All there but officecli, which checks every Python deck: not
+        // offered.
+        let boot = boot_with(
+            &[
+                "runtime/src/python/runner.mjs",
+                "engines/python/assets.json",
+            ],
+            json!({"node": "node/node", "engines": {"python": python}}),
+        )
+        .await;
+        assert_eq!(boot["runtime"]["documents"]["python"], false);
+        // All there: offered on macOS, where sandbox-exec is; the engine
+        // exists nowhere else.
+        let boot = boot_with(
+            &[
+                "runtime/src/python/runner.mjs",
+                "engines/python/assets.json",
+                "engines/officecli/officecli",
+            ],
+            json!({"node": "node/node", "engines": {
+                "python": python,
+                "officecli": {"path": "engines/officecli/officecli"},
+            }}),
+        )
+        .await;
+        assert_eq!(
+            boot["runtime"]["documents"]["python"],
+            cfg!(target_os = "macos")
         );
     }
     fn audio_target(host: &AssistantHost, sid: &str) -> DeleteRequest {

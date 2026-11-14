@@ -3440,7 +3440,16 @@
       "templates": {
         "coding": "通用编程",
         "chinese": "中文沟通",
-        "review": "代码审查"
+        "review": "代码审查",
+        "tdd": "测试先行",
+        "debugging": "先找根因",
+        "git-commits": "提交与 PR 规范",
+        "frontend": "前端界面",
+        "docs-writing": "文档写作",
+        "security": "安全检查",
+        "refactor": "小步重构",
+        "plan-first": "先规划再动手",
+        "concise": "简洁回答"
       },
       "recipes": {
         "context7": "为编程问题补充库和框架文档。",
@@ -3453,7 +3462,16 @@
         "skill-creator": "帮助编写、改进和验证技能。",
         "coding": "约定代码修改、测试与结果说明方式。",
         "chinese": "使用中文清晰沟通，保留代码和专有名称。",
-        "review": "聚焦可验证的问题、影响和代码位置。"
+        "review": "聚焦可验证的问题、影响和代码位置。",
+        "tdd": "先写失败测试，用最少代码通过，再整理实现。",
+        "debugging": "先复现并查明原因；同一问题失败三次就停下来换思路。",
+        "git-commits": "小步提交，遵循 Conventional Commits，说明改动原因和验证。",
+        "frontend": "沿用已有组件和样式，兼顾可访问性、暗色模式、窄屏和 i18n。",
+        "docs-writing": "先写结论，用短句和可直接运行的示例解释操作。",
+        "security": "保护密钥，校验输入，检查注入、越权和依赖版本。",
+        "refactor": "保持行为不变，一次只改一件事，每一步都能运行测试。",
+        "plan-first": "复杂任务先列步骤和验收标准，确认后再写代码。",
+        "concise": "先给答案，少铺垫，不重复用户的话。"
       },
       "requirements": {
         "context7": "保持网络可用；建议在 Context7 创建 API Key，再填入 Authorization 请求头。",
@@ -3682,6 +3700,8 @@
     "skillSourceUnverified": "旧源无法核验，请保留原文件并另存远端候选。",
     "skillTargetModified": "工具副本已修改，请另存候选或先处理冲突。",
     "skillDownloadFailed": "无法读取仓库，请检查网络、访问权限或稍后重试。",
+    "githubRateLimited": "GitHub 匿名访问已达每小时 60 次上限（同一网络共用），请稍后重试。",
+    "githubRateLimitedUntil": "GitHub 匿名访问已达每小时 60 次上限（同一网络共用），{{time}} 后可重试。",
     "skillArtifactHashOccupied": "相同内容哈希的旧存储已被修改，无法安全另存此候选。请先备份用户修改并手动修复旧源；Ofox 不会替换仍可能被工具读取的目录。",
     "skillSourceMissing": "仓库中的原技能源路径已不存在，请核对来源。",
     "instructionOverview": "工具指令总览",
@@ -4256,7 +4276,8 @@
         "files": "文件与网页",
         "development": "开发协作",
         "design": "设计辅助",
-        "communication": "沟通与审查"
+        "communication": "沟通与审查",
+        "search": "搜索"
       },
       "details": "配置详情",
       "closeDetails": "收起详情",
@@ -4265,14 +4286,11 @@
       "preparationLabel": "准备事项",
       "licenseLabel": "许可与条款",
       "reviewedAt": "文档核对：{{date}}",
-      "reviewBoundary": "文档核对不代表实际连接或工具执行已通过验收。",
       "selectedSkillNote": "仅下载所选技能目录，保留其中的许可文件，并固定实际提交版本。",
-      "configurable": "可配置",
       "nativeAuth": "需凭据或原生授权",
       "checkLabel": "检查方式",
       "checkOfox": "可由 Ofox 发起连接检查",
       "checkNative": "请在对应工具中检查",
-      "notTested": "尚未实测",
       "notCollected": "尚未加入",
       "collected": "已加入我的资源",
       "nativeOther": "本机有其他配置",
@@ -4282,7 +4300,6 @@
       "readOnly": "仅提供只读工具集",
       "credentialBoundary": "仍需凭据；实际访问权限由凭据决定。",
       "githubChoice": "默认选择官方只读工具集；可在表单中按官方说明修改 URL。",
-      "compatibilityNote": "以下工具具有既有写入适配；实际加载、授权及服务兼容性需在对应版本确认。",
       "runtime": {
         "http": "远程 HTTP",
         "node": "本地命令 · Node.js",
@@ -4298,7 +4315,8 @@
         "mitService": "服务端源码：MIT；托管服务另受 GitHub 条款约束。",
         "skill": "下载时保留技能目录内许可文件；实际提交与许可在详情中记录。",
         "skillFonts": "保留技能许可与字体的独立许可；使用字体前查看对应条款。",
-        "template": "Ofox 可编辑模板，可按项目需求修改。"
+        "template": "Ofox 可编辑模板，可按项目需求修改。",
+        "sourceTerms": "源码许可尚未核验；使用前请查看来源项目所用版本的许可与服务条款。"
       },
       "recipes": {
         "microsoft-learn": "检索微软官方文档与代码示例。",
@@ -4416,6 +4434,9 @@
       "showMine": "查看我的资源"
     },
     "skillDiscover": {
+      "popular": "热门技能",
+      "add": "添加",
+      "official": "官方",
       "source": "发现来源",
       "repos": "仓库 · {{count}}",
       "featured": "精选",
@@ -4429,6 +4450,7 @@
       "results": "{{count}} 个技能",
       "failed": "读取失败，请重试。",
       "partial": "部分仓库读取失败：{{repos}}",
+      "saved": "{{repos}} 暂时读不到，显示的是 {{time}} 保存的列表。",
       "collected": "已收录",
       "choose": "选择安装",
       "searchHint": "输入至少 2 个字符，搜索 skills.sh 公共目录。",
@@ -4446,7 +4468,64 @@
       "resolveTitle": "确认技能来源",
       "resolveHelp": "正在核对 {{repo}} 的实际技能目录和默认分支。选择要安装的来源。",
       "confirmSource": "使用此来源"
-    }
+    },
+    "discover3": {
+      "signIn": "需登录",
+      "apiKey": "需要 API key",
+      "preparation": {
+        "signIn": "保持网络连接，并在目标工具中完成浏览器登录授权。",
+        "publicHttp": "保持网络连接；目标工具须支持 Streamable HTTP。",
+        "node": "准备 Node.js 和 npm；首次使用时下载对应 MCP 包。",
+        "uv": "准备 uv / uvx 与兼容的 Python 环境。",
+        "apiKey": "准备 Node.js、npm 和服务商的 API key，在表单中填写对应环境变量。"
+      },
+      "permissions": {
+        "remote": "请求会发送给服务提供方；实际读取和写入范围由工具、账号与授权决定。",
+        "local": "本地进程可访问其运行环境允许的数据；仅授予完成任务所需的权限。"
+      },
+      "recipes": {
+        "exa": "为 Agent 打造的网页与代码搜索，返回干净的页面内容。",
+        "memory": "Agent 跨对话保留的知识图谱。",
+        "sequential-thinking": "一步步想清问题，边想边修正、分支。",
+        "git": "读取、搜索和修改 Git 仓库。",
+        "time": "任意地点的当前时间，以及时区换算。",
+        "sentry": "Sentry 中的问题、错误和追踪，以及 Seer 的分析。",
+        "linear": "查找、创建和更新 Linear 的 Issue、项目和评论。",
+        "notion": "搜索、读写 Notion 工作区中的页面和数据库。",
+        "atlassian": "Atlassian Cloud 上的 Jira Issue 和 Confluence 页面。",
+        "supabase": "管理 Supabase 项目：数据表、SQL、迁移、日志和 Edge Functions。",
+        "stripe": "客户、支付、订阅，以及 Stripe 文档。",
+        "vercel": "Vercel 上的项目、部署和日志，以及其文档。",
+        "neon": "Neon 上的 Serverless Postgres：项目、分支和 SQL。",
+        "cloudflare-docs": "搜索 Cloudflare 文档。",
+        "huggingface": "搜索 Hugging Face Hub 上的模型、数据集、Spaces 和论文。",
+        "brave-search": "基于 Brave 独立索引的网页、新闻、图片和本地搜索。",
+        "firecrawl": "抓取、爬取和搜索网页，输出干净的 Markdown。",
+        "tavily": "用 Tavily 搜索并提取网页内容。"
+      }
+    },
+    "assistantTarget": {
+      "label": "Ofox 助手",
+      "mode": "助手使用方式",
+      "auto": "自动用",
+      "manual": "只能手动用",
+      "broken": "无法读取：{{reason}}",
+      "reviewed": "已审核",
+      "unreviewed": "未审核",
+      "assistantCreated": "助手创建",
+      "bundled": "内置",
+      "originHint": "目录来源标记不代表内容安全保证。"
+    },
+    "assistantSkillStateInvalid": "助手技能设置无法读取，请检查后重试。",
+    "assistantSkillUnreadable": "技能文件无法读取。",
+    "assistantSkillTooLarge": "SKILL.md 超过 1 MB。",
+    "assistantSkillBinary": "SKILL.md 不是有效的文本文件。",
+    "assistantSkillFrontmatter": "SKILL.md 缺少或包含无效的开头元数据。",
+    "assistantSkillDescriptionMissing": "技能缺少描述。",
+    "assistantSkillNameInvalid": "技能名称无效。",
+    "assistantSkillDuplicate": "技能名称重复，请使用唯一名称。",
+    "assistantSkillUnavailable": "技能已变更或未给助手启用，请刷新后重试。",
+    "assistantMcpSignInUnsupported": "该服务需要登录，Ofox 助手暂不支持"
   },
   "datePicker": {
     "open": "为{{label}}选择日期",
@@ -4901,6 +4980,7 @@
     "totalTokens": "总 Token"
   },
   "assistant": {
+    "retrying": "重试中…（{{attempt}}/2）",
     "audio": {
       "title": "语音输入",
       "import": "导入音频",
@@ -5008,6 +5088,9 @@
       "mediaImageTurnLimit": "每次回答最多生成 4 张图片，需要更多请再发一次。",
       "mediaDeclined": "你取消了这次生成，未产生费用。",
       "mediaSpeechTurnLimit": "每次回答最多生成 3 段语音，需要更多请再发一次。",
+      "documentFailed": "没能生成这份文档。",
+      "documentLimit": "每次回答最多生成 3 份文档，需要更多请再发一次。",
+      "documentTooLarge": "这份文档太长，无法一次生成。请要一份短些的，或分成几份。",
       "mediaInvalidParams": "此模型不支持所选媒体参数。",
       "mediaOutcomeUnknown": "此媒体请求可能已计费，但无法确认结果。再次提交前请查看使用记录。",
       "mediaSafetyRejected": "图像请求未通过提供方的安全检查，请修改提示词或输入图片后重试。",
@@ -5031,6 +5114,7 @@
       "deletePending": "对话已移除，但部分文件尚未删除。重启应用后将重试清理。",
       "exportFailed": "无法保存导出文件，请检查保存位置后重试。",
       "exportDestinationInvalid": "请选择应用数据目录以外的普通文件。",
+      "openFailed": "文件已保存，但无法用默认应用打开。请到保存位置手动打开。",
       "exportTooLarge": "此对话超出 Markdown 导出的 64 MiB 大小上限。",
       "backupInvalid": "备份文件已损坏，或格式不受支持。没有替换任何已有的对话。",
       "backupTooLarge": "备份超过大小或文件数限制：ZIP 最大 512 MiB，解压后最大 2 GiB，最多 20,000 个文件。",
@@ -5073,7 +5157,10 @@
       "localInvalidPlan": "任务步骤格式无效。",
       "localCostUnavailable": "该模型或搜索缺少可靠价格，无法执行本轮费用限制。请选择有价格信息的模型后继续本机配置。",
       "localPartialChange": "修复失败前已产生部分改动。请检查改动记录后再试。",
-      "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。"
+      "localMutationUnknown": "无法确认改动结果，请先检查文件再重试。",
+      "mcpUnavailable": "MCP 服务不可用或配置已变更。请在资源库检查后重试。",
+      "skillUnavailable": "技能不可用或已更改，请用 / 重新选择或移除。",
+      "approvalOnceRequired": "请点击安装或保存，确认本次操作。"
     },
     "title": "Ofox 助手",
     "loginRequired": "登录 Ofox 后即可使用内置助手。",
@@ -5100,7 +5187,8 @@
     "activity": {
       "searching": "正在搜索网页…",
       "readingPage": "正在阅读网页…",
-      "readingFile": "正在读取文件…"
+      "readingFile": "正在读取文件…",
+      "makingDocument": "正在生成文档…"
     },
     "welcome": "有什么可以帮你？",
     "emptyBoundary": "助手只读取你附加的文件；开启联网后才会搜索网页。",
@@ -5175,6 +5263,26 @@
     "webSearchUnavailable": "联网搜索暂不可用，回复将基于模型自身的知识。",
     "webSearchNextMessage": "联网搜索的更改将从你的下一条消息开始生效。",
     "searchSkipped": "此回复无法使用联网搜索，因此基于模型自身的知识作答。",
+    "webSearchMenu": {
+      "head": "回复时通过 Ofox 或 Exa 联网搜索。",
+      "off": "关闭",
+      "ofox": "Ofox 搜索",
+      "ofoxNote": "按次计费：每次约 {{low}}–{{high}}，另加少量 Token",
+      "ofoxUnavailable": "暂不可用",
+      "ofoxUnavailableNote": "Ofox 搜索暂不可用，可以改用 Exa 免费搜索。",
+      "exa": "Exa 免费搜索",
+      "exaShort": "免费，搜索词会发送给 Exa",
+      "exaNote": "由 Exa 提供的免费搜索。搜索词会发送给 Exa；本机读取失败的网页，其地址也会发送给 Exa。",
+      "trigger": {
+        "ofox": "Ofox 搜索",
+        "exa": "Exa 搜索"
+      }
+    },
+    "searchLimited": {
+      "search_rate_limited": "Exa 免费搜索在当前网络已达到限额，这条回复没有联网搜索。",
+      "search_blocked": "Exa 不接受来自当前网络的免费搜索（需要直连的 IPv4，不能经过代理或 IPv6），这条回复没有联网搜索。",
+      "useOfox": "改用 Ofox 搜索"
+    },
     "editKeepsFiles": "所选附件会随编辑后的消息重新发送，你可以移除其中任意附件。",
     "editDropsFiles": "无法读取的文件不会发送。",
     "attachmentOutcome": {
@@ -5275,6 +5383,10 @@
       "speech": {
         "label": "配段旁白",
         "prompt": "用沉稳、温和的声音把这段话读成旁白：\n\n欢迎来到 Ofox，一个账号就能用上主流的 AI 模型。"
+      },
+      "deck": {
+        "label": "做个 PPT",
+        "prompt": "做一份 PPT：向新同事介绍远程办公的好习惯，共 6 页，版面简洁，每页只讲一个重点。"
       },
       "localCheck": {
         "label": "检查 Claude Code 配置",
@@ -5610,7 +5722,8 @@
       "kinds": {
         "image": "生成图片",
         "video": "生成视频",
-        "speech": "生成语音"
+        "speech": "生成语音",
+        "document": "文档"
       },
       "chipLabel": "{{name}}：模型和参数",
       "remove": "去掉{{name}}",
@@ -5652,6 +5765,56 @@
       "overLimit": "生成视频最多使用 9 张参考图、3 段音频（每段不超过 15 秒）和 1 个视频，请删掉多余的附件。",
       "needsTools": "当前模型不能调用工具，无法生成图片、视频或语音。请换一个模型。",
       "readAloudFailed": "朗读失败，请稍后再试。"
+    },
+    "document": {
+      "saveAndOpen": "保存并打开",
+      "making": "正在生成文档…",
+      "issues_one": "{{count}} 个问题",
+      "issues_other": "{{count}} 个问题",
+      "pages_one": "{{count}} 页",
+      "pages_other": "{{count}} 页",
+      "slides_one": "{{count}} 张幻灯片",
+      "slides_other": "{{count}} 张幻灯片",
+      "sheets_one": "{{count}} 张工作表",
+      "sheets_other": "{{count}} 张工作表",
+      "severity": {
+        "error": "错误",
+        "warning": "警告",
+        "info": "提示"
+      }
+    },
+    "skills": {
+      "choose": "选择技能",
+      "chip": "技能：{{name}}",
+      "remove": "移除技能 {{name}}",
+      "empty": "没有可用的技能",
+      "unavailable": "技能加载失败，请重新输入 /。",
+      "queueOnly": "带技能的消息会排队，等本次回答结束后发送。"
+    },
+    "skillTools": {
+      "results": "技能搜索结果",
+      "installTitle": "安装技能",
+      "saveTitle": "保存技能",
+      "install": "安装",
+      "save": "保存",
+      "preview": "技能预览",
+      "installs": "{{count}} 次安装",
+      "originHint": "目录来源标记不代表安全保证。安装始终需要你确认。",
+      "installed": "已安装"
+    },
+    "mcp": {
+      "steps": "MCP 工具步骤",
+      "running": "调用中",
+      "completed": "已完成",
+      "failed": "调用失败",
+      "unavailable": "服务暂不可用",
+      "needs_node": "请安装 Node.js（含 npx）",
+      "needs_uv": "请安装 uv",
+      "externalCost": "第三方 MCP 费用未纳入此估算。",
+      "approval": "此 MCP 工具可能修改数据。允许本次、本对话，或拒绝。",
+      "approvalTitle": "允许此 MCP 操作？",
+      "argumentsPreview": "参数预览",
+      "argumentsTruncated": "预览已截断。批准后会执行完整调用，包括此处未显示的参数。"
     }
   },
   "pages": {

@@ -211,6 +211,14 @@ impl Attachment {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_steps: Vec<Value>,
+    /// Host-authored, read-only historical search cards; never an installation capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_results: Vec<Value>,
+    /// User-selected skill name only; never a persisted permission or body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<MediaRecord>,
     /// What the reply's generation tools made, one record per tool call.
@@ -399,6 +407,38 @@ impl Default for Preferences {
     }
 }
 
+/// Where a run's web search searches: Ofox's paid search through the gateway
+/// (the default), or Exa's free one. One choice per account, kept in
+/// `prefs.json` beside the settings; the conversation's switch says whether
+/// a run searches at all.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchProvider {
+    #[default]
+    Ofox,
+    Exa,
+}
+
+impl SearchProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ofox => "ofox",
+            Self::Exa => "exa",
+        }
+    }
+}
+
+/// Save the account's search provider, and nothing else.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSearchProviderRequest {
+    /// Checked by the host against the signed-in owner, not by the store.
+    pub expected_owner: Option<String>,
+    /// Checked by the host against its authority generation, not by the store.
+    pub expected_generation: Option<u64>,
+    pub provider: SearchProvider,
+}
+
 /// Save all of the assistant settings at once.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -499,6 +539,15 @@ pub struct ExportMarkdownRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
+    #[serde(default)]
+    pub skill: Option<String>,
+    /// An edit explicitly replaces or clears its original selection.
+    #[serde(default)]
+    pub replace_skill: bool,
+    /// The renderer's resolved language, including first-launch OS detection.
+    /// Older callers omit it and use the saved application preference.
+    #[serde(default)]
+    pub ui_language: Option<String>,
     /// Optional together for older callers; new sends freeze the account and
     /// region generation before IPC admission, including ordinary queues.
     #[serde(default)]

@@ -24,8 +24,15 @@ export const UNUSED_PACKAGE_PATHS = [
   "pdfjs-dist/legacy/image_decoders",
 ];
 
-export async function pruneProduction(directory) {
-  for (const unused of UNUSED_PACKAGE_PATHS)
+// The pyodide npm package (about 13 MB) only runs the Python engine. Where
+// that engine is not offered (python-assets.mjs) it can never run.
+export const PYTHON_PACKAGE_PATHS = ["pyodide"];
+
+export async function pruneProduction(directory, { pythonEngine = true } = {}) {
+  const unusedPaths = pythonEngine
+    ? UNUSED_PACKAGE_PATHS
+    : [...UNUSED_PACKAGE_PATHS, ...PYTHON_PACKAGE_PATHS];
+  for (const unused of unusedPaths)
     await rm(path.join(directory, "node_modules", ...unused.split("/")), {
       recursive: true,
       force: true,

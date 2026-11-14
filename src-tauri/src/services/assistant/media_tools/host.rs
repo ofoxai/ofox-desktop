@@ -7,6 +7,10 @@ use super::*;
 use crate::services::assistant::{
     attachments::{self, Source},
     catalog::Model,
+    documents::create::{
+        DocumentFormat, PreviewRecord, LIMIT as DOCUMENT_LIMIT, MAX_PREVIEWS_PER_NAME,
+        MAX_PREVIEWS_PER_RUN,
+    },
     host::{blocking, scrub_secrets, scrub_secrets_in, AssistantHost, RunControl, PROTOCOL, STATE},
     materials::{self, Material, Plan},
     media, media_host, media_http,
@@ -19,10 +23,10 @@ use crate::services::assistant::{
 use base64::Engine;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
 };
 
@@ -42,10 +46,41 @@ pub(in crate::services::assistant) struct MediaRun {
     direct: bool,
     images: AtomicUsize,
     speech: AtomicUsize,
+    /// Documents made so far (see `documents::create`).
+    documents: AtomicUsize,
+    /// The ids of the `outputs/<id>` folders documents were made in; they
+    /// are removed when the run ends.
+    document_folders: Mutex<Vec<String>>,
+    /// The documents made as previews, and the files delivered.
+    previews: Mutex<Previews>,
     calls: Mutex<HashMap<String, CallRecord>>,
     /// Submitted videos, polled once the run ends: (reply, tool call,
     /// authority generation).
     polls: Mutex<Vec<(String, String, u64)>>,
+}
+
+/// A run's previews (see `documents::create`): each one asked for, in
+/// order, the file names it delivered documents as, and when it last
+/// delivered a document of each format.
+#[derive(Default)]
+struct Previews {
+    asked: Vec<AskedPreview>,
+    delivered: HashSet<String>,
+    /// By format extension, the [`Self::clock`] of the run's latest
+    /// delivery of that format.
+    last_delivery: HashMap<&'static str, u64>,
+    /// Counts the previews made and the documents delivered, in order.
+    clock: u64,
+}
+
+/// A preview of the file `name` in the folder `doc_id`; `made` while it is
+/// made and not delivered, `made_at` the [`Previews::clock`] when it was
+/// first made.
+struct AskedPreview {
+    name: String,
+    doc_id: String,
+    made: Option<PreviewRecord>,
+    made_at: Option<u64>,
 }
 
 impl MediaRun {
@@ -55,6 +90,9 @@ impl MediaRun {
             direct: false,
             images: AtomicUsize::new(0),
             speech: AtomicUsize::new(0),
+            documents: AtomicUsize::new(0),
+            document_folders: Mutex::new(vec![]),
+            previews: Mutex::default(),
             calls: Mutex::new(HashMap::new()),
             polls: Mutex::new(vec![]),
         }
@@ -94,19 +132,207 @@ impl MediaRun {
                 Some(made.saturating_sub(count))
             });
     }
+
+    /// Hold one of the run's `limit` documents; `false` when none is left.
+    pub fn reserve_document(&self, limit: usize) -> bool {
+        self.documents
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |made| {
+                (made < limit).then_some(made + 1)
+            })
+            .is_ok()
+    }
+
+    /// Remember the folder `outputs/<doc_id>` before it is made, so that the
+    /// end of the run removes it however the document went.
+    pub fn track_document_folder(&self, doc_id: &str) {
+        self.document_folders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(doc_id.to_owned());
+    }
+
+    pub fn take_document_folders(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .document_folders
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Give back a document that was not made.
+    pub fn release_document(&self) {
+        let _ = self
+            .documents
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |made| {
+                Some(made.saturating_sub(1))
+            });
+    }
+
+    fn previews(&self) -> MutexGuard<'_, Previews> {
+        self.previews
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Hold one of the [`MAX_PREVIEWS_PER_NAME`] previews of the file
+    /// `name`, and one of the reply's [`MAX_PREVIEWS_PER_RUN`], for the
+    /// folder `doc_id`; refused when none is left.
+    pub fn record_preview(&self, name: &str, doc_id: &str) -> Result<(), String> {
+        let mut previews = self.previews();
+        if previews.asked.len() >= MAX_PREVIEWS_PER_RUN {
+            return Err(refuse(
+                DOCUMENT_LIMIT,
+                format!(
+                    "at most {MAX_PREVIEWS_PER_RUN} previews per reply; deliver a file with fromPreview, or send the content without preview"
+                ),
+            ));
+        }
+        let asked = previews.asked.iter().filter(|p| p.name == name).count();
+        if asked >= MAX_PREVIEWS_PER_NAME {
+            return Err(refuse(
+                DOCUMENT_LIMIT,
+                format!(
+                    "at most {MAX_PREVIEWS_PER_NAME} previews of {name} per reply; deliver one with fromPreview, or send the content without preview"
+                ),
+            ));
+        }
+        previews.asked.push(AskedPreview {
+            name: name.into(),
+            doc_id: doc_id.into(),
+            made: None,
+            made_at: None,
+        });
+        Ok(())
+    }
+
+    /// Give back the preview held for the folder `doc_id`: it was not made.
+    pub fn release_preview(&self, doc_id: &str) {
+        self.previews().asked.retain(|p| p.doc_id != doc_id);
+    }
+
+    /// Keep `preview`, made in the folder held for it, until it is
+    /// delivered; again when its delivery failed.
+    pub fn keep_preview(&self, preview: PreviewRecord) {
+        let mut previews = self.previews();
+        let Previews { asked, clock, .. } = &mut *previews;
+        if let Some(asked) = asked.iter_mut().find(|p| p.doc_id == preview.doc_id) {
+            if asked.made_at.is_none() {
+                *clock += 1;
+                asked.made_at = Some(*clock);
+            }
+            asked.made = Some(preview);
+        }
+    }
+
+    /// The preview in the folder `doc_id` this run made and has not
+    /// delivered, taken for its delivery.
+    pub fn take_preview(&self, doc_id: &str) -> Option<PreviewRecord> {
+        self.previews()
+            .asked
+            .iter_mut()
+            .find(|p| p.doc_id == doc_id)
+            .and_then(|p| p.made.take())
+    }
+
+    /// Remember that the run delivered a document of `format` as the file
+    /// `name`.
+    pub fn record_delivery(&self, name: &str, format: DocumentFormat) {
+        let mut previews = self.previews();
+        previews.clock += 1;
+        let now = previews.clock;
+        previews.delivered.insert(name.into());
+        previews.last_delivery.insert(format.extension(), now);
+    }
+
+    /// For each file the run previewed and delivered no document as, its
+    /// latest preview, taken for its delivery; in the order they were asked
+    /// for. A preview made before the run delivered a document of its
+    /// format is left out: that document stands for it, whatever its name
+    /// (the model renamed the file when it delivered it).
+    pub fn undelivered_previews(&self) -> Vec<PreviewRecord> {
+        let mut previews = self.previews();
+        let Previews {
+            asked,
+            delivered,
+            last_delivery,
+            ..
+        } = &mut *previews;
+        let superseded = |preview: &AskedPreview| match (&preview.made, preview.made_at) {
+            (Some(made), Some(at)) => last_delivery
+                .get(made.format.extension())
+                .is_some_and(|&delivered| delivered > at),
+            _ => false,
+        };
+        let mut latest: Vec<PreviewRecord> = vec![];
+        for preview in asked.iter_mut().rev() {
+            if delivered.contains(&preview.name)
+                || latest.iter().any(|p| p.name == preview.name)
+                || superseded(preview)
+            {
+                continue;
+            }
+            latest.extend(preview.made.take());
+        }
+        latest.reverse();
+        latest
+    }
+
+    /// What an earlier call with the same id answered (an unknown outcome
+    /// while it still runs, a conflict when its arguments differ); `None`
+    /// for a new call, which is then remembered as running.
+    pub fn begin_call(&self, id: &str, fingerprint: &str) -> Option<Result<Value, String>> {
+        let Ok(mut calls) = self.calls.lock() else {
+            return Some(Err(STATE.into()));
+        };
+        if let Some((previous, result)) = calls.get(id) {
+            if previous != fingerprint {
+                return Some(Err("assistant_tool_call_conflict".into()));
+            }
+            return Some(
+                result
+                    .clone()
+                    .unwrap_or_else(|| Err("unknown_outcome".into())),
+            );
+        }
+        calls.insert(id.into(), (fingerprint.into(), None));
+        None
+    }
+
+    /// Remember how the call `id` ended.
+    pub fn end_call(
+        &self,
+        id: String,
+        fingerprint: String,
+        result: &Result<Value, String>,
+    ) -> Result<(), String> {
+        self.calls
+            .lock()
+            .map_err(|_| STATE)?
+            .insert(id, (fingerprint, Some(result.clone())));
+        Ok(())
+    }
+}
+
+/// The fingerprint a repeated tool call must match: its name and arguments.
+pub(in crate::services::assistant) fn fingerprint(call: &registry::Call) -> Result<String, String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&json!([call.name, call.args])).map_err(|_| PROTOCOL)?)
+    ))
 }
 
 const AUDIO_REFERENCE_BYTES: u64 = 15 * 1024 * 1024;
 const VIDEO_REFERENCE_BYTES: u64 = 25 * 1024 * 1024;
 
 impl AssistantHost {
-    /// A generation tool call of a chat run, answered with a short result
-    /// (ids and status, never bytes).
-    pub(in crate::services::assistant) async fn dispatch_media_tool(
-        self: &Arc<Self>,
-        run: &Arc<RunControl>,
+    /// The runtime's tool call of `run`, once its run, identity and call id
+    /// are checked.
+    pub(in crate::services::assistant) async fn tool_call(
+        &self,
+        run: &RunControl,
         params: &Value,
-    ) -> Result<Value, String> {
+    ) -> Result<registry::Call, String> {
         self.validate_run(run)?;
         if self.identity().await? != run.identity {
             return Err(crate::services::assistant::host::IDENTITY_CHANGED.into());
@@ -122,28 +348,25 @@ impl AssistantHost {
         if call.tool_call_id.is_empty() || call.tool_call_id.len() > 200 {
             return Err("assistant_invalid_tool".into());
         }
+        Ok(call)
+    }
+
+    /// A generation tool call of a chat run, answered with a short result
+    /// (ids and status, never bytes).
+    pub(in crate::services::assistant) async fn dispatch_media_tool(
+        self: &Arc<Self>,
+        run: &Arc<RunControl>,
+        params: &Value,
+    ) -> Result<Value, String> {
+        let call = self.tool_call(run, params).await?;
         let media = run
             .media
             .as_ref()
             .filter(|_| !run.compact_only)
             .ok_or("assistant_capability_disabled")?;
-        let fingerprint = format!(
-            "{:x}",
-            Sha256::digest(
-                serde_json::to_vec(&json!([call.name, call.args])).map_err(|_| PROTOCOL)?
-            )
-        );
-        {
-            let mut calls = media.calls.lock().map_err(|_| STATE)?;
-            if let Some((previous, result)) = calls.get(&call.tool_call_id) {
-                if previous != &fingerprint {
-                    return Err("assistant_tool_call_conflict".into());
-                }
-                return result
-                    .clone()
-                    .unwrap_or_else(|| Err("unknown_outcome".into()));
-            }
-            calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
+        let fingerprint = fingerprint(&call)?;
+        if let Some(earlier) = media.begin_call(&call.tool_call_id, &fingerprint) {
+            return earlier;
         }
         let mid = run.reply_id();
         let work = async {
@@ -182,11 +405,7 @@ impl AssistantHost {
                 .await;
         }
         let result = result.map_err(|error| scrub_secrets(&error, &run.secrets()));
-        media
-            .calls
-            .lock()
-            .map_err(|_| STATE)?
-            .insert(call.tool_call_id, (fingerprint, Some(result.clone())));
+        media.end_call(call.tool_call_id, fingerprint, &result)?;
         result
     }
 
@@ -911,7 +1130,10 @@ impl AssistantHost {
         self.start_media_polls(run);
     }
 
-    async fn load(&self, run: &RunControl) -> Result<SessionRecord, String> {
+    pub(in crate::services::assistant) async fn load(
+        &self,
+        run: &RunControl,
+    ) -> Result<SessionRecord, String> {
         let store = self.store(&run.identity.owner)?;
         let sid = run.session_id.clone();
         let record = blocking(move || store.load_record(&sid)).await?;
@@ -996,7 +1218,7 @@ impl AssistantHost {
         Ok(())
     }
 
-    fn publish_generation(
+    pub(in crate::services::assistant) fn publish_generation(
         &self,
         run: &RunControl,
         mid: &str,
@@ -1075,7 +1297,10 @@ fn selectable(record: &SessionRecord, id: &str) -> Result<Attachment, String> {
 }
 
 /// The run is still the conversation's and it was not stopped.
-fn still_running(record: &SessionRecord, run: &RunControl) -> Result<(), String> {
+pub(in crate::services::assistant) fn still_running(
+    record: &SessionRecord,
+    run: &RunControl,
+) -> Result<(), String> {
     if run.cancelled()
         || record.session.deleted_at.is_some()
         || record

@@ -3440,7 +3440,16 @@
       "templates": {
         "coding": "General coding",
         "chinese": "Chinese communication",
-        "review": "Code review"
+        "review": "Code review",
+        "tdd": "Test first",
+        "debugging": "Find the root cause",
+        "git-commits": "Commits and PRs",
+        "frontend": "Frontend interfaces",
+        "docs-writing": "Documentation writing",
+        "security": "Security checks",
+        "refactor": "Small-step refactoring",
+        "plan-first": "Plan before coding",
+        "concise": "Concise answers"
       },
       "recipes": {
         "context7": "Look up library and framework documentation while coding.",
@@ -3453,7 +3462,16 @@
         "skill-creator": "Write, improve, and validate skills.",
         "coding": "Set expectations for code changes, tests, and reports.",
         "chinese": "Communicate clearly in Chinese while preserving code and proper names.",
-        "review": "Focus on verifiable findings, impact, and code locations."
+        "review": "Focus on verifiable findings, impact, and code locations.",
+        "tdd": "Write a failing test, pass it with minimal code, then refactor.",
+        "debugging": "Reproduce and diagnose first; stop and change approach after three failed attempts.",
+        "git-commits": "Use small Conventional Commits and explain the reason, behavior, and validation.",
+        "frontend": "Reuse existing components and styles with accessible, dark, narrow-screen, localized UI.",
+        "docs-writing": "Lead with the conclusion, use short sentences, and provide runnable examples.",
+        "security": "Protect secrets, validate input, check injection and authorization, and pin dependencies.",
+        "refactor": "Preserve behavior, change one thing at a time, and test every step.",
+        "plan-first": "For complex tasks, define steps and acceptance criteria, then confirm before coding.",
+        "concise": "Give the answer first, minimize introductions, and avoid repeating the user."
       },
       "requirements": {
         "context7": "Internet access is required. Create a Context7 API key if needed, then add it in the Authorization header.",
@@ -3682,6 +3700,8 @@
     "skillSourceUnverified": "The old source cannot be verified. Preserve it and save a separate remote candidate.",
     "skillTargetModified": "A tool copy was modified. Save a new candidate copy or resolve the conflict.",
     "skillDownloadFailed": "Cannot read the repository. Check network and access permissions, or retry later.",
+    "githubRateLimited": "GitHub's anonymous limit of 60 requests an hour, shared by everyone on this network, is used up. Try again later.",
+    "githubRateLimitedUntil": "GitHub's anonymous limit of 60 requests an hour, shared by everyone on this network, is used up. Try again after {{time}}.",
     "skillArtifactHashOccupied": "The existing object for this content hash was modified. This candidate cannot be copied safely. Back up user changes and repair the old source manually; Ofox will not replace a directory that tools may still read.",
     "skillSourceMissing": "The original skill path is missing from the repository. Verify the source.",
     "instructionOverview": "Tool instructions overview",
@@ -4256,7 +4276,8 @@
         "files": "Files and web",
         "development": "Development",
         "design": "Design",
-        "communication": "Communication and review"
+        "communication": "Communication and review",
+        "search": "Search"
       },
       "details": "Configuration details",
       "closeDetails": "Hide details",
@@ -4265,14 +4286,11 @@
       "preparationLabel": "Preparation",
       "licenseLabel": "License and terms",
       "reviewedAt": "Documentation reviewed: {{date}}",
-      "reviewBoundary": "Reviewing documentation does not verify a live connection or execution in a tool.",
       "selectedSkillNote": "Download only the selected skill directory, retain its license files, and pin the actual commit.",
-      "configurable": "Configurable",
       "nativeAuth": "Credentials or native authorization required",
       "checkLabel": "Check method",
       "checkOfox": "Ofox can start a connection check",
       "checkNative": "Check in the target tool",
-      "notTested": "Not live-tested",
       "notCollected": "Not added yet",
       "collected": "Added to My resources",
       "nativeOther": "Other local configuration exists",
@@ -4282,7 +4300,6 @@
       "readOnly": "Read-only toolset only",
       "credentialBoundary": "Credentials are still required; their scope determines actual access.",
       "githubChoice": "The official read-only toolset is selected by default. You can edit the URL in the form using the official instructions.",
-      "compatibilityNote": "These tools have existing write adapters. Verify loading, authorization, and service compatibility in the actual target version.",
       "runtime": {
         "http": "Remote HTTP",
         "node": "Local command · Node.js",
@@ -4298,7 +4315,8 @@
         "mitService": "Server source: MIT. GitHub terms apply separately to the hosted service.",
         "skill": "License files within the selected skill directory are retained. Details record the actual commit and license.",
         "skillFonts": "Retain the skill license and separate font licenses. Read their terms before using the fonts.",
-        "template": "An editable Ofox template that you can adapt to your project."
+        "template": "An editable Ofox template that you can adapt to your project.",
+        "sourceTerms": "Source license not verified. Consult the source project license and service terms for the version you use."
       },
       "recipes": {
         "microsoft-learn": "Search Microsoft's official documentation and code examples.",
@@ -4416,6 +4434,9 @@
       "showMine": "View My resources"
     },
     "skillDiscover": {
+      "popular": "Popular skills",
+      "add": "Add",
+      "official": "Official",
       "source": "Discovery source",
       "repos": "Repositories · {{count}}",
       "featured": "Featured",
@@ -4429,6 +4450,7 @@
       "results": "{{count}} skills",
       "failed": "Could not load. Please retry.",
       "partial": "Some repositories failed: {{repos}}",
+      "saved": "Couldn't reach {{repos}}; showing the list saved at {{time}}.",
       "collected": "Collected",
       "choose": "Choose to install",
       "searchHint": "Enter at least 2 characters to search the skills.sh directory.",
@@ -4446,7 +4468,64 @@
       "resolveTitle": "Confirm skill source",
       "resolveHelp": "Verify the actual skill path and default branch in {{repo}}, then choose a source.",
       "confirmSource": "Use this source"
-    }
+    },
+    "discover3": {
+      "signIn": "Sign-in required",
+      "apiKey": "API key required",
+      "preparation": {
+        "signIn": "Network access and browser sign-in authorization in the target tool.",
+        "publicHttp": "Network access and Streamable HTTP support in the target tool.",
+        "node": "Node.js and npm; the MCP package is downloaded on first use.",
+        "uv": "uv / uvx and a compatible Python environment.",
+        "apiKey": "Node.js, npm, and a provider API key entered in the matching environment variable."
+      },
+      "permissions": {
+        "remote": "Requests go to the service provider. Read and write access depends on the tool, account, and authorization.",
+        "local": "The local process can access data permitted by its runtime environment. Grant only the permissions needed for the task."
+      },
+      "recipes": {
+        "exa": "Web search and code search built for agents, with clean page contents.",
+        "memory": "A knowledge graph the agent keeps across conversations.",
+        "sequential-thinking": "Think a problem through step by step, revising and branching as it goes.",
+        "git": "Read, search and change Git repositories.",
+        "time": "The current time anywhere, and conversions between time zones.",
+        "sentry": "Issues, errors and traces from Sentry, and Seer's analysis of them.",
+        "linear": "Find, create and update Linear issues, projects and comments.",
+        "notion": "Search, read and write pages and databases in your Notion workspace.",
+        "atlassian": "Jira issues and Confluence pages from Atlassian Cloud.",
+        "supabase": "Manage Supabase projects: tables, SQL, migrations, logs and edge functions.",
+        "stripe": "Customers, payments, subscriptions and Stripe's documentation.",
+        "vercel": "Projects, deployments and logs on Vercel, and its documentation.",
+        "neon": "Serverless Postgres on Neon: projects, branches and SQL.",
+        "cloudflare-docs": "Search Cloudflare's documentation.",
+        "huggingface": "Search models, datasets, Spaces and papers on the Hugging Face Hub.",
+        "brave-search": "Web, news, image and local search from Brave's independent index.",
+        "firecrawl": "Scrape, crawl and search the web into clean Markdown.",
+        "tavily": "Search and extract from the web with Tavily."
+      }
+    },
+    "assistantTarget": {
+      "label": "Ofox Assistant",
+      "mode": "Assistant skill use",
+      "auto": "Automatic",
+      "manual": "Manual only",
+      "broken": "Cannot read: {{reason}}",
+      "reviewed": "Reviewed",
+      "unreviewed": "Unreviewed",
+      "assistantCreated": "Assistant created",
+      "bundled": "Built-in",
+      "originHint": "Catalog origin does not guarantee content safety."
+    },
+    "assistantSkillStateInvalid": "Assistant skill settings cannot be read. Check them and retry.",
+    "assistantSkillUnreadable": "The skill file cannot be read.",
+    "assistantSkillTooLarge": "SKILL.md exceeds 1 MB.",
+    "assistantSkillBinary": "SKILL.md is not a valid text file.",
+    "assistantSkillFrontmatter": "SKILL.md has missing or invalid frontmatter.",
+    "assistantSkillDescriptionMissing": "The skill has no description.",
+    "assistantSkillNameInvalid": "The skill name is invalid.",
+    "assistantSkillDuplicate": "The skill name is duplicated. Use a unique name.",
+    "assistantSkillUnavailable": "The skill changed or is not enabled for the assistant. Refresh and retry.",
+    "assistantMcpSignInUnsupported": "This service requires sign-in, which Ofox Assistant does not support yet"
   },
   "datePicker": {
     "open": "Choose {{label}}",
@@ -4901,6 +4980,7 @@
     "totalTokens": "Total tokens"
   },
   "assistant": {
+    "retrying": "Retrying… ({{attempt}}/2)",
     "audio": {
       "title": "Voice input",
       "import": "Import audio",
@@ -5008,6 +5088,9 @@
       "mediaImageTurnLimit": "One reply makes at most 4 images. Ask again for more.",
       "mediaDeclined": "You declined this generation, so nothing was charged.",
       "mediaSpeechTurnLimit": "One reply makes at most 3 speech files. Ask again for more.",
+      "documentFailed": "The document could not be made.",
+      "documentLimit": "One reply makes at most 3 documents. Ask again for more.",
+      "documentTooLarge": "This document is too long to make in one go. Ask for a shorter one or split it.",
       "mediaInvalidParams": "This model does not support the selected media parameters.",
       "mediaOutcomeUnknown": "The media request may have been charged, but its result could not be confirmed. Check your activity before submitting again.",
       "mediaSafetyRejected": "The image request was rejected by the provider’s safety checks. Change the prompt or input image and try again.",
@@ -5031,6 +5114,7 @@
       "deletePending": "The conversation was removed, but some files could not be deleted. Restart the app to retry cleanup.",
       "exportFailed": "Could not save the export. Check the destination and try again.",
       "exportDestinationInvalid": "Choose a regular file outside the application data folder.",
+      "openFailed": "The file was saved, but its default app couldn't open it. Open it from where you saved it.",
       "exportTooLarge": "This conversation is too large for a Markdown export (64 MiB maximum).",
       "backupInvalid": "The backup is damaged or uses an unsupported format. No conflicting conversation was replaced.",
       "backupTooLarge": "The backup exceeds the size or file-count limit (512 MiB ZIP, 2 GiB expanded, 20,000 files).",
@@ -5073,7 +5157,10 @@
       "localInvalidPlan": "The task plan is invalid.",
       "localCostUnavailable": "This model or search has no reliable price. Choose a priced model to use local configuration within the task budget.",
       "localPartialChange": "Some changes were made before the repair failed. Review the changes before trying again.",
-      "localMutationUnknown": "The change outcome could not be confirmed. Check the files before retrying."
+      "localMutationUnknown": "The change outcome could not be confirmed. Check the files before retrying.",
+      "mcpUnavailable": "An MCP service is unavailable or its configuration changed. Check it in Resources and try again.",
+      "skillUnavailable": "This skill is unavailable or has changed. Choose it again from / or remove it.",
+      "approvalOnceRequired": "Choose Install or Save to approve this request."
     },
     "title": "Ofox Assistant",
     "loginRequired": "Sign in to Ofox to use the built-in assistant.",
@@ -5100,7 +5187,8 @@
     "activity": {
       "searching": "Searching the web…",
       "readingPage": "Reading a page…",
-      "readingFile": "Reading a file…"
+      "readingFile": "Reading a file…",
+      "makingDocument": "Generating a document…"
     },
     "welcome": "How can I help?",
     "emptyBoundary": "The assistant only reads files you attach, and searches the web only when web search is on.",
@@ -5175,6 +5263,26 @@
     "webSearchUnavailable": "Web search is unavailable right now. Replies use the model's own knowledge.",
     "webSearchNextMessage": "Your web search change applies to your next message.",
     "searchSkipped": "Web search was unavailable for this reply, so it uses the model's own knowledge.",
+    "webSearchMenu": {
+      "head": "Search the web for replies through Ofox or Exa.",
+      "off": "Off",
+      "ofox": "Ofox search",
+      "ofoxNote": "Paid: about {{low}}–{{high}} per search, plus a few tokens",
+      "ofoxUnavailable": "Unavailable right now",
+      "ofoxUnavailableNote": "Ofox search is unavailable right now; Exa's free search still works.",
+      "exa": "Exa free search",
+      "exaShort": "Free. Search queries go to Exa",
+      "exaNote": "Free search by Exa. Your search queries go to Exa, and so do the addresses of pages this computer could not read.",
+      "trigger": {
+        "ofox": "Ofox search",
+        "exa": "Exa search"
+      }
+    },
+    "searchLimited": {
+      "search_rate_limited": "Exa's free search reached its limit for this network, so this reply did not search the web.",
+      "search_blocked": "Exa refused a free search from this network (it needs a direct IPv4 connection, not a proxy or IPv6), so this reply did not search the web.",
+      "useOfox": "Use Ofox search"
+    },
     "editKeepsFiles": "The selected files will be sent again. You can remove any of them.",
     "editDropsFiles": "Files that can't be read are left out.",
     "attachmentOutcome": {
@@ -5275,6 +5383,10 @@
       "speech": {
         "label": "Record a voice-over",
         "prompt": "Read this as a voice-over in a calm, warm voice:\n\nWelcome to Ofox: one account for the leading AI models."
+      },
+      "deck": {
+        "label": "Make a deck",
+        "prompt": "Make a presentation: a 6-slide introduction to remote-work habits for new teammates, clean layout, one key idea per slide."
       },
       "localCheck": {
         "label": "Check Claude Code setup",
@@ -5610,7 +5722,8 @@
       "kinds": {
         "image": "Generate image",
         "video": "Generate video",
-        "speech": "Generate speech"
+        "speech": "Generate speech",
+        "document": "Document"
       },
       "chipLabel": "{{name}}: model and parameters",
       "remove": "Remove {{name}}",
@@ -5652,6 +5765,56 @@
       "overLimit": "A video can use at most 9 reference images, 3 audio clips (15 seconds each at most) and 1 video. Remove the extra files.",
       "needsTools": "This model cannot use tools, so it cannot generate images, videos or speech. Choose another model.",
       "readAloudFailed": "Reading aloud failed. Try again later."
+    },
+    "document": {
+      "saveAndOpen": "Save and open",
+      "making": "Generating document…",
+      "issues_one": "{{count}} issue",
+      "issues_other": "{{count}} issues",
+      "pages_one": "{{count}} page",
+      "pages_other": "{{count}} pages",
+      "slides_one": "{{count}} slide",
+      "slides_other": "{{count}} slides",
+      "sheets_one": "{{count}} sheet",
+      "sheets_other": "{{count}} sheets",
+      "severity": {
+        "error": "Error",
+        "warning": "Warning",
+        "info": "Note"
+      }
+    },
+    "skills": {
+      "choose": "Choose a skill",
+      "chip": "Skill: {{name}}",
+      "remove": "Remove skill {{name}}",
+      "empty": "No available skills",
+      "unavailable": "Skills could not be loaded. Try typing / again.",
+      "queueOnly": "Messages with a skill are queued for the next reply."
+    },
+    "skillTools": {
+      "results": "Skill search results",
+      "installTitle": "Install skill",
+      "saveTitle": "Save skill",
+      "install": "Install",
+      "save": "Save",
+      "preview": "Skill preview",
+      "installs": "{{count}} installs",
+      "originHint": "Catalog origin labels do not guarantee safety. Installation always requires your confirmation.",
+      "installed": "Installed"
+    },
+    "mcp": {
+      "steps": "MCP tool steps",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "unavailable": "Service unavailable",
+      "needs_node": "Install Node.js with npx",
+      "needs_uv": "Install uv",
+      "externalCost": "Third-party MCP charges are not included in this estimate.",
+      "approval": "This MCP tool may change data. Allow once, for this conversation, or deny.",
+      "approvalTitle": "Allow this MCP operation?",
+      "argumentsPreview": "Arguments preview",
+      "argumentsTruncated": "The preview is truncated. Approval runs the complete call, including parameters not shown here."
     }
   },
   "pages": {

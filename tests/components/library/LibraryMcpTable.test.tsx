@@ -133,14 +133,21 @@ function renderTable(onRefresh?: (refresh: () => Promise<unknown>) => void) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  let openDiscover: ((trigger: HTMLElement) => void) | undefined;
   render(
     <QueryClientProvider client={client}>
+      <button onClick={(event) => openDiscover?.(event.currentTarget)}>
+        发现 MCP 推荐
+      </button>
       <LibraryMcpTable
         registerRefresh={(_kind, refresh) => {
           onRefresh?.(refresh);
           return () => undefined;
         }}
-        registerDiscover={() => () => undefined}
+        registerDiscover={(_kind, open) => {
+          openDiscover = open;
+          return () => undefined;
+        }}
         onChanged={vi.fn()}
       />
     </QueryClientProvider>,
@@ -262,7 +269,11 @@ it("lays MCP servers out as rows with one checkbox per agent and per-agent count
   expect(
     screen.queryByRole("columnheader", { name: "ChatGPT" }),
   ).not.toBeInTheDocument();
-  expect(within(row).getAllByRole("checkbox")).toHaveLength(9);
+  expect(within(row).getAllByRole("checkbox")).toHaveLength(10);
+  expect(cell("filesystem", "Ofox 助手")).toHaveAttribute(
+    "data-state",
+    "unchecked",
+  );
   expect(cell("filesystem", "Codex / ChatGPT")).toHaveAttribute(
     "data-state",
     "checked",
@@ -564,4 +575,85 @@ it("keeps the complete pasted server when the dialog updates its identifier", as
       4,
     ),
   );
+});
+
+it("returns focus to the page discovery button after Escape", async () => {
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  const opener = screen.getByRole("button", { name: "发现 MCP 推荐" });
+  await userEvent.click(opener);
+  expect(await screen.findByRole("dialog", { name: "精选 MCP" })).toBeVisible();
+  await userEvent.keyboard("{Escape}");
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await waitFor(() => expect(opener).toHaveFocus());
+});
+
+it("closes featured MCP servers from the header close button", async () => {
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  await userEvent.click(screen.getByRole("button", { name: "发现 MCP 推荐" }));
+  const discovery = await screen.findByRole("dialog", { name: "精选 MCP" });
+  // Opening still lands in search, not on the new close button.
+  await waitFor(() =>
+    expect(within(discovery).getByRole("searchbox")).toHaveFocus(),
+  );
+  // The dialog is 3xl wide: two cards a row, never three narrow ones.
+  const grid = within(discovery).getAllByRole("article")[0].parentElement!;
+  expect(grid.className).toContain("grid-cols-2");
+  expect(grid.className).not.toContain("grid-cols-3");
+  await userEvent.click(
+    within(discovery).getByRole("button", { name: "关闭" }),
+  );
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+});
+
+it("hands discovery focus to the recipe editor and restores its page opener on cancel", async () => {
+  renderTable();
+  await screen.findByTestId("mcp-row-filesystem");
+  const opener = screen.getByRole("button", { name: "发现 MCP 推荐" });
+  await userEvent.click(opener);
+  const discovery = await screen.findByRole("dialog", { name: "精选 MCP" });
+  await userEvent.click(
+    within(discovery).getByRole("button", { name: "选择 Context7" }),
+  );
+  const editor = await screen.findByRole("dialog", { name: "添加 MCP" });
+  await waitFor(() =>
+    expect(editor).toContainElement(document.activeElement as HTMLElement),
+  );
+  expect(opener).not.toHaveFocus();
+  await userEvent.click(within(editor).getByRole("button", { name: "取消" }));
+  await waitFor(() =>
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument(),
+  );
+  await waitFor(() => expect(opener).toHaveFocus());
+});
+
+it("shows the assistant MCP target and refuses sign-in services with the reason", async () => {
+  tools.push("ofox-assistant");
+  try {
+    servers = [
+      server(
+        "sentry",
+        {},
+        {
+          "ofox-assistant": {
+            available: true,
+            disabledReason: "library.assistantMcpSignInUnsupported",
+          },
+        },
+      ),
+    ];
+    renderTable();
+    const checkbox = await screen.findByRole("checkbox", {
+      name: /sentry · Ofox 助手/,
+    });
+    expect(checkbox).toBeDisabled();
+    expect(checkbox.getAttribute("aria-label")).toContain("登录");
+  } finally {
+    tools.pop();
+  }
 });

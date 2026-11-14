@@ -12,8 +12,9 @@ use crate::services::assistant::{
     types::{
         Attachment, CompactRequest, CreateRequest, DeleteRequest, Detail, EmptyTrashReport,
         EmptyTrashRequest, Event, ExportMarkdownRequest, ForkRequest, ImportDropRequest,
-        Preferences, RunProxy, RunRef, SendRequest, Session, SetPreferencesRequest, SteerRequest,
-        SwitchVersionRequest, TransferRequest, UpdateRequest,
+        Preferences, RunProxy, RunRef, SearchProvider, SendRequest, Session, SetPreferencesRequest,
+        SetSearchProviderRequest, SteerRequest, SwitchVersionRequest, TransferRequest,
+        UpdateRequest,
     },
     AssistantHost,
 };
@@ -34,6 +35,11 @@ pub const ASSISTANT_DRAG_EVENT: &str = "assistant:drag";
 pub const ASSISTANT_DROP_EVENT: &str = "assistant:drop";
 
 type Host<'a> = State<'a, Arc<AssistantHost>>;
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_list_skills(host: Host<'_>) -> Result<Value, String> {
+    host.list_skills().await
+}
 
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_bootstrap(
@@ -86,6 +92,15 @@ pub async fn assistant_set_preferences(
     request: SetPreferencesRequest,
 ) -> Result<Preferences, String> {
     host.set_preferences(request).await
+}
+
+/// Where the account's web searches go: Ofox (paid) or Exa (free).
+#[tauri::command(rename_all = "camelCase")]
+pub async fn assistant_set_search_provider(
+    host: Host<'_>,
+    request: SetSearchProviderRequest,
+) -> Result<SearchProvider, String> {
+    host.set_search_provider(request).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -515,6 +530,24 @@ fn runtime_dir_for(
 }
 
 impl Environment for AssistantEnvironment {
+    fn skill_database(&self) -> Result<std::sync::Arc<crate::Database>, String> {
+        Ok(self.app.state::<crate::store::AppState>().db.clone())
+    }
+
+    fn skill_snapshot(&self) -> Result<crate::assistant_target::AssistantSkillSnapshot, String> {
+        let state = self.app.state::<crate::store::AppState>();
+        crate::services::assistant::skills::snapshot(&state.db)
+    }
+    fn skill_read(
+        &self,
+        proof: &crate::assistant_target::AssistantSkillProof,
+        access: crate::assistant_target::SkillAccess,
+        read: crate::services::assistant::skills::SkillRead,
+    ) -> Result<Value, String> {
+        let state = self.app.state::<crate::store::AppState>();
+        crate::services::assistant::skills::read_verified(&state.db, proof, access, read)
+    }
+
     fn local_mutate<'a>(
         &'a self,
         name: &'a str,
@@ -969,7 +1002,8 @@ mod tests {
     }
 }
 
-/// The destination comes only from the native save dialog, never IPC.
+/// The destination comes only from the native save dialog, never IPC; `open`
+/// opens that saved path with the OS default app and nothing else.
 #[tauri::command(rename_all = "camelCase")]
 pub async fn assistant_save_media(
     app: tauri::AppHandle,
@@ -977,17 +1011,28 @@ pub async fn assistant_save_media(
     request: crate::services::assistant::media_protocol::SaveMediaRequest,
 ) -> Result<bool, String> {
     use tauri_plugin_dialog::DialogExt;
-    host.save_media(request, move |name| {
-        app.dialog()
-            .file()
-            .set_file_name(name)
-            .blocking_save_file()
-            .map(|file| {
-                file.into_path()
-                    .map_err(|_| "assistant_export_destination_invalid".to_string())
-            })
-            .transpose()
-    })
+    use tauri_plugin_opener::OpenerExt;
+    let opener = app.clone();
+    host.save_and_open(
+        request,
+        move |name| {
+            app.dialog()
+                .file()
+                .set_file_name(name)
+                .blocking_save_file()
+                .map(|file| {
+                    file.into_path()
+                        .map_err(|_| "assistant_export_destination_invalid".to_string())
+                })
+                .transpose()
+        },
+        move |path| {
+            opener
+                .opener()
+                .open_path(path.to_string_lossy().to_string(), None::<String>)
+                .map_err(|error| error.to_string())
+        },
+    )
     .await
 }
 

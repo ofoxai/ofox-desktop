@@ -341,3 +341,184 @@ Linux GTK3/Tauri still resolves `glib` 0.18.5. [GHSA-wrw7-89jp-8q8g](https://git
 ## ZIP import metadata bounds
 
 ZIP imports require single-disk archives with zero archive offset and an unambiguous end record. Archives with another end-record signature in the final 128 KiB, over 32 MiB of central metadata (lower limits apply to smaller imports), or over 1 MiB of ZIP64 extensible metadata are rejected before metadata allocation. This intentionally excludes ambiguous/polyglot or unusually metadata-heavy archives; ordinary stored, deflated, Unicode-name and legacy ZIP64 archives have compatibility fixtures.
+
+## Assistant conversation request retries
+
+[Conversation retries](assistant-request-retries.md) preserve unknown billing
+receipts for 502/503 attempts even if a later attempt succeeds. Gateway errors
+are not proof that a model did no work. A partially received stream, timeout
+or ambiguous socket failure still requires a manual retry. This change has
+macOS fixture coverage through the prepared Pi runtime and real Rust event
+bridge; native Windows and live billed-provider acceptance remain unverified.
+
+## Assistant skill target
+
+The library target and modes now feed a fresh host snapshot into runtime skill loading. Automatic skills are listed within a bounded prompt and loaded through `use_skill`; broken and manual skills cannot be loaded by that tool. Runs without local command tools can still read skill instructions. A leading / in the composer selects Auto or Manual for one message. Its current body is injected as XML-escaped ordinary user input; history displays only the original words and skill chip. Retry/regenerate revalidate the current installed body, so a changed skill can change replay input; unavailable skills fail clearly. Edit can replace or clear the chip. Unsent chips are session-scoped memory only, and queued chips are checked again at dispatch. A message with a skill can queue during a reply but cannot steer that existing run. Chat installation and creation now require one-shot approval in every permission mode. The optional creation-origin sidecar has a strict reader and transactional writer. Missing origin evidence does not reconstruct ownership from names.
+
+Official popular metadata does not contain a unique repository directory. Origin classification verifies its full publisher repository and the actual fixed artifact's frontmatter name; it does not assert a unique skills.sh URL-to-directory mapping or a safety audit. Ambiguous/mismatching metadata remains unreviewed. Native Windows execution and live-agent acceptance remain unverified. Configuration locks coordinate application writes, not arbitrary external processes; skill scripts are not placed in an OS sandbox.
+
+Generic assistant file tools protect the private AppConfig tree, with read/execute exceptions only for current verified automatic skills or an explicitly user-selected run grant. Traversal from outside prunes private descendants. Generic writes and recognized direct shell mutations are denied in every permission mode; dedicated approval-backed library operations retain their own authority. Linked skills grant only their verified artifact tree, never the whole artifact store. An unrelated epoch refresh preserves an explicit manual grant only when every other proof field is unchanged.
+
+These are host tool and direct-command checks, not filesystem isolation. Approved scripts still have the user's OS rights and can compute paths, read manual files or write their own directory; static command checks cannot prevent every such effect. Manual controls discovery and `use_skill`, not confidentiality of bytes also available through an automatic skill's shared canonical artifact or an ordinary outside copy. Python is not bundled. Native Windows execution remains unverified; public skill directories use verified ordinary lexical paths instead of Windows device/verbatim paths.
+
+
+Assistant chat skill transactions reject stale approval epochs rather than rebasing automatically. An unresolved private intent blocks the assistant skill snapshot until its affected state can be verified; recovery never guesses or replays a pending install. A commit followed by snapshot-refresh failure remains installed/saved but unusable for that response; retry verifies the receipt and refreshes without overwriting later mode changes. If storing the installed-card update fails after commit, the tool reports the committed result with cardPersisted:false and does not reinstall. Private orphan staging/artifacts from a failure before intent publication confer no runtime authority.
+
+This chat-skill increment has macOS sandbox transaction/restart/fault tests, prepared Node/Pi with a local synthetic gateway and real Rust callbacks on both apexes, and 900px Chrome light/dark checks in three languages. It does not establish live public-source downloads, billed model behavior, native Ofox rendering, or native Windows replacement/recovery. Only invented skill bodies are used in acceptance fixtures.
+
+## Assistant document engines (2026-11-07)
+
+The assistant's `create_document` tool makes PDF, Word, PowerPoint and Excel
+files (and md, txt, csv, html and json) with bundled engines: officecli and
+Typst, and on macOS a Python engine for PowerPoint decks. See
+[document engines](assistant-engines.md) for how it works and for the
+acceptance checklist. Everything below is known and not claimed fixed or
+verified. The engines ran on macOS arm64 only; none of this validates Windows
+or Linux.
+
+Isolation and platforms:
+
+- The engines' read sandbox is macOS only (`sandbox-exec` with a profile that
+  hides `/Users` and `/Volumes` from officecli and the network from both).
+  Windows and Linux rely on the host's batch validator (which refuses any
+  property that names a file or an address) and on the dead proxy every engine
+  gets. A batch the validator misses would not be stopped by the operating
+  system there.
+- Windows: .NET may resolve the profile folder through the Known Folder API
+  rather than `USERPROFILE`, so officecli's private `HOME` may not be what it
+  uses; this is unverified. The Windows branches of the runner (process jobs,
+  no sandbox) are not compiled in the macOS development environment, so they
+  have had no compiler or test run. Windows acceptance is a separate gate.
+- A `/tmp/officecli-<uid>` folder that is not the current user's own folder
+  (another owner, a link, a file) makes every Word, Excel and PowerPoint
+  document fail closed on macOS: officecli keeps temporary files there whatever
+  `TMPDIR` says, and the sandbox profile needs to allow exactly that folder.
+  Documents work again once the folder is removed. The user's own folder with
+  looser permissions is made private (0700) and used.
+- A crash, a forced quit, or an app shutdown that aborts a run's task during a
+  run leaves that run's `outputs/<docId>` folders in the conversation's folder
+  until the conversation is removed; a normal end of a run, including a stop or
+  a failure, removes them.
+
+Signing and packaging:
+
+- officecli is signed with the hardened runtime and `allow-jit` only. That is
+  what upstream's own signature carries and what the signed binary needed in
+  the spike, but notarization has not been run: it needs the release owner's
+  `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID`. Until a notarized build has
+  run both engines from the installed bundle, a hardened-runtime failure that
+  only appears under Gatekeeper is not ruled out. See
+  [notarization](assistant-engines.md#notarization-to-do-by-the-release-owner).
+- The branch-package and CI smoke tests run the engines unsigned, so they do not
+  exercise the hardened runtime or the entitlements.
+
+What the files and previews are:
+
+- A PDF's page count is a heuristic: the number of `/Type /Page` objects in the
+  file. It can be off for unusual PDFs; Typst's own output is what it was
+  checked against.
+- The PowerPoint preview (first slide) depends on the runtime rasterizing
+  officecli's SVG with `@napi-rs/canvas`. Where the canvas build cannot read the
+  SVG, or the model cannot see images, the file is still made and the reply has
+  no thumbnail. Word and Excel files have no preview.
+- There are no `submitting` or `failed` document cards: a record is written
+  only once the file exists, so a failed or interrupted document leaves no card
+  (the model gets the error and may retry, at most twice).
+- When officecli gives no usable issues report (for example one cut at the
+  runner's output limit), the document gets one warning, "issues unavailable",
+  instead of a count of zero. At most 200 issues are asked for.
+- CSV files are written as the model wrote them and are not formula-checked: a
+  cell that starts with `=`, `+`, `-` or `@` is a formula when the file is
+  opened in Excel (CSV formula injection). Only xlsx batches are filtered.
+- **Save and open** (保存并打开) of an html document opens the saved copy in the
+  default browser from `file://`, where the model-written page and its scripts
+  run. The app itself never loads a document: its media protocol refuses to
+  serve one.
+- In an Office batch, a literal `\n` (backslash, n) in the `text` and `notes`
+  props is read as a newline, as officecli's command line reads it, because
+  models escape it twice (`use_skill` now hands the skill body over as plain
+  text, which was the trigger: inside JSON its examples showed `\\n`). Those
+  two props cannot hold a literal backslash-n.
+- A signed local build (`pnpm tauri build` with `APPLE_SIGNING_IDENTITY`) signs
+  the prepared runtime in place: `assistant-runtime/resources/node/node` and
+  the runtime's native addons keep the Developer ID signature with the hardened
+  runtime, and `pnpm assistant:test`, which runs with that Node, then fails to
+  load the development `node_modules` addons ("different Team IDs"). The
+  preparation's currency check does not notice the identity change; run
+  `rm -rf assistant-runtime/resources/node && pnpm assistant:prepare` without
+  the identity before the tests.
+
+Features of the engines that are deliberately unavailable, because making a
+document must read nothing outside it and run nothing. An Excel workbook's
+formulas run later, when it is opened: they are filtered, not sandboxed.
+
+- diagrams (officecli renders them in a browser it starts and loads a script
+  from the network), OLE objects and embedded packages;
+- pictures and any other file from a path or an address: images are `data:`
+  URIs only (the document's own bytes, up to the content limit);
+- Word fields other than PAGE, NUMPAGES, DATE, TIME and TOC, and any field
+  instruction that runs, fetches or links (DDE, INCLUDEPICTURE, LINK, and so on);
+- number formats that escape a character with a backslash, such as `\$`: a
+  backslash reads as a path separator to the check. `$#,##0` is accepted;
+- Typst packages (`#import "@…"`);
+- Excel formulas outside an allowlist. A formula is any key with `formula` in
+  its name (such as `arrayFormula`), `ref`, `refersTo` or `calculatedField`;
+  every key of a conditional format, validation, named range, chart,
+  sparkline, table or pivot table except its text keys (titles, names, labels,
+  legends, prompts, messages, captions, formats and fonts) and its inline lists;
+  and any other value that starts with `=`, `+`, `-` or `@` and is not a
+  number. A formula may call only maths and rounding, statistics, logic, text,
+  lookup and reference, date and time, finance, information and dynamic-array
+  functions (SUM, IF, IFERROR, VLOOKUP, XLOOKUP, INDEX, MATCH, TEXT, DATE, PMT,
+  ISNUMBER, UNIQUE, FILTER and the like), and HYPERLINK only with one quoted
+  https:, http:, mailto: or # address as its first argument. Refused even inside
+  quoted text: functions that fetch, run code or build a reference from text
+  (WEBSERVICE, IMAGE, RTD, FILTERXML, STOCKHISTORY, CUBE…, IMPORT…, CALL,
+  REGISTER, EXEC, PY, DDE, INDIRECT and others), a DDE `|`, another workbook
+  (`[book]Sheet!A1`, a quoted path before `!`), `\\`, `//` and `file:` where a
+  word starts (so "Risk profile: by region" passes and "see file:x" in a
+  formula does not). So a formula with such a word or character in its text
+  (`"Call us"`, `"a|b"`, an address outside HYPERLINK) is refused too. An
+  inline list (chart `data` and `categories`, series `values`, table
+  `columns`, pivot fields) that is one reference, or that holds a `!` or `|`
+  anywhere, is read whole as a formula: officecli writes a chart list with a
+  `!` as it is into the chart's formula (`Sheet1!A1,WEBSERVICE(B2)` would be
+  fetched when the workbook opens), so such a list may hold only references
+  separated by `,`. A list with `|` is refused, and so is a list of labels
+  where one holds a `!`: `categories: "Hello!,World"` is refused with "holds !, so
+  officecli writes it as a formula, and it is not a reference such as
+  Sheet1!A2:A5 or several separated by ,"; put such labels in cells and give
+  their range. Any other inline list is checked cell by cell, and officecli
+  writes its cells as literals: a cell may not name another workbook, a share,
+  an address or a file, and a cell that starts like a formula is checked as
+  one; a table's `data` rows hold values only, so no cell there may start with
+  `=`, `+`, `-` or `@` unless it is a number. A sparkline's `data` is a
+  reference, read as a formula like its `dataRange`. Text keys are checked the
+  same way as a whole, so `North (EU)` or "Call volume" passes and a title
+  with an address in it does not. A cell value that starts with `=`, `+`, `-`
+  or `@` (`+1 555 0100`, `- Item`) is refused as a formula; a leading
+  apostrophe keeps it text. A text key that starts that way is checked as a
+  formula too, and its refusal offers no apostrophe: officecli shows the
+  apostrophe of a chart title or a validation prompt, so the text has to be
+  reworded. A text key is matched by the last part of its name, so a key
+  officecli has that the list does not (a table's `totalLabel`, a chart's
+  `referenceLine`) is read as a formula.
+
+Tool behavior changed in this round:
+
+- `wrapTool` now reports `success:false` for a tool result with `isError`. In
+  local-config mode pi's bash tool returns a non-zero exit as such a result, so
+  those calls now show as failed.
+- The bundled skill folders (`ofox-office-*`) are neither denied nor added as
+  readable roots for the generic file tools in local-config mode: they have no
+  rule of their own there. The model reads a bundled skill through `use_skill`.
+
+Tests:
+
+- The runner's 3 s timeout test (`run_engine_kills_what_the_engine_started_and_keeps_its_output`)
+  is fragile under heavy parallel load: a new stand-in executable can take longer
+  than the deadline to start for the first time on macOS. The document tests take
+  turns for that reason; a run of the whole workspace beside other heavy jobs can
+  still fail it.
+- The process-reaping case of `assistant-runtime/test/mcp.test.mjs` failed once
+  under load and passed on rerun; its cause is not established.

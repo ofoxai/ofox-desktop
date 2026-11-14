@@ -67,6 +67,11 @@ enum Reply {
     Wait(Arc<AtomicBool>, Box<Reply>),
     /// A 200 with these bytes, as a speech request is answered.
     Bytes(&'static str, Vec<u8>),
+    /// The reply this makes of the request, as a model answers what a tool
+    /// result said (e.g. a call that names an id the result gave).
+    /// Only the macOS Python deck tests use it so far.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    Answer(fn(&Request) -> Reply),
 }
 
 /// Tool-call ids are unique, as a provider's are.
@@ -206,13 +211,17 @@ fn serve(stream: TcpStream, script: &Script) {
         let scripted = script.titles.lock().unwrap().pop_front();
         scripted.unwrap_or_else(|| Reply::Error(400, json!({"error": {"message": "unscripted"}})))
     } else {
-        script.requests.lock().unwrap().push(request);
-        script
+        script.requests.lock().unwrap().push(request.clone());
+        let scripted = script
             .replies
             .lock()
             .unwrap()
             .pop_front()
-            .expect("the gateway got a request the test did not script")
+            .expect("the gateway got a request the test did not script");
+        match scripted {
+            Reply::Answer(answer) => answer(&request),
+            reply => reply,
+        }
     };
     while let Reply::Wait(gate, inner) = reply {
         while !gate.load(Ordering::SeqCst) {
@@ -302,6 +311,7 @@ fn serve(stream: TcpStream, script: &Script) {
             );
         }
         Reply::Wait(..) => unreachable!("opened above"),
+        Reply::Answer(..) => unreachable!("answered above"),
         Reply::Bytes(mime, bytes) => {
             let _ = out.write_all(
                 format!(
@@ -419,6 +429,8 @@ fn split_in_three(text: &str) -> Vec<String> {
 // ── environment ──────────────────────────────────────────────────────────
 
 struct TestEnv {
+    local_paths: Mutex<Option<cc_switch_lib::assistant::tools::context::LocalPaths>>,
+    skill_db: Mutex<Option<Arc<cc_switch_lib::Database>>>,
     config: PathBuf,
     runtime: PathBuf,
     state: Mutex<EnvState>,
@@ -453,6 +465,8 @@ fn owner() -> String {
 impl TestEnv {
     fn new(config: &Path, runtime: &Path, gateways: &[(&str, &Gateway)]) -> Arc<Self> {
         Arc::new(Self {
+            local_paths: Mutex::new(None),
+            skill_db: Mutex::new(None),
             config: config.to_path_buf(),
             runtime: runtime.to_path_buf(),
             state: Mutex::new(EnvState {
@@ -500,6 +514,15 @@ impl TestEnv {
             .insert(apex.into(), base_url);
     }
 
+    /// Hand out `key` instead of [`KEY`]. A refused key is not replaced: the
+    /// run fails, as it does when the gateway refuses a real key.
+    fn set_key(&self, key: String) {
+        let mut state = self.state.lock().unwrap();
+        state.key = key;
+        state.replacement = None;
+        state.refuse_refresh = true;
+    }
+
     fn events(&self, run_id: &str) -> Vec<Event> {
         self.events
             .lock()
@@ -512,6 +535,43 @@ impl TestEnv {
 }
 
 impl Environment for TestEnv {
+    fn local_paths(
+        &self,
+    ) -> BoxFuture<'_, Result<cc_switch_lib::assistant::tools::context::LocalPaths, String>> {
+        Box::pin(async {
+            self.local_paths
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or_else(|| "assistant_local_unavailable".into())
+        })
+    }
+
+    fn skill_database(&self) -> Result<Arc<cc_switch_lib::Database>, String> {
+        self.skill_db
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("skill_service_unavailable".into())
+    }
+    fn skill_snapshot(
+        &self,
+    ) -> Result<cc_switch_lib::assistant_target::AssistantSkillSnapshot, String> {
+        match self.skill_db.lock().unwrap().as_ref() {
+            Some(db) => cc_switch_lib::assistant::skills::snapshot(db),
+            None => Ok(Default::default()),
+        }
+    }
+    fn skill_read(
+        &self,
+        proof: &cc_switch_lib::assistant_target::AssistantSkillProof,
+        access: cc_switch_lib::assistant_target::SkillAccess,
+        read: cc_switch_lib::assistant::skills::SkillRead,
+    ) -> Result<Value, String> {
+        let db = self.skill_db.lock().unwrap().clone().ok_or("no skill db")?;
+        cc_switch_lib::assistant::skills::read_verified(&db, proof, access, read)
+    }
+
     fn identity(&self) -> BoxFuture<'_, Result<Identity, String>> {
         Box::pin(async move { self.state.lock().unwrap().identity.clone() })
     }
@@ -748,7 +808,7 @@ fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
         let boot = host.bootstrap().await.unwrap();
         assert_eq!(boot["owner"], owner());
         assert_eq!(boot["runtime"]["available"], true);
-        assert_eq!(boot["runtime"]["version"], "1.4.0");
+        assert_eq!(boot["runtime"]["version"], "1.5.0");
         assert_eq!(boot["defaultModelId"], MODEL);
         assert_eq!(boot["models"][0]["id"], MODEL);
         assert_eq!(boot["key"]["status"], "missing", "bootstrap mints no key");
@@ -1683,6 +1743,10 @@ fn provider_failures_have_their_own_codes_and_unbilled_ones_keep_the_cost_known(
                 "assistant_model_unavailable",
             ),
         ] {
+            if code == "assistant_rate_limited" {
+                gateway.reply(reply.clone());
+                gateway.reply(reply.clone());
+            }
             gateway.reply(reply);
             let usage = assert_failed(code).await;
             assert_eq!(usage["estimatedCostUsd"], priced["estimatedCostUsd"], "{code}");
@@ -3187,7 +3251,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let boot = host.bootstrap().await.unwrap();
         assert_eq!(
             boot["search"],
-            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL})
+            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL, "provider": "ofox"})
         );
         let sid = create(&host).await;
         let on = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
@@ -3195,16 +3259,25 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         gateway.reply(Reply::Stream("No search here".into()));
         let (run, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
         assert_eq!(end.data["status"], "completed");
-        assert!(tool_names(&gateway.requests()[0]).is_empty());
+        assert_eq!(
+            tool_names(&gateway.requests()[0]),
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "create_document"
+            ]
+        );
         // The run says it could not search, although the switch is on.
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
-        // Priced: offered, and a conversation with search off still gets no tools.
+        // Priced: offered, and a conversation with search off still gets no web tools.
         env.catalog.lock().unwrap().push(search_model());
         let boot = AssistantHost::new(env.clone()).bootstrap().await.unwrap();
         assert_eq!(
             boot["search"],
-            json!({"available": true, "unitPriceUsd": "0.014", "model": SEARCH_MODEL})
+            json!({"available": true, "unitPriceUsd": "0.014", "model": SEARCH_MODEL, "provider": "ofox"})
         );
         let host = AssistantHost::new(env.clone());
         let request_off: types::CreateRequest =
@@ -3213,7 +3286,16 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         assert!(!off.web_search);
         gateway.reply(Reply::Stream("Still no search".into()));
         let (run, _) = turn(&host, &env, request(&off.id, "What is new?", json!({}))).await;
-        assert!(tool_names(&gateway.requests()[1]).is_empty());
+        assert_eq!(
+            tool_names(&gateway.requests()[1]),
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "create_document"
+            ]
+        );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // The conversation with search on now gets both tools.
@@ -3221,12 +3303,119 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
         let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
         assert_eq!(
             tool_names(&gateway.requests()[2]),
-            ["web_search", "web_fetch"]
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "create_document",
+                "web_search",
+                "web_fetch"
+            ]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], true);
         let detail = host.get_session(&sid).await.unwrap();
         assert_eq!(detail.usage["searchCount"], 0);
         assert_eq!(detail.usage["searchCostUsd"], "0");
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+}
+
+#[test]
+fn exa_search_is_offered_without_a_price_and_the_choice_is_kept_per_account() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let provider = |value: &str, generation: u64| -> types::SetSearchProviderRequest {
+            serde_json::from_value(json!({
+                "provider": value, "expectedOwner": owner(), "expectedGeneration": generation,
+            }))
+            .unwrap()
+        };
+        host.set_preferences(
+            serde_json::from_value(json!({
+                "instructions": "Answer briefly.", "autoTitle": false, "notifyOnFinish": true,
+                "expectedOwner": owner(), "expectedGeneration": host.generation(),
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        // A stale page cannot change it.
+        assert_eq!(
+            host.set_search_provider(provider("exa", host.generation() + 1))
+                .await
+                .unwrap_err(),
+            "assistant_identity_changed"
+        );
+        assert_eq!(host.bootstrap().await.unwrap()["search"]["provider"], "ofox");
+        assert_eq!(
+            host.set_search_provider(provider("exa", host.generation()))
+                .await
+                .unwrap(),
+            types::SearchProvider::Exa
+        );
+        // Kept beside the settings, which stay as they were.
+        let prefs_file = config.path().join("assistant").join(owner()).join("prefs.json");
+        let prefs: Value = serde_json::from_slice(&std::fs::read(&prefs_file).unwrap()).unwrap();
+        assert_eq!(prefs["searchProvider"], "exa");
+        assert_eq!(prefs["instructions"], "Answer briefly.");
+        assert_eq!(host.get_preferences().await.unwrap().instructions, "Answer briefly.");
+        let boot = AssistantHost::new(env.clone()).bootstrap().await.unwrap();
+        // The catalog still has no search model: Ofox search is not offered.
+        assert_eq!(
+            boot["search"],
+            json!({"available": false, "unitPriceUsd": null, "model": SEARCH_MODEL, "provider": "exa"})
+        );
+
+        // Exa needs no price: a conversation with search on gets both tools,
+        // and the model is told the searches are free.
+        let sid = create(&host).await;
+        let on = serde_json::from_value(json!({"sessionId": sid, "webSearch": true})).unwrap();
+        host.update_session(on).await.unwrap();
+        gateway.reply(Reply::Stream("No search needed".into()));
+        let (run, end) = turn(&host, &env, request(&sid, "What is new?", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        assert_eq!(
+            tool_names(&requests[0]),
+            [
+                "use_skill",
+                "find_skills",
+                "install_skill",
+                "save_skill",
+                "create_document",
+                "web_search",
+                "web_fetch"
+            ]
+        );
+        let prompt = requests[0].body["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("web_search searches the web for free through Exa"));
+        assert!(!prompt.contains("paid search"));
+        let start = &of_type(&env, &run, "run_start")[0];
+        assert_eq!(
+            (&start["webSearch"], &start["searchProvider"]),
+            (&json!(true), &json!("exa"))
+        );
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["searchCostUsd"], "0");
+
+        // A value this version does not know is the default, not damage.
+        let mut prefs = prefs;
+        prefs["searchProvider"] = json!("bing");
+        std::fs::write(&prefs_file, serde_json::to_vec(&prefs).unwrap()).unwrap();
+        let host = AssistantHost::new(env.clone());
+        assert_eq!(host.bootstrap().await.unwrap()["search"]["provider"], "ofox");
+        assert_eq!(host.get_preferences().await.unwrap().instructions, "Answer briefly.");
+        gateway.reply(Reply::Stream("Without search".into()));
+        let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
+        assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
+        assert!(of_type(&env, &run, "run_start")[0].get("searchProvider").is_none());
     });
     assert_no_secret_on_disk(config.path(), &[KEY]);
 }
@@ -5085,7 +5274,7 @@ fn media_save_checks_file_and_owner_before_dialog_and_rechecks_after_it() {
         store.mutate(&sid,|record| {record.attachments.push(serde_json::from_value(json!({"id":aid,"name":"result.png","mimeType":"image/png","sizeBytes":bytes.len(),"status":"ready","origin":"generated"})).unwrap());Ok(())}).unwrap();
         std::fs::write(store.attachment_dir(&sid).unwrap().join(&aid),bytes).unwrap();
         let dest=output.path().join("saved.png");let picked=dest.clone();
-        assert!(host.save_media(request(aid.clone()),move |_name|Ok(Some(picked))).await.unwrap());assert_eq!(std::fs::read(&dest).unwrap(),bytes);
+        assert_eq!(host.save_media(request(aid.clone()),move |_name|Ok(Some(picked))).await.unwrap(),Some(dest.clone()));assert_eq!(std::fs::read(&dest).unwrap(),bytes);
         #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600); }
         let private=output.path().join("must-not-exist.png");let picked=private.clone();let auth=env.clone();
         assert!(host.save_media(request(aid),move |_name|{auth.set_identity(Err("assistant_sign_in_required".into()));Ok(Some(picked))}).await.is_err());
@@ -6027,4 +6216,2498 @@ fn a_chat_model_reads_text_aloud_into_a_file_on_its_reply() {
         assert_eq!(spoken.outputs, vec![reply.attachments[0].id.clone()]);
         host.shutdown().await;
     });
+}
+
+#[test]
+fn retrying_events_and_actual_ui_language_reach_the_real_host_and_model() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &runtime_dir, &[("ofox.ai", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        for language in ["en", "ja", "zh"] {
+            gateway.reply(Reply::Error(
+                503,
+                json!({"error":{"message":format!("busy {KEY}")}}),
+            ));
+            gateway.reply(Reply::Stream("One answer".into()));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Hello", json!({"uiLanguage":language})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            assert_eq!(of_type(&env, &run, "retrying"), vec![json!({"attempt":1})]);
+            assert!(system_preamble(gateway.requests().last().unwrap())
+                .contains(&format!("App language: {language}.")));
+        }
+        assert_eq!(gateway.requests().len(), 6);
+        let detail = host.get_session(&sid).await.unwrap();
+        assert_eq!(detail.usage["usageCoverage"], "incomplete");
+        assert!(detail.usage["estimatedCostUsd"].is_null());
+        assert_eq!(detail.usage["inputTokens"], 30);
+        assert_eq!(detail.usage["outputTokens"], 15);
+        assert_eq!(detail.usage["modelRequests"], 3);
+        let requests = detail.usage["requests"].as_array().unwrap();
+        assert_eq!(
+            requests.iter().filter(|r| r["status"] == "unknown").count(),
+            3
+        );
+        for reply in detail.messages.iter().filter(|m| m.role == "assistant") {
+            let usage = reply.usage.as_ref().unwrap();
+            assert_eq!(usage["usageCoverage"], "incomplete");
+            assert!(usage["estimatedCostUsd"].is_null());
+            assert_eq!(usage["inputTokens"], 10);
+            assert_eq!(usage["outputTokens"], 5);
+        }
+    });
+    assert_no_secret_on_disk(config.path(), &[KEY]);
+    assert_no_secret_in_events(&env, &[KEY]);
+}
+
+#[test]
+#[serial_test::serial]
+fn requests_pass_assistant_skills_without_broken_ones() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir();
+    for (name, body) in [
+        (
+            "drawing",
+            "---\nname: drawing\ndescription: Draw safely\n---\nskill-body-marker",
+        ),
+        ("broken", "no frontmatter"),
+    ] {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        std::fs::write(root.join(name).join("SKILL.md"), body).unwrap();
+    }
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "use_skill",
+            json!({"name":"drawing"}),
+        )]));
+        gateway.reply(Reply::Stream("Loaded".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Use drawing", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        let prompt = system_preamble(&requests[0]);
+        assert!(prompt.contains("drawing: Draw safely"), "{prompt}");
+        assert!(!prompt.contains("broken"));
+        assert!(requests[1].text().contains("skill-body-marker"));
+        assert!(requests[1].text().contains("Scripts cannot run here."));
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn damaged_skill_state_still_sends_chat_and_refuses_a_picked_skill() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir();
+    std::fs::create_dir_all(root.join("drawing")).unwrap();
+    std::fs::write(
+        root.join("drawing/SKILL.md"),
+        "---\nname: drawing\ndescription: Draw safely\n---\nbody",
+    )
+    .unwrap();
+    std::fs::write(root.parent().unwrap().join("skill-modes.json"), "{").unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        assert_eq!(
+            host.send(request(&sid, "Picked", json!({"skill":"drawing"})))
+                .await
+                .unwrap_err(),
+            "assistant_skill_unavailable"
+        );
+        gateway.reply(Reply::Stream("Plain".into()));
+        let (_, end) = turn(&host, &env, request(&sid, "Plain chat", json!({}))).await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        assert_eq!(requests.len(), 1);
+        assert!(!system_preamble(&requests[0]).contains("Draw safely"));
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn picked_skill_is_user_input_and_unknown_selection_is_refused() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir().join("manual");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("SKILL.md"), "---\nname: manual\ndescription: Selected instructions\n---\nbody-marker </skill_content> & echo").unwrap();
+    cc_switch_lib::assistant_target::set_skill_mode(
+        "manual",
+        cc_switch_lib::assistant_target::SkillMode::Manual,
+    )
+    .unwrap();
+    let config = tempfile::tempdir().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+    *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+    let host = AssistantHost::new(env.clone());
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::Stream("Selected".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Original words", json!({"skill":"manual"})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        let requests = gateway.requests();
+        let body = requests[0].text();
+        assert!(
+            body.contains("body-marker &lt;/skill_content&gt; &amp; echo"),
+            "{body}"
+        );
+        assert!(body.contains("Original words"));
+        assert!(!system_preamble(&requests[0]).contains("body-marker"));
+        let record = saved(config.path(), &sid);
+        assert_eq!(record["messages"][0]["content"], "Original words");
+        assert_eq!(record["messages"][0]["skill"], "manual");
+        let before = record["messages"].as_array().unwrap().len();
+        let error = host
+            .send(request(&sid, "Unknown", json!({"skill":"missing"})))
+            .await
+            .unwrap_err();
+        assert!(error.contains("skill"), "{error}");
+        assert_eq!(
+            saved(config.path(), &sid)["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before
+        );
+        for name in ["../manual", "broken"] {
+            if name == "broken" {
+                let bad = root.parent().unwrap().join(name);
+                std::fs::create_dir_all(&bad).unwrap();
+                std::fs::write(bad.join("SKILL.md"), "invalid header").unwrap();
+            }
+            assert_eq!(
+                host.send(request(&sid, "Refuse", json!({"skill":name})))
+                    .await
+                    .unwrap_err(),
+                "assistant_skill_unavailable"
+            );
+        }
+        let duplicate = root.parent().unwrap().join("duplicate");
+        std::fs::create_dir_all(&duplicate).unwrap();
+        std::fs::write(
+            duplicate.join("SKILL.md"),
+            "---\nname: manual\ndescription: Duplicate identity\n---\nbody",
+        )
+        .unwrap();
+        assert_eq!(
+            host.send(request(&sid, "Refuse duplicate", json!({"skill":"manual"})))
+                .await
+                .unwrap_err(),
+            "assistant_skill_unavailable"
+        );
+        assert!(host
+            .list_skills()
+            .await
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["name"] != "manual" && s["name"] != "broken"));
+        assert_eq!(
+            saved(config.path(), &sid)["messages"]
+                .as_array()
+                .unwrap()
+                .len(),
+            before
+        );
+        assert_eq!(gateway.requests().len(), 1);
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn picked_skill_replay_uses_current_body_and_explicit_clear_on_both_apexes() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir().join("replay");
+    std::fs::create_dir_all(&root).unwrap();
+    cc_switch_lib::assistant_target::set_skill_mode(
+        "replay",
+        cc_switch_lib::assistant_target::SkillMode::Manual,
+    )
+    .unwrap();
+    for apex in ["ofox.ai", "ofox.io"] {
+        let write_body = |body: &str| {
+            std::fs::write(
+                root.join("SKILL.md"),
+                format!("---\nname: replay\ndescription: Replay instructions\n---\n{body}"),
+            )
+            .unwrap()
+        };
+        write_body("version-one");
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            let list = host.list_skills().await.unwrap();
+            assert!(list
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["name"] == "replay" && s["origin"] == "local"));
+            gateway.reply(Reply::Stream("First".into()));
+            turn(
+                &host,
+                &env,
+                request(&sid, "Only original words", json!({"skill":"replay"})),
+            )
+            .await;
+            let first = host.get_session(&sid).await.unwrap();
+            let user = first.messages.iter().find(|m| m.role == "user").unwrap();
+            let reply = first
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant")
+                .unwrap();
+            assert_eq!(user.content, "Only original words");
+            assert_eq!(user.skill.as_deref(), Some("replay"));
+            write_body("version-two");
+            gateway.reply(Reply::Stream("Regenerated".into()));
+            turn(
+                &host,
+                &env,
+                request(&sid, "", json!({"regenerateMessageId":reply.id})),
+            )
+            .await;
+            let calls = gateway.requests();
+            assert!(calls[1].text().contains("version-two"));
+            assert!(!calls[1].text().contains("version-one"));
+            let current = host.get_session(&sid).await.unwrap();
+            let regenerated_user = current
+                .messages
+                .iter()
+                .find(|m| m.role == "user" && !m.superseded)
+                .unwrap();
+            assert_eq!(regenerated_user.content, "Only original words");
+            assert_eq!(regenerated_user.skill.as_deref(), Some("replay"));
+            gateway.reply(Reply::Stream("Cleared".into()));
+            turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Edited plain words",
+                    json!({"editMessageId":regenerated_user.id,"replaceSkill":true}),
+                ),
+            )
+            .await;
+            let calls = gateway.requests();
+            assert!(!calls[2].text().contains("skill_content"));
+            assert!(calls[2].text().contains("Edited plain words"));
+            let current = host.get_session(&sid).await.unwrap();
+            assert!(current
+                .messages
+                .iter()
+                .find(|m| m.role == "user" && !m.superseded)
+                .unwrap()
+                .skill
+                .is_none());
+            write_body("version-three-failed");
+            gateway.reply(Reply::Error(400, "synthetic refusal".into()));
+            let (failed_run, failed_end) = turn(
+                &host,
+                &env,
+                request(&sid, "Retry original", json!({"skill":"replay"})),
+            )
+            .await;
+            assert_eq!(failed_end.data["status"], "error");
+            let failed_detail = host.get_session(&sid).await.unwrap();
+            let failed_reply = failed_detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && m.run_id.as_deref() == Some(&failed_run))
+                .unwrap();
+            write_body("version-four-retry");
+            gateway.reply(Reply::Stream("Recovered".into()));
+            turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Retry original",
+                    json!({"retryMessageId":failed_reply.id}),
+                ),
+            )
+            .await;
+            let last = gateway.requests().last().unwrap().text();
+            assert!(last.contains("version-four-retry"));
+            assert!(!last.contains("version-three-failed"));
+            // An old history chip is not authority after the skill disappears.
+            std::fs::remove_file(root.join("SKILL.md")).unwrap();
+            let error = host
+                .send(request(&sid, "", json!({"regenerateMessageId":reply.id})))
+                .await
+                .unwrap_err();
+            assert_eq!(error, "assistant_skill_unavailable");
+            assert_eq!(gateway.requests().len(), 5);
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn picked_skill_manual_reference_grant_and_tools_false_guidance() {
+    let bundle = runtime_dir().expect("run pnpm assistant:prepare before skill integration tests");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let root = cc_switch_lib::assistant_target::skills_dir().join("manual-reference");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("SKILL.md"),
+        "---\nname: manual-reference\ndescription: Read the reference\n---\nUse reference.txt",
+    )
+    .unwrap();
+    std::fs::write(root.join("reference.txt"), "manual-reference-read-marker").unwrap();
+    cc_switch_lib::assistant_target::set_skill_mode(
+        "manual-reference",
+        cc_switch_lib::assistant_target::SkillMode::Manual,
+    )
+    .unwrap();
+    for tools in [true, false] {
+        let config = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+        env.catalog.lock().unwrap()[0].tools = tools;
+        *env.local_paths.lock().unwrap() =
+            Some(cc_switch_lib::assistant::tools::context::LocalPaths {
+                home: home.path().into(),
+                config_roots: vec![],
+                shell_files: vec![],
+                skill: std::fs::canonicalize(bundle.join("runtime/skills/local-config/SKILL.md"))
+                    .unwrap(),
+            });
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = host
+                .create_session(
+                    serde_json::from_value(
+                        json!({"capabilities":[{"id":"local_config","version":1}]}),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap()
+                .id;
+            if tools {
+                gateway.reply(Reply::ToolCalls(vec![(
+                    "read",
+                    json!({"path":root.join("reference.txt")}),
+                )]));
+            }
+            gateway.reply(Reply::Stream("Read selected skill".into()));
+            let (_, end) = turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Read its reference",
+                    json!({"skill":"manual-reference"}),
+                ),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let calls = gateway.requests();
+            if tools {
+                assert!(
+                    calls[1].text().contains("manual-reference-read-marker"),
+                    "{}",
+                    calls[1].text()
+                );
+            } else {
+                assert!(calls[0]
+                    .text()
+                    .contains("This model cannot execute scripts or tools"));
+                assert!(
+                    calls[0].body["tools"].is_null()
+                        || calls[0].body["tools"].as_array().unwrap().is_empty()
+                );
+            }
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn skill_tools_real_bridge_save_click_refresh_then_same_turn_use_on_both_apexes() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    let bundle =
+        runtime_dir().expect("prepare Node/Pi bundle is required for skill tool bridge tests");
+    for apex in ["ofox.ai", "ofox.io"] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[(apex, &gateway)]);
+        let db = Arc::new(cc_switch_lib::Database::memory().unwrap());
+        *env.skill_db.lock().unwrap() = Some(db.clone());
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async{
+            let sid=create(&host).await;
+            let prefix="same-turn-bridge-body-marker\n";let body=format!("{prefix}{}","😀".repeat(60000-prefix.chars().count()));let description="😀".repeat(500);
+            gateway.reply(Reply::ToolCalls(vec![("save_skill",json!({"name":"bridge-fixture","description":description,"body":body}))]));
+            gateway.reply(Reply::ToolCalls(vec![("use_skill",json!({"name":"bridge-fixture"}))]));gateway.reply(Reply::Stream("Saved and used in this turn".into()));
+            let run=host.send(request(&sid,"Save the reusable fixture then use it",json!({}))).await.unwrap();let approval=wait_for(&env,&run.run_id,"approval").await;
+            assert_eq!(approval.data["name"],"save_skill");assert_eq!(approval.data["allowSession"],false);assert_eq!(approval.data["details"]["description"].as_str().unwrap().chars().count(),500);assert_eq!(approval.data["details"]["body"].as_str().unwrap().chars().count(),60000);
+            assert!(db.get_all_installed_skills().unwrap().is_empty());assert!(!cc_switch_lib::assistant_target::skills_dir().join("bridge-fixture").exists());
+            let respond:ApprovalRequest=serde_json::from_value(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"once","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap();host.respond_approval(respond).await.unwrap();
+            let end=wait_for(&env,&run.run_id,"run_end").await;assert_eq!(end.data["status"],"completed","{end:?}");let calls=gateway.requests();assert_eq!(calls.len(),3);
+            let tool=calls[1].body["messages"].as_array().unwrap().iter().find(|m|m["role"]=="tool").expect("save result reaches the next model turn");
+            let result:Value=serde_json::from_str(tool["content"].as_str().unwrap()).unwrap();assert_eq!(result["saved"],true);assert_eq!(result["usable"],true);assert!(result.get("refresh").is_none(),"host-only refresh must not be model content");
+            assert!(calls[2].text().contains(prefix.trim()),"same-turn use must return the saved body");assert!(calls[2].text().contains("Scripts cannot run here."));
+            assert_eq!(db.get_all_installed_skills().unwrap().len(),1);assert_eq!(cc_switch_lib::assistant_target::list_assistant_skills(&db,&Default::default()).unwrap()[0].origin,Some(cc_switch_lib::assistant_target::SkillOrigin::AssistantCreated));
+            let detail=host.get_session(&sid).await.unwrap();assert_eq!(detail.messages.last().unwrap().content,"Saved and used in this turn");
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_real_bridge_discovery_read_write_approval_and_persisted_steps() {
+    use cc_switch_lib::assistant::host::local::{ApprovalRequest, PermissionRequest};
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi is required for MCP bridge tests");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    for apex in ["ofox.ai", "ofox.io"] {
+        for (mode, choice) in [
+            ("default", "once"),
+            ("autoEdit", "session"),
+            ("default", "deny"),
+            ("fullAuto", "once"),
+        ] {
+            let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+            let config = tempfile::tempdir().unwrap();
+            let gateway = Gateway::start();
+            let physical_config = config.path().canonicalize().unwrap();
+            let env = TestEnv::new(&physical_config, &bundle, &[(apex, &gateway)]);
+            let host = AssistantHost::new(env.clone());
+            let record = config.path().join("mcp-calls.jsonl");
+            fs::create_dir_all(config.path().join("assistant")).unwrap();
+            fs::write(config.path().join("assistant/mcp.json"),json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":record,"MCP_CHILD_FILE":config.path().join("child-pid")}}}}).to_string()).unwrap();
+            runtime().block_on(async {
+            let sid = create(&host).await;
+            host.set_permission(serde_json::from_value::<PermissionRequest>(json!({"sessionId":sid,"mode":mode,"confirmedFullAccess":true,"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture resources"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("list_mcp_resources",json!({}))]));
+            gateway.reply(Reply::ToolCalls(vec![("read_mcp_resource",json!({"server":"fixture","uri":"fixture://read"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__read_fixture",json!({}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+            if choice=="session" { gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))])); }
+            gateway.reply(Reply::Stream("MCP turn finished".into()));
+            let run = host.send(request(&sid,"Use the fixture",json!({}))).await.unwrap();
+            if mode != "fullAuto" {
+                let approval = wait_for(&env,&run.run_id,"approval").await;
+                assert_eq!(approval.data["name"],"mcp__fixture__write_fixture");
+                assert_eq!(approval.data["allowSession"],true);
+                assert_eq!(fs::read_to_string(&record).unwrap().lines().count(),1,"read-only ran without a prompt");
+                host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":choice,"expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            }
+            let end = wait_for(&env,&run.run_id,"run_end").await;
+            assert_eq!(end.data["status"],"completed","{end:?}");
+            let rows=fs::read_to_string(&record).unwrap();
+            assert_eq!(rows.lines().count(),if choice=="deny" {1} else if choice=="session" {3} else {2});
+            let detail=host.get_session(&sid).await.unwrap();
+            let message=detail.messages.last().unwrap();
+            assert_eq!(message.content,"MCP turn finished");
+            assert_eq!(message.mcp_steps.len(),if choice=="session" {6} else {5});
+            assert!(message.mcp_steps.iter().any(|s|s["tool"]=="mcp__fixture__read_fixture" && s["status"]=="completed"));
+            assert!(!serde_json::to_string(&message.mcp_steps).unwrap().contains(record.to_str().unwrap()));
+            assert_mcp_child_gone(&node, &config.path().join("child-pid"));
+            assert_eq!(gateway.requests().len(),if choice=="session" {7} else {6});
+            if choice=="session" {
+                gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+                gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+                gateway.reply(Reply::Stream("Next reply reused conversation grant".into()));
+                let (next_id,next_end)=turn(&host,&env,request(&sid,"Write again in this conversation",json!({}))).await;
+                assert_eq!(next_end.data["status"],"completed");
+                assert!(!env.events(&next_id).iter().any(|event|event.r#type=="approval"),"conversation grant must survive a new run");
+                assert_eq!(fs::read_to_string(&record).unwrap().lines().count(),4);
+                assert_mcp_child_gone(&node,&config.path().join("child-pid"));
+                for boundary in ["other_session","changed_config"] {
+                    let target=if boundary=="other_session" {create(&host).await} else {
+                        let file=config.path().join("assistant/mcp.json");
+                        let mut changed:Value=serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+                        changed["mcpServers"]["fixture"]["env"]["MCP_REAUTH"]=json!("configuration-changed");
+                        fs::write(&file,serde_json::to_vec(&changed).unwrap()).unwrap();
+                        sid.clone()
+                    };
+                    gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+                    gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+                    gateway.reply(Reply::Stream("Boundary required a new approval".into()));
+                    let again=host.send(request(&target,boundary,json!({}))).await.unwrap();
+                    let card=wait_for(&env,&again.run_id,"approval").await;
+                    host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":target,"runId":again.run_id,"operationId":again.operation_id,"approvalId":card.data["approvalId"],"choice":"deny","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+                    assert_eq!(wait_for(&env,&again.run_id,"run_end").await.data["status"],"completed");
+                    assert_eq!(fs::read_to_string(&record).unwrap().lines().count(),4,"a different conversation/config must not inherit permission");
+                    assert_mcp_child_gone(&node,&config.path().join("child-pid"));
+                }
+            }
+        });
+        }
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_real_bridge_revalidates_approval_after_config_change_and_cancel() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for MCP stale/cancel bridge");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    for action in ["stale", "cancel", "unknown_cost", "leader_failure"] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let config = tempfile::tempdir().unwrap();
+        let physical = config.path().canonicalize().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+        if action == "unknown_cost" {
+            let mut model = serde_json::to_value(test_model()).unwrap();
+            model["pricingKnown"] = json!(false);
+            model["cost"] = json!({"input":null,"output":null,"cacheRead":null,"cacheWrite":null});
+            *env.catalog.lock().unwrap() = vec![serde_json::from_value(model).unwrap()];
+        }
+        let host = AssistantHost::new(env.clone());
+        let calls = physical.join("calls.jsonl");
+        fs::create_dir_all(physical.join("assistant")).unwrap();
+        let source = physical.join("assistant/mcp.json");
+        fs::write(&source,json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":calls,"MCP_CHILD_FILE":physical.join("child-pid"),"MCP_SCENARIO":if action=="leader_failure" {"fail"} else {"normal"}}}}}).to_string()).unwrap();
+        runtime().block_on(async {
+            let sid=create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",json!({}))]));
+            gateway.reply(Reply::Stream("No external write completed".into()));
+            let run=host.send(request(&sid,"Use fixture",json!({}))).await.unwrap();
+            if action!="unknown_cost" && action!="leader_failure" {
+                let approval=wait_for(&env,&run.run_id,"approval").await;
+                if action=="cancel" { host.stop(&sid,&run.run_id,&run.operation_id).await.unwrap(); }
+                else { fs::write(&source,"{\"mcpServers\":{}}").unwrap();host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"once","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap(); }
+            }
+            let end=wait_for(&env,&run.run_id,"run_end").await;
+            if action=="cancel" {assert_eq!(end.data["status"],"stopped");}
+            assert!(!calls.exists(),"{action} must prevent actual external execution");
+            if action!="unknown_cost" { assert_mcp_child_gone(&node,&physical.join("child-pid")); }
+            if action=="unknown_cost" { assert!(!env.events.lock().unwrap().iter().any(|e|e.run_id==run.run_id && e.r#type=="approval")); }
+        });
+    }
+}
+
+fn assert_mcp_child_gone(node: &Path, record: &Path) {
+    let pid = std::fs::read_to_string(record).expect("fixture must really spawn a descendant");
+    let pid: u32 = pid.parse().unwrap();
+    assert!(pid > 1);
+    let status=std::process::Command::new(node).args(["-e","try {process.kill(Number(process.argv[1]),0); process.exit(1)} catch(e) {process.exit(e.code==='ESRCH'?0:2)}",&pid.to_string()]).status().expect("prepared Node process probe");
+    assert!(
+        status.success(),
+        "MCP descendant {pid} survived run teardown"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_missing_environment_isolated_to_one_server_in_real_bridge() {
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for missing-environment bridge");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let config = tempfile::tempdir().unwrap();
+    let physical = config.path().canonicalize().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    let record = physical.join("calls.jsonl");
+    let blocked = physical.join("must-not-start");
+    assert!(std::env::var_os("OFOX_TASK7_MISSING_ENV_7A").is_none());
+    fs::create_dir_all(physical.join("assistant")).unwrap();
+    fs::write(physical.join("assistant/mcp.json"),json!({"mcpServers":{
+        "fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":record}},
+        "missing":{"command":node,"args":[fixture],"env":{"TOKEN":"${OFOX_TASK7_MISSING_ENV_7A}","MCP_PID_FILE":blocked}}
+    }}).to_string()).unwrap();
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        gateway.reply(Reply::ToolCalls(vec![(
+            "tool_search",
+            json!({"query":"fixture"}),
+        )]));
+        gateway.reply(Reply::ToolCalls(vec![(
+            "mcp__fixture__read_fixture",
+            json!({}),
+        )]));
+        gateway.reply(Reply::Stream("Healthy service completed".into()));
+        let (_, end) = turn(
+            &host,
+            &env,
+            request(&sid, "Read healthy service", json!({})),
+        )
+        .await;
+        assert_eq!(end.data["status"], "completed");
+        assert!(
+            record.exists(),
+            "one missing environment must not stop the healthy real MCP server"
+        );
+        assert_eq!(fs::read_to_string(&record).unwrap().lines().count(), 1);
+        assert!(
+            !blocked.exists(),
+            "unresolved credentials must never reach a launched service"
+        );
+        assert!(!env
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.r#type == "approval"));
+        let detail = host.get_session(&sid).await.unwrap();
+        let steps = &detail.messages.last().unwrap().mcp_steps;
+        assert!(steps
+            .iter()
+            .any(|s| s["server"] == "missing" && s["status"] == "unavailable"));
+        assert!(steps.iter().all(|s| s.get("identity").is_none()));
+        for call in gateway.requests() {
+            assert!(!call.text().contains("OFOX_TASK7_MISSING_ENV_7A"));
+            assert!(!call.text().contains("captured-config"));
+        }
+    });
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_no_local_twenty_tool_budget_includes_existing_skill_tools() {
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for MCP budget regression");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    for local_capability in [false, true] {
+        let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+        let skill = cc_switch_lib::assistant_target::skills_dir().join("budget-fixture");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"),"---\nname: budget-fixture\ndescription: Budget fixture\n---\nReadable skill instructions").unwrap();
+        cc_switch_lib::assistant_target::set_skill_mode(
+            "budget-fixture",
+            cc_switch_lib::assistant_target::SkillMode::Auto,
+        )
+        .unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let physical = config.path().canonicalize().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+        *env.skill_db.lock().unwrap() = Some(Arc::new(cc_switch_lib::Database::memory().unwrap()));
+        let host = AssistantHost::new(env.clone());
+        let calls = physical.join("calls");
+        fs::create_dir_all(physical.join("assistant")).unwrap();
+        fs::write(physical.join("assistant/mcp.json"),json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"MCP_RECORD":calls}}}}).to_string()).unwrap();
+        runtime().block_on(async {
+            let sid=host.create_session(serde_json::from_value(if local_capability {json!({"capabilities":[{"id":"local_config","version":1}]})}else{json!({})}).unwrap()).await.unwrap().id;
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+            for index in 2..=21 { gateway.reply(Reply::ToolCalls(vec![if index%5==0 {("use_skill",json!({"name":"budget-fixture"}))}else{("mcp__fixture__read_fixture",json!({"index":index}))}])); }
+            gateway.reply(Reply::Stream("Budget complete".into()));
+            let (run,_)=turn(&host,&env,request(&sid,"Use mixed tools",json!({}))).await;
+            let events=env.events(&run);let starts:Vec<_>=events.iter().filter(|event|event.r#type=="tool_start").collect();
+            assert_eq!(starts.len(),20,"actual Host no-local params must retain twenty tools, capability={local_capability}");
+            assert_eq!(fs::read_to_string(&calls).unwrap().lines().count(),15,"call21 never executes");
+            assert_eq!(starts.iter().filter(|event|event.data["name"]=="use_skill").count(),4,"existing tool20 executes");
+            assert_eq!(gateway.requests()[20].body["tool_choice"],"none");
+            assert!(!gateway.requests()[0].body["tools"].as_array().unwrap().iter().any(|tool|tool["function"]["name"]=="read"));
+        });
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn final_mcp_approval_previews_show_distinct_safe_arguments_and_limits() {
+    use cc_switch_lib::assistant::host::local::ApprovalRequest;
+    use std::fs;
+    let bundle = runtime_dir().expect("prepared Node/Pi required for actual MCP approval previews");
+    let node = bundle
+        .join("node")
+        .join(if cfg!(windows) { "node.exe" } else { "node" });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../assistant-runtime/test/fixtures/mcp-fixture.mjs");
+    let _sandbox = cc_switch_lib::test_sandbox::sandbox();
+    let config = tempfile::tempdir().unwrap();
+    let physical = config.path().canonicalize().unwrap();
+    let gateway = Gateway::start();
+    let env = TestEnv::new(&physical, &bundle, &[("ofox.io", &gateway)]);
+    let host = AssistantHost::new(env.clone());
+    fs::create_dir_all(physical.join("assistant")).unwrap();
+    fs::write(physical.join("assistant/mcp.json"), json!({"mcpServers":{"fixture":{"command":node,"args":[fixture],"env":{"PIN":"418731","SHORT_TOKEN":"xy7","FLAG":"false"}}}}).to_string()).unwrap();
+    runtime().block_on(async {
+        let sid = create(&host).await;
+        let variants = [json!({"target":"draft-inbox","body":"First readable body","nested":{"text":"xy7","pin":418731,"418731":"Readable key"}}), json!({"target":"published-inbox","body":"Second readable body"}),json!({}),json!({"target":"large-inbox","body":"😀".repeat(9000)})];
+        let mut displays = vec![];
+        for args in variants {
+            gateway.reply(Reply::ToolCalls(vec![("tool_search",json!({"query":"fixture"}))]));
+            gateway.reply(Reply::ToolCalls(vec![("mcp__fixture__write_fixture",args)]));
+            gateway.reply(Reply::Stream("Preview checked".into()));
+            let run = host.send(request(&sid,"Use fixture",json!({}))).await.unwrap();
+            let approval = wait_for(&env,&run.run_id,"approval").await;
+            host.respond_approval(serde_json::from_value::<ApprovalRequest>(json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"approvalId":approval.data["approvalId"],"choice":"deny","expectedOwner":owner(),"expectedGeneration":host.generation()})).unwrap()).await.unwrap();
+            assert_eq!(wait_for(&env,&run.run_id,"run_end").await.data["status"],"completed");
+            displays.push(approval.data.clone());
+        }
+        let previews:Vec<_> = displays.iter().map(|v|v["argumentsPreview"].as_str().expect("every new MCP approval supplies a safe preview")).collect();
+        assert!(previews[0].contains("draft-inbox") && previews[0].contains("First readable body"));
+        assert!(previews[1].contains("published-inbox") && previews[1].contains("Second readable body"));
+        assert!(!previews[0].contains("418731") && !previews[0].contains("xy7"));
+        assert!(previews[0].contains("Readable key") && previews[0].contains("***"));
+        assert_eq!(previews[2],"{}");
+        assert_eq!(previews[3].chars().count(),8000);
+        assert_eq!(displays[3]["argumentsTruncated"],true);
+        assert!(displays[..3].iter().all(|v|v["argumentsTruncated"]==false));
+        let detail=host.get_session(&sid).await.unwrap();
+        assert!(!serde_json::to_string(&detail).unwrap().contains("argumentsPreview"),"previews are ephemeral approval DTOs, not chat metadata");
+    });
+}
+
+// ── documents ────────────────────────────────────────────────────────────
+
+/// `create_document` end to end: the model reads the bundled skill, then the
+/// real engines make the file and the host keeps it as a generated
+/// attachment of the reply. `cargo test --test assistant_host documents`.
+mod documents {
+    use super::*;
+
+    const PPTX: &str = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    const XLSX: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+    /// The prepared runtime with both document engines, or `None` (with a
+    /// message) on a developer machine without them. In CI a missing engine
+    /// is a failure.
+    fn engines_runtime() -> Option<PathBuf> {
+        let bundle = runtime_dir()?;
+        let engines = cc_switch_lib::assistant::documents::engines::engines_at(&bundle);
+        if engines.officecli.is_some() && engines.typst.is_some() {
+            return Some(bundle);
+        }
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "the document engines are not prepared at {}; CI must run `pnpm assistant:prepare` before cargo test",
+            bundle.display()
+        );
+        eprintln!(
+            "skipping: the document engines are not prepared at {} (run `pnpm assistant:prepare`)",
+            bundle.display()
+        );
+        None
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/assistant-documents")
+            .join(name);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    fn batch(name: &str) -> Value {
+        serde_json::from_str(&fixture(name)).unwrap()
+    }
+
+    /// What one turn that read a skill and called `create_document` left.
+    struct Outcome {
+        config: tempfile::TempDir,
+        sid: String,
+        generations: Vec<Value>,
+        tool_ends: Vec<Value>,
+        requests: Vec<Request>,
+        detail: Detail,
+        /// The last `create_document` result as the runtime keeps it in its
+        /// history.
+        result: Value,
+    }
+
+    /// Every `create_document` result in the conversation's native history,
+    /// in order.
+    fn document_results(config: &Path, sid: &str) -> Vec<Value> {
+        let native =
+            std::fs::read_to_string(session_dir(config, sid).join("session.jsonl")).unwrap();
+        native
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|entry| entry["type"] == "message")
+            .map(|entry| entry["message"].clone())
+            .filter(|m| m["role"] == "toolResult" && m["toolName"] == "create_document")
+            .collect()
+    }
+
+    impl Outcome {
+        /// The last `create_document` result's text as the model was sent it.
+        fn sent(&self) -> String {
+            self.sent_of(&self.result)
+        }
+
+        /// `result`'s text as the model was sent it.
+        fn sent_of(&self, result: &Value) -> String {
+            let id = &result["toolCallId"];
+            self.requests
+                .iter()
+                .flat_map(|request| request.body["messages"].as_array().into_iter().flatten())
+                .find(|m| m["role"] == "tool" && &m["tool_call_id"] == id)
+                .map(|m| text_of(&m["content"]))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no create_document result {id} was sent: {:?}",
+                        self.requests.last().map(|request| &request.body)
+                    )
+                })
+        }
+
+        /// The images the model was sent after the tool calls.
+        fn images_sent(&self) -> Vec<String> {
+            self.requests[1].body["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|m| m["content"].as_array())
+                .flatten()
+                .filter(|part| part["type"] == "image_url")
+                .filter_map(|part| part["image_url"]["url"].as_str().map(str::to_owned))
+                .collect()
+        }
+
+        fn stored(&self) -> PathBuf {
+            session_dir(self.config.path(), &self.sid).join("attachments")
+        }
+
+        /// The one generated document: checked as every format's, and its
+        /// generation record and bytes.
+        fn made(&self, mime: &str) -> (Value, Vec<u8>) {
+            let [event] = &self.generations[..] else {
+                panic!(
+                    "one generation event: {:?}; the result: {}",
+                    self.generations, self.result
+                );
+            };
+            let generation = &event["generation"];
+            assert_eq!(generation["kind"], "document");
+            assert_eq!(generation["status"], "completed");
+            assert_eq!(generation["cost"], "0", "made on this computer");
+            let [attachment] = &self.detail.attachments[..] else {
+                panic!("one attachment: {:?}", self.detail.attachments);
+            };
+            assert_eq!(attachment.origin.as_deref(), Some("generated"));
+            assert_eq!(attachment.mime_type, mime);
+            assert_eq!(event["attachments"][0]["id"], attachment.id.as_str());
+            assert_eq!(event["attachments"][0]["origin"], "generated");
+            assert_eq!(generation["outputs"], json!([attachment.id]));
+            let reply = self
+                .detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && !m.generations.is_empty())
+                .expect("the reply keeps the document");
+            assert_eq!(reply.generations[0].kind, "document");
+            assert_eq!(reply.attachments.len(), 1);
+            assert_eq!(reply.attachments[0].id, attachment.id);
+            assert_ne!(self.result["isError"], true, "{}", self.result);
+            let sent = self.sent();
+            assert!(
+                sent.contains(&format!("as attachment {}", attachment.id)),
+                "{sent}"
+            );
+            let bytes = std::fs::read(self.stored().join(&attachment.id)).unwrap();
+            assert_eq!(bytes.len() as u64, attachment.size_bytes);
+            (generation.clone(), bytes)
+        }
+
+        /// A refused document: the model hears why, and nothing is kept.
+        fn refused(&self) -> String {
+            assert_eq!(self.result["isError"], true, "{}", self.result);
+            let end = self
+                .tool_ends
+                .iter()
+                .find(|e| e["name"] == "create_document")
+                .expect("create_document ended");
+            assert_eq!(end["success"], false);
+            assert!(self.generations.is_empty(), "{:?}", self.generations);
+            assert!(self.detail.attachments.is_empty());
+            assert!(self
+                .detail
+                .messages
+                .iter()
+                .all(|m| m.attachments.is_empty() && m.generations.is_empty()));
+            let kept = std::fs::read_dir(self.stored()).map_or(0, |dir| dir.count());
+            assert_eq!(kept, 0, "no attachment file is kept");
+            self.sent()
+        }
+    }
+
+    /// One turn: the model reads `skill`, calls `create_document` with
+    /// `args`, then answers.
+    fn create_document(bundle: &Path, model: Model, skill: &str, args: Value) -> Outcome {
+        document_turn(bundle, model, skill, args, vec![])
+    }
+
+    /// One turn: the model reads `skill` and calls `create_document` with
+    /// `args`, then makes one more model turn for each of `next` (its tool
+    /// calls), then answers.
+    fn document_turn(
+        bundle: &Path,
+        model: Model,
+        skill: &str,
+        args: Value,
+        next: Vec<Reply>,
+    ) -> Outcome {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), bundle, &[("ofox.ai", &gateway)]);
+        *env.catalog.lock().unwrap() = vec![model];
+        let host = AssistantHost::new(env.clone());
+        let turns = 2 + next.len();
+        let (sid, run, end, detail) = runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![
+                ("use_skill", json!({"name": skill})),
+                ("create_document", args),
+            ]));
+            for reply in next {
+                gateway.reply(reply);
+            }
+            gateway.reply(Reply::Stream("The document is ready.".into()));
+            let (run, end) = turn(&host, &env, request(&sid, "Make the document", json!({}))).await;
+            let detail = host.get_session(&sid).await.unwrap();
+            host.shutdown().await;
+            (sid, run, end, detail)
+        });
+        let requests = gateway.requests();
+        assert_eq!(
+            end.data["status"],
+            "completed",
+            "{:?} {:?}",
+            of_type(&env, &run, "error"),
+            requests.iter().map(tool_results).collect::<Vec<_>>()
+        );
+        assert_eq!(requests.len(), turns, "the tool calls, then the answer");
+        assert!(tool_names(&requests[0]).contains(&"create_document".to_string()));
+        let tool_ends = of_type(&env, &run, "tool_end");
+        let skill_end = tool_ends
+            .iter()
+            .find(|e| e["name"] == "use_skill")
+            .expect("use_skill ended");
+        assert_eq!(skill_end["success"], true, "{skill_end}");
+        // Every office skill opens with the call it teaches.
+        assert!(
+            tool_results(&requests[1])
+                .iter()
+                .any(|text| text.contains(skill) && text.contains("create_document({ name: ")),
+            "the bundled skill reached the model"
+        );
+        let result = document_results(config.path(), &sid)
+            .pop()
+            .expect("the create_document result is in the history");
+        assert_no_secret_in_events(&env, &[KEY, NEW_KEY]);
+        Outcome {
+            config,
+            sid,
+            generations: of_type(&env, &run, "generation"),
+            tool_ends,
+            requests,
+            detail,
+            result,
+        }
+    }
+
+    #[test]
+    fn creates_a_pptx_from_a_batch() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let deck = batch("deck.json");
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": deck}),
+        );
+        let (generation, bytes) = outcome.made(PPTX);
+        assert_eq!(generation["params"]["format"], "pptx");
+        assert_eq!(generation["params"]["slides"], 8);
+        assert_eq!(outcome.result["details"]["file"]["slides"], 8);
+        assert!(bytes.starts_with(b"PK"));
+        // The deck validates: no issue is an error.
+        let issues = generation["params"]["issues"].as_array().unwrap();
+        assert!(
+            issues.iter().all(|issue| issue["severity"] != "error"),
+            "{issues:?}"
+        );
+        assert_eq!(
+            outcome.result["details"]["issues"],
+            generation["params"]["issues"]
+        );
+        let sent = outcome.sent();
+        assert!(sent.contains("Created deck.pptx (pptx, "), "{sent}");
+        assert!(
+            sent.contains("8 slides") && sent.contains("attachment"),
+            "{sent}"
+        );
+        assert!(
+            outcome.images_sent().is_empty(),
+            "a text model gets no preview"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// The deck object end to end: the runtime renders it into a batch, the
+    /// real officecli runs it, and the host validates it, fixes nothing, and
+    /// exports every slide as an SVG page beside the attachment.
+    #[test]
+    fn renders_a_deck_into_a_pptx_with_no_issues() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-object.json")}),
+        );
+        let (generation, bytes) = outcome.made(PPTX);
+        assert!(bytes.starts_with(b"PK"));
+        let params = &generation["params"];
+        assert_eq!(params["format"], "pptx");
+        assert_eq!(params["slides"], 8);
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["fixed"], 0, "{params}");
+        assert_eq!(params["svgPages"], 8, "{params}");
+        let id = &outcome.detail.attachments[0].id;
+        let pages = outcome.stored().join(format!("{id}.pages"));
+        for page in 1..=8 {
+            let path = pages.join(format!("{page}.svg"));
+            let svg = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(svg.trim_start().starts_with("<svg"), "{}", path.display());
+        }
+        let sent = outcome.sent();
+        assert!(
+            sent.contains("Rendered 8 slides from the deck with theme navy"),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// The showcase page's chart, table (with signed cells) and image pass
+    /// the host and validate without an issue.
+    #[test]
+    fn renders_showcase_media_without_issues() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "showcase.pptx", "format": "pptx", "content": batch("deck-showcase.json")}),
+        );
+        let (generation, _) = outcome.made(PPTX);
+        let params = &generation["params"];
+        assert_eq!(params["slides"], 5);
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["fixed"], 0, "{params}");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_a_deck_with_an_unknown_page_type() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-unknown-type.json")}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("unknown type \"bullets\""), "{sent}");
+        assert!(sent.contains("hero, statement"), "the page types: {sent}");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_an_overlong_deck_without_a_file() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-too-long.json")}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("is 61 characters; the limit is 60"), "{sent}");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn creates_a_pdf_and_reports_pages() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pdf",
+            json!({"name": "essay.pdf", "format": "pdf", "content": fixture("essay.typ")}),
+        );
+        let (generation, bytes) = outcome.made("application/pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+        let pages = outcome.result["details"]["file"]["pages"]
+            .as_u64()
+            .expect("the runtime counts the pages");
+        assert!(pages >= 1);
+        assert_eq!(
+            generation["params"]["pages"], pages,
+            "host and runtime agree"
+        );
+        let sent = outcome.sent();
+        assert!(sent.contains(&format!(" {pages} page")), "{sent}");
+        assert!(
+            outcome.images_sent().is_empty(),
+            "a text model gets no preview"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn creates_a_pdf_and_shows_a_vision_model_its_first_page() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            vision_model(),
+            "ofox-office-pdf",
+            json!({"name": "essay.pdf", "format": "pdf", "content": fixture("essay.typ")}),
+        );
+        let (_, bytes) = outcome.made("application/pdf");
+        assert!(bytes.starts_with(b"%PDF"));
+        let images = outcome.images_sent();
+        assert_eq!(images.len(), 1, "the first page's thumbnail");
+        assert!(
+            images[0].starts_with("data:image/"),
+            "{}",
+            &images[0][..40.min(images[0].len())]
+        );
+        let pixels = outcome.result["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|part| part["type"] == "image")
+            .count();
+        assert_eq!(pixels, 1, "the history keeps the thumbnail with the result");
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn creates_an_xlsx() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let cell = |at: &str, value: &str| json!({"command":"set","path":format!("/Sheet1/{at}"),"props":{"value":value}});
+        let table = json!([
+            cell("A1", "Item"), cell("B1", "Q1"), cell("C1", "Q2"),
+            cell("A2", "Apples"), cell("B2", "120"), cell("C2", "135"),
+            cell("A3", "Pears"), cell("B3", "98"), cell("C3", "104"),
+            {"command":"set","path":"/Sheet1/A1:C1","props":{"font.bold":"true"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-xlsx",
+            json!({"name": "fruit.xlsx", "format": "xlsx", "content": table}),
+        );
+        let (generation, bytes) = outcome.made(XLSX);
+        assert!(bytes.starts_with(b"PK"));
+        assert_eq!(generation["params"]["format"], "xlsx");
+        assert_eq!(generation["params"]["sheets"], 1);
+        assert_eq!(outcome.result["details"]["file"]["sheets"], 1);
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// R61: a chart's inline categories and values that are not references
+    /// are written as literals (`<c:strLit>`, `<c:numLit>`), never as a
+    /// formula, so the host lets them through as text. R62: a list with a
+    /// `!` in it is written whole as the chart's formula
+    /// (`<c:f>Sheet1!$A$1,WEBSERVICE(B2)</c:f>`), so the host reads it
+    /// whole as one and refuses it.
+    #[test]
+    fn a_chart_keeps_inline_list_cells_as_literals() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let content = json!([
+            {"command":"set","path":"/Sheet1/A1","props":{"value":"Region"}},
+            {"command":"set","path":"/Sheet1/B2","props":{"value":"5"}},
+            {"command":"add","parent":"/Sheet1","type":"chart","props":{"chartType":"column","data":"Sales (k):1,2","categories":"IMAGE(B2),North (EU)","title":"Revenue (USD)"}},
+            {"command":"add","parent":"/Sheet1/chart[1]","type":"series","props":{"name":"V1","values":"WEBSERVICE(B2),2","categories":"IMAGE(B2),North (EU)"}},
+            {"command":"add","parent":"/Sheet1/chart[1]","type":"series","props":{"name":"V2","values":"INDIRECT(B2)"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-xlsx",
+            json!({"name": "chart.xlsx", "format": "xlsx", "content": content}),
+        );
+        let (_, bytes) = outcome.made(XLSX);
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        let (mut charts, mut parts) = (String::new(), String::new());
+        for index in 0..archive.len() {
+            let mut part = archive.by_index(index).unwrap();
+            let mut text = String::new();
+            part.read_to_string(&mut text).unwrap();
+            if part.name().unwrap().contains("charts/chart") {
+                charts.push_str(&text);
+            }
+            parts.push_str(&text);
+        }
+        assert!(charts.contains("<c:strLit>"), "{charts}");
+        assert!(charts.contains("<c:numLit>"), "{charts}");
+        for cell in ["IMAGE(B2)", "North (EU)", "WEBSERVICE(B2)", "INDIRECT(B2)"] {
+            assert!(
+                charts.contains(&format!("<c:v>{cell}</c:v>")),
+                "{cell}: {charts}"
+            );
+        }
+        // No formula element anywhere in the workbook holds them.
+        for open in ["<c:f>", "<x:f>", "<x:f ", "<f>", "<f "] {
+            for formula in parts.split(open).skip(1) {
+                let formula = formula.split("</").next().unwrap_or_default();
+                for name in ["WEBSERVICE", "INDIRECT", "IMAGE"] {
+                    assert!(!formula.contains(name), "{open}{formula}");
+                }
+            }
+        }
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+        let content = json!([
+            {"command":"add","parent":"/Sheet1","type":"chart","props":{"chartType":"column","data":"Sales (k):1,2","categories":"Q1,Q2"}},
+            {"command":"add","parent":"/Sheet1/chart[1]","type":"series","props":{"name":"V1","values":"Sheet1!A1,WEBSERVICE(B2)"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-xlsx",
+            json!({"name": "chart.xlsx", "format": "xlsx", "content": content}),
+        );
+        let sent = outcome.refused();
+        assert!(
+            sent.contains("assistant_document_failed")
+                && sent.contains("item 1: \"props.values\" calls WEBSERVICE"),
+            "R62: {sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_an_invalid_batch_without_a_file() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("bad-batch.json")}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("assistant_document_failed"), "{sent}");
+        assert!(
+            sent.contains("item 1") && sent.contains("\"explode\""),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rolls_back_a_batch_that_officecli_refuses() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        // Valid to the host, but the deck has one slide, not nine.
+        let rollback = json!([
+            {"command":"add","parent":"/","type":"slide","props":{"title":"Plan"}},
+            {"command":"set","path":"/slide[9]/shape[1]","props":{"text":"x"}},
+        ]);
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": rollback}),
+        );
+        let sent = outcome.refused();
+        let report = sent
+            .strip_prefix("assistant_document_failed: ")
+            .unwrap_or_else(|| panic!("{sent}"));
+        let report: Value = serde_json::from_str(report).unwrap_or_else(|e| panic!("{e}: {sent}"));
+        let message = report["message"].as_str().unwrap();
+        assert!(message.contains("1 of 2 commands failed"), "{sent}");
+        assert!(message.contains("rolled back"), "{sent}");
+        let [item] = report["items"].as_array().unwrap().as_slice() else {
+            panic!("one failed command: {sent}");
+        };
+        assert_eq!(item["index"], 1, "{sent}");
+        let said = item["output"].as_str().unwrap();
+        // officecli's own words, e.g. "Slide 9 not found (total: 1)".
+        assert!(said.contains("not found"), "{sent}");
+        let folder = outcome.config.path().to_string_lossy().into_owned();
+        assert!(
+            !sent.contains(&folder),
+            "the document folder is scrubbed: {sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    #[test]
+    fn rejects_a_typst_syntax_error() {
+        let Some(bundle) = engines_runtime() else {
+            return;
+        };
+        let body = "= 一、开头\n\n这是一段正文。\n\n#table(\n  columns: 2,\n  [甲], [乙],\n";
+        let outcome = create_document(
+            &bundle,
+            test_model(),
+            "ofox-office-pdf",
+            json!({"name": "broken.pdf", "format": "pdf", "content": body}),
+        );
+        let sent = outcome.refused();
+        assert!(sent.contains("assistant_document_failed"), "{sent}");
+        assert!(
+            sent.contains("Typst could not compile") && sent.contains("error"),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    // ── Python decks (macOS only, where the engine ships) ────────────────
+
+    /// The prepared runtime with the Python engine as well: on macOS a
+    /// runtime prepared without it is a failure.
+    #[cfg(target_os = "macos")]
+    fn python_runtime() -> Option<PathBuf> {
+        let bundle = engines_runtime()?;
+        assert!(
+            cc_switch_lib::assistant::documents::engines::engines_at(&bundle)
+                .python
+                .is_some(),
+            "the Python engine is not prepared at {}; run `pnpm assistant:prepare`",
+            bundle.display()
+        );
+        Some(bundle)
+    }
+
+    /// The Python code of the pptx skill's worked example, from the skill as
+    /// the runtime gives it to the model: four slides in which neither the
+    /// helpers nor officecli find anything wrong.
+    #[cfg(target_os = "macos")]
+    fn worked_example(bundle: &Path) -> String {
+        let skill =
+            std::fs::read_to_string(bundle.join("runtime/skills/ofox-office-pptx/SKILL.md"))
+                .unwrap();
+        let (_, example) = skill
+            .split_once("## Worked example")
+            .expect("the skill has a worked example");
+        let (_, code) = example
+            .split_once("```python\n")
+            .expect("the example is Python code");
+        code.split_once("\n```")
+            .expect("the code block ends")
+            .0
+            .to_owned()
+    }
+
+    /// The `create_document` tool as `request` offered it to the model.
+    #[cfg(target_os = "macos")]
+    fn document_tool(request: &Request) -> &Value {
+        request.body["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|tool| &tool["function"])
+            .find(|tool| tool["name"] == "create_document")
+            .expect("create_document is offered")
+    }
+
+    /// The model's turn after a preview: deliver it by the previewId its
+    /// result named.
+    #[cfg(target_os = "macos")]
+    fn deliver_the_preview(request: &Request) -> Reply {
+        let id = tool_results(request)
+            .iter()
+            .rev()
+            .find_map(|text| {
+                let (_, rest) = text.split_once("as previewId ")?;
+                rest.split(';').next().map(str::to_owned)
+            })
+            .expect("a preview result names its previewId");
+        Reply::ToolCalls(vec![(
+            "create_document",
+            json!({"name": "cache.pptx", "format": "pptx", "fromPreview": id}),
+        )])
+    }
+
+    /// What the bundled officecli's `validate` reports of `bytes`, run the
+    /// way the host runs it.
+    #[cfg(target_os = "macos")]
+    fn validated(bundle: &Path, bytes: &[u8]) -> Value {
+        use cc_switch_lib::assistant::documents::{engines::engines_at, runner};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(dir.path().join("deck.pptx"), bytes).unwrap();
+        let officecli = engines_at(bundle).officecli.unwrap();
+        let output = runtime()
+            .block_on(runner::run_engine(
+                &officecli,
+                &["validate", "deck.pptx", "--json"],
+                dir.path(),
+                &home,
+                runner::ENGINE_TIMEOUT,
+            ))
+            .unwrap();
+        assert_eq!(output.status, Some(0), "{}", output.stderr);
+        serde_json::from_str(output.stdout.trim())
+            .unwrap_or_else(|e| panic!("{e}: {}", output.stdout))
+    }
+
+    /// The Python route with the real engines: the model previews its deck
+    /// code (nothing is delivered), reads the previewId from the result and
+    /// delivers that preview with `fromPreview`. The one attachment is the
+    /// previewed file (it takes the preview's id), validates, has no issue
+    /// and keeps a picture of every slide.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial(python_runner)]
+    fn previews_then_delivers_a_python_deck() {
+        let Some(bundle) = python_runtime() else {
+            return;
+        };
+        let code = worked_example(&bundle);
+        let outcome = document_turn(
+            &bundle,
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "cache.pptx", "format": "pptx",
+                   "content": {"kind": "python", "code": code}, "preview": true}),
+            vec![Reply::Answer(deliver_the_preview)],
+        );
+        // Python content and its preview step were offered.
+        let tool = document_tool(&outcome.requests[0]);
+        assert!(
+            tool["description"]
+                .as_str()
+                .unwrap()
+                .contains(r#"{"kind":"python","code":"…"}"#),
+            "{tool}"
+        );
+        let properties = &tool["parameters"]["properties"];
+        assert!(
+            properties["preview"].is_object() && properties["fromPreview"].is_object(),
+            "{tool}"
+        );
+
+        // The real eval reads the route and the previews from this history.
+        let history = std::fs::read_to_string(
+            session_dir(outcome.config.path(), &outcome.sid).join("session.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::real_eval::documents_of(&history),
+            super::real_eval::Documents {
+                route: Some("python"),
+                previews: 1
+            }
+        );
+
+        let results = document_results(outcome.config.path(), &outcome.sid);
+        let [preview, delivery] = &results[..] else {
+            panic!("two create_document results: {results:?}");
+        };
+        assert_ne!(preview["isError"], true, "{preview}");
+        let details = &preview["details"];
+        assert_eq!(details["preview"], true, "{details}");
+        assert_eq!(details["slides"], 4, "{details}");
+        assert_eq!(details["issues"], json!([]), "{details}");
+        let preview_id = details["previewId"].as_str().expect("a previewId");
+        let told = outcome.sent_of(preview);
+        assert!(
+            told.contains(&format!(
+                "Previewed cache.pptx (pptx, 4 slides) as previewId {preview_id}; nothing is delivered yet. Issues: 0."
+            )),
+            "{told}"
+        );
+        assert!(!told.contains("attachment"), "{told}");
+
+        // One document, published by the delivering call: the preview made
+        // no attachment and no card of its own.
+        let (generation, bytes) = outcome.made(PPTX);
+        assert_eq!(generation["toolCallId"], delivery["toolCallId"]);
+        assert_ne!(generation["toolCallId"], preview["toolCallId"]);
+        let attachment = &outcome.detail.attachments[0];
+        assert_eq!(attachment.id, preview_id, "the previewed file is delivered");
+        assert_eq!(attachment.name, "cache.pptx");
+        assert!(bytes.starts_with(b"PK"));
+        let params = &generation["params"];
+        assert_eq!(params["format"], "pptx");
+        assert_eq!(params["slides"], 4, "{params}");
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["fixed"], 0, "{params}");
+        assert_eq!(params["svgPages"], 4, "{params}");
+        let pages = outcome.stored().join(format!("{preview_id}.pages"));
+        for page in 1..=4 {
+            let path = pages.join(format!("{page}.svg"));
+            let svg = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(svg.trim_start().starts_with("<svg"), "{}", path.display());
+        }
+        let report = validated(&bundle, &bytes);
+        assert_eq!(report["success"], true, "{report}");
+        assert_eq!(report["data"]["errors"], json!([]), "{report}");
+        let sent = outcome.sent();
+        assert!(
+            sent.contains("Created cache.pptx (pptx, ") && sent.contains("Issues: 0."),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// A copy of the prepared runtime whose manifest lists no Python engine:
+    /// every other part is the prepared runtime's, through links.
+    #[cfg(target_os = "macos")]
+    fn runtime_without_python(bundle: &Path) -> tempfile::TempDir {
+        let copy = tempfile::tempdir().unwrap();
+        for entry in std::fs::read_dir(bundle).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_name() != "manifest.json" {
+                std::os::unix::fs::symlink(entry.path(), copy.path().join(entry.file_name()))
+                    .unwrap();
+            }
+        }
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(bundle.join("manifest.json")).unwrap()).unwrap();
+        let engines = manifest["engines"].as_object_mut().unwrap();
+        assert!(
+            engines.remove("python").is_some(),
+            "the prepared manifest lists the Python engine"
+        );
+        std::fs::write(copy.path().join("manifest.json"), manifest.to_string()).unwrap();
+        copy
+    }
+
+    /// Without the manifest's Python engine the model hears nothing of
+    /// Python or previews, and the deck object still makes a clean deck.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn falls_back_to_the_deck_object_without_python() {
+        let Some(bundle) = python_runtime() else {
+            return;
+        };
+        let without = runtime_without_python(&bundle);
+        let engines = cc_switch_lib::assistant::documents::engines::engines_at(without.path());
+        assert!(engines.python.is_none() && engines.officecli.is_some());
+        let outcome = create_document(
+            without.path(),
+            test_model(),
+            "ofox-office-pptx",
+            json!({"name": "deck.pptx", "format": "pptx", "content": batch("deck-object.json")}),
+        );
+        let tool = document_tool(&outcome.requests[0]);
+        let offered = tool.to_string().to_lowercase();
+        assert!(
+            !offered.contains("python") && !offered.contains("preview"),
+            "{tool}"
+        );
+        let prompt = outcome.requests[0].body["messages"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(
+            prompt.contains("For a pptx, send the deck object the skill describes"),
+            "{prompt}"
+        );
+        assert!(
+            !prompt.contains("send the Python deck code") && !prompt.contains("preview: true"),
+            "{prompt}"
+        );
+
+        let history = std::fs::read_to_string(
+            session_dir(outcome.config.path(), &outcome.sid).join("session.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(
+            super::real_eval::documents_of(&history),
+            super::real_eval::Documents {
+                route: Some("deck"),
+                previews: 0
+            }
+        );
+
+        let (generation, bytes) = outcome.made(PPTX);
+        assert!(bytes.starts_with(b"PK"));
+        let params = &generation["params"];
+        assert_eq!(params["slides"], 8, "{params}");
+        assert_eq!(params["issues"], json!([]), "{params}");
+        assert_eq!(params["svgPages"], 8, "{params}");
+        let sent = outcome.sent();
+        assert!(
+            sent.contains("Rendered 8 slides from the deck with theme navy"),
+            "{sent}"
+        );
+        assert_no_secret_on_disk(outcome.config.path(), &[KEY, NEW_KEY]);
+    }
+
+    /// The processes whose command line names `script`, as (pid, parent
+    /// pid). A process that has ended but not been reaped has no command
+    /// line left.
+    #[cfg(target_os = "macos")]
+    fn processes_naming(script: &str) -> Vec<(u32, u32)> {
+        let output = std::process::Command::new("/bin/ps")
+            .args(["-axww", "-o", "pid=,ppid=,command="])
+            .output()
+            .expect("ps runs");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(script))
+            .filter_map(|line| {
+                let mut fields = line.split_whitespace();
+                Some((fields.next()?.parse().ok()?, fields.next()?.parse().ok()?))
+            })
+            .collect()
+    }
+
+    /// Stopping the reply while the runner runs the model's code ends the
+    /// runner. The code marks in its folder that it started (through
+    /// Pyodide's bridge to Node, as the sandbox lets it write there) and then
+    /// spins for longer than the host's time limit, so only the stop ends it
+    /// within the test (and a runner a failed test leaks ends by itself).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial(python_runner)]
+    fn stopping_the_reply_ends_the_runner() {
+        let Some(bundle) = python_runtime() else {
+            return;
+        };
+        // As the host names it on the runner's command line.
+        let runner = cc_switch_lib::assistant::documents::engines::engines_at(&bundle)
+            .python
+            .unwrap()
+            .runner;
+        let runner = runner.to_string_lossy();
+        assert!(
+            processes_naming(&runner).is_empty(),
+            "a runner is left from before"
+        );
+        let code = "import js, time\njs.process.getBuiltinModule(\"fs\").writeFileSync(\"started\", \"\")\nend = time.time() + 120\nwhile time.time() < end:\n    pass\n";
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![(
+                "create_document",
+                json!({"name": "loop.pptx", "format": "pptx",
+                       "content": {"kind": "python", "code": code}, "preview": true}),
+            )]));
+            let run = host
+                .send(request(&sid, "Make the deck", json!({})))
+                .await
+                .unwrap();
+            let outputs = session_dir(config.path(), &sid).join("outputs");
+            let started = || {
+                std::fs::read_dir(&outputs)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|doc| doc.path().join("python/started").is_file())
+            };
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !started() {
+                assert!(
+                    Instant::now() < deadline,
+                    "the runner never ran the code: {:?}",
+                    of_type(&env, &run.run_id, "tool_end")
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            let host_pid = std::process::id();
+            let running = processes_naming(&runner);
+            assert!(
+                running.iter().any(|&(_, parent)| parent == host_pid),
+                "the host's runner is running: {running:?}"
+            );
+
+            host.stop(&sid, &run.run_id, &run.operation_id)
+                .await
+                .unwrap();
+            let end = wait_for(&env, &run.run_id, "run_end").await;
+            assert_eq!(end.data["status"], "stopped", "{:?}", end.data);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let left = processes_naming(&runner);
+                if left.is_empty() {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the runner outlived the stopped reply: {left:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            let detail = host.get_session(&sid).await.unwrap();
+            assert!(detail.attachments.is_empty(), "{:?}", detail.attachments);
+            assert!(of_type(&env, &run.run_id, "generation").is_empty());
+            assert_eq!(gateway.requests().len(), 1, "no model turn after the stop");
+            host.shutdown().await;
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY, NEW_KEY]);
+    }
+}
+
+// ── real models ──────────────────────────────────────────────────────────
+
+/// The four acceptance prompts on real models through the real gateway: one
+/// JSON line per case on stdout, and the files each case made copied out for
+/// a person to open. It spends real money, so it is ignored; run it with
+/// `pnpm assistant:real-eval`, which finds the key and the models, runs this
+/// and writes the report.
+mod real_eval {
+    use super::*;
+    use cc_switch_lib::assistant::catalog::Kind;
+    use cc_switch_lib::assistant::documents::{engines::engines_at, runner};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// The case (it names the folder its files go to) and what the user asks.
+    const CASES: [(&str, &str); 4] = [
+        ("pdf-sichuan", "写一个 pdf，介绍四川"),
+        ("pptx-transformer", "做一个 8 页的 Transformer 介绍 ppt"),
+        ("xlsx-grades", "做一张三科成绩表"),
+        ("docx-weekly", "写一份 Word 版的周报"),
+    ];
+
+    /// A real model writing an eight-slide deck takes minutes, not the 45
+    /// seconds a mock turn gets.
+    const TURN_LIMIT: Duration = Duration::from_secs(15 * 60);
+
+    /// What one case left, as its JSON line reports it.
+    #[derive(Default)]
+    struct Tally {
+        files: usize,
+        warnings: usize,
+        fixed: u64,
+        svg_pages: u64,
+        calls: usize,
+        /// How the pptx's content was sent (see [`Documents::route`]); `None`
+        /// for a case that makes no pptx.
+        route: Option<&'static str>,
+        /// The previews the reply made.
+        previews: usize,
+        input: u64,
+        output: u64,
+        /// Every Office file was read, and none has a literal `\n` in its text.
+        clean_text: bool,
+        notes: Vec<String>,
+    }
+
+    impl Tally {
+        fn failed(note: String) -> Self {
+            Self {
+                notes: vec![note],
+                ..Self::default()
+            }
+        }
+
+        fn ok(&self) -> bool {
+            // A deck is looked at before it is delivered: it takes a call
+            // per preview and one to deliver (or none, when the reply's end
+            // delivers the last preview). Every other case takes one call.
+            let calls = if self.route.is_some() {
+                self.calls >= 1
+            } else {
+                self.calls == 1
+            };
+            self.files == 1 && self.warnings == 0 && calls && self.clean_text
+        }
+    }
+
+    /// What a reply's `create_document` calls were, from the conversation's
+    /// native history.
+    #[derive(Debug, Default, PartialEq, Eq)]
+    pub(super) struct Documents {
+        /// `python` when the last pptx call that sent content sent Python
+        /// deck code, `deck` when it sent a deck object (or officecli
+        /// commands); a call that delivers a preview sends none. `None`
+        /// when the reply made no pptx.
+        pub(super) route: Option<&'static str>,
+        /// The previews that were made: one that failed made none.
+        pub(super) previews: usize,
+    }
+
+    /// Whether `content` is Python deck code as the runtime reads it: the
+    /// object `{"kind":"python","code":"…"}`, a list of one around it, or
+    /// its JSON text.
+    fn is_python(content: &Value) -> bool {
+        let parsed;
+        let given = match content {
+            Value::String(text) => match serde_json::from_str::<Value>(text) {
+                Ok(value) => {
+                    parsed = value;
+                    &parsed
+                }
+                Err(_) => return false,
+            },
+            other => other,
+        };
+        let candidate = match given {
+            Value::Array(items) if items.len() == 1 => &items[0],
+            other => other,
+        };
+        candidate["kind"] == "python"
+    }
+
+    /// The route and the previews of the `create_document` calls in
+    /// `history` (a `session.jsonl`); a line that is not an entry is skipped.
+    pub(super) fn documents_of(history: &str) -> Documents {
+        let mut found = Documents::default();
+        let messages = history
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|entry| entry["type"] == "message")
+            .map(|entry| entry["message"].clone());
+        for message in messages {
+            match message["role"].as_str() {
+                Some("assistant") => {
+                    for call in message["content"].as_array().into_iter().flatten() {
+                        let args = &call["arguments"];
+                        if call["type"] == "toolCall"
+                            && call["name"] == "create_document"
+                            && args["format"] == "pptx"
+                            && !args["content"].is_null()
+                        {
+                            found.route = Some(if is_python(&args["content"]) {
+                                "python"
+                            } else {
+                                "deck"
+                            });
+                        }
+                    }
+                }
+                Some("toolResult")
+                    if message["toolName"] == "create_document"
+                        && message["isError"] != true
+                        && message["details"]["preview"] == true =>
+                {
+                    found.previews += 1;
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    #[test]
+    #[ignore = "spends real money on the real gateway; run `pnpm assistant:real-eval`"]
+    fn four_prompts_on_the_listed_models() {
+        let Some(key) = std::env::var("OFOX_REAL_EVAL_KEY")
+            .ok()
+            .filter(|key| !key.is_empty())
+        else {
+            eprintln!("skipping: OFOX_REAL_EVAL_KEY is not set (run `pnpm assistant:real-eval`)");
+            return;
+        };
+        let apex = std::env::var("OFOX_REAL_EVAL_APEX").unwrap_or_else(|_| "ofox.ai".into());
+        // The key goes to an Ofox gateway and nowhere else.
+        assert!(
+            matches!(apex.as_str(), "ofox.ai" | "ofox.io"),
+            "OFOX_REAL_EVAL_APEX is ofox.ai or ofox.io, not {apex}"
+        );
+        let models: Vec<Value> = std::env::var("OFOX_REAL_EVAL_MODELS")
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .expect("OFOX_REAL_EVAL_MODELS is a JSON array of models");
+        let out = std::env::var_os("OFOX_REAL_EVAL_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../.real-eval/manual"));
+        let bundle = runtime_dir().expect("the assistant runtime is prepared");
+        let officecli = engines_at(&bundle)
+            .officecli
+            .expect("the document engines are prepared (run `pnpm assistant:prepare`)");
+        // On a serial run libtest has printed `test <name> ... ` with no line
+        // end; the case lines start on lines of their own.
+        println!();
+        for item in &models {
+            let model = model_of(item);
+            let id = match &model {
+                Ok(model) => model.id.clone(),
+                Err(_) => item["id"].as_str().unwrap_or("?").to_owned(),
+            };
+            for (case, prompt) in CASES {
+                let started = Instant::now();
+                let tally = match &model {
+                    Err(error) => Tally::failed(error.clone()),
+                    Ok(model) => {
+                        let folder = out.join(slug(&model.id)).join(case);
+                        catch_unwind(AssertUnwindSafe(|| {
+                            run_case(&bundle, &officecli, &apex, &key, model, prompt, &folder)
+                        }))
+                        .unwrap_or_else(|panic| {
+                            Tally::failed(format!("panicked: {}", panic_text(&*panic)))
+                        })
+                    }
+                };
+                let mut note = tally.notes.join("; ");
+                if note.chars().count() > 500 {
+                    note = note.chars().take(500).collect::<String>() + "…";
+                }
+                let line = json!({
+                    "case": case,
+                    "model": id,
+                    "ok": tally.ok(),
+                    "files": tally.files,
+                    "warnings": tally.warnings,
+                    "fixed": tally.fixed,
+                    "svgPages": tally.svg_pages,
+                    "calls": tally.calls,
+                    "route": tally.route,
+                    "previews": tally.previews,
+                    "seconds": (started.elapsed().as_secs_f64() * 10.0).round() / 10.0,
+                    "tokens": {"input": tally.input, "output": tally.output},
+                    "note": note,
+                });
+                println!("{}", line.to_string().replace(&key, "***"));
+            }
+        }
+    }
+
+    /// The eval runs only models the app offers, set up as the app sets them
+    /// up; no network.
+    #[test]
+    fn eval_models_are_built_as_the_app_builds_them() {
+        let row = json!({
+            "id": "openai/gpt-6.1-terra", "object": "model", "name": "OpenAI: GPT-6.1 Terra",
+            "context_length": 400000,
+            "supported_endpoints": ["/v1/responses", "/v1/chat/completions"],
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["text"]},
+            "top_provider": {"max_completion_tokens": 128000},
+            "pricing": {"prompt": "0.000001", "completion": "0.000008"},
+        });
+        let model = model_of(&row).unwrap();
+        assert_eq!(model.max_output_tokens, 128000);
+        assert!(model.supports_images);
+        assert_eq!(json!(model.protocol), "openai-responses");
+        // A row the app drops is refused, not run on `test_model()` settings.
+        for dropped in [
+            json!({"id": "x/no-endpoints", "object": "model", "context_length": 128000}),
+            json!({"id": "x/no-endpoints", "contextWindow": 64000, "context_length": 128000}),
+            json!({"id": "x/no-endpoints"}),
+        ] {
+            let error = model_of(&dropped).unwrap_err();
+            assert!(error.starts_with("x/no-endpoints: "), "{error}");
+        }
+        let image = model_of(&json!({
+            "id": "openai/gpt-image-2", "context_length": 0,
+            "supported_endpoints": ["/v1/images/generations"],
+            "architecture": {"input_modalities": ["text", "image"], "output_modalities": ["image"]},
+        }))
+        .unwrap_err();
+        assert!(image.contains("not a chat model"), "{image}");
+        // The app's own camelCase model object takes the rest from `test_model()`.
+        let shaped = model_of(&json!({"id": "x/shaped", "contextWindow": 64000})).unwrap();
+        assert_eq!(
+            (shaped.context_window, shaped.max_output_tokens),
+            (64000, 4096)
+        );
+    }
+
+    /// The conversation's native history as the eval reads it: one line per
+    /// entry, the model's tool calls in its messages and the host's answers
+    /// as tool results.
+    fn history(entries: &[Value]) -> String {
+        entries
+            .iter()
+            .map(|entry| json!({"type": "message", "message": entry}).to_string() + "\n")
+            .collect()
+    }
+
+    fn calls_of(calls: &[Value]) -> Value {
+        let parts: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(index, arguments)| {
+                json!({"type": "toolCall", "id": format!("call-{index}"),
+                       "name": "create_document", "arguments": arguments})
+            })
+            .collect();
+        json!({"role": "assistant", "content": parts})
+    }
+
+    fn result_of(details: Value, is_error: bool) -> Value {
+        json!({"role": "toolResult", "toolName": "create_document",
+               "isError": is_error, "details": details})
+    }
+
+    fn python(preview: bool) -> Value {
+        json!({"name": "a.pptx", "format": "pptx", "preview": preview,
+               "content": {"kind": "python", "code": "prs = new_deck()"}})
+    }
+
+    fn deck() -> Value {
+        json!({"name": "a.pptx", "format": "pptx",
+               "content": {"kind": "deck", "slides": []}})
+    }
+
+    #[test]
+    fn the_route_and_previews_are_read_from_the_history() {
+        let preview = result_of(json!({"preview": true, "previewId": "p1"}), false);
+        let delivered = result_of(json!({"file": {"name": "a.pptx"}}), false);
+        let from_preview = json!({"name": "a.pptx", "format": "pptx", "fromPreview": "p1"});
+
+        // Python code previewed, then delivered as it was previewed.
+        let found = documents_of(&history(&[
+            calls_of(&[python(true)]),
+            preview.clone(),
+            calls_of(std::slice::from_ref(&from_preview)),
+            delivered.clone(),
+        ]));
+        assert_eq!((found.route, found.previews), (Some("python"), 1));
+
+        // A deck object sent once, never previewed.
+        let found = documents_of(&history(&[calls_of(&[deck()]), delivered.clone()]));
+        assert_eq!((found.route, found.previews), (Some("deck"), 0));
+
+        // Two previews, and a reply that ended with the latest delivered by
+        // the host.
+        let found = documents_of(&history(&[
+            calls_of(&[python(true)]),
+            preview.clone(),
+            calls_of(&[python(true)]),
+            preview.clone(),
+        ]));
+        assert_eq!((found.route, found.previews), (Some("python"), 2));
+
+        // No call at all.
+        assert_eq!(documents_of(""), Documents::default());
+    }
+
+    #[test]
+    fn a_failed_preview_is_not_counted_and_the_last_content_decides_the_route() {
+        let preview = result_of(json!({"preview": true, "previewId": "p1"}), false);
+        let failed = result_of(json!({"code": "assistant_document_failed"}), true);
+        let found = documents_of(&history(&[
+            calls_of(&[python(true)]),
+            failed,
+            calls_of(&[deck()]),
+            preview,
+        ]));
+        assert_eq!((found.route, found.previews), (Some("deck"), 1));
+    }
+
+    #[test]
+    fn python_content_is_found_as_the_runtime_reads_it() {
+        let text = json!({"kind": "python", "code": "x"}).to_string();
+        let wrapped = json!([{"kind": "python", "code": "x"}]);
+        for content in [json!(text), wrapped] {
+            let call = json!({"name": "a.pptx", "format": "pptx", "content": content});
+            let found = documents_of(&history(&[calls_of(&[call])]));
+            assert_eq!(found.route, Some("python"));
+        }
+        // An array of officecli commands, or other text, is not Python.
+        for content in [
+            json!([{"command": "add"}]),
+            json!("not json"),
+            json!({"kind": "deck"}),
+        ] {
+            let call = json!({"name": "a.pptx", "format": "pptx", "content": content});
+            let found = documents_of(&history(&[calls_of(&[call])]));
+            assert_eq!(found.route, Some("deck"));
+        }
+    }
+
+    #[test]
+    fn only_a_pptx_has_a_route() {
+        let call = json!({"name": "a.docx", "format": "docx", "content": [{"command": "add"}]});
+        let found = documents_of(&history(&[
+            calls_of(&[call]),
+            // Other tools and malformed lines are not create_document.
+            json!({"role": "toolResult", "toolName": "use_skill", "details": {"preview": true}}),
+        ]));
+        assert_eq!(found, Documents::default());
+        assert_eq!(
+            documents_of("{not json\n{\"type\":\"custom\"}\n"),
+            Documents::default()
+        );
+    }
+
+    #[test]
+    fn a_pptx_may_take_a_call_per_preview_and_every_other_case_takes_one() {
+        let clean = |route, previews, calls| Tally {
+            files: 1,
+            calls,
+            route,
+            previews,
+            clean_text: true,
+            ..Tally::default()
+        };
+        assert!(clean(None, 0, 1).ok(), "a pdf, one call");
+        assert!(!clean(None, 0, 2).ok(), "a pdf, a retry");
+        assert!(clean(Some("deck"), 0, 1).ok());
+        assert!(clean(Some("python"), 1, 2).ok(), "preview, then deliver");
+        assert!(
+            clean(Some("python"), 2, 3).ok(),
+            "two previews, then deliver"
+        );
+        assert!(
+            clean(Some("python"), 1, 1).ok(),
+            "delivered at the reply's end"
+        );
+        assert!(!clean(Some("python"), 0, 0).ok(), "no call");
+        assert!(!Tally {
+            files: 2,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+        assert!(!Tally {
+            files: 0,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+        assert!(!Tally {
+            warnings: 1,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+        assert!(!Tally {
+            clean_text: false,
+            ..clean(Some("python"), 1, 2)
+        }
+        .ok());
+    }
+
+    /// One prompt in a new conversation with `model` on the real gateway.
+    fn run_case(
+        bundle: &Path,
+        officecli: &Path,
+        apex: &str,
+        key: &str,
+        model: &Model,
+        prompt: &str,
+        folder: &Path,
+    ) -> Tally {
+        let config = tempfile::tempdir().unwrap();
+        // Never asked: the apex's requests go to the real gateway instead.
+        let placeholder = Gateway::start();
+        let env = TestEnv::new(config.path(), bundle, &[(apex, &placeholder)]);
+        env.route(apex, format!("https://api.{apex}"));
+        env.set_key(key.to_owned());
+        *env.catalog.lock().unwrap() = vec![model.clone()];
+        let host = AssistantHost::new(env.clone());
+        let tokio = runtime();
+        let (sid, run, end, detail) = tokio.block_on(async {
+            // No title request: it is not what is measured, and it costs.
+            host.set_preferences(
+                serde_json::from_value(json!({
+                    "instructions": "", "autoTitle": false, "notifyOnFinish": false,
+                    "expectedOwner": owner(), "expectedGeneration": host.generation(),
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let sid = create(&host).await;
+            let run = host
+                .send(request(&sid, prompt, json!({})))
+                .await
+                .unwrap()
+                .run_id;
+            let end = finished(&env, &run).await;
+            if end.is_none() {
+                host.cancel_all();
+            }
+            let detail = host.get_session(&sid).await.unwrap();
+            host.shutdown().await;
+            (sid, run, end, detail)
+        });
+
+        let mut tally = Tally::default();
+        match end {
+            None => tally
+                .notes
+                .push(format!("no run_end within {} s", TURN_LIMIT.as_secs())),
+            Some(end) if end.data["status"] != "completed" => {
+                tally.notes.push(format!("run {}", end.data["status"]));
+            }
+            Some(_) => {}
+        }
+        for error in of_type(&env, &run, "error") {
+            tally.notes.push(format!(
+                "error {}: {}",
+                error["code"].as_str().unwrap_or("?"),
+                error["message"].as_str().unwrap_or("")
+            ));
+        }
+        tally.files = detail.attachments.len();
+        let documents: Vec<_> = detail
+            .messages
+            .iter()
+            .flat_map(|message| &message.generations)
+            .filter(|generation| generation.kind == "document")
+            .collect();
+        if let Some(last) = documents.last() {
+            tally.warnings = last.params["issues"].as_array().map_or(0, Vec::len);
+            tally.fixed = last.params["fixed"].as_u64().unwrap_or(0);
+            tally.svg_pages = last.params["svgPages"].as_u64().unwrap_or(0);
+        }
+        let calls: Vec<Value> = of_type(&env, &run, "tool_end")
+            .into_iter()
+            .filter(|end| end["name"] == "create_document")
+            .collect();
+        tally.calls = calls.len();
+        // How the deck was sent and previewed is in the model's own calls,
+        // which the events leave out.
+        match std::fs::read_to_string(session_dir(config.path(), &sid).join("session.jsonl")) {
+            Ok(text) => {
+                let documents = documents_of(&text);
+                tally.route = documents.route;
+                tally.previews = documents.previews;
+            }
+            Err(error) => tally.notes.push(format!(
+                "could not read the conversation's history: {error}"
+            )),
+        }
+        let refused = calls.iter().filter(|end| end["success"] != true).count();
+        if refused > 0 {
+            tally
+                .notes
+                .push(format!("{refused} create_document call(s) failed"));
+        }
+        // Chat requests count Pi's `input`/`output`; searches count tokens.
+        for request in detail.usage["requests"].as_array().into_iter().flatten() {
+            let usage = &request["usage"];
+            let count = |pi: &str, search: &str| {
+                usage[pi]
+                    .as_u64()
+                    .or_else(|| usage[search].as_u64())
+                    .unwrap_or(0)
+            };
+            tally.input += count("input", "inputTokens");
+            tally.output += count("output", "outputTokens");
+        }
+
+        std::fs::create_dir_all(folder).unwrap();
+        let reply = detail
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant");
+        if let Some(reply) = reply {
+            if reply.model_id.as_deref().is_some_and(|id| id != model.id) {
+                tally
+                    .notes
+                    .push(format!("answered by {:?}", reply.model_id));
+            }
+            std::fs::write(folder.join("reply.md"), &reply.content).unwrap();
+        }
+        let stored = session_dir(config.path(), &sid).join("attachments");
+        let home = tempfile::tempdir().unwrap();
+        tally.clean_text = true;
+        let several = detail.attachments.len() > 1;
+        for (index, attachment) in detail.attachments.iter().enumerate() {
+            let name = Path::new(&attachment.name).file_name().map_or_else(
+                || attachment.id.clone(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            let name = if several {
+                format!("{}-{name}", index + 1)
+            } else {
+                name
+            };
+            let copy = folder.join(&name);
+            if let Err(error) = std::fs::copy(stored.join(&attachment.id), &copy) {
+                tally.clean_text = false;
+                tally.notes.push(format!("could not copy {name}: {error}"));
+                continue;
+            }
+            // Kept by a host that saves the rendered pages; skipped before it.
+            let pages = stored.join(format!("{}.pages", attachment.id));
+            if pages.is_dir() {
+                if let Err(error) = copy_folder(&pages, &folder.join(format!("{name}.pages"))) {
+                    tally
+                        .notes
+                        .push(format!("could not copy {name}.pages: {error}"));
+                }
+            }
+            let extension = Path::new(&name)
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase());
+            if !matches!(extension.as_deref(), Some("pptx" | "docx" | "xlsx")) {
+                continue;
+            }
+            match tokio.block_on(office_text(officecli, &copy, home.path())) {
+                Ok(text) => {
+                    std::fs::write(folder.join(format!("{name}.txt")), &text).unwrap();
+                    if text.contains("\\n") {
+                        tally.clean_text = false;
+                        tally.notes.push(format!("{name} has a literal \\n"));
+                    }
+                }
+                Err(error) => {
+                    tally.clean_text = false;
+                    tally
+                        .notes
+                        .push(format!("officecli could not read {name}: {error}"));
+                }
+            }
+        }
+        tally
+    }
+
+    /// The run's end, or `None` once [`TURN_LIMIT`] has passed.
+    async fn finished(env: &TestEnv, run_id: &str) -> Option<Event> {
+        let deadline = Instant::now() + TURN_LIMIT;
+        while Instant::now() < deadline {
+            if let Some(end) = env
+                .events(run_id)
+                .into_iter()
+                .find(|event| event.r#type == "run_end")
+            {
+                return Some(end);
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        None
+    }
+
+    /// What officecli reads as the file's text, run the way the app runs it:
+    /// with none of this process's environment (the key is in it).
+    async fn office_text(officecli: &Path, file: &Path, home: &Path) -> Result<String, String> {
+        let file = file.to_string_lossy();
+        let output = runner::run_engine(
+            officecli,
+            &["view", &file, "text"],
+            home,
+            home,
+            runner::ENGINE_TIMEOUT,
+        )
+        .await?;
+        if output.status != Some(0) {
+            return Err(format!(
+                "exit {:?}: {}",
+                output.status,
+                output.stderr.trim()
+            ));
+        }
+        Ok(output.stdout)
+    }
+
+    /// A `/v1/models` row goes through the app's own parser, so the model
+    /// runs with the protocol, tools and output limit the app gives it, and a
+    /// row the app drops is refused rather than run on made-up settings. Only
+    /// a model object in the app's own camelCase shape (as [`test_model`]
+    /// writes one, with no catalog field) takes what it leaves out from there.
+    fn model_of(item: &Value) -> Result<Model, String> {
+        let id = item["id"].as_str().unwrap_or("?");
+        let catalog_row = [
+            "object",
+            "supported_endpoints",
+            "context_length",
+            "architecture",
+            "top_provider",
+        ]
+        .iter()
+        .any(|field| item.get(field).is_some());
+        let model_object = ["supportedEndpoints", "contextWindow"]
+            .iter()
+            .any(|field| item.get(field).is_some());
+        let model = if model_object && !catalog_row {
+            let fields = item.as_object().ok_or("a model is a JSON object")?;
+            let mut model = serde_json::to_value(test_model()).unwrap();
+            model.as_object_mut().unwrap().extend(fields.clone());
+            serde_json::from_value(model).map_err(|error| format!("{id}: {error}"))?
+        } else {
+            parse_models(json!({ "data": [item] }), Source::V1)
+                .pop()
+                .ok_or_else(|| {
+                    format!("{id}: the app drops this catalog row and does not offer it")
+                })?
+        };
+        if model.kind != Kind::Chat {
+            return Err(format!(
+                "{} is a {:?} model, not a chat model",
+                model.id, model.kind
+            ));
+        }
+        Ok(model)
+    }
+
+    /// `openai/gpt-6.1-terra` → `openai-gpt-6.1-terra`.
+    fn slug(id: &str) -> String {
+        id.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    }
+
+    fn copy_folder(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn panic_text(panic: &(dyn std::any::Any + Send)) -> String {
+        panic
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_owned())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".into())
+    }
 }

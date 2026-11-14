@@ -1,9 +1,22 @@
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
-import { Download, Info, Loader2, RefreshCw } from "lucide-react";
+import {
+  Download,
+  FileCode,
+  FileJson,
+  FileSpreadsheet,
+  FileText,
+  Info,
+  Loader2,
+  Presentation,
+  RefreshCw,
+  TriangleAlert,
+  type LucideIcon,
+} from "lucide-react";
 import type {
   AssistantAttachment,
+  AssistantDocumentIssue,
   AssistantGeneration,
   AssistantMessage,
   AssistantModel,
@@ -25,6 +38,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { Textarea } from "@/components/ui/textarea";
+import { fmtBinaryBytes } from "@/lib/format";
 import { MediaBlock, ActivityLink } from "./MediaBlock";
 import { VideoBlock } from "./VideoBlock";
 import { MEDIA_PLACEHOLDER, MediaToolButton, MediaTools } from "./MediaTools";
@@ -33,6 +47,9 @@ import {
   MediaDefaultsFields,
   type MediaFieldsValue,
 } from "./MediaDefaultsFields";
+
+/** What can be made again with other parameters: all but a document. */
+type MediaGeneration = Exclude<AssistantGeneration, { kind: "document" }>;
 
 export interface RegenerateInput {
   prompt: string;
@@ -44,7 +61,7 @@ export interface RegenerateInput {
 
 /** The fields a generation was made with, as its regeneration starts them. */
 export function generationFields(
-  generation: AssistantGeneration,
+  generation: MediaGeneration,
 ): MediaFieldsValue {
   if (generation.kind === "image")
     return {
@@ -70,7 +87,7 @@ export function generationFields(
 
 /** The request parameters for `fields` of a generation of `kind`. */
 export function regenerationParams(
-  generation: AssistantGeneration,
+  generation: MediaGeneration,
   fields: MediaFieldsValue,
 ): Record<string, unknown> {
   const value = fields as Record<string, unknown>;
@@ -95,7 +112,7 @@ export function regenerationParams(
 
 /** One line of what a generation used: model and parameters. */
 function summary(
-  generation: AssistantGeneration,
+  generation: MediaGeneration,
   models: ReadonlyArray<AssistantModel>,
   t: (key: string, options?: Record<string, unknown>) => string,
 ): string {
@@ -144,7 +161,7 @@ function GenerationDetails({
   item,
   models,
 }: {
-  item: AssistantGeneration;
+  item: MediaGeneration;
   models: ReadonlyArray<AssistantModel>;
 }) {
   const { t } = useTranslation();
@@ -239,6 +256,7 @@ export function GenerationCards({
   models,
   disabled,
   onSave,
+  onSaveAndOpen,
   onCancelVideo,
   onResumeVideo,
   onRegenerate,
@@ -251,6 +269,8 @@ export function GenerationCards({
   models: ReadonlyArray<AssistantModel>;
   disabled?: boolean;
   onSave: (file: AssistantAttachment) => Promise<unknown>;
+  /** Save a copy and open it with the default app. */
+  onSaveAndOpen: (file: AssistantAttachment) => Promise<unknown>;
   onCancelVideo: (item: AssistantGeneration) => Promise<unknown>;
   onResumeVideo: (item: AssistantGeneration) => Promise<unknown>;
   onRegenerate?: (
@@ -261,7 +281,7 @@ export function GenerationCards({
   sourceFile?: (id: string) => AssistantAttachment | undefined;
 }) {
   const { t } = useTranslation();
-  const [editing, setEditing] = useState<AssistantGeneration | null>(null);
+  const [editing, setEditing] = useState<MediaGeneration | null>(null);
   const items = message.generations ?? [];
   if (items.length === 0) return null;
   return (
@@ -270,6 +290,28 @@ export function GenerationCards({
         const files = (message.attachments ?? []).filter((file) =>
           item.outputs.includes(file.id),
         );
+        // A document has nothing to regenerate with other parameters, and no
+        // details to show: its card is the file.
+        if (item.kind === "document")
+          return (
+            <section
+              key={item.toolCallId}
+              aria-label={t("assistant.generation.kinds.document")}
+              className="max-w-full"
+            >
+              {["error", "failed"].includes(item.status) ? (
+                <FailedResult item={item} details={null} />
+              ) : (
+                <DocumentResult
+                  item={item}
+                  files={files}
+                  disabled={disabled}
+                  onSave={onSave}
+                  onSaveAndOpen={onSaveAndOpen}
+                />
+              )}
+            </section>
+          );
         const regenerate = onRegenerate ? () => setEditing(item) : undefined;
         const details = <GenerationDetails item={item} models={models} />;
         const tools = (
@@ -369,6 +411,172 @@ export function GenerationCards({
   );
 }
 
+const DOCUMENT_ICONS: Record<string, LucideIcon> = {
+  pptx: Presentation,
+  xlsx: FileSpreadsheet,
+  csv: FileSpreadsheet,
+  html: FileCode,
+  json: FileJson,
+};
+/** Most problems a card lists: the record keeps no more. */
+const MAX_DOCUMENT_ISSUES = 20;
+
+/** The problems a document's checks found, behind a count. */
+function DocumentIssues({ issues }: { issues: AssistantDocumentIssue[] }) {
+  const { t } = useTranslation();
+  const label = t("assistant.document.issues", { count: issues.length });
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          variant="ghost"
+          aria-label={label}
+          title={label}
+          className="h-6 flex-none gap-1 px-1.5 text-note text-warn"
+        >
+          <TriangleAlert aria-hidden className="h-3.5 w-3.5" />
+          <span className="tabular-nums">{issues.length}</span>
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        aria-label={label}
+        className="w-80 max-w-[calc(100vw-32px)] p-3 text-note text-ink-2"
+      >
+        <ul aria-label={label} className="max-h-60 space-y-2 overflow-y-auto">
+          {issues.map((issue, index) => (
+            <li key={index} className="space-y-0.5">
+              <p className="break-words">
+                {issue.severity && (
+                  <span className="font-medium text-ink">
+                    {t(
+                      `assistant.document.severity.${issue.severity.toLowerCase()}`,
+                      { defaultValue: issue.severity },
+                    )}
+                    {": "}
+                  </span>
+                )}
+                {issue.message}
+              </p>
+              {issue.path && (
+                <p className="break-all text-ink-muted">{issue.path}</p>
+              )}
+            </li>
+          ))}
+        </ul>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * A generated document as a card: what it is, how big, how many pages, slides
+ * or sheets, and what its checks found; saved and opened in one step, or only
+ * saved. There is nothing to play or preview here.
+ */
+function DocumentResult({
+  item,
+  files,
+  disabled,
+  onSave,
+  onSaveAndOpen,
+}: {
+  item: Extract<AssistantGeneration, { kind: "document" }>;
+  files: AssistantAttachment[];
+  disabled?: boolean;
+  onSave: (file: AssistantAttachment) => Promise<unknown>;
+  onSaveAndOpen: (file: AssistantAttachment) => Promise<unknown>;
+}) {
+  const { t } = useTranslation();
+  const [saving, setSaving] = useState(false);
+  if (item.status === "submitting")
+    return (
+      <div role="status" className={`${MEDIA_PLACEHOLDER} h-14 w-64 flex-row`}>
+        <Loader2 aria-hidden className="h-3.5 w-3.5 animate-spin" />
+        {t("assistant.document.making")}
+      </div>
+    );
+  const { pages, slides, sheets } = item.params;
+  const issues = (item.params.issues ?? []).slice(0, MAX_DOCUMENT_ISSUES);
+  const counts = (
+    [
+      ["slides", slides],
+      ["pages", pages],
+      ["sheets", sheets],
+    ] as const
+  ).flatMap(([key, count]) =>
+    typeof count === "number"
+      ? [t(`assistant.document.${key}`, { count })]
+      : [],
+  );
+  const save = (
+    action: (file: AssistantAttachment) => Promise<unknown>,
+    file: AssistantAttachment,
+  ) => {
+    setSaving(true);
+    void action(file)
+      .catch((error) => toast.error(t(assistantErrorKey(error))))
+      .finally(() => setSaving(false));
+  };
+  return (
+    <div className="space-y-2">
+      {files.map((file) => {
+        const format = (
+          item.params.format ||
+          file.name.split(".").pop() ||
+          ""
+        ).toLowerCase();
+        const Icon = DOCUMENT_ICONS[format] ?? FileText;
+        return (
+          <div
+            key={file.id}
+            className="w-full max-w-[420px] space-y-2.5 rounded-list border border-line bg-card-2 px-3 py-2.5"
+          >
+            <div className="flex items-center gap-3">
+              <span className="flex h-10 w-10 flex-none items-center justify-center rounded-ctl border border-line bg-card text-ink-2">
+                <Icon aria-hidden className="h-5 w-5" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p
+                  className="truncate text-ui font-medium text-ink"
+                  title={file.name}
+                >
+                  {file.name}
+                </p>
+                <p className="truncate text-note tabular-nums text-ink-muted">
+                  {[
+                    format.toUpperCase(),
+                    fmtBinaryBytes(file.sizeBytes),
+                    ...counts,
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              </div>
+              {issues.length > 0 && <DocumentIssues issues={issues} />}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                disabled={disabled || saving}
+                onClick={() => save(onSaveAndOpen, file)}
+              >
+                {t("assistant.document.saveAndOpen")}
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={disabled || saving}
+                onClick={() => save(onSave, file)}
+              >
+                {t("assistant.media.save")}
+              </Button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function SpeechResult({
   item,
   files,
@@ -447,7 +655,7 @@ function SpeechResult({
  * thumbnail can show; a file that is gone is left out.
  */
 function generationSources(
-  item: AssistantGeneration,
+  item: MediaGeneration,
   sourceFile: ((id: string) => AssistantAttachment | undefined) | undefined,
   t: (key: string) => string,
 ): { file: AssistantAttachment; label: string }[] {
@@ -488,7 +696,7 @@ function RegenerateDialog({
   onClose,
   onSubmit,
 }: {
-  item: AssistantGeneration;
+  item: MediaGeneration;
   models: ReadonlyArray<AssistantModel>;
   sources: { file: AssistantAttachment; label: string }[];
   url: (file: AssistantAttachment) => string;

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { listen } from "@tauri-apps/api/event";
+import i18n from "@/i18n";
 import en from "@/i18n/locales/en.json";
 import ja from "@/i18n/locales/ja.json";
 import zh from "@/i18n/locales/zh.json";
@@ -39,6 +40,33 @@ it("keeps default bootstrap IPC unchanged and requests catalog refresh only expl
   await assistantApi.bootstrap(true);
   expect(invoke).toHaveBeenLastCalledWith("assistant_bootstrap", {
     refreshCatalog: true,
+  });
+});
+
+describe("saving generated media", () => {
+  const request = {
+    sessionId: "session",
+    attachmentId: "attachment",
+    expectedOwner: "owner",
+    expectedGeneration: 7,
+  };
+
+  it("passes open:true through to the command, and omits it for a plain save", async () => {
+    invoke.mockResolvedValue(true);
+    expect(await assistantApi.saveMedia({ ...request, open: true })).toBe(true);
+    expect(invoke).toHaveBeenLastCalledWith("assistant_save_media", {
+      request: { ...request, open: true },
+    });
+    await assistantApi.saveMedia(request);
+    expect(invoke).toHaveBeenLastCalledWith("assistant_save_media", {
+      request,
+    });
+  });
+
+  it("maps a failed open to its own message", () => {
+    expect(assistantErrorKey("assistant_open_failed")).toBe(
+      "assistant.errors.openFailed",
+    );
   });
 });
 
@@ -241,8 +269,11 @@ describe("assistant commands", () => {
       attachmentIds: [],
       retryMessageId: "failed",
     };
+    await i18n.changeLanguage("en");
     await assistantApi.send(request);
-    expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
+    expect(invoke).toHaveBeenCalledWith("assistant_send", {
+      request: { ...request, uiLanguage: "en" },
+    });
   });
 
   it("writes an interruption to its existing run with frozen authority", async () => {
@@ -270,8 +301,11 @@ describe("assistant commands", () => {
       expectedOwner: "owner",
       expectedGeneration: 7,
     };
+    await i18n.changeLanguage("en");
     await assistantApi.send(request);
-    expect(invoke).toHaveBeenCalledWith("assistant_send", { request });
+    expect(invoke).toHaveBeenCalledWith("assistant_send", {
+      request: { ...request, uiLanguage: "en" },
+    });
     expect(invoke).toHaveBeenCalledOnce();
   });
 
@@ -742,4 +776,26 @@ it("sets a local permission mode and has no folder command", async () => {
   expect(await assistantApi.setPermission(request)).toBe("fullAuto");
   expect(invoke).toHaveBeenCalledWith("assistant_set_permission", { request });
   expect("localFolder" in assistantApi).toBe(false);
+});
+
+it("sends the actual UI language on first launch and after switching languages", async () => {
+  const previous = i18n.language;
+  try {
+    for (const language of ["en", "ja", "zh"]) {
+      await i18n.changeLanguage(language);
+      const request = {
+        sessionId: "session",
+        runId: "run",
+        operationId: "op",
+        text: "Hello",
+        attachmentIds: [],
+      };
+      await assistantApi.send(request);
+      expect(invoke).toHaveBeenLastCalledWith("assistant_send", {
+        request: { ...request, uiLanguage: language },
+      });
+    }
+  } finally {
+    await i18n.changeLanguage(previous);
+  }
 });

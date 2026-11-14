@@ -280,6 +280,10 @@ pub fn native_paths() -> Result<BTreeMap<String, PathBuf>, AppError> {
         .find(|path| path.exists())
         .unwrap_or_else(|| dir.join("opencode.json"));
     Ok(BTreeMap::from([
+        (
+            super::assistant_target::ID.into(),
+            super::assistant_target::mcp_config_path(),
+        ),
         ("claude".into(), crate::config::get_claude_mcp_path()),
         ("codex".into(), crate::codex_config::get_codex_config_path()),
         (
@@ -463,6 +467,12 @@ pub(crate) fn preview_at_adoption(
         .get_all_mcp_servers()?
         .shift_remove(id)
         .ok_or_else(|| error("resourceMissing"))?;
+    if selected
+        .iter()
+        .any(|(tool, _)| tool == super::assistant_target::ID)
+    {
+        super::mcp_targets::validate_assistant_server(&server.server)?;
+    }
     let hash = spec_hash(&server.server)?;
     if hash != meta.hash {
         return Err(error("revisionChanged"));
@@ -747,8 +757,8 @@ pub(crate) fn preview_at_adoption(
             }
             write.after_hash = io::fingerprint(Some(after.as_bytes()));
             write.after_text = after;
-            write.private_values =
-                native.is_some() && mcp_codec::has_literal_values(&server.server);
+            write.private_values = group.path == super::assistant_target::mcp_config_path()
+                || (native.is_some() && mcp_codec::has_literal_values(&server.server));
             write.receipt = receipt
                 .map(|mut owned| {
                     mcp_codec::inherit_created_section(&mut owned, &siblings);

@@ -78,8 +78,8 @@ pub use mcp::{
 pub use provider::{Provider, ProviderMeta};
 pub use services::assistant;
 pub use services::library::{
-    apply_operation as apply_resource_operation, delete_mcp_draft, preview_mcp_resource,
-    recover_operation as recover_resource_operation, save_mcp_draft,
+    apply_operation as apply_resource_operation, assistant_target, delete_mcp_draft,
+    preview_mcp_resource, recover_operation as recover_resource_operation, save_mcp_draft,
     skill_resource::preview as preview_skills_resource, Operation as ResourceOperation,
 };
 pub use services::{
@@ -157,6 +157,7 @@ mod assistant_wiring_tests {
                 "assistant_import_drop",
                 "assistant_import_pasted",
                 "assistant_list_sessions",
+                "assistant_list_skills",
                 "assistant_local_changes",
                 "assistant_pick_attachments",
                 "assistant_pick_audio",
@@ -170,6 +171,7 @@ mod assistant_wiring_tests {
                 "assistant_send",
                 "assistant_set_permission",
                 "assistant_set_preferences",
+                "assistant_set_search_provider",
                 "assistant_steer",
                 "assistant_stop",
                 "assistant_switch_version",
@@ -1561,6 +1563,8 @@ pub fn run() {
             commands::import_library_instruction,
             commands::delete_library_instruction,
             commands::get_library_skills,
+            commands::library_assistant_skill_modes,
+            commands::library_set_assistant_skill_mode,
             commands::preview_library_skill_distribution,
             commands::preview_library_skill_replacement,
             commands::keep_library_skill_native,
@@ -1879,6 +1883,7 @@ pub fn run() {
             commands::assistant_backup,
             commands::assistant_restore,
             commands::assistant_bootstrap,
+            commands::assistant_list_skills,
             commands::assistant_list_sessions,
             commands::assistant_create_session,
             commands::assistant_get_session,
@@ -1886,6 +1891,7 @@ pub fn run() {
             commands::assistant_usage_summary,
             commands::assistant_get_preferences,
             commands::assistant_set_preferences,
+            commands::assistant_set_search_provider,
             commands::assistant_delete_session,
             commands::assistant_empty_trash,
             commands::assistant_export_markdown,
