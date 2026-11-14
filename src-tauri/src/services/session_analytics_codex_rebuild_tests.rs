@@ -86,7 +86,12 @@ fn codex_rebuild_failed_generation_never_publishes_a_partial_file_set() {
     refresh_sources(&db, std::slice::from_ref(&spec)).unwrap();
     let before = read_input(&db).unwrap();
     let body = std::fs::read_to_string(&spec.path).unwrap();
-    std::fs::write(&spec.path, body.replace("100", "200")).unwrap();
+    // Ensure Windows observes the modified first source before the second fails.
+    std::fs::write(&spec.path, body.replace("100", "2000")).unwrap();
+    assert_ne!(
+        std::fs::metadata(&spec.path).unwrap().len(),
+        body.len() as u64
+    );
     let second = SourceSpec {
         path: spec.path.with_file_name("rollout-second.jsonl"),
         ..spec.clone()

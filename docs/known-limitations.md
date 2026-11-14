@@ -26,6 +26,14 @@ Regression fixtures exercise both Ofox apex choices and the Bash/PowerShell
 runtime adapters on macOS. They do not establish native Windows execution or
 acceptance in the installed desktop application.
 
+## Codex transcript cache stamps on Windows (2026-11-14)
+
+Warm source checks use physical file identity, size and last-write metadata.
+An in-place Windows rewrite of the same size within one filesystem clock tick
+can retain the same stamp. Such rewrites can keep serving cached values until
+a distinguishable filesystem revision is observed. The conflict and stale-source
+fixtures change size explicitly so they exercise an observable source mutation.
+
 ## Presentation thumbnail fonts (2026-11-14)
 
 CJK thumbnail rendering depends on an available font with the required glyphs.
