@@ -24,6 +24,7 @@ import { TOOL_ORDER } from "@/config/toolMeta";
 import { server } from "../msw/server";
 import type { ToolInstallationInfo } from "@/lib/api/toolUpdates";
 import * as tauri from "@tauri-apps/api/core";
+import { useState } from "react";
 
 vi.mock("@/lib/bindTools", () => ({ bindTools: vi.fn() }));
 vi.mock("@/hooks/useToolInstall", () => ({
@@ -96,6 +97,113 @@ describe("AddToolsDialog binding lifecycle", () => {
     fireEvent.click(confirm);
     await waitFor(() => expect(bindTools).toHaveBeenCalledWith(["claude"]));
     expect(added).toHaveBeenCalledWith(["workbuddy", "claude"]);
+  });
+
+  it("keeps the dialog open when only unrelated previous bindings are retained", async () => {
+    scan({ claude: { installationStatus: "installed", version: "1.0" } });
+    vi.mocked(bindTools).mockResolvedValue(["workbuddy"]);
+    const close = vi.fn();
+    render(
+      <AddToolsDialog
+        open
+        alreadyBound={["workbuddy"]}
+        onAdded={vi.fn()}
+        onOpenChange={close}
+      />,
+    );
+    const confirm = await screen.findByRole("button", { name: "确认（1）" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(bindTools).toHaveBeenCalledWith(["claude"]));
+    await waitFor(() => expect(confirm).toBeEnabled());
+    expect(close).not.toHaveBeenCalledWith(false);
+  });
+
+  it("preserves successful additions without closing after a partial failure", async () => {
+    scan({
+      claude: { installationStatus: "installed", version: "1.0" },
+      codex: { installationStatus: "installed", version: "1.0" },
+    });
+    vi.mocked(bindTools).mockResolvedValue(["workbuddy", "claude"]);
+    const added = vi.fn();
+    const close = vi.fn();
+    render(
+      <AddToolsDialog
+        open
+        alreadyBound={["workbuddy"]}
+        onAdded={added}
+        onOpenChange={close}
+      />,
+    );
+    const confirm = await screen.findByRole("button", { name: "确认（2）" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() =>
+      expect(added).toHaveBeenCalledWith(["workbuddy", "claude"]),
+    );
+    expect(close).not.toHaveBeenCalledWith(false);
+  });
+
+  it("retains the user's deselection when successful additions update parent state", async () => {
+    scan({
+      claude: { installationStatus: "installed", version: "1.0" },
+      codex: { installationStatus: "installed", version: "1.0" },
+      gemini: { installationStatus: "installed", version: "1.0" },
+    });
+    vi.mocked(bindTools).mockResolvedValue(["workbuddy", "claude"]);
+    function Parent() {
+      const [bound, setBound] = useState(["workbuddy"]);
+      return (
+        <AddToolsDialog
+          open
+          alreadyBound={bound}
+          onAdded={setBound}
+          onOpenChange={vi.fn()}
+        />
+      );
+    }
+    render(<Parent />);
+    const first = await screen.findByRole("button", { name: "确认（3）" });
+    await waitFor(() => expect(first).toBeEnabled());
+    fireEvent.click(screen.getByText("Gemini").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "确认（2）" }));
+    await waitFor(() =>
+      expect(screen.getByText("Claude Code").closest("button")).toBeDisabled(),
+    );
+    const retry = await screen.findByRole("button", { name: "确认（1）" });
+    await waitFor(() => expect(retry).toBeEnabled());
+    fireEvent.click(retry);
+    await waitFor(() => expect(bindTools).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(bindTools).mock.calls[1][0]).toEqual(["codex"]);
+  });
+
+  it("does not navigate or dismiss while a binding is still pending", async () => {
+    scan({ claude: { installationStatus: "installed", version: "1.0" } });
+    let finish!: (tools: string[]) => void;
+    vi.mocked(bindTools).mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    const manage = vi.fn();
+    const close = vi.fn();
+    render(
+      <AddToolsDialog
+        open
+        alreadyBound={["workbuddy"]}
+        onAdded={vi.fn()}
+        onOpenChange={close}
+        onManageBound={manage}
+      />,
+    );
+    const confirm = await screen.findByRole("button", { name: "确认（1）" });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    fireEvent.click(screen.getByRole("button", { name: "在主页配置" }));
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Escape" });
+    expect(manage).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalledWith(false);
+    await act(async () => finish(["workbuddy"]));
   });
 
   it("does not label an uncertain scan as uninstalled or offer installation", async () => {
