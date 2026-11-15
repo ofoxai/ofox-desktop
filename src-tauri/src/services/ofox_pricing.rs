@@ -90,7 +90,11 @@ impl CostEstimate {
         self.additional_units_unsupported |= other.additional_units_unsupported;
         self.availability = match self.known_cost_usd.as_deref() {
             None => "unknown",
-            Some(_) if before_has_unknown || other_has_unknown => "partial",
+            Some(_)
+                if before_has_unknown || other_has_unknown || self.additional_units_unsupported =>
+            {
+                "partial"
+            }
             Some("0") if !self.additional_units_unsupported => "free",
             Some("0") => "partial",
             _ => "known",
@@ -409,6 +413,27 @@ impl PriceCatalog {
         hour_writes: u64,
         records: Option<u64>,
     ) -> CostEstimate {
+        self.estimate_with_ttl(model, buckets, Some(hour_writes), records)
+    }
+
+    /// Unknown cache-write duration cannot be priced as a known five-minute write.
+    pub fn estimate_with_ttl(
+        &self,
+        model: &str,
+        buckets: [u64; 4],
+        hour_writes: Option<u64>,
+        records: Option<u64>,
+    ) -> CostEstimate {
+        if hour_writes.is_some_and(|hour| hour > buckets[3]) {
+            return CostEstimate {
+                unpriced_model_ids: vec![model.into()],
+                unpriced_record_count: records,
+                additional_units_unsupported: true,
+                ..CostEstimate::default()
+            };
+        }
+        let ttl_known = hour_writes.is_some() || buckets[3] == 0;
+        let hour_writes = hour_writes.unwrap_or(0);
         let ofox = self.snapshot.as_ref().and_then(|s| {
             let rate = |name: &str| {
                 s.aliases
@@ -427,7 +452,7 @@ impl PriceCatalog {
                 rate.rates.iter().all(Option::is_some)
             } else {
                 let mut needed = buckets;
-                let hour = hour_writes.min(needed[3]);
+                let hour = hour_writes;
                 needed[3] -= hour;
                 needed
                     .iter()
@@ -495,16 +520,16 @@ impl PriceCatalog {
                 }
             })
             .or_else(|| rate(0).and_then(|input| input.checked_mul(Decimal::TWO)));
-        let hour = hour_writes.min(buckets[3]);
+        let hour = hour_writes;
         let priced = [
             (buckets[0], rate(0)),
             (buckets[1], rate(1)),
             (buckets[2], rate(2)),
-            (buckets[3] - hour, rate(3)),
+            (if ttl_known { buckets[3] - hour } else { 0 }, rate(3)),
             (hour, hour_rate),
         ];
         let mut known = false;
-        let mut unknown = tier_unknown;
+        let mut unknown = tier_unknown || !ttl_known;
         let mut amount = Decimal::ZERO;
         for (count, rate) in priced {
             if count == 0 {
@@ -527,16 +552,20 @@ impl PriceCatalog {
             unknown = !known;
         }
         let additional = resolved.is_some_and(|rate| {
-            rate.additional_units.values().any(|value| {
-                value
-                    .as_deref()
-                    .and_then(|v| parse_rate(v).ok())
-                    .is_none_or(|v| !v.is_zero())
-            })
+            rate.additional_units
+                .iter()
+                // This dimension is supported above and is not an unknown add-on.
+                .filter(|(unit, _)| unit.as_str() != "input_cache_write_1h")
+                .any(|(_, value)| {
+                    value
+                        .as_deref()
+                        .and_then(|v| parse_rate(v).ok())
+                        .is_none_or(|v| !v.is_zero())
+                })
         });
         let availability = if !known {
             "unknown"
-        } else if unknown || (amount.is_zero() && additional) {
+        } else if unknown || additional {
             "partial"
         } else if amount.is_zero() {
             "free"
@@ -683,7 +712,17 @@ mod tests {
                 "deepseek/deepseek-v4-flash",
             ] {
                 let estimate = catalog.estimate(model, [1000, 1000, 0, 0], Some(1));
-                assert_eq!(estimate.availability, "known", "{apex}: {model}");
+                // Structured/audio/reasoning add-ons are not part of the base subtotal.
+                let expected = if matches!(
+                    model,
+                    "openai/gpt-6.1-sol" | "google/gemini-2.5-flash" | "deepseek/deepseek-v4-flash"
+                ) {
+                    assert!(estimate.additional_units_unsupported);
+                    "partial"
+                } else {
+                    "known"
+                };
+                assert_eq!(estimate.availability, expected, "{apex}: {model}");
                 assert_eq!(estimate.official_model_ids, vec![model]);
             }
             assert_eq!(
@@ -1064,5 +1103,69 @@ mod tests {
                 .catalog_version,
             b.coverage.catalog_version
         );
+    }
+
+    #[test]
+    fn recovered_ttl_hours_above_total_are_not_silently_clamped() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &json!({"data":[{"id":"ttl-only","pricing":{"prompt":"0.000005","input_cache_write_5m":"0.00000625","input_cache_write_1h":"0.00001"}}]}), 10).unwrap();
+        let estimate = catalog.estimate_with_hour_writes("ttl-only", [0, 0, 0, 100], 101, Some(1));
+        assert_eq!(estimate.availability, "unknown");
+        assert_eq!(estimate.known_cost_usd, None);
+    }
+
+    #[test]
+    fn recovered_positive_subtotal_with_unsupported_additions_stays_partial() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let catalog = PriceCatalog::ingest_on(&conn, "ofox.ai", &json!({"data":[{"id":"addon","pricing":{"prompt":"0.000001","completion":"0","input_cache_read":"0","input_cache_write":"0","web_search":"0.13"}}]}), 10).unwrap();
+        let estimate = catalog.estimate("addon", [1000000, 0, 0, 0], Some(1));
+        assert_eq!(estimate.availability, "partial");
+        assert_eq!(estimate.known_cost_usd.as_deref(), Some("1"));
+        let mut total = CostEstimate::empty();
+        total
+            .combine(&CostEstimate {
+                known_cost_usd: Some("1".into()),
+                availability: "known".into(),
+                additional_units_unsupported: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total.availability, "partial");
+    }
+
+    #[test]
+    fn dashboard_ttl_unknown_is_not_zero_and_invalid_hours_are_rejected() {
+        let db = Database::memory().unwrap();
+        let conn = db.conn.lock().unwrap();
+        let catalog = PriceCatalog::ingest_on(
+            &conn,
+            "ofox.ai",
+            &json!({"data":[{
+                "id":"ttl-only", "pricing":{"prompt":"0.000005",
+                "input_cache_write_5m":"0.00000625", "input_cache_write_1h":"0.00001"}
+            }]}),
+            10,
+        )
+        .unwrap();
+        let estimate =
+            catalog.estimate_with_ttl("ttl-only", [1_000_000, 0, 0, 1_000_000], None, Some(1));
+        assert_eq!(estimate.availability, "partial");
+        assert_eq!(estimate.known_cost_usd.as_deref(), Some("5"));
+        assert_eq!(estimate.unpriced_record_count, Some(1));
+        for hours in [None, Some(101)] {
+            let estimate = catalog.estimate_with_ttl("ttl-only", [0, 0, 0, 100], hours, Some(1));
+            assert_eq!(estimate.availability, "unknown");
+            assert_eq!(estimate.known_cost_usd, None);
+        }
+        let zero = catalog.estimate_with_ttl("ttl-only", [0, 0, 0, 1_000_000], Some(0), Some(1));
+        assert_eq!(zero.known_cost_usd.as_deref(), Some("6.25"));
+        assert_eq!(zero.availability, "known");
+        assert!(!zero.additional_units_unsupported);
+        let mixed =
+            catalog.estimate_with_ttl("ttl-only", [0, 0, 0, 1_000_000], Some(600_000), Some(1));
+        assert_eq!(mixed.known_cost_usd.as_deref(), Some("8.5"));
+        assert_eq!(mixed.availability, "known");
     }
 }

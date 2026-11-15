@@ -344,6 +344,7 @@ pub(crate) fn read_dsh(path: &Path) -> Result<DshRead, AppError> {
                     )
                 });
             let fact = NormalizedUsageFact {
+                cache_write_ttl_known: false,
                 request_id: request_id.clone(),
                 native_key: native_key.clone(),
                 session_id: read.session_id.clone(),

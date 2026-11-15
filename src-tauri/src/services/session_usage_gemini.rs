@@ -420,6 +420,7 @@ pub(crate) fn normalized_facts(
         calls
             .into_iter()
             .map(|c| usage_source::NormalizedUsageFact {
+                cache_write_ttl_known: false,
                 request_id: format!(
                     "gemini_session:{}:{}",
                     session.as_deref().unwrap_or("unknown"),

@@ -416,14 +416,14 @@ impl NumericEstimate {
             .transpose()?;
         let additional_units = self.additional_units || value.additional_units_unsupported;
         // Match CostEstimate::combine's sticky partial policy, including a
-        // previous zero-token estimate with unsupported additional charges.
+        // previous estimate with unsupported additional charges.
         let before_has_unknown =
             self.partial || (self.amount.is_none() && !self.unpriced_models.is_empty());
         let partial = amount.is_some()
             && (before_has_unknown
                 || value.availability == "partial"
                 || (value.availability == "unknown" && !value.unpriced_model_ids.is_empty())
-                || (amount.is_some_and(|v| v.is_zero()) && additional_units));
+                || additional_units);
         self.amount = amount;
         self.unpriced_records = unpriced_records;
         self.additional_units = additional_units;
@@ -618,9 +618,12 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         .filter(|event| event.main)
         .map(|event| event.session_key.as_str())
         .collect();
-    let message_activity =
+    let message_activity = if native_mode {
+        core::message_counts_refs(messages.iter().copied(), &filters.window, days)
+    } else {
         core::message_activity_refs(messages.iter().copied(), &filters.window, days)
-            .map_err(|code| invalid(&code))?;
+    }
+    .map_err(|code| invalid(&code))?;
     let runtime_activity = if native_mode {
         super::session_native_activity::activity(&runtime_events, &filters.window, days)
             .map_err(|code| invalid(&code))?
@@ -1001,14 +1004,15 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
     let messages_available = message_reason.is_none();
     let activity_available = activity_reason.is_none();
     let message_projection = |selected: &BTreeSet<String>| {
-        core::message_activity_refs(
-            messages
-                .iter()
-                .copied()
-                .filter(|message| selected.contains(&message.session_key)),
-            &filters.window,
-            days,
-        )
+        let selected_messages = messages
+            .iter()
+            .copied()
+            .filter(|message| selected.contains(&message.session_key));
+        if native_mode {
+            core::message_counts_refs(selected_messages, &filters.window, days)
+        } else {
+            core::message_activity_refs(selected_messages, &filters.window, days)
+        }
         .map_err(|code| invalid(&code))
     };
     let runtime_projection = |selected: &BTreeSet<String>| {
@@ -1102,10 +1106,10 @@ pub(crate) fn build_analysis_in<Tz: chrono::TimeZone>(
         }
         // Every projection uses the same immutable per-record estimate from
         // the captured catalog. Resolve aliases/rates and price buckets once.
-        let mut fact_estimate = catalog.estimate_with_hour_writes(
+        let mut fact_estimate = catalog.estimate_with_ttl(
             &fact.model,
             fact.buckets,
-            fact.cache_write_1h,
+            (fact.tool_id != "claude" || fact.cache_write_ttl_known).then_some(fact.cache_write_1h),
             Some(1),
         );
         if !fact.complete && fact_estimate.known_cost_usd.is_some() {
@@ -1680,6 +1684,7 @@ mod tests {
             buckets: tokens,
             complete: true,
             cache_write_1h: 0,
+            cache_write_ttl_known: true,
         }
     }
     fn days() -> Vec<DayBoundary> {

@@ -1380,3 +1380,113 @@ it("greets the first load of the overview with the fox, and not a refresh with d
     screen.queryByRole("status", { name: zh.pages.usage.loading }),
   ).toBeNull();
 });
+
+it.each([true, false])(
+  "rolls today's query over without collection or a manual refresh (query backend: %s)",
+  async (modern) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 9, 21, 23, 59, 59));
+    try {
+      localStorage.setItem("ofox.usageRefreshSeconds", "0");
+      localStorage.setItem("ofox.usagePeriod", "today");
+      const normal = mocks.invoke.getMockImplementation()!;
+      mocks.invoke.mockImplementation(async (command: string, args: any) => {
+        if (command === "get_usage_capabilities")
+          return modern ? { queryVersion: 1, sources: [] } : {};
+        if (command === "get_usage_overview")
+          return {
+            ...overview,
+            appliedQuery: args.query,
+            queryFingerprint: "calendar-query",
+            snapshotVersion: "calendar-snapshot",
+          };
+        return normal(command, args);
+      });
+      render(<Page />);
+      await waitFor(() =>
+        expect(
+          mocks.invoke.mock.calls.some(
+            ([name]) => name === "get_usage_overview",
+          ),
+        ).toBe(true),
+      );
+      const before = mocks.invoke.mock.calls.filter(
+        ([name]) => name === "get_usage_overview",
+      ).length;
+      vi.setSystemTime(new Date(2026, 9, 22, 0, 0, 1));
+      fireEvent.focus(window);
+      if (modern) {
+        await waitFor(() =>
+          expect(mocks.invoke).toHaveBeenCalledWith(
+            "get_usage_overview",
+            expect.objectContaining({
+              query: expect.objectContaining({
+                startMs: new Date(2026, 9, 22).getTime(),
+                endMs: Date.now(),
+              }),
+            }),
+          ),
+        );
+      } else {
+        await waitFor(() =>
+          expect(
+            mocks.invoke.mock.calls.filter(
+              ([name]) => name === "get_usage_overview",
+            ).length,
+          ).toBeGreaterThan(before),
+        );
+        const since = mocks.invoke.mock.calls
+          .slice(
+            mocks.invoke.mock.calls.findIndex(
+              ([name]) => name === "get_usage_overview",
+            ) + 1,
+          )
+          .map(([name]) => name);
+        expect(since).not.toContain("sync_session_usage");
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  },
+);
+
+it("retries a legacy new-day read after hiding the page discards its reply", async () => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(2026, 9, 21, 23, 59, 59));
+  try {
+    localStorage.setItem("ofox.usageRefreshSeconds", "0");
+    localStorage.setItem("ofox.usagePeriod", "today");
+    const normal = mocks.invoke.getMockImplementation()!;
+    let reads = 0;
+    let finish!: (value: UsageOverview) => void;
+    mocks.invoke.mockImplementation(async (command: string, args: any) => {
+      if (command === "get_usage_capabilities") return {};
+      if (command === "get_usage_overview") {
+        reads++;
+        if (reads === 2)
+          return new Promise<UsageOverview>((resolve) => {
+            finish = resolve;
+          });
+        return {
+          ...overview,
+          totals: { ...totals, totalTokens: reads === 1 ? 1200 : 7200 },
+        };
+      }
+      return normal(command, args);
+    });
+    render(<Page />);
+    await screen.findAllByText("1.2K");
+    vi.setSystemTime(new Date(2026, 9, 22, 0, 0, 1));
+    fireEvent.focus(window);
+    await waitFor(() => expect(reads).toBe(2));
+    fireEvent.click(screen.getByText("hide-page"));
+    await act(async () =>
+      finish({ ...overview, totals: { ...totals, totalTokens: 5000 } }),
+    );
+    fireEvent.click(screen.getByText("show-page"));
+    await waitFor(() => expect(reads).toBe(3));
+    expect(await screen.findAllByText("7.2K")).not.toHaveLength(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});

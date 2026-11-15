@@ -114,3 +114,12 @@ Managed analytics queries can reuse a verified projection without rereading all 
 Local statistics publish as soon as native synchronization and their query complete, independently of pending or failed account endpoints. Manual failures are visible while retaining the last validated data. UsagePage owns publication of query-mode refresh results; usage-synced does not additionally refetch an old query anchor. Sync and staged reads have visible progress, a spinning refresh action and aria-busy. During filter changes the date summary follows the displayed result receipt, with a highlighted pending/previous-result notice. The last graph and its local state remain available while waiting; a late response cannot publish to a different query/apex owner.
 
 A synthetic debug benchmark of 32 MiB raw cache measured approximately 1.5 seconds for full warm validation versus less than 1 millisecond for an unchanged managed SQLite observation. This measures projection reuse only, excluding native synchronization, aggregation, IPC, rendering and first-load network requests; it is not an end-to-end app speed claim.
+
+
+## 缓存写入时长证据（2026-11-15）
+
+Claude 的 cache-write 总量不证明其中 1 小时写入为零。解析器区分缺失时长、明确零及正数，并拒绝负数、错误类型、超出总量或互相冲突的子桶。Claude parser revision 由 3 升到 4，旧来源重新验证；其他原生适配器新增兼容字段但不改变原有事件身份。
+
+重估历史 Claude ledger 行时，仅借用 session、message identity、model、事件秒与四个 token 桶均一致的原生证据；重复或不完整证据不能补成确定时长。未知时长只保留可估算的已知部分，不能按默认时长声称完整费用。归档聚合丢失了单次时长时仍保持未知。该补充只校准当前估价，历史保存金额和当前 CSV 格式不变。
+
+`CostEstimate::combine` 与会话分析的数值累加器共用相同 partial 语义：存在未支持的额外计费单位时，即使已知基础费用为正，也不是完整费用。原有精度、溢出与未知值差分测试继续约束这一行为。

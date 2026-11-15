@@ -4606,6 +4606,7 @@
     "unknownTime": "No successful sync time yet",
     "priceUnavailable": "Price catalog unavailable; costs cannot be estimated",
     "pricePartial": "{{count}} models unpriced",
+    "priceIncomplete": "Some costs cannot be fully estimated",
     "officialFallback": "{{count}} models estimated at manufacturer API prices",
     "officialPriceSource": "Manufacturer API list price",
     "ofoxPriceSource": "Ofox API price",

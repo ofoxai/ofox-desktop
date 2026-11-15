@@ -34,7 +34,7 @@ mod rebuild;
 const VERSION: u8 = 1;
 /// Bump to read every Claude source again after a change to what is read
 /// (2: hour-long cache writes).
-const CLAUDE_PARSER_VERSION: u8 = 3;
+const CLAUDE_PARSER_VERSION: u8 = 4;
 /// The one-query read of every cached source. A 1,700-session history is
 /// about 125 MB even stored compactly, and a read over the budget refuses
 /// listings and every refresh alike; decoding it holds more than this anyway.
@@ -1751,6 +1751,7 @@ fn parse(spec: &SourceSpec, now: i64) -> Result<Entry, AppError> {
             .map(u64::from),
             complete: true,
             cache_write_1h: u64::from(fact.usage.cache_creation_1h_tokens),
+            cache_write_ttl_known: fact.cache_write_ttl_known,
         });
     }
     entry.reasons.extend(transcript.reasons);

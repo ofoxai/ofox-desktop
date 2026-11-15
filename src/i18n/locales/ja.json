@@ -4606,6 +4606,7 @@
     "unknownTime": "成功した同期時刻がありません",
     "priceUnavailable": "価格カタログを利用できないため、費用を見積もれません",
     "pricePartial": "{{count}} 個のモデルが未計価",
+    "priceIncomplete": "一部の費用は完全に算出できません",
     "officialFallback": "{{count}}モデルを提供元の公式 API 価格で概算",
     "officialPriceSource": "提供元の公式 API 価格",
     "ofoxPriceSource": "Ofox API 価格",

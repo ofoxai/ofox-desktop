@@ -4606,6 +4606,7 @@
     "unknownTime": "尚无成功同步时间",
     "priceUnavailable": "价格目录不可用，费用暂无法估算",
     "pricePartial": "{{count}} 个模型未计价",
+    "priceIncomplete": "部分费用尚无法完整估算",
     "officialFallback": "{{count}} 个模型按厂商官方价估算",
     "officialPriceSource": "厂商官方 API 标价",
     "ofoxPriceSource": "Ofox API 单价",
