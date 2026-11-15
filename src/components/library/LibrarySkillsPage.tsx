@@ -215,12 +215,10 @@ export function LibrarySkillsPage({
   const { t } = useTranslation();
   const active = useInteractionActive();
   const queryClient = useQueryClient();
-  // Observe the existing settings cache for the folders that move skill targets.
-  const routingSettings = useQuery({
-    queryKey: ["settings"],
-    queryFn: settingsApi.get,
-    enabled: false,
-  }).data;
+  const routingQuery = useSettingsQuery();
+  const routingSettings = routingQuery.data;
+  const routingReadError =
+    routingSettings === undefined && routingQuery.isError;
   const routingKey = JSON.stringify([
     routingSettings?.claudeConfigDir,
     routingSettings?.codexConfigDir,
@@ -229,11 +227,14 @@ export function LibrarySkillsPage({
     routingSettings?.hermesConfigDir,
     routingSettings?.openclawConfigDir,
   ]);
-  const settings = useSettingsQuery().data;
+  const settings = routingSettings;
   const query = useQuery({
     queryKey: ["library", "skills", routingKey],
     queryFn: () => libraryApi.list("skills"),
     retry: false,
+    enabled: active && routingSettings !== undefined,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
   const data = query.data;
   const rows = data?.skills ?? [];
@@ -314,10 +315,20 @@ export function LibrarySkillsPage({
   useEffect(
     () =>
       registerRefresh("skills", async () => {
+        if (routingSettings === undefined) {
+          await routingQuery.refetch();
+          return;
+        }
         await query.refetch();
         native.rescan();
       }),
-    [registerRefresh, query.refetch, native.rescan],
+    [
+      registerRefresh,
+      query.refetch,
+      native.rescan,
+      routingSettings,
+      routingQuery.refetch,
+    ],
   );
   useEffect(
     () =>
@@ -1545,13 +1556,18 @@ export function LibrarySkillsPage({
               {t("library.legacyReadOnly")}
             </p>
           )}
-          {query.isError && (
+          {(query.isError || routingReadError) && (
             <p role="alert" className="text-ctl text-danger">
-              {libraryError(query.error, t)}
+              {libraryError(
+                routingReadError ? routingQuery.error : query.error,
+                t,
+              )}
             </p>
           )}
         </div>
-        {query.isPending && <FoxLoader label={t("pages.library.loading")} />}
+        {query.isPending && !routingReadError && (
+          <FoxLoader label={t("pages.library.loading")} />
+        )}
 
         {data?.assistantSkillsError && (
           <p role="status" className="text-ctl text-warn">
