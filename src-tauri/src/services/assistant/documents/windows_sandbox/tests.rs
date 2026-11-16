@@ -43,7 +43,9 @@ fn assert_suspended_lpac_access_controls() {
         (ContainerPolicy::Lpac, true),
         (ContainerPolicy::OrdinaryAppContainer, false),
     ] {
-        let observation = Observer::fixed_probe();
+        let mut trace = ProbeTrace::new();
+        trace.engine(ProbeStage::NodeIsolation);
+        let observation = trace.observation.clone();
         let child = create_suspended(
             &exe,
             &["/D".into(), "/C".into(), "echo bad>must-not-run".into()],
@@ -54,19 +56,39 @@ fn assert_suspended_lpac_access_controls() {
             policy,
             &observation,
         )
-        .unwrap();
+        .unwrap_or_else(|error| {
+            observation.failed();
+            panic!(
+                "SUSPENDED_CONTROL_CREATE lpac={lpac}: {}",
+                trace.failure(&error, &[])
+            );
+        });
         let verified = verify_token(
             raw(&child.process.process),
             profile.sid.0,
             cap.sid,
             &observation,
         );
-        if lpac {
-            verified.expect("actual suspended LPAC must pass the complete production verifier");
-        } else {
-            assert_eq!(verified.unwrap_err(), UNAVAILABLE);
+        if verified.is_err() {
+            observation.failed();
         }
         let report = observation.snapshot().unwrap();
+        let diagnostic = verified
+            .as_ref()
+            .err()
+            .map(|error| trace.failure(error, &[]));
+        if lpac {
+            assert!(
+                verified.is_ok(),
+                "actual suspended LPAC must pass the complete production verifier: diagnostic={diagnostic:?}; report={report}"
+            );
+        } else {
+            assert!(
+                verified.as_ref().err().is_some_and(|error| error == UNAVAILABLE),
+                "ordinary AC must receive the expected production refusal: accepted={}; diagnostic={diagnostic:?}; report={report}",
+                verified.is_ok()
+            );
+        }
         let evidence = &report["evidence"];
         assert_eq!(evidence["appContainer"], 1);
         assert_eq!(evidence["packageMatches"], true);
