@@ -1,3 +1,5 @@
+use super::super::tools::scope::resolve as resolve_local_test_path;
+
 struct LocalMutationFixture {
     path: PathBuf,
     change: bool,
@@ -50,7 +52,7 @@ async fn home_retarget_during_journal_key_wait_is_refused_before_mutation() {
     let mut run = control(&sid);
     let state = Arc::get_mut(&mut run).unwrap();
     state.local_enabled = true;
-    state.local_home = Some(original.canonicalize().unwrap());
+    state.local_home = Some(resolve_local_test_path(&original).unwrap());
     host.register_run(run.clone(), host.generation(), || Ok(()))
         .unwrap();
     let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
@@ -86,6 +88,9 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
     let _sandbox = crate::test_sandbox::sandbox();
     for cancel in [true, false] {
         let (_tmp, env, host) = fixture_with_env();
+        // Admission uses scope::resolve, not std canonicalize's Windows
+        // verbatim spelling, which generic tool paths intentionally reject.
+        let admitted_home = resolve_local_test_path(&env.config).unwrap();
         let path = env.config.join("config/target.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, b"original").unwrap();
@@ -110,7 +115,7 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
         let mut run = control(&sid);
         let state = Arc::get_mut(&mut run).unwrap();
         state.local_enabled = true;
-        state.local_home = Some(env.config.canonicalize().unwrap());
+        state.local_home = Some(admitted_home.clone());
         if !cancel {
             state.deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         }
@@ -118,14 +123,24 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
             .unwrap();
         let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
             "toolCallId":"interrupted-mutation","name":"rebind_tool","args":{"tool":"codex"}});
-        let work = tokio::spawn({
+        let mut work = tokio::spawn({
             let host = host.clone();
             let run = run.clone();
             async move { host.dispatch_tool(&run, &call).await }
         });
-        tokio::time::timeout(Duration::from_secs(5), fixture.written.notified())
-            .await
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                biased;
+                _ = fixture.written.notified() => {},
+                result = &mut work => match result {
+                    Ok(Err(error)) => panic!("mutation refused before the journaled write: {error}"),
+                    Ok(Ok(_)) => panic!("mutation returned before the journaled write"),
+                    Err(error) => panic!("mutation worker failed before the journaled write: {error}"),
+                },
+            }
+        })
+        .await
+        .expect("mutation did not reach its journaled write before interruption");
         if cancel {
             run.cancel.send_replace(true);
         }
@@ -147,7 +162,7 @@ async fn interrupted_journaled_mutation_keeps_verification_debt_across_run_resul
         assert_eq!(
             pending["targets"],
             json!([{
-                "tool":"codex","folder":env.config.canonicalize().unwrap(),"verified":false
+                "tool":"codex","folder":admitted_home,"verified":false
             }])
         );
         // The runtime saw cancellation, not the successful changed result.
@@ -204,7 +219,8 @@ async fn verify_interrupted_debt_in_canonical_home(
     let mut next = control(sid);
     let state = Arc::get_mut(&mut next).unwrap();
     state.local_enabled = true;
-    state.local_home = Some(env.config.canonicalize().unwrap());
+    let admitted_home = resolve_local_test_path(&env.config).unwrap();
+    state.local_home = Some(admitted_home.clone());
     host.register_run(next.clone(), host.generation(), || Ok(()))
         .unwrap();
     let call = |id: &str, name: &str, args: Value| json!({"sessionId":sid,"runId":next.run_id,"operationId":next.operation_id,"toolCallId":id,"name":name,"args":args});
@@ -215,7 +231,7 @@ async fn verify_interrupted_debt_in_canonical_home(
         )
         .await
         .unwrap();
-    assert_eq!(status["folder"], json!(env.config.canonicalize().unwrap()));
+    assert_eq!(status["folder"], json!(admitted_home));
     let verified = host
         .dispatch_tool(
             &next,

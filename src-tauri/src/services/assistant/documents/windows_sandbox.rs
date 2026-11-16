@@ -41,9 +41,9 @@ use windows::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
                 SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
             },
-            DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetSecurityDescriptorDacl,
-            GetSecurityDescriptorSacl, GetSidSubAuthority, GetSidSubAuthorityCount,
-            GetTokenInformation,
+            DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, GetSecurityDescriptorSacl, GetSidSubAuthority,
+            GetSidSubAuthorityCount, GetTokenInformation,
             Isolation::{
                 CreateAppContainerProfile, DeleteAppContainerProfile, GetAppContainerFolderPath,
             },
@@ -500,6 +500,102 @@ fn descriptor_string(descriptor: PSECURITY_DESCRIPTOR) -> Result<String, String>
         result
     }
 }
+
+/// Diagnostic shape only, never an ACL acceptance rule. Keep permission/control
+/// differences visible without logging account SIDs or conditional ACE payloads.
+fn descriptor_shape(text: &str) -> serde_json::Value {
+    let aces: Vec<_> = text
+        .split('(')
+        .skip(1)
+        .take(32)
+        .filter_map(|part| {
+            let body = part.split(')').next()?;
+            let fields: Vec<_> = body.split(';').take(6).collect();
+            if fields.len() != 6 {
+                return None;
+            }
+            let tokens = |value: &str, allowed: &[&str]| {
+                (value.len() <= 48
+                    && value.len().is_multiple_of(2)
+                    && value
+                        .as_bytes()
+                        .chunks(2)
+                        .all(|pair| allowed.iter().any(|token| token.as_bytes() == pair)))
+                .then(|| value.to_owned())
+            };
+            let kind = match fields[0] {
+                "A" => "allow",
+                "D" => "deny",
+                "ML" => "mandatory_label",
+                _ => "other",
+            };
+            if kind == "other" {
+                return Some(serde_json::json!({"type":"other"}));
+            }
+            let sid = fields[5];
+            let identity = if [
+                "SY", "ME", "LW", "HI", "SI", "OW", "WD", "BA", "BU", "AC", "RA", "AN", "AU", "LS",
+                "NS", "IU", "SU", "NU", "CO", "CG",
+            ]
+            .contains(&sid)
+            {
+                serde_json::json!({"wellKnownAlias":sid})
+            } else {
+                let kind = if sid.starts_with("S-1-5-21-") {
+                    "nt_account"
+                } else if sid.starts_with("S-1-15-3-") {
+                    "capability"
+                } else if sid.starts_with("S-1-15-2-") {
+                    "app_container"
+                } else if sid.starts_with("S-1-16-") {
+                    "integrity_label"
+                } else {
+                    "other"
+                };
+                serde_json::json!({"kind":kind})
+            };
+            let flags = tokens(
+                fields[1],
+                &["OI", "CI", "NP", "IO", "ID", "SA", "FA", "TP", "CR"],
+            );
+            let rights = if fields[2].starts_with("0x")
+                && fields[2].len() <= 10
+                && fields[2][2..].bytes().all(|c| c.is_ascii_hexdigit())
+            {
+                Some(fields[2].to_owned())
+            } else {
+                tokens(
+                    fields[2],
+                    &[
+                        "GA", "GR", "GW", "GX", "RC", "SD", "WD", "WO", "FA", "FR", "FW", "FX",
+                        "KA", "KR", "KW", "KX", "NR", "NW", "NX",
+                    ],
+                )
+            };
+            Some(serde_json::json!({
+                "type":kind, "flags":flags,
+                "rights":rights, "identityClass":identity
+            }))
+        })
+        .collect();
+    serde_json::json!({"sddlBytes":text.len(),"aces":aces})
+}
+
+fn descriptor_diagnostic(descriptor: PSECURITY_DESCRIPTOR) -> Result<serde_json::Value, String> {
+    let (mut control, mut revision) = (0u16, 0u32);
+    unsafe {
+        win(GetSecurityDescriptorControl(
+            descriptor,
+            &mut control,
+            &mut revision,
+        ))?;
+    }
+    Ok(serde_json::json!({
+        "control":format!("{control:04x}"), "revision":revision,
+        "shape":descriptor_shape(&descriptor_string(descriptor)?)
+    }))
+}
+
 fn verify_cache_acl(root: &File, expected: &str) -> Result<(), String> {
     let mut actual = PSECURITY_DESCRIPTOR::default();
     unsafe {
@@ -514,15 +610,28 @@ fn verify_cache_acl(root: &File, expected: &str) -> Result<(), String> {
             Some(&mut actual),
         )
         .ok()
-        .map_err(|_| UNAVAILABLE.to_owned())?;
+        .map_err(|error| {
+            format!(
+                "{UNAVAILABLE}:cache_acl_query_{:08x}",
+                error.code().0 as u32
+            )
+        })?;
     }
     let allocation = Local(actual.0);
     let expected = security_descriptor(expected)?;
     let matches =
         descriptor_string(actual)? == descriptor_string(PSECURITY_DESCRIPTOR(expected.0))?;
+    let diagnostic = if matches {
+        None
+    } else {
+        Some(serde_json::json!({
+            "actual":descriptor_diagnostic(actual)?,
+            "expected":descriptor_diagnostic(PSECURITY_DESCRIPTOR(expected.0))?
+        }))
+    };
     drop(allocation);
-    if !matches {
-        return Err(UNAVAILABLE.into());
+    if let Some(diagnostic) = diagnostic {
+        return Err(format!("{UNAVAILABLE}:cache_acl_mismatch {diagnostic}"));
     }
     Ok(())
 }

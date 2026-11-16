@@ -72,6 +72,26 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -
 `.github/workflows/windows-probe.yml` 已使用相同后端入口。代码推送后，Windows
 workflow 将构建两个探针并上传验证日志；全量前端检查继续由主 CI 执行。
 
+### 文档引擎开发诊断
+
+[Document Engine Development Checks](../.github/workflows/document-engine-check.yml)
+是独立的定向开发入口。默认由 `workflow_dispatch` 手动触发；为让尚未进入默认
+分支的新 workflow 首次注册，只对 `codex/desktop-next` 上修改该 workflow 文件
+本身的 push 启用极窄 bootstrap。普通源码修改不会自动运行，也不添加 PR trigger。
+此安排遵循 [GitHub 手动 workflow 的注册要求](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)，不修改 main。
+
+该入口准备 pinned 生产资源后，第一个 Cargo 测试只运行精确的 synthetic ACL
+用例；失败即停并上传日志。通过后串行执行全部 `windows_sandbox`、三个附件备份
+及长路径回归、三个 Host 中断／无副作用／未知结果回归。每个命令都检查实际测试
+计数，零测试、跳过、失败或不完整输出均不能通过。开发 debug0 v3 缓存纳入
+Cargo.toml 的 features/profile，兼容恢复旧 v2 依赖；断言失败仍保存已完成依赖。
+
+日志及 `summary.json` 位于同 SHA、同 attempt 的
+`document-engine-development-<SHA>-<attempt>` artifact，不含发布包或账户配置。
+不运行全 sidecar、release probes、安装包或付费模型。默认 Windows Host pipeline
+e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能代替完整 Windows Probe、
+发布同 SHA 门禁、安装版 UI 或 Windows 10/11 客户端验收。
+
 运行时测试入口会先准备完整生产资源，再验证打包依赖与清单；Windows Probe
 同时安装根目录依赖，供 PPT 来源和覆盖率维护测试使用。上游 PPT 资源禁止 Git
 换行转换，来源哈希始终核对原始字节。

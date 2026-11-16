@@ -225,6 +225,20 @@ fn document_cache_requires_exact_specific_file_read_execute_acl() {
 }
 
 #[test]
+fn document_acl_diagnostics_keep_rights_and_flags_without_account_sid_values() {
+    let text = "D:PAI(A;OICI;FRFX;;;S-1-5-21-111111-222222-333333-1001)S:AI(ML;OICI;NW;;;ME)";
+    let shape = descriptor_shape(text);
+    assert_eq!(shape["aces"][0]["rights"], "FRFX");
+    assert_eq!(shape["aces"][0]["flags"], "OICI");
+    assert_eq!(shape["aces"][0]["identityClass"]["kind"], "nt_account");
+    assert_eq!(shape["aces"][1]["identityClass"]["wellKnownAlias"], "ME");
+    let encoded = shape.to_string();
+    for private in ["111111", "222222", "333333", "1001", "S-1-5-21-"] {
+        assert!(!encoded.contains(private));
+    }
+}
+
+#[test]
 fn document_win32_paths_are_lexical_extended_absolute_paths() {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;

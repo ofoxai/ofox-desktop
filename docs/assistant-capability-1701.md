@@ -93,3 +93,15 @@ Branch Packages 已补充独立的 Windows release Host driver artifact：编译
 二进制摘要。六项打包回归及十二项 campaign 回归合计 18/18 通过，独立审查通过。
 完整 installer、离线探针、开发 Host driver 与安装版 UI 是不同证据；详见
 [客户端说明](document-engine-client-acceptance.md)。原生 artifact 构建仍待 CI。
+
+Windows Probe 43885065018（`329edf85`）已完成：库测试 4008 通过、14 失败、
+12 忽略。长路径附件恢复及目录句柄新建/替换发布实测通过，原 302/87 错误已消失；
+缓存 ACL 前置检查仍拒绝，连带隔离、取消和证明用例尚未进入有效路径。另一个
+中断用例的失败是测试入场用了 Windows verbatim spelling，而生产 admission 使用
+`scope::resolve`；夹具与精确预期已统一，macOS 针对用例通过，Windows 待复跑。
+未放宽 ACL 验收或中断债务断言，Windows Python 能力继续关闭。
+
+为缩短原生定位，新增独立 Document Engine Development Checks：先精确运行
+ACL 前置，失败即停；通过后运行完整 sandbox 及指定附件、Host 回归，拒绝零测试
+与跳过。权限诊断只保留数值控制位和脱敏 ACE 形状，不记录 SID 或原始 SDDL。
+该开发入口不提供发布证明；最终仍须完整 Windows Probe 和两种客户端验收。
