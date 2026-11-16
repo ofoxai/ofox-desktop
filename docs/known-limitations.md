@@ -14,6 +14,12 @@ Extended-path handling covers runtime resources and document/backup reads and
 publication. Arbitrarily long process working directories are not certified;
 native launch failure keeps Python unavailable.
 
+One macOS full sidecar run observed a shutdown assertion reporting a descendant
+alive at ordinary exit. The original trace cannot distinguish running, zombie,
+or failed observation. Targeted repetitions and the subsequent full run passed;
+test-only process-state diagnostics were added without weakening the assertion
+or changing production cleanup. The original failure remains unexplained.
+
 The accepted structured Office/deck fallback remains available when native
 Python admission fails; that fallback is not claimed to have LPAC isolation.
 Python-derived files, source edits and uploaded-file previews must remain on

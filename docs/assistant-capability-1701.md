@@ -81,3 +81,15 @@ macOS 复跑还发现测试用例漏关 OfficeCLI 自更新，固定资源从 1.
 1.0.161，引发并发读取 bundle 失败；已补齐兄弟用例的跳过更新参数和临时 HOME。
 生产 runner、prepare 和 smoke 原已有这些限制。保留的 `1cb01fd3` 验收包仍为
 固定 1.0.160，二进制摘要与下载 pin 一致；不是安装版验收通过的替代证据。
+
+`329edf85` 的后续 macOS 全量结果：前端 3372 通过、1 跳过，Rust 4555
+通过、28 忽略，Clippy/类型/格式检查通过。sidecar 出现一次退出清理观测失败
+（827 通过、1 失败），原 trace 只有布尔值，不能据此断言是实际存活或观测降级。
+保持生产清理与所有断言不变，增加仅测试用的 PID/ps 状态诊断后，工作稿全量
+833 通过，搜索 102 通过；原偶发失败仍未定因，不声称已经修复。
+
+Branch Packages 已补充独立的 Windows release Host driver artifact：编译前后
+核对干净源码，从 Cargo JSON 绑定唯一测试 exe 和实际编译 SHA/clean，再记录
+二进制摘要。六项打包回归及十二项 campaign 回归合计 18/18 通过，独立审查通过。
+完整 installer、离线探针、开发 Host driver 与安装版 UI 是不同证据；详见
+[客户端说明](document-engine-client-acceptance.md)。原生 artifact 构建仍待 CI。

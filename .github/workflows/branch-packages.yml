@@ -119,6 +119,21 @@ jobs:
       - name: Build Windows preview (unsigned)
         if: runner.os == 'Windows'
         run: pnpm tauri build --bundles nsis -- --locked
+      # build.rs records untracked files in compiled provenance. Build before
+      # dist-release/build-provenance.json exist; keep driver output outside Git.
+      - name: Compile Windows parity Host driver (no model execution)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\assistant-runtime\resources\node\node.exe scripts/package-parity-driver.mjs --sha $env:GITHUB_SHA --out "$env:RUNNER_TEMP/assistant-parity-driver-windows-x86_64-$env:GITHUB_SHA"
+      - name: Upload Windows parity Host driver
+        if: runner.os == 'Windows'
+        id: parity-driver
+        uses: actions/upload-artifact@v7
+        with:
+          name: assistant-parity-driver-windows-x86_64-${{ github.sha }}
+          path: ${{ runner.temp }}/assistant-parity-driver-windows-x86_64-${{ github.sha }}/
+          if-no-files-found: error
+          retention-days: 30
       - name: Prepare exact installer
         shell: bash
         env:
@@ -179,6 +194,7 @@ jobs:
         env:
           PLATFORM: ${{ matrix.platform }}
           ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+          PARITY_DRIVER_URL: ${{ steps.parity-driver.outputs.artifact-url }}
           SOURCE_SHA: ${{ github.sha }}
         run: |
           {
@@ -187,4 +203,8 @@ jobs:
             echo "Commit: ${SOURCE_SHA}"
             echo ""
             echo "[Download installer, SHA-256 and source record](${ARTIFACT_URL})"
+            if [[ -n "$PARITY_DRIVER_URL" ]]; then
+              echo ""
+              echo "[Download developer parity Host driver and provenance](${PARITY_DRIVER_URL})"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
