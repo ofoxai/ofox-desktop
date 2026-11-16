@@ -3,7 +3,7 @@ import type {
   SkillDefinition,
   SkillTarget,
 } from "@/lib/api/library";
-import { RESOURCE_TARGET_IDS } from "@/config/resourceTargets";
+import { SKILL_TARGET_IDS } from "@/config/resourceTargets";
 
 export type SkillCellState =
   /** Ofox gave it to the agent and it is in place. */
@@ -58,7 +58,7 @@ export function skillColumns(
       )
         ids.add(target.toolId);
   const supported = targets && new Set(targets.map((target) => target.id));
-  return RESOURCE_TARGET_IDS.filter(
+  return SKILL_TARGET_IDS.filter(
     (id) => ids.has(id) && (!supported || supported.has(id)),
   );
 }

@@ -27,6 +27,7 @@ import type { LibraryKind } from "@/lib/api/library";
 import { LibraryResourceIcon } from "./LibraryResourceIcon";
 import {
   LIBRARY_RECOMMENDATIONS,
+  needsApiKey,
   type LibraryRecommendation,
 } from "./libraryRecommendations";
 
@@ -47,6 +48,8 @@ export interface LibraryDiscoverProps {
   onOpenSource?: (url: string) => void;
   onLocateExisting?: (match: LibraryRecommendationLocation) => void;
   searchInputRef?: RefObject<HTMLInputElement>;
+  /** A dialog is narrower than the page; three cards a row would crowd it. */
+  maxColumns?: 2 | 3;
 }
 export function LibraryDiscover({
   kind,
@@ -56,6 +59,7 @@ export function LibraryDiscover({
   onOpenSource,
   onLocateExisting,
   searchInputRef,
+  maxColumns = 3,
 }: LibraryDiscoverProps) {
   const { t } = useTranslation();
   const [query, setQuery] = useState("");
@@ -134,7 +138,9 @@ export function LibraryDiscover({
         </span>
       </div>
       <TooltipProvider delayDuration={250}>
-        <div className="grid min-w-0 gap-3 min-[900px]:grid-cols-2 min-[1200px]:grid-cols-3">
+        <div
+          className={`grid min-w-0 items-start gap-3 min-[900px]:grid-cols-2 ${maxColumns === 3 ? "min-[1200px]:grid-cols-3" : ""}`}
+        >
           {visible.map((recipe) => {
             const name = recipe.titleKey ? t(recipe.titleKey) : recipe.name;
             const match = matches?.[recipe.id];
@@ -152,6 +158,7 @@ export function LibraryDiscover({
                   <LibraryResourceIcon
                     kind={recipe.kind}
                     recipeId={recipe.id}
+                    name={name}
                   />
                   <div className="min-w-0 flex-1">
                     <h3 className="break-words text-ui font-medium text-ink">
@@ -160,6 +167,16 @@ export function LibraryDiscover({
                     <p className="mt-0.5 flex flex-wrap gap-x-2 text-note text-ink-muted">
                       <span>{recipe.publisher}</span>
                       {recipe.runtimeKey && <span>{t(recipe.runtimeKey)}</span>}
+                      {recipe.signIn && (
+                        <span className="rounded-full bg-pill px-2 py-0.5">
+                          {t("library.discover3.signIn")}
+                        </span>
+                      )}
+                      {needsApiKey(recipe) && (
+                        <span className="rounded-full bg-pill px-2 py-0.5">
+                          {t("library.discover3.apiKey")}
+                        </span>
+                      )}
                     </p>
                   </div>
                 </div>
@@ -212,51 +229,53 @@ export function LibraryDiscover({
                       </Button>
                     )}
                   </div>
-                  <CollapsibleContent className="space-y-3 border-t border-line-2 pt-3 text-note leading-relaxed">
-                    <div className="flex flex-wrap gap-2 text-note">
-                      <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
-                        {t(
-                          exactMatch
-                            ? "library.discover2.collected"
-                            : nativeMatch
-                              ? "library.discover2.nativeOther"
-                              : match?.state === "none"
-                                ? "library.discover2.notCollected"
-                                : "library.discover2.configurable",
+                  <CollapsibleContent className="space-y-2.5 border-t border-line-2 pt-3 text-note leading-relaxed">
+                    {(match ||
+                      recipe.authRequired ||
+                      recipe.referenceExample) && (
+                      <div className="flex flex-wrap gap-2 text-note">
+                        {match && (
+                          <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
+                            {t(
+                              exactMatch
+                                ? "library.discover2.collected"
+                                : nativeMatch
+                                  ? "library.discover2.nativeOther"
+                                  : "library.discover2.notCollected",
+                            )}
+                          </span>
                         )}
-                      </span>
-                      {recipe.authRequired && (
-                        <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
-                          {t("library.discover2.nativeAuth")}
-                        </span>
-                      )}
-                      {recipe.referenceExample && (
-                        <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
-                          {t("library.discover.reference")}
-                        </span>
-                      )}
-                    </div>
-                    {recipe.preparationKey && (
-                      <p className="text-ink-muted">
-                        {t(recipe.preparationKey)}
-                      </p>
+                        {recipe.authRequired && (
+                          <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
+                            {t("library.discover2.nativeAuth")}
+                          </span>
+                        )}
+                        {recipe.referenceExample && (
+                          <span className="rounded-full bg-pill px-2 py-0.5 text-ink-muted">
+                            {t("library.discover.reference")}
+                          </span>
+                        )}
+                      </div>
                     )}
-                    <dl className="space-y-2">
-                      {recipe.dependencyKeys.length > 0 && (
-                        <div>
-                          <dt className="font-medium text-ink-2">
+                    <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1.5">
+                      {(recipe.dependencyKeys.length > 0 ||
+                        recipe.preparationKey) && (
+                        <>
+                          <dt className="text-ink-2">
                             {t("library.discover.dependencies")}
                           </dt>
                           <dd className="text-ink-muted">
-                            {recipe.dependencyKeys
-                              .map((key) => t(key))
-                              .join(" ")}
+                            {recipe.dependencyKeys.length > 0
+                              ? recipe.dependencyKeys
+                                  .map((key) => t(key))
+                                  .join(" ")
+                              : t(recipe.preparationKey!)}
                           </dd>
-                        </div>
+                        </>
                       )}
                       {recipe.permissionKeys.length > 0 && (
-                        <div>
-                          <dt className="font-medium text-ink-2">
+                        <>
+                          <dt className="text-ink-2">
                             {t("library.discover.permissionsLabel")}
                           </dt>
                           <dd className="text-ink-muted">
@@ -264,11 +283,11 @@ export function LibraryDiscover({
                               .map((key) => t(key))
                               .join(" ")}
                           </dd>
-                        </div>
+                        </>
                       )}
                       {recipe.licenseKey && (
-                        <div>
-                          <dt className="font-medium text-ink-2">
+                        <>
+                          <dt className="text-ink-2">
                             {t("library.discover2.licenseLabel")}
                           </dt>
                           <dd className="text-ink-muted">
@@ -276,11 +295,11 @@ export function LibraryDiscover({
                               `library.discover2.licenses.${recipe.licenseKey}`,
                             )}
                           </dd>
-                        </div>
+                        </>
                       )}
                       {kind === "mcp" && (
-                        <div>
-                          <dt className="font-medium text-ink-2">
+                        <>
+                          <dt className="text-ink-2">
                             {t("library.discover2.checkLabel")}
                           </dt>
                           <dd className="text-ink-muted">
@@ -288,11 +307,35 @@ export function LibraryDiscover({
                               recipe.checkMode === "ofox"
                                 ? "library.discover2.checkOfox"
                                 : "library.discover2.checkNative",
-                            )}{" "}
-                            · {t("library.discover2.notTested")}
+                            )}
                           </dd>
-                        </div>
+                        </>
                       )}
+                      <dt className="text-ink-2">
+                        {t("library.discover.compatible")}
+                      </dt>
+                      <dd className="flex flex-wrap items-center gap-1">
+                        {recipe.toolIds.map((tool) => (
+                          <Tooltip key={tool}>
+                            <TooltipTrigger asChild>
+                              <span
+                                tabIndex={0}
+                                aria-label={TOOL_META[tool]?.label ?? tool}
+                                className="rounded-ctl outline-none focus-visible:ring-2 focus-visible:ring-brand"
+                              >
+                                <ToolBadge
+                                  toolId={tool}
+                                  size={18}
+                                  variant="plain"
+                                />
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {TOOL_META[tool]?.label ?? tool}
+                            </TooltipContent>
+                          </Tooltip>
+                        ))}
+                      </dd>
                     </dl>
                     {recipe.id === "github" && (
                       <div className="space-y-1 text-ink-muted">
@@ -312,45 +355,12 @@ export function LibraryDiscover({
                         )}
                       </p>
                     )}
-                    <div className="space-y-1.5">
-                      <p className="font-medium text-ink-2">
-                        {t("library.discover.compatible")}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-1">
-                        {recipe.toolIds.map((tool) => (
-                          <Tooltip key={tool}>
-                            <TooltipTrigger asChild>
-                              <span
-                                tabIndex={0}
-                                aria-label={TOOL_META[tool]?.label ?? tool}
-                                className="rounded-ctl outline-none focus-visible:ring-2 focus-visible:ring-brand"
-                              >
-                                <ToolBadge
-                                  toolId={tool}
-                                  size={20}
-                                  variant="plain"
-                                />
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              {TOOL_META[tool]?.label ?? tool}
-                            </TooltipContent>
-                          </Tooltip>
-                        ))}
-                      </div>
-                      <p className="text-ink-muted">
-                        {t("library.discover2.compatibilityNote")}
-                      </p>
-                    </div>
-                    <p className="text-ink-muted">
-                      {t("library.discover2.reviewedAt", {
-                        date: recipe.reviewedAt,
-                      })}
-                    </p>
-                    <p className="text-ink-faint">
-                      {t("library.discover2.reviewBoundary")}
-                    </p>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-ink-faint">
+                      <span>
+                        {t("library.discover2.reviewedAt", {
+                          date: recipe.reviewedAt,
+                        })}
+                      </span>
                       {recipe.sourceUrl ? (
                         <Button
                           type="button"
@@ -363,9 +373,7 @@ export function LibraryDiscover({
                           <ExternalLink aria-hidden className="h-3 w-3" />
                         </Button>
                       ) : (
-                        <span className="text-ink-faint">
-                          {t("library.discover.templateSource")}
-                        </span>
+                        <span>{t("library.discover.templateSource")}</span>
                       )}
                     </div>
                   </CollapsibleContent>

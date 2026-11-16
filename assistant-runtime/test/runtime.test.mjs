@@ -739,10 +739,11 @@ test("navigate refuses anything but a message of a saved history and changes not
   await runtime.close();
 });
 
-test("provider errors never retry paid requests and stay scrubbed in native history", async (t) => {
+test("rate limit retries are bounded and stay scrubbed in native history", async (t) => {
   const params = await sandbox(t);
   let requests = 0;
   const runtime = new AssistantRuntime({
+    retrySleep: async () => {},
     fetch: async () => {
       requests++;
       return Response.json(
@@ -752,7 +753,7 @@ test("provider errors never retry paid requests and stay scrubbed in native hist
     },
   });
   const result = await runtime.run(params);
-  assert.equal(requests, 1);
+  assert.equal(requests, 3);
   assert.equal(result.status, "error");
   assert.equal(
     (await readFile(params.sessionFile, "utf8")).includes(token),
@@ -896,7 +897,10 @@ test("a request refused with a 4xx or never sent reports why and costs a known z
     ],
   ]) {
     const params = await sandbox(t);
-    const runtime = new AssistantRuntime({ fetch: async () => reply() });
+    const runtime = new AssistantRuntime({
+      retrySleep: async () => {},
+      fetch: async () => reply(),
+    });
     const result = await runtime.run(params);
     assert.equal(result.status, "error", name);
     const failed = result.entries.at(-1);
@@ -2455,6 +2459,10 @@ async function thinkingRun(t, name, input, extra = {}) {
     raw: bodies[0]
       .split(dir)
       .join("<dir>")
+      .replace(
+        /Current date: [^\\]+App language: zh\./,
+        "Current date: <date> (<weekday>). Time zone: <zone>. App language: zh.",
+      )
       .replace(/"prompt_cache_key":"[^"]+"/, '"prompt_cache_key":"<session>"'),
     body: JSON.parse(bodies[0]),
     events,
@@ -2700,6 +2708,190 @@ test("reasoning start is signalled at once, before its held-back text", async (t
   await plain.run({ ...(await sandbox(t)) });
   assert.equal(
     events.some((event) => event.type === "thinking_start"),
+    false,
+  );
+});
+
+test("tool preparation is visible while arguments stream, before any execution and without their source", async (t) => {
+  const events = [];
+  const calls = [];
+  const encoder = new TextEncoder();
+  const chunk = (delta, finish = null) =>
+    encoder.encode(
+      `data: ${JSON.stringify({ id: "preparing", choices: [{ index: 0, delta, finish_reason: finish }], ...(finish ? { usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } } : {}) })}\n\n`,
+    );
+  let release;
+  const blocked = new Promise((resolve) => {
+    release = resolve;
+  });
+  let requestCount = 0;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        status: "completed",
+        file: {
+          id: "notes",
+          name: "notes.md",
+          mimeType: "text/markdown",
+          bytes: 7,
+        },
+        issues: [],
+      };
+    },
+    fetch: async () =>
+      ++requestCount > 1
+        ? stream("done")
+        : new Response(
+            new ReadableStream({
+              async start(controller) {
+                controller.enqueue(
+                  chunk({
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "call-preparing",
+                        type: "function",
+                        function: {
+                          name: "create_document",
+                          arguments:
+                            '{"name":"notes.md","format":"md","content":"',
+                        },
+                      },
+                    ],
+                  }),
+                );
+                await blocked;
+                controller.enqueue(
+                  chunk({
+                    tool_calls: [
+                      {
+                        index: 0,
+                        function: { arguments: 'private-source-code"}' },
+                      },
+                    ],
+                  }),
+                );
+                controller.enqueue(chunk({}, "tool_calls"));
+                controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+                controller.close();
+              },
+            }),
+            { headers: { "content-type": "text/event-stream" } },
+          ),
+  });
+  t.after(() => runtime.close());
+  const running = runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md"] },
+  });
+  try {
+    for (
+      let i = 0;
+      i < 50 && !events.some((event) => event.type === "tool_preparing");
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    const preparing = events.filter((event) => event.type === "tool_preparing");
+    assert.equal(
+      preparing.length,
+      1,
+      "preparation must arrive before complete arguments",
+    );
+    assert.deepEqual(preparing[0].data, {
+      name: "create_document",
+      toolCallId: "call-preparing",
+    });
+    assert.equal(
+      events.some((event) => event.type === "tool_start"),
+      false,
+    );
+    assert.equal(calls.length, 0, "the Host has not executed a tool");
+  } finally {
+    release();
+    await running;
+  }
+  const observed = events.filter((event) =>
+    ["tool_preparing", "tool_start", "tool_end"].includes(event.type),
+  );
+  assert.deepEqual(
+    observed.map((event) => event.type),
+    ["tool_preparing", "tool_start", "tool_end", "tool_preparing"],
+  );
+  assert.deepEqual(observed.at(-1).data, {
+    name: "create_document",
+    toolCallId: "call-preparing",
+    active: false,
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.content, "private-source-code");
+  assert.doesNotMatch(
+    JSON.stringify(observed[0]),
+    /arguments|private-source-code|content|format/,
+  );
+});
+
+test("tool preparation clears after SDK validation without inventing an execution", async (t) => {
+  const events = [];
+  let hostCalls = 0;
+  let requests = 0;
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async () => {
+      hostCalls++;
+      throw new Error("must not execute");
+    },
+    fetch: async () =>
+      ++requests === 1
+        ? toolStream("create_document", { format: "md" })
+        : stream("done"),
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md"] },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(hostCalls, 0);
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "tool_preparing")
+      .map((event) => event.data),
+    [
+      { name: "create_document", toolCallId: "call-one" },
+      { name: "create_document", toolCallId: "call-one", active: false },
+    ],
+  );
+  assert.equal(
+    events.some(
+      (event) => event.type === "tool_start" || event.type === "tool_end",
+    ),
+    false,
+  );
+});
+
+test("tool preparation never publishes arbitrary registered tool names", async (t) => {
+  const events = [];
+  let requests = 0;
+  let hostCalls = 0;
+  const runtime = new ProbeRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async () => {
+      hostCalls++;
+      return { status: "completed", output: "ok" };
+    },
+    fetch: async () =>
+      ++requests === 1
+        ? toolStream(probeToolName, { command: "private command" })
+        : stream("done"),
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(await sandbox(t))).status, "completed");
+  assert.equal(hostCalls, 1, "ordinary execution is unchanged");
+  assert.equal(
+    events.some((event) => event.type === "tool_preparing"),
     false,
   );
 });
@@ -3075,4 +3267,714 @@ test("a completed reply without usage retains its receipt while its cost stays u
   assert.equal(receipt.estimatedCostUsd, null);
   assert.equal(receipt.billedCostUsd, null);
   assert.equal(result.usageCoverage, "incomplete");
+});
+
+test("system prompt states the local date, English weekday, IANA time zone and app language", async (t) => {
+  const original = process.env.TZ;
+  process.env.TZ = "Asia/Shanghai";
+  t.after(() =>
+    original === undefined
+      ? delete process.env.TZ
+      : (process.env.TZ = original),
+  );
+  for (const uiLanguage of ["zh", "en", "ja"])
+    for (const now of ["2026-11-05T02:00:00Z", "2026-11-04T18:00:00Z"]) {
+      const params = {
+        ...(await sandbox(t)),
+        uiLanguage,
+        now,
+      };
+      let prompt;
+      const runtime = new AssistantRuntime({
+        fetch: async (_url, options) => {
+          prompt = JSON.parse(options.body).messages[0].content;
+          return stream("Answer");
+        },
+      });
+      await runtime.run(params);
+      assert.match(
+        prompt,
+        /Current date: 2026-11-05 \(Thursday\)\. Time zone: Asia\/Shanghai\./,
+      );
+      assert.ok(prompt.includes(`App language: ${uiLanguage}.`));
+      await runtime.close();
+    }
+});
+
+test("retries only the failed model HTTP request twice and preserves every receipt", async (t) => {
+  for (const status of [429, 502, 503]) {
+    const params = {
+      ...(await sandbox(t)),
+      model: { ...model, pricingKnown: true, cost: { input: 1, output: 1 } },
+    };
+    const events = [],
+      delays = [];
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      emit: (e) => events.push(e),
+      retrySleep: async (ms) => delays.push(ms),
+      fetch: async () => {
+        requests++;
+        return requests < 3
+          ? Response.json(
+              { error: { message: `busy ${token}` } },
+              { status, headers: { "x-request-id": `attempt-${requests}` } },
+            )
+          : stream("One answer");
+      },
+    });
+    const result = await runtime.run(params);
+    assert.equal(result.status, "completed", String(status));
+    assert.equal(requests, 3);
+    const coverage = status === 429 ? "complete" : "incomplete";
+    assert.equal(result.usageCoverage, coverage);
+    const loaded = await runtime.load(params);
+    assert.equal(loaded.usageCoverage, coverage);
+    const known = loaded.entries.filter((e) => e.role === "assistant");
+    assert.equal(
+      known.reduce((sum, e) => sum + e.usage.input, 0),
+      10,
+    );
+    assert.equal(
+      known.reduce((sum, e) => sum + e.usage.output, 0),
+      5,
+    );
+    assert.ok(known[0].usage.cost.total > 0);
+    assert.deepEqual(delays, [1000, 3000]);
+    assert.deepEqual(
+      events.filter((e) => e.type === "retrying").map((e) => e.data),
+      [{ attempt: 1 }, { attempt: 2 }],
+    );
+    assert.equal(
+      result.entries.filter((e) => e.role === "assistant").length,
+      1,
+    );
+    const raw = await readFile(params.sessionFile, "utf8");
+    assert.ok(!raw.includes(token));
+    const receipts = raw
+      .trim()
+      .split("\n")
+      .map(JSON.parse)
+      .filter((e) => e.customType === "ofox-desktop-request")
+      .map((e) => e.data);
+    assert.deepEqual(
+      receipts.map((e) => e.httpStatus),
+      [status, status, 200],
+    );
+    assert.deepEqual(
+      receipts.map((e) => e.status),
+      [
+        status === 429 ? "rejected" : "unknown",
+        status === 429 ? "rejected" : "unknown",
+        "completed",
+      ],
+    );
+    assert.ok(!JSON.stringify(events).includes(token));
+    await runtime.close();
+  }
+});
+
+test("honours Retry-After up to 10 seconds on 429 and stops after two retries", async (t) => {
+  for (const [header, expected] of [
+    ["2", 2000],
+    ["60", 10000],
+    ["invalid", 1000],
+  ]) {
+    const params = await sandbox(t),
+      delays = [],
+      events = [];
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      retrySleep: async (ms) => delays.push(ms),
+      emit: (e) => events.push(e),
+      fetch: async () => {
+        requests++;
+        return Response.json(
+          { error: { message: "busy" } },
+          { status: 429, headers: { "Retry-After": header } },
+        );
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "error");
+    assert.equal(requests, 3);
+    assert.deepEqual(delays, [
+      expected,
+      header === "invalid" ? 3000 : expected,
+    ]);
+    assert.equal(events.filter((e) => e.type === "retrying").length, 2);
+    await runtime.close();
+  }
+});
+
+test("retries connection failures and drops but never timeouts, aborts or other HTTP errors", async (t) => {
+  const cases = [
+    [
+      () => {
+        throw networkError(systemError("ECONNREFUSED", "connect"));
+      },
+      3,
+    ],
+    [
+      () => {
+        throw networkError(systemError("ENOTFOUND", "getaddrinfo"));
+      },
+      3,
+    ],
+    [
+      () => {
+        throw networkError(systemError("UND_ERR_CONNECT_TIMEOUT", "connect"));
+      },
+      1,
+    ],
+    [
+      () => {
+        throw networkError(systemError("ECONNRESET", "read"));
+      },
+      3,
+    ],
+    [
+      () => {
+        throw Object.assign(new Error("timeout"), { name: "TimeoutError" });
+      },
+      1,
+    ],
+    [
+      () => {
+        throw Object.assign(new Error("cancelled"), {
+          name: "AbortError",
+          cause: systemError("ECONNREFUSED", "connect"),
+        });
+      },
+      1,
+    ],
+    ...[400, 408, 409, 500, 504].map((status) => [
+      () => Response.json({ error: { message: "failed" } }, { status }),
+      1,
+    ]),
+  ];
+  for (const [reply, count] of cases) {
+    const params = await sandbox(t);
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      retrySleep: async () => {},
+      fetch: async () => {
+        requests++;
+        return reply();
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "error");
+    assert.equal(requests, count);
+    await runtime.close();
+  }
+});
+
+test("partial text, reasoning and tool-call streams are never retried", async (t) => {
+  for (const delta of [
+    { content: "partial answer" },
+    { reasoning_content: "partial thought" },
+    {
+      tool_calls: [
+        {
+          index: 0,
+          id: "call",
+          type: "function",
+          function: { name: "probe", arguments: "{" },
+        },
+      ],
+    },
+  ]) {
+    const params = await sandbox(t);
+    let requests = 0;
+    const runtime = new AssistantRuntime({
+      retrySleep: async () => assert.fail("no partial retry"),
+      fetch: async () => {
+        requests++;
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  `data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`,
+                ),
+              );
+              setTimeout(
+                () =>
+                  controller.error(
+                    networkError(systemError("ECONNREFUSED", "connect")),
+                  ),
+                10,
+              );
+            },
+          }),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "error");
+    assert.equal(requests, 1);
+    await runtime.close();
+  }
+});
+
+test("cancelling during retry wait stops immediately without another HTTP request", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0,
+    retrySeen;
+  const ready = new Promise((resolve) => (retrySeen = resolve));
+  const runtime = new AssistantRuntime({
+    emit: (e) => {
+      if (e.type === "retrying") retrySeen();
+    },
+    fetch: async () => {
+      requests++;
+      return Response.json(
+        { error: { message: "busy" } },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    },
+  });
+  const running = runtime.run(params);
+  await Promise.race([
+    ready,
+    running.then(() => assert.fail("expected retry wait")),
+  ]);
+  const start = Date.now();
+  await runtime.stop(params);
+  const result = await running;
+  assert.equal(result.status, "stopped");
+  assert.ok(Date.now() - start < 1000);
+  assert.equal(requests, 1);
+  await runtime.close();
+});
+
+test("request retries work for all supported protocols on both apexes without changing the request", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"])
+    for (const [name, input] of Object.entries(await thinkingModels())) {
+      const params = { ...(await sandbox(t)), apex, model: input };
+      const bodies = [],
+        events = [];
+      const runtime = new AssistantRuntime({
+        retrySleep: async () => {},
+        emit: (e) => events.push(e),
+        fetch: async (url, init) => {
+          assert.equal(new URL(url).hostname, `api.${apex}`);
+          assert.equal(
+            new Headers(init.headers).get("authorization"),
+            `Bearer ${token}`,
+          );
+          bodies.push(init.body);
+          return bodies.length < 3
+            ? Response.json({ error: { message: "busy" } }, { status: 503 })
+            : thinkingReply(name);
+        },
+      });
+      assert.equal(
+        (await runtime.run(params)).status,
+        "completed",
+        `${name}/${apex}`,
+      );
+      assert.equal(bodies.length, 3);
+      assert.equal(bodies[0], bodies[1]);
+      assert.equal(bodies[1], bodies[2]);
+      assert.equal(events.filter((e) => e.type === "retrying").length, 2);
+      await runtime.close();
+    }
+});
+
+test("retrying a model request after a tool or media operation never replays that side effect", async (t) => {
+  for (const name of [
+    probeToolName,
+    "generate_image",
+    "generate_video",
+    "generate_speech",
+  ]) {
+    const params = {
+      ...(await sandbox(t)),
+      media: {
+        image: { model: "image", models: ["image"], maxImages: 4 },
+        video: {
+          model: "video",
+          models: ["video"],
+          minDuration: 4,
+          maxDuration: 30,
+        },
+        speech: { model: "speech", models: ["speech"], voices: ["voice"] },
+      },
+    };
+    let requests = 0;
+    const calls = [];
+    const Runtime = name === probeToolName ? ProbeRuntime : AssistantRuntime;
+    const args =
+      name === probeToolName
+        ? { command: "one operation" }
+        : name === "generate_speech"
+          ? { text: "Hello" }
+          : { prompt: "One fox" };
+    const runtime = new Runtime({
+      retrySleep: async () => {},
+      hostCall: async (call) => {
+        calls.push(call);
+        return { status: "completed", model: "media", files: [] };
+      },
+      fetch: async () => {
+        requests++;
+        return requests === 1
+          ? toolStream(name, args)
+          : requests < 4
+            ? Response.json({ error: { message: "busy" } }, { status: 503 })
+            : stream("Done once");
+      },
+    });
+    assert.equal((await runtime.run(params)).status, "completed", name);
+    assert.equal(requests, 4, name);
+    assert.equal(calls.length, 1, name);
+    await runtime.close();
+  }
+});
+
+test("the SDK abort signal cancels a retry wait even without a run cancellation", async (t) => {
+  const params = await sandbox(t);
+  let requests = 0,
+    retrySeen;
+  const ready = new Promise((resolve) => (retrySeen = resolve));
+  const runtime = new AssistantRuntime({
+    emit: (e) => {
+      if (e.type === "retrying") retrySeen();
+    },
+    fetch: async () => {
+      requests++;
+      return Response.json(
+        { error: { message: "busy" } },
+        { status: 429, headers: { "Retry-After": "60" } },
+      );
+    },
+  });
+  const running = runtime.run(params);
+  await ready;
+  const context = runtime.runs.get(params.runId);
+  const start = Date.now();
+  await context.session.abort();
+  await running;
+  assert.equal(context.abort.signal.aborted, false);
+  assert.ok(Date.now() - start < 1000);
+  assert.equal(requests, 1);
+  await runtime.close();
+});
+
+test("assistant skills appear in the actual provider prompt without local tools", async (t) => {
+  const params = await sandbox(t);
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw\nclear diagrams",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+    {
+      name: "private-manual",
+      description: "Hidden",
+      dir: "/skills/manual",
+      mode: "manual",
+      hasScripts: true,
+      reviewed: false,
+    },
+  ];
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return stream("done");
+    },
+  });
+  await runtime.run(params);
+  assert.match(JSON.stringify(requests[0].messages), /Available skills/);
+  assert.match(
+    JSON.stringify(requests[0].messages),
+    /drawing: Draw clear diagrams/,
+  );
+  assert.doesNotMatch(JSON.stringify(requests[0].messages), /private-manual/);
+  assert.ok(
+    requests[0].tools.some((tool) => tool.function.name === "use_skill"),
+  );
+});
+
+test("assistant use_skill reaches the host without local tools", async (t) => {
+  const params = await sandbox(t);
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+  ];
+  let count = 0;
+  const calls = [];
+  const runtime = new AssistantRuntime({
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        name: "drawing",
+        dir: "/skills/drawing",
+        body: "skill-body-marker",
+        files: ["SKILL.md"],
+        truncated: false,
+      };
+    },
+    fetch: async () =>
+      count++ === 0
+        ? toolStream("use_skill", { name: "drawing" })
+        : stream("done"),
+  });
+  await runtime.run(params);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].name, "use_skill");
+});
+
+test("use_skill hands the model the skill body as written, not as JSON", async (t) => {
+  const params = await sandbox(t);
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+  ];
+  // A JSON example with an escape and quotes, as the office skills hold.
+  const body = 'Example: {"text":"one\\ntwo"} and a "quoted" word';
+  let count = 0;
+  let request;
+  const runtime = new AssistantRuntime({
+    hostCall: async () => ({
+      name: "drawing",
+      dir: "/skills/drawing",
+      body,
+      files: ["SKILL.md", "references/a.md"],
+      truncated: false,
+    }),
+    fetch: async (_url, init) => {
+      request = JSON.parse(init.body);
+      return count++ === 0
+        ? toolStream("use_skill", { name: "drawing" })
+        : stream("done");
+    },
+  });
+  await runtime.run(params);
+  const tool = request.messages.find((message) => message.role === "tool");
+  assert.ok(tool.content.includes(body), tool.content);
+  assert.match(
+    tool.content,
+    /^Skill drawing \(dir: \/skills\/drawing\)\nFiles: SKILL\.md, references\/a\.md\n/,
+  );
+  // No doubled escape or escaped quote reaches the model.
+  assert.doesNotMatch(tool.content, /\\\\n|\\"/);
+});
+
+test("models without tools receive neither use_skill nor an instruction to call it", async (t) => {
+  const params = await sandbox(t);
+  params.model = { ...params.model, tools: false };
+  params.skills = [
+    {
+      name: "drawing",
+      description: "Draw",
+      dir: "/skills/drawing",
+      mode: "auto",
+      hasScripts: true,
+      reviewed: false,
+    },
+  ];
+  let request;
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      request = JSON.parse(init.body);
+      return stream("done");
+    },
+  });
+  await runtime.run(params);
+  assert.equal(request.tools, undefined);
+  assert.doesNotMatch(
+    JSON.stringify(request.messages),
+    /use_skill|Available skills/,
+  );
+});
+
+test("system prompt tells the model to produce files with create_document", async (t) => {
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return stream("done");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md", "pdf"] },
+  });
+  assert.equal(result.status, "completed");
+  const [body] = requests;
+  const tool = body.tools.find(
+    (entry) => entry.function.name === "create_document",
+  );
+  assert.ok(tool);
+  const formats = JSON.stringify(tool.function.parameters.properties.format);
+  assert.match(formats, /"md"/);
+  assert.match(formats, /"pdf"/);
+  assert.doesNotMatch(formats, /pptx/);
+  const prompt = body.messages[0].content;
+  assert.match(
+    prompt,
+    /When the user asks for a file, or names a PDF document, produce it with create_document\./,
+  );
+  assert.match(
+    prompt,
+    /This machine cannot produce Word, PowerPoint or Excel files; say so if asked\./,
+  );
+  assert.match(prompt, /call use_skill on its skill \(ofox-office-pdf\)/);
+  assert.doesNotMatch(prompt, /never say you cannot attach|ofox-office-md/);
+});
+
+test("no create_document without the documents param", async (t) => {
+  const requests = [];
+  for (const extra of [
+    {},
+    { documents: { formats: ["md"] }, model: { ...model, tools: false } },
+  ]) {
+    const runtime = new AssistantRuntime({
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return stream("done");
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({ ...(await sandbox(t)), ...extra });
+    assert.equal(result.status, "completed");
+  }
+  for (const body of requests) {
+    assert.equal(body.tools, undefined);
+    assert.doesNotMatch(
+      body.messages[0].content,
+      /create_document|cannot attach|cannot produce/,
+    );
+  }
+});
+
+test("only a vision model sees the document's preview after create_document", async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "ofox-preview-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const previewPath = path.join(directory, "preview-1.png");
+  await writeFile(previewPath, Buffer.from(onePixelPng, "base64"));
+  const args = { name: "notes.md", format: "md", content: "# Notes" };
+  for (const supportsImages of [true, false]) {
+    const calls = [];
+    const requests = [];
+    const runtime = new AssistantRuntime({
+      hostCall: async (call) => {
+        calls.push(call);
+        return {
+          status: "completed",
+          file: {
+            id: "att-notes",
+            name: "notes.md",
+            mimeType: "text/markdown",
+            bytes: 7,
+          },
+          issues: [],
+          filePath: path.join(directory, "notes.md"),
+          previewPath,
+        };
+      },
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return requests.length === 1
+          ? toolStream("create_document", args)
+          : stream("done");
+      },
+    });
+    t.after(() => runtime.close());
+    const result = await runtime.run({
+      ...(await sandbox(t)),
+      model: { ...model, supportsImages },
+      documents: { formats: ["md"] },
+    });
+    assert.equal(result.status, "completed");
+    assert.deepEqual(
+      calls.map((call) => [call.name, call.args]),
+      [["create_document", args]],
+    );
+    const followUp = JSON.stringify(requests[1].messages);
+    assert.match(followUp, /attachment att-notes/);
+    assert.doesNotMatch(followUp, new RegExp(directory));
+    if (supportsImages) assert.match(followUp, /image\/jpeg;base64/);
+    else assert.doesNotMatch(followUp, /image\/jpeg/);
+  }
+});
+
+test("a create_document call the runtime rejects ends unsuccessful, a created file successful", async (t) => {
+  const events = [];
+  const calls = [];
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async (call) => {
+      calls.push(call);
+      return {
+        status: "completed",
+        file: {
+          id: "att-notes",
+          name: "notes.md",
+          mimeType: "text/markdown",
+          bytes: 7,
+        },
+        issues: [],
+      };
+    },
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? toolStream(
+            "create_document",
+            { name: "deck.pptx", format: "pptx", content: "Slide 1" },
+            {
+              name: "create_document",
+              args: { name: "notes.md", format: "md", content: "# Notes" },
+            },
+          )
+        : stream("done");
+    },
+  });
+  t.after(() => runtime.close());
+  const result = await runtime.run({
+    ...(await sandbox(t)),
+    documents: { formats: ["md", "pptx"] },
+  });
+  assert.equal(result.status, "completed");
+  assert.deepEqual(
+    calls.map((call) => call.args.format),
+    ["md"],
+  );
+  assert.deepEqual(
+    events
+      .filter((event) => event.type === "tool_end")
+      .map(({ data }) => [data.toolCallId, data.success]),
+    [
+      ["call-one", false],
+      ["call-two", true],
+    ],
+  );
+  const results = requests[1].messages.filter(
+    (message) => message.role === "tool",
+  );
+  assert.match(
+    JSON.stringify(results[0]),
+    /pptx content must be a deck object .* or, for experts, an array of officecli batch commands/,
+  );
+  assert.match(JSON.stringify(results[1]), /attachment att-notes/);
 });

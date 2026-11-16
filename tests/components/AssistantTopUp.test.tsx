@@ -111,6 +111,7 @@ describe("a generation that ran out of credits", () => {
         generation={1}
         models={[]}
         onSave={vi.fn()}
+        onSaveAndOpen={vi.fn()}
         onCancelVideo={vi.fn()}
         onResumeVideo={vi.fn()}
       />,

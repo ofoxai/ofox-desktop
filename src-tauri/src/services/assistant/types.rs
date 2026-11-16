@@ -208,9 +208,35 @@ impl Attachment {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FileReference {
+    pub attachment_id: String,
+    pub version: String,
+    pub page: Option<u32>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Message {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_references: Vec<FileReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_visual_policy: Option<super::presentation::VisualPolicy>,
+    /// Host-validated decision and page plan; separate from the user selection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_plan: Option<Value>,
+    /// User-selected PPT mode/style, not a permission or quality assertion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation_style_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_steps: Vec<Value>,
+    /// Host-authored, read-only historical search cards; never an installation capability.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skill_results: Vec<Value>,
+    /// User-selected skill name only; never a persisted permission or body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<MediaRecord>,
     /// What the reply's generation tools made, one record per tool call.
@@ -399,6 +425,38 @@ impl Default for Preferences {
     }
 }
 
+/// Where a run's web search searches: Ofox's paid search through the gateway
+/// (the default), or Exa's free one. One choice per account, kept in
+/// `prefs.json` beside the settings; the conversation's switch says whether
+/// a run searches at all.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchProvider {
+    #[default]
+    Ofox,
+    Exa,
+}
+
+impl SearchProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ofox => "ofox",
+            Self::Exa => "exa",
+        }
+    }
+}
+
+/// Save the account's search provider, and nothing else.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSearchProviderRequest {
+    /// Checked by the host against the signed-in owner, not by the store.
+    pub expected_owner: Option<String>,
+    /// Checked by the host against its authority generation, not by the store.
+    pub expected_generation: Option<u64>,
+    pub provider: SearchProvider,
+}
+
 /// Save all of the assistant settings at once.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -499,6 +557,29 @@ pub struct ExportMarkdownRequest {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SendRequest {
+    #[serde(default)]
+    pub file_references: Vec<FileReference>,
+    #[serde(default)]
+    pub replace_file_references: bool,
+    #[serde(default)]
+    pub presentation_workflow_version: Option<u8>,
+    #[serde(default)]
+    pub presentation_visual_policy: Option<super::presentation::VisualPolicy>,
+    #[serde(default)]
+    pub replace_presentation_visual_policy: bool,
+    #[serde(default)]
+    pub presentation_style_id: Option<String>,
+    #[serde(default)]
+    pub replace_presentation_style: bool,
+    #[serde(default)]
+    pub skill: Option<String>,
+    /// An edit explicitly replaces or clears its original selection.
+    #[serde(default)]
+    pub replace_skill: bool,
+    /// The renderer's resolved language, including first-launch OS detection.
+    /// Older callers omit it and use the saved application preference.
+    #[serde(default)]
+    pub ui_language: Option<String>,
     /// Optional together for older callers; new sends freeze the account and
     /// region generation before IPC admission, including ordinary queues.
     #[serde(default)]
@@ -531,6 +612,25 @@ pub struct SendRequest {
     /// every version.
     #[serde(default)]
     pub retry_message_id: Option<String>,
+}
+
+/// Public, bundled choices only: Auto (PPT intent without a theme override),
+/// the built-in navy, and every catalog style that is enabled with a reviewed
+/// license and a native theme. The catalog is the single list of styles.
+pub fn presentation_style_ids() -> &'static [String] {
+    static IDS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    IDS.get_or_init(|| {
+        let mut ids = vec!["auto".to_owned(), "navy".to_owned()];
+        ids.extend(super::presentation::enabled_catalog_styles());
+        ids
+    })
+}
+
+pub(super) fn validate_presentation_style(style: Option<&str>) -> Result<(), String> {
+    if style.is_some_and(|id| !presentation_style_ids().iter().any(|known| known == id)) {
+        return Err("assistant_invalid_message".into());
+    }
+    Ok(())
 }
 
 /// Text admitted into a running chat, tied to its authority and operation.

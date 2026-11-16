@@ -264,6 +264,62 @@ describe("a reply's usage", () => {
     expect(popover).toHaveTextContent("This reply (estimate)Cost unavailable");
   });
 
+  it("counts documents without an amount, and does not call them unpriced", async () => {
+    render(
+      view({
+        modelId: "openai/gpt-5-mini",
+        completedAt: 2_000,
+        usage: {
+          outputTokens: 40,
+          chatCostUsd: "0.0004",
+          mediaCostUsd: "0.02",
+          estimatedCostUsd: "0.0204",
+          requests: [
+            {
+              kind: "chat",
+              status: "completed",
+              usage: { cost: { output: 0.0004 } },
+            },
+            {
+              kind: "image",
+              modelId: "openai/gpt-5-mini",
+              toolCallId: "call-1",
+              status: "completed",
+              estimatedCostUsd: "0.02",
+            },
+            {
+              kind: "document",
+              modelId: "",
+              toolCallId: "call-2",
+              status: "completed",
+              estimatedCostUsd: "0",
+            },
+            {
+              kind: "document",
+              modelId: "",
+              toolCallId: "call-3",
+              status: "completed",
+              estimatedCostUsd: "0",
+            },
+          ],
+        },
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Reply details" }),
+    );
+    const popover = await screen.findByRole("dialog");
+    const row = (name: string | RegExp) =>
+      within(popover).getByText(name).closest("[data-usage-line]")!;
+    expect(row("Document ×2")).not.toHaveTextContent("$");
+    expect(row("Document ×2")).not.toHaveTextContent("—");
+    expect(row(/^Generate image/)).toHaveTextContent("$0.02");
+    expect(popover).toHaveTextContent("This reply (estimate)$0.02");
+    expect(popover).not.toHaveTextContent(
+      en.assistant.usageLines.generationUnpriced,
+    );
+  });
+
   it("lists each line with its tokens and cost, like ofox-agent", async () => {
     render(
       view({

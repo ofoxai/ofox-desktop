@@ -1,0 +1,720 @@
+{
+  "id": "scatterbrain",
+  "family": "playful",
+  "names": {
+    "zh": "Scatterbrain 便利贴",
+    "en": "Scatterbrain",
+    "ja": "Scatterbrain 付箋"
+  },
+  "intro": {
+    "zh": "暖色纸面和软木底上贴着黄、蓝、粉、绿的便利贴色块，衬线字体，标题写在一张黄色便签上；适合头脑风暴、工作坊、设计评审和想保留“进行中”感觉的分享。",
+    "en": "Yellow, blue, pink and green sticky-note blocks on warm paper and cork, serif type, the title written on a yellow note; for brainstorms, workshops, design reviews and work-in-progress thinking.",
+    "ja": "温かい紙とコルクの背景に黄・青・ピンク・緑の付箋ブロック、セリフ書体、見出しは黄色い付箋の上。ブレスト、ワークショップ、デザインレビュー向け。"
+  },
+  "routing": {
+    "scenarios": ["workshop", "creative", "teaching"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["informal", "warm", "expressive"],
+    "suits": {
+      "data": 1,
+      "formulas": 0,
+      "images": 1,
+      "longText": 1
+    },
+    "avoid": "Material that demands precision and institutional weight; the sticky-note look reads as unfinished on purpose."
+  },
+  "theme": {
+    "colors": {
+      "background": "F7F5F0",
+      "card": "FFFFFF",
+      "primary": "2D2A26",
+      "secondary": "5C5750",
+      "accent": "2D2A26",
+      "text": "2D2A26",
+      "textSecondary": "5C5750",
+      "textMuted": "6B655C",
+      "line": "DDD7CB",
+      "accentTint": "FFE066",
+      "dark": "2D2A26",
+      "onDark": "FAF8F3",
+      "onDarkMuted": "D4C5B0",
+      "surface": "FFFFFF",
+      "palette": ["FFE066", "A5D8FF", "FFC9C9", "B2F2BB", "FFCC80", "D0BFFF"],
+      "chart": ["FFD43B", "74C0FC", "FF9F9F", "8CE99A", "FFCC80", "D0BFFF"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Georgia",
+        "body": "Georgia",
+        "data": "Georgia"
+      },
+      "zh": {
+        "title": "SimSun",
+        "body": "SimSun"
+      },
+      "ja": {
+        "title": "Yu Mincho",
+        "body": "Yu Mincho"
+      }
+    },
+    "sizes": {
+      "hero": [54, 48, 40, 34],
+      "statement": [36, 32, 28, 24],
+      "title": [28, 26, 24, 22],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [14, 13, 12],
+      "kpi": [48, 40, 32]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "warm": {
+            "bg": "FAF8F3",
+            "title": "2D2A26",
+            "body": "2D2A26",
+            "muted": "5C5750",
+            "faint": "6B655C",
+            "accent": "2D2A26",
+            "line": "E3DCCF",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFE066",
+            "chart": [
+              "FFD43B",
+              "74C0FC",
+              "FF9F9F",
+              "8CE99A",
+              "FFCC80",
+              "D0BFFF"
+            ]
+          },
+          "cork": {
+            "bg": "D4C5B0",
+            "title": "2D2A26",
+            "body": "2D2A26",
+            "muted": "5C5750",
+            "faint": "6B655C",
+            "accent": "2D2A26",
+            "line": "B8A088",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFE066",
+            "chart": [
+              "FFD43B",
+              "74C0FC",
+              "FF9F9F",
+              "8CE99A",
+              "FFCC80",
+              "D0BFFF"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "cork",
+          "section": "warm",
+          "statement": "base",
+          "content": ["base", "warm", "cork"],
+          "closing": "cork"
+        },
+        "cover": {
+          "title": {
+            "x": 3.5,
+            "y": 2.55,
+            "w": 6.3,
+            "h": 1.35,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "kicker": {
+            "x": 3.5,
+            "y": 2.15,
+            "w": 6.3,
+            "align": "center",
+            "size": 13,
+            "color": "muted"
+          },
+          "subtitle": {
+            "x": 3.5,
+            "y": 3.95,
+            "w": 6.3,
+            "align": "center",
+            "size": 16,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 5.55,
+            "w": 8.9,
+            "align": "center",
+            "color": "body"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 2.25,
+              "y": 1.62,
+              "w": 1.0,
+              "h": 0.95,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -7
+            },
+            {
+              "kind": "rect",
+              "x": 2.2,
+              "y": 1.55,
+              "w": 1.0,
+              "h": 0.95,
+              "fill": "B2F2BB",
+              "name": "note",
+              "rot": -7
+            },
+            {
+              "kind": "rect",
+              "x": 9.65,
+              "y": 1.32,
+              "w": 2.2,
+              "h": 0.7,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": 8
+            },
+            {
+              "kind": "rect",
+              "x": 9.6,
+              "y": 1.25,
+              "w": 2.2,
+              "h": 0.7,
+              "fill": "A5D8FF",
+              "name": "note",
+              "rot": 8
+            },
+            {
+              "kind": "rect",
+              "x": 2.05,
+              "y": 4.82,
+              "w": 1.7,
+              "h": 0.6,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -6
+            },
+            {
+              "kind": "rect",
+              "x": 2.0,
+              "y": 4.75,
+              "w": 1.7,
+              "h": 0.6,
+              "fill": "FFC9C9",
+              "name": "note",
+              "rot": -6
+            },
+            {
+              "kind": "rect",
+              "x": 3.15,
+              "y": 1.97,
+              "w": 7.1,
+              "h": 3.0,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -1
+            },
+            {
+              "kind": "rect",
+              "x": 3.1,
+              "y": 1.9,
+              "w": 7.1,
+              "h": 3.0,
+              "fill": "FFE066",
+              "name": "title note",
+              "rot": -1
+            },
+            {
+              "kind": "oval",
+              "x": 6.55,
+              "y": 1.82,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            },
+            {
+              "kind": "oval",
+              "x": 2.75,
+              "y": 4.68,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 3.6,
+            "y": 2.9,
+            "w": 6.1,
+            "h": 1.5,
+            "align": "center",
+            "anchor": "middle",
+            "sizes": [44, 40, 36, 30]
+          },
+          "number": {
+            "x": 3.6,
+            "y": 2.15,
+            "w": 6.1,
+            "align": "center",
+            "size": 30,
+            "color": "body"
+          },
+          "subtitle": {
+            "x": 3.6,
+            "y": 4.5,
+            "w": 6.1,
+            "align": "center",
+            "size": 16,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 10.05,
+              "y": 1.77,
+              "w": 1.5,
+              "h": 1.1,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": 6
+            },
+            {
+              "kind": "rect",
+              "x": 10.0,
+              "y": 1.7,
+              "w": 1.5,
+              "h": 1.1,
+              "fill": "FFE066",
+              "name": "note",
+              "rot": 6
+            },
+            {
+              "kind": "rect",
+              "x": 1.95,
+              "y": 4.67,
+              "w": 1.3,
+              "h": 0.9,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -6
+            },
+            {
+              "kind": "rect",
+              "x": 1.9,
+              "y": 4.6,
+              "w": 1.3,
+              "h": 0.9,
+              "fill": "FFC9C9",
+              "name": "note",
+              "rot": -6
+            },
+            {
+              "kind": "rect",
+              "x": 3.25,
+              "y": 1.97,
+              "w": 6.9,
+              "h": 3.4,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -1.5
+            },
+            {
+              "kind": "rect",
+              "x": 3.2,
+              "y": 1.9,
+              "w": 6.9,
+              "h": 3.4,
+              "fill": "A5D8FF",
+              "name": "title note",
+              "rot": -1.5
+            },
+            {
+              "kind": "oval",
+              "x": 6.57,
+              "y": 1.8,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 3.0,
+            "y": 2.1,
+            "w": 7.3,
+            "h": 2.7,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 10.25,
+              "y": 2.07,
+              "w": 1.6,
+              "h": 1.2,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": 6
+            },
+            {
+              "kind": "rect",
+              "x": 10.2,
+              "y": 2.0,
+              "w": 1.6,
+              "h": 1.2,
+              "fill": "A5D8FF",
+              "name": "note",
+              "rot": 6
+            },
+            {
+              "kind": "rect",
+              "x": 2.55,
+              "y": 1.52,
+              "w": 8.3,
+              "h": 4.3,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -1
+            },
+            {
+              "kind": "rect",
+              "x": 2.5,
+              "y": 1.45,
+              "w": 8.3,
+              "h": 4.3,
+              "fill": "FFE066",
+              "name": "quote note",
+              "rot": -1
+            },
+            {
+              "kind": "oval",
+              "x": 6.57,
+              "y": 1.36,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 1.0,
+            "y": 0.68,
+            "w": 6.4,
+            "h": 0.65
+          },
+          "subtitle": {
+            "x": 8.0,
+            "y": 0.92,
+            "w": 4.6,
+            "align": "right",
+            "size": 14,
+            "color": "muted"
+          },
+          "body": {
+            "x": 0.9,
+            "y": 2.0,
+            "w": 11.5,
+            "h": 4.7
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.77,
+              "y": 0.57,
+              "w": 7.0,
+              "h": 0.98,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -1
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 7.0,
+              "h": 0.98,
+              "fill": "FFE066",
+              "name": "title note",
+              "rot": -1
+            },
+            {
+              "kind": "oval",
+              "x": 4.1,
+              "y": 0.42,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 3.2,
+            "y": 2.75,
+            "w": 6.9,
+            "h": 1.1,
+            "align": "center",
+            "anchor": "middle",
+            "sizes": [48, 40, 34, 28]
+          },
+          "subtitle": {
+            "x": 3.2,
+            "y": 3.9,
+            "w": 6.9,
+            "align": "center",
+            "size": 16,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 5.5,
+            "w": 8.9,
+            "align": "center",
+            "color": "body"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 1.55,
+              "y": 1.97,
+              "w": 2.4,
+              "h": 0.6,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -8
+            },
+            {
+              "kind": "rect",
+              "x": 1.5,
+              "y": 1.9,
+              "w": 2.4,
+              "h": 0.6,
+              "fill": "A5D8FF",
+              "name": "note",
+              "rot": -8
+            },
+            {
+              "kind": "rect",
+              "x": 11.05,
+              "y": 2.47,
+              "w": 0.65,
+              "h": 0.65,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": 6
+            },
+            {
+              "kind": "rect",
+              "x": 11.0,
+              "y": 2.4,
+              "w": 0.65,
+              "h": 0.65,
+              "fill": "B2F2BB",
+              "name": "note",
+              "rot": 6
+            },
+            {
+              "kind": "rect",
+              "x": 1.85,
+              "y": 4.67,
+              "w": 0.5,
+              "h": 0.6,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -4
+            },
+            {
+              "kind": "rect",
+              "x": 1.8,
+              "y": 4.6,
+              "w": 0.5,
+              "h": 0.6,
+              "fill": "FFCC80",
+              "name": "note",
+              "rot": -4
+            },
+            {
+              "kind": "rect",
+              "x": 9.05,
+              "y": 4.92,
+              "w": 2.5,
+              "h": 0.6,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": 8
+            },
+            {
+              "kind": "rect",
+              "x": 9.0,
+              "y": 4.85,
+              "w": 2.5,
+              "h": 0.6,
+              "fill": "FFC9C9",
+              "name": "note",
+              "rot": 8
+            },
+            {
+              "kind": "rect",
+              "x": 2.85,
+              "y": 2.52,
+              "w": 7.7,
+              "h": 2.2,
+              "fill": "line",
+              "name": "note shadow",
+              "rot": -1
+            },
+            {
+              "kind": "rect",
+              "x": 2.8,
+              "y": 2.45,
+              "w": 7.7,
+              "h": 2.2,
+              "fill": "FFE066",
+              "name": "title note",
+              "rot": -1
+            },
+            {
+              "kind": "oval",
+              "x": 6.57,
+              "y": 2.36,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            },
+            {
+              "kind": "oval",
+              "x": 10.0,
+              "y": 4.8,
+              "w": 0.17,
+              "h": 0.17,
+              "fill": "E03131",
+              "name": "pin"
+            }
+          ]
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "palette",
+          "line": "none",
+          "shadow": [0.05, 0.07, "line"],
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "block",
+          "shape": "rect",
+          "fill": "palette",
+          "line": "none",
+          "shadow": [0.05, 0.07, "line"]
+        },
+        "steps": {
+          "style": "block",
+          "shape": "rect",
+          "fill": "palette",
+          "line": "none",
+          "shadow": [0.05, 0.07, "line"],
+          "gap": 0.3
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Sticky notes on a desk: warm paper, cream and cork canvases alternate; the page title is written on a slightly tilted yellow note with a red pin, cover, quote and closing put the text on one large note with smaller notes around it.",
+    "components": "Square-cornered note blocks in yellow, blue, pink and green with a soft offset shadow and dark serif text; stats and steps are notes too. One note carries one thought.",
+    "narrative": "Scattered idea, problem and answer, growth chart, three moves, phases, spotlight image, key statistics, before and after, thanks.",
+    "nativeCoverage": "Cover, quote, note cards, comparison, bar and pie charts, numbered note steps, text with image region and closing as native text, shapes and charts. Not reproduced: tilted content notes (only decorative notes are rotated), tape strips, handwritten Caveat labels on the small notes, Shrikhand and Zilla Slab type, soft blurred drop shadows, paper grid and doodle textures, dashed curved arrows."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Small notes carry no handwritten labels; the source's paragraph under the note becomes one meta line."
+    },
+    {
+      "page": 2,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": "Tape strip and the handwritten line on the small blue note are not drawn."
+    },
+    {
+      "page": 3,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Two tilted checklist notes with numbered section headings become two upright note cards with bullets under a title note; check marks become bullets."
+    },
+    {
+      "page": 4,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source chart is hand-outlined on a taped white sheet beside a green key-metrics note; native is an editable chart on the canvas without the side note."
+    },
+    {
+      "page": 5,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "adapted",
+      "differences": "Notes are upright; pins and the circled letters A, B, C are not drawn."
+    },
+    {
+      "page": 6,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Three note-and-description pairs in a zigzag joined by dashed arrows become one row of numbered note blocks."
+    },
+    {
+      "page": 7,
+      "archetype": "split-image",
+      "native": "content_slide + bullets + image",
+      "status": "approximate",
+      "differences": "Source has a taped photo frame on the left and the text on a pink note with a yellow caption strip; native puts open bullets on the left and a flat image region on the right."
+    },
+    {
+      "page": 8,
+      "archetype": "chart-pie",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "The yellow key-statistics note beside the chart and the taped white sheet are not reproduced; native is a pie chart on the canvas."
+    },
+    {
+      "page": 9,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "adapted",
+      "differences": "The round vs badge between the notes, the heading underlines and the tilt are not drawn."
+    },
+    {
+      "page": 10,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "Small notes carry no handwritten labels."
+    }
+  ]
+}

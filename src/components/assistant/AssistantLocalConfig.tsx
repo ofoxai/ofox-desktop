@@ -1,7 +1,10 @@
-import { useState } from "react";
+import { SkillApprovalCard } from "./SkillResultCards";
+import { useId, useState } from "react";
+import { Check, ChevronDown, CircleDashed, Loader2 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type {
   AssistantGenerationApproval,
+  AssistantSkillApproval,
   AssistantApprovalChoice,
   AssistantLocalChange,
   AssistantPermissionMode,
@@ -101,45 +104,107 @@ export function LocalTaskProgress({
   intent,
   warning,
   plan,
+  showIntent = true,
+  paused = false,
 }: {
   intent: string | null;
   warning: string | null;
   plan: LocalPlanStep[];
+  showIntent?: boolean;
+  paused?: boolean;
 }) {
   const { t } = useTranslation();
-  if (!intent && !warning && plan.length === 0) return null;
+  const listId = useId();
+  const countId = `${listId}-count`;
+  const [expanded, setExpanded] = useState(true);
+  const completed = plan.filter((step) => step.status === "completed").length;
+  if ((!showIntent || !intent) && !warning && plan.length === 0) return null;
   return (
-    <div className="mt-2 space-y-1 text-note text-ink-muted">
-      {intent && <p>{intent}</p>}
+    <div className="mt-2 min-w-0 w-full max-w-xl space-y-2 text-note text-ink-muted">
+      {showIntent && intent && <p className="break-words">{intent}</p>}
       {warning && (
-        <p role="status" className="text-warn">
+        <p role="status" className="break-words text-warn">
           {t(`assistant.local.warnings.${warning}`)}
         </p>
       )}
       {plan.length > 0 && (
-        <ol aria-label={t("assistant.local.plan")} className="space-y-0.5">
-          {plan.map((step, index) => (
-            <li
-              key={index}
-              className={
-                step.status === "completed"
-                  ? "text-ink-faint"
-                  : step.status === "in_progress"
-                    ? "text-ink-2"
-                    : undefined
-              }
+        <div className="overflow-hidden rounded-list border border-line bg-card-2">
+          <button
+            type="button"
+            aria-label={t("assistant.local.plan")}
+            aria-describedby={countId}
+            aria-expanded={expanded}
+            aria-controls={listId}
+            onClick={() => setExpanded((open) => !open)}
+            className="flex w-full items-center gap-2 rounded-ctl px-3 py-2.5 text-left text-ink-2 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand/60"
+          >
+            <span className="min-w-0 flex-1 font-medium">
+              {t("assistant.local.plan")}
+            </span>
+            <span
+              id={countId}
+              className="flex-none tabular-nums text-ink-muted"
             >
-              <span aria-label={t(`assistant.local.steps.${step.status}`)}>
-                {step.status === "completed"
-                  ? "✓"
-                  : step.status === "in_progress"
-                    ? "→"
-                    : "○"}
-              </span>{" "}
-              {step.step}
-            </li>
-          ))}
-        </ol>
+              {completed}/{plan.length}
+            </span>
+            <ChevronDown
+              aria-hidden
+              className={cn(
+                "h-3.5 w-3.5 flex-none transition-transform duration-150 motion-reduce:transition-none",
+                !expanded && "-rotate-90",
+              )}
+            />
+          </button>
+          <ol
+            id={listId}
+            role="list"
+            hidden={!expanded}
+            aria-label={t("assistant.local.plan")}
+            className="space-y-1 px-2 pb-2"
+          >
+            {plan.map((step, index) => {
+              const current = step.status === "in_progress";
+              const Icon =
+                step.status === "completed"
+                  ? Check
+                  : current && !paused
+                    ? Loader2
+                    : CircleDashed;
+              return (
+                <li
+                  key={index}
+                  aria-current={current ? "step" : undefined}
+                  aria-busy={current ? !paused : undefined}
+                  className={cn(
+                    "flex items-start gap-2 rounded-ctl border px-2 py-1.5",
+                    current
+                      ? "border-line bg-card text-ink"
+                      : "border-transparent text-ink-muted",
+                  )}
+                >
+                  <span
+                    role="img"
+                    aria-label={t(`assistant.local.steps.${step.status}`)}
+                    className="mt-0.5 flex-none"
+                  >
+                    <Icon
+                      aria-hidden
+                      className={cn(
+                        "h-3.5 w-3.5",
+                        current &&
+                          !paused &&
+                          "animate-spin motion-reduce:animate-none",
+                      )}
+                    />
+                  </span>
+                  <span className="min-w-0 flex-1 break-words">
+                    {step.step}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </div>
       )}
     </div>
   );
@@ -164,18 +229,37 @@ export function LocalApprovalCard({
     void onRespond(approval.approvalId, choice).finally(() => setBusy(false));
   };
   if (
+    (approval.category === "skillInstall" ||
+      approval.category === "skillSave") &&
+    typeof approval.details === "object"
+  )
+    return (
+      <SkillApprovalCard
+        details={approval.details as AssistantSkillApproval}
+        install={approval.category === "skillInstall"}
+        busy={busy}
+        onRespond={respond}
+      />
+    );
+  if (
     approval.category === "generation" &&
     typeof approval.details === "object"
   )
     return (
       <GenerationApproval
-        details={approval.details}
+        details={approval.details as AssistantGenerationApproval}
         busy={busy}
         allowSession={approval.allowSession}
         onRespond={respond}
       />
     );
   const overwrites = approval.overwrites ?? [];
+  const mcpDetails =
+    approval.category === "mcp" &&
+    typeof approval.details === "object" &&
+    "tool" in approval.details
+      ? approval.details
+      : null;
   return (
     <div
       role="group"
@@ -183,10 +267,37 @@ export function LocalApprovalCard({
       className="mt-2 space-y-2 rounded-list border border-line bg-card-2 px-3 py-2 text-ctl"
     >
       <p className="font-medium text-ink">
-        {t(`assistant.local.operations.${approval.name}`, {
-          defaultValue: approval.name,
-        })}
+        {approval.category === "mcp"
+          ? t("assistant.mcp.approvalTitle")
+          : t(`assistant.local.operations.${approval.name}`, {
+              defaultValue: approval.name,
+            })}
       </p>
+      {mcpDetails && (
+        <p className="break-words text-note text-ink-2">
+          {mcpDetails.server ?? "MCP"} · {mcpDetails.tool}
+        </p>
+      )}
+      {approval.category === "mcp" && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.mcp.approval")}
+        </p>
+      )}
+      {mcpDetails && typeof approval.argumentsPreview === "string" && (
+        <details className="text-note text-ink-muted">
+          <summary className="cursor-default select-none">
+            {t("assistant.mcp.argumentsPreview")}
+          </summary>
+          <pre className="mt-1 max-h-36 overflow-auto whitespace-pre-wrap break-words rounded-ctl bg-pill px-2 py-1 font-mono text-ink-2">
+            {approval.argumentsPreview}
+          </pre>
+        </details>
+      )}
+      {mcpDetails && approval.argumentsTruncated === true && (
+        <p className="text-note text-ink-muted">
+          {t("assistant.mcp.argumentsTruncated")}
+        </p>
+      )}
       {overwrites.length > 0 && (
         <div className="text-note text-ink-2">
           <p>{t("assistant.local.overwrites")}</p>

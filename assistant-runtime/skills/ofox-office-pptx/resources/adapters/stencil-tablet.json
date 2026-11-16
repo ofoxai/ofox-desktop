@@ -1,0 +1,399 @@
+{
+  "id": "stencil-tablet",
+  "family": "color-block",
+  "names": {
+    "zh": "Stencil & Tablet 骨色石板",
+    "en": "Stencil & Tablet",
+    "ja": "Stencil & Tablet 石板風"
+  },
+  "intro": {
+    "zh": "骨白纸与纯黑画布交替，衬线大写标题配赭、洋红、橙、青绿、蓝等饱和圆角色块；适合文化机构、建筑与工艺品牌、长篇研究和咨询汇报。",
+    "en": "Bone-paper and black canvases alternate under large serif capitals with saturated rounded blocks in sienna, magenta, orange and teal; for cultural institutions, research and consulting readouts.",
+    "ja": "骨色の紙と黒の画面が交互に現れ、大きなセリフ体の大文字見出しと、シエナ・マゼンタ・オレンジ・ティール・ブルーの角丸ブロックで構成。文化施設や工芸ブランド、調査報告向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "consulting",
+      "research",
+      "business-review",
+      "creative",
+      "general"
+    ],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["weighty", "tactile", "graphic"],
+    "suits": { "data": 2, "formulas": 0, "images": 1, "longText": 1 },
+    "avoid": "Decks that want digital-native polish or playful pop; the heavy serif capitals and earth palette are deliberately analog."
+  },
+  "theme": {
+    "colors": {
+      "background": "E2DCC9",
+      "card": "F4EFE0",
+      "primary": "0A0A0A",
+      "secondary": "2D7E73",
+      "accent": "C73B7A",
+      "text": "0A0A0A",
+      "textSecondary": "33312B",
+      "textMuted": "5C584C",
+      "line": "A8A18C",
+      "accentTint": "EE7A2E",
+      "dark": "0A0A0A",
+      "onDark": "F4EFE0",
+      "onDarkMuted": "E2DCC9",
+      "surface": "F4EFE0",
+      "palette": ["A06A3C", "C73B7A", "EE7A2E", "2D7E73", "3F73B7", "D8A93B"],
+      "chart": ["EE7A2E", "2D7E73", "C73B7A", "3F73B7", "D8A93B", "6F7A2E"]
+    },
+    "fonts": {
+      "latin": { "title": "Georgia", "body": "Arial", "data": "Georgia" },
+      "zh": { "title": "SimSun", "body": "Microsoft YaHei" },
+      "ja": { "title": "Yu Mincho", "body": "Yu Gothic" }
+    },
+    "sizes": {
+      "hero": [88, 72, 60, 48],
+      "statement": [36, 32, 28, 24],
+      "title": [36, 32, 28, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 15, 14],
+      "caption": [14, 12, 11],
+      "kpi": [80, 72, 66]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": true,
+        "canvases": {
+          "ink": {
+            "bg": "000000",
+            "title": "F4EFE0",
+            "body": "F4EFE0",
+            "muted": "E2DCC9",
+            "faint": "A8A18C",
+            "accent": "EE7A2E",
+            "line": "4A473E",
+            "card": "1C1B18",
+            "surface": "1C1B18",
+            "accentTint": "EE7A2E",
+            "chart": [
+              "EE7A2E",
+              "D8A93B",
+              "F4EFE0",
+              "2D7E73",
+              "C73B7A",
+              "3F73B7"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "ink",
+          "statement": "base",
+          "content": [
+            "base",
+            "ink",
+            "base",
+            "base",
+            "base",
+            "ink",
+            "base",
+            "base",
+            "ink",
+            "base",
+            "base"
+          ],
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 0.72,
+            "y": 2.9,
+            "w": 9.4,
+            "h": 2.9,
+            "anchor": "bottom"
+          },
+          "kicker": {
+            "x": 0.72,
+            "y": 0.5,
+            "w": 8,
+            "size": 12,
+            "color": "title"
+          },
+          "subtitle": {
+            "x": 1.25,
+            "y": 6.3,
+            "w": 7.2,
+            "size": 13,
+            "color": "title"
+          },
+          "meta": {
+            "x": 8.6,
+            "y": 6.32,
+            "w": 4.0,
+            "size": 12,
+            "align": "right",
+            "color": "title"
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 10.35,
+              "y": 0.95,
+              "w": 2.3,
+              "h": 1.45,
+              "fill": "2D7E73",
+              "rot": -28,
+              "name": "leaf"
+            },
+            {
+              "kind": "oval",
+              "x": 11.35,
+              "y": 0.4,
+              "w": 1.25,
+              "h": 1.25,
+              "fill": "2D7E73",
+              "name": "leaf tip"
+            },
+            {
+              "kind": "round",
+              "x": 0.72,
+              "y": 6.28,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "EE7A2E",
+              "radius": 0.06,
+              "name": "orange mark"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 5.2,
+            "y": 3.5,
+            "w": 7.4,
+            "h": 2.6,
+            "align": "right",
+            "anchor": "bottom",
+            "sizes": [54, 48, 40, 32]
+          },
+          "number": {
+            "x": 0.72,
+            "y": 0.5,
+            "w": 5.5,
+            "h": 2.7,
+            "size": 150,
+            "align": "left"
+          }
+        },
+        "statement": {
+          "title": {
+            "x": 1.5,
+            "y": 2.0,
+            "w": 10.3,
+            "h": 3.2,
+            "anchor": "middle",
+            "color": "0A0A0A",
+            "upper": false
+          },
+          "kicker": {
+            "x": 1.5,
+            "y": 1.4,
+            "w": 9,
+            "size": 12,
+            "color": "0A0A0A"
+          },
+          "attribution": {
+            "x": 1.5,
+            "y": 5.55,
+            "w": 10,
+            "size": 13,
+            "color": "0A0A0A"
+          },
+          "shapes": [
+            {
+              "kind": "round",
+              "x": 0.72,
+              "y": 0.9,
+              "w": 11.9,
+              "h": 5.6,
+              "fill": "C73B7A",
+              "radius": 0.14,
+              "name": "magenta panel"
+            }
+          ]
+        },
+        "content": {
+          "title": { "x": 0.72, "y": 0.72, "w": 9.6, "h": 0.95 },
+          "body": { "x": 0.72, "y": 2.1, "w": 11.9, "h": 4.6 },
+          "shapes": [
+            {
+              "kind": "round",
+              "x": 0.72,
+              "y": 0.36,
+              "w": 0.24,
+              "h": 0.24,
+              "fill": "EE7A2E",
+              "radius": 0.04,
+              "name": "orange mark"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.15,
+            "y": 2.0,
+            "w": 6.9,
+            "h": 2.7,
+            "color": "F4EFE0",
+            "sizes": [66, 60, 54, 44, 36]
+          },
+          "subtitle": {
+            "x": 1.15,
+            "y": 5.3,
+            "w": 6.9,
+            "size": 14,
+            "color": "F4EFE0"
+          },
+          "meta": {
+            "x": 9.2,
+            "y": 1.25,
+            "w": 3.0,
+            "size": 13,
+            "color": "0A0A0A"
+          },
+          "shapes": [
+            {
+              "kind": "round",
+              "x": 0.72,
+              "y": 0.8,
+              "w": 7.9,
+              "h": 5.9,
+              "fill": "2D7E73",
+              "radius": 0.14,
+              "name": "teal panel"
+            },
+            {
+              "kind": "round",
+              "x": 8.82,
+              "y": 0.8,
+              "w": 3.8,
+              "h": 5.9,
+              "fill": "EE7A2E",
+              "radius": 0.14,
+              "name": "orange panel"
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.1,
+          "fill": "card",
+          "line": "none",
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "block",
+          "fill": "palette",
+          "line": "none",
+          "shape": "round",
+          "radius": 0.1
+        },
+        "steps": {
+          "style": "block",
+          "fill": "palette",
+          "line": "none",
+          "shape": "round",
+          "radius": 0.1,
+          "gap": 0.12
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Bone-paper pages alternate with pure black pages; large serif capitals carry the cover (bottom-left, under a teal leaf form), black chapter pages pair a giant orange numeral with a right-aligned title, quotes sit on one magenta panel and the closing splits into teal and orange panels.",
+    "components": "Saturated rounded blocks in sienna, magenta, orange, teal, blue and mustard for numbered moves and figures; plain paper rounded cards with the highlighted one in orange; black-header tables. No outlines, gradients or shadows.",
+    "narrative": "Title, agenda, principles, direction, findings, evidence, process, options matrix, numbers, client voice, next steps.",
+    "nativeCoverage": "Cover, agenda blocks, numbered blocks, black chapter, finding cards, line chart, five-move process, table, figure blocks, quote panel and two-panel closing as native shapes, text, chart and table. Stencil-cut silhouettes, the mustard action-title band, the paper chart panel, pill tags in table cells, the numbered action list on the closing page and Bowlby One / Stardos Stencil are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "The stencil-cut leaf is drawn as two overlapping ovals."
+    },
+    {
+      "page": 2,
+      "archetype": "agenda",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source items are tall stencil-cut silhouettes (hourglass, octagon, spool); native items are numbered rounded blocks under a page title."
+    },
+    {
+      "page": 3,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source is four full-height principle blocks with the numeral at the top and text at the foot, not a sequence; native numbered blocks are shorter and keep the text under the numeral."
+    },
+    {
+      "page": 4,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 5,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source sets the action title in a mustard band joined to the three columns; native uses a plain page title above three separate cards."
+    },
+    {
+      "page": 6,
+      "archetype": "chart-line",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source puts the chart in a light paper panel on the right beside a title column, with a dashed control line; native draws the chart across the black canvas."
+    },
+    {
+      "page": 7,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "adapted",
+      "differences": "Intro text beside the title and the week strip under the blocks are omitted."
+    },
+    {
+      "page": 8,
+      "archetype": "table",
+      "native": "content_slide + table",
+      "status": "adapted",
+      "differences": "Coloured pill tags inside cells become plain cell text."
+    },
+    {
+      "page": 9,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "adapted",
+      "differences": "Block colours follow the palette order (sienna, magenta, orange) rather than orange, mustard, bone."
+    },
+    {
+      "page": 10,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": "The large quotation mark at the left of the panel is omitted."
+    },
+    {
+      "page": 11,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "Source fills the orange panel with a numbered list of three next steps; the native closing page holds only a meta line there."
+    }
+  ]
+}

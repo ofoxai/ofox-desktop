@@ -1,0 +1,8 @@
+#set page(paper: "a4", margin: (x: 2.2cm, y: 2.4cm), numbering: "1")
+#set text(font: ("PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Hiragino Sans", "Yu Gothic", "Helvetica Neue", "Arial"), size: 11pt, lang: "{{LANG}}")
+#set par(justify: true, leading: 0.8em)
+#set heading(numbering: none)
+#show heading.where(level: 1): it => block(above: 1.4em, below: 0.8em, text(size: 20pt, weight: "bold", it.body))
+#show heading.where(level: 2): it => block(above: 1.2em, below: 0.6em, text(size: 15pt, weight: "bold", it.body))
+#show heading.where(level: 3): it => block(above: 1em, below: 0.5em, text(size: 12.5pt, weight: "bold", it.body))
+#set table(inset: 6pt, stroke: 0.5pt + luma(180))

@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { libraryApi, type InventorySourceDetail } from "@/lib/api/library";
@@ -167,7 +168,9 @@ export function LibrarySourceDetail({
           {error}
         </p>
       )}
-      {!detail && !error && <p role="status">{t("library.loading")}</p>}
+      {!detail && !error && (
+        <FoxLoader size="block" label={t("library.loading")} />
+      )}
       {detail && (
         <>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-2 text-ctl">

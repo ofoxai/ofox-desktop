@@ -1,0 +1,38 @@
+[
+  {
+    "id": "frontend-design",
+    "owner": "anthropics",
+    "repo": "skills",
+    "directory": "skills/frontend-design"
+  },
+  {
+    "id": "webapp-testing",
+    "owner": "anthropics",
+    "repo": "skills",
+    "directory": "skills/webapp-testing"
+  },
+  {
+    "id": "mcp-builder",
+    "owner": "anthropics",
+    "repo": "skills",
+    "directory": "skills/mcp-builder"
+  },
+  {
+    "id": "skill-creator",
+    "owner": "anthropics",
+    "repo": "skills",
+    "directory": "skills/skill-creator"
+  },
+  {
+    "id": "theme-factory",
+    "owner": "anthropics",
+    "repo": "skills",
+    "directory": "skills/theme-factory"
+  },
+  {
+    "id": "canvas-design",
+    "owner": "anthropics",
+    "repo": "skills",
+    "directory": "skills/canvas-design"
+  }
+]

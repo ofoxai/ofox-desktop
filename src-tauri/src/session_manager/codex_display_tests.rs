@@ -141,8 +141,12 @@ fn codex_thread_display_parent_child_replicas_conflicts_and_source_change() {
     assert_eq!(values["root"].0.as_ref().unwrap().total_tokens, 320);
     assert_eq!(values["child"].0.as_ref().unwrap().total_tokens, 120);
     drop(conn);
-    write(&copy, "child", "root", 200);
-    refresh(&db, &[&root, &child, &copy]);
+    // Same-size rewrites can retain Windows' last-write stamp in one clock
+    // tick. Make this fixture an observable source change, like an append.
+    let copy_size = std::fs::metadata(&copy).unwrap().len();
+    write(&copy, "child", "root", 2000);
+    assert_ne!(std::fs::metadata(&copy).unwrap().len(), copy_size);
+    assert_eq!(refresh(&db, &[&root, &child, &copy]), 1);
     let conn = db.conn.lock().unwrap();
     let conflict = display_on(&conn, &listing, "ofox.ai", 2)
         .unwrap()
@@ -154,7 +158,9 @@ fn codex_thread_display_parent_child_replicas_conflicts_and_source_change() {
         .reasons
         .contains(&"conflictingUsageReplica".into()));
     // One changed physical source must not serve stale own values before refresh.
-    write(&root, "root", "root", 301);
+    let root_size = std::fs::metadata(&root).unwrap().len();
+    write(&root, "root", "root", 3000);
+    assert_ne!(std::fs::metadata(&root).unwrap().len(), root_size);
     let changed = display_on(&conn, &listing, "ofox.ai", 2)
         .unwrap()
         .remove("root")

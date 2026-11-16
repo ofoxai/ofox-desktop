@@ -998,7 +998,40 @@ fn preview_scoped(
     if spec_hash(&row)? != meta.hash {
         return Err(error("revisionChanged"));
     }
-    let artifact = artifact_for(db, id)?;
+    artifact_for(db, id)?;
+    let op = plan_proposed(
+        &before,
+        (&row, meta),
+        roots,
+        resolvers,
+        adopt,
+        append_only,
+        replace,
+    )?;
+    let mut next = before.clone();
+    next.machine.operations.insert(op.id.clone(), op.clone());
+    io::prune_history(&mut next, &op.id);
+    db.library_commit(&before, &next)?;
+    Ok(op)
+}
+
+/// Prepare against a proposed immutable row without publishing database state.
+pub(crate) fn plan_proposed(
+    before: &super::LibrarySnapshot,
+    spec: (&InstalledSkill, &ResourceRevision),
+    roots: &[(String, PathBuf)],
+    resolvers: Option<BTreeMap<String, PathBuf>>,
+    adopt: &BTreeSet<String>,
+    append_only: bool,
+    replace: &BTreeSet<String>,
+) -> Result<Operation, AppError> {
+    let (row, meta) = spec;
+    let id = row.id.as_str();
+    let artifact = artifacts::path(
+        row.content_hash
+            .as_deref()
+            .ok_or_else(|| error("skillArtifactMissing"))?,
+    )?;
     let hash = artifacts::tree_hash(&artifact)?;
     let selected: BTreeSet<_> = roots.iter().map(|(tool, _)| tool.clone()).collect();
     if selected.len() != roots.len() {
@@ -1258,13 +1291,10 @@ fn preview_scoped(
         resolved_physical,
         routing: None,
     };
-    let mut next = before.clone();
-    next.machine.operations.insert(op.id.clone(), op.clone());
-    io::prune_history(&mut next, &op.id);
-    db.library_commit(&before, &next)?;
     Ok(op)
 }
-fn unlink(path: &Path) -> Result<(), AppError> {
+
+pub(crate) fn unlink(path: &Path) -> Result<(), AppError> {
     let metadata = fs::symlink_metadata(path).map_err(|_| error("skillWriteFailed"))?;
     if metadata.file_type().is_symlink() {
         #[cfg(unix)]
@@ -1290,7 +1320,7 @@ pub fn stage(target: &mut TargetWrite) -> Result<(), AppError> {
         }
     })
 }
-fn stage_with(
+pub(crate) fn stage_with(
     target: &mut TargetWrite,
     link: impl Fn(&Path, &Path) -> std::io::Result<()>,
 ) -> Result<(), AppError> {
@@ -1567,6 +1597,59 @@ pub(crate) fn receipt_intact_with(receipt: &Receipt, hashes: &mut TreeHashes) ->
                     && (owned.adopted.is_none()
                         || hashes.hash(path, None).ok().as_ref() == Some(&owned.artifact_hash))
             })
+}
+
+/// Undo only this staged entry; refuse external edits and retain the evidence.
+pub(crate) fn rollback_written(target: &TargetWrite) -> Result<(), AppError> {
+    let Some(plan) = target.directory.as_ref() else {
+        return if target.receipt.as_ref().is_some_and(receipt_intact)
+            && target.before_hash == target.after_hash
+        {
+            Ok(())
+        } else {
+            Err(error("operationNeedsReview"))
+        };
+    };
+    let path = Path::new(&target.path);
+    if entry_id(path)? != target.physical_target {
+        return Err(error("targetChanged"));
+    }
+    let previous = target
+        .previous_receipt
+        .as_ref()
+        .map(|r| serde_json::from_str::<DirectoryOwned>(&r.owned_segment))
+        .transpose()
+        .map_err(|_| error("stateUnreadable"))?;
+    let old = owned_hash(path, previous.as_ref()).ok();
+    let backup = Path::new(&plan.backup_path);
+    if fs::symlink_metadata(backup).is_err() && old.as_deref() == Some(&target.before_hash) {
+        return discard_staged(&mut target.clone());
+    }
+    let current = entry_hash_with(path, Some(&plan.artifact_hash))?;
+    if fs::symlink_metadata(backup).is_ok() {
+        let hash = entry_hash_from(
+            backup,
+            previous.as_ref().map(|p| p.artifact_hash.as_str()),
+            path.parent(),
+        )?;
+        if hash != target.before_hash || (current != "missing" && current != target.after_hash) {
+            return Err(error("operationNeedsReview"));
+        }
+        if current != "missing" {
+            unlink(path)?;
+        }
+        fs::rename(backup, path).map_err(|_| error("skillWriteFailed"))?;
+    } else if target.before_hash == "missing" {
+        if current == target.after_hash {
+            unlink(path)?;
+        } else if current != "missing" {
+            return Err(error("operationNeedsReview"));
+        }
+    } else if old.as_deref() != Some(&target.before_hash) {
+        return Err(error("operationNeedsReview"));
+    }
+    let mut staged = target.clone();
+    discard_staged(&mut staged)
 }
 
 #[cfg(test)]

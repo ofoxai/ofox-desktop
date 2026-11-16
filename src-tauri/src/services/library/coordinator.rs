@@ -483,6 +483,15 @@ fn compact_finished(op: &mut Operation) {
 }
 
 pub(crate) fn prune_history(snapshot: &mut LibrarySnapshot, keep_id: &str) {
+    if super::assistant_skill_transaction::pending_intent() {
+        return;
+    }
+    prune_history_preserving(snapshot, keep_id);
+}
+
+/// Pure retention policy. The intent owner may use this inside its single CAS
+/// only after recovering earlier intents and explicitly preserving its witness.
+pub(super) fn prune_history_preserving(snapshot: &mut LibrarySnapshot, keep_id: &str) {
     for (status, limit) in [
         ("previewed", 8usize),
         ("applied", 20usize),
@@ -618,6 +627,7 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         return Ok(op);
     }
     verify_routing(&op)?;
+    super::assistant_target::validate_operation(&op, db)?;
     let first_confirmation = op.status == "previewed";
     let mut prepared = snapshot.clone();
     let mut blocked_updates = BTreeSet::new();
@@ -691,6 +701,7 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
             snapshot = persist(db, &snapshot, &op, None)?;
         }
         let source_valid = verify_sources(&op.targets[index], &op.targets);
+        let enabling = super::assistant_target::is_newly_enabled(&op, &op.targets[index]);
         let target = &mut op.targets[index];
         if target.status == "applied" || target.status == "conflict" || target.after_hash.is_empty()
         {
@@ -700,7 +711,7 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
         let result = (|| {
             source_valid?;
             if op.kind == super::ResourceKind::Skills {
-                return super::skill_resource::write(target);
+                return super::assistant_target::write_target(target, enabling);
             }
             if physical(&path)?.to_string_lossy() != target.physical_target {
                 return Err(error("targetChanged"));
@@ -709,6 +720,9 @@ pub fn apply_operation(db: &Database, id: &str) -> Result<Operation, AppError> {
             let hash = fingerprint(current.as_deref().map(str::as_bytes));
             if hash != target.before_hash {
                 return Err(error("targetChanged"));
+            }
+            if path == super::assistant_target::mcp_config_path() {
+                return super::mcp_targets::write_assistant(&target.after_text);
             }
             let mode = target
                 .private_values
@@ -783,6 +797,18 @@ pub fn recover_operation(db: &Database, id: &str) -> Result<Operation, AppError>
         .cloned()
         .ok_or_else(|| error("operationMissing"))?;
     if op.status == "previewed" || op.status == "applied" || op.status == "cancelled" {
+        return Ok(op);
+    }
+    // A plan that no longer validates is never claimed as applied, but the
+    // interrupted operation still settles instead of staying in progress.
+    if super::mcp_targets::validate_operation(db, &op).is_err() {
+        for target in op.targets.iter_mut().filter(|t| t.status != "applied") {
+            target.status = "needsReview".into();
+            target.reason = Some("library.operationNeedsReview".into());
+        }
+        op.status = "needsReview".into();
+        compact_finished(&mut op);
+        persist(db, &snapshot, &op, None)?;
         return Ok(op);
     }
     let current_version =

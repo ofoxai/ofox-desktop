@@ -50,6 +50,304 @@ fn id(value: &Value) -> &str {
 
 #[test]
 #[serial_test::serial]
+fn assistant_mcp_batch_writes_private_json_without_touching_corrupt_skill_state() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let resources = vec![mcp(&db, "alpha"), mcp(&db, "beta")];
+    std::fs::create_dir_all(assistant::assistant_dir()).unwrap();
+    let modes = assistant::assistant_dir().join("skill-modes.json");
+    std::fs::write(&modes, b"unreadable skill state must stay intact").unwrap();
+    let plan = preview_batch(
+        &db,
+        ResourceKind::Mcp,
+        resources,
+        vec![assistant::ID.into()],
+        BatchAction::Apply,
+        0,
+    )
+    .unwrap();
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+    let native: Value =
+        serde_json::from_slice(&std::fs::read(assistant::mcp_config_path()).unwrap()).unwrap();
+    assert_eq!(native["mcpServers"].as_object().unwrap().len(), 2);
+    assert_eq!(
+        std::fs::read(&modes).unwrap(),
+        b"unreadable skill state must stay intact"
+    );
+    assert!(!assistant::assistant_dir()
+        .join("skill-origins.json")
+        .exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(assistant::mcp_config_path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_mcp_batch_revalidates_frozen_and_metadata_only_resume_before_any_assignment() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    for metadata_only in [false, true] {
+        let db = Database::memory().unwrap();
+        let resource = mcp(&db, "remote");
+        let plan = preview_batch(
+            &db,
+            ResourceKind::Mcp,
+            vec![resource],
+            vec![assistant::ID.into()],
+            BatchAction::Apply,
+            0,
+        )
+        .unwrap();
+        let mut server = db
+            .get_all_mcp_servers()
+            .unwrap()
+            .shift_remove("remote")
+            .unwrap();
+        server.server = json!({"url":"https://mcp.notion.com/mcp"});
+        mcp_resource::save_draft(&db, server, Some(1)).unwrap();
+        if metadata_only {
+            let mut store: BatchStore =
+                serde_json::from_str(&db.get_setting(SETTING_KEY).unwrap().unwrap()).unwrap();
+            let journal = store.operations.get_mut(id(&plan)).unwrap();
+            journal.plans[0].targets.clear();
+            journal.groups.clear();
+            journal.status = "partial".into();
+            let mut snapshot = db.library_snapshot().unwrap();
+            project_children(journal, &mut snapshot).unwrap();
+            db.set_setting(
+                library::MACHINE_KEY,
+                &serde_json::to_string(&snapshot.machine).unwrap(),
+            )
+            .unwrap();
+            db.set_setting(SETTING_KEY, &serde_json::to_string(&store).unwrap())
+                .unwrap();
+        }
+        let before = db.library_snapshot().unwrap();
+        assert!(run_batch(&db, id(&plan))
+            .unwrap_err()
+            .to_string()
+            .contains("assistantMcpSignInUnsupported"));
+        assert_eq!(
+            db.library_snapshot().unwrap().machine.assignments,
+            before.machine.assignments
+        );
+        assert!(!assistant::mcp_config_path().exists());
+    }
+}
+
+fn assistant_skill(db: &Database, name: &str) -> BatchResource {
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join("SKILL.md"),
+        format!("---\nname: {name}\ndescription: fixture\n---\nBody"),
+    )
+    .unwrap();
+    let row = library::catalog::import_directory(db, source.path(), name, "Renamed display title")
+        .unwrap();
+    BatchResource {
+        resource_id: row.id,
+        expected_revision: 1,
+        add_tools: vec![],
+        withdraw_tools: vec![],
+    }
+}
+fn assistant_plan(db: &Database, resources: Vec<BatchResource>, action: BatchAction) -> Value {
+    preview_batch(
+        db,
+        ResourceKind::Skills,
+        resources,
+        vec![library::assistant_target::ID.into()],
+        action,
+        db.library_snapshot().unwrap().machine.epoch,
+    )
+    .unwrap()
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_batch_reenabling_manual_after_off_starts_auto() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let resource = assistant_skill(&db, "actual-name");
+    let enable =
+        library::skill_resource::preview(&db, &resource.resource_id, &[assistant::ID.into()])
+            .unwrap();
+    assert_eq!(
+        library::apply_operation(&db, &enable.id).unwrap().status,
+        "applied"
+    );
+    assistant::set_skill_mode("actual-name", assistant::SkillMode::Manual).unwrap();
+    let off = library::skill_resource::preview(&db, &resource.resource_id, &[]).unwrap();
+    assert_eq!(
+        library::apply_operation(&db, &off.id).unwrap().status,
+        "applied"
+    );
+    assert!(!assistant::skills_dir().join("actual-name").exists());
+    let plan = assistant_plan(&db, vec![resource], BatchAction::Apply);
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+    assert_eq!(
+        assistant::skill_modes().unwrap()["actual-name"],
+        assistant::SkillMode::Auto
+    );
+    assert!(!assistant::skill_modes()
+        .unwrap()
+        .contains_key("Renamed display title"));
+    assert!(assistant::skills_dir()
+        .join("actual-name/SKILL.md")
+        .exists());
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_batch_invalid_sidecars_block_fresh_execution_and_allow_repaired_retry() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    for (index, file) in [
+        "skill-modes.json",
+        "agent-skills.json",
+        "agent-skill-origins.json",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let db = Database::memory().unwrap();
+        let name = format!("fresh-{index}");
+        let resource = assistant_skill(&db, &name);
+        let plan = assistant_plan(&db, vec![resource], BatchAction::Apply);
+        let before = paired(&db).unwrap();
+        std::fs::create_dir_all(assistant::assistant_dir()).unwrap();
+        let sidecar = assistant::assistant_dir().join(file);
+        let old = std::fs::read(&sidecar).ok();
+        std::fs::write(&sidecar, "{").unwrap();
+        assert!(run_batch(&db, id(&plan)).is_err(), "{file}");
+        assert_eq!(
+            paired(&db).unwrap(),
+            before,
+            "{file}: no assignment or journal mutation"
+        );
+        assert!(!assistant::skills_dir().join(&name).exists());
+        assert_eq!(std::fs::read_to_string(&sidecar).unwrap(), "{");
+        if let Some(old) = old {
+            std::fs::write(&sidecar, old).unwrap();
+        } else {
+            std::fs::remove_file(&sidecar).unwrap();
+        }
+        assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+        assert!(assistant::skills_dir()
+            .join(&name)
+            .join("SKILL.md")
+            .exists());
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_batch_invalid_state_blocks_metadata_only_assignment_withdrawal() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let resource = assistant_skill(&db, "metadata-only");
+    let before = db.library_snapshot().unwrap();
+    let mut next = before.clone();
+    next.machine.assignments.insert(
+        format!("skills:{}:{}", resource.resource_id, assistant::ID),
+        resource.resource_id.clone(),
+    );
+    db.library_commit(&before, &next).unwrap();
+    let plan = assistant_plan(&db, vec![resource], BatchAction::Withdraw);
+    assert!(plan["groups"].as_array().unwrap().is_empty());
+    let before = paired(&db).unwrap();
+    std::fs::create_dir_all(assistant::assistant_dir()).unwrap();
+    std::fs::write(assistant::assistant_dir().join("skill-modes.json"), "{").unwrap();
+    assert!(run_batch(&db, id(&plan)).is_err());
+    assert_eq!(paired(&db).unwrap(), before);
+    assert!(!assistant::skills_dir().join("metadata-only").exists());
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_batch_resumed_after_recovery_revalidates_state_before_remaining_writes() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let resources = vec![
+        assistant_skill(&db, "resume-a"),
+        assistant_skill(&db, "resume-b"),
+    ];
+    let plan = assistant_plan(&db, resources, BatchAction::Apply);
+    assert!(run_inner(&db, id(&plan), &AtomicBool::new(false), true).is_err());
+    assert_eq!(reconcile_batch(&db, id(&plan)).unwrap()["completed"], 1);
+    let before = paired(&db).unwrap();
+    let paths = [
+        assistant::skills_dir().join("resume-a/SKILL.md"),
+        assistant::skills_dir().join("resume-b/SKILL.md"),
+    ];
+    let contents: Vec<_> = paths.iter().map(std::fs::read).map(Result::ok).collect();
+    assert_eq!(contents.iter().filter(|v| v.is_some()).count(), 1);
+    let sidecar = assistant::assistant_dir().join("skill-modes.json");
+    let old = std::fs::read(&sidecar).ok();
+    std::fs::write(&sidecar, "{").unwrap();
+    assert!(run_batch(&db, id(&plan)).is_err());
+    assert_eq!(paired(&db).unwrap(), before);
+    assert_eq!(
+        paths
+            .iter()
+            .map(std::fs::read)
+            .map(Result::ok)
+            .collect::<Vec<_>>(),
+        contents
+    );
+    if let Some(old) = old {
+        std::fs::write(&sidecar, old).unwrap();
+    } else {
+        std::fs::remove_file(&sidecar).unwrap();
+    }
+    assert_eq!(run_batch(&db, id(&plan)).unwrap()["status"], "applied");
+    assert!(paths.iter().all(|p| p.exists()));
+}
+
+#[test]
+#[serial_test::serial]
+fn assistant_batch_immediate_write_failure_restores_previous_manual_mode() {
+    use library::assistant_target as assistant;
+    let _sandbox = crate::test_sandbox::sandbox();
+    let db = Database::memory().unwrap();
+    let resource = assistant_skill(&db, "write-failure");
+    assistant::set_skill_mode("write-failure", assistant::SkillMode::Manual).unwrap();
+    let plan = assistant_plan(&db, vec![resource], BatchAction::Apply);
+    let (_, batches) = paired(&db).unwrap();
+    let mut journal = batches.operations[id(&plan)].clone();
+    let member = journal.groups[0].members[0].clone();
+    let target = &mut journal.plans[member.child].targets[member.target];
+    library::skill_resource::stage(target).unwrap();
+    let path = std::path::Path::new(&target.path).to_path_buf();
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(path.join("SKILL.md"), "User replacement").unwrap();
+    assert!(plan::write_group(&journal, 0).is_err());
+    assert_eq!(
+        assistant::skill_modes().unwrap()["write-failure"],
+        assistant::SkillMode::Manual
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("SKILL.md")).unwrap(),
+        "User replacement"
+    );
+}
+
+#[test]
+#[serial_test::serial]
 fn two_mcp_resources_share_one_final_file_and_both_receipts() {
     let _sandbox = crate::test_sandbox::sandbox();
     let db = Database::memory().unwrap();

@@ -1,3 +1,4 @@
+import { SkillChip } from "./SkillPicker";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Loader2, Pencil, X } from "lucide-react";
@@ -78,6 +79,7 @@ export function AssistantQueue({
             <li key={message.id} className="rounded-ctl bg-card-2 px-2 py-1">
               {editing?.id === message.id ? (
                 <div className="space-y-1">
+                  {message.skill && <SkillChip name={message.skill} />}
                   <Textarea
                     autoFocus
                     rows={2}
@@ -128,6 +130,7 @@ export function AssistantQueue({
                   >
                     {message.text}
                   </p>
+                  {message.skill && <SkillChip name={message.skill} />}
                   {sending && (
                     <Loader2
                       aria-label={t("assistant.queue.sending")}

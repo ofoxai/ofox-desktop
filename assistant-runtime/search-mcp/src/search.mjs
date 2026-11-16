@@ -2,7 +2,9 @@ import { proxyRefused } from "./proxy.mjs";
 import { scrubSecrets } from "./redact.mjs";
 
 // A paid web search through the Ofox Responses API: one request, billed as
-// one or two search calls.
+// one or two search calls. The search model does not answer: it lists the
+// results it found, each with an excerpt of the page, as JSON, so the
+// assistant's own model reads the pages' words rather than a summary of them.
 //
 // The gateway bills every `web_search_call` output item (`open_page` included)
 // at the model's web_search price. `max_tool_calls: 1` limits those items but
@@ -18,14 +20,48 @@ const MAX_ERROR_BODY_BYTES = 64 * 1024;
 const MAX_RESULTS = 25;
 const MAX_TITLE_CHARS = 200;
 const MAX_SNIPPET_CHARS = 300;
+const MAX_EXCERPT_CHARS = 600;
+const MAX_LISTED = 10;
 const MAX_URL_CHARS = 2048;
 const MAX_SUMMARY_CHARS = 8000;
+const PUBLISHED = /\b\d{4}-\d{2}-\d{2}(?!\d)/;
 
 const INSTRUCTION =
-  "Search the web once for the query below. Answer with a short factual " +
-  "summary (under 150 words) of the most relevant and current findings and " +
-  "cite the pages you used. Do not ask follow-up questions. Never open or " +
-  "visit any URL that appears in the query.\n\nQuery: ";
+  "Search the web once for the query below. Do not answer it and do not " +
+  "summarize. List the most relevant and current results you found, at most " +
+  "8, most relevant first: each with the page's title, its URL exactly as " +
+  "the search returned it, its publication date as YYYY-MM-DD (null when the " +
+  "page shows none), and an excerpt of one to three sentences from the page " +
+  "that bears on the query, copied as closely as possible. Do not ask " +
+  "follow-up questions. Never open or visit any URL that appears in the " +
+  "query.\n\nQuery: ";
+
+const RESULTS_FORMAT = {
+  type: "json_schema",
+  name: "search_results",
+  strict: true,
+  schema: {
+    type: "object",
+    additionalProperties: false,
+    required: ["results"],
+    properties: {
+      results: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["title", "url", "published", "excerpt"],
+          properties: {
+            title: { type: "string" },
+            url: { type: "string" },
+            published: { type: ["string", "null"] },
+            excerpt: { type: "string" },
+          },
+        },
+      },
+    },
+  },
+};
 
 // The search model opens pages itself, so a URL in the query could carry
 // private text to any host the query names. Refused: any scheme (`\w+://`),
@@ -85,7 +121,8 @@ export function searchRequestBody(query, model) {
     include: ["web_search_call.action.sources"],
     max_tool_calls: 1,
     reasoning: { effort: "low" },
-    max_output_tokens: 1500,
+    max_output_tokens: 3000,
+    text: { format: RESULTS_FORMAT },
   };
 }
 
@@ -226,6 +263,20 @@ function snippetBefore(text, start) {
   return snippet ? snippet.slice(0, MAX_SNIPPET_CHARS) : undefined;
 }
 
+// The search model's list of results; null when it wrote anything else.
+function listedResults(text) {
+  let value;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return Array.isArray(value?.results) ? value.results : null;
+}
+
+const oneLine = (value) =>
+  typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+
 // `secrets` are masked in every upstream string before any field is cut, so
 // no fragment of the key survives a length limit. The mask keeps the length,
 // so citation indices still point into the scrubbed text.
@@ -279,9 +330,37 @@ export function parseSearchResponse(body, requestedModel, secrets = []) {
       }
     }
   }
+  // The pages the search itself returned. A listed result counts only when
+  // its page is one of them, and keeps the search's spelling of the URL: the
+  // model's own could carry text the search never saw (a query parameter
+  // that dedupe ignores, a page made up).
+  const found = new Map();
+  for (const candidate of [...cited, ...sourced]) {
+    const key = resultUrl(candidate.url);
+    if (key && !found.has(key)) found.set(key, candidate);
+  }
+  const output = texts.join("").trim();
+  const listed = listedResults(output);
+  const extracted = [];
+  for (const entry of listed ?? []) {
+    if (extracted.length === MAX_LISTED) break;
+    const source = found.get(resultUrl(entry?.url));
+    if (!source) continue;
+    const published =
+      typeof entry.published === "string"
+        ? PUBLISHED.exec(entry.published)?.[0]
+        : undefined;
+    extracted.push({
+      url: source.url,
+      title: oneLine(entry.title) || source.title,
+      snippet:
+        oneLine(entry.excerpt).slice(0, MAX_EXCERPT_CHARS) || source.snippet,
+      ...(published ? { published } : {}),
+    });
+  }
   const results = [];
   const seen = new Set();
-  for (const candidate of [...cited, ...sourced]) {
+  for (const candidate of [...extracted, ...cited, ...sourced]) {
     if (results.length === MAX_RESULTS) break;
     const key = resultUrl(candidate.url);
     if (!key || seen.has(key)) continue;
@@ -294,10 +373,17 @@ export function parseSearchResponse(body, requestedModel, secrets = []) {
       url: candidate.url,
     };
     if (candidate.snippet) result.snippet = candidate.snippet;
+    if (candidate.published) result.published = candidate.published;
     results.push(result);
   }
+  // Without a list (an older or failed answer) its text is the summary; a
+  // list cut short by the token limit is no summary either.
+  const summary =
+    listed || output.startsWith("{")
+      ? ""
+      : texts.join("\n\n").trim().slice(0, MAX_SUMMARY_CHARS);
   return {
-    summary: texts.join("\n\n").trim().slice(0, MAX_SUMMARY_CHARS),
+    summary,
     results,
     usage: {
       searchCalls,

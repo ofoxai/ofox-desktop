@@ -291,3 +291,13 @@ test("a title needs a saved conversation and trusted parameters", async (t) => {
   await assert.rejects(title({ userText: undefined }), /title input/);
   await assert.rejects(title({ sessionFile: "relative.jsonl" }), /absolute/);
 });
+
+test("conversation retry rules do not retry title HTTP requests", async (t) => {
+  for (const status of [429, 502, 503]) {
+    const { title, requests } = await answered(t, () =>
+      Response.json({ error: { message: "busy" } }, { status }),
+    );
+    assert.equal((await title()).title, null);
+    assert.equal(requests.length, 1);
+  }
+});

@@ -30,11 +30,30 @@ export function validatePlan(steps) {
   return steps.map((s) => ({ ...s }));
 }
 const targetKey = (tool, folder) => JSON.stringify([tool, folder]);
+// Host-observed tool activity scopes uncertain command effects to tool repairs.
+const TOOL_OPERATIONS = new Set([
+  "tool_status",
+  "diagnose_in_folder",
+  "verify_in_folder",
+  "repair_launcher",
+  "rebind_tool",
+  "install_tool",
+  "update_tool",
+  "uninstall_tool",
+  "set_tool_model",
+]);
 export class LocalTask {
   // `state` is the host-kept snapshot of an earlier run in this conversation:
   // a repair whose verification is still missing stays missing. `home` is
   // where a change is verified when the user named no problem folder.
-  constructor(limits, clock = Date.now, state = null, home = null) {
+  constructor(
+    limits,
+    clock = Date.now,
+    state = null,
+    home = null,
+    reserveFinalStep = true,
+  ) {
+    this.reserveFinalStep = reserveFinalStep;
     this.home = home;
     this.homeVerified = false;
     this.limits = limits;
@@ -45,6 +64,11 @@ export class LocalTask {
     this.repeats = new Map();
     this.targets = new Map();
     this.changed = state?.changed === true;
+    // An arbitrary command is not proof of a configuration change. Only a
+    // tool repair needs its uncertain effects verified; e.g. a currency lookup
+    // with curl must finish without inspecting unrelated tools.
+    this.uncertain = false;
+    this.inspected = false;
     for (const t of Array.isArray(state?.targets) ? state.targets : [])
       if (typeof t?.tool === "string" && typeof t?.folder === "string")
         this.targets.set(targetKey(t.tool, t.folder), {
@@ -71,7 +95,9 @@ export class LocalTask {
     if (this.cost >= this.limits.maxCostUsd) this.stop("assistant_cost_limit");
   }
   get finalStep() {
-    return this.calls >= this.limits.maxToolCalls - 1;
+    return (
+      this.calls >= this.limits.maxToolCalls - Number(this.reserveFinalStep)
+    );
   }
   beforeTool(name, args) {
     this.beforeRequest();
@@ -120,8 +146,10 @@ export class LocalTask {
     const key = targetKey(args.tool, folder);
     if (name === "diagnose_in_folder" && !this.targets.has(key))
       this.targets.set(key, { tool: args.tool, folder, verified: false });
+    if (TOOL_OPERATIONS.has(name)) this.inspected = true;
+    if (result.changed === true) this.changed = true;
+    if (result.requiresVerification === true) this.uncertain = true;
     if (result.changed === true || result.requiresVerification === true) {
-      this.changed = true;
       for (const target of this.targets.values()) target.verified = false;
       this.homeVerified = false;
     }
@@ -137,7 +165,7 @@ export class LocalTask {
   }
   get needsVerification() {
     return (
-      this.changed &&
+      (this.changed || (this.uncertain && this.inspected)) &&
       (this.targets.size
         ? [...this.targets.values()].some((t) => !t.verified)
         : !this.homeVerified)

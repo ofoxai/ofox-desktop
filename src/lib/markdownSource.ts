@@ -1,0 +1,138 @@
+// Reading markdown source before it is parsed: which lines are code, where
+// a paragraph ends and where an inline code span closes. The rewrites that
+// run on a message's text (formulas, bare URLs) leave code as it was.
+
+// A backtick fence's info string holds no backtick, or it is inline code.
+const FENCE_OPEN =
+  /^[\s>]*(?:(?:[-*+]|\d{1,9}[.)])\s+)?(?:(`{3,})[^`]*|(~{3,})[\s\S]*)$/;
+const FENCE_CLOSE = /^[\s>]*(`{3,}|~{3,})\s*$/;
+const LIST_ITEM = /^ {0,3}(?:[-*+]|\d{1,9}[.)])(?:\s|$)/;
+const INDENTED = /^(?: {4}|\t)/;
+// A `$$` fence alone on its line, after a quote's `>` or a list item's marker.
+const MATH_FENCE = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?\$\$[ \t]*$/;
+
+/** How many `$$` `line` holds: not escaped, not in a longer run of dollars, not in code. */
+function doubleDollars(line: string): number {
+  let found = 0;
+  for (let at = 0; at < line.length; ) {
+    const char = line[at];
+    if (char === "`") {
+      at = codeSpanEnd(line, at);
+    } else if (char === "\\") {
+      at += 2;
+    } else if (char === "$") {
+      let end = at;
+      while (line[end] === "$") end += 1;
+      if (end - at === 2) found += 1;
+      at = end;
+    } else {
+      at += 1;
+    }
+  }
+  return found;
+}
+
+/** The most text a rewrite works through; a longer message is left as written. */
+export const MAX_REWRITE = 64 * 1024;
+
+/**
+ * Splits text into runs of prose and runs of code (fenced or indented), by
+ * line. A `run` is its lines joined, so a run of prose can be scanned whole.
+ * An indented line inside a `$$` block is the formula's, not code. That is
+ * read as `rewriteMathDelimiters` pairs `$$`: a line with an odd number of
+ * them opens or closes a block, and a blank line ends the block unless its
+ * opening fence stood alone on its line (and some line after it closes it).
+ * Indented code needs a blank line before it, so a `$$` in a sentence never
+ * reaches it.
+ */
+export function splitCode(content: string): { code: boolean; text: string }[] {
+  const runs: { code: boolean; lines: string[] }[] = [];
+  const add = (code: boolean, line: string) => {
+    const last = runs[runs.length - 1];
+    if (last?.code === code) last.lines.push(line);
+    else runs.push({ code, lines: [line] });
+  };
+  let fence: { char: string; length: number } | null = null;
+  let afterBlank = true;
+  let afterCode = false;
+  let inList = false;
+  // The `$$` block a line is in: none, opened in a sentence, or opened by a
+  // fence alone on its line (which may span blank lines).
+  let math = "none" as "none" | "inline" | "fence";
+  const lines = content.split("\n");
+  const odd = lines.map((line) => doubleDollars(line) % 2 === 1);
+  const lastOdd = odd.lastIndexOf(true);
+  const flip = (at: number) => {
+    if (!odd[at]) return;
+    if (math !== "none") math = "none";
+    else if (!MATH_FENCE.test(lines[at])) math = "inline";
+    else if (at < lastOdd) math = "fence";
+  };
+  for (const [at, line] of lines.entries()) {
+    const blank = line.trim() === "";
+    let code = false;
+    if (fence) {
+      code = true;
+      const close = FENCE_CLOSE.exec(line)?.[1];
+      if (close?.[0] === fence.char && close.length >= fence.length)
+        fence = null;
+    } else {
+      const match = FENCE_OPEN.exec(line);
+      const open = match?.[1] ?? match?.[2];
+      if (open) {
+        code = true;
+        fence = { char: open[0], length: open.length };
+      } else if (!blank && INDENTED.test(line)) {
+        code = (afterBlank || afterCode) && !inList && math !== "fence";
+        if (!code) flip(at);
+      } else if (!blank) {
+        flip(at);
+        inList = LIST_ITEM.test(line) || (inList && !afterBlank);
+      } else if (math === "inline") {
+        math = "none";
+      }
+    }
+    add(code, line);
+    afterCode = code && !blank;
+    afterBlank = blank;
+  }
+  return runs.map(({ code, lines }) => ({ code, text: lines.join("\n") }));
+}
+
+/** Rewrites the prose of `content` with `rewrite`, leaving its code as it was. */
+export function rewriteProse(
+  content: string,
+  rewrite: (prose: string) => string,
+): string {
+  if (content.length > MAX_REWRITE) return content;
+  return splitCode(content)
+    .map(({ code, text }) => (code ? text : rewrite(text)))
+    .join("\n");
+}
+
+/** True when the line break at `newline` is followed by a blank line or the end. */
+export function endsParagraph(text: string, newline: number): boolean {
+  let index = newline + 1;
+  while (text[index] === " " || text[index] === "\t" || text[index] === "\r")
+    index += 1;
+  return index >= text.length || text[index] === "\n";
+}
+
+/** The end of the code span whose backtick run starts at `from`, or the run's end. */
+export function codeSpanEnd(text: string, from: number): number {
+  let run = from;
+  while (text[run] === "`") run += 1;
+  const ticks = text.slice(from, run);
+  for (let index = run; index < text.length; ) {
+    if (text[index] === "\n" && endsParagraph(text, index)) break;
+    if (text[index] !== "`") {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (text[end] === "`") end += 1;
+    if (end - index === ticks.length) return end;
+    index = end;
+  }
+  return run;
+}

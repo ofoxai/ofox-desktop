@@ -25,6 +25,7 @@ pub enum Choice {
 }
 
 struct Pending {
+    once_only: bool,
     binding: Binding,
     display: Option<serde_json::Value>,
     sender: oneshot::Sender<Choice>,
@@ -44,11 +45,28 @@ impl Broker {
             .insert(
                 id.clone(),
                 Pending {
+                    once_only: false,
                     binding,
                     sender,
                     display: None,
                 },
             );
+        Ok((id, receiver))
+    }
+
+    pub fn request_once(
+        &self,
+        binding: Binding,
+    ) -> Result<(String, oneshot::Receiver<Choice>), String> {
+        let (id, receiver) = self.request(binding)?;
+        if let Some(p) = self
+            .pending
+            .lock()
+            .map_err(|_| "assistant_state_unavailable")?
+            .get_mut(&id)
+        {
+            p.once_only = true;
+        }
         Ok((id, receiver))
     }
 
@@ -80,6 +98,9 @@ impl Broker {
             .map_err(|_| "assistant_state_unavailable")?;
         if pending.get(id).is_none_or(|p| p.binding != *binding) {
             return Err("assistant_approval_expired".into());
+        }
+        if choice == Choice::Session && pending.get(id).is_some_and(|p| p.once_only) {
+            return Err("assistant_approval_once_required".into());
         }
         pending
             .remove(id)

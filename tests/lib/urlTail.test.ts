@@ -16,6 +16,8 @@ describe("where a URL ends in running text", () => {
     ["【注】", "【注】"],
     ["　后面", "　后面"],
     ["｡", "｡"],
+    ["”，即可", "”，即可"],
+    ["’s", "’s"],
   ])("cuts at the first full-width mark: %s", (rest, tail) => {
     expect(splitUrlTail(`https://a.example/x${rest}`)).toEqual({
       url: "https://a.example/x",

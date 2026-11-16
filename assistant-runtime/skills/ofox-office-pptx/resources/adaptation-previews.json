@@ -1,0 +1,2343 @@
+{
+  "schemaVersion": 1,
+  "styles": [
+    {
+      "id": "architectural-plan",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "9c214263f98b4137596cb776f1326847f731cf8cfedf85aaeb307b965b80410b",
+      "codeSha256": "2febf43ebae77faec2788d338a9ec08b2b8bde379bc32059bf18765081a1435a",
+      "adapterSha256": "591a0d8568bbd71f2bc43aa809a20d783962ba24469e8a8e91d0ba9a80a37026",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 6,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/architectural-plan/page-01-02c89c204991a1ef0054e46e75b24ef86bd0943555ef687102a7186612c93014.jpg",
+          "sha256": "02c89c204991a1ef0054e46e75b24ef86bd0943555ef687102a7186612c93014"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/architectural-plan/page-02-6533443393e3d558bd05e1d1fb5d83a9b2ea7ce717db1c13d5712fabdcec36cd.jpg",
+          "sha256": "6533443393e3d558bd05e1d1fb5d83a9b2ea7ce717db1c13d5712fabdcec36cd"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/architectural-plan/page-03-eecd26c79d342dfee26588cc61e5a9bbbf79b8f41f23d4b90008385935858819.jpg",
+          "sha256": "eecd26c79d342dfee26588cc61e5a9bbbf79b8f41f23d4b90008385935858819"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/architectural-plan/page-04-a8490d59eb42da700d335a27a4609ea0caaaf86f9746a4b303e91499089fb9bf.jpg",
+          "sha256": "a8490d59eb42da700d335a27a4609ea0caaaf86f9746a4b303e91499089fb9bf"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/architectural-plan/page-05-5c8d0ab6fbc2eecb88a083a40823885505f5f3c725beea02eb0b4dba29751483.jpg",
+          "sha256": "5c8d0ab6fbc2eecb88a083a40823885505f5f3c725beea02eb0b4dba29751483"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/architectural-plan/page-06-2c93be0cc50b7fe6c7390df25786a4aa5896756f8d86c85882632e8484b2b4a7.jpg",
+          "sha256": "2c93be0cc50b7fe6c7390df25786a4aa5896756f8d86c85882632e8484b2b4a7"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "block-frame",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "74f5af3b3c04573f06dcb46a08fce206223975a5c4da5deccf00b6b2be53e2cf",
+      "codeSha256": "12edc11d5a4b214208219580812964af74e418bdc4a3394edd9b2474ea571d06",
+      "adapterSha256": "506e74cc3334684cc4dc4731309c6d8b76d71c1686f21c51e1ca4358385eb8b0",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/block-frame/page-01-63c4948d164ea4406f0acec3db3bedeb5f10dd7c095d8f8c0026dd90cf5536ab.jpg",
+          "sha256": "63c4948d164ea4406f0acec3db3bedeb5f10dd7c095d8f8c0026dd90cf5536ab"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/block-frame/page-02-97b21703f007c42384d9bb2f90b8ea532e89c3dc6d25ef6b5ffdbc715aaf8ac8.jpg",
+          "sha256": "97b21703f007c42384d9bb2f90b8ea532e89c3dc6d25ef6b5ffdbc715aaf8ac8"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "cards",
+          "status": "adapted",
+          "path": "adaptation-previews/block-frame/page-03-9da07ba8048da418f917d99be5c1394a2b842791c4ff363c3493f6d583ad0ebb.jpg",
+          "sha256": "9da07ba8048da418f917d99be5c1394a2b842791c4ff363c3493f6d583ad0ebb"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/block-frame/page-04-2a01cac5bd8b036cf1ec8b9dc112cb5c950d9e559a9fa1f84788d444ed8f87b1.jpg",
+          "sha256": "2a01cac5bd8b036cf1ec8b9dc112cb5c950d9e559a9fa1f84788d444ed8f87b1"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/block-frame/page-05-bf5e8b67412f7160a2e905e1b49207ac5f3902af807ed67222291ead3d1c6f61.jpg",
+          "sha256": "bf5e8b67412f7160a2e905e1b49207ac5f3902af807ed67222291ead3d1c6f61"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/block-frame/page-06-9a803fb84c3e3dfbc355c5604d7068e2781e58962e3fcd9981bc95b8d1e21b26.jpg",
+          "sha256": "9a803fb84c3e3dfbc355c5604d7068e2781e58962e3fcd9981bc95b8d1e21b26"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/block-frame/page-07-6b68456148bc1626610347657bf4b88f058e59114af3223a2f035dbde25266f6.jpg",
+          "sha256": "6b68456148bc1626610347657bf4b88f058e59114af3223a2f035dbde25266f6"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/block-frame/page-08-902b6c0011267f2bc9bc03ca2d4d7216bd92c6d4c5e72667daa3b95d6d2e6da6.jpg",
+          "sha256": "902b6c0011267f2bc9bc03ca2d4d7216bd92c6d4c5e72667daa3b95d6d2e6da6"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "team",
+          "status": "approximate",
+          "path": "adaptation-previews/block-frame/page-09-5c98fdebf331b9139ed54e368ac3e52a4dfbbca8582b7f1bb3afe44ed50f3d58.jpg",
+          "sha256": "5c98fdebf331b9139ed54e368ac3e52a4dfbbca8582b7f1bb3afe44ed50f3d58"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/block-frame/page-10-20578c7e3b3198fe0823ab002e040f600854faf8d28dbfed4f07f1e5488b826c.jpg",
+          "sha256": "20578c7e3b3198fe0823ab002e040f600854faf8d28dbfed4f07f1e5488b826c"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "blue-professional",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "421337525fce0bc595d590ca3089e9b201e522aff29569937c2aa5ad939c0a02",
+      "codeSha256": "2f84e3246428baa1bedc94e0d44ce6abf9b623d931d265824d2ea2384bfafeb4",
+      "adapterSha256": "5564b84225a4005aa0aafcda2ce10b9d1065a0b73aa382786e36cb2e6a3dd7da",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-01-bf23d58d589ae4611e29455b59e52a14ba8206f4fc95c814ea035c3320fbd132.jpg",
+          "sha256": "bf23d58d589ae4611e29455b59e52a14ba8206f4fc95c814ea035c3320fbd132"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "agenda",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-02-0044a76ad850cd2b7659109fd694b0d061aebf9acda4e9c3f49ac9f8298e2ab4.jpg",
+          "sha256": "0044a76ad850cd2b7659109fd694b0d061aebf9acda4e9c3f49ac9f8298e2ab4"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-03-3f0f5f73c11b27d31665a138fb0ed26c95506699c38cb5b3ec965559d54f5671.jpg",
+          "sha256": "3f0f5f73c11b27d31665a138fb0ed26c95506699c38cb5b3ec965559d54f5671"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-04-9c4a940e1ae109ded65086088ce5e6db75699a1b49c9cef14580e9cf678ac57b.jpg",
+          "sha256": "9c4a940e1ae109ded65086088ce5e6db75699a1b49c9cef14580e9cf678ac57b"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-05-79406e0f1357b648d9bafe98347a4f73fb8a914ba4b2c653d457fe2a760b5c67.jpg",
+          "sha256": "79406e0f1357b648d9bafe98347a4f73fb8a914ba4b2c653d457fe2a760b5c67"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-06-af44974c49465ff37d1044adfb6f62aa0ab80da01b523cbdf713c4a055867897.jpg",
+          "sha256": "af44974c49465ff37d1044adfb6f62aa0ab80da01b523cbdf713c4a055867897"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "quote",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-07-20e9f6679adaed6c1ff953bac9ddaeb5873b033f1a3832c9d6e421645decd625.jpg",
+          "sha256": "20e9f6679adaed6c1ff953bac9ddaeb5873b033f1a3832c9d6e421645decd625"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "timeline",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-08-44cc5c21af8b71ef34f63528d50ccdb4545ea0575b547ef55fdcf725b711e727.jpg",
+          "sha256": "44cc5c21af8b71ef34f63528d50ccdb4545ea0575b547ef55fdcf725b711e727"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-09-fba6df83dc73012593abb4c13ef2cdc821e9d0f928548c97e65fdeffa293b1c5.jpg",
+          "sha256": "fba6df83dc73012593abb4c13ef2cdc821e9d0f928548c97e65fdeffa293b1c5"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/blue-professional/page-10-0ad9d2065fe5a59f198a96245d983b450b1ba3d4f565d7ec80df36a71d98e530.jpg",
+          "sha256": "0ad9d2065fe5a59f198a96245d983b450b1ba3d4f565d7ec80df36a71d98e530"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "bold-poster",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "2ba4f9a63b1e5817881a67e70612d7f5772ec2fc6e3bcfeab5fef0be9a18c5f5",
+      "codeSha256": "c51bad714fdfd74c8d163395fd2bcc7c3b313bae4d1772c2cf11e89b1ad44eb9",
+      "adapterSha256": "3250cd3f4c516a24537adbf196e6cd511ec4f3550a04ab6dd2f6e60a299a7cdb",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-01-cba876ed296c8f03500b5e98b28b0f764576e2d528fc66454d793420236d5cc3.jpg",
+          "sha256": "cba876ed296c8f03500b5e98b28b0f764576e2d528fc66454d793420236d5cc3"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/bold-poster/page-02-03e3c9c0878a2ae15e1c3caf5c59e6e5bfbbe259efd676afa2cc202c2b1b79e3.jpg",
+          "sha256": "03e3c9c0878a2ae15e1c3caf5c59e6e5bfbbe259efd676afa2cc202c2b1b79e3"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-03-c5904e59385161ba68af8041b91ffdf7eb3709163d866159c8658bc1da72d0f0.jpg",
+          "sha256": "c5904e59385161ba68af8041b91ffdf7eb3709163d866159c8658bc1da72d0f0"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-04-58e969238cb52da645861047c14b599e0cde7e960a563bf0647ebbcd10732188.jpg",
+          "sha256": "58e969238cb52da645861047c14b599e0cde7e960a563bf0647ebbcd10732188"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-05-dcbe4445065cf510319915bfa04e902ffab6d5d825d4033b660d2bd374f35341.jpg",
+          "sha256": "dcbe4445065cf510319915bfa04e902ffab6d5d825d4033b660d2bd374f35341"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-06-e23a82c78dd5d9769500d685ef13e7fee86b8c34add70301e09605bb5b26ec64.jpg",
+          "sha256": "e23a82c78dd5d9769500d685ef13e7fee86b8c34add70301e09605bb5b26ec64"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-07-93f5dc4caac29a4216d616a98d1c7728cebab7debfde1ded62db485a4ae49f3c.jpg",
+          "sha256": "93f5dc4caac29a4216d616a98d1c7728cebab7debfde1ded62db485a4ae49f3c"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-08-a71dda97b68f152691a464169ee20f453b4a60df688a6b67c0ac1eb5d270b528.jpg",
+          "sha256": "a71dda97b68f152691a464169ee20f453b4a60df688a6b67c0ac1eb5d270b528"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-09-6620861dfbd286b3cd055c9a23983ae4766cad778b313fbf475ca228cc43c62a.jpg",
+          "sha256": "6620861dfbd286b3cd055c9a23983ae4766cad778b313fbf475ca228cc43c62a"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/bold-poster/page-10-1c340e4bbda3e6925df8170f1eaec3f70244e10d405570288d6d6edd39d0640e.jpg",
+          "sha256": "1c340e4bbda3e6925df8170f1eaec3f70244e10d405570288d6d6edd39d0640e"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "broadside",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "c52b45e978b7934b7a9017e2834a741e121c1e29be06f98f5d18cbb562db6b1b",
+      "codeSha256": "e81f81a2b2e73f5d76a601d3da317b4dd83e87c5cea8af9b5fd0e489fcb1d347",
+      "adapterSha256": "7561b7e93bb203c0bdc0509a4619caf240438f33cfdf30f9ad0ee0374ee64c41",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 16,
+      "unsupportedPages": [
+        6
+      ],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/broadside/page-01-02e50709d4fce4f7b53b8c37928dde9d53e11582367b80689b1b0e4af1ccf573.jpg",
+          "sha256": "02e50709d4fce4f7b53b8c37928dde9d53e11582367b80689b1b0e4af1ccf573"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/broadside/page-02-642396cfd6f313c4c2580caa67ba5ab523f607610d2facc006a56e2339f7b651.jpg",
+          "sha256": "642396cfd6f313c4c2580caa67ba5ab523f607610d2facc006a56e2339f7b651"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/broadside/page-03-b09d66aa1de06cc2101a15b6d173e1733757aa33d0456514695a921283722576.jpg",
+          "sha256": "b09d66aa1de06cc2101a15b6d173e1733757aa33d0456514695a921283722576"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-04-ae6809ca9cad7e00fe2245a59c47101987b1a74c4cbd6ce76ee2ab78974691a6.jpg",
+          "sha256": "ae6809ca9cad7e00fe2245a59c47101987b1a74c4cbd6ce76ee2ab78974691a6"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-05-5939bb22bedda9b5ab965f3b6ddb70e4289367964cae99393ddd9ac111895fc7.jpg",
+          "sha256": "5939bb22bedda9b5ab965f3b6ddb70e4289367964cae99393ddd9ac111895fc7"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 6,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-07-99b4dc9ac680126e7eee8c9e522173964fa5e7a7a6950f77af62135843bcbdff.jpg",
+          "sha256": "99b4dc9ac680126e7eee8c9e522173964fa5e7a7a6950f77af62135843bcbdff"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 7,
+          "archetype": "quote",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-08-c7609d04b01d1a0a094df49d57c9ba08c841831ad2bfa6926b5f10bc53ab3b66.jpg",
+          "sha256": "c7609d04b01d1a0a094df49d57c9ba08c841831ad2bfa6926b5f10bc53ab3b66"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 8,
+          "archetype": "comparison",
+          "status": "adapted",
+          "path": "adaptation-previews/broadside/page-09-e72a39c4eb2ea8a396ab488e7cd11eff205afeec07009b01317e262f1af941a7.jpg",
+          "sha256": "e72a39c4eb2ea8a396ab488e7cd11eff205afeec07009b01317e262f1af941a7"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 9,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-10-10d96b332513e53cd61a7ff62764a1b4f0323aa3122b2fec5c21dcf42e773fbb.jpg",
+          "sha256": "10d96b332513e53cd61a7ff62764a1b4f0323aa3122b2fec5c21dcf42e773fbb"
+        },
+        {
+          "sourcePage": 11,
+          "nativePage": 10,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/broadside/page-11-6b4800855e352e5d6ea6df115b3fd1bb1a2b3214ce105b193738dfde2a4c47db.jpg",
+          "sha256": "6b4800855e352e5d6ea6df115b3fd1bb1a2b3214ce105b193738dfde2a4c47db"
+        },
+        {
+          "sourcePage": 12,
+          "nativePage": 11,
+          "archetype": "chart-pie",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-12-1f682aa96c1551c60badf8d4ce8ea35bf55ce4c740efa060bde9113f7a86e407.jpg",
+          "sha256": "1f682aa96c1551c60badf8d4ce8ea35bf55ce4c740efa060bde9113f7a86e407"
+        },
+        {
+          "sourcePage": 13,
+          "nativePage": 12,
+          "archetype": "hierarchy",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-13-23aab595596c79c83431676378170793229cf45263df27198986f19153125db2.jpg",
+          "sha256": "23aab595596c79c83431676378170793229cf45263df27198986f19153125db2"
+        },
+        {
+          "sourcePage": 14,
+          "nativePage": 13,
+          "archetype": "timeline",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-14-5b8d494697240ba026101a141e1abe4e0fadebb34e7a345ab320c7d24c7303e1.jpg",
+          "sha256": "5b8d494697240ba026101a141e1abe4e0fadebb34e7a345ab320c7d24c7303e1"
+        },
+        {
+          "sourcePage": 15,
+          "nativePage": 14,
+          "archetype": "cycle",
+          "status": "approximate",
+          "path": "adaptation-previews/broadside/page-15-05ac0c4aa88dd3f75710ecfd09d0511d629fa05ebd823c8ad7086d63289ebd76.jpg",
+          "sha256": "05ac0c4aa88dd3f75710ecfd09d0511d629fa05ebd823c8ad7086d63289ebd76"
+        },
+        {
+          "sourcePage": 16,
+          "nativePage": 15,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/broadside/page-16-1708eb97446d6a740069c05b7921a316bca500d72e1937b05f948f42e59c78fd.jpg",
+          "sha256": "1708eb97446d6a740069c05b7921a316bca500d72e1937b05f948f42e59c78fd"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "capsule",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "92110ca3ec48ea0001f87d4378a13579b42394f7dde603ff88280a1795f74a65",
+      "codeSha256": "87969d966be7d8475e30a42a8f750ff1dec74b260ebd39fae893511044b11a6d",
+      "adapterSha256": "bc6817986b18204c3cee485909c431e54b8d4ea32a5828ec400679cf0c6d0e51",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/capsule/page-01-44b001b814e41a2a3a780967c63af60df15e6a94ecda6a287586675e84186070.jpg",
+          "sha256": "44b001b814e41a2a3a780967c63af60df15e6a94ecda6a287586675e84186070"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-02-5604b08ecab5f3d7776340b7da3539e27d47cfe3ba547904f89fb11539895fce.jpg",
+          "sha256": "5604b08ecab5f3d7776340b7da3539e27d47cfe3ba547904f89fb11539895fce"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "cards",
+          "status": "adapted",
+          "path": "adaptation-previews/capsule/page-03-539bc54da46f47a8d80633653231cacdd0f566cda10d2a892109e5e6d97ed6aa.jpg",
+          "sha256": "539bc54da46f47a8d80633653231cacdd0f566cda10d2a892109e5e6d97ed6aa"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-04-de982493a6230d00be5f7cce0eed6acb95624e81159b800dda02bc61335e5870.jpg",
+          "sha256": "de982493a6230d00be5f7cce0eed6acb95624e81159b800dda02bc61335e5870"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "quote",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-05-bcfb3ce2210388eed1958c3059cd344ce1467c17c3b28bc699fd7faefd95613e.jpg",
+          "sha256": "bcfb3ce2210388eed1958c3059cd344ce1467c17c3b28bc699fd7faefd95613e"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "timeline",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-06-5fb707a50d62775f5801a020844961108872d2010e1a9c4a51fb98f118a3d794.jpg",
+          "sha256": "5fb707a50d62775f5801a020844961108872d2010e1a9c4a51fb98f118a3d794"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-07-5cf79aa689005a1856831fd3a58f1479845d0ebe9f46fc2a97138ef06484a147.jpg",
+          "sha256": "5cf79aa689005a1856831fd3a58f1479845d0ebe9f46fc2a97138ef06484a147"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-08-6dae8171ddf9af933da70844a23af06cc49b6018a31399cca71f8d8d27bd2b09.jpg",
+          "sha256": "6dae8171ddf9af933da70844a23af06cc49b6018a31399cca71f8d8d27bd2b09"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/capsule/page-09-6c112fdbe6c1a8b8768e9ca2b60dde8ba6600b08d0c74f0cebe9b31301291037.jpg",
+          "sha256": "6c112fdbe6c1a8b8768e9ca2b60dde8ba6600b08d0c74f0cebe9b31301291037"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/capsule/page-10-440af5e881d1a30d441de466b56f8ec04f4db0445707760a5c40d7f68e02edfe.jpg",
+          "sha256": "440af5e881d1a30d441de466b56f8ec04f4db0445707760a5c40d7f68e02edfe"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "cartesian",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "eb996b32278429fc991ea8239255118a955cddcab6edc925946326024f268fdf",
+      "codeSha256": "e7a3d4fcc9ea164f66c17686f1e657651e3da3b767f0a487951a08247c79b7dc",
+      "adapterSha256": "06982118e2b96a9c4c3ad8f4cad6513eb3f169de28af2ef541560a82489baeba",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/cartesian/page-01-bc572716597faa1c683170ed0be518ea7c4e7976747290cb3fae499a9cedd5d2.jpg",
+          "sha256": "bc572716597faa1c683170ed0be518ea7c4e7976747290cb3fae499a9cedd5d2"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "agenda",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-02-3e8234526e1e1f0a3d963f65d734ab5c2372e79e77dd9f5939f800ead1bca545.jpg",
+          "sha256": "3e8234526e1e1f0a3d963f65d734ab5c2372e79e77dd9f5939f800ead1bca545"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "statement",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-03-6d39055e153d82bf90786cee49f2bbc9757b821c36241f1f5f890753efb914c4.jpg",
+          "sha256": "6d39055e153d82bf90786cee49f2bbc9757b821c36241f1f5f890753efb914c4"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-04-e737f64281f5405728801044d489eaf4cc4eb987d347b245c2c0a9c4d0260b09.jpg",
+          "sha256": "e737f64281f5405728801044d489eaf4cc4eb987d347b245c2c0a9c4d0260b09"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-05-73b666b334d3b18df8961f96b5163bd9e90e6779036b6ea79bb354d44842800c.jpg",
+          "sha256": "73b666b334d3b18df8961f96b5163bd9e90e6779036b6ea79bb354d44842800c"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-06-9ebdb99cdce35c66a88a91ab53fb8e38b5c2deef1ee032b3e077bff3eff0ef4e.jpg",
+          "sha256": "9ebdb99cdce35c66a88a91ab53fb8e38b5c2deef1ee032b3e077bff3eff0ef4e"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "chart-line",
+          "status": "adapted",
+          "path": "adaptation-previews/cartesian/page-07-17d604e412f1227f4c815f88325f1b85c9dff50f60bdf0e224491b71a0a77ed6.jpg",
+          "sha256": "17d604e412f1227f4c815f88325f1b85c9dff50f60bdf0e224491b71a0a77ed6"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "timeline",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-08-d2ef44c4b11db1f94aecb521b38c06f48f49a7f269233a1088e12dc681d3f8ac.jpg",
+          "sha256": "d2ef44c4b11db1f94aecb521b38c06f48f49a7f269233a1088e12dc681d3f8ac"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "team",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-09-be7dbf3364435fd25df4257a26e91609ae15599dbe55fda3d3ec7b71dac32e34.jpg",
+          "sha256": "be7dbf3364435fd25df4257a26e91609ae15599dbe55fda3d3ec7b71dac32e34"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/cartesian/page-10-8a5104389c59b2bf653bfcbc0398c27a335905fbddaca49dd3188b411f7488a2.jpg",
+          "sha256": "8a5104389c59b2bf653bfcbc0398c27a335905fbddaca49dd3188b411f7488a2"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "cobalt-grid",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "74f58f5e9a62f6be713088cf993e4f37b383f1e99f6033cdde01b044e85b7b35",
+      "codeSha256": "266e30bdd8b28ba3d37f61942e9d26f3498237e44153f8cc49974811140dc4c0",
+      "adapterSha256": "1cf04378193b3b59c0506f7d505d53791a45c1aaa9368e82f6afaccb6e8c96aa",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/cobalt-grid/page-01-888a386d12caee7e1b9e0585024e299e82343c230b15f56498919eb1111d046a.jpg",
+          "sha256": "888a386d12caee7e1b9e0585024e299e82343c230b15f56498919eb1111d046a"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/cobalt-grid/page-02-7b0885c785ae2ede4d4ec2efc5752e50f3234196fdc8a3bdea319392cf072fc2.jpg",
+          "sha256": "7b0885c785ae2ede4d4ec2efc5752e50f3234196fdc8a3bdea319392cf072fc2"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "agenda",
+          "status": "approximate",
+          "path": "adaptation-previews/cobalt-grid/page-03-d154a4e511a1f5535a566178a12b155d5ef80ea6014730aabc2965fb80cc53d0.jpg",
+          "sha256": "d154a4e511a1f5535a566178a12b155d5ef80ea6014730aabc2965fb80cc53d0"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/cobalt-grid/page-04-08adb45c369b8e85a2a55fbf409a9849af2bb9ca6044ab0b79d6ab0a1b36018b.jpg",
+          "sha256": "08adb45c369b8e85a2a55fbf409a9849af2bb9ca6044ab0b79d6ab0a1b36018b"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/cobalt-grid/page-05-bedfda71fbed4eb404daba7a760e8ef01d969c5565b245ad89aa90567e3b4220.jpg",
+          "sha256": "bedfda71fbed4eb404daba7a760e8ef01d969c5565b245ad89aa90567e3b4220"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/cobalt-grid/page-06-50b7542d60e6d262909b4d304594923f747aea2620a64e5778f82f141622bc83.jpg",
+          "sha256": "50b7542d60e6d262909b4d304594923f747aea2620a64e5778f82f141622bc83"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "table",
+          "status": "approximate",
+          "path": "adaptation-previews/cobalt-grid/page-07-415de9e5c783a242d205a0b2d8a2970c4778a4cda4271d10b69412751c83ae28.jpg",
+          "sha256": "415de9e5c783a242d205a0b2d8a2970c4778a4cda4271d10b69412751c83ae28"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/cobalt-grid/page-08-228f3842624225be881cbce8371baf14b620bd07a1921ae465d287cc4eae85a5.jpg",
+          "sha256": "228f3842624225be881cbce8371baf14b620bd07a1921ae465d287cc4eae85a5"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "course-module",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "4093b3adc136da0fd495e54b307e97eea3e9477364cd91c774e7052654c19eac",
+      "codeSha256": "f14901af15be87d3dc9df29c99925c7e1bac626f78cf91e71bbae87623e4ead5",
+      "adapterSha256": "fb017b9a335c39dd1e0db072fe5bafe6670618d94a8aaaf3ea2bee130c0cbbc9",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 7,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-01-f8f5406e620dc2c83c1d2bbad5492cfc0bf6915dab18c5df301a1b8c92864188.jpg",
+          "sha256": "f8f5406e620dc2c83c1d2bbad5492cfc0bf6915dab18c5df301a1b8c92864188"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "lesson",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-02-0b59e679dc37adc6343b636c0651b4b2dc7ce86070de66935b8ab9d5028436ca.jpg",
+          "sha256": "0b59e679dc37adc6343b636c0651b4b2dc7ce86070de66935b8ab9d5028436ca"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "lesson",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-03-02d273ad179b387b08212cc7c8e19a2051ba7c36466716df9cd11b91e14e4ab8.jpg",
+          "sha256": "02d273ad179b387b08212cc7c8e19a2051ba7c36466716df9cd11b91e14e4ab8"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "code",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-04-0a8015efd17551bc2d40e40de0a048aa58ead6061f8733fd8562ac17e0d63783.jpg",
+          "sha256": "0a8015efd17551bc2d40e40de0a048aa58ead6061f8733fd8562ac17e0d63783"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "lesson",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-05-e71718f543e0a1a52aaaa57a0e7a355be621cb6cc22ea173b91be737996c62da.jpg",
+          "sha256": "e71718f543e0a1a52aaaa57a0e7a355be621cb6cc22ea173b91be737996c62da"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "lesson",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-06-454cbb52e168293a4934aaf59a889f032d5ec37223ddd4308e6bb0d0b38fab9e.jpg",
+          "sha256": "454cbb52e168293a4934aaf59a889f032d5ec37223ddd4308e6bb0d0b38fab9e"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/course-module/page-07-1167ee53936ed4bd33adac92c928a740927a1ad79127c0c7c3b8801569793b93.jpg",
+          "sha256": "1167ee53936ed4bd33adac92c928a740927a1ad79127c0c7c3b8801569793b93"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "creative-mode",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "610bb000f559832a2b0c93a4f14b153b5293de9ced2018ac829e87f3c9882a8e",
+      "codeSha256": "ec70cd7d65fa75750e32c54330f23602d186e7472f3c910fe1b87a44a239f7c7",
+      "adapterSha256": "beb2f147e53cee621e6c9114953c49035c9f3978350b64fc785b56c6ec80828f",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/creative-mode/page-01-c9cc3a58b5ecb3020e7444f9c4b162232d2f6996e7acad6cb07e9a5465930e94.jpg",
+          "sha256": "c9cc3a58b5ecb3020e7444f9c4b162232d2f6996e7acad6cb07e9a5465930e94"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "approximate",
+          "path": "adaptation-previews/creative-mode/page-02-14dc1e37e611245a5d08fb8d03462b4ec460f511a5bc9a4a15e39a44c8c6af38.jpg",
+          "sha256": "14dc1e37e611245a5d08fb8d03462b4ec460f511a5bc9a4a15e39a44c8c6af38"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/creative-mode/page-03-cba18aee8948a7011b4d5f2af11731aa9c4b273c7ca3ae54b6c37dba6f2ccec8.jpg",
+          "sha256": "cba18aee8948a7011b4d5f2af11731aa9c4b273c7ca3ae54b6c37dba6f2ccec8"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "hierarchy",
+          "status": "approximate",
+          "path": "adaptation-previews/creative-mode/page-04-00252a7f836b6fe3126c69512c6040753e30baeaaa71c8c9fee38c80c7020878.jpg",
+          "sha256": "00252a7f836b6fe3126c69512c6040753e30baeaaa71c8c9fee38c80c7020878"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/creative-mode/page-05-f2a597010163677dd4e03687867cec7930910120d2b63ce50940e611dea75dab.jpg",
+          "sha256": "f2a597010163677dd4e03687867cec7930910120d2b63ce50940e611dea75dab"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/creative-mode/page-06-5e408359c1a92673a82319301d435204e901e7c4d3dc8bbc08615df0ec7af79f.jpg",
+          "sha256": "5e408359c1a92673a82319301d435204e901e7c4d3dc8bbc08615df0ec7af79f"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "table",
+          "status": "approximate",
+          "path": "adaptation-previews/creative-mode/page-07-b46b0bb8b46cb9d1e484ee718078a52261e42a576abcaa5b212f13171883ff1e.jpg",
+          "sha256": "b46b0bb8b46cb9d1e484ee718078a52261e42a576abcaa5b212f13171883ff1e"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/creative-mode/page-08-7ce64e54a40dde27844b126caaf4abaf68f611fe5611954476c49d6364020c16.jpg",
+          "sha256": "7ce64e54a40dde27844b126caaf4abaf68f611fe5611954476c49d6364020c16"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "daisy-days",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "91dea57998ff84b83ba8ed84ccef6e802f6b78336bfb4397961b446b1f73fbae",
+      "codeSha256": "5a934f6df893b60db0398f7648a7e89b0d420d5c921ba32a1c5dbc7dbfe934e8",
+      "adapterSha256": "2bd54f9dea6394243e7f3575f11607e5c3ed6eb2401e96b45ab06e28709afba3",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/daisy-days/page-01-f4b368e0ac0eec46a411901fc1a26077584ac5f02ab7566dd75ee291072324c4.jpg",
+          "sha256": "f4b368e0ac0eec46a411901fc1a26077584ac5f02ab7566dd75ee291072324c4"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-02-2ba4727382f0c5d265a30666de133571f77cb81b8cdc6663d8685640bc9f8a0f.jpg",
+          "sha256": "2ba4727382f0c5d265a30666de133571f77cb81b8cdc6663d8685640bc9f8a0f"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-03-4dc6eac8c3ce3db1234fb7d1f1b9e9f81ead27c3e8b267b05ee5eb5c246e4e0a.jpg",
+          "sha256": "4dc6eac8c3ce3db1234fb7d1f1b9e9f81ead27c3e8b267b05ee5eb5c246e4e0a"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "agenda",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-04-71b585328b57b061e341945a96779f46b6ad7d2dc229ee9aa897b1fe9e712196.jpg",
+          "sha256": "71b585328b57b061e341945a96779f46b6ad7d2dc229ee9aa897b1fe9e712196"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-05-0c913d924869fb9b7cde143388429c9a2bf8b775cbadfa6899125ac2e5fa1d28.jpg",
+          "sha256": "0c913d924869fb9b7cde143388429c9a2bf8b775cbadfa6899125ac2e5fa1d28"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-06-2bd2c750ba9b97517dd762f2e952886e28e2787061c1c3843e4370069f93ee02.jpg",
+          "sha256": "2bd2c750ba9b97517dd762f2e952886e28e2787061c1c3843e4370069f93ee02"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/daisy-days/page-07-0114cf6eab5e9739b1ca4ed4346f8e46ba4785dd665d18b3e8e022e13c50c38e.jpg",
+          "sha256": "0114cf6eab5e9739b1ca4ed4346f8e46ba4785dd665d18b3e8e022e13c50c38e"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "team",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-08-b5de080527c90b73643ca9d6729f7bfe69451ebe6ebbfb17ba8f1227ad2caa5b.jpg",
+          "sha256": "b5de080527c90b73643ca9d6729f7bfe69451ebe6ebbfb17ba8f1227ad2caa5b"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-09-cd8a72d07ad2b7fbe3df447f72ebf7806d0dd67faf1c7bc2ee92141f4f46503b.jpg",
+          "sha256": "cd8a72d07ad2b7fbe3df447f72ebf7806d0dd67faf1c7bc2ee92141f4f46503b"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "chart-pie",
+          "status": "approximate",
+          "path": "adaptation-previews/daisy-days/page-10-671cd1e2eb87f4f81cc743756e0206d6873a9f764b18c1936890f16daeced6fb.jpg",
+          "sha256": "671cd1e2eb87f4f81cc743756e0206d6873a9f764b18c1936890f16daeced6fb"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "editorial-forest",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "c405e9a8f0a20998e7a489aea33819fe1b72d9afa20ae7a0407952feedba0b8f",
+      "codeSha256": "7c7d5198ab49d5d92b66a2e4223245e542f10d6cb3325d03b9adb16eb6030b48",
+      "adapterSha256": "8f467572cb33390878d5d14124b7905217357fd8ca7988686f617ad6cdd6128e",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/editorial-forest/page-01-05d1834b39ec1e1d2310076c8a5f200e054d65261e3c8d5ab5333a02448c50cf.jpg",
+          "sha256": "05d1834b39ec1e1d2310076c8a5f200e054d65261e3c8d5ab5333a02448c50cf"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "agenda",
+          "status": "approximate",
+          "path": "adaptation-previews/editorial-forest/page-02-d2ae7f11b804af55a5a927401d2b76288dfa48ed77182c52cb3ff3507d238a17.jpg",
+          "sha256": "d2ae7f11b804af55a5a927401d2b76288dfa48ed77182c52cb3ff3507d238a17"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/editorial-forest/page-03-70f1eb06ffdd64cbd9af32f4b562e70d3bcceab083e4ae1f58a82e6da8232f4a.jpg",
+          "sha256": "70f1eb06ffdd64cbd9af32f4b562e70d3bcceab083e4ae1f58a82e6da8232f4a"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/editorial-forest/page-04-c37366ca0863c32670f799e5909899294d500471b65bc9bb80e6408ffed4466f.jpg",
+          "sha256": "c37366ca0863c32670f799e5909899294d500471b65bc9bb80e6408ffed4466f"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "chart-bar",
+          "status": "adapted",
+          "path": "adaptation-previews/editorial-forest/page-05-e5732a2bb0b6f41abddd2835612c5ada9cea51407fdda00f5a9b5b680b94c80d.jpg",
+          "sha256": "e5732a2bb0b6f41abddd2835612c5ada9cea51407fdda00f5a9b5b680b94c80d"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/editorial-forest/page-06-e43aa38e23fb2172ffb0aec8716bccdbd8e63a8489d12091b9ddfab5a94c76cf.jpg",
+          "sha256": "e43aa38e23fb2172ffb0aec8716bccdbd8e63a8489d12091b9ddfab5a94c76cf"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/editorial-forest/page-07-49bcbd5592802b30b9bf5cb1cb9d2e0433a4336bab160c8f6380f62a9d4316ea.jpg",
+          "sha256": "49bcbd5592802b30b9bf5cb1cb9d2e0433a4336bab160c8f6380f62a9d4316ea"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/editorial-forest/page-08-1936f90fec22043b39029ecb5c324593be6b50dd249221199a810a86c1cf1f60.jpg",
+          "sha256": "1936f90fec22043b39029ecb5c324593be6b50dd249221199a810a86c1cf1f60"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "graphify-dark-graph",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "1cf58f8bc462299480faca330b8ca8e72b70c9a56cd36cce18cbaf2f796fda19",
+      "codeSha256": "93281f372e69ddf0e639d3b590ba2daef1f2f85f00e060066636b438dd917c9d",
+      "adapterSha256": "75a3c15c8251c74adaadc3648c819bb9a2ef82b1521f903fc53741899d528e4d",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-01-3a3430a87a5852b9e18b8c0e5e1b6e15e606371bad7b841f2fb25ea5cd143ace.jpg",
+          "sha256": "3a3430a87a5852b9e18b8c0e5e1b6e15e606371bad7b841f2fb25ea5cd143ace"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/graphify-dark-graph/page-02-ccf9499c57af3f5d908320f4598b167dfdeb697278539549cf2344bc18f05844.jpg",
+          "sha256": "ccf9499c57af3f5d908320f4598b167dfdeb697278539549cf2344bc18f05844"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-03-41b8b65688154db7497f90b8d49ca3a9d28b074d2e9eb5a195530c78a68319e6.jpg",
+          "sha256": "41b8b65688154db7497f90b8d49ca3a9d28b074d2e9eb5a195530c78a68319e6"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "code",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-04-efff43b06e498727e45853f2e4d237783fdf838d51133e3e4e0cdf1176892542.jpg",
+          "sha256": "efff43b06e498727e45853f2e4d237783fdf838d51133e3e4e0cdf1176892542"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-05-bea170605c45c87d86d0217ea0a91359b414d7dc0317e2f2666bf09442ddb3c3.jpg",
+          "sha256": "bea170605c45c87d86d0217ea0a91359b414d7dc0317e2f2666bf09442ddb3c3"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-06-6899c251827c81ad2bb4d31e017bd53e8924fc5eaba464baf106377c8eae9975.jpg",
+          "sha256": "6899c251827c81ad2bb4d31e017bd53e8924fc5eaba464baf106377c8eae9975"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "code",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-07-ecb0bd838e4e77087c2c125d44c791ff7e95938dfb28f003ecbbc22f638ebb5f.jpg",
+          "sha256": "ecb0bd838e4e77087c2c125d44c791ff7e95938dfb28f003ecbbc22f638ebb5f"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/graphify-dark-graph/page-08-dbae9bdd2a3b7f4ad59af076b03903abb427ac06434837008af9c018ff697eef.jpg",
+          "sha256": "dbae9bdd2a3b7f4ad59af076b03903abb427ac06434837008af9c018ff697eef"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "hermes-cyber-terminal",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "66fb6d91dd69091152716f408d4c636061b7fbb4ec524e2c2f4a3c2f8f3d5126",
+      "codeSha256": "07f6373dfbc94a988ce1bdadf99fe9b33107fc9df44bd6bc08230f9ac9c5a3a4",
+      "adapterSha256": "5300b4539150663cdccaf9609cea78d0015819600da663d13cf96a142e44922d",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-01-8c1e8010a28bc356724e26c4e8fa8e75298bbe8cff4143f8f760b7ff1f1c1b4b.jpg",
+          "sha256": "8c1e8010a28bc356724e26c4e8fa8e75298bbe8cff4143f8f760b7ff1f1c1b4b"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-02-3186f77ed659722e8fa9c87e6d9fd3c2fbfe226dc82378b8e8121504aa16d3cc.jpg",
+          "sha256": "3186f77ed659722e8fa9c87e6d9fd3c2fbfe226dc82378b8e8121504aa16d3cc"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-03-969427c985c1917c83d9097faa8222a77613d9cb79a58d421755d68ccfea00ed.jpg",
+          "sha256": "969427c985c1917c83d9097faa8222a77613d9cb79a58d421755d68ccfea00ed"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "code",
+          "status": "adapted",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-04-31bcf55a0c740cc146a94ab776613a8cafda303481ae5d8494131171a5656d09.jpg",
+          "sha256": "31bcf55a0c740cc146a94ab776613a8cafda303481ae5d8494131171a5656d09"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-05-30ba9b54c8b3deb8558e4c7943e6f82279f32d6a4e800c2ac65ccc337a531076.jpg",
+          "sha256": "30ba9b54c8b3deb8558e4c7943e6f82279f32d6a4e800c2ac65ccc337a531076"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "comparison",
+          "status": "approximate",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-06-d99959c9934e58a9ec81aa483f208c5ca84b5e44036b638f3715cb9d96877c36.jpg",
+          "sha256": "d99959c9934e58a9ec81aa483f208c5ca84b5e44036b638f3715cb9d96877c36"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "code",
+          "status": "adapted",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-07-026d3db19cd19fc9a713ff2a8fc693342d0e68ee86958fd32c056ed72f87c3ad.jpg",
+          "sha256": "026d3db19cd19fc9a713ff2a8fc693342d0e68ee86958fd32c056ed72f87c3ad"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/hermes-cyber-terminal/page-08-9fdcf1bf331d9e708dbc09581458be13064dec564e09ffd57c919236d35eafc2.jpg",
+          "sha256": "9fdcf1bf331d9e708dbc09581458be13064dec564e09ffd57c919236d35eafc2"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "knowledge-arch-blueprint",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "aaa357ce88bcca4b8798a863ea00b63826a2fd165b1fbaa94e6e37aa61f1f48b",
+      "codeSha256": "9a4a6ce4a0da5f98c1ff4d3a7438cc5f08d96356049860956e9d04e8bda6a4a8",
+      "adapterSha256": "aff3d3a33e7458ac43e294399549cabfa121c5659efc1a44e04f2e2720343759",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-01-f710a95883c9856fbd3eb9083e62777063793b524f8a5bc68c461e30d3683e99.jpg",
+          "sha256": "f710a95883c9856fbd3eb9083e62777063793b524f8a5bc68c461e30d3683e99"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-02-014899708f8840568b40568ab990f3199bd0b589d075907d40c609c4547652ee.jpg",
+          "sha256": "014899708f8840568b40568ab990f3199bd0b589d075907d40c609c4547652ee"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "comparison",
+          "status": "approximate",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-03-3ed1c6c5a656846b376a8c8ee7e3dece7ab7622f65a06af22a12d95c9e320690.jpg",
+          "sha256": "3ed1c6c5a656846b376a8c8ee7e3dece7ab7622f65a06af22a12d95c9e320690"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "code",
+          "status": "adapted",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-04-eee3d26343787edce1a97084303fd86c048ffe3ca97d7044c1ebb05dc4d2f725.jpg",
+          "sha256": "eee3d26343787edce1a97084303fd86c048ffe3ca97d7044c1ebb05dc4d2f725"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "cycle",
+          "status": "approximate",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-05-3e51bdf61969cde782874b626658994449d34d4ebfe88b6af919b511a0e5a372.jpg",
+          "sha256": "3e51bdf61969cde782874b626658994449d34d4ebfe88b6af919b511a0e5a372"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-06-348d1ae7beaa2e66a9ad463ce405340cf2a7fc0f18f0cb716a588a366d8cfa5e.jpg",
+          "sha256": "348d1ae7beaa2e66a9ad463ce405340cf2a7fc0f18f0cb716a588a366d8cfa5e"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-07-37fce83a0c13bdef187e247a3471122f1552f168bd5d42d6f6a58e58b75103c3.jpg",
+          "sha256": "37fce83a0c13bdef187e247a3471122f1552f168bd5d42d6f6a58e58b75103c3"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/knowledge-arch-blueprint/page-08-d3d872b56f10bfbd9337ae9bb47083bacf917d3508cb64b4326ef4ffde70720f.jpg",
+          "sha256": "d3d872b56f10bfbd9337ae9bb47083bacf917d3508cb64b4326ef4ffde70720f"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "monochrome",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "bb8614e321b614cf852157a890bf999335729d5d57306e7bbb2435f91a69bd84",
+      "codeSha256": "da7db2f0bb8d572d36d6e9dbdc64177ad8b44be00d5000cb63038cf49a135acd",
+      "adapterSha256": "f4745032021341093efbfb5b5cd815e3cde16b1d7cb98f85c8d57326e799b391",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 16,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-01-ead27b3ebfbf904099a186af4ac89c31b5d35f7e98c9638a7ab602cc08091810.jpg",
+          "sha256": "ead27b3ebfbf904099a186af4ac89c31b5d35f7e98c9638a7ab602cc08091810"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-02-1b59138c393a3b37d11a1af9868eab44119a7a6fc7fae75e0b064d8e035fbb64.jpg",
+          "sha256": "1b59138c393a3b37d11a1af9868eab44119a7a6fc7fae75e0b064d8e035fbb64"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-03-46723d9d09605041d5c3f5c27b1e7d2a685aa735846719f703a349cfe9a4d72a.jpg",
+          "sha256": "46723d9d09605041d5c3f5c27b1e7d2a685aa735846719f703a349cfe9a4d72a"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-04-5008f635db8bf5ce07c7319ea6cd5ea0ad7b306813915a2ba4036496fcfd5e8a.jpg",
+          "sha256": "5008f635db8bf5ce07c7319ea6cd5ea0ad7b306813915a2ba4036496fcfd5e8a"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-05-984c2ac17f33bf392b2e97bda0927e5874244690102503b811df739a3081e2c0.jpg",
+          "sha256": "984c2ac17f33bf392b2e97bda0927e5874244690102503b811df739a3081e2c0"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-06-cab387ce84d7afe86b41e8b8a365e0616cc8146a0a0c3c75f070c1a050f2029f.jpg",
+          "sha256": "cab387ce84d7afe86b41e8b8a365e0616cc8146a0a0c3c75f070c1a050f2029f"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "comparison",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-07-40d65b5226ed7abbf1cb648144eb5edc88059e73a188ced2f6d04c51326fb3cf.jpg",
+          "sha256": "40d65b5226ed7abbf1cb648144eb5edc88059e73a188ced2f6d04c51326fb3cf"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "quote",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-08-7242a09b58c59beb2235c9cc70d7e0167e77405a650fd91041380ef2d37316fe.jpg",
+          "sha256": "7242a09b58c59beb2235c9cc70d7e0167e77405a650fd91041380ef2d37316fe"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-09-6dac1fe6e819252e62857029c371f818e50a6a2a5df97255e359fa8f6b00a161.jpg",
+          "sha256": "6dac1fe6e819252e62857029c371f818e50a6a2a5df97255e359fa8f6b00a161"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "chart-bar",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-10-db8fb15ccbab698ce7cca870861074dded46d16ab3817b1d2db88e5d409cff74.jpg",
+          "sha256": "db8fb15ccbab698ce7cca870861074dded46d16ab3817b1d2db88e5d409cff74"
+        },
+        {
+          "sourcePage": 11,
+          "nativePage": 11,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-11-2406a3212d83611bb34536f19c37f92c90589b03df16e9b9df95a3d78465d574.jpg",
+          "sha256": "2406a3212d83611bb34536f19c37f92c90589b03df16e9b9df95a3d78465d574"
+        },
+        {
+          "sourcePage": 12,
+          "nativePage": 12,
+          "archetype": "chart-pie",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-12-4758a60627b31b39937a2c8c8da89c004536ff43b2e3ad42feb5fc500ce9b2c5.jpg",
+          "sha256": "4758a60627b31b39937a2c8c8da89c004536ff43b2e3ad42feb5fc500ce9b2c5"
+        },
+        {
+          "sourcePage": 13,
+          "nativePage": 13,
+          "archetype": "timeline",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-13-3b8a92d44931ba3eb298f7d391b57cf7831aa4f800277f0c3fd5d717e9331f4e.jpg",
+          "sha256": "3b8a92d44931ba3eb298f7d391b57cf7831aa4f800277f0c3fd5d717e9331f4e"
+        },
+        {
+          "sourcePage": 14,
+          "nativePage": 14,
+          "archetype": "cycle",
+          "status": "approximate",
+          "path": "adaptation-previews/monochrome/page-14-7e206e257da9d34c7ff7332fcdece18de46fee892a91a56fe4a9de37df2bd711.jpg",
+          "sha256": "7e206e257da9d34c7ff7332fcdece18de46fee892a91a56fe4a9de37df2bd711"
+        },
+        {
+          "sourcePage": 15,
+          "nativePage": 15,
+          "archetype": "hierarchy",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-15-c367a06d3bfa1faa591a097341e221f47f59a8072ea790c6a67e96d3376d8248.jpg",
+          "sha256": "c367a06d3bfa1faa591a097341e221f47f59a8072ea790c6a67e96d3376d8248"
+        },
+        {
+          "sourcePage": 16,
+          "nativePage": 16,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/monochrome/page-16-d2a759cd1ceebffa1bd6360b1e90de9527e8bec0718ceb9241be2374cb4af042.jpg",
+          "sha256": "d2a759cd1ceebffa1bd6360b1e90de9527e8bec0718ceb9241be2374cb4af042"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "product-launch",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "83e856a2739cbaeb75a2de763024a3db2c7aff37145d00d7523a1ed4c750290b",
+      "codeSha256": "ca0a3cf7b20e6c31811a5d11fbab3ff2696ffc4af26cde2ad88864022fecf94d",
+      "adapterSha256": "d3b10a5a3857fc55649d0c38f3d1ccd40fc5c418433110ec20dbffcc6a3b5c62",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-01-fc34efa277befcebdcdcb1f3a046dff02e2cb9e979f213f263bfe117bed065ef.jpg",
+          "sha256": "fc34efa277befcebdcdcb1f3a046dff02e2cb9e979f213f263bfe117bed065ef"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "statement",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-02-8a174669e4a0a8aa1dc25dc867712e78a1e90a65934d6f5a7facd15e46a787f9.jpg",
+          "sha256": "8a174669e4a0a8aa1dc25dc867712e78a1e90a65934d6f5a7facd15e46a787f9"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-03-e7cd56f83d7f9d96c0378c000d8fb44dacaa2bd181d92793f99ce220bb34e46d.jpg",
+          "sha256": "e7cd56f83d7f9d96c0378c000d8fb44dacaa2bd181d92793f99ce220bb34e46d"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-04-f26d4a0c3929ec80456d361af1b9b5a35854ea0ba87a8bb31175934d7215f2ac.jpg",
+          "sha256": "f26d4a0c3929ec80456d361af1b9b5a35854ea0ba87a8bb31175934d7215f2ac"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-05-f44f5dafdbd81e9fbf32c2b05b7ee385476dab97299704c1731f52d7feaea853.jpg",
+          "sha256": "f44f5dafdbd81e9fbf32c2b05b7ee385476dab97299704c1731f52d7feaea853"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-06-9a4223ab22bff0f00e10bde707b041410250e2dfd06dbf133ec6edfa6d028d2b.jpg",
+          "sha256": "9a4223ab22bff0f00e10bde707b041410250e2dfd06dbf133ec6edfa6d028d2b"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "pricing",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-07-072ab094a182e1ee8d5274c8b45ec0f4ca104b528867b0038a4a4bddf63a5ace.jpg",
+          "sha256": "072ab094a182e1ee8d5274c8b45ec0f4ca104b528867b0038a4a4bddf63a5ace"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/product-launch/page-08-db47aafafa3e294f8f08bca365a8a3014376ee62475b2793300c4a4579ea82fc.jpg",
+          "sha256": "db47aafafa3e294f8f08bca365a8a3014376ee62475b2793300c4a4579ea82fc"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "sakura-chroma",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "aa4f428305fb39816bf72467318638e856d67ef120b3dbe31fd5e12c8b6dda7d",
+      "codeSha256": "21f94a7ec4efdce050b5e1e06ab888062041f5d0336ed8781c99b6ee73631420",
+      "adapterSha256": "34955b4001235cd7886bbe3527640d58c8cb2d57d94059914e160c73c19224e4",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 8,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/sakura-chroma/page-01-a2404899bb3bec9da1cb77d745d0cab8327ace3030b52c031e90b6bcad731c1d.jpg",
+          "sha256": "a2404899bb3bec9da1cb77d745d0cab8327ace3030b52c031e90b6bcad731c1d"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/sakura-chroma/page-02-35f0a3bd66412ae8838be85f9090d1af0b7c9214518725ce5b7fdf4c8ba91185.jpg",
+          "sha256": "35f0a3bd66412ae8838be85f9090d1af0b7c9214518725ce5b7fdf4c8ba91185"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/sakura-chroma/page-03-f01550a0e0c6208c57a3e68d43daa5b8bf2d0a77efa2d1cafb724466ed42ace2.jpg",
+          "sha256": "f01550a0e0c6208c57a3e68d43daa5b8bf2d0a77efa2d1cafb724466ed42ace2"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "statement",
+          "status": "approximate",
+          "path": "adaptation-previews/sakura-chroma/page-04-35f0a3bd66412ae8838be85f9090d1af0b7c9214518725ce5b7fdf4c8ba91185.jpg",
+          "sha256": "35f0a3bd66412ae8838be85f9090d1af0b7c9214518725ce5b7fdf4c8ba91185"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/sakura-chroma/page-05-605e22c89f62b7375f0b4eeec1d6e31df6bdf11e33f99492d8b4067ad5ed6610.jpg",
+          "sha256": "605e22c89f62b7375f0b4eeec1d6e31df6bdf11e33f99492d8b4067ad5ed6610"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "quote",
+          "status": "approximate",
+          "path": "adaptation-previews/sakura-chroma/page-06-09e03376ab91fda71af60e218a25d6440a77f702962680fa719a447d536eb8de.jpg",
+          "sha256": "09e03376ab91fda71af60e218a25d6440a77f702962680fa719a447d536eb8de"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "table",
+          "status": "approximate",
+          "path": "adaptation-previews/sakura-chroma/page-07-6a9b64067fe254276a2794db83653f7b80e66191a2bb3e9f043f76e1cccf073e.jpg",
+          "sha256": "6a9b64067fe254276a2794db83653f7b80e66191a2bb3e9f043f76e1cccf073e"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/sakura-chroma/page-08-b7478479ec697396c9fb7c3606a7cf6731635046264a524361def3f0e50a6a33.jpg",
+          "sha256": "b7478479ec697396c9fb7c3606a7cf6731635046264a524361def3f0e50a6a33"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "scatterbrain",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "60b24f047c47d87b286d3fc0e546cb2998ee2e5161af0b3291814d5ea821d426",
+      "codeSha256": "b6a00a7576be7f334a96db23cbc0c2e731bc02de8c539955d7c68675a0bc8a42",
+      "adapterSha256": "ba4318e5226497975c448945f7bb626ac3931b80cb89514f0116a495103f9c9b",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 10,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/scatterbrain/page-01-6df9fe53b82df2625fd2eea667767664ac68386b33fcfc82ed83e78c5a988423.jpg",
+          "sha256": "6df9fe53b82df2625fd2eea667767664ac68386b33fcfc82ed83e78c5a988423"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/scatterbrain/page-02-3e09de2b311c4421285aaddc871fedaef01c0915d4015e4779918248b5d66c91.jpg",
+          "sha256": "3e09de2b311c4421285aaddc871fedaef01c0915d4015e4779918248b5d66c91"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "comparison",
+          "status": "approximate",
+          "path": "adaptation-previews/scatterbrain/page-03-22e937ff9c1ee6f5c68f27aea1eb76180b6d4b1ca487c180d98304c6a6df0211.jpg",
+          "sha256": "22e937ff9c1ee6f5c68f27aea1eb76180b6d4b1ca487c180d98304c6a6df0211"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/scatterbrain/page-04-cc7bff9434de890e0e88839886ceea9ac688069369188a85ee8be3bcfdaf3a6b.jpg",
+          "sha256": "cc7bff9434de890e0e88839886ceea9ac688069369188a85ee8be3bcfdaf3a6b"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "cards",
+          "status": "adapted",
+          "path": "adaptation-previews/scatterbrain/page-05-94cdbf04eb3a8a00473715ecebb55be41d6a2625923e3a16aab846b5a84afb10.jpg",
+          "sha256": "94cdbf04eb3a8a00473715ecebb55be41d6a2625923e3a16aab846b5a84afb10"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/scatterbrain/page-06-f08020234604f837c9063908fe3ba79d2b6650b0c096f4efa571c708a5daa49f.jpg",
+          "sha256": "f08020234604f837c9063908fe3ba79d2b6650b0c096f4efa571c708a5daa49f"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/scatterbrain/page-07-7bfde01fda12517d6b67b12612d496af266c38e1c296b1f5eb7e4902fab8ee66.jpg",
+          "sha256": "7bfde01fda12517d6b67b12612d496af266c38e1c296b1f5eb7e4902fab8ee66"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "chart-pie",
+          "status": "approximate",
+          "path": "adaptation-previews/scatterbrain/page-08-73a4909b465a75b1b66be0e3a472fb176cb64de2ad3f9fed7c8ef543a2e35f69.jpg",
+          "sha256": "73a4909b465a75b1b66be0e3a472fb176cb64de2ad3f9fed7c8ef543a2e35f69"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "comparison",
+          "status": "adapted",
+          "path": "adaptation-previews/scatterbrain/page-09-085337e9c4be9a86a712c55cdfeb74c575e7f63cdefd78d6f3f07df1a644cf1e.jpg",
+          "sha256": "085337e9c4be9a86a712c55cdfeb74c575e7f63cdefd78d6f3f07df1a644cf1e"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/scatterbrain/page-10-273cd07a1caa85c2a14af9ef8d7cf2600e96616e579926212e81f9614a4f14a9.jpg",
+          "sha256": "273cd07a1caa85c2a14af9ef8d7cf2600e96616e579926212e81f9614a4f14a9"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "signal",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "e4b12d99cebfdc728501ed43d8183fd676e9566f34cf9db3b8efca2c345b444c",
+      "codeSha256": "89c3c36474a3f2e5fec7ab084f92e05653717f2c21a53199736c4636729036f2",
+      "adapterSha256": "a2b1ba7c00946d9e88378dc7c2972da51215aa73ae242614f7d026250f9cbb32",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 18,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-01-4534f65ebc1de25451cc96aec37c07f924ccf7faacb0531a015b2c2fee1ff197.jpg",
+          "sha256": "4534f65ebc1de25451cc96aec37c07f924ccf7faacb0531a015b2c2fee1ff197"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-02-6db0054af8b89309466e45380d9ad6d6482c24538a31f591c6df90613962785e.jpg",
+          "sha256": "6db0054af8b89309466e45380d9ad6d6482c24538a31f591c6df90613962785e"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-03-46f6cc079b86f5c61d40889b2707c67535d65d83d8e1157661243e1b389981b5.jpg",
+          "sha256": "46f6cc079b86f5c61d40889b2707c67535d65d83d8e1157661243e1b389981b5"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-04-b616767128745109f70c5a88ab219e97dd59f34b4f724def7033ba5f702b3ab0.jpg",
+          "sha256": "b616767128745109f70c5a88ab219e97dd59f34b4f724def7033ba5f702b3ab0"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-05-1b050a59029a3e1b7977d71a23008bd5babbe3eaa612cb4afe017dc12e02db44.jpg",
+          "sha256": "1b050a59029a3e1b7977d71a23008bd5babbe3eaa612cb4afe017dc12e02db44"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "quote",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-06-890888dd2d0023615b3d2fb0bf709ad159fa3535e0abd49c266a9e57e9b11172.jpg",
+          "sha256": "890888dd2d0023615b3d2fb0bf709ad159fa3535e0abd49c266a9e57e9b11172"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-07-69e941e947978823f3fb56e6cdc7b659b456920839e0b71fc03851ef9431076a.jpg",
+          "sha256": "69e941e947978823f3fb56e6cdc7b659b456920839e0b71fc03851ef9431076a"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "comparison",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-08-f6aae21aca18db6da01f010fd7568735c4cb2591e078ec34f506ac4a20063df0.jpg",
+          "sha256": "f6aae21aca18db6da01f010fd7568735c4cb2591e078ec34f506ac4a20063df0"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-09-418b4f0b7229e94e7d9d7f5da8d566c76692c1f80efa22be674fbbf67ea15df6.jpg",
+          "sha256": "418b4f0b7229e94e7d9d7f5da8d566c76692c1f80efa22be674fbbf67ea15df6"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-10-56bc3d1bfd97976bbc2777a8a7737bf9c19f16731f25416d2d916dd69e131fd5.jpg",
+          "sha256": "56bc3d1bfd97976bbc2777a8a7737bf9c19f16731f25416d2d916dd69e131fd5"
+        },
+        {
+          "sourcePage": 11,
+          "nativePage": 11,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-11-46f6cc079b86f5c61d40889b2707c67535d65d83d8e1157661243e1b389981b5.jpg",
+          "sha256": "46f6cc079b86f5c61d40889b2707c67535d65d83d8e1157661243e1b389981b5"
+        },
+        {
+          "sourcePage": 12,
+          "nativePage": 12,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-12-8251acd45ea2c5a7a3382f13f7e0e935b15991bfaf0ed45fe9d4892c82f073e3.jpg",
+          "sha256": "8251acd45ea2c5a7a3382f13f7e0e935b15991bfaf0ed45fe9d4892c82f073e3"
+        },
+        {
+          "sourcePage": 13,
+          "nativePage": 13,
+          "archetype": "chart-bar",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-13-0b9f2478af3cfd5898d6a19005714b030e1ab00e85fccd8e04cff5e7ca2f589a.jpg",
+          "sha256": "0b9f2478af3cfd5898d6a19005714b030e1ab00e85fccd8e04cff5e7ca2f589a"
+        },
+        {
+          "sourcePage": 14,
+          "nativePage": 14,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-14-f5b9122ff814c3ade06f3e1ffca38c07f86886233f629bd6280de1ee4cb217d8.jpg",
+          "sha256": "f5b9122ff814c3ade06f3e1ffca38c07f86886233f629bd6280de1ee4cb217d8"
+        },
+        {
+          "sourcePage": 15,
+          "nativePage": 15,
+          "archetype": "chart-pie",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-15-14efa9316052231b712b1c190a3c0fdeb6739eea01025bd79757e76f8524c50d.jpg",
+          "sha256": "14efa9316052231b712b1c190a3c0fdeb6739eea01025bd79757e76f8524c50d"
+        },
+        {
+          "sourcePage": 16,
+          "nativePage": 16,
+          "archetype": "hierarchy",
+          "status": "adapted",
+          "path": "adaptation-previews/signal/page-16-f43ec05ee39d31d9f2b8f2053720f919cac1dbe4e1f0806d536b47f36d8ab936.jpg",
+          "sha256": "f43ec05ee39d31d9f2b8f2053720f919cac1dbe4e1f0806d536b47f36d8ab936"
+        },
+        {
+          "sourcePage": 17,
+          "nativePage": 17,
+          "archetype": "timeline",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-17-9221ee721c9733ecf9b1f396cc30be21f346698f233d59a73c8c8921ec910f12.jpg",
+          "sha256": "9221ee721c9733ecf9b1f396cc30be21f346698f233d59a73c8c8921ec910f12"
+        },
+        {
+          "sourcePage": 18,
+          "nativePage": 18,
+          "archetype": "cycle",
+          "status": "approximate",
+          "path": "adaptation-previews/signal/page-18-92299b47a1cb690d073ca4b3f193512079c3b96d7dd73ffb0b0afad351fa0b62.jpg",
+          "sha256": "92299b47a1cb690d073ca4b3f193512079c3b96d7dd73ffb0b0afad351fa0b62"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "stencil-tablet",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "3ddb9d53471685aaed73f3e1faffd4bb90028d04c2f7cf9320caedfc83d85c30",
+      "codeSha256": "34063ccd083130583075c88ab06d4d8eb3ab11b0bd55c010e06688f3fb1bb891",
+      "adapterSha256": "6c84bfed21aa32bd2e9141c0357c5c181709975196c3d07958440d76fdaefb4b",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 11,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/stencil-tablet/page-01-aba936dce312c08e45d9fee758bb1e2f078f1ea53099be686cba667c427835fa.jpg",
+          "sha256": "aba936dce312c08e45d9fee758bb1e2f078f1ea53099be686cba667c427835fa"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "agenda",
+          "status": "approximate",
+          "path": "adaptation-previews/stencil-tablet/page-02-b4d23af1f83257f1c69204f160b213b0e00e4bb8cb16ef1c9c5c2b9ce884d7a0.jpg",
+          "sha256": "b4d23af1f83257f1c69204f160b213b0e00e4bb8cb16ef1c9c5c2b9ce884d7a0"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "process",
+          "status": "approximate",
+          "path": "adaptation-previews/stencil-tablet/page-03-03a92c3dc4374ea1fbce95b453cc1cd9cfda66d46c2b6b723dcdecc3c1d309cd.jpg",
+          "sha256": "03a92c3dc4374ea1fbce95b453cc1cd9cfda66d46c2b6b723dcdecc3c1d309cd"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/stencil-tablet/page-04-db4c8eece310d8ed6ec7d8af5b3c1087e193a8e84658de433f5b365f4109c8d1.jpg",
+          "sha256": "db4c8eece310d8ed6ec7d8af5b3c1087e193a8e84658de433f5b365f4109c8d1"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/stencil-tablet/page-05-42bfe5591846f14b92ee9a90997e1b2368b5e8bc03d47ebc03e4d95cb414d72d.jpg",
+          "sha256": "42bfe5591846f14b92ee9a90997e1b2368b5e8bc03d47ebc03e4d95cb414d72d"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "chart-line",
+          "status": "approximate",
+          "path": "adaptation-previews/stencil-tablet/page-06-3b147a0b6e46709d2aed785a249ca4558b448827571c621f3f590764b279a79a.jpg",
+          "sha256": "3b147a0b6e46709d2aed785a249ca4558b448827571c621f3f590764b279a79a"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "process",
+          "status": "adapted",
+          "path": "adaptation-previews/stencil-tablet/page-07-33fcda7df1f13ce04859843a4477db34a595146b1001f51555093e9877681ad1.jpg",
+          "sha256": "33fcda7df1f13ce04859843a4477db34a595146b1001f51555093e9877681ad1"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "table",
+          "status": "adapted",
+          "path": "adaptation-previews/stencil-tablet/page-08-4d5391854721393b3cfdf43265d7c5fad4897662d4c21bb39ddce5edf2902964.jpg",
+          "sha256": "4d5391854721393b3cfdf43265d7c5fad4897662d4c21bb39ddce5edf2902964"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/stencil-tablet/page-09-8d6a00c3536089c4b84acfab48eabc66679d7906386f574dbacca6224168f805.jpg",
+          "sha256": "8d6a00c3536089c4b84acfab48eabc66679d7906386f574dbacca6224168f805"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/stencil-tablet/page-10-3f2c09bfb202b0cd1809a794d560f90553ea21163d176294b7a7cbcbe4cc4ed6.jpg",
+          "sha256": "3f2c09bfb202b0cd1809a794d560f90553ea21163d176294b7a7cbcbe4cc4ed6"
+        },
+        {
+          "sourcePage": 11,
+          "nativePage": 11,
+          "archetype": "closing",
+          "status": "approximate",
+          "path": "adaptation-previews/stencil-tablet/page-11-15a5635b5891fae2abc9576b6fa0be8e01df70b3ec7abd3b04481fe05122f98a.jpg",
+          "sha256": "15a5635b5891fae2abc9576b6fa0be8e01df70b3ec7abd3b04481fe05122f98a"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "studio",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "80ef9be1c29974fccad901a57957facce08604b0cf2766118d0ac5633c710f1e",
+      "codeSha256": "2ed5461e46d1d65a6621d27cfa7da0c9bf4036c370fc790094bd72988ea0451b",
+      "adapterSha256": "090f0d335ba92b000be814b0d3e5e54ad571aed47e424843364acdf9feeed5ad",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 12,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-01-8cf6ec8859803a0f4519be9e56c23a5bea12795f9f184137f79a1e8d9401ae4c.jpg",
+          "sha256": "8cf6ec8859803a0f4519be9e56c23a5bea12795f9f184137f79a1e8d9401ae4c"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-02-e05a8eb002d6467cfdc9752606bfd3d7240f0f6075488c3d2ef668cbd275eaba.jpg",
+          "sha256": "e05a8eb002d6467cfdc9752606bfd3d7240f0f6075488c3d2ef668cbd275eaba"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-03-9142775d5d836bdc3622cc94fe402fdb40ecb287dee1cb1ed3071963623af0b6.jpg",
+          "sha256": "9142775d5d836bdc3622cc94fe402fdb40ecb287dee1cb1ed3071963623af0b6"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "split-image",
+          "status": "approximate",
+          "path": "adaptation-previews/studio/page-04-155721371d9e2dc800ce2f5f1c7ac0713bcfb283548a937462d07222b693cd74.jpg",
+          "sha256": "155721371d9e2dc800ce2f5f1c7ac0713bcfb283548a937462d07222b693cd74"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "stats",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-05-44a97f9db02fc66fb494ab2f8310aa0d72e674a7dcbee4ddb52b4c6d2ed66437.jpg",
+          "sha256": "44a97f9db02fc66fb494ab2f8310aa0d72e674a7dcbee4ddb52b4c6d2ed66437"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "list",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-06-bf0bb685241fbc7aa8108e539bd152126d614231b86ffd40a3aee9732c48d0b4.jpg",
+          "sha256": "bf0bb685241fbc7aa8108e539bd152126d614231b86ffd40a3aee9732c48d0b4"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-07-795a83620731ab0279816644824fbb16bfe26933adbc18aa451432b2d311b867.jpg",
+          "sha256": "795a83620731ab0279816644824fbb16bfe26933adbc18aa451432b2d311b867"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "comparison",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-08-ffd9ea521cceb9d0eb7420d0b5b9c9f922c312ca5c585195ae2f162afd5dba1c.jpg",
+          "sha256": "ffd9ea521cceb9d0eb7420d0b5b9c9f922c312ca5c585195ae2f162afd5dba1c"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "chapter",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-09-e05a8eb002d6467cfdc9752606bfd3d7240f0f6075488c3d2ef668cbd275eaba.jpg",
+          "sha256": "e05a8eb002d6467cfdc9752606bfd3d7240f0f6075488c3d2ef668cbd275eaba"
+        },
+        {
+          "sourcePage": 10,
+          "nativePage": 10,
+          "archetype": "statement",
+          "status": "approximate",
+          "path": "adaptation-previews/studio/page-10-9142775d5d836bdc3622cc94fe402fdb40ecb287dee1cb1ed3071963623af0b6.jpg",
+          "sha256": "9142775d5d836bdc3622cc94fe402fdb40ecb287dee1cb1ed3071963623af0b6"
+        },
+        {
+          "sourcePage": 11,
+          "nativePage": 11,
+          "archetype": "chart-bar",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-11-08a7457a0924f7b7d996769c952249ebbf3b5be9521da3c130efc17745b7d8ee.jpg",
+          "sha256": "08a7457a0924f7b7d996769c952249ebbf3b5be9521da3c130efc17745b7d8ee"
+        },
+        {
+          "sourcePage": 12,
+          "nativePage": 12,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/studio/page-12-816fb775d82eb30584407956044e1eb417d5a987929de6c6a28e0e3307abc120.jpg",
+          "sha256": "816fb775d82eb30584407956044e1eb417d5a987929de6c6a28e0e3307abc120"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "vellum",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "ac368f3688aa052088efef5aeab42cbeb5df72d9a0068c9af89b955d820c59b2",
+      "codeSha256": "a5d7ce5bdffb5a96b0f2bac3859e288d69ac1063c2fe7034cbfbc52181777c33",
+      "adapterSha256": "b8e28cbf8cfba64a9303a12240de66118fec33802c6a6975e1aa6b2429754eb5",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 9,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/vellum/page-01-f36a3f4be2bfa55178cbad631227e5c2d0b5bab8a6ee34dc98e554f1969fd077.jpg",
+          "sha256": "f36a3f4be2bfa55178cbad631227e5c2d0b5bab8a6ee34dc98e554f1969fd077"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "statement",
+          "status": "adapted",
+          "path": "adaptation-previews/vellum/page-02-bd9bd520095f3bc598c89626e1666cc9ecc7d3a25f95ca303b13f1de20df5c78.jpg",
+          "sha256": "bd9bd520095f3bc598c89626e1666cc9ecc7d3a25f95ca303b13f1de20df5c78"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "chapter",
+          "status": "approximate",
+          "path": "adaptation-previews/vellum/page-03-747bbf080b6bcca44cf313ce894e927b072acf7bb2a388b4a9fb2175a5d38dde.jpg",
+          "sha256": "747bbf080b6bcca44cf313ce894e927b072acf7bb2a388b4a9fb2175a5d38dde"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/vellum/page-04-8e72a46ead9a9ae214b063379e417ec688c42ff47a12dd78bef5f210b65cd18c.jpg",
+          "sha256": "8e72a46ead9a9ae214b063379e417ec688c42ff47a12dd78bef5f210b65cd18c"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "list",
+          "status": "adapted",
+          "path": "adaptation-previews/vellum/page-05-8c6773aa5ad7d58ed0fc8c2161adce578ae507a3876c17f79a190f1f35c87648.jpg",
+          "sha256": "8c6773aa5ad7d58ed0fc8c2161adce578ae507a3876c17f79a190f1f35c87648"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "quote",
+          "status": "adapted",
+          "path": "adaptation-previews/vellum/page-06-7f1807efa5bad4e33952d6420d1a3fec503d8adb5985d01f40e841b9b6a94310.jpg",
+          "sha256": "7f1807efa5bad4e33952d6420d1a3fec503d8adb5985d01f40e841b9b6a94310"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "comparison",
+          "status": "approximate",
+          "path": "adaptation-previews/vellum/page-07-3d2ea08700ea28b139676789bb8cc4b0fa74e78b2abcc4e70069e56f0aad13a4.jpg",
+          "sha256": "3d2ea08700ea28b139676789bb8cc4b0fa74e78b2abcc4e70069e56f0aad13a4"
+        },
+        {
+          "sourcePage": 8,
+          "nativePage": 8,
+          "archetype": "chart-bar",
+          "status": "adapted",
+          "path": "adaptation-previews/vellum/page-08-51e7b6b8c776ebed3ab8254d37e38eed1bb5e7f9e6a40c135ecbc5794301cecf.jpg",
+          "sha256": "51e7b6b8c776ebed3ab8254d37e38eed1bb5e7f9e6a40c135ecbc5794301cecf"
+        },
+        {
+          "sourcePage": 9,
+          "nativePage": 9,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/vellum/page-09-d77e3cac1aae2c1462200a1f4a216e27f926a3d5ef3805a067edfde520bbc547.jpg",
+          "sha256": "d77e3cac1aae2c1462200a1f4a216e27f926a3d5ef3805a067edfde520bbc547"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    },
+    {
+      "id": "weekly-report",
+      "kind": "nativeAdaptationSample",
+      "sourceEquivalent": false,
+      "language": "zh",
+      "content": "Self-written sample content about a fictional reading club; every figure is a labelled sample value.",
+      "pptxSha256": "49c6d20fc20dd73e15c2a19a397ca36e4b56844bdc51d84b2b61c547034710a1",
+      "codeSha256": "8a687e690bace02873ceed8dd3e535f5531037bebadd3378be0b4bc346f4fb03",
+      "adapterSha256": "034b28c3ea51c328489e25ffb7c055875c844fd84440e255babdb17ca2ea84ee",
+      "lint": [],
+      "schemaErrors": [],
+      "embeddedMedia": 0,
+      "sourcePages": 7,
+      "unsupportedPages": [],
+      "pages": [
+        {
+          "sourcePage": 1,
+          "nativePage": 1,
+          "archetype": "cover",
+          "status": "adapted",
+          "path": "adaptation-previews/weekly-report/page-01-13609d0f2e7183e1b075fa86b60a805a963c8280f9d5ea0c431dbc224eb99e9e.jpg",
+          "sha256": "13609d0f2e7183e1b075fa86b60a805a963c8280f9d5ea0c431dbc224eb99e9e"
+        },
+        {
+          "sourcePage": 2,
+          "nativePage": 2,
+          "archetype": "stats",
+          "status": "approximate",
+          "path": "adaptation-previews/weekly-report/page-02-5af93d9a023faa72f7fd08d31b1ee1bcde2f5a32e47961764ac4885e12952d8f.jpg",
+          "sha256": "5af93d9a023faa72f7fd08d31b1ee1bcde2f5a32e47961764ac4885e12952d8f"
+        },
+        {
+          "sourcePage": 3,
+          "nativePage": 3,
+          "archetype": "list",
+          "status": "approximate",
+          "path": "adaptation-previews/weekly-report/page-03-9b8fd521c60a0a0e37976deebd6a884e6af46ddbf23986a082f85d63ba9ee867.jpg",
+          "sha256": "9b8fd521c60a0a0e37976deebd6a884e6af46ddbf23986a082f85d63ba9ee867"
+        },
+        {
+          "sourcePage": 4,
+          "nativePage": 4,
+          "archetype": "chart-bar",
+          "status": "approximate",
+          "path": "adaptation-previews/weekly-report/page-04-ef0edbd93a948fd38bb1e6e5384c653cad620ed21c6e21f3926a82ed9b99b978.jpg",
+          "sha256": "ef0edbd93a948fd38bb1e6e5384c653cad620ed21c6e21f3926a82ed9b99b978"
+        },
+        {
+          "sourcePage": 5,
+          "nativePage": 5,
+          "archetype": "cards",
+          "status": "approximate",
+          "path": "adaptation-previews/weekly-report/page-05-54fc450d0d9de9db1fcf9f345fa55e1951da1c659be1f944493097355b5e33f2.jpg",
+          "sha256": "54fc450d0d9de9db1fcf9f345fa55e1951da1c659be1f944493097355b5e33f2"
+        },
+        {
+          "sourcePage": 6,
+          "nativePage": 6,
+          "archetype": "table",
+          "status": "approximate",
+          "path": "adaptation-previews/weekly-report/page-06-054bd3254d037852a98561a85f528a3c79e7483940e9982ce90c7404159db1fa.jpg",
+          "sha256": "054bd3254d037852a98561a85f528a3c79e7483940e9982ce90c7404159db1fa"
+        },
+        {
+          "sourcePage": 7,
+          "nativePage": 7,
+          "archetype": "closing",
+          "status": "adapted",
+          "path": "adaptation-previews/weekly-report/page-07-a51820610db7c2945965bce50998fa536c7625d60d65cd7a93b7ac4b01dfb0bf.jpg",
+          "sha256": "a51820610db7c2945965bce50998fa536c7625d60d65cd7a93b7ac4b01dfb0bf"
+        }
+      ],
+      "visualReview": "pending",
+      "targetApplicationEditing": "not-inferred"
+    }
+  ]
+}

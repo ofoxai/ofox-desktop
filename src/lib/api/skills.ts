@@ -59,6 +59,15 @@ export interface DiscoverableSkill {
   repoBranch: string;
 }
 
+/** One repository's skills; while GitHub is unreachable, its last saved list. */
+export interface RepositoryCatalog {
+  skills: DiscoverableSkill[];
+  /** Unix seconds of the saved list shown because GitHub could not be read now. */
+  savedAt?: number | null;
+  /** The `library.*` reason the live read failed, set together with `savedAt`. */
+  reason?: string | null;
+}
+
 /** 未管理的 Skill（用于导入） */
 export interface UnmanagedSkill {
   directory: string;
@@ -162,8 +171,11 @@ export const skillsApi = {
     return await invoke("collect_library_skill", { skill, expectedEpoch });
   },
 
-  async discoverRepository(repo: SkillRepo): Promise<DiscoverableSkill[]> {
+  async discoverRepositoryCatalog(repo: SkillRepo): Promise<RepositoryCatalog> {
     return await invoke("discover_skill_repository", { repo });
+  },
+  async discoverRepository(repo: SkillRepo): Promise<DiscoverableSkill[]> {
+    return (await skillsApi.discoverRepositoryCatalog(repo)).skills;
   },
   async collectZip(
     zipPath: string,

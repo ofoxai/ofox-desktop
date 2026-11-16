@@ -215,7 +215,8 @@ test("web_fetch checks DNS locally, then tunnels by host name with a verified ce
   });
   assert.deepEqual(page, {
     url: "https://example.com/news",
-    text: "Through the tunnel",
+    text: "# Through the tunnel",
+    links: [],
     truncated: false,
   });
   assert.deepEqual(lookups, ["example.com"]);
@@ -272,7 +273,7 @@ test("a fake-IP host is checked with DNS-over-HTTPS through the proxy, then tunn
       ),
     },
   });
-  assert.equal(page.text, "Through the tunnel");
+  assert.equal(page.text, "# Through the tunnel");
   assert.deepEqual(queries.toSorted(), ["A example.com", "AAAA example.com"]);
   const targets = proxy.tunnels.map((tunnel) => tunnel.target);
   assert.ok(targets.includes(`localhost:${dohPort}`), String(targets));

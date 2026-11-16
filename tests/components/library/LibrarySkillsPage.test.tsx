@@ -168,6 +168,10 @@ beforeEach(async () => {
     ],
   };
   vi.restoreAllMocks();
+  // Browsing reads the catalog; tests set the live skills through discoverRepository.
+  vi.spyOn(skillsApi, "discoverRepositoryCatalog").mockImplementation(
+    async (repo) => ({ skills: await skillsApi.discoverRepository(repo) }),
+  );
   vi.spyOn(libraryApi, "list").mockImplementation(async () => ({
     epoch: 4,
     skills,
@@ -212,6 +216,154 @@ function renderPage() {
 }
 const chip = (name: string, tool: string) =>
   screen.getByRole("button", { name: new RegExp(`^${name} · ${tool} · `) });
+
+it("the Ofox Assistant target offers auto and manual use", async () => {
+  const assistant = {
+    id: "ofox-assistant",
+    label: "Ofox Assistant",
+    detected: true,
+    readsShared: false,
+    scopeKnown: true,
+  };
+  skills = [
+    skill("notes", {
+      assistantSkill: {
+        name: "actual-name",
+        description: "Fixture",
+        dir: "/fixture",
+        mode: "auto",
+        reviewed: false,
+        hasScripts: false,
+      },
+      targets: [target(assistant.id, { desired: true, status: "applied" })],
+    }),
+  ];
+  const setMode = vi
+    .spyOn(libraryApi, "setAssistantSkillMode")
+    .mockResolvedValue();
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 4,
+    skills,
+    skillTargets: [assistant],
+    operations: [],
+  });
+  renderPage();
+  await screen.findByTestId("skill-row-notes");
+  expect(chip("notes", "Ofox 助手")).toHaveAttribute("aria-pressed", "true");
+  expect(
+    screen.getByRole("combobox", { name: "notes · 助手使用方式" }),
+  ).toHaveTextContent("自动用");
+  await userEvent.click(
+    screen.getByRole("combobox", { name: "notes · 助手使用方式" }),
+  );
+  await userEvent.click(screen.getByRole("option", { name: "只能手动用" }));
+  await waitFor(() =>
+    expect(setMode).toHaveBeenCalledWith("actual-name", "manual"),
+  );
+});
+
+it("adding a skill does not pre-select the Ofox Assistant target", async () => {
+  const assistant = {
+    id: "ofox-assistant",
+    label: "Ofox Assistant",
+    detected: true,
+    readsShared: false,
+    scopeKnown: true,
+  };
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 4,
+    skills,
+    skillTargets: [...skillTargets, assistant],
+    operations: [],
+  });
+  vi.spyOn(skillsApi, "discoverRepository").mockResolvedValue([
+    {
+      key: "fixture/repo:skills/new",
+      name: "new",
+      directory: "skills/new",
+      description: "Fixture",
+      repoOwner: "fixture",
+      repoName: "repo",
+      repoBranch: "main",
+    },
+  ]);
+  renderPage();
+  await screen.findByTestId("skill-row-notes");
+  await userEvent.type(
+    screen.getByRole("textbox", { name: "技能来源" }),
+    "fixture/repo",
+  );
+  await userEvent.click(screen.getByRole("button", { name: "查找技能" }));
+  expect(
+    await screen.findByRole("button", { name: "安装后给 Ofox 助手 启用" }),
+  ).toHaveAttribute("aria-pressed", "false");
+  expect(
+    screen.getByRole("button", { name: "安装后给 Codex 启用" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await userEvent.click(
+    screen.getByRole("button", { name: "安装后给 Ofox 助手 启用" }),
+  );
+  expect(
+    screen.getByRole("button", { name: "安装后给 Ofox 助手 启用" }),
+  ).toHaveAttribute("aria-pressed", "true");
+});
+
+it("source labels distinguish reviewed, assistant-created, third-party and local skills", async () => {
+  skills = [
+    skill("one", { origin: "reviewed" }),
+    skill("two", { origin: "assistantCreated" }),
+    skill("three", { origin: "unreviewed" }),
+    skill("four", { origin: "local" }),
+  ];
+  renderPage();
+  expect(await screen.findByText("已审核")).toBeVisible();
+  expect(screen.getByText("助手创建")).toBeVisible();
+  expect(screen.getByText("未审核")).toBeVisible();
+  expect(
+    within(screen.getByTestId("skill-row-four")).queryByText("未审核"),
+  ).toBeNull();
+});
+
+it("a broken assistant skill shows why", async () => {
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 4,
+    skills: [],
+    skillTargets: [],
+    operations: [],
+    ...{
+      assistantSkills: [
+        {
+          name: "broken",
+          description: "",
+          dir: "/sandbox/assistant/skills/broken",
+          mode: "auto",
+          hasScripts: false,
+          reviewed: false,
+          broken: "library.assistantSkillDescriptionMissing",
+        },
+      ],
+    },
+  });
+  renderPage();
+  expect(await screen.findByText(/无法读取/)).toBeVisible();
+  expect(screen.getByText(/缺少描述/)).toBeVisible();
+});
+
+it("damaged assistant skill settings leave the other skills listed", async () => {
+  vi.mocked(libraryApi.list).mockResolvedValue({
+    epoch: 4,
+    skills: [skill("pdf")],
+    skillTargets: [],
+    operations: [],
+    assistantSkills: [],
+    assistantSkillsError: "配置错误: library.assistantSkillStateInvalid",
+  });
+  renderPage();
+  expect(
+    await screen.findByText(zh.library.assistantSkillStateInvalid),
+  ).toBeVisible();
+  expect(screen.getByText("pdf")).toBeVisible();
+});
 
 it("groups library skills by source with one chip per detected agent", async () => {
   renderPage();
@@ -1165,6 +1317,7 @@ it("searches repository skills with provenance and chooses through the existing 
   const search = await screen.findByRole("searchbox", {
     name: "搜索 Skill、描述或仓库",
   });
+  await userEvent.click(screen.getByRole("radio", { name: /^仓库/ }));
   await userEvent.type(search, "evidence");
   const row = await screen.findByRole("article", { name: "Research helper" });
   expect(within(row).getByText("example/catalog")).toBeVisible();
@@ -1201,6 +1354,7 @@ it("opens discovery on demand and returns to the saved Skills list without losin
   expect(search).toHaveFocus();
   expect(row).not.toBeVisible();
   expect(screen.queryByRole("region", { name: "Agent 中已有" })).toBeNull();
+  await userEvent.click(screen.getByRole("radio", { name: /^仓库/ }));
   await userEvent.type(search, "evidence");
   await waitFor(() => expect(catalog).toHaveBeenCalledTimes(1));
   scroller.scrollTop = 300;

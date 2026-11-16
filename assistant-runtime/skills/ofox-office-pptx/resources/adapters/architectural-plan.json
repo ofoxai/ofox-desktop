@@ -1,0 +1,77 @@
+{
+  "id": "architectural-plan",
+  "family": "technical",
+  "names": {
+    "zh": "架构蓝图",
+    "en": "Architectural Plan",
+    "ja": "アーキテクチャプラン"
+  },
+  "intro": {
+    "zh": "浅蓝与深蓝灰面板左右交替，编号导航与金黄色结构标记；适合技术方案、架构说明和咨询类规划汇报。",
+    "en": "Light-blue and blue-grey panels alternating left and right, numbered navigation and gold structural markers; for technical proposals, architecture walkthroughs and planning readouts.",
+    "ja": "ライトブルーとブルーグレーのパネルが左右交互に並び、番号ナビとゴールドのマーカー。技術提案や設計説明向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "technical",
+      "consulting"
+    ],
+    "density": "medium",
+    "scheme": "mixed",
+    "tone": [
+      "structured",
+      "architectural"
+    ],
+    "suits": {
+      "data": 1,
+      "formulas": 0,
+      "images": 2,
+      "longText": 1
+    },
+    "avoid": "Dense tables or wide charts: the side panel leaves a narrow content column."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "Source keeps the title on a white column with a star badge, gold underline, dark button and two figures, and puts a darker rounded image block on a light-blue band at the right; native draws a flat empty light-blue panel on the left that the title straddles, inside a hairline frame, with no badge, button, figures or image block."
+    },
+    {
+      "page": 2,
+      "archetype": "cards",
+      "native": "panel_slide + card",
+      "status": "approximate",
+      "differences": "Source has the image panel on the left with a rounded image block, a badge title with gold underline, three rounded pale cards with a gold left bar, a figure row and a button; native has an empty flat panel on the opposite side, three square outlined cards and no figures, badge or button."
+    },
+    {
+      "page": 3,
+      "archetype": "list",
+      "native": "panel_slide + bullets",
+      "status": "approximate",
+      "differences": "Source is two titled paragraphs each with a gold left bar plus a large figure, beside a right image panel; native is a plain bullet list beside an empty flat panel on the left, with no gold bars or figure."
+    },
+    {
+      "page": 4,
+      "archetype": "cards",
+      "native": "panel_slide + card",
+      "status": "approximate",
+      "differences": "Source has a left image panel with a rounded image block, three rounded pale cards with a gold left bar and a figure with caption; native has an empty flat panel on the right, three square outlined cards and no figure."
+    },
+    {
+      "page": 5,
+      "archetype": "cards",
+      "native": "panel_slide + card",
+      "status": "approximate",
+      "differences": "Source has three rounded pale cards with bullet lists and a gold left bar, a figure with caption and a right image panel with a rounded image block; native has an empty flat panel on the left, square outlined cards with one body line and no figure."
+    },
+    {
+      "page": 6,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "Source closing turns the whole page dark navy with white title, gold underline, gold button and a figure; native reuses the light cover layout with a light-blue panel and hairline frame, no dark canvas, button or figure."
+    }
+  ]
+}
