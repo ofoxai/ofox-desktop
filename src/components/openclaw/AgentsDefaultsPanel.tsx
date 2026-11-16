@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import React, { useState, useEffect, useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import { Save, Plus, Trash2, TriangleAlert } from "lucide-react";
@@ -182,9 +183,7 @@ const AgentsDefaultsPanel: React.FC = () => {
   if (isLoading) {
     return (
       <div className="px-6 pt-4 pb-8 flex items-center justify-center min-h-[200px]">
-        <div className="text-sm text-muted-foreground">
-          {t("common.loading")}
-        </div>
+        <FoxLoader size="block" label={t("common.loading")} />
       </div>
     );
   }

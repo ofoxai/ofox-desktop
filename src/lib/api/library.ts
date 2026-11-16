@@ -80,7 +80,25 @@ export interface SkillDefinition {
   commitSha?: string | null;
   installedAtMs?: number;
   updatedAtMs?: number;
+  origin?: SkillOrigin;
+  assistantSkill?: AssistantSkill;
   targets: ResourceTarget[];
+}
+export type SkillMode = "auto" | "manual";
+export type SkillOrigin =
+  | "reviewed"
+  | "unreviewed"
+  | "assistantCreated"
+  | "local";
+export interface AssistantSkill {
+  name: string;
+  description: string;
+  dir: string;
+  mode: SkillMode;
+  hasScripts: boolean;
+  reviewed: boolean;
+  broken?: string | null;
+  origin?: SkillOrigin | null;
 }
 export interface LibraryOperation {
   operationId: string;
@@ -110,6 +128,9 @@ export interface LibraryData {
   servers?: McpDefinition[];
   skills?: SkillDefinition[];
   skillTargets?: SkillTarget[];
+  assistantSkills?: AssistantSkill[];
+  /** The assistant's skill settings could not be read; other skills still list. */
+  assistantSkillsError?: string | null;
   targets?: ResourceTarget[];
   detachedTargets?: { path: string; resourceId: string; tools: string[] }[];
   operations: LibraryOperation[];
@@ -350,6 +371,10 @@ export interface LibraryBuiltinRecipe {
   directory?: string;
 }
 export const libraryApi = {
+  assistantSkillModes: () =>
+    invoke<Record<string, SkillMode>>("library_assistant_skill_modes"),
+  setAssistantSkillMode: (name: string, mode: SkillMode) =>
+    invoke<void>("library_set_assistant_skill_mode", { name, mode }),
   matchBuiltinRecipes: (
     kind: LibraryKind,
     recipes: LibraryBuiltinRecipe[],

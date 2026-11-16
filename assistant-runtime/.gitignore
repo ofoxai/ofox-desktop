@@ -1,3 +1,5 @@
 node_modules/
-resources/
+/resources/
 .cache/
+!skills/ofox-office-pptx/resources/vendor/
+!skills/ofox-office-pptx/resources/vendor/**

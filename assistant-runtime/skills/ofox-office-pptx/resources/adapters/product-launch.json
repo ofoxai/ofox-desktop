@@ -1,0 +1,90 @@
+{
+  "id": "product-launch",
+  "family": "business",
+  "names": {
+    "zh": "产品发布",
+    "en": "Product Launch",
+    "ja": "プロダクトローンチ"
+  },
+  "intro": {
+    "zh": "深色开场配橙色焦点，超大标题与明暗交替的功能页；适合新品发布、功能亮点和定价说明。",
+    "en": "Dark hero opening with one orange focal point, oversized headlines and alternating light and dark feature pages; for product launches, feature highlights and pricing.",
+    "ja": "ダークなヒーローページにオレンジのアクセント、大きな見出しと明暗が交互の機能ページ。新製品発表や価格説明向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "product-launch"
+    ],
+    "density": "low",
+    "scheme": "mixed",
+    "tone": [
+      "bold",
+      "polished"
+    ],
+    "suits": {
+      "data": 1,
+      "formulas": 0,
+      "images": 2,
+      "longText": 0
+    },
+    "avoid": "Academic, formula-heavy or long-text material."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "Source is left-aligned with one headline line in orange, a logo mark and a product visual on an orange disc at the right; native is a centred title on the dark page with no coloured line, logo or product visual."
+    },
+    {
+      "page": 2,
+      "archetype": "statement",
+      "native": "statement_slide",
+      "status": "approximate",
+      "differences": "Source is a white page with a centred eyebrow, oversized product name and two-line subtitle; native statement is on the dark canvas and its kicker is left-aligned at the top while the statement is centred."
+    },
+    {
+      "page": 3,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is a white page with a large two-line headline, an orange eyebrow and three white rounded cards each with an orange icon tile; native has a dark title band with a small one-line title and three peach-tinted cards without icons."
+    },
+    {
+      "page": 4,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source turns the whole page dark with a large white headline and three dark bordered cards; native content pages stay white with only a dark title band, and the cards are peach-tinted."
+    },
+    {
+      "page": 5,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is a large two-line headline over two wide white cards with orange icon tiles; native has a dark title band with a small title and tinted cards without icons."
+    },
+    {
+      "page": 6,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source is a vertical list of three numbered orange circles with a title and a line of text beside each; native is one horizontal row of outlined boxes joined by arrows, without numerals."
+    },
+    {
+      "page": 7,
+      "archetype": "pricing",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is three plan cards with a plan label, a large price figure and hairline-separated feature rows, the middle plan a raised dark card with a glow; native is three tinted cards with a title and bullets, the middle only outlined in orange, no price figure or dark card."
+    },
+    {
+      "page": 8,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "Source is a two-column dark page: a serif customer quote with attribution on the left, and a price with an orange gradient button on the right; native is a centred sign-off title, subtitle and meta line with no quote column, price or button."
+    }
+  ]
+}

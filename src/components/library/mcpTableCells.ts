@@ -2,7 +2,7 @@ import type { LibraryInventory, McpDefinition } from "@/lib/api/library";
 import { RESOURCE_TARGET_IDS } from "@/config/resourceTargets";
 
 /** Bindable agents Ofox can write MCP servers for, in the tools page's order. */
-export const MCP_TABLE_TOOLS = RESOURCE_TARGET_IDS;
+export const MCP_TABLE_TOOLS = [...RESOURCE_TARGET_IDS, "ofox-assistant"];
 
 export type McpCellState =
   /** Ofox wrote it and it is intact. */

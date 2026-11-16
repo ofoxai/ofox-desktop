@@ -66,6 +66,7 @@ async function fixture(t, turns, host, extra = {}) {
     events = [],
     calls = [];
   const runtime = new AssistantRuntime({
+    retrySleep: async () => {},
     fetch: async (url, options) => {
       requests.push(JSON.parse(options.body));
       return turns[requests.length - 1]?.() ?? reply();
@@ -324,6 +325,71 @@ test("a failed shell repair cannot bypass the original-folder verification gate"
   assert.equal(f.requests.length, 5);
 });
 
+for (const apex of ["ofox.ai", "ofox.io"])
+  for (const platform of ["macos", "windows"])
+    test(`a command-assisted question finishes without a verification turn (${apex}, ${platform})`, async (t) => {
+      const shell = platform === "windows" ? "powershell" : "bash";
+      const f = await fixture(
+        t,
+        [
+          () =>
+            call(shell, { command: 'curl -s "https://example.invalid/rate"' }),
+          reply,
+        ],
+        () => ({ output: "82.85", exitCode: 0, requiresVerification: true }),
+        { apex, prompt: "300,000 卢布是多少美金？" },
+      );
+      f.params.localConfig.platform = platform;
+      const result = await f.run();
+      assert.equal(result.status, "completed");
+      assert.equal(result.errorCode, undefined);
+      assert.equal(
+        f.requests.length,
+        2,
+        "no extra model request to verify tools",
+      );
+      assert.deepEqual(
+        f.calls.map((c) => c.name),
+        [shell],
+      );
+      assert.equal(
+        result.localTaskState,
+        null,
+        "no verification debt on the next run",
+      );
+      assert.equal(
+        f.events.some((e) => e.data?.warning === "verification_required"),
+        false,
+      );
+    });
+
+for (const platform of ["macos", "windows"])
+  test(`a status check followed by a shell repair still needs verification (${platform})`, async (t) => {
+    const shell = platform === "windows" ? "powershell" : "bash";
+    const f = await fixture(
+      t,
+      [
+        () => call("tool_status", { tool: "codex" }),
+        () => call(shell, { command: "repair" }),
+        reply,
+        () => call("verify_in_folder", { tool: "codex" }),
+        reply,
+      ],
+      (name, args) =>
+        name === shell
+          ? { output: "repaired", exitCode: 0, requiresVerification: true }
+          : { folder: args.folder, verified: name === "verify_in_folder" },
+    );
+    f.params.localConfig.platform = platform;
+    const result = await f.run();
+    assert.equal(result.status, "completed");
+    assert.equal(f.requests.length, 5);
+    assert.ok(
+      f.events.some((e) => e.data?.warning === "verification_required"),
+    );
+    assert.equal(result.localTaskState, null);
+  });
+
 for (const [name, usage] of [
   [
     "unknown cache pricing",
@@ -336,7 +402,7 @@ for (const [name, usage] of [
   ],
   ["missing token usage", undefined],
 ])
-  test(`${name} stops the local task without duplicating its request receipt`, async (t) => {
+  test(`${name} counts toward the limit at its ceiling and lets the task finish, with one receipt`, async (t) => {
     const f = await fixture(
       t,
       [() => reply(usage === undefined ? {} : usage)],
@@ -353,7 +419,108 @@ for (const [name, usage] of [
       },
     );
     const result = await f.run();
-    assert.equal(result.errorCode, "assistant_cost_unavailable");
+    assert.equal(result.status, "completed");
+    assert.equal(result.errorCode, undefined);
     assert.equal(f.requests.length, 1);
     assert.equal(result.entries.filter((e) => e.role === "request").length, 1);
+    // Never less than all 15 tokens at the input rate: unpriced cached
+    // tokens count as input, an unreported request at its ceiling.
+    const spent = f.events
+      .filter((e) => e.type === "task_status" && "cost" in e.data)
+      .at(-1).data.cost;
+    assert.ok(spent > 14.9 / 1e6, `${spent}`);
   });
+
+test("unknown retry receipts stay unknown while the task goes on to its tools and finishes", async (t) => {
+  for (const status of [502, 503]) {
+    const refused = () =>
+      Response.json({ error: { message: "upstream unavailable" } }, { status });
+    const f = await fixture(
+      t,
+      [refused, refused, () => call("tool_status", { tool: "codex" }), reply],
+      () => ({ installed: true }),
+    );
+    const result = await f.run();
+    assert.equal(f.requests.length, 4);
+    assert.equal(f.calls.length, 1, "an unknown cost does not block the task");
+    assert.equal(result.status, "completed");
+    assert.equal(result.errorCode, undefined);
+    assert.deepEqual(
+      f.events.filter((e) => e.type === "retrying").map((e) => e.data.attempt),
+      [1, 2],
+    );
+    assert.deepEqual(
+      result.entries
+        .filter((e) => e.role === "request")
+        .map((e) => e.request.status),
+      ["unknown", "unknown", "completed", "completed"],
+    );
+    const success = result.entries.find((e) => e.role === "assistant");
+    assert.equal(success.usage.input, 10);
+    assert.equal(success.usage.output, 5);
+    assert.ok(success.usage.cost.total > 0);
+    assert.equal(result.usageCoverage, "incomplete");
+  }
+});
+
+test("rejected and reliably unsent retry receipts do not block local tools or their follow-up model request", async (t) => {
+  for (const refused of [
+    () =>
+      Response.json({ error: { message: "rate limited" } }, { status: 429 }),
+    () => {
+      throw new TypeError("fetch failed", {
+        cause: Object.assign(new Error("connection refused"), {
+          code: "ECONNREFUSED",
+          syscall: "connect",
+        }),
+      });
+    },
+  ]) {
+    const f = await fixture(
+      t,
+      [refused, refused, () => call("tool_status", { tool: "codex" }), reply],
+      () => ({ installed: true }),
+    );
+    const result = await f.run();
+    assert.equal(result.status, "completed");
+    assert.equal(f.requests.length, 4);
+    assert.equal(f.calls.length, 1);
+    assert.equal(result.usageCoverage, "complete");
+    assert.equal(result.errorCode, undefined);
+  }
+});
+
+test("an unknown OFox retry cost does not block use_skill", async (t) => {
+  const skills = [
+    {
+      name: "sample",
+      description: "Sample",
+      dir: "/skills/sample",
+      mode: "auto",
+      hasScripts: false,
+      reviewed: false,
+    },
+  ];
+  const f = await fixture(
+    t,
+    [
+      () =>
+        Response.json({ error: { message: "unavailable" } }, { status: 503 }),
+      () => call("use_skill", { name: "sample" }),
+      reply,
+    ],
+    () => ({
+      name: "sample",
+      body: "loaded",
+      dir: "/skills/sample",
+      files: [],
+      truncated: false,
+    }),
+    { skills },
+  );
+  const result = await f.run();
+  assert.equal(f.requests.length, 3);
+  assert.equal(f.calls.length, 1);
+  assert.equal(result.status, "completed");
+  assert.equal(result.usageCoverage, "incomplete");
+});

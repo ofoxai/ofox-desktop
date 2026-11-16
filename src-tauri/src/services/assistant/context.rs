@@ -150,7 +150,7 @@ impl AssistantHost {
         if let Some(level) = thinking {
             object.insert("thinkingLevel".into(), json!(level));
         }
-        self.emit_start(&control, false, thinking);
+        self.emit_start(&control, None, thinking);
         self.spawn_run(control, params);
         drop(history);
         Ok(RunRef {

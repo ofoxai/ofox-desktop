@@ -1,0 +1,105 @@
+{
+  "id": "blue-professional",
+  "family": "business",
+  "names": {
+    "zh": "蓝色专业",
+    "en": "Blue Professional",
+    "ja": "ブループロフェッショナル"
+  },
+  "intro": {
+    "zh": "暖纸色背景配钴蓝强调色，现代无衬线字体，克制专业；适合咨询汇报、经营复盘和投资者沟通。",
+    "en": "Warm paper background with cobalt-blue accents and a modern sans; quiet and professional, for consulting readouts, business reviews and investor updates.",
+    "ja": "温かい紙色の背景にコバルトブルーのアクセント、モダンなサンセリフ。コンサル報告や経営レビュー向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "consulting",
+      "business-review"
+    ],
+    "density": "medium",
+    "scheme": "light",
+    "tone": [
+      "professional",
+      "restrained"
+    ],
+    "suits": {
+      "data": 2,
+      "formulas": 0,
+      "images": 0,
+      "longText": 1
+    },
+    "avoid": "Playful, image-led or highly expressive creative material."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "Source is a paper page with a pale grey slanted panel on the right, a short blue dash above the title and a dot grid; native draws a solid cobalt panel on the left with a white cross mark and puts the title to its right."
+    },
+    {
+      "page": 2,
+      "archetype": "agenda",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source is a 2 x 3 grid of ruled rows with blue numerals 01-06, a small-caps eyebrow and a pill tag; native is one row of four outlined rounded boxes joined by arrows, with a cobalt edge stripe and no numerals, eyebrow or tag."
+    },
+    {
+      "page": 3,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source puts each figure in a filled grey rounded card with three supporting lines and a green/red change line; native figures are open with only a bottom rule, a label and one note, with no change indicator, eyebrow or pill tag."
+    },
+    {
+      "page": 4,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source is a 2 x 3 dashboard of six small filled figure cards with an inline unit after each value; native is one row of three open figures over a bottom rule."
+    },
+    {
+      "page": 5,
+      "archetype": "list",
+      "native": "content_slide + bullets",
+      "status": "approximate",
+      "differences": "Source splits the page: five numbered points on the left, and on the right a quote box with a blue left bar, three small figure tiles and a footnote; native is a single bulleted column without numerals, quote box or figure tiles."
+    },
+    {
+      "page": 6,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source is seven horizontal ranked bars drawn as rounded blue fills on grey tracks with a percentage at the right end; native is an editable vertical column chart with axes and a legend, no tracks."
+    },
+    {
+      "page": 7,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "approximate",
+      "differences": "Source centres the quote on a full paper page with a large pale quote glyph and two circle ornaments; native puts the quote left-aligned beside a solid cobalt panel, with no glyph or ornaments."
+    },
+    {
+      "page": 8,
+      "archetype": "timeline",
+      "native": "content_slide + timeline",
+      "status": "approximate",
+      "differences": "Source is four numbered blue circles (fading in strength) joined by short dashes with centred captions; native is a continuous line with unnumbered dots and a period label above each dot."
+    },
+    {
+      "page": 9,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is a 2 x 3 grid of six filled grey rounded cards each holding three bullets; native is one row of three open blocks with a cobalt leading rule and a single body line."
+    },
+    {
+      "page": 10,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "Source is centred on the paper page inside a faint circle with a blue pill button; native reuses the cover layout: solid cobalt panel on the left, left-aligned title, no circle and no button."
+    }
+  ]
+}

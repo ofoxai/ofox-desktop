@@ -1,0 +1,14 @@
+{
+  "kind": "deck",
+  "title": "自注意力详解",
+  "language": "zh",
+  "slides": [
+    {"type": "hero", "title": "自注意力详解", "subtitle": "Transformer 的核心模块"},
+    {"type": "pillars", "title": "自注意力的三步", "pillars": [
+      {"heading": "计算相似度", "body": "每个词与句中所有词两两比较"},
+      {"heading": "加权汇总", "body": "自注意力让每个词先与句中所有词计算相似度，再按相似度把信息加权汇总，整句可以同时并行计算，训练速度因此大幅提升，成本更低。"},
+      {"heading": "输出表示", "body": "每个词得到融合了上下文的新向量"}
+    ]},
+    {"type": "cta", "title": "谢谢", "subtitle": "欢迎提问"}
+  ]
+}

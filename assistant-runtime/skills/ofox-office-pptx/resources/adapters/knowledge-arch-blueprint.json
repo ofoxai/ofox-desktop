@@ -1,0 +1,414 @@
+{
+  "id": "knowledge-arch-blueprint",
+  "family": "technical",
+  "names": {
+    "zh": "知识架构蓝图",
+    "en": "Knowledge Arch Blueprint",
+    "ja": "ナレッジ設計ブループリント"
+  },
+  "intro": {
+    "zh": "暖纸色底，粗黑无衬线标题靠左，锈红色只用在重点上；白底黑描边的卡片里有一张填满锈红；适合架构说明、技术方案和知识管理分享。",
+    "en": "Warm paper canvas, heavy left-aligned sans titles, rust red only for the key point: white ink-outlined cards with one filled rust; for architecture explainers and technical proposals.",
+    "ja": "温かい紙色の背景に左揃えの太いサンセリフ見出し、要点だけに使う錆赤。黒枠の白いカードのうち一枚だけ錆赤で塗る。アーキテクチャ説明や技術提案向け。"
+  },
+  "routing": {
+    "scenarios": ["technical", "research", "consulting"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["engineered", "confident", "plain"],
+    "suits": {
+      "data": 2,
+      "formulas": 1,
+      "images": 1,
+      "longText": 1
+    },
+    "avoid": "Playful or emotional material, and photo-led storytelling."
+  },
+  "theme": {
+    "colors": {
+      "background": "F0EAE0",
+      "card": "FFFFFF",
+      "primary": "1A1A1A",
+      "secondary": "B5392A",
+      "accent": "B5392A",
+      "text": "1A1A1A",
+      "textSecondary": "555555",
+      "textMuted": "77726A",
+      "line": "CEC8BE",
+      "accentTint": "B5392A",
+      "dark": "1A1A1A",
+      "onDark": "F0EAE0",
+      "onDarkMuted": "CEC8BE",
+      "surface": "FFFFFF",
+      "palette": ["FFFFFF", "B5392A"],
+      "chart": ["B5392A", "1A1A1A", "8A8478", "D98C7F", "555555", "CEC8BE"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Arial",
+        "body": "Arial",
+        "data": "Consolas"
+      },
+      "zh": {
+        "title": "Microsoft YaHei",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Gothic",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [60, 54, 48, 40],
+      "statement": [66, 54, 44, 36],
+      "title": [32, 30, 28, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [14, 13, 12],
+      "kpi": [54, 44, 36]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 0.72,
+            "y": 2.2,
+            "w": 9.2,
+            "h": 2.3
+          },
+          "kicker": {
+            "x": 0.72,
+            "y": 1.7,
+            "w": 8,
+            "size": 12,
+            "color": "accent"
+          },
+          "meta": {
+            "x": 0.72,
+            "y": 7.0,
+            "w": 9
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "CEC8BE",
+              "name": "footer rule"
+            },
+            {
+              "kind": "round",
+              "x": 9.72,
+              "y": 1.68,
+              "w": 0.62,
+              "h": 0.4,
+              "radius": 0.06,
+              "fill": "FFFFFF",
+              "line": "1A1A1A",
+              "lineW": 1.5,
+              "name": "pipeline box"
+            },
+            {
+              "kind": "round",
+              "x": 10.48,
+              "y": 1.68,
+              "w": 0.62,
+              "h": 0.4,
+              "radius": 0.06,
+              "fill": "FFFFFF",
+              "line": "1A1A1A",
+              "lineW": 1.5,
+              "name": "pipeline box"
+            },
+            {
+              "kind": "round",
+              "x": 11.24,
+              "y": 1.68,
+              "w": 0.62,
+              "h": 0.4,
+              "radius": 0.06,
+              "fill": "B5392A",
+              "line": "B5392A",
+              "lineW": 1.5,
+              "name": "pipeline box"
+            },
+            {
+              "kind": "round",
+              "x": 12.0,
+              "y": 1.68,
+              "w": 0.62,
+              "h": 0.4,
+              "radius": 0.06,
+              "fill": "FFFFFF",
+              "line": "1A1A1A",
+              "lineW": 1.5,
+              "name": "pipeline box"
+            },
+            {
+              "kind": "rect",
+              "x": 10.34,
+              "y": 1.87,
+              "w": 0.14,
+              "h": 0.015,
+              "fill": "1A1A1A"
+            },
+            {
+              "kind": "rect",
+              "x": 11.1,
+              "y": 1.87,
+              "w": 0.14,
+              "h": 0.015,
+              "fill": "1A1A1A"
+            },
+            {
+              "kind": "rect",
+              "x": 11.86,
+              "y": 1.87,
+              "w": 0.14,
+              "h": 0.015,
+              "fill": "1A1A1A"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 0.72,
+            "y": 2.45,
+            "w": 10.5,
+            "h": 2.4
+          },
+          "number": {
+            "x": 0.72,
+            "y": 1.95,
+            "w": 4,
+            "size": 14,
+            "color": "accent"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "CEC8BE",
+              "name": "footer rule"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 0.72,
+            "y": 2.3,
+            "w": 10.8,
+            "h": 2.8,
+            "sizes": [48, 44, 36, 30]
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "CEC8BE",
+              "name": "footer rule"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.55,
+              "w": 0.5,
+              "h": 0.05,
+              "fill": "B5392A",
+              "name": "rule"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 0.72,
+            "y": 0.66,
+            "w": 11.9,
+            "h": 0.7
+          },
+          "body": {
+            "x": 0.72,
+            "y": 1.85,
+            "w": 11.9,
+            "h": 4.9
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "CEC8BE",
+              "name": "footer rule"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 0.46,
+              "w": 0.5,
+              "h": 0.05,
+              "fill": "B5392A",
+              "name": "rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.2,
+            "y": 2.2,
+            "w": 10.9,
+            "h": 1.9,
+            "align": "center",
+            "anchor": "bottom",
+            "sizes": [88, 72, 60, 48]
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.3,
+            "w": 8.9,
+            "align": "center",
+            "size": 18,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 0.72,
+            "y": 7.0,
+            "w": 9
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "CEC8BE",
+              "name": "footer rule"
+            },
+            {
+              "kind": "rect",
+              "x": 6.42,
+              "y": 1.75,
+              "w": 0.5,
+              "h": 0.05,
+              "fill": "B5392A",
+              "name": "rule"
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.1,
+          "fill": "card",
+          "line": "title",
+          "lineW": 1.5,
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.1,
+          "fill": "none",
+          "line": "title",
+          "lineW": 1.5,
+          "shadow": [0, 0, "card"],
+          "valueColor": "accent"
+        },
+        "steps": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.1,
+          "fill": "card",
+          "line": "title",
+          "lineW": 1.5,
+          "gap": 0.14
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Warm paper canvas; a short rust rule and a heavy black sans title at the top left, body below on a strict grid, a hairline above the footer. The closing title is centred and oversized.",
+    "components": "White rounded cards with a 1.5 pt ink outline; exactly one card, stat or step per page is filled rust with light text to mark the core. Dark code panel for manifests. Rust is never used for decoration.",
+    "narrative": "Blueprint overview, why it matters, original versus upgraded, how it is implemented, system loop, results, next steps, thanks.",
+    "nativeCoverage": "Cover, chapter, comparison, code panel, step row, stat boxes, process diagram and closing as native text, shapes and connectors. Not reproduced: two-colour titles with one rust keyword, mono kicker labels above content titles, dashed curved feedback arrows, the giant Playfair numeral, syntax colouring in code, Inter and JetBrains Mono."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "Source cover also carries a four-step pipeline card row and a rust key-insight card; native cover has the kicker, title and subtitle with a small four-box pipeline motif. The rust keyword inside the title is not coloured separately."
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "adapted",
+      "differences": "The rust keyword inside the title is not coloured separately."
+    },
+    {
+      "page": 3,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source upgraded card is a pale rust tint with a rust outline and a legend row below; native highlights it as a solid rust card and has no legend."
+    },
+    {
+      "page": 4,
+      "archetype": "code",
+      "native": "content_slide + code",
+      "status": "adapted",
+      "differences": "Syntax colouring inside the code panel is not reproduced."
+    },
+    {
+      "page": 5,
+      "archetype": "cycle",
+      "native": "content_slide + relation + callout",
+      "status": "approximate",
+      "differences": "Dashed curved feedback arrows with labels above and below the pipeline are not drawn; the loop is stated in a callout line under a straight process row."
+    },
+    {
+      "page": 6,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source sets one giant serif rust numeral beside four outlined fact cards; native is a row of three outlined stat boxes with rust mono numerals, the first with a rust outline."
+    },
+    {
+      "page": 7,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "adapted",
+      "differences": "Mono step labels become large step numerals."
+    },
+    {
+      "page": 8,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "The rust dot between the two words and the mono kicker are not drawn."
+    }
+  ]
+}

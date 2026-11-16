@@ -1,0 +1,390 @@
+{
+  "source": "magpie market_skills.json (MIT, yetone)",
+  "generatedAt": "2026-11-05T12:38:58.581Z",
+  "skills": [
+    {
+      "source": "vercel-labs/skills",
+      "skillId": "find-skills",
+      "name": "find-skills",
+      "installs": 3556437,
+      "official": true,
+      "description": "Helps users discover and install agent skills when they ask questions like \"how do I do X\", \"find a skill for X\", \"is there a skill that can...\", or express…"
+    },
+    {
+      "source": "mattpocock/skills",
+      "skillId": "grill-me",
+      "name": "grill-me",
+      "installs": 1219508,
+      "official": false,
+      "description": "A relentless interview to sharpen a plan or design."
+    },
+    {
+      "source": "mattpocock/skills",
+      "skillId": "grill-with-docs",
+      "name": "grill-with-docs",
+      "installs": 1041790,
+      "official": false,
+      "description": "A relentless interview to sharpen a plan or design, which also creates docs (ADR's and glossary) as we go."
+    },
+    {
+      "source": "mattpocock/skills",
+      "skillId": "improve-codebase-architecture",
+      "name": "improve-codebase-architecture",
+      "installs": 989954,
+      "official": false,
+      "description": "Scan a codebase for deepening opportunities, present them as a visual HTML report, then grill through whichever one you pick."
+    },
+    {
+      "source": "mattpocock/skills",
+      "skillId": "tdd",
+      "name": "tdd",
+      "installs": 962002,
+      "official": false,
+      "description": "Test-driven development. Use when the user wants to build features or fix bugs test-first, mentions \"red-green-refactor\", or wants integration tests."
+    },
+    {
+      "source": "vercel-labs/agent-browser",
+      "skillId": "agent-browser",
+      "name": "agent-browser",
+      "installs": 935933,
+      "official": true,
+      "description": "Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking…"
+    },
+    {
+      "source": "anthropics/skills",
+      "skillId": "frontend-design",
+      "name": "frontend-design",
+      "installs": 920400,
+      "official": true,
+      "description": "Guidance for distinctive, intentional visual design when building new UI or reshaping an existing one. Helps with aesthetic direction, typography, and making…"
+    },
+    {
+      "source": "vercel-labs/agent-skills",
+      "skillId": "vercel-react-best-practices",
+      "name": "vercel-react-best-practices",
+      "installs": 742023,
+      "official": true,
+      "description": "React and Next.js performance optimization guidelines from Vercel Engineering. This skill should be used when writing, reviewing, or refactoring React/Next.js…"
+    },
+    {
+      "source": "heygen-com/hyperframes",
+      "skillId": "hyperframes-cli",
+      "name": "hyperframes-cli",
+      "installs": 667837,
+      "official": false,
+      "description": "The HyperFrames CLI by job - scaffold, check, look at frames, edit the timeline, preview, render locally or in the cloud, publish, project history - plus…"
+    },
+    {
+      "source": "vercel-labs/agent-skills",
+      "skillId": "web-design-guidelines",
+      "name": "web-design-guidelines",
+      "installs": 664841,
+      "official": true,
+      "description": "Review UI code for Web Interface Guidelines compliance. Use when asked to \"review my UI\", \"check accessibility\", \"audit design\", \"review UX\", or \"check my site…"
+    },
+    {
+      "source": "heygen-com/hyperframes",
+      "skillId": "hyperframes",
+      "name": "hyperframes",
+      "installs": 637008,
+      "official": false,
+      "description": "Read first to make, edit, animate or render any video with HyperFrames (HTML rendered to video), including launch films, explainers, music videos, charts,…"
+    },
+    {
+      "source": "microsoft/azure-skills",
+      "skillId": "microsoft-foundry",
+      "name": "microsoft-foundry",
+      "installs": 610871,
+      "official": true,
+      "description": "Build, deploy, evaluate, optimize, fine-tune, and manage Microsoft Foundry agents, models, and resources end to end. USE FOR: foundry, azd ai agent, azd…"
+    },
+    {
+      "source": "microsoft/azure-skills",
+      "skillId": "azure-diagnostics",
+      "name": "azure-diagnostics",
+      "installs": 601390,
+      "official": true,
+      "description": "Debug Azure production issues using AppLens, Azure Monitor, resource health, and safe triage, including evidence-only diagnosis without live access. WHEN:…"
+    },
+    {
+      "source": "microsoft/azure-skills",
+      "skillId": "azure-prepare",
+      "name": "azure-prepare",
+      "installs": 600969,
+      "official": true,
+      "description": "Prepare azd-based Azure projects for deployment: generates azure.yaml, infrastructure (Bicep/Terraform), and Dockerfiles for the Azure Developer CLI (azd)…"
+    },
+    {
+      "source": "microsoft/azure-skills",
+      "skillId": "azure-ai",
+      "name": "azure-ai",
+      "installs": 600734,
+      "official": true,
+      "description": "Build and troubleshoot Azure AI Search, Speech, OpenAI, and Document Intelligence apps. WHEN: AI Search, query search, vector search, hybrid search, semantic…"
+    },
+    {
+      "source": "heygen-com/hyperframes",
+      "skillId": "hyperframes-registry",
+      "name": "hyperframes-registry",
+      "installs": 577592,
+      "official": false,
+      "description": "About 450 ready-made HyperFrames blocks and components installed as editable source - transitions, overlays, titles, kinetic type, captions, charts, map…"
+    },
+    {
+      "source": "heygen-com/hyperframes",
+      "skillId": "media-use",
+      "name": "media-use",
+      "installs": 541736,
+      "official": false,
+      "description": "Get or make any media for a HyperFrames video - music, sound effects, images, icons, logos, voiceover, avatar and generated video, transcripts, cutouts, colour…"
+    },
+    {
+      "source": "remotion-dev/skills",
+      "skillId": "remotion-best-practices",
+      "name": "remotion-best-practices",
+      "installs": 541414,
+      "official": true,
+      "description": "Router for all Remotion skills"
+    },
+    {
+      "source": "juliusbrussee/caveman",
+      "skillId": "caveman",
+      "name": "caveman",
+      "installs": 537287,
+      "official": false,
+      "description": "Terse caveman voice: answer first, fluff gone, every technical fact kept. Use for /caveman, \"caveman mode\", \"talk like caveman\", \"be brief\", \"less tokens\".…"
+    },
+    {
+      "source": "leonxlnx/taste-skill",
+      "skillId": "design-taste-frontend",
+      "name": "design-taste-frontend",
+      "installs": 516524,
+      "official": false,
+      "description": "tasteskill v2, the anti-slop frontend skill. Art direction for websites, distilled from a study of 247 curated gallery sites (One Page Love, Awwwards Sites of…"
+    },
+    {
+      "source": "larksuite/cli",
+      "skillId": "lark-doc",
+      "name": "lark-doc",
+      "installs": 459114,
+      "official": false,
+      "description": "飞书云文档（Docx / Wiki）内容操作：读取、创建、编辑文档，插入或下载图片附件，以及操作思维笔记。用户提供文档 URL/token（包括 doubao.com 的 /docx/、/wiki/）时使用；按 URL 路径/token 而非域名路由；`/page/<token>`…"
+    },
+    {
+      "source": "larksuite/cli",
+      "skillId": "lark-base",
+      "name": "lark-base",
+      "installs": 456967,
+      "official": false,
+      "description": "飞书多维表格（Base）操作：建表、字段、记录、视图、统计、公式/lookup、表单、仪表盘、应用模式（BaseApp/AppMode 页面与组件）、Workspace 目录、workflow、角色权限、模板中心（多维表格模板分类/列表/搜索）；遇到…"
+    },
+    {
+      "source": "larksuite/cli",
+      "skillId": "lark-shared",
+      "name": "lark-shared",
+      "installs": 455800,
+      "official": false,
+      "description": "Use for lark-cli setup/auth tasks: auth login/status/logout, user vs bot identity, business-domain permissions (--domain, including all/docs/drive), missing…"
+    },
+    {
+      "source": "larksuite/cli",
+      "skillId": "lark-im",
+      "name": "lark-im",
+      "installs": 454247,
+      "official": false,
+      "description": "飞书即时通讯：收发消息和管理群聊。发送和回复消息、搜索聊天记录、管理群聊成员、上传下载图片和文件、管理表情回复、发送应用内/短信/电话加急、发送和处理交互卡片（Interactive Card）、监听卡片按钮回调（card.action.trigger）。当用户需要发消息、查看或搜索聊天记录、下载聊天中的文件、查看群成…"
+    },
+    {
+      "source": "lllllllama/rigorpilot-skills",
+      "skillId": "paper-context-resolver",
+      "name": "paper-context-resolver",
+      "installs": 450949,
+      "official": false,
+      "description": "Rigor Paper Context helper for README-first deep learning repo reproduction. Use only when the README and repository files leave a narrow reproduction-critical…"
+    },
+    {
+      "source": "lllllllama/rigorpilot-skills",
+      "skillId": "repo-intake-and-plan",
+      "name": "repo-intake-and-plan",
+      "installs": 450158,
+      "official": false,
+      "description": "Rigor Intake helper for README-first deep learning repo reproduction. Use when the task is specifically to scan a repository, read the README and common…"
+    },
+    {
+      "source": "lllllllama/rigorpilot-skills",
+      "skillId": "minimal-run-and-audit",
+      "name": "minimal-run-and-audit",
+      "installs": 450072,
+      "official": false,
+      "description": "Rigor Run skill for README-first deep learning repo reproduction. Use when the task is specifically to capture or normalize evidence from the selected smoke…"
+    },
+    {
+      "source": "lllllllama/rigorpilot-skills",
+      "skillId": "env-and-assets-bootstrap",
+      "name": "env-and-assets-bootstrap",
+      "installs": 450035,
+      "official": false,
+      "description": "Rigor Setup skill for README-first deep learning repo reproduction. Use when the task is specifically to prepare a conservative conda-first environment,…"
+    },
+    {
+      "source": "designed-by-ai/skills",
+      "skillId": "design-mobile-apps",
+      "name": "design-mobile-apps",
+      "installs": 419474,
+      "official": false,
+      "description": "Design mobile app screens with Sleek, edit Sleek projects, and implement their designs in React Native or HTML."
+    },
+    {
+      "source": "supabase/agent-skills",
+      "skillId": "supabase-postgres-best-practices",
+      "name": "supabase-postgres-best-practices",
+      "installs": 416025,
+      "official": true,
+      "description": "Postgres best practices maintained by Supabase, for Postgres running anywhere. Load this skill BEFORE writing or changing anything that lives in a Postgres…"
+    },
+    {
+      "source": "anthropics/skills",
+      "skillId": "skill-creator",
+      "name": "skill-creator",
+      "installs": 390357,
+      "official": true,
+      "description": "Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to create a skill from scratch, edit, or optimize an…"
+    },
+    {
+      "source": "leonxlnx/taste-skill",
+      "skillId": "high-end-visual-design",
+      "name": "high-end-visual-design",
+      "installs": 378409,
+      "official": false,
+      "description": "Classic style skill, opt-in: it runs only when called by name. A calm, polished look with soft contrast, generous whitespace and spring motion."
+    },
+    {
+      "source": "juliusbrussee/caveman",
+      "skillId": "caveman-commit",
+      "name": "caveman-commit",
+      "installs": 377338,
+      "official": false,
+      "description": "Write a Conventional Commits message compressed to intent only. Use for \"write a commit\", \"commit message\", /commit or /caveman-commit."
+    },
+    {
+      "source": "obra/superpowers",
+      "skillId": "brainstorming",
+      "name": "brainstorming",
+      "installs": 375490,
+      "official": false,
+      "description": "You MUST use this before any creative work - creating features, building components, adding functionality, modifying behavior, or planning anything new, in…"
+    },
+    {
+      "source": "juliusbrussee/caveman",
+      "skillId": "caveman-review",
+      "name": "caveman-review",
+      "installs": 373492,
+      "official": false,
+      "description": "Compressed code review - one line per finding with location, problem and fix. Use for /caveman-review, \"review this PR\", or \"review the diff\"."
+    },
+    {
+      "source": "juliusbrussee/caveman",
+      "skillId": "caveman-compress",
+      "name": "caveman-compress",
+      "installs": 372202,
+      "official": false,
+      "description": "Compress a memory file such as CLAUDE.md or a todo list into caveman format to save input tokens, keeping a readable backup. Sends the file's text to the…"
+    },
+    {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "skillId": "ui-ux-pro-max",
+      "name": "ui-ux-pro-max",
+      "installs": 369890,
+      "official": false,
+      "description": "UI/UX design intelligence for web, mobile, and desktop. This skill should be used when designing, building, reviewing, or fixing interfaces, including pages,…"
+    },
+    {
+      "source": "google/agents-cli",
+      "skillId": "google-agents-cli-adk-code",
+      "name": "google-agents-cli-adk-code",
+      "installs": 358165,
+      "official": false,
+      "description": "This skill should be used when the user wants to \"write agent code\", \"build an agent with ADK\", \"add a tool\", \"create a callback\", \"define an agent\", \"use…"
+    },
+    {
+      "source": "google/agents-cli",
+      "skillId": "google-agents-cli-workflow",
+      "name": "google-agents-cli-workflow",
+      "installs": 357749,
+      "official": false,
+      "description": "This skill should be used when the user wants to \"develop an agent\", \"build an agent using ADK\", \"run the agent locally\", \"debug agent code\", \"test an agent\",…"
+    },
+    {
+      "source": "google/agents-cli",
+      "skillId": "google-agents-cli-eval",
+      "name": "google-agents-cli-eval",
+      "installs": 357721,
+      "official": false,
+      "description": "This skill should be used when the user wants to \"run an evaluation\", \"evaluate my agent\", \"evaluate my ADK agent\", \"write an eval dataset\", \"analyze eval…"
+    },
+    {
+      "source": "google/agents-cli",
+      "skillId": "google-agents-cli-deploy",
+      "name": "google-agents-cli-deploy",
+      "installs": 357661,
+      "official": false,
+      "description": "This skill should be used when the user wants to \"deploy an agent\", \"deploy my ADK agent\", \"set up CI/CD\", \"configure secrets\", \"troubleshoot a deployment\", or…"
+    },
+    {
+      "source": "vercel-labs/agent-skills",
+      "skillId": "vercel-composition-patterns",
+      "name": "vercel-composition-patterns",
+      "installs": 355196,
+      "official": true,
+      "description": "React composition patterns that scale. Use when refactoring components with boolean prop proliferation, building flexible component libraries, or designing…"
+    },
+    {
+      "source": "leonxlnx/taste-skill",
+      "skillId": "minimalist-ui",
+      "name": "minimalist-ui",
+      "installs": 348610,
+      "official": false,
+      "description": "Classic style skill, opt-in: it runs only when called by name. Editorial product UI with a warm monochrome palette, typographic contrast and flat bento grids."
+    },
+    {
+      "source": "leonxlnx/taste-skill",
+      "skillId": "full-output-enforcement",
+      "name": "full-output-enforcement",
+      "installs": 332586,
+      "official": false,
+      "description": "Overrides default LLM truncation behavior. Enforces complete code generation, bans placeholder patterns, and handles token-limit splits cleanly. Apply to any…"
+    },
+    {
+      "source": "prisma/skills",
+      "skillId": "prisma-client-api",
+      "name": "prisma-client-api",
+      "installs": 311858,
+      "official": true,
+      "description": "Prisma Client API reference covering model queries, filters, operators, and client methods. Use when writing database queries, using CRUD operations, filtering…"
+    },
+    {
+      "source": "prisma/skills",
+      "skillId": "prisma-cli",
+      "name": "prisma-cli",
+      "installs": 309452,
+      "official": true,
+      "description": "Prisma ORM 7 CLI reference for existing Prisma 7 applications or explicitly selected Prisma 7 workflows. Covers prisma init, generate, migrate, db, dev,…"
+    },
+    {
+      "source": "prisma/skills",
+      "skillId": "prisma-postgres",
+      "name": "prisma-postgres",
+      "installs": 304981,
+      "official": true,
+      "description": "Deprecated compatibility name for prisma-postgres-setup. Use only when a user or existing integration explicitly invokes prisma-postgres; otherwise select…"
+    },
+    {
+      "source": "prisma/skills",
+      "skillId": "prisma-driver-adapter-implementation",
+      "name": "prisma-driver-adapter-implementation",
+      "installs": 300037,
+      "official": true,
+      "description": "Required reference for Prisma ORM 7 SQL driver adapter work. Use when implementing or modifying adapters, adding database drivers, or touching…"
+    }
+  ]
+}

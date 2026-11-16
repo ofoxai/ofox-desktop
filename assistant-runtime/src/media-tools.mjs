@@ -26,7 +26,7 @@ const fileList = (files) =>
     .map((f) => `${f.name ?? f.id} (attachment id ${f.id})`)
     .join(", ");
 
-function describe(name, result) {
+function describe(name, result, presentation) {
   const cost = result?.estimatedCostUsd
     ? ` Estimated cost: $${result.estimatedCostUsd}.`
     : "";
@@ -34,7 +34,10 @@ function describe(name, result) {
     return `Video queued with ${result?.model}: it is being generated and will appear under your reply in a few minutes, where the user can watch it. Do not call generate_video again for this request.${cost}`;
   if (name === "generate_speech")
     return `Speech generated with ${result?.model}: ${fileList(result?.files)}. The user sees a player under your reply; do not repeat the audio as a link.${cost}`;
-  return `Generated with ${result?.model}: ${fileList(result?.files)}. The images are shown under your reply; do not repeat them as links. Use the attachment ids to change an image or to start a video from it.${cost}`;
+  const use = presentation
+    ? `For the frozen presentation, embed with image(slide, ${JSON.stringify(presentation.presentationAssetId)}, x, y, w, h). This is the PPT asset ID; the attachment ID is for chat/image editing, not this lookup.`
+    : "Use the attachment ids to change an image or to start a video from it.";
+  return `Generated with ${result?.model}: ${fileList(result?.files)}. The images are shown under your reply; do not repeat them as links. ${use}${cost}`;
 }
 
 function guidelines(media) {
@@ -42,7 +45,7 @@ function guidelines(media) {
     "Generation tools make what the user asks for; the user's own words decide what to make.",
     "Pass the user's description faithfully in the prompt, in the language that suits the model; do not add subjects, styles or details the user did not ask for, and do not drop any they did.",
     "Pass only the parameters the user stated in this conversation (model, size, quality, count, duration, resolution, aspect ratio, sound, voice); leave the rest out so the defaults set under the composer apply.",
-    "Images, audio and videos the user attached are named as [User attachment: \"name\"; id=...]; files you generated are named by attachment id in the tool result. Use those ids.",
+    'Images, audio and videos the user attached are named as [User attachment: "name"; id=...]; files you generated are named by attachment id in the tool result. Use those ids.',
   ];
   if (media.image)
     lines.push(
@@ -66,16 +69,68 @@ function guidelines(media) {
 
 export function mediaTools(runtime, context) {
   const media = context.params.media ?? {};
+  const planned = context.params.documents?.presentationPlanning === "v1";
   const host = (name) => async (args, signal, toolCallId) => {
-    const result = await runtime.hostTool(
-      context,
-      name,
-      args,
-      signal,
-      toolCallId,
-    );
+    if (
+      name === "generate_image" &&
+      planned &&
+      ["presentationAssetId", "planId", "revision"].some(
+        (key) => args[key] !== undefined,
+      ) &&
+      (!/^[A-Za-z0-9_-]{1,80}$/.test(args.presentationAssetId ?? "") ||
+        !/^[A-Za-z0-9_-]{1,80}$/.test(args.planId ?? "") ||
+        !Number.isSafeInteger(args.revision) ||
+        args.revision < 1)
+    )
+      throw new Error(
+        "assistant_presentation_asset_invalid: PPT image generation requires a frozen planId, revision and presentationAssetId; Host budget approval is separate",
+      );
+    const presentation =
+      name === "generate_image" &&
+      planned &&
+      ["presentationAssetId", "planId", "revision"].some(
+        (key) => args[key] !== undefined,
+      )
+        ? {
+            presentationAssetId: args.presentationAssetId,
+            planId: args.planId,
+            revision: args.revision,
+          }
+        : undefined;
+    let result;
+    try {
+      result = await runtime.hostTool(context, name, args, signal, toolCallId);
+    } catch (error) {
+      // A deck does not end over one picture: the Host has already counted
+      // the image against the budget, so only this image is lost.
+      if (
+        !presentation ||
+        !/\bassistant_media_outcome_unknown\b/.test(String(error?.message))
+      )
+        throw error;
+      return {
+        content: [
+          {
+            type: "text",
+            text: `No answer arrived for image ${presentation.presentationAssetId}; it may have been charged and counts against the image budget. Do not request it again: build the page without it, using the plan's fallback.`,
+          },
+        ],
+        details: { code: "assistant_media_unanswered" },
+        isError: true,
+      };
+    }
+    if (
+      presentation &&
+      (result?.status !== "completed" ||
+        result.presentationAssetId !== presentation.presentationAssetId ||
+        result.planId !== presentation.planId ||
+        result.revision !== presentation.revision)
+    )
+      throw new Error(
+        "assistant_presentation_asset_invalid: generated image result does not match the frozen presentation request",
+      );
     return {
-      content: [{ type: "text", text: describe(name, result) }],
+      content: [{ type: "text", text: describe(name, result, presentation) }],
       details: result,
     };
   };
@@ -90,7 +145,10 @@ export function mediaTools(runtime, context) {
         Type.Object({
           prompt: Type.String({ minLength: 1, maxLength: MAX_PROMPT }),
           model: modelChoice(image),
-          size: optionalChoice(image.sizes, "Only when the user states a size."),
+          size: optionalChoice(
+            image.sizes,
+            "Only when the user states a size, or for a planned presentation image the size the frozen plan lists for that asset in imageSizes.",
+          ),
           quality: optionalChoice(
             image.qualities,
             "Only when the user states a quality.",
@@ -108,6 +166,21 @@ export function mediaTools(runtime, context) {
               description: "The attachment id of an image to change.",
             }),
           ),
+          ...(planned
+            ? {
+                presentationAssetId: Type.Optional(
+                  Type.String({
+                    pattern: "^[A-Za-z0-9_-]{1,80}$",
+                    description:
+                      "The generated-image visual.assetId of the frozen page plan; does not grant a budget.",
+                  }),
+                ),
+                planId: Type.Optional(
+                  Type.String({ pattern: "^[A-Za-z0-9_-]{1,80}$" }),
+                ),
+                revision: Type.Optional(Type.Integer({ minimum: 1 })),
+              }
+            : {}),
         }),
         host("generate_image"),
       ),
@@ -197,6 +270,7 @@ export function mediaTools(runtime, context) {
       ),
     );
   }
-  if (tools.length) tools[0] = { ...tools[0], promptGuidelines: guidelines(media) };
+  if (tools.length)
+    tools[0] = { ...tools[0], promptGuidelines: guidelines(media) };
   return tools;
 }

@@ -3,12 +3,12 @@
 use super::{
     db_state,
     journal::Journal,
-    scope::{Access, Scope},
+    scope::{self, sensitive_path, Access, Scope},
 };
 use crate::database::Database;
 use serde_json::Value;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -74,6 +74,25 @@ pub fn begin<'a>(
     tool: &str,
     paths: Vec<PathBuf>,
 ) -> Result<Option<ChangeGuard<'a>>, String> {
+    begin_with(db, tool, paths, None)
+}
+
+/// Launcher repair writes host-chosen files in one folder of the private root.
+/// Only that folder, reached without a symlink, skips the private overlay.
+pub fn begin_launcher(
+    tool: &str,
+    launchers: &Path,
+    paths: Vec<PathBuf>,
+) -> Result<Option<ChangeGuard<'static>>, String> {
+    begin_with(None, tool, paths, Some(launchers))
+}
+
+fn begin_with<'a>(
+    db: Option<&'a Database>,
+    tool: &str,
+    paths: Vec<PathBuf>,
+    launchers: Option<&Path>,
+) -> Result<Option<ChangeGuard<'a>>, String> {
     let Ok(context) = ACTIVE.try_with(Arc::clone) else {
         return Ok(None);
     };
@@ -85,7 +104,7 @@ pub fn begin<'a>(
         return Err("assistant_cancelled".into());
     }
     for path in &paths {
-        if context.scope.check(path)?.access == Access::Forbidden {
+        if denied(&context.scope, path, launchers)? {
             return Err("assistant_path_denied".into());
         }
     }
@@ -97,6 +116,20 @@ pub fn begin<'a>(
         .prepare(&context.operation, &paths, state)?;
     context.observed.store(true, Ordering::SeqCst);
     Ok(Some(ChangeGuard { context, db, id }))
+}
+
+fn denied(scope: &Scope, path: &Path, launchers: Option<&Path>) -> Result<bool, String> {
+    let real = scope::resolve(path)?;
+    if sensitive_path(&path.to_string_lossy()) || sensitive_path(&real.to_string_lossy()) {
+        return Ok(true);
+    }
+    if let Some(dir) = launchers {
+        let linked = std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_symlink());
+        if !linked && path.starts_with(dir) && real.starts_with(scope::resolve(dir)?) {
+            return Ok(false);
+        }
+    }
+    Ok(scope.write_forbidden(path) || scope.check(path)?.access == Access::Forbidden)
 }
 
 #[cfg(test)]
@@ -118,6 +151,78 @@ mod tests {
             error: Mutex::new(None),
             observed: AtomicBool::new(false),
         })
+    }
+    fn protected_context(
+        home: &std::path::Path,
+        tool: &str,
+        private: &std::path::Path,
+    ) -> Arc<Context> {
+        let mut ctx = Arc::try_unwrap(context(home, tool)).ok().unwrap();
+        ctx.scope.protect(private, &[], vec![]).unwrap();
+        Arc::new(ctx)
+    }
+    #[tokio::test]
+    async fn host_launcher_repair_writes_inside_the_private_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join(".ofox-desktop");
+        std::fs::create_dir_all(private.join("bin")).unwrap();
+        let ctx = protected_context(tmp.path(), "claude", &private);
+        let bin = private.join("bin");
+        let result = ACTIVE
+            .scope(ctx, async move {
+                begin_launcher("claude", &bin, vec![bin.join("claude")]).map(|g| g.is_some())
+            })
+            .await;
+        assert_eq!(result, Ok(true));
+    }
+    #[tokio::test]
+    async fn host_writes_into_private_state_stay_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join(".ofox-desktop");
+        std::fs::create_dir_all(private.join("bin")).unwrap();
+        let ctx = protected_context(tmp.path(), "claude", &private);
+        let bin = private.join("bin");
+        let state = private.join("agent-skills.json");
+        let result = ACTIVE
+            .scope(ctx, async move {
+                (
+                    begin(None, "claude", vec![bin.join("claude")]).map(|g| g.is_some()),
+                    begin_launcher("claude", &bin, vec![state]).map(|g| g.is_some()),
+                )
+            })
+            .await;
+        assert_eq!(result.0, Err("assistant_path_denied".into()));
+        assert_eq!(result.1, Err("assistant_path_denied".into()));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn launcher_writes_through_a_symlinked_folder_stay_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join(".ofox-desktop");
+        std::fs::create_dir_all(private.join("assistant")).unwrap();
+        std::os::unix::fs::symlink(private.join("assistant"), private.join("bin")).unwrap();
+        let ctx = protected_context(tmp.path(), "claude", &private);
+        let bin = private.join("bin");
+        let result = ACTIVE
+            .scope(ctx, async move {
+                begin_launcher("claude", &bin, vec![bin.join("claude")]).map(|g| g.is_some())
+            })
+            .await;
+        assert_eq!(result, Err("assistant_path_denied".into()));
+    }
+    #[tokio::test]
+    async fn host_writes_still_refuse_sensitive_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join(".ofox-desktop");
+        std::fs::create_dir_all(&private).unwrap();
+        let ctx = protected_context(tmp.path(), "claude", &private);
+        let key = tmp.path().join(".ssh/config");
+        let result = ACTIVE
+            .scope(ctx, async move {
+                begin(None, "claude", vec![key]).map(|g| g.is_some())
+            })
+            .await;
+        assert_eq!(result, Err("assistant_path_denied".into()));
     }
     #[tokio::test]
     #[serial_test::serial]

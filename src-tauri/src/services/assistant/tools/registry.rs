@@ -21,6 +21,8 @@ impl Tool {
 
 pub fn get(name: &str) -> Result<Tool, String> {
     const READ: &[&str] = &[
+        "use_skill",
+        "find_skills",
         "read",
         "stat",
         "ls",
@@ -31,6 +33,8 @@ pub fn get(name: &str) -> Result<Tool, String> {
         "verify_in_folder",
     ];
     const WRITE: &[&str] = &[
+        "install_skill",
+        "save_skill",
         "write",
         "edit",
         "repair_launcher",
@@ -76,6 +80,26 @@ pub struct Call {
 
 pub fn validate_args(tool: Tool, args: &Value) -> Result<(), String> {
     match tool.name {
+        "find_skills" | "install_skill" | "save_skill" => {
+            super::super::skill_tools::validate(tool.name, args)
+        }
+        "use_skill" => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct SkillArgs {
+                name: String,
+            }
+            let a: SkillArgs = decode(args)?;
+            if a.name.is_empty()
+                || a.name.len() > 128
+                || a.name.contains("..")
+                || a.name.contains(['/', '\\'])
+            {
+                Err("not_available: invalid name".into())
+            } else {
+                Ok(())
+            }
+        }
         "read" | "stat" => {
             let args: PathArgs = decode(args)?;
             path_ok(&args.path)

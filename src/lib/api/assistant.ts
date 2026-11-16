@@ -1,3 +1,5 @@
+import type { SkillMode, SkillOrigin } from "@/lib/api/library";
+import i18n from "@/i18n";
 import { isWindows } from "@/lib/platform";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -254,6 +256,8 @@ export interface AssistantBootstrap {
     available: boolean;
     reason: string | null;
     version: string | null;
+    /** Document formats the runtime can make; absent when it makes none. */
+    documents?: { formats: string[] };
   };
   models: AssistantModel[];
   /** Dedicated tool models, separate from the conversation model picker. */
@@ -284,8 +288,17 @@ export type AssistantCatalogSnapshot = Pick<
 };
 
 /**
- * Whether runs can search the web: only while the catalog prices the search
- * model. A conversation with `webSearch` on runs without web tools otherwise.
+ * Where the account's web searches go: Ofox's paid search through the
+ * gateway, or Exa's free one (queries, and pages that could not be read
+ * locally, go to Exa).
+ */
+export type AssistantSearchProvider = "ofox" | "exa";
+
+/**
+ * Whether runs can search the web through Ofox: only while the catalog
+ * prices the search model. Exa's free search is always offered. A
+ * conversation with `webSearch` on runs without web tools when its account's
+ * provider is unavailable.
  */
 export interface AssistantSearchStatus {
   available: boolean;
@@ -295,6 +308,8 @@ export interface AssistantSearchStatus {
    */
   unitPriceUsd: string | null;
   model: string;
+  /** The account's provider; absent from an older backend (Ofox). */
+  provider?: AssistantSearchProvider;
 }
 
 /** A page a reply's web searches found: always HTTPS on a public host. */
@@ -333,6 +348,12 @@ export interface AssistantLocalChange {
  * commands and installs; `fullAuto` never asks.
  */
 export type AssistantPermissionMode = "default" | "autoEdit" | "fullAuto";
+/**
+ * `auto` asks for a PPTX without fixing its style; absence keeps ordinary chat.
+ * Every other id comes from the bundled style catalog, so it is checked at
+ * runtime with `isPresentationStyleAvailable` rather than listed here.
+ */
+export type AssistantPresentationStyleId = string;
 export type AssistantApprovalChoice = "once" | "session" | "deny";
 
 export interface AssistantCapabilityRef {
@@ -484,12 +505,100 @@ export interface AssistantAttachment {
   details: Record<string, unknown> | null;
 }
 
+/** Derived, persisted raster pages. No file path or provider URL is exposed. */
+export interface AssistantDocumentPreview {
+  mimeType: "image/jpeg";
+  pages: number[];
+}
+
+export function assistantDocumentPreview(
+  attachment: AssistantAttachment,
+): AssistantDocumentPreview | null {
+  if (
+    attachment.origin !== "generated" ||
+    attachment.status === "missing" ||
+    attachment.mimeType !==
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+  )
+    return null;
+  const value = attachment.details?.documentPreview;
+  if (!value || typeof value !== "object") return null;
+  const preview = value as { mimeType?: unknown; pages?: unknown };
+  if (
+    preview.mimeType !== "image/jpeg" ||
+    !Array.isArray(preview.pages) ||
+    preview.pages.length === 0 ||
+    preview.pages.length > 60 ||
+    !preview.pages.every(
+      (page) => Number.isInteger(page) && page >= 1 && page <= 1000,
+    ) ||
+    new Set(preview.pages).size !== preview.pages.length
+  )
+    return null;
+  return {
+    mimeType: "image/jpeg",
+    pages: [...preview.pages].sort((a, b) => a - b),
+  };
+}
+
 /**
  * The backend always sends every field. Those marked optional are left out
  * only by the renderer's own placeholders (a question being sent, a reply
  * being streamed).
  */
+export interface AssistantSkillResult {
+  resultId: string;
+  name: string;
+  source: string;
+  description: string;
+  installs?: number | null;
+  reviewed: boolean;
+  /** Host-confirmed commit fact; never an installation control. */
+  installed?: boolean;
+}
+export interface AssistantSkillResultGroup {
+  toolCallId: string;
+  results: AssistantSkillResult[];
+}
+export interface AssistantSkillApproval {
+  name: string;
+  description?: string;
+  body?: string;
+  source?: string;
+  directory?: string;
+  commitSha?: string;
+  installs?: number | null;
+  reviewed?: boolean;
+}
+export interface AssistantMcpStep {
+  id: string;
+  server: string | null;
+  tool: string;
+  status: "running" | "completed" | "failed" | "unavailable";
+  reason?: "needs_node" | "needs_uv" | "unavailable";
+  recipeId?: string | null;
+}
+export interface AssistantFileReference {
+  attachmentId: string;
+  version: string;
+  page: number | null;
+}
+
 export interface AssistantMessage {
+  fileReferences?: AssistantFileReference[];
+  presentationPlan?: {
+    planId?: string;
+    revision?: number;
+    effectiveStyle?: string;
+    styleId?: AssistantPresentationStyleId;
+    decisionSummary?: string;
+    [key: string]: unknown;
+  };
+  presentationStyleId?: AssistantPresentationStyleId;
+  presentationVisualPolicy?: AssistantPresentationVisualPolicy;
+  mcpSteps?: AssistantMcpStep[];
+  skillResults?: AssistantSkillResultGroup[];
+  skill?: string;
   media?: AssistantMedia;
   /** What the reply's generation tools made, one per tool call. */
   generations?: AssistantGeneration[];
@@ -667,7 +776,101 @@ export interface AssistantUpdateRequest {
   media?: AssistantMediaDefaults;
 }
 
+export interface AssistantPresentationVisualPolicy {
+  /** `auto`: up to maxImages, the model's choice. `exact`: that many. */
+  mode: "off" | "auto" | "illustration" | "exact";
+  maxImages: number;
+  /** Decimal USD ceiling, or explicitly selected "count-only". Zero authorizes no paid images. */
+  maxCostUsd: string;
+  /** Explicit next-run text-cost pause threshold (USD 0.01–1); omitted retains existing behavior. Not a server-side hard cap. */
+  textMaxCostUsd?: string;
+}
+export function isAssistantPresentationTextBudget(
+  value: unknown,
+): value is string {
+  return (
+    typeof value === "string" &&
+    /^(?:0|1)(?:\.\d{1,6})?$/.test(value) &&
+    Number(value) >= 0.01 &&
+    Number(value) <= 1
+  );
+}
+export const DEFAULT_PRESENTATION_VISUAL_POLICY: AssistantPresentationVisualPolicy =
+  {
+    mode: "off",
+    maxImages: 0,
+    maxCostUsd: "0",
+  };
+
+/**
+ * How a deck gets its images: none, as many as the model finds useful up to a
+ * ceiling, or exactly the number asked for.
+ */
+export type PresentationImageChoice = "off" | "auto" | "exact";
+/** The most images one deck may generate (the Host refuses more). */
+export const PRESENTATION_MAX_IMAGES = 8;
+const DEFAULT_IMAGES: Record<
+  Exclude<PresentationImageChoice, "off">,
+  number
+> = { auto: 3, exact: 2 };
+/**
+ * USD held per image: above the most one GPT Image 2 generation can cost
+ * (about US$0.34 at high quality with a long prompt). Fixed-price models cost
+ * far less; actual usage is what is billed.
+ */
+export const PRESENTATION_IMAGE_CEILING_USD = 0.4;
+
+/** The choice an existing policy reads as, including older detailed drafts. */
+export function presentationImageChoice(
+  policy: AssistantPresentationVisualPolicy,
+): PresentationImageChoice {
+  if (policy.mode === "off" || policy.maxImages === 0) return "off";
+  return policy.mode === "exact" ? "exact" : "auto";
+}
+
+/**
+ * The policy a choice stands for. `count` is the ceiling (auto) or the number
+ * asked for (exact); without one the current count is kept, else the
+ * choice's default. An explicit text threshold is kept.
+ */
+export function presentationImagePolicy(
+  choice: PresentationImageChoice,
+  previous?: AssistantPresentationVisualPolicy,
+  count?: number,
+): AssistantPresentationVisualPolicy {
+  let policy: AssistantPresentationVisualPolicy;
+  if (choice === "off") policy = { ...DEFAULT_PRESENTATION_VISUAL_POLICY };
+  else {
+    const kept =
+      previous && presentationImageChoice(previous) !== "off"
+        ? previous.maxImages
+        : DEFAULT_IMAGES[choice];
+    const maxImages = Math.min(
+      PRESENTATION_MAX_IMAGES,
+      Math.max(1, Math.round(count ?? kept)),
+    );
+    policy = {
+      mode: choice,
+      maxImages,
+      maxCostUsd: (maxImages * PRESENTATION_IMAGE_CEILING_USD).toFixed(2),
+    };
+  }
+  if (previous?.textMaxCostUsd !== undefined)
+    policy.textMaxCostUsd = previous.textMaxCostUsd;
+  return policy;
+}
+
 export interface AssistantSendRequest extends AssistantRunRef {
+  fileReferences?: AssistantFileReference[];
+  replaceFileReferences?: boolean;
+  presentationWorkflowVersion?: 1;
+  presentationVisualPolicy?: AssistantPresentationVisualPolicy;
+  replacePresentationVisualPolicy?: boolean;
+  presentationStyleId?: AssistantPresentationStyleId;
+  /** An edit explicitly replaces or clears the original PPT choice. */
+  replacePresentationStyle?: boolean;
+  skill?: string;
+  replaceSkill?: boolean;
   /** Frozen before admission; the host rejects work left by an old account or region. */
   expectedOwner?: string;
   expectedGeneration?: number;
@@ -804,6 +1007,13 @@ export interface AssistantGenerationApproval {
   estimatedCostUsd?: string | null;
 }
 
+/** One problem a document's checks found, as its record keeps it. */
+export interface AssistantDocumentIssue {
+  severity: string;
+  message: string;
+  path?: string;
+}
+
 /** A generation tool's result on a reply. */
 export type AssistantGeneration = AssistantMediaBase & {
   toolCallId: string;
@@ -824,6 +1034,18 @@ export type AssistantGeneration = AssistantMediaBase & {
           instructions?: string | null;
         };
         audio?: { output?: { durationMs?: number; mimeType?: string } };
+      }
+    | {
+        kind: "document";
+        /** Free: made on this computer, so it has no model and no price. */
+        params: {
+          name?: string;
+          format: string;
+          pages?: number;
+          slides?: number;
+          sheets?: number;
+          issues?: AssistantDocumentIssue[];
+        };
       }
   );
 
@@ -935,7 +1157,8 @@ export type AssistantRunEvent =
   /**
    * `messageId` is the run's reply. `webSearch` is whether the run got web
    * search: false with the conversation's switch on means search was
-   * unavailable when it was sent (or the model takes no tools).
+   * unavailable when it was sent (or the model takes no tools);
+   * `searchProvider` is where its searches go when it did.
    * `thinkingLevel` is the level the host sent the run, null for the
    * default. It is one the model's `thinkingLevels` lists, which are Pi's
    * own levels for it, so Pi runs it as sent rather than clamping it.
@@ -945,10 +1168,13 @@ export type AssistantRunEvent =
       data: {
         messageId: string;
         webSearch: boolean;
+        searchProvider?: AssistantSearchProvider;
         thinkingLevel?: AssistantThinkingLevel | null;
         compactOnly?: boolean;
       };
     }
+  /** A model HTTP request is waiting before its first or second retry. */
+  | { type: "retrying"; data: { attempt: 1 | 2 } }
   /**
    * The reply began streaming reasoning, as soon as its first reasoning
    * arrived: the reasoning text itself can follow a little later. It lasts
@@ -988,14 +1214,24 @@ export type AssistantRunEvent =
         toolCallId: string;
         name: string;
         category:
+          | "mcp"
           | "read"
           | "write_config"
           | "exec"
           | "network"
           | "paid"
-          | "generation";
+          | "generation"
+          | "skillInstall"
+          | "skillSave";
         /** Text for a local operation; what will be made for a generation. */
-        details: string | AssistantGenerationApproval;
+        details:
+          | string
+          | AssistantGenerationApproval
+          | AssistantSkillApproval
+          | { server: string | null; tool: string };
+        /** Ephemeral, source-redacted MCP arguments; never execution input. */
+        argumentsPreview?: string;
+        argumentsTruncated?: boolean;
         allowSession: boolean;
         /**
          * The config fields the user changed that the operation sets back to
@@ -1006,6 +1242,11 @@ export type AssistantRunEvent =
         expectedGeneration: number;
       };
     }
+  | {
+      type: "skill_results";
+      data: { messageId: string; group: AssistantSkillResultGroup };
+    }
+  | { type: "mcp_step"; data: { messageId: string; step: AssistantMcpStep } }
   | { type: "approval_end"; data: { approvalId: string } }
   /**
    * A generation tool's result on reply `messageId` changed: made, failed or
@@ -1017,6 +1258,20 @@ export type AssistantRunEvent =
         messageId: string;
         generation: AssistantGeneration;
         attachments: AssistantAttachment[];
+      };
+    }
+  /**
+   * The model is streaming arguments for a known tool, before execution.
+   * No arguments or source are published; active:false clears this request
+   * even when SDK validation prevents a real tool_start/tool_end pair.
+   */
+  | {
+      type: "tool_preparing";
+      data: {
+        messageId: string;
+        name: string;
+        toolCallId: string;
+        active?: boolean;
       };
     }
   /**
@@ -1059,6 +1314,13 @@ export type AssistantRunEvent =
   | { type: "compaction_start"; data: Record<string, never> }
   | { type: "compaction_end"; data: { success: boolean; willRetry?: boolean } }
   /** The run's saved assistant message. */
+  | {
+      type: "presentation_plan";
+      data: {
+        messageId: string;
+        plan: NonNullable<AssistantMessage["presentationPlan"]>;
+      };
+    }
   | { type: "message"; data: { message: AssistantMessage } }
   /**
    * The saved session; its `activeRun` is null. A generated title's event
@@ -1103,7 +1365,17 @@ export const ASSISTANT_DRAG_EVENT = "assistant:drag";
 export const ASSISTANT_DROP_EVENT = "assistant:drop";
 
 /** The backend derives account, organization and region; callers never supply owner IDs. */
+export interface AssistantSkillChoice {
+  name: string;
+  description: string;
+  mode: SkillMode;
+  reviewed: boolean;
+  /** `bundled`: shipped with the app, listed after the user's own skills. */
+  origin?: SkillOrigin | "bundled" | null;
+}
+
 export const assistantApi = {
+  listSkills: () => invoke<AssistantSkillChoice[]>("assistant_list_skills"),
   bootstrap: (refreshCatalog = false) =>
     refreshCatalog
       ? invoke<AssistantBootstrap>("assistant_bootstrap", {
@@ -1136,6 +1408,18 @@ export const assistantApi = {
       expectedGeneration?: number;
     },
   ) => invoke<AssistantPreferences>("assistant_set_preferences", { request }),
+  /**
+   * Saves where the account's web searches go, for the account and authority
+   * the page shows, from the next message on; returns it as saved.
+   */
+  setSearchProvider: (request: {
+    provider: AssistantSearchProvider;
+    expectedOwner?: string;
+    expectedGeneration?: number;
+  }) =>
+    invoke<AssistantSearchProvider>("assistant_set_search_provider", {
+      request,
+    }),
   createSession: (request: {
     assistantId?: string;
     capabilities?: AssistantCapabilityRef[];
@@ -1210,6 +1494,8 @@ export const assistantApi = {
     attachmentId: string;
     expectedOwner: string;
     expectedGeneration: number;
+    /** Also open the saved copy with the default app. */
+    open?: boolean;
   }) => invoke<boolean>("assistant_save_media", { request }),
   exportMarkdown: (request: {
     sessionId: string;
@@ -1320,7 +1606,16 @@ export const assistantApi = {
       callback(payload),
     ),
   send: (request: AssistantSendRequest) =>
-    invoke<AssistantRunRef>("assistant_send", { request }),
+    invoke<AssistantRunRef>("assistant_send", {
+      request: {
+        ...request,
+        uiLanguage: ["en", "ja"].includes(
+          i18n.resolvedLanguage ?? i18n.language,
+        )
+          ? (i18n.resolvedLanguage ?? i18n.language)
+          : "zh",
+      },
+    }),
   steer: (request: AssistantSteerRequest) =>
     invoke<null>("assistant_steer", { request }),
   stop: (sessionId: string, runId: string, operationId: string) =>
@@ -1399,6 +1694,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_operation_already_submitted: "runChanged",
   assistant_approval_expired: "approvalExpired",
   assistant_approval_timeout: "approvalTimeout",
+  assistant_approval_once_required: "approvalOnceRequired",
   assistant_capability_disabled: "capabilityDisabled",
   assistant_full_access_confirmation_required: "fullAccessConfirmation",
   assistant_invalid_assistant: "capabilityInvalid",
@@ -1444,6 +1740,7 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_backup_owner_mismatch: "backupOwnerMismatch",
   assistant_export_failed: "exportFailed",
   assistant_export_destination_invalid: "exportDestinationInvalid",
+  assistant_open_failed: "openFailed",
   assistant_export_too_large: "exportTooLarge",
   assistant_invalid_identifier: "sessionMissing",
   assistant_invalid_session: "sessionUnreadable",
@@ -1456,6 +1753,14 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_version_unavailable: "versionUnavailable",
   assistant_version_switch_failed: "versionSwitchFailed",
   assistant_invalid_message: "invalidMessage",
+  assistant_mcp_config_unavailable: "mcpUnavailable",
+  assistant_mcp_data_unavailable: "mcpUnavailable",
+  assistant_mcp_environment_missing: "mcpUnavailable",
+  assistant_mcp_snapshot_changed: "mcpUnavailable",
+  assistant_mcp_unknown_server: "mcpUnavailable",
+  assistant_mcp_unknown_tool: "mcpUnavailable",
+  assistant_tool_pending: "mcpUnavailable",
+  assistant_skill_unavailable: "skillUnavailable",
   assistant_message_too_large: "messageTooLarge",
   assistant_title_too_long: "titleTooLong",
   assistant_instructions_too_long: "instructionsTooLong",
@@ -1503,6 +1808,22 @@ export const ASSISTANT_ERROR_MESSAGES: Record<string, string> = {
   assistant_media_image_turn_limit: "mediaImageTurnLimit",
   assistant_media_declined: "mediaDeclined",
   assistant_media_speech_turn_limit: "mediaSpeechTurnLimit",
+  assistant_document_failed: "documentFailed",
+  assistant_preview_unavailable: "mediaReadFailed",
+  assistant_presentation_plan_invalid: "presentationPlanInvalid",
+  assistant_presentation_source_unavailable: "presentationSourceUnavailable",
+  assistant_presentation_source_changed: "presentationSourceChanged",
+  assistant_presentation_asset_invalid: "presentationAssetInvalid",
+  assistant_presentation_asset_missing: "presentationAssetMissing",
+  assistant_presentation_asset_limit: "presentationAssetLimit",
+  assistant_presentation_image_budget: "presentationImageBudget",
+  assistant_preview_version_changed: "previewVersionChanged",
+  assistant_preview_limit: "previewLimit",
+  assistant_preview_page_invalid: "previewPageInvalid",
+  assistant_preview_sandbox_unavailable: "previewSandboxUnavailable",
+  assistant_preview_port_unavailable: "previewPortUnavailable",
+  assistant_document_limit: "documentLimit",
+  assistant_document_too_large: "documentTooLarge",
   assistant_vision_model_required: "visionModelRequired",
   assistant_choose_model: "modelRequired",
   assistant_model_unavailable: "modelUnavailable",
@@ -1571,4 +1892,19 @@ export function assistantMediaUrl(
     ? "http://assistant-media.localhost"
     : "assistant-media://localhost";
   return `${base}/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachmentId)}?owner=${encodeURIComponent(owner)}&generation=${generation}`;
+}
+
+export function assistantDocumentPreviewUrl(
+  sessionId: string,
+  attachmentId: string,
+  owner: string,
+  generation: number,
+  page: number,
+): string {
+  if (!Number.isInteger(page) || page < 1 || page > 1000)
+    throw new Error("Invalid document preview page");
+  return assistantMediaUrl(sessionId, attachmentId, owner, generation).replace(
+    "?",
+    `/preview/${page}?`,
+  );
 }

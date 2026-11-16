@@ -82,6 +82,41 @@ pub(super) fn cost(
         .checked_div(Decimal::from(1_000_000))
 }
 
+/// The most one generation can cost on a token-priced model, so a budget can
+/// be held before it is sent: the prompt's UTF-8 bytes as input tokens (a
+/// prompt never has more tokens than bytes) and one and a half times the
+/// published GPT Image output tokens for each image's size and quality. No
+/// quality or `auto` is priced as high, and an unknown size as the largest.
+/// `None` for a per-image price (that price is used as it is), an edit, or a
+/// model without token prices.
+pub(super) fn token_upper_bound(
+    caps: &ImageCapabilities,
+    prompt: &str,
+    request: &ImageRequest,
+) -> Option<Decimal> {
+    if caps.per_image_price.is_some() || request.input_attachment_id.is_some() {
+        return None;
+    }
+    let rates = caps.token_pricing.as_ref()?;
+    let rate = |s: &str| Decimal::from_str(s).ok().filter(|n| *n >= Decimal::ZERO);
+    let column = match request.quality.as_deref() {
+        Some("low") => 0,
+        Some("medium") => 1,
+        _ => 2,
+    };
+    let tokens: u64 = if request.size.as_deref() == Some("1024x1024") {
+        [272, 1056, 4160][column]
+    } else {
+        [408, 1584, 6240][column]
+    };
+    let output = Decimal::from(tokens * 3 / 2 * request.count() as u64)
+        .checked_mul(rate(&rates.output_image)?)?;
+    let input = Decimal::from(prompt.len() as u64).checked_mul(rate(rates.input.as_deref()?)?)?;
+    input
+        .checked_add(output)?
+        .checked_div(Decimal::from(1_000_000))
+}
+
 pub(super) fn decode(value: &Value, expected: usize) -> Result<Vec<(String, Vec<u8>)>, String> {
     let data = value["data"]
         .as_array()
@@ -126,6 +161,47 @@ mod tests {
     use base64::Engine;
     use serde_json::json;
     use std::str::FromStr;
+
+    #[test]
+    fn a_token_priced_generation_has_an_upper_bound_from_its_size_and_quality() {
+        let request = |size: Option<&str>, quality: Option<&str>| ImageRequest {
+            size: size.map(Into::into),
+            quality: quality.map(Into::into),
+            ..ImageRequest::default()
+        };
+        let bound =
+            |size, quality| token_upper_bound(&caps(), "ab", &request(size, quality)).unwrap();
+        // 2 prompt bytes at $5/M plus 1.5 x the published output tokens at $30/M.
+        assert_eq!(
+            bound(Some("1024x1024"), Some("low")),
+            Decimal::from_str("0.01225").unwrap()
+        );
+        assert_eq!(
+            bound(Some("1536x1024"), Some("high")),
+            Decimal::from_str("0.28081").unwrap()
+        );
+        // Unknown or automatic quality is priced as high; an unknown size as the largest.
+        assert_eq!(
+            bound(Some("1536x1024"), None),
+            bound(Some("1536x1024"), Some("high"))
+        );
+        assert_eq!(
+            bound(None, Some("auto")),
+            bound(Some("1024x1536"), Some("high"))
+        );
+        // A per-image price, an edit or a model without token prices gives no bound here.
+        let mut fixed = caps();
+        fixed.per_image_price = Some("0.02".into());
+        assert!(token_upper_bound(&fixed, "ab", &request(None, None)).is_none());
+        let edit = ImageRequest {
+            input_attachment_id: Some("a".into()),
+            ..ImageRequest::default()
+        };
+        assert!(token_upper_bound(&caps(), "ab", &edit).is_none());
+        let mut unpriced = caps();
+        unpriced.token_pricing = None;
+        assert!(token_upper_bound(&unpriced, "ab", &request(None, None)).is_none());
+    }
 
     fn caps() -> ImageCapabilities {
         ImageCapabilities {

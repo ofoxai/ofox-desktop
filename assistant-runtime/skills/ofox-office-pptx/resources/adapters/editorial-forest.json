@@ -1,0 +1,150 @@
+{
+  "id": "editorial-forest",
+  "family": "color-block",
+  "names": { "zh": "Editorial Forest 森林绿", "en": "Editorial Forest", "ja": "Editorial Forest 森の緑" },
+  "intro": {
+    "zh": "森林绿、灰粉和米色三种页面交替，衬线标题配色块卡片；适合季度回顾、内部汇报、工作室近况和研究总结。",
+    "en": "Forest green, dusty pink and cream pages take turns, with serif headlines and colour blocks; for quarterly reviews, internal readouts, studio updates and research recaps.",
+    "ja": "森の緑、くすんだピンク、クリームのページが交互に現れ、セリフ見出しと色面のブロックで構成。四半期レビュー、社内報告、スタジオの近況向け。"
+  },
+  "routing": {
+    "scenarios": ["business-review", "creative", "research"],
+    "density": "medium",
+    "scheme": "mixed",
+    "tone": ["warm", "considered"],
+    "suits": { "data": 2, "formulas": 0, "images": 2, "longText": 1 },
+    "avoid": "Urgent, punchy or sales-driven material."
+  },
+  "theme": {
+    "colors": {
+      "background": "EFE7D4",
+      "card": "E6DCC4",
+      "primary": "2E4A2A",
+      "secondary": "E89CB1",
+      "accent": "2E4A2A",
+      "text": "1A1A17",
+      "textSecondary": "4A4A40",
+      "textMuted": "7A7566",
+      "line": "A9A18C",
+      "accentTint": "E89CB1",
+      "dark": "2E4A2A",
+      "onDark": "EFE7D4",
+      "onDarkMuted": "C9C5AE",
+      "surface": "E6DCC4",
+      "palette": ["2E4A2A", "E89CB1", "E6DCC4", "3A5A36"],
+      "chart": ["2E4A2A", "E89CB1", "3A5A36", "D27E96", "7A7566", "243A21"]
+    },
+    "fonts": {
+      "latin": { "title": "Georgia", "body": "Georgia", "data": "Georgia" },
+      "zh": { "title": "SimSun", "body": "SimSun" },
+      "ja": { "title": "Yu Mincho", "body": "Yu Mincho" }
+    },
+    "sizes": {
+      "hero": [100, 88, 72, 60, 48],
+      "statement": [60, 54, 44, 36],
+      "title": [32, 28, 26],
+      "subtitle": [20, 18],
+      "body": [18, 16, 14],
+      "card": [15, 14],
+      "caption": [12, 11],
+      "kpi": [60]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "base": { "chart": ["2E4A2A", "E89CB1", "3A5A36", "D27E96", "7A7566", "243A21"] },
+          "forest": {
+            "bg": "2E4A2A",
+            "title": "EFE7D4",
+            "body": "EFE7D4",
+            "muted": "C9C5AE",
+            "faint": "A3AD98",
+            "accent": "E89CB1",
+            "line": "5C7657",
+            "card": "3A5A36",
+            "surface": "3A5A36",
+            "accentTint": "243A21",
+            "chart": ["E89CB1", "EFE7D4", "A3AD98", "D27E96", "C9C5AE", "6F8A6A"]
+          },
+          "pink": {
+            "bg": "E89CB1",
+            "title": "1A1A17",
+            "body": "1A1A17",
+            "muted": "3F2A31",
+            "faint": "6B4450",
+            "accent": "2E4A2A",
+            "line": "B86C82",
+            "card": "D27E96",
+            "surface": "EFE7D4",
+            "accentTint": "EFE7D4",
+            "chart": ["2E4A2A", "1A1A17", "EFE7D4", "3A5A36", "6B4450", "243A21"]
+          }
+        },
+        "tones": {
+          "cover": "forest",
+          "section": "forest",
+          "statement": "pink",
+          "content": ["base", "base", "base", "base", "forest", "base", "forest", "base"],
+          "closing": "forest"
+        },
+        "cover": {
+          "title": { "x": 0.95, "y": 1.75, "w": 9.6, "h": 4.0, "color": "accent" },
+          "kicker": { "x": 0.95, "y": 1.15, "w": 8, "size": 11, "color": "accent" },
+          "meta": { "x": 0.95, "y": 6.72, "w": 11.43, "size": 10, "color": "accent" },
+          "shapes": [
+            { "kind": "oval", "x": 11.48, "y": 0.72, "w": 0.9, "h": 0.9, "line": "accent", "lineW": 1, "name": "page ring" }
+          ]
+        },
+        "section": {
+          "title": { "x": 0.95, "y": 2.3, "w": 10.4, "h": 3.2, "color": "accent", "sizes": [72, 60, 54, 44] },
+          "number": { "x": 0.95, "y": 1.15, "w": 4, "size": 14, "color": "accent" },
+          "shapes": [
+            { "kind": "oval", "x": 11.48, "y": 0.72, "w": 0.9, "h": 0.9, "line": "accent", "lineW": 1, "name": "page ring" }
+          ]
+        },
+        "statement": {
+          "title": { "x": 1.05, "y": 1.5, "w": 10.6, "h": 4.0 },
+          "kicker": { "x": 1.05, "y": 0.95, "w": 8, "size": 11, "color": "body" },
+          "attribution": { "x": 1.05, "y": 6.0, "w": 10.6, "size": 16, "color": "body" },
+          "shapes": []
+        },
+        "content": {
+          "title": { "x": 0.85, "y": 0.72, "w": 11.63, "h": 0.8 },
+          "body": { "x": 0.85, "y": 1.85, "w": 11.63, "h": 4.8 },
+          "shapes": []
+        },
+        "closing": {
+          "title": { "x": 0.95, "y": 1.3, "w": 11.43, "h": 3.9, "anchor": "bottom", "color": "accent" },
+          "subtitle": { "x": 0.95, "y": 5.75, "w": 9, "size": 16, "color": "body" },
+          "meta": { "x": 0.95, "y": 6.72, "w": 11.43, "size": 10, "color": "accent" },
+          "shapes": [
+            { "kind": "rect", "x": 0.95, "y": 5.5, "w": 11.43, "h": 0.012, "fill": "line", "name": "summary rule" }
+          ]
+        },
+        "card": { "shape": "rect", "fill": "palette", "line": "none", "bar": "none" },
+        "kpi": { "style": "bare", "valueColor": "accent" },
+        "steps": { "style": "block", "fill": "palette", "line": "none", "shape": "rect", "gap": 0.14 }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Three flat canvases take turns: forest green for openers, data and the close, dusty pink for the one big statement, cream for working pages. Serif headlines set top-left; pink display type on green.",
+    "components": "Flat colour blocks in green, pink and cream for agenda items, steps and comparisons; bare serif numerals in pink on green; pink-and-cream charts on green. No outlines-only card grids, no gradients, no fourth colour.",
+    "narrative": "Cover, agenda, the shift, a two-column proof with image, numbers by period, a plan in steps, three figures, summary.",
+    "nativeCoverage": "Cover, agenda blocks, statement, split text with image region, bar chart, colour-block steps, stat row and closing as native text, shapes and chart; Source Serif 4 and the mono labels, the bento agenda grid, the full-height image panel, the rule above the stat row and the three-column summary are not reproduced."
+  },
+  "pageMapping": [
+    { "page": 1, "archetype": "cover", "native": "cover_slide", "status": "adapted", "differences": "The ring at the top right is empty; the source puts the page number in it." },
+    { "page": 2, "archetype": "agenda", "native": "content_slide + steps", "status": "approximate", "differences": "Source is a bento grid with one tall block and four smaller ones; native shows the items as one row of equal colour blocks." },
+    { "page": 3, "archetype": "statement", "native": "statement_slide", "status": "adapted", "differences": "" },
+    { "page": 4, "archetype": "split-image", "native": "content_slide + bullets + image", "status": "approximate", "differences": "Source fills the left half with a full-height green image panel and sets heading, paragraphs and a three-field footer on the right; native keeps the heading at the top with bullets left and the image region right." },
+    { "page": 5, "archetype": "chart-bar", "native": "content_slide + native_chart", "status": "adapted", "differences": "Native chart with editable data; the source legend sits at the top right." },
+    { "page": 6, "archetype": "process", "native": "content_slide + steps", "status": "adapted", "differences": "Source blocks are outlined cream, pink, green, outlined cream with a ruled footer line each; native blocks take the palette colours in order and have no footer line." },
+    { "page": 7, "archetype": "stats", "native": "content_slide + kpi", "status": "adapted", "differences": "Source draws one hairline above the row of numerals; native numerals stand bare." },
+    { "page": 8, "archetype": "closing", "native": "closing_slide", "status": "approximate", "differences": "Source lists three numbered takeaways in columns under the rule; native has one subtitle line and one meta line." }
+  ]
+}

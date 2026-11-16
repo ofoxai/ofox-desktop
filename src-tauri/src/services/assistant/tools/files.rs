@@ -36,6 +36,15 @@ pub fn read(scope: &Scope, path: &Path, outside: bool) -> Result<String, String>
 }
 
 pub(crate) fn read_original(scope: &Scope, path: &Path, outside: bool) -> Result<String, String> {
+    read_bounded(scope, path, outside, MAX_BYTES)
+}
+
+fn read_bounded(
+    scope: &Scope,
+    path: &Path,
+    outside: bool,
+    max_bytes: u64,
+) -> Result<String, String> {
     let path = checked(scope, path, outside)?;
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -48,7 +57,7 @@ pub(crate) fn read_original(scope: &Scope, path: &Path, outside: bool) -> Result
         .open(&path)
         .map_err(|_| "assistant_file_unreadable")?;
     let metadata = file.metadata().map_err(|_| "assistant_file_unreadable")?;
-    if !metadata.is_file() || metadata.len() > MAX_BYTES {
+    if !metadata.is_file() || metadata.len() > max_bytes {
         return Err("assistant_file_too_large".into());
     }
     // Validate after opening, before consuming bytes, in case an ancestor moved.
@@ -56,10 +65,10 @@ pub(crate) fn read_original(scope: &Scope, path: &Path, outside: bool) -> Result
         return Err("assistant_path_denied".into());
     }
     let mut bytes = Vec::new();
-    file.take(MAX_BYTES + 1)
+    file.take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "assistant_file_unreadable")?;
-    if bytes.len() as u64 > MAX_BYTES {
+    if bytes.len() as u64 > max_bytes {
         return Err("assistant_file_too_large".into());
     }
     let text = String::from_utf8(bytes).map_err(|_| "assistant_file_unreadable")?;
@@ -67,6 +76,21 @@ pub(crate) fn read_original(scope: &Scope, path: &Path, outside: bool) -> Result
         return Err("assistant_path_denied".into());
     }
     Ok(text)
+}
+
+pub fn read_skill(scope: &Scope, path: &Path) -> Result<String, String> {
+    read_bounded(scope, path, false, 1024 * 1024)
+        .map(|text| crate::redact::scrub(&text).into_owned())
+}
+pub fn skill_files(scope: &Scope, root: &Path) -> Result<Vec<String>, String> {
+    walk(scope, root, false)?
+        .into_iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .map_err(|_| "assistant_path_denied".into())
+        })
+        .collect()
 }
 
 pub fn list(scope: &Scope, path: &Path, limit: usize, outside: bool) -> Result<Vec<Value>, String> {

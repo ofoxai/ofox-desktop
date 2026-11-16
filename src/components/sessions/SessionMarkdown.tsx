@@ -1,13 +1,19 @@
 import {
   Children,
+  Fragment,
   isValidElement,
+  memo,
   useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
-import Markdown from "react-markdown";
+import Markdown, { type Components } from "react-markdown";
+import remarkParse from "remark-parse";
+import { unified, type PluggableList } from "unified";
 import remarkGfm from "remark-gfm";
+import remarkCjkFriendly from "remark-cjk-friendly";
+import remarkCjkFriendlyStrikethrough from "remark-cjk-friendly-gfm-strikethrough";
 import { useTranslation } from "react-i18next";
 import { settingsApi } from "@/lib/api/settings";
 import { CodeBlock, codePreview } from "./CodeBlock";
@@ -24,6 +30,7 @@ import {
   markdownMathReady,
   rewriteMathDelimiters,
 } from "@/lib/markdownMath";
+import { rewriteBareUrls } from "@/lib/markdownUrls";
 import { splitUrlTail } from "@/lib/urlTail";
 
 function codeText(children: ReactNode): string {
@@ -46,6 +53,18 @@ function codeLanguage(children: ReactNode): string | null {
     if (found) return found[1].toLowerCase();
   }
   return null;
+}
+
+/**
+ * True for a `$$` formula left as its source (remark-math's `math-display`
+ * code, which KaTeX did not draw); a ```math code block is code.
+ */
+function displayMathSource(children: ReactNode): boolean {
+  return Children.toArray(children).some(
+    (child) =>
+      isValidElement<{ className?: string }>(child) &&
+      /(?:^|\s)math-display(?:\s|$)/.test(child.props.className ?? ""),
+  );
 }
 
 interface MarkdownNode {
@@ -88,6 +107,9 @@ function bareUrlText(node: MarkdownNode): string | null {
  * without spaces ("…northeast1。然后") makes the full stop and what follows
  * part of the link, and the link wrong. Ends such a link at its first
  * full-width punctuation mark and puts the rest after it as text.
+ * `rewriteBareUrls` already does this before parsing, and keeps the bold
+ * around such a URL, which this cannot; this is the backstop for the URLs it
+ * leaves alone, as in a message above its size cap.
  */
 function splitBareUrlTail() {
   return (tree: unknown) => {
@@ -197,6 +219,112 @@ function useMarkdownMath(enabled: boolean) {
   return enabled && ready;
 }
 
+/** A link opens only a web page; any other address is dropped. */
+function webUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.href
+      : "";
+  } catch {
+    return "";
+  }
+}
+
+interface Block {
+  start: number;
+  text: string;
+}
+
+/**
+ * `source` cut into its top-level blocks (paragraphs, lists, tables, formula
+ * and code blocks) as `remarkPlugins` read it, so each block is drawn, and
+ * kept, on its own. A block that follows the one before it with no blank
+ * line stays with it: what it is can hang on that line (a list after a
+ * paragraph is read as interrupting it). A reference or footnote definition
+ * belongs to the whole text: then it stays one block (`whole`).
+ */
+function splitBlocks(
+  source: string,
+  remarkPlugins: PluggableList,
+): { blocks: Block[]; whole: boolean } {
+  const whole = { blocks: [{ start: 0, text: source }], whole: true };
+  const tree = unified().use(remarkParse).use(remarkPlugins).parse(source);
+  if (
+    tree.children.some(
+      (node) =>
+        node.type === "definition" || node.type === "footnoteDefinition",
+    )
+  )
+    return whole;
+  const starts: number[] = [];
+  let end = 0;
+  for (const node of tree.children) {
+    const start = node.position?.start.offset ?? end;
+    // From the start of its line: a block's position leaves out the indent of
+    // its first line, which decides what its lines are (a fence's indent is
+    // taken off each of its lines).
+    if (starts.length === 0 || /\n[ \t\r]*\n/.test(source.slice(end, start)))
+      starts.push(source.lastIndexOf("\n", start - 1) + 1);
+    end = node.position?.end.offset ?? start;
+  }
+  if (starts.length < 2) return { blocks: whole.blocks, whole: false };
+  return {
+    blocks: starts.map((start, index) => ({
+      start,
+      text: source.slice(
+        index === 0 ? 0 : start,
+        starts[index + 1] ?? source.length,
+      ),
+    })),
+    whole: false,
+  };
+}
+
+// A display formula that has not closed yet: a `$$`, which
+// `rewriteMathDelimiters` shows as text, or a `\[` it leaves as it was.
+const UNCLOSED_FENCE =
+  /^([ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?)(?:\\\$\\\$|\\\[)[ \t]*([^\n\r]*)/;
+
+/**
+ * The block being written, with a display formula it opens and has not
+ * closed shown as its source: an opening fence that runs to the block's end.
+ */
+const asWritten = (text: string) =>
+  // Indented code is not a formula, and a `\]` closes what it opens (the
+  // formula rewrite did not run on it: a long text, or KaTeX not loaded).
+  /^(?: {4}|\t)/.test(text) || text.includes("\\]")
+    ? text
+    : text.replace(UNCLOSED_FENCE, (_, containers: string, rest: string) =>
+        rest
+          ? `${containers}$$\n${containers.replace(/[^\s>]/g, " ")}${rest}`
+          : `${containers}$$`,
+      );
+
+/** One block, drawn again only when its text or how it is drawn changes. */
+const MarkdownBlock = memo(function MarkdownBlock({
+  text,
+  remarkPlugins,
+  rehypePlugins,
+  components,
+}: {
+  text: string;
+  remarkPlugins: PluggableList;
+  rehypePlugins: PluggableList;
+  components: Components;
+}) {
+  return (
+    <Markdown
+      remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
+      urlTransform={webUrl}
+      components={components}
+    >
+      {text}
+    </Markdown>
+  );
+});
+
 /** HTML stays escaped text (no rehype-raw), with no embedded resources or automatic navigation. */
 export function SessionMarkdown({
   content,
@@ -204,6 +332,7 @@ export function SessionMarkdown({
   syntaxHighlight = false,
   math = false,
   previews = false,
+  streaming = false,
 }: {
   content: string;
   highlight?: string;
@@ -213,22 +342,36 @@ export function SessionMarkdown({
   math?: boolean;
   /** Draws Mermaid diagrams and previews HTML blocks; external session transcripts leave it off. */
   previews?: boolean;
+  /**
+   * The text is still arriving: a reply is drawn block by block, each block
+   * kept once drawn, and the last block, the one being written, shows its
+   * formulas as their source.
+   */
+  streaming?: boolean;
 }) {
   const { t } = useTranslation();
   const syntax = useMarkdownSyntax(syntaxHighlight);
   const drawMath = useMarkdownMath(math && hasMathMarkers(content));
   const mathPlugins = drawMath ? markdownMathPlugins() : null;
-  const source = useMemo(
-    () => (mathPlugins ? rewriteMathDelimiters(content) : content),
-    [mathPlugins, content],
-  );
+  const source = useMemo(() => {
+    const text = rewriteBareUrls(content);
+    return mathPlugins ? rewriteMathDelimiters(text) : text;
+  }, [mathPlugins, content]);
   const remarkPlugins = useMemo(
-    () => [remarkGfm, ...(mathPlugins?.remark ?? []), splitBareUrlTail],
+    () => [
+      remarkGfm,
+      // CommonMark will not close `**说明：**正文` (punctuation, then a
+      // letter): these let bold and strikethrough end beside Chinese text.
+      remarkCjkFriendly,
+      remarkCjkFriendlyStrikethrough,
+      ...(mathPlugins?.remark ?? []),
+      splitBareUrlTail,
+    ],
     [mathPlugins],
   );
-  const plugins = useMemo(
+  // Everything but the formulas, which the block being written shows as text.
+  const textPlugins = useMemo(
     () => [
-      ...(mathPlugins?.rehype ?? []),
       ...(syntax ? [markdownSyntax] : []),
       ...(highlight
         ? [
@@ -239,67 +382,90 @@ export function SessionMarkdown({
           ]
         : []),
     ],
-    [mathPlugins, syntax, highlight],
+    [syntax, highlight],
+  );
+  const plugins = useMemo(
+    () => [...(mathPlugins?.rehype ?? []), ...textPlugins],
+    [mathPlugins, textPlugins],
+  );
+  // Only a reply still arriving is cut into blocks: a finished one is drawn
+  // whole, once, as it was before (the reply is drawn anew when it joins the
+  // history anyway).
+  const split = useMemo(
+    () =>
+      math && streaming
+        ? splitBlocks(source, remarkPlugins)
+        : { blocks: [{ start: 0, text: source }], whole: true },
+    [math, streaming, source, remarkPlugins],
+  );
+  const components = useMemo<Components>(
+    () => ({
+      img: ({ alt }) => (
+        <span
+          className="inline-flex rounded border border-line-2 px-2 py-1 text-note text-ink-muted"
+          title={t("sessionExperience.imageHint")}
+        >
+          {t("sessionExperience.imageBlocked")}
+          {alt ? ` · ${alt}` : ""}
+        </span>
+      ),
+      a: ({ href, children }) =>
+        href ? (
+          <a
+            href={href}
+            className="text-brand underline underline-offset-2"
+            onClick={(event) => {
+              event.preventDefault();
+              void settingsApi
+                .openExternal(href)
+                .catch(() => toast.error(t("common.error")));
+            }}
+          >
+            {children}
+          </a>
+        ) : (
+          <span>{children}</span>
+        ),
+      input: ({ checked }) => <span aria-hidden>{checked ? "☑" : "☐"}</span>,
+      pre: ({ children }) =>
+        displayMathSource(children) ? (
+          // A display formula shown as its source while it is written.
+          <pre className="my-2 overflow-x-auto whitespace-pre-wrap text-ink-muted">
+            {children}
+          </pre>
+        ) : (
+          <CodeBlock
+            text={codeText(children).replace(/\n$/, "")}
+            preview={previews ? codePreview(codeLanguage(children)) : null}
+          >
+            {children}
+          </CodeBlock>
+        ),
+    }),
+    [t, previews],
   );
   return (
     <div
-      className={`${syntaxHighlight ? "markdown-syntax " : ""}break-words text-ui leading-relaxed text-ink-2 [&_p]:my-2 [&_h1]:mb-2 [&_h1]:mt-4 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-base [&_h2]:font-semibold [&_h3]:my-2 [&_h3]:font-semibold [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-brand [&_blockquote]:pl-3 [&_blockquote]:text-ink-muted [&_table]:block [&_table]:overflow-x-auto [&_th]:border [&_th]:border-line [&_th]:px-2 [&_td]:border [&_td]:border-line [&_td]:px-2 [&_code]:rounded [&_code]:bg-pill [&_code]:px-1 [&_code]:font-mono [&_code]:text-[12px] [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden`}
+      className={`${syntaxHighlight ? "markdown-syntax " : ""}break-words text-ui leading-relaxed text-ink-2 [&_p]:my-2 [&_h1]:mb-2 [&_h1]:mt-4 [&_h1]:text-lg [&_h1]:font-semibold [&_h2]:mb-2 [&_h2]:mt-4 [&_h2]:text-base [&_h2]:font-semibold [&_h3]:my-2 [&_h3]:font-semibold [&_ul]:my-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:my-2 [&_ol]:list-decimal [&_ol]:pl-5 [&_blockquote]:border-l-2 [&_blockquote]:border-brand [&_blockquote]:pl-3 [&_blockquote]:text-ink-muted [&_table]:block [&_table]:overflow-x-auto [&_th]:border [&_th]:border-line [&_th]:px-2 [&_td]:border [&_td]:border-line [&_td]:px-2 [&_code]:rounded [&_code]:bg-pill [&_code]:px-1 [&_code]:font-mono [&_code]:text-[12px] [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-error]:font-mono [&_.katex-error]:text-[12px]`}
     >
-      <Markdown
-        remarkPlugins={remarkPlugins}
-        rehypePlugins={plugins}
-        urlTransform={(url) => {
-          try {
-            const parsed = new URL(url);
-            return parsed.protocol === "http:" || parsed.protocol === "https:"
-              ? parsed.href
-              : "";
-          } catch {
-            return "";
-          }
-        }}
-        components={{
-          img: ({ alt }) => (
-            <span
-              className="inline-flex rounded border border-line-2 px-2 py-1 text-note text-ink-muted"
-              title={t("sessionExperience.imageHint")}
-            >
-              {t("sessionExperience.imageBlocked")}
-              {alt ? ` · ${alt}` : ""}
-            </span>
-          ),
-          a: ({ href, children }) =>
-            href ? (
-              <a
-                href={href}
-                className="text-brand underline underline-offset-2"
-                onClick={(event) => {
-                  event.preventDefault();
-                  void settingsApi
-                    .openExternal(href)
-                    .catch(() => toast.error(t("common.error")));
-                }}
-              >
-                {children}
-              </a>
-            ) : (
-              <span>{children}</span>
-            ),
-          input: ({ checked }) => (
-            <span aria-hidden>{checked ? "☑" : "☐"}</span>
-          ),
-          pre: ({ children }) => (
-            <CodeBlock
-              text={codeText(children).replace(/\n$/, "")}
-              preview={previews ? codePreview(codeLanguage(children)) : null}
-            >
-              {children}
-            </CodeBlock>
-          ),
-        }}
-      >
-        {source}
-      </Markdown>
+      {/* Blocks sit side by side with no wrapper, a line break between them
+          as markdown puts between its blocks, so the page is the same as one
+          text drawn whole. */}
+      {split.blocks.map((block, index) => {
+        const writing =
+          streaming && !split.whole && index === split.blocks.length - 1;
+        return (
+          <Fragment key={block.start}>
+            {index > 0 && "\n"}
+            <MarkdownBlock
+              text={writing ? asWritten(block.text) : block.text}
+              remarkPlugins={remarkPlugins}
+              rehypePlugins={writing ? textPlugins : plugins}
+              components={components}
+            />
+          </Fragment>
+        );
+      })}
     </div>
   );
 }

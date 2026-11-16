@@ -47,7 +47,8 @@ export function LibraryTargets({
           const shared =
             target.status === "shared" ||
             (!target.desired && target.readable === true);
-          const blocked = !target.available && !target.desired;
+          const blocked =
+            (!target.available || !!target.disabledReason) && !target.desired;
           const state = changed
             ? "pending"
             : shared

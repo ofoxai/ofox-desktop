@@ -1636,6 +1636,27 @@ fn cli_search_paths(tool: &str) -> (Vec<PathBuf>, String, Option<String>) {
     }
     (search_paths, current_path, first_error)
 }
+/// Pure discovery for services launched by the builtin assistant. Never runs a CLI.
+pub(crate) fn resolve_cli_path(tool: &str) -> (Option<PathBuf>, String) {
+    let (paths, current, _) = cli_search_paths(tool);
+    let found = paths
+        .iter()
+        .flat_map(|dir| tool_executable_candidates(tool, dir))
+        .find(|path| {
+            path.is_absolute() && super::tool_update::candidate_exists(path).unwrap_or(false)
+        });
+    let mut service = Vec::new();
+    if let Some(parent) = found.as_ref().and_then(|p| p.parent()) {
+        service.push(parent.to_path_buf());
+    }
+    service.extend(std::env::split_paths(&current));
+    (
+        found,
+        std::env::join_paths(service)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(current),
+    )
+}
 /// Read-only resource lists reuse every installer fallback without running a CLI.
 pub(crate) fn locate_cli(tool: &str) -> bool {
     #[cfg(windows)]

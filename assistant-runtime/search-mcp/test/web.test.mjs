@@ -5,7 +5,8 @@ import test from "node:test";
 import {
   FetchError,
   MAX_PAGE_BYTES,
-  htmlText,
+  MAX_PAGE_LINKS,
+  htmlMarkdown,
   isPublicAddress,
   readWebPage,
   validateWebUrl,
@@ -90,7 +91,7 @@ test("web extraction enforces content type, body and output limits", async () =>
   assert.equal(result.text.length, 20000);
   assert.equal(result.truncated, true);
   assert.equal(result.text.includes("hidden"), false);
-  assert.match(result.text, /^Title\n/);
+  assert.match(result.text, /^# Title\n\n/);
 
   const tooLarge = await fetchError(
     readWebPage("https://example.com/", {
@@ -120,6 +121,22 @@ test("plain text pages are returned trimmed and untruncated when short", async (
     url: "https://example.com/notes.txt",
     text: "hello <b>world</b>",
     truncated: false,
+    links: [],
+  });
+});
+
+test("an HTML page's links resolve against the page that was read", async () => {
+  const result = await readWebPage("https://example.com/a/b?q=1", {
+    lookup: publicLookup,
+    request: page(
+      '<h2>Next</h2><a href="c">C</a> <a href="//cdn.example/x">X</a>',
+    ),
+  });
+  assert.deepEqual(result, {
+    url: "https://example.com/a/b?q=1",
+    text: "## Next\n\n[C](https://example.com/a/c) [X](https://cdn.example/x)",
+    truncated: false,
+    links: ["https://example.com/a/c", "https://cdn.example/x"],
   });
 });
 
@@ -251,33 +268,140 @@ test("DNS failures, network errors and timeouts are plain fetch failures", async
   assert.match(slow.message, /timed out|cancelled/);
 });
 
-test("HTML text extraction drops markup and decodes entities", () => {
+const markdown = (html, base = "https://example.com/docs/page") =>
+  htmlMarkdown(html, base).text;
+
+test("an HTML page reads as Markdown with absolute links", () => {
+  const read = htmlMarkdown(
+    [
+      '<title>Doc</title><nav><a href="/">Home</a> <a href="#top">Top</a></nav>',
+      "<h1>Start &amp; go</h1>",
+      '<p>Read <a href="/guide/intro?x=1#part">the intro</a>, <a href="javascript:void(0)">menu</a> or <a href="http://plain.example/a">plain</a>.</p>',
+      "<pre><code>  if (a &lt; b) {\n    go();\n  }</code></pre>",
+      "<p>Use <code>npm i</code> then:</p>",
+      "<ul><li>One<ul><li>Nested</li></ul></li><li>Two</li></ul>",
+      "<ol><li>First</li></ol>",
+      "<table><tr><th>A</th><th>B</th></tr><tr><td><p>1</p></td><td>2</td></tr></table>",
+      '<hr><img src="/x.png" alt="x">Line<br>Break',
+      '<a href="/blog/post"><h2>Post title</h2></a>',
+      '<a href="https://example.com/docs/page#x">self</a> <a href="https://a.example/p(1)">p</a>',
+    ].join("\n"),
+    "https://example.com/docs/page#here",
+  );
   assert.equal(
-    htmlText(
+    read.text,
+    [
+      "Doc",
+      "[Home](https://example.com/) Top",
+      "# Start & go",
+      "Read [the intro](https://example.com/guide/intro?x=1), menu or [plain](http://plain.example/a).",
+      "```\n  if (a < b) {\n    go();\n  }\n```",
+      "Use `npm i` then:",
+      "- One\n  - Nested\n- Two",
+      "1. First",
+      "| A | B |\n| --- | --- |\n| 1 | 2 |",
+      "---",
+      "Line\nBreak",
+      "## [Post title](https://example.com/blog/post)",
+      "self [p](https://a.example/p%281%29)",
+    ].join("\n\n"),
+  );
+  // The HTTPS pages it links to, each once: not the page itself, not plain
+  // HTTP, not scripts or fragments.
+  assert.deepEqual(read.links, [
+    "https://example.com/",
+    "https://example.com/guide/intro?x=1",
+    "https://example.com/blog/post",
+    "https://a.example/p%281%29",
+  ]);
+});
+
+test("omitted end tags close list items, cells and rows as in a browser", () => {
+  assert.equal(markdown("<ul><li>a<li>b</ul>"), "- a\n- b");
+  assert.equal(
+    markdown("<table><tr><td>a<td>b<tr><td>c<td>d</table>"),
+    "| a | b |\n| --- | --- |\n| c | d |",
+  );
+  assert.equal(
+    markdown("<td>x<td>y<tr><td>z"),
+    "| x | y |\n| --- | --- |\n| z |",
+  );
+  assert.equal(markdown("<li>stray"), "- stray");
+  assert.equal(
+    markdown('<a href="/x">A<a href="/y">B</a>'),
+    "[A](https://example.com/x)[B](https://example.com/y)",
+  );
+  assert.equal(markdown("<pre>a<pre>b</pre>c</pre>d"), "```\nabc\n```\n\nd");
+  assert.equal(
+    markdown("<pre>has ``` inside</pre>"),
+    "````\nhas ``` inside\n````",
+  );
+});
+
+test("HTML text decodes entities and drops hidden elements", () => {
+  assert.equal(
+    markdown(
       "<!-- c --><div>a &amp; b&nbsp;&#x41;&#66;</div><template>t</template><br>c",
     ),
     "a & b AB\n\nc",
   );
+  assert.equal(
+    markdown("<p>&AMP; &copy; &mdash; &#0;&#x1F600; &unknown;</p>"),
+    "& © — 😀 &unknown;",
+  );
+  assert.equal(
+    markdown("<svg><text>icon</text></svg><iframe>f</iframe>x"),
+    "x",
+  );
+  // Relative links need a page to resolve against; without one they are text.
+  assert.deepEqual(htmlMarkdown('<a href="/x">x</a>', "not a url"), {
+    text: "x",
+    links: [],
+  });
+});
+
+test("a page's links stop at the limit", () => {
+  const html = Array.from(
+    { length: MAX_PAGE_LINKS + 10 },
+    (_, i) => `<a href="/p${i}">p${i}</a>`,
+  ).join(" ");
+  const { links } = htmlMarkdown(html, "https://example.com/");
+  assert.equal(links.length, MAX_PAGE_LINKS);
+  assert.equal(links.at(-1), `https://example.com/p${MAX_PAGE_LINKS - 1}`);
 });
 
 test("an unclosed script, comment or tag hides the rest of the page, as in a browser", () => {
-  assert.equal(htmlText("<p>Shown</p><script>hidden() <p>too"), "Shown");
-  assert.equal(htmlText("<p>Shown</p><!-- open <p>hidden"), "Shown");
-  assert.equal(htmlText("<p>Shown</p><div class=open hidden"), "Shown");
+  assert.equal(markdown("<p>Shown</p><script>hidden() <p>too"), "Shown");
+  assert.equal(markdown("<p>Shown</p><!-- open <p>hidden"), "Shown");
+  assert.equal(markdown("<p>Shown</p><div class=open hidden"), "Shown");
   assert.equal(
-    htmlText("<SCRIPT>x</script >A<style>.a{}</STYLE><b>B</b>"),
+    markdown("<SCRIPT>x</script >A<style>.a{}</STYLE><b>B</b>"),
     "A B",
   );
-  assert.equal(htmlText("<script>a</scripts>b</script>Shown"), "Shown");
-  assert.equal(htmlText("<!DOCTYPE html><?xml x?>Shown"), "Shown");
+  assert.equal(markdown("<script>a</scripts>b</script>Shown"), "Shown");
+  assert.equal(markdown("<!DOCTYPE html><?xml x?>Shown"), "Shown");
   // A "<" that starts no tag is text.
-  assert.equal(htmlText("1 < 2 and 3 > 2"), "1 < 2 and 3 > 2");
+  assert.equal(markdown("1 < 2 and 3 > 2"), "1 < 2 and 3 > 2");
 });
 
 test("2 MiB of unclosed scripts, comments or tags is read well within the deadline", async () => {
   // A quadratic scan would block the event loop for minutes, so the 15 s
   // deadline could never fire.
-  for (const unit of ["<script>", "<script", "<!--", "<", "<style a='", "<b"]) {
+  for (const unit of [
+    "<script>",
+    "<script",
+    "<!--",
+    "<",
+    "<style a='",
+    "<b",
+    // Nesting costs nothing either.
+    "<div>",
+    "<ul><li>",
+    '<a href="/x">',
+    "<td>",
+    "<pre>",
+    "<h1>",
+  ]) {
     const start = "<p>Start</p>";
     const body =
       start +
@@ -290,6 +414,7 @@ test("2 MiB of unclosed scripts, comments or tags is read well within the deadli
     });
     assert.ok(performance.now() - started < 2000, unit);
     assert.match(result.text, /^Start/, unit);
+    assert.ok(result.links.length <= 1, unit);
   }
 });
 

@@ -1,0 +1,199 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { copyFile, mkdir, readFile, readdir, symlink } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+import {
+  assets,
+  exists,
+  options,
+  requireEngine,
+  run,
+  runner,
+  scratch,
+  staged,
+  zipEntries,
+} from "./fixtures/python-engine.mjs";
+
+const TITLE_SLIDE = `
+prs = new_deck(title="t")
+content_slide(prs, "Hello")
+`;
+
+test("makes a pptx from code", options, async (t) => {
+  const result = await run(t, TITLE_SLIDE);
+  assert.equal(result.status, 0, result.stderr);
+  const entries = await zipEntries(result.out);
+  assert.ok(entries.has("ppt/slides/slide1.xml"));
+  const lint = JSON.parse(await readFile(result.lint, "utf8"));
+  assert.ok(Array.isArray(lint));
+});
+
+test("reports a Python error", options, async (t) => {
+  const result = await run(t, "prs = new_deck()\nprint(undefined_name)\n");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^\nPythonError: /);
+  assert.match(result.stderr, /NameError/);
+  // The traceback is cut to its end, not left to fill the host's buffer.
+  assert.ok(result.stderr.length <= "\nPythonError: ".length + 1800 + 1);
+  assert.equal(await exists(result.out), false);
+});
+
+// The host finds the report by its label at the start of a line.
+test("starts its report on a line of its own", options, async (t) => {
+  const result = await run(
+    t,
+    'import sys\nsys.stderr.write("no newline")\nsys.stderr.flush()\nprs = new_deck()\nraise ValueError("boom")\n',
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^no newline\nPythonError: /);
+  assert.match(result.stderr, /ValueError: boom/);
+});
+
+// Exit 2 means the engine itself is broken (the host stops offering it);
+// exit 1 is a recoverable code or private-input failure.
+test("exits 1 when it is started with missing arguments", options, async () => {
+  await requireEngine();
+  const result = spawnSync(staged, [runner, "--assets", assets], {
+    env: { PATH: process.env.PATH },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /^\nRunnerError: usage: /);
+});
+
+// Code that ends the process or Pyodide itself must still come back as one
+// short, labelled error, not Node's dump of Pyodide's minified source. It is
+// the code's failure (exit 1), even when Pyodide reports it from outside the
+// code, so the host keeps offering the engine.
+for (const [name, code] of [
+  ["sys.exit", "import sys\nprs = new_deck()\nsys.exit(0)\n"],
+  ["os._exit", "import os\nprs = new_deck()\nos._exit(0)\n"],
+]) {
+  test(
+    `reports ${name} in the code as one bounded error`,
+    options,
+    async (t) => {
+      const result = await run(t, code);
+      assert.equal(result.status, 1);
+      assert.match(result.stderr, /^\n(PythonError|RunnerError): /);
+      assert.ok(result.stderr.length <= 4096, `${result.stderr.length} bytes`);
+      assert.doesNotMatch(result.stderr, /Node\.js v/);
+      assert.equal(await exists(result.out), false);
+      assert.equal(await exists(result.lint), false);
+    },
+  );
+}
+
+test("requires prs", options, async (t) => {
+  const result = await run(t, "x = 1\n");
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /the code must create prs = new_deck\(\.\.\.\)/);
+});
+
+test("writes non-negative chart axis ids", options, async (t) => {
+  const result = await run(
+    t,
+    `
+prs = new_deck(title="t")
+slide = content_slide(prs, "Chart")
+data = CategoryChartData()
+data.categories = ["A", "B", "C"]
+data.add_series("Sales", (1, 2, 3))
+slide.shapes.add_chart(
+    XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(1), Inches(2), Inches(6), Inches(4), data
+)
+`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const entries = await zipEntries(result.out);
+  const charts = [...entries.keys()].filter((name) =>
+    /^ppt\/charts\/chart\d+\.xml$/.test(name),
+  );
+  assert.equal(charts.length, 1);
+  for (const name of charts) {
+    const xml = entries.get(name).toString("utf8");
+    for (const [, tag, value] of xml.matchAll(
+      /<c:(axId|crossAx) val="([^"]*)"/g,
+    ))
+      assert.match(value, /^\d+$/, `${name} ${tag}`);
+    // The category and value axes still point at each other, and the plot
+    // still names exactly those two axes.
+    const axes = [...xml.matchAll(/<c:(catAx|valAx)>([\s\S]*?)<\/c:\1>/g)].map(
+      ([, , body]) => ({
+        id: body.match(/<c:axId val="(\d+)"/)[1],
+        cross: body.match(/<c:crossAx val="(\d+)"/)[1],
+      }),
+    );
+    assert.equal(axes.length, 2, name);
+    assert.equal(axes[0].cross, axes[1].id, name);
+    assert.equal(axes[1].cross, axes[0].id, name);
+    assert.notEqual(axes[0].id, axes[1].id, name);
+    const plotted = [
+      ...xml
+        .match(/<c:barChart>[\s\S]*?<\/c:barChart>/)[0]
+        .matchAll(/<c:axId val="(\d+)"/g),
+    ].map(([, id]) => id);
+    assert.deepEqual(plotted.sort(), axes.map((axis) => axis.id).sort(), name);
+  }
+});
+
+test("fails on a missing wheel", options, async (t) => {
+  await requireEngine();
+  const manifest = JSON.parse(
+    await readFile(path.join(assets, "assets.json"), "utf8"),
+  );
+  const numpy = (await readdir(path.join(assets, "wheels"))).find((file) =>
+    file.startsWith("numpy-"),
+  );
+  // One pure-Python wheel from the manifest and one Pyodide wheel named by
+  // the lock file: each is missing from its own copy of the assets.
+  for (const missing of [manifest.pure[0], numpy]) {
+    const copy = await scratch(t);
+    await mkdir(path.join(copy, "wheels"));
+    for (const file of await readdir(path.join(assets, "wheels")))
+      if (file !== missing)
+        await symlink(
+          path.join(assets, "wheels", file),
+          path.join(copy, "wheels", file),
+        );
+    await symlink(path.join(assets, "fonts"), path.join(copy, "fonts"));
+    await copyFile(
+      path.join(assets, "assets.json"),
+      path.join(copy, "assets.json"),
+    );
+    const result = await run(t, TITLE_SLIDE, { assetsDir: copy });
+    // Before the code ran: the engine is broken, not the code.
+    assert.equal(result.status, 2, missing);
+    assert.match(result.stderr, /^\nRunnerError: /, missing);
+    assert.ok(result.stderr.includes(missing), result.stderr);
+    assert.equal(await exists(result.out), false, missing);
+  }
+});
+
+test("draws an SVG figure", options, async (t) => {
+  const result = await run(
+    t,
+    `
+prs = new_deck(title="t")
+slide = content_slide(prs, "Figure")
+figure(
+    slide,
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300">'
+    '<rect width="400" height="300" fill="#1E3A5F"/>'
+    '<circle cx="200" cy="150" r="80" fill="#D9822B"/></svg>',
+    1, 2, 4, 3,
+)
+`,
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const entries = await zipEntries(result.out);
+  const images = [...entries.keys()].filter((name) =>
+    /^ppt\/media\/.*\.png$/.test(name),
+  );
+  assert.equal(images.length, 1);
+  assert.deepEqual(
+    [...entries.get(images[0]).subarray(0, 4)],
+    [0x89, 0x50, 0x4e, 0x47],
+  );
+});

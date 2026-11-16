@@ -1,0 +1,2087 @@
+{
+  "id": "daisy-days",
+  "family": "playful",
+  "names": {
+    "zh": "Daisy Days 雏菊",
+    "en": "Daisy Days",
+    "ja": "Daisy Days デイジー"
+  },
+  "intro": {
+    "zh": "每页换一种柔和的粉彩底色，标题居中，白色圆角卡片配深色描边和错位投影，角落点缀圆形拼成的小花；适合课堂、亲子、社区活动和轻松的团队分享。",
+    "en": "A new pastel canvas on each page, centred titles, rounded white cards with dark outlines and offset shadows, circle flowers in the corners; for classrooms, community sessions and friendly kickoffs.",
+    "ja": "ページごとに変わるパステルの背景、中央揃えの見出し、濃い縁取りとずらした影の白い角丸カード、隅に円で描いた小花。授業、親子・地域イベント、気軽なチーム共有向け。"
+  },
+  "routing": {
+    "scenarios": ["teaching", "workshop", "general"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["cheerful", "friendly", "soft"],
+    "suits": {
+      "data": 1,
+      "formulas": 0,
+      "images": 1,
+      "longText": 0
+    },
+    "avoid": "Audiences that expect authority and precision: board reviews, academic defences, dense technical material."
+  },
+  "theme": {
+    "colors": {
+      "background": "F5F0E6",
+      "card": "FFFFFF",
+      "primary": "2D2D2D",
+      "secondary": "7ECDC0",
+      "accent": "D9413D",
+      "text": "2D2D2D",
+      "textSecondary": "555555",
+      "textMuted": "6B6B6B",
+      "line": "2D2D2D",
+      "accentTint": "FFF6D6",
+      "dark": "2D2D2D",
+      "onDark": "FFFFFF",
+      "onDarkMuted": "E6E0D4",
+      "surface": "FFFFFF",
+      "palette": ["F7C8D4", "FDE68A", "A8E6CF", "D4A5E8", "A8D8F0", "FFCBA4"],
+      "chart": ["F8635F", "7ECDC0", "D4A5E8", "FDE68A", "A8D8F0", "F7C8D4"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Arial",
+        "body": "Arial",
+        "data": "Arial"
+      },
+      "zh": {
+        "title": "Microsoft YaHei",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Gothic",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [60, 54, 44, 36],
+      "statement": [32, 28, 24, 22],
+      "title": [32, 28, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [14, 12, 11],
+      "kpi": [48, 40, 32]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "turquoise": {
+            "bg": "7ECDC0",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "F8635F",
+              "FDE68A",
+              "D4A5E8",
+              "FFFFFF",
+              "F7C8D4",
+              "FFCBA4"
+            ]
+          },
+          "pink": {
+            "bg": "F7C8D4",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "7ECDC0",
+              "FDE68A",
+              "D4A5E8",
+              "A8D8F0",
+              "F8635F",
+              "FFFFFF"
+            ]
+          },
+          "butter": {
+            "bg": "FDE68A",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "F8635F",
+              "7ECDC0",
+              "D4A5E8",
+              "A8D8F0",
+              "F7C8D4",
+              "FFFFFF"
+            ]
+          },
+          "lavender": {
+            "bg": "D4A5E8",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "FDE68A",
+              "A8E6CF",
+              "F8635F",
+              "A8D8F0",
+              "FFFFFF",
+              "FFCBA4"
+            ]
+          },
+          "mint": {
+            "bg": "A8E6CF",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "F8635F",
+              "D4A5E8",
+              "FDE68A",
+              "A8D8F0",
+              "F7C8D4",
+              "FFFFFF"
+            ]
+          },
+          "peach": {
+            "bg": "FFCBA4",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "7ECDC0",
+              "D4A5E8",
+              "FDE68A",
+              "A8D8F0",
+              "FFFFFF",
+              "F8635F"
+            ]
+          },
+          "sky": {
+            "bg": "A8D8F0",
+            "title": "2D2D2D",
+            "body": "2D2D2D",
+            "muted": "444444",
+            "faint": "555555",
+            "accent": "2D2D2D",
+            "line": "2D2D2D",
+            "card": "FFFFFF",
+            "surface": "FFFFFF",
+            "accentTint": "FFF6D6",
+            "chart": [
+              "F8635F",
+              "FDE68A",
+              "D4A5E8",
+              "A8E6CF",
+              "F7C8D4",
+              "FFFFFF"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "turquoise",
+          "statement": "lavender",
+          "content": [
+            "base",
+            "base",
+            "turquoise",
+            "pink",
+            "butter",
+            "base",
+            "lavender",
+            "mint",
+            "peach",
+            "sky"
+          ],
+          "closing": "butter"
+        },
+        "cover": {
+          "title": {
+            "x": 1.7,
+            "y": 2.8,
+            "w": 9.9,
+            "h": 1.4,
+            "align": "center"
+          },
+          "kicker": {
+            "x": 5.27,
+            "y": 2.13,
+            "w": 2.8,
+            "align": "center",
+            "size": 13,
+            "color": "body"
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.35,
+            "w": 8.9,
+            "align": "center",
+            "size": 18,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 6.75,
+            "w": 8.9,
+            "align": "center"
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 1.087,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 0.412,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.787,
+              "y": 0.787,
+              "w": 0.425,
+              "h": 0.425,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 1.12,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 0.58,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.13,
+              "y": 0.88,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 6.42,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 5.88,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.98,
+              "y": 6.18,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 6.384,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 5.736,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.046,
+              "y": 6.096,
+              "w": 0.408,
+              "h": 0.408,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 2.1,
+              "y": 1.75,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "F7C8D4",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.9,
+              "y": 1.5,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "A8E6CF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 2.35,
+              "y": 5.3,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.8,
+              "y": 5.6,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "D4A5E8",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "round",
+              "x": 5.27,
+              "y": 2.02,
+              "w": 2.8,
+              "h": 0.5,
+              "radius": 0.25,
+              "fill": "FDE68A",
+              "name": "badge",
+              "line": "2D2D2D",
+              "lineW": 2.25
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 1.7,
+            "y": 3.3,
+            "w": 9.9,
+            "h": 1.5,
+            "align": "center",
+            "sizes": [54, 44, 36]
+          },
+          "number": {
+            "x": 5.97,
+            "y": 1.83,
+            "w": 1.4,
+            "align": "center",
+            "size": 34,
+            "color": "body"
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 1.087,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 0.412,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.787,
+              "y": 0.787,
+              "w": 0.425,
+              "h": 0.425,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 1.12,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 0.58,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.13,
+              "y": 0.88,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 6.42,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 5.88,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.98,
+              "y": 6.18,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 6.384,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 5.736,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.046,
+              "y": 6.096,
+              "w": 0.408,
+              "h": 0.408,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 2.1,
+              "y": 1.75,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "F7C8D4",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.9,
+              "y": 1.5,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "A8E6CF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 2.35,
+              "y": 5.3,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.8,
+              "y": 5.6,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "D4A5E8",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 5.97,
+              "y": 1.5,
+              "w": 1.4,
+              "h": 1.4,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 2.25,
+              "name": "number badge"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 3.0,
+            "y": 2.3,
+            "w": 7.3,
+            "h": 2.5,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 1.087,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 0.412,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.787,
+              "y": 0.787,
+              "w": 0.425,
+              "h": 0.425,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 1.12,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 0.58,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.13,
+              "y": 0.88,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 6.42,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 5.88,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.98,
+              "y": 6.18,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 6.384,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 5.736,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.046,
+              "y": 6.096,
+              "w": 0.408,
+              "h": 0.408,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 2.2,
+              "y": 0.75,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "F7C8D4",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.9,
+              "y": 0.7,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 2.4,
+              "y": 6.5,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "A8E6CF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.7,
+              "y": 6.55,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFCBA4",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "round",
+              "x": 2.47,
+              "y": 1.72,
+              "w": 8.5,
+              "h": 3.9,
+              "radius": 0.3,
+              "fill": "2D2D2D",
+              "name": "card shadow"
+            },
+            {
+              "kind": "round",
+              "x": 2.4,
+              "y": 1.65,
+              "w": 8.5,
+              "h": 3.9,
+              "radius": 0.3,
+              "fill": "FFFFFF",
+              "name": "quote card",
+              "line": "2D2D2D",
+              "lineW": 2.25
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 1.9,
+            "y": 0.9,
+            "w": 9.5,
+            "h": 0.75,
+            "align": "center",
+            "sizes": [32, 28, 24]
+          },
+          "subtitle": {
+            "x": 1.9,
+            "y": 1.58,
+            "w": 9.5,
+            "align": "center",
+            "size": 13,
+            "color": "muted"
+          },
+          "body": {
+            "x": 1.3,
+            "y": 2.2,
+            "w": 10.7,
+            "h": 4.5
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 0.629,
+              "y": 0.545,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.43,
+              "y": 0.659,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.231,
+              "y": 0.545,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.231,
+              "y": 0.315,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.43,
+              "y": 0.2,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.629,
+              "y": 0.315,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.455,
+              "y": 0.455,
+              "w": 0.289,
+              "h": 0.289,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.754,
+              "y": 0.554,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.59,
+              "y": 0.649,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.426,
+              "y": 0.554,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.426,
+              "y": 0.365,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.59,
+              "y": 0.271,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.754,
+              "y": 0.365,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.611,
+              "y": 0.481,
+              "w": 0.238,
+              "h": 0.238,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 1.45,
+              "y": 0.42,
+              "w": 0.24,
+              "h": 0.24,
+              "fill": "F7C8D4",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 11.8,
+              "y": 0.5,
+              "w": 0.22,
+              "h": 0.22,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.7,
+            "y": 2.5,
+            "w": 9.9,
+            "h": 1.6,
+            "align": "center",
+            "anchor": "bottom",
+            "sizes": [66, 54, 44]
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.35,
+            "w": 8.9,
+            "align": "center",
+            "size": 18,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 6.75,
+            "w": 8.9,
+            "align": "center"
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 1.087,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.919,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.458,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.75,
+              "y": 0.412,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.042,
+              "y": 0.581,
+              "w": 0.5,
+              "h": 0.5,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.787,
+              "y": 0.787,
+              "w": 0.425,
+              "h": 0.425,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 1.12,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.985,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.866,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.1,
+              "y": 0.58,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.334,
+              "y": 0.715,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.13,
+              "y": 0.88,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 6.42,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.285,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.716,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.95,
+              "y": 5.88,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 1.184,
+              "y": 6.015,
+              "w": 0.4,
+              "h": 0.4,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 0.98,
+              "y": 6.18,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 6.384,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 6.222,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 11.729,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.01,
+              "y": 5.736,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.291,
+              "y": 5.898,
+              "w": 0.48,
+              "h": 0.48,
+              "fill": "FFFFFF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "petal"
+            },
+            {
+              "kind": "oval",
+              "x": 12.046,
+              "y": 6.096,
+              "w": 0.408,
+              "h": 0.408,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "flower centre"
+            },
+            {
+              "kind": "oval",
+              "x": 2.1,
+              "y": 1.75,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "F7C8D4",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.9,
+              "y": 1.5,
+              "w": 0.34,
+              "h": 0.34,
+              "fill": "A8E6CF",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 2.35,
+              "y": 5.3,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "FDE68A",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            },
+            {
+              "kind": "oval",
+              "x": 10.8,
+              "y": 5.6,
+              "w": 0.3,
+              "h": 0.3,
+              "fill": "D4A5E8",
+              "line": "2D2D2D",
+              "lineW": 1.5,
+              "name": "dot"
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.22,
+          "fill": "FFFFFF",
+          "line": "2D2D2D",
+          "lineW": 2.25,
+          "shadow": [0.07, 0.07, "2D2D2D"],
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "box"
+        },
+        "steps": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.22,
+          "fill": "palette",
+          "line": "2D2D2D",
+          "lineW": 2.25,
+          "shadow": [0.07, 0.07, "2D2D2D"],
+          "gap": 0.3
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Centred rounded-sans titles on a pastel canvas that changes page by page (cream, turquoise, pink, butter, lavender, mint, peach, sky); circle-built daisies and coloured dots sit in the corners, away from the text.",
+    "components": "Rounded white cards with a dark outline and a solid offset shadow; pastel step blocks in the same outline language; quotes sit in one large white card. Keep text short and friendly.",
+    "narrative": "Welcome, the week at a glance, schedule, activity chart, focus areas, quote, team, how it works, topic split.",
+    "nativeCoverage": "Cover, list, card rows, step blocks, bar and pie charts, quote card and team cards as native text, shapes and charts. Not reproduced: the hand-drawn SVG daisies, stars, clouds, rainbows and smiling suns (replaced by circle flowers and dots), white titles with dark text shadow, Fredoka One and Quicksand, avatar illustrations, coloured header strips on cards."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Hand-drawn SVG daisies and stars become circle-built flowers and dots; a butter badge holds the kicker."
+    },
+    {
+      "page": 2,
+      "archetype": "list",
+      "native": "content_slide + bullets",
+      "status": "approximate",
+      "differences": "Source list sits inside a white outlined card with a mint header strip and yellow bullet dots; native is a centred title with an open bullet list. Sun, star and rainbow drawings are not reproduced."
+    },
+    {
+      "page": 3,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Five weekday columns with coloured header strips become a row of three plain white outlined cards; the white title with dark shadow is drawn dark."
+    },
+    {
+      "page": 4,
+      "archetype": "agenda",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "A vertical stack of five rows with numbered colour circles becomes one horizontal row of numbered pastel blocks; cloud drawings are not reproduced."
+    },
+    {
+      "page": 5,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source chart is inside a white outlined card with a different colour and outline per bar; native is an editable chart on the canvas in one series colour."
+    },
+    {
+      "page": 6,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "A two-by-two grid with lettered colour badges becomes one row of three cards without badges."
+    },
+    {
+      "page": 7,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": "Rainbow and star drawings are replaced by circle flowers and dots."
+    },
+    {
+      "page": 8,
+      "archetype": "team",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Round avatar illustrations with names below become white outlined name cards without pictures."
+    },
+    {
+      "page": 9,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Numbered colour circles joined by arrows become numbered pastel blocks without arrows."
+    },
+    {
+      "page": 10,
+      "archetype": "chart-pie",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source is a ring chart with a total in the centre beside a title and legend; native is a pie chart under a centred page title."
+    }
+  ]
+}

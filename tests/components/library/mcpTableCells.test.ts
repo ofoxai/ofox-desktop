@@ -48,7 +48,7 @@ const inventory = (
 });
 
 describe("mcpCell", () => {
-  it("lists the MCP-capable bindable agents in the tools page order", () => {
+  it("keeps external agents in tools page order and appends the independent assistant", () => {
     expect(MCP_TABLE_TOOLS).toEqual([
       "claude",
       "codex",
@@ -59,6 +59,7 @@ describe("mcpCell", () => {
       "workbuddy",
       "dsh",
       "pi",
+      "ofox-assistant",
     ]);
   });
   it("is checked and toggleable once Ofox applied it, or while it is assigned", () => {

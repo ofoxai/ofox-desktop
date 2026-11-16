@@ -1,0 +1,629 @@
+{
+  "id": "graphify-dark-graph",
+  "family": "technical",
+  "names": {
+    "zh": "Graphify 暗色图谱",
+    "en": "Graphify Dark Graph",
+    "ja": "Graphify ダークグラフ"
+  },
+  "intro": {
+    "zh": "近黑的深蓝底，粗白无衬线标题，封面和结尾用暖橙与亮绿的大字，配节点连线图案和深色卡片；适合开发者工具、知识图谱和技术分享。",
+    "en": "Near-black navy canvas, heavy off-white sans titles, warm orange and green display type on cover and closing, a node-and-edge motif and dark cards; for developer tools, knowledge graphs and talks.",
+    "ja": "黒に近いネイビーの背景に太いオフホワイトの見出し、表紙と締めは暖かいオレンジと明るい緑の大きな文字、ノードと線のモチーフと暗いカード。開発者ツールや技術共有向け。"
+  },
+  "routing": {
+    "scenarios": ["technical", "research", "product-launch"],
+    "density": "medium",
+    "scheme": "dark",
+    "tone": ["technical", "calm", "modern"],
+    "suits": {
+      "data": 2,
+      "formulas": 1,
+      "images": 1,
+      "longText": 0
+    },
+    "avoid": "Printed handouts, bright rooms and formal institutional reports."
+  },
+  "theme": {
+    "colors": {
+      "background": "0A0B16",
+      "card": "131630",
+      "primary": "F0ECE4",
+      "secondary": "B8A4D6",
+      "accent": "E8A87C",
+      "text": "F0ECE4",
+      "textSecondary": "B0A99E",
+      "textMuted": "8A847B",
+      "line": "2A2E45",
+      "accentTint": "241C1C",
+      "dark": "020205",
+      "onDark": "D8D4C8",
+      "onDarkMuted": "B0A99E",
+      "surface": "131630",
+      "palette": ["131630", "0E1020"],
+      "chart": ["E8A87C", "7EB8DA", "7ED3A4", "D4A0B9", "B8A4D6", "E07070"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Arial",
+        "body": "Arial",
+        "data": "Consolas"
+      },
+      "zh": {
+        "title": "Microsoft YaHei",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Gothic",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [54, 48, 40, 36],
+      "statement": [66, 54, 44, 36],
+      "title": [30, 28, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [14, 13, 12],
+      "kpi": [60, 48, 40]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 0.72,
+            "y": 4.55,
+            "w": 9.5,
+            "h": 1.5,
+            "color": "E8A87C"
+          },
+          "kicker": {
+            "x": 0.72,
+            "y": 4.15,
+            "w": 8,
+            "size": 12,
+            "color": "faint"
+          },
+          "meta": {
+            "x": 0.72,
+            "y": 6.95,
+            "w": 9
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 2.445,
+              "y": 1.544,
+              "w": 2.11,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 31.4,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 4.351,
+              "y": 1.769,
+              "w": 2.198,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": -17.2,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 6.322,
+              "y": 2.094,
+              "w": 2.555,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 30.6,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 8.582,
+              "y": 2.269,
+              "w": 2.035,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": -27.8,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 10.057,
+              "y": 2.594,
+              "w": 1.887,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 58.0,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 3.935,
+              "y": 2.919,
+              "w": 1.929,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 58.8,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 5.395,
+              "y": 3.844,
+              "w": 2.11,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 5.4,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 7.251,
+              "y": 3.344,
+              "w": 1.697,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 135.0,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 1.238,
+              "y": 1.869,
+              "w": 1.924,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 114.6,
+              "name": "edge"
+            },
+            {
+              "kind": "oval",
+              "x": 2.52,
+              "y": 0.92,
+              "w": 0.16,
+              "h": 0.16,
+              "fill": "8F6953",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 4.29,
+              "y": 1.99,
+              "w": 0.22,
+              "h": 0.22,
+              "fill": "50738C",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 6.43,
+              "y": 1.38,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "50836B",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 8.56,
+              "y": 2.61,
+              "w": 0.28,
+              "h": 0.28,
+              "fill": "726789",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 10.43,
+              "y": 1.73,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "50836B",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 11.42,
+              "y": 3.32,
+              "w": 0.16,
+              "h": 0.16,
+              "fill": "50738C",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 5.31,
+              "y": 3.66,
+              "w": 0.18,
+              "h": 0.18,
+              "fill": "836478",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 7.41,
+              "y": 3.86,
+              "w": 0.18,
+              "h": 0.18,
+              "fill": "8F6953",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 1.74,
+              "y": 2.69,
+              "w": 0.12,
+              "h": 0.12,
+              "fill": "726789",
+              "name": "node"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 0.72,
+            "y": 2.75,
+            "w": 11,
+            "h": 2.2
+          },
+          "number": {
+            "x": 0.72,
+            "y": 2.3,
+            "w": 4,
+            "size": 14,
+            "color": "D4A0B9"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 11.256,
+              "y": 0.669,
+              "w": 0.738,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 28.3,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 11.88,
+              "y": 0.644,
+              "w": 0.64,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": -38.7,
+              "name": "edge"
+            },
+            {
+              "kind": "oval",
+              "x": 11.25,
+              "y": 0.45,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50738C",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 11.88,
+              "y": 0.78,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "726789",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 12.4,
+              "y": 0.4,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50836B",
+              "name": "node"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 0.72,
+            "y": 2.4,
+            "w": 10.8,
+            "h": 2.6,
+            "sizes": [48, 44, 36, 30]
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 11.256,
+              "y": 0.669,
+              "w": 0.738,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 28.3,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 11.88,
+              "y": 0.644,
+              "w": 0.64,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": -38.7,
+              "name": "edge"
+            },
+            {
+              "kind": "oval",
+              "x": 11.25,
+              "y": 0.45,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50738C",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 11.88,
+              "y": 0.78,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "726789",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 12.4,
+              "y": 0.4,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50836B",
+              "name": "node"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 0.72,
+            "y": 0.7,
+            "w": 10.2,
+            "h": 0.7
+          },
+          "body": {
+            "x": 0.72,
+            "y": 1.9,
+            "w": 11.9,
+            "h": 4.85
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 11.256,
+              "y": 0.669,
+              "w": 0.738,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 28.3,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 11.88,
+              "y": 0.644,
+              "w": 0.64,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": -38.7,
+              "name": "edge"
+            },
+            {
+              "kind": "oval",
+              "x": 11.25,
+              "y": 0.45,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50738C",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 11.88,
+              "y": 0.78,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "726789",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 12.4,
+              "y": 0.4,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50836B",
+              "name": "node"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.7,
+            "y": 2.3,
+            "w": 9.9,
+            "h": 1.9,
+            "align": "center",
+            "anchor": "bottom",
+            "color": "7ED3A4",
+            "sizes": [88, 72, 60, 48]
+          },
+          "subtitle": {
+            "x": 2.2,
+            "y": 4.4,
+            "w": 8.9,
+            "align": "center",
+            "size": 16,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 2.2,
+            "y": 6.95,
+            "w": 8.9,
+            "align": "center"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 11.256,
+              "y": 0.669,
+              "w": 0.738,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": 28.3,
+              "name": "edge"
+            },
+            {
+              "kind": "rect",
+              "x": 11.88,
+              "y": 0.644,
+              "w": 0.64,
+              "h": 0.012,
+              "fill": "23263A",
+              "rot": -38.7,
+              "name": "edge"
+            },
+            {
+              "kind": "oval",
+              "x": 11.25,
+              "y": 0.45,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50738C",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 11.88,
+              "y": 0.78,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "726789",
+              "name": "node"
+            },
+            {
+              "kind": "oval",
+              "x": 12.4,
+              "y": 0.4,
+              "w": 0.1,
+              "h": 0.1,
+              "fill": "50836B",
+              "name": "node"
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.12,
+          "fill": "none",
+          "line": "line",
+          "lineW": 0.75,
+          "shadow": [0, 0, "card"],
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "box",
+          "valueColor": "accent"
+        },
+        "steps": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.12,
+          "fill": "none",
+          "line": "line",
+          "lineW": 0.75,
+          "shadow": [0, 0, "card"],
+          "gap": 0.3,
+          "numberColor": "accent"
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "One near-black navy canvas throughout; heavy off-white sans titles at the left, the cover title low on the page in warm orange under a dim node-and-edge network, the closing word centred in green. A three-node motif marks the top right of other pages.",
+    "components": "Dark navy cards with a hairline border, big warm-orange numerals for stats, numbered dark step cards, a darker code panel with mono text. Accent colours (warm, blue, green, rose, purple) appear one at a time.",
+    "narrative": "Hook, why graphs, what the tool does, one command, with versus without, pipeline, try it, thanks.",
+    "nativeCoverage": "Cover, chapter, card row, code panel, stat cards, step cards and closing as native text and shapes. Not reproduced: gradient-filled title words (drawn in one flat colour), glowing nodes and text glow, card gradients, emoji icons, the race-bar comparison, hashtag chips, Inter and JetBrains Mono."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "The orange-to-green-to-blue gradient title is drawn in one flat warm orange; network nodes have no glow."
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "adapted",
+      "differences": "The rose-to-purple gradient on the second title word is not reproduced; the title is one off-white colour."
+    },
+    {
+      "page": 3,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Four emoji-headed feature cards and a full-width note bar become a row of three text cards without icons or the note bar."
+    },
+    {
+      "page": 4,
+      "archetype": "code",
+      "native": "content_slide + code",
+      "status": "approximate",
+      "differences": "The large glowing green command line above the code box is not drawn; code has no syntax colouring."
+    },
+    {
+      "page": 5,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Two emoji race bars above the stat cards are not reproduced; stat numerals are flat warm orange instead of a gradient."
+    },
+    {
+      "page": 6,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Emoji icons, the arrows between the cards and the note bar below are not drawn; steps are numbered instead."
+    },
+    {
+      "page": 7,
+      "archetype": "code",
+      "native": "content_slide + code",
+      "status": "approximate",
+      "differences": "Source shows two bare glowing command lines and a row of hashtag chips under a gradient title; native puts the commands in one code panel without chips."
+    },
+    {
+      "page": 8,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "The yellow-to-green gradient on the closing word is drawn in one flat green."
+    }
+  ]
+}

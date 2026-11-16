@@ -19,7 +19,8 @@ pub const VIDEO: &str = "generate_video";
 pub const SPEECH: &str = "generate_speech";
 
 /// The most images one run may make, across all of its calls.
-pub const MAX_IMAGES_PER_RUN: usize = 4;
+/// As many as one deck may generate (`presentation::MAX_IMAGES`).
+pub const MAX_IMAGES_PER_RUN: usize = 8;
 /// The most speech files one run may make.
 pub const MAX_SPEECH_PER_RUN: usize = 3;
 pub const SPEECH_LIMIT: &str = "assistant_media_speech_turn_limit";
@@ -111,6 +112,12 @@ impl MediaDefaults {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ImageArgs {
+    #[serde(default, rename = "presentationAssetId")]
+    pub presentation_asset_id: Option<String>,
+    #[serde(default, rename = "planId")]
+    pub plan_id: Option<String>,
+    #[serde(default)]
+    pub revision: Option<u64>,
     pub prompt: String,
     #[serde(default)]
     pub model: Option<String>,
@@ -291,15 +298,30 @@ pub fn image_request(
         same.and_then(|d| d.quality.as_ref()),
         &caps.qualities,
     )?;
-    let n = match args.n.or(same.and_then(|d| d.n)) {
-        Some(n) if !caps.n && n > 1 => {
-            if args.n.is_some() {
-                return Err(refuse(INVALID, "this model makes one image per call"));
+    let requested_n = args.n.or(same.and_then(|d| d.n));
+    let n = if model.id == "volcengine/doubao-seedream-5.0-pro" {
+        // Planned assets keep their Host count/reservation of one. This exact
+        // provider contract rejects the n wire field even when V1 advertises it.
+        match requested_n {
+            None | Some(1) => None,
+            _ => {
+                return Err(refuse(
+                    INVALID,
+                    "Seedream 5.0 Pro makes one image per call; leave n out",
+                ))
             }
-            None
         }
-        Some(n) if caps.n => Some(n),
-        _ => None,
+    } else {
+        match requested_n {
+            Some(n) if !caps.n && n > 1 => {
+                if args.n.is_some() {
+                    return Err(refuse(INVALID, "this model makes one image per call"));
+                }
+                None
+            }
+            Some(n) if caps.n => Some(n),
+            _ => None,
+        }
     };
     let count = n.unwrap_or(1) as usize;
     if count == 0 || made + count > MAX_IMAGES_PER_RUN {
@@ -676,6 +698,118 @@ mod tests {
         assert_eq!(request.n, Some(1));
     }
 
+    #[tokio::test]
+    async fn seedream_pro_compat_planned_single_image_omits_n_on_the_actual_wire() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+        let model = image_model("volcengine/doubao-seedream-5.0-pro");
+        // tool_image fills n=Some(1) for a planned asset before image_request.
+        // The broad V1 row advertises n, so use caps.n=true in this regression.
+        let args: ImageArgs = serde_json::from_value(json!({
+            "prompt":"One authored concept illustration", "model":model.id,
+            "presentationAssetId":"cover", "planId":"plan", "revision":1, "n":1
+        }))
+        .unwrap();
+        let defaults = ImageDefaults {
+            model: Some("openai/gpt-image-2.6-flare".into()),
+            size: Some("1536x1024".into()),
+            quality: Some("high".into()),
+            n: Some(4),
+        };
+        let (prompt, request) = image_request(&model, Some(&defaults), &args, 0).unwrap();
+        assert_eq!(args.n, Some(1), "do not mutate the Host planned count");
+        assert_eq!(
+            request.count(),
+            1,
+            "reservation/decode still expect one image"
+        );
+        let server = MockServer::start().await;
+        let response = json!({"data":[{"b64_json":"synthetic-wire-only-fixture"}]});
+        Mock::given(method("POST"))
+            .and(path("/v1/images/generations"))
+            .and(header("Authorization", "Bearer synthetic-pro-wire-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let result = super::super::media_http::request(
+            &client,
+            &server.uri(),
+            "synthetic-pro-wire-key",
+            &model.id,
+            &prompt,
+            &request,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.value, response);
+        let sent = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        assert_eq!(
+            body,
+            json!({"model":model.id,"prompt":prompt}),
+            "exact Pro rejects n; no default GPT parameter may leak to its wire body"
+        );
+    }
+
+    #[test]
+    fn seedream_pro_compat_multiple_images_are_rejected_before_submission() {
+        let model = image_model("volcengine/doubao-seedream-5.0-pro");
+        for n in [2, 4, 0] {
+            let mut args = image_args("One illustration");
+            args.n = Some(n);
+            let error = image_request(&model, None, &args, 0).unwrap_err();
+            assert!(error.starts_with(INVALID), "{error}");
+            assert!(error.contains("one image"), "{error}");
+        }
+        let defaults = ImageDefaults {
+            model: Some(model.id.clone()),
+            n: Some(2),
+            ..Default::default()
+        };
+        assert!(image_request(&model, Some(&defaults), &image_args("x"), 0).is_err());
+    }
+
+    #[test]
+    fn seedream_pro_compat_other_models_keep_explicit_single_image_n() {
+        for id in [
+            "qwen/qwen-image-3.0",
+            "volcengine/doubao-seedream-5.0-flash",
+            "volcengine/doubao-seedream-5.0-pro-preview",
+        ] {
+            let model = image_model(id);
+            let mut args = image_args("One image");
+            args.n = Some(1);
+            let (_, request) = image_request(&model, None, &args, 0).unwrap();
+            assert_eq!(request.n, Some(1), "{id}");
+            assert_eq!(request.count(), 1);
+        }
+    }
+
+    #[test]
+    fn seedream_pro_compat_drops_all_defaults_from_the_gpt_model() {
+        let model = image_model("volcengine/doubao-seedream-5.0-pro");
+        let defaults = ImageDefaults {
+            model: Some("openai/gpt-image-2.6-flare".into()),
+            size: Some("1536x1024".into()),
+            quality: Some("high".into()),
+            n: Some(4),
+        };
+        let (_, request) = image_request(&model, Some(&defaults), &image_args("x"), 0).unwrap();
+        assert_eq!(request.size, None);
+        assert_eq!(request.quality, None);
+        assert_eq!(request.n, None);
+        assert_eq!(request.count(), 1);
+    }
+
     #[test]
     fn defaults_of_another_model_are_not_applied() {
         let model = image_model("other");
@@ -714,7 +848,7 @@ mod tests {
         assert!(error.starts_with(TURN_LIMIT), "{error}");
         let mut many = image_args("x");
         many.n = Some(3);
-        assert!(image_request(&model, None, &many, 2)
+        assert!(image_request(&model, None, &many, MAX_IMAGES_PER_RUN - 2)
             .unwrap_err()
             .starts_with(TURN_LIMIT));
     }

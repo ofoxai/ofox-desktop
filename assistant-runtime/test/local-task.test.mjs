@@ -147,6 +147,84 @@ test("a host-reported command side effect invalidates earlier folder verificatio
   assert.equal(task.needsVerification, false);
 });
 
+for (const shell of ["bash", "powershell"])
+  test(`${shell} outside a tool repair does not create pending verification`, () => {
+    const task = new LocalTask(limits);
+    task.observe(
+      shell,
+      { command: 'curl -s "https://example.invalid/rate"' },
+      { output: "82.85", exitCode: 0, requiresVerification: true },
+    );
+    assert.equal(task.needsVerification, false);
+    assert.equal(task.continuation(), null);
+    assert.equal(task.snapshot(), null);
+    // A confirmed effect always requires verification, even without inspection.
+    task.observe("write", { path: "/config" }, { changed: true });
+    assert.equal(task.needsVerification, true);
+  });
+
+for (const name of [
+  "tool_status",
+  "diagnose_in_folder",
+  "verify_in_folder",
+  "repair_launcher",
+  "rebind_tool",
+  "install_tool",
+  "update_tool",
+  "uninstall_tool",
+  "set_tool_model",
+])
+  for (const inspectFirst of [true, false])
+    test(`an uncertain command ${inspectFirst ? "after" : "before"} ${name} still requires verification`, () => {
+      const home = "/home/test";
+      const task = new LocalTask(limits, Date.now, null, home);
+      const inspect = () =>
+        task.observe(name, { tool: "codex", folder: home }, { changed: false });
+      const command = () =>
+        task.observe(
+          "bash",
+          { command: "repair" },
+          { requiresVerification: true },
+        );
+      if (inspectFirst) {
+        inspect();
+        assert.equal(
+          task.needsVerification,
+          false,
+          "inspection alone is not a change",
+        );
+        command();
+      } else {
+        command();
+        assert.equal(
+          task.needsVerification,
+          false,
+          "an unclassified command is not a repair",
+        );
+        inspect();
+      }
+      assert.equal(task.needsVerification, true);
+      assert.ok(task.continuation());
+      // Pending uncertain repairs use the existing host snapshot contract.
+      const next = new LocalTask(limits, Date.now, task.snapshot(), home);
+      assert.equal(next.needsVerification, true);
+      next.observe(
+        "verify_in_folder",
+        { tool: "codex", folder: home },
+        { verified: true },
+      );
+      assert.equal(next.needsVerification, false);
+      assert.equal(next.snapshot(), null);
+    });
+
+test("a known read-only command after tool inspection needs no verification", () => {
+  const task = new LocalTask(limits);
+  task.observe("tool_status", { tool: "codex" }, { installed: true });
+  task.observe("bash", { command: "pwd" }, { requiresVerification: false });
+  assert.equal(task.needsVerification, false);
+  assert.equal(task.snapshot(), null);
+});
+
 test("paid search contributes to the same budget and missing prices fail closed", () => {
   const task = new LocalTask(limits);
   task.addSearchUsage(

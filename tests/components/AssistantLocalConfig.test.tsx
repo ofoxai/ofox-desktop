@@ -217,7 +217,12 @@ describe("a local run's progress", () => {
       within(screen.getByRole("list", { name: "Task steps" }))
         .getAllByRole("listitem")
         .map((item) => item.textContent),
-    ).toEqual(["✓ Inspect", "→ Repair"]);
+    ).toEqual(["Inspect", "Repair"]);
+    expect(screen.getByLabelText("Completed")).toBeInTheDocument();
+    expect(screen.getByText("Repair").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
   });
 
   it("is nothing without any of them", () => {
@@ -226,4 +231,70 @@ describe("a local run's progress", () => {
     );
     expect(container).toBeEmptyDOMElement();
   });
+});
+
+it("shows the actual MCP approval details and all three ordinary choices", async () => {
+  const respond = vi.fn().mockResolvedValue(true);
+  const base: LocalApproval = {
+    approvalId: "mcp",
+    toolCallId: "tool",
+    name: "mcp__custom__write",
+    category: "mcp",
+    details: { server: "custom", tool: "mcp__custom__write" },
+    allowSession: true,
+    expectedOwner: "owner",
+    expectedGeneration: 1,
+  };
+  const result = render(
+    <LocalApprovalCard approval={base} onRespond={respond} />,
+  );
+  expect(screen.getByText("Allow this MCP operation?")).toBeVisible();
+  expect(screen.getByText("custom · mcp__custom__write")).toBeVisible();
+  const buttons = screen.getAllByRole("button");
+  expect(buttons).toHaveLength(3);
+  for (const [index, choice] of ["once", "session", "deny"].entries()) {
+    await userEvent.click(buttons[index]);
+    await waitFor(() =>
+      expect(respond).toHaveBeenLastCalledWith("mcp", choice),
+    );
+    result.rerender(<LocalApprovalCard approval={base} onRespond={respond} />);
+  }
+});
+
+it("renders MCP argument previews as text with an explicit complete-call truncation warning", async () => {
+  const details = {
+    server: "custom",
+    tool: "mcp__custom__write",
+    argumentsPreview: JSON.stringify(
+      { target: "draft-inbox", body: "<img src=x onerror=alert(1)>" },
+      null,
+      2,
+    ),
+    argumentsTruncated: true,
+  };
+  const approval: LocalApproval = {
+    approvalId: "preview",
+    toolCallId: "preview-call",
+    name: details.tool,
+    category: "mcp",
+    details,
+    argumentsPreview: details.argumentsPreview,
+    argumentsTruncated: details.argumentsTruncated,
+    allowSession: true,
+    expectedOwner: "owner",
+    expectedGeneration: 1,
+  };
+  const rendered = render(
+    <LocalApprovalCard
+      approval={approval}
+      onRespond={vi.fn().mockResolvedValue(true)}
+    />,
+  );
+  await userEvent.click(screen.getByText("Arguments preview"));
+  expect(screen.getByText(/draft-inbox/)).toBeVisible();
+  expect(screen.getByText(/Approval runs the complete call/)).toBeVisible();
+  expect(rendered.container.querySelector("img")).toBeNull();
+  expect(rendered.container.querySelector("pre")?.textContent).toContain(
+    "<img src=x onerror=alert(1)>",
+  );
 });
