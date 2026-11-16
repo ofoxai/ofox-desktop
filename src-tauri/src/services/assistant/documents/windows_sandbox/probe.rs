@@ -55,6 +55,12 @@ pub(super) enum Phase {
     TokenCapabilities,
     TokenIntegrity,
     TokenMitigations,
+    TokenLpacDuplicate,
+    TokenLpacDescriptors,
+    TokenLpacWorld,
+    TokenLpacAllPackages,
+    TokenLpacCapability,
+    TokenLpacForeign,
     Resume,
     ProcessWait,
     ProcessStatus,
@@ -92,6 +98,7 @@ pub(super) struct Evidence {
     pub profile_pin_complete: Option<bool>,
     pub token_queries: Vec<TokenQuery>,
     pub token_comparisons: Vec<TokenComparison>,
+    pub lpac_access_proof: Option<LpacAccessProof>,
     pub app_container: Option<u32>,
     pub less_privileged: Option<u32>,
     pub package_matches: Option<bool>,
@@ -121,6 +128,35 @@ pub(super) struct Evidence {
 pub(super) struct TokenQuery {
     pub kind: i32,
     pub required_bytes: u32,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum AccessCase {
+    WorldOnly,
+    AllApplicationPackages,
+    RuntimeCapability,
+    ForeignCapability,
+}
+
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LpacAccessProof {
+    pub duplicated: bool,
+    pub checks: Vec<AccessObservation>,
+    pub matched: Option<bool>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct AccessObservation {
+    pub case: AccessCase,
+    pub api_success: bool,
+    pub status: u32,
+    pub access_status: Option<bool>,
+    pub granted_access: Option<u32>,
+    pub returned_privilege_bytes: Option<u32>,
+    pub privilege_count: Option<u32>,
 }
 
 #[derive(Clone, Copy, serde::Serialize)]

@@ -14,6 +14,13 @@ Extended-path handling covers runtime resources and document/backup reads and
 publication. Arbitrarily long process working directories are not certified;
 native launch failure keeps Python unavailable.
 
+Server 2022 build 20348 rejects the user-mode class-46 token query, including
+fixed-size buffers. The replacement LPAC check uses the actual suspended
+child token's authorization behavior with documented token duplication and
+AccessCheck APIs. This is a behavioral proof based on LPAC semantics, not a
+Microsoft-defined IsLPAC query contract. Its ordinary AppContainer controls
+and Windows 10/11 client validation remain required acceptance evidence.
+
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,
 or failed observation. Targeted repetitions and the subsequent full run passed;

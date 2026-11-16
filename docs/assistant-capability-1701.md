@@ -142,3 +142,18 @@ class 46 的 NULL/0 查询返回长度 0，因此尚未取得 LPAC 标志的值�
 profile 路径/标签、进程创建和 Job 分配均已完成，task/profile 清理均成功；
 失败不属于 Python、Office、进程执行超时或管道排空。下一次仅在相同 suspended
 token 上增加固定缓冲查询及数值错误码对照，原来的失败关闭判定保持不变。
+
+开发运行 43916502977（`1e009434`）完成同 token 对照，确认当前 Server 2022
+build 20348 不接受 class 46 的用户态查询：Win32 NULL/4/8 字节均返回
+`0x80070057`；同样的 Nt 查询均返回 `0xc0000003 (STATUS_INVALID_INFO_CLASS)`，
+长度与缓冲均未写入。class 29 的正控长度为 4，固定 4/8 字节查询均成功且值为 1。
+因此当前根因为使用了该系统不支持的 token 查询项，不能靠增大缓冲解决，也不能
+把查询失败当成 LPAC=false。修复使用同一未恢复进程的 token 授权行为进行验证：
+仅 Everyone、AAP、foreign capability 拒绝，exact runtime capability 允许；
+API 失败、权限输出不完整或任一矩阵不符都拒绝。原有包/capability/完整性级别、
+Job 和 mitigation 检查保留；普通 AppContainer 成对反控前置到原功能用例，均不
+恢复执行。Windows 目标交叉 Clippy、observer 状态回归 4/4、格式及双独立审查
+通过；实际原生成对控制和后续完整功能探针仍待验证，Windows 能力保持关闭。
+该行为证明依据 [LPAC 语义](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_information_class)
+与 [AccessCheck](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-accesscheck)
+组合，不声称微软提供了专用的 IsLPAC Win32 查询契约。

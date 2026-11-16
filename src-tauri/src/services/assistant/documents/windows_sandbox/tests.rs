@@ -9,11 +9,217 @@ fn runtime() -> PathBuf {
 #[tokio::test]
 #[serial_test::serial]
 async fn document_lpac_proves_python_office_and_escape_denials() {
+    assert_suspended_lpac_access_controls();
     let root = runtime();
     let office = root.join("engines/officecli/officecli.exe");
     probe_windows_document_engines(&root, &office)
         .await
         .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
+}
+
+#[test]
+#[serial_test::serial]
+fn document_lpac_verifier_rejects_real_ordinary_appcontainer_before_resume() {
+    assert_suspended_lpac_access_controls();
+}
+
+// Both callers already hold the default serial lock. Do not annotate this
+// helper or call another serial test: nested locks would deadlock the gate.
+fn assert_suspended_lpac_access_controls() {
+    let cap = RuntimeCapability::new().unwrap();
+    let user = current_user().unwrap();
+    // This fixed Windows image is never resumed. Token controls run before
+    // expensive runtime hashing; bundled engine behavior is proved afterward.
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    assert!(system.is_absolute());
+    let exe = system.join("System32").join("cmd.exe");
+    let mut profile = Profile::new(&cap).unwrap();
+    profile.make_low_profile().unwrap();
+    let mut task = task_directory(&user, profile.sid.0).unwrap();
+    let home = task.0.join("home");
+    fs::create_dir(&home).unwrap();
+    let marker = task.0.join("must-not-run");
+    for (policy, lpac) in [
+        (ContainerPolicy::Lpac, true),
+        (ContainerPolicy::OrdinaryAppContainer, false),
+    ] {
+        let observation = Observer::fixed_probe();
+        let child = create_suspended(
+            &exe,
+            &["/D".into(), "/C".into(), "echo bad>must-not-run".into()],
+            &task.0,
+            &home,
+            &profile,
+            &cap,
+            policy,
+            &observation,
+        )
+        .unwrap();
+        let verified = verify_token(
+            raw(&child.process.process),
+            profile.sid.0,
+            cap.sid,
+            &observation,
+        );
+        if lpac {
+            verified.expect("actual suspended LPAC must pass the complete production verifier");
+        } else {
+            assert_eq!(verified.unwrap_err(), UNAVAILABLE);
+        }
+        let report = observation.snapshot().unwrap();
+        let evidence = &report["evidence"];
+        assert_eq!(evidence["appContainer"], 1);
+        assert_eq!(evidence["packageMatches"], true);
+        assert_eq!(evidence["capabilityGroups"], 1);
+        assert_eq!(evidence["capabilityMatches"], true);
+        assert!(evidence["integrityRid"].as_u64().unwrap() <= 4096);
+        assert_eq!(evidence["childPolicy"].as_u64().unwrap() & 1, 1);
+        assert_eq!(evidence["imagePolicy"].as_u64().unwrap() & 3, 3);
+        assert!(
+            evidence["lessPrivileged"].is_null(),
+            "AccessCheck proof must not impersonate a class46 gate result"
+        );
+        assert!(evidence["resumeResult"].is_null());
+        assert_eq!(evidence["lpacAccessProof"]["matched"], lpac);
+        let checks = evidence["lpacAccessProof"]["checks"].as_array().unwrap();
+        assert_eq!(checks.len(), 4);
+        for (check, (case, granted)) in checks.iter().zip([
+            ("world_only", false),
+            ("all_application_packages", !lpac),
+            ("runtime_capability", true),
+            ("foreign_capability", false),
+        ]) {
+            assert_eq!(check["case"], case);
+            assert_eq!(check["apiSuccess"], true);
+            assert_eq!(check["privilegeCount"], 0);
+            assert!(valid_specific_privilege_output(
+                check["returnedPrivilegeBytes"].as_u64().unwrap() as u32,
+                0
+            ));
+            assert_eq!(check["accessStatus"], granted);
+            assert_eq!(check["grantedAccess"], u32::from(granted));
+        }
+        assert!(!marker.exists(), "suspended control must never execute");
+        unsafe {
+            win(TerminateJobObject(raw(&child.process.job), 1)).unwrap();
+            assert_eq!(
+                WaitForSingleObject(raw(&child.process.process), 5000),
+                WAIT_OBJECT_0
+            );
+        }
+        drop(child);
+        assert!(
+            !marker.exists(),
+            "rejected ordinary AC must never be resumed"
+        );
+    }
+    task.dispose().unwrap();
+    profile.dispose().unwrap();
+}
+
+#[test]
+fn document_lpac_accesscheck_api_error_is_never_a_denial() {
+    let mut primary = HANDLE::default();
+    unsafe {
+        win(OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut primary,
+        ))
+        .unwrap();
+    }
+    let primary = handle(primary);
+    let observation = Observer::fixed_probe();
+    let duplicate = access_impersonation_token(raw(&primary), &observation).unwrap();
+    // AccessCheck explicitly requires both owner and group in the descriptor.
+    // A malformed descriptor must fail the API, never become a valid deny.
+    assert!(check_specific_access(
+        raw(&duplicate),
+        "D:P(A;;0x1;;;WD)",
+        AccessCase::WorldOnly,
+        &observation,
+    )
+    .is_err());
+    let report = observation.snapshot().unwrap();
+    let result = &report["evidence"]["lpacAccessProof"]["checks"][0];
+    assert_eq!(result["apiSuccess"], false);
+    assert!(result["status"].as_u64().unwrap() != 0);
+    assert!(result["accessStatus"].is_null());
+    assert!(result["grantedAccess"].is_null());
+    assert!(result["returnedPrivilegeBytes"].is_null());
+    assert!(result["privilegeCount"].is_null());
+    assert!(report["evidence"]["lpacAccessProof"]["matched"].is_null());
+    // The same helper must grant the ordinary user side on a valid SD. Its
+    // result is not sufficient for LPAC: the real paired test covers that gate.
+    assert_eq!(
+        check_specific_access(
+            raw(&duplicate),
+            "O:SYG:SYD:P(A;;0x1;;;WD)",
+            AccessCase::WorldOnly,
+            &Observer::default(),
+        )
+        .unwrap(),
+        AccessVerdict {
+            allowed: true,
+            granted: 1
+        }
+    );
+}
+
+#[test]
+fn document_lpac_access_matrix_rejects_missing_positive_or_extra_grants() {
+    let deny = AccessVerdict {
+        allowed: false,
+        granted: 0,
+    };
+    let grant = AccessVerdict {
+        allowed: true,
+        granted: 1,
+    };
+    assert!(lpac_access_matches(&[deny, deny, grant, deny]));
+    for unsafe_matrix in [
+        [deny; 4],                  // Bad SD / all-deny cannot prove LPAC.
+        [grant; 4],                 // An unrestricted host token cannot prove LPAC.
+        [deny, grant, grant, deny], // The actual ordinary-AC negative control.
+        [deny, deny, grant, grant], // An unrelated capability must stay denied.
+        [
+            deny,
+            deny,
+            AccessVerdict {
+                allowed: true,
+                granted: 3,
+            },
+            deny,
+        ],
+        [
+            AccessVerdict {
+                allowed: false,
+                granted: 1,
+            },
+            deny,
+            grant,
+            deny,
+        ],
+    ] {
+        assert!(!lpac_access_matches(&unsafe_matrix));
+    }
+}
+
+#[test]
+fn document_lpac_accesscheck_rejects_unknown_privilege_output() {
+    let header = std::mem::offset_of!(PRIVILEGE_SET, Privilege) as u32;
+    let capacity = size_of::<PRIVILEGE_SET>() as u32;
+    assert!(valid_specific_privilege_output(header, 0));
+    assert!(valid_specific_privilege_output(capacity, 0));
+    for (bytes, count) in [
+        (0, 0),
+        (header - 1, 0),
+        (capacity + 1, 0),
+        (capacity, 1),
+        (capacity, u32::MAX),
+    ] {
+        assert!(!valid_specific_privilege_output(bytes, count));
+    }
 }
 
 #[tokio::test]

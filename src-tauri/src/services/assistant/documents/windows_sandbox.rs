@@ -5,7 +5,7 @@
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{EngineOutput, DEAD_PROXY};
 mod probe;
-use probe::{Observer, Phase, Receive, TokenApi};
+use probe::{AccessCase, AccessObservation, Observer, Phase, Receive, TokenApi};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
@@ -39,24 +39,25 @@ use windows::{
             HANDLE_FLAG_INHERIT, HLOCAL, NTSTATUS, STATUS_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
+            AccessCheck,
             Authorization::{
                 ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
                 SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
             },
-            DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetSecurityDescriptorControl,
-            GetSecurityDescriptorDacl, GetSecurityDescriptorSacl, GetSidSubAuthority,
-            GetSidSubAuthorityCount, GetTokenInformation,
+            DeriveCapabilitySidsFromName, DuplicateTokenEx, EqualSid, FreeSid,
+            GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
             Isolation::{
                 CreateAppContainerProfile, DeleteAppContainerProfile, GetAppContainerFolderPath,
             },
-            SetSecurityDescriptorControl, TokenAppContainerSid, TokenCapabilities,
-            TokenIntegrityLevel, TokenIsAppContainer, TokenIsLessPrivilegedAppContainer, TokenUser,
-            DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
-            PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
-            SECURITY_DESCRIPTOR_CONTROL, SE_SACL_AUTO_INHERITED, SID_AND_ATTRIBUTES,
-            TOKEN_APPCONTAINER_INFORMATION, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-            TOKEN_USER,
+            SecurityImpersonation, SetSecurityDescriptorControl, TokenAppContainerSid,
+            TokenCapabilities, TokenImpersonation, TokenIntegrityLevel, TokenIsAppContainer,
+            TokenUser, DACL_SECURITY_INFORMATION, GENERIC_MAPPING, LABEL_SECURITY_INFORMATION,
+            OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, PSID,
+            SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR_CONTROL,
+            SE_SACL_AUTO_INHERITED, SID_AND_ATTRIBUTES, TOKEN_APPCONTAINER_INFORMATION,
+            TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
         },
         Storage::FileSystem::{
             CreateDirectoryW, CreateFileW, FileDispositionInfo, GetFileInformationByHandle,
@@ -109,6 +110,7 @@ const NO_REMOTE_IMAGES: u64 = 1 << 52;
 const NO_LOW_LABEL_IMAGES: u64 = 1 << 56;
 const PREFER_SYSTEM32: u64 = 1 << 60;
 const RUNTIME_CAPABILITY: &str = "ofoxDocumentRuntimeReadV1";
+const FOREIGN_CAPABILITY: &str = "ofoxDocumentForeignControlV1";
 
 #[track_caller]
 fn win<T>(result: windows::core::Result<T>) -> Result<T, String> {
@@ -295,7 +297,10 @@ impl RuntimeCapability {
         Self::new_observed(&Observer::default())
     }
     fn new_observed(observation: &Observer) -> Result<Self, String> {
-        let name = wide(RUNTIME_CAPABILITY)?;
+        Self::derive(RUNTIME_CAPABILITY, observation)
+    }
+    fn derive(name: &str, observation: &Observer) -> Result<Self, String> {
+        let name = wide(name)?;
         let (mut groups, mut count, mut sids, mut sid_count) =
             (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
         unsafe {
@@ -1480,6 +1485,188 @@ impl Drop for Process {
         }
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AccessVerdict {
+    allowed: bool,
+    granted: u32,
+}
+
+fn valid_specific_privilege_output(bytes: u32, count: u32) -> bool {
+    // AccessCheck may use the fixed header even when no privileges are needed.
+    // The invented specific bit must not depend on a standard-right privilege.
+    bytes >= std::mem::offset_of!(PRIVILEGE_SET, Privilege) as u32
+        && bytes <= size_of::<PRIVILEGE_SET>() as u32
+        && count == 0
+}
+
+fn access_impersonation_token(
+    token: HANDLE,
+    observation: &Observer,
+) -> Result<OwnedHandle, String> {
+    observation.enter(Phase::TokenLpacDuplicate);
+    observation.evidence(|evidence| {
+        evidence.lpac_access_proof = Some(Default::default());
+    });
+    let mut duplicate = HANDLE::default();
+    unsafe {
+        win(DuplicateTokenEx(
+            token,
+            TOKEN_QUERY,
+            None,
+            SecurityImpersonation,
+            TokenImpersonation,
+            &mut duplicate,
+        ))?;
+    }
+    let duplicate = handle(duplicate);
+    observation.evidence(|evidence| {
+        evidence
+            .lpac_access_proof
+            .get_or_insert_default()
+            .duplicated = true;
+    });
+    Ok(duplicate)
+}
+
+fn check_specific_access(
+    token: HANDLE,
+    sddl: &str,
+    case: AccessCase,
+    observation: &Observer,
+) -> Result<AccessVerdict, String> {
+    observation.enter(match case {
+        AccessCase::WorldOnly => Phase::TokenLpacWorld,
+        AccessCase::AllApplicationPackages => Phase::TokenLpacAllPackages,
+        AccessCase::RuntimeCapability => Phase::TokenLpacCapability,
+        AccessCase::ForeignCapability => Phase::TokenLpacForeign,
+    });
+    let descriptor = security_descriptor(sddl)?;
+    // One invented object-specific bit: no generic/MAXIMUM_ALLOWED or standard
+    // owner rights can turn a denied package-side check into a positive result.
+    let mapping = GENERIC_MAPPING {
+        GenericRead: 1,
+        GenericWrite: 1,
+        GenericExecute: 1,
+        GenericAll: 1,
+    };
+    let mut privileges = PRIVILEGE_SET::default();
+    let mut privilege_bytes = size_of::<PRIVILEGE_SET>() as u32;
+    let mut granted = 0u32;
+    let mut allowed = BOOL(0);
+    let result = unsafe {
+        AccessCheck(
+            PSECURITY_DESCRIPTOR(descriptor.0),
+            token,
+            1,
+            &mapping,
+            Some(&mut privileges),
+            &mut privilege_bytes,
+            &mut granted,
+            &mut allowed,
+        )
+    };
+    let success = result.is_ok();
+    let status = result
+        .as_ref()
+        .err()
+        .map_or(0, |error| error.code().0 as u32);
+    observation.evidence(|evidence| {
+        let proof = evidence.lpac_access_proof.get_or_insert_default();
+        if proof.checks.len() < 4 {
+            proof.checks.push(AccessObservation {
+                case,
+                api_success: success,
+                status,
+                access_status: success.then(|| allowed.as_bool()),
+                granted_access: success.then_some(granted),
+                returned_privilege_bytes: success.then_some(privilege_bytes),
+                privilege_count: success.then_some(privileges.PrivilegeCount),
+            });
+        }
+    });
+    // API failure (including invalid SD or privilege-buffer size) is never a
+    // successful denial. Do not interpret its initialized output parameters.
+    win(result)?;
+    if !valid_specific_privilege_output(privilege_bytes, privileges.PrivilegeCount) {
+        return Err(UNAVAILABLE.into());
+    }
+    Ok(AccessVerdict {
+        allowed: allowed.as_bool(),
+        granted,
+    })
+}
+
+fn lpac_access_matches(verdicts: &[AccessVerdict; 4]) -> bool {
+    *verdicts
+        == [
+            AccessVerdict {
+                allowed: false,
+                granted: 0,
+            },
+            AccessVerdict {
+                allowed: false,
+                granted: 0,
+            },
+            AccessVerdict {
+                allowed: true,
+                granted: 1,
+            },
+            AccessVerdict {
+                allowed: false,
+                granted: 0,
+            },
+        ]
+}
+
+fn verify_lpac_access(
+    token: HANDLE,
+    capability: PSID,
+    observation: &Observer,
+) -> Result<(), String> {
+    let duplicate = access_impersonation_token(token, observation)?;
+    observation.enter(Phase::TokenLpacDescriptors);
+    let own = sid_string(capability)?;
+    let foreign_capability = RuntimeCapability::derive(FOREIGN_CAPABILITY, &Observer::default())?;
+    let foreign = sid_string(foreign_capability.sid)?;
+    if own == foreign {
+        return Err(UNAVAILABLE.into());
+    }
+    // AppContainer authorization intersects normal-user and package/capability
+    // grants. WD supplies only the user side; every SD has an owner and group.
+    let base = "O:SYG:SYD:P(A;;0x1;;;WD)";
+    let descriptors = [
+        (AccessCase::WorldOnly, base.to_owned()),
+        (
+            AccessCase::AllApplicationPackages,
+            format!("{base}(A;;0x1;;;S-1-15-2-1)"),
+        ),
+        (
+            AccessCase::RuntimeCapability,
+            format!("{base}(A;;0x1;;;{own})"),
+        ),
+        (
+            AccessCase::ForeignCapability,
+            format!("{base}(A;;0x1;;;{foreign})"),
+        ),
+    ];
+    let mut verdicts = [AccessVerdict {
+        allowed: false,
+        granted: 0,
+    }; 4];
+    for ((case, descriptor), verdict) in descriptors.iter().zip(&mut verdicts) {
+        *verdict = check_specific_access(raw(&duplicate), descriptor, *case, observation)?;
+    }
+    let matched = lpac_access_matches(&verdicts);
+    observation.evidence(|evidence| {
+        evidence.lpac_access_proof.get_or_insert_default().matched = Some(matched);
+    });
+    if !matched {
+        return Err(UNAVAILABLE.into());
+    }
+    Ok(())
+}
+
 fn verify_token(
     process: HANDLE,
     package: PSID,
@@ -1489,7 +1676,11 @@ fn verify_token(
     observation.enter(Phase::TokenOpen);
     let mut token = HANDLE::default();
     unsafe {
-        win(OpenProcessToken(process, TOKEN_QUERY, &mut token))?;
+        win(OpenProcessToken(
+            process,
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ))?;
     }
     let token = handle(token);
     observation.enter(Phase::TokenContainer);
@@ -1513,18 +1704,10 @@ fn verify_token(
             }
         }
     });
-    for kind in [TokenIsAppContainer, TokenIsLessPrivilegedAppContainer] {
-        let value = token_buffer_observed(raw(&token), kind, observation)?[0] as u32;
-        observation.evidence(|evidence| {
-            if kind == TokenIsAppContainer {
-                evidence.app_container = Some(value);
-            } else {
-                evidence.less_privileged = Some(value);
-            }
-        });
-        if value != 1 {
-            return Err(UNAVAILABLE.into());
-        }
+    let container = token_buffer_observed(raw(&token), TokenIsAppContainer, observation)?[0] as u32;
+    observation.evidence(|evidence| evidence.app_container = Some(container));
+    if container != 1 {
+        return Err(UNAVAILABLE.into());
     }
     observation.enter(Phase::TokenPackage);
     let package_data = token_buffer_observed(raw(&token), TokenAppContainerSid, observation)?;
@@ -1590,7 +1773,10 @@ fn verify_token(
     if child & 1 == 0 || image & 3 != 3 {
         return Err(UNAVAILABLE.into());
     }
-    Ok(())
+    // Class 46 is rejected with STATUS_INVALID_INFO_CLASS on native 20348.
+    // Prove its documented LPAC authorization semantics on this actual token,
+    // while it is still suspended, with both positive and negative controls.
+    verify_lpac_access(raw(&token), capability, observation)
 }
 
 struct Launch {
@@ -1598,6 +1784,26 @@ struct Launch {
     stdout: std::sync::mpsc::Receiver<Vec<u8>>,
     stderr: std::sync::mpsc::Receiver<Vec<u8>>,
 }
+
+#[derive(Clone, Copy)]
+enum ContainerPolicy {
+    Lpac,
+    // A native negative control can create an ordinary AC, but no production
+    // caller can select it and no control ever resumes its primary thread.
+    #[cfg(test)]
+    OrdinaryAppContainer,
+}
+
+struct SuspendedLaunch {
+    thread: OwnedHandle,
+    process: Process,
+    stdin_read: OwnedHandle,
+    stdout_read: OwnedHandle,
+    stdout_write: OwnedHandle,
+    stderr_read: OwnedHandle,
+    stderr_write: OwnedHandle,
+}
+
 fn drain(handle: OwnedHandle, limit: usize) -> std::sync::mpsc::Receiver<Vec<u8>> {
     let (send, recv) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -1624,6 +1830,65 @@ fn launch(
     limit: usize,
     observation: &Observer,
 ) -> Result<Launch, String> {
+    let suspended = create_suspended(
+        exe,
+        args,
+        cwd,
+        home,
+        profile,
+        cap,
+        ContainerPolicy::Lpac,
+        observation,
+    )?;
+    verify_token(
+        raw(&suspended.process.process),
+        profile.sid.0,
+        cap.sid,
+        observation,
+    )?;
+    let SuspendedLaunch {
+        thread,
+        process,
+        stdin_read,
+        stdout_read,
+        stdout_write,
+        stderr_read,
+        stderr_write,
+    } = suspended;
+    observation.enter(Phase::Resume);
+    let resumed = unsafe { ResumeThread(raw(&thread)) };
+    let resume_error = (resumed == u32::MAX).then(|| unsafe { GetLastError().0 });
+    observation.evidence(|evidence| {
+        evidence.resume_result = Some(resumed);
+        if let Some(code) = resume_error {
+            evidence.native_status = Some(code);
+        }
+    });
+    if resumed == u32::MAX {
+        return Err(UNAVAILABLE.into());
+    }
+    drop(thread);
+    drop(stdin_read);
+    drop(stdout_write);
+    drop(stderr_write);
+    Ok(Launch {
+        process,
+        stdout: drain(stdout_read, limit),
+        stderr: drain(stderr_read, limit),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_suspended(
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+    home: &Path,
+    profile: &Profile,
+    cap: &RuntimeCapability,
+    policy: ContainerPolicy,
+    observation: &Observer,
+) -> Result<SuspendedLaunch, String> {
     observation.enter(Phase::Command);
     let app = wide(exe)?;
     let mut cmd = quote(exe.as_os_str())?;
@@ -1662,12 +1927,20 @@ fn launch(
     };
     let mitigations = NO_REMOTE_IMAGES | NO_LOW_LABEL_IMAGES | PREFER_SYSTEM32;
     observation.enter(Phase::Attributes);
-    let mut attributes = Attributes::new(5)?;
+    let mut attributes = Attributes::new(match policy {
+        ContainerPolicy::Lpac => 5,
+        #[cfg(test)]
+        ContainerPolicy::OrdinaryAppContainer => 4,
+    })?;
     attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &security)?;
-    attributes.set(
-        PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
-        &LPAC_OPT_OUT,
-    )?;
+    match policy {
+        ContainerPolicy::Lpac => attributes.set(
+            PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
+            &LPAC_OPT_OUT,
+        )?,
+        #[cfg(test)]
+        ContainerPolicy::OrdinaryAppContainer => {}
+    }
     attributes.set(
         PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
         &CHILD_RESTRICTED,
@@ -1727,27 +2000,14 @@ fn launch(
             raw(&process.process),
         ))?;
     }
-    verify_token(raw(&process.process), profile.sid.0, cap.sid, observation)?;
-    observation.enter(Phase::Resume);
-    let resumed = unsafe { ResumeThread(raw(&thread)) };
-    let resume_error = (resumed == u32::MAX).then(|| unsafe { GetLastError().0 });
-    observation.evidence(|evidence| {
-        evidence.resume_result = Some(resumed);
-        if let Some(code) = resume_error {
-            evidence.native_status = Some(code);
-        }
-    });
-    if resumed == u32::MAX {
-        return Err(UNAVAILABLE.into());
-    }
-    drop(thread);
-    drop(stdin_read);
-    drop(stdout_write);
-    drop(stderr_write);
-    Ok(Launch {
+    Ok(SuspendedLaunch {
+        thread,
         process,
-        stdout: drain(stdout_read, limit),
-        stderr: drain(stderr_read, limit),
+        stdin_read,
+        stdout_read,
+        stdout_write,
+        stderr_read,
+        stderr_write,
     })
 }
 
@@ -2206,6 +2466,7 @@ fn run_blocking(
             "runId":uuid::Uuid::new_v4().to_string(), "runtimeSha256":runtime.digest,
             "executable":actual_exe.strip_prefix(&runtime.root).map_err(|_| UNSAFE_FILE)?.to_string_lossy(),
             "policy":"lpac-v1", "tokenVerified":true, "childProcessDenied":true,
+            "lpacProof":"access-check-v1",
             "lowImageDenied":true, "jobStopped":true, "timedOut":timed_out,
             "trustedProbe":trusted_probe, "cancelled":was_cancelled,
             "taskId":task.0.file_name().ok_or(UNSAFE_FILE)?.to_string_lossy(),
