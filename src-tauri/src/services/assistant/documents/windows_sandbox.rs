@@ -5,7 +5,7 @@
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{EngineOutput, DEAD_PROXY};
 mod probe;
-use probe::{Observer, Phase, Receive};
+use probe::{Observer, Phase, Receive, TokenApi};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
@@ -28,7 +28,8 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR},
     Wdk::{
         Storage::FileSystem::{
-            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+            FileRenameInformation, NtQueryInformationToken, NtSetInformationFile,
+            FILE_RENAME_INFORMATION,
         },
         System::SystemServices::RtlGetVersion,
     },
@@ -1492,6 +1493,26 @@ fn verify_token(
     }
     let token = handle(token);
     observation.enter(Phase::TokenContainer);
+    observation.compare_token_queries(|api, kind, buffer, bytes, length| {
+        let buffer = buffer.map(|buffer| buffer.as_mut_ptr().cast());
+        let kind = windows::Win32::Security::TOKEN_INFORMATION_CLASS(kind);
+        match api {
+            TokenApi::GetTokenInformation => {
+                let result =
+                    unsafe { GetTokenInformation(raw(&token), kind, buffer, bytes, length) };
+                let status = result
+                    .as_ref()
+                    .err()
+                    .map_or(0, |error| error.code().0 as u32);
+                (result.is_ok(), status)
+            }
+            TokenApi::NtQueryInformationToken => {
+                let status =
+                    unsafe { NtQueryInformationToken(raw(&token), kind, buffer, bytes, length) };
+                (status.0 == 0, status.0 as u32)
+            }
+        }
+    });
     for kind in [TokenIsAppContainer, TokenIsLessPrivilegedAppContainer] {
         let value = token_buffer_observed(raw(&token), kind, observation)?[0] as u32;
         observation.evidence(|evidence| {

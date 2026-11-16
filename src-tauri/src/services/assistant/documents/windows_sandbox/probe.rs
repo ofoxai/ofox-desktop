@@ -91,6 +91,7 @@ pub(super) struct Evidence {
     pub profile_folder_has_parent: Option<bool>,
     pub profile_pin_complete: Option<bool>,
     pub token_queries: Vec<TokenQuery>,
+    pub token_comparisons: Vec<TokenComparison>,
     pub app_container: Option<u32>,
     pub less_privileged: Option<u32>,
     pub package_matches: Option<bool>,
@@ -120,6 +121,63 @@ pub(super) struct Evidence {
 pub(super) struct TokenQuery {
     pub kind: i32,
     pub required_bytes: u32,
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum TokenApi {
+    GetTokenInformation,
+    NtQueryInformationToken,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TokenComparison {
+    api: TokenApi,
+    kind: i32,
+    buffer_bytes: u32,
+    success: bool,
+    // HRESULT for GetTokenInformation, NTSTATUS for NtQueryInformationToken.
+    status: u32,
+    returned_bytes: u32,
+    length_written: bool,
+    buffer_written: bool,
+    first_dword: Option<u32>,
+}
+
+impl TokenComparison {
+    fn capture(
+        api: TokenApi,
+        kind: i32,
+        buffer_bytes: u32,
+        query: impl FnOnce(Option<&mut [u32; 2]>, u32, &mut u32) -> (bool, u32),
+    ) -> Self {
+        const BUFFER_SENTINELS: [u32; 2] = [0xa5a5_5a5a, 0x5a5a_a5a5];
+        const LENGTH_SENTINEL: u32 = 0x5a5a_5a5a;
+        let mut buffer = BUFFER_SENTINELS;
+        let mut length = LENGTH_SENTINEL;
+        let (success, status) = query(
+            (buffer_bytes != 0).then_some(&mut buffer),
+            buffer_bytes,
+            &mut length,
+        );
+        Self {
+            api,
+            kind,
+            buffer_bytes,
+            success,
+            status,
+            returned_bytes: length,
+            length_written: length != LENGTH_SENTINEL,
+            buffer_written: buffer != BUFFER_SENTINELS,
+            // A failed API call never makes any output-buffer value evidence.
+            first_dword: if success && buffer_bytes != 0 {
+                Some(buffer[0])
+            } else {
+                None
+            },
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -194,6 +252,33 @@ impl Observer {
         });
     }
 
+    pub fn compare_token_queries(
+        &self,
+        mut query: impl FnMut(TokenApi, i32, Option<&mut [u32; 2]>, u32, &mut u32) -> (bool, u32),
+    ) {
+        self.evidence(|evidence| {
+            if !evidence.token_comparisons.is_empty() {
+                return;
+            }
+            // This fixed matrix runs against the same suspended token. Its
+            // observations are never used by the original verification below.
+            for (api, kind) in [
+                (TokenApi::GetTokenInformation, 29),
+                (TokenApi::GetTokenInformation, 46),
+                (TokenApi::NtQueryInformationToken, 46),
+            ] {
+                for bytes in [0, 4, 8] {
+                    evidence.token_comparisons.push(TokenComparison::capture(
+                        api,
+                        kind,
+                        bytes,
+                        |buffer, bytes, length| query(api, kind, buffer, bytes, length),
+                    ));
+                }
+            }
+        });
+    }
+
     pub fn snapshot(&self) -> Option<serde_json::Value> {
         self.0.as_ref().map(|state| {
             let state = state.lock().unwrap_or_else(|error| error.into_inner());
@@ -240,6 +325,9 @@ mod tests {
         ordinary.failed();
         // The closure is not called at all for an ordinary model execution.
         ordinary.evidence(|_| panic!("ordinary runner allocated diagnostic state"));
+        ordinary.compare_token_queries(|_, _, _, _, _| {
+            panic!("ordinary runner issued an additional token query")
+        });
         assert!(ordinary.snapshot().is_none());
         let observation = Observer::fixed_probe();
         for _ in 0..1000 {
@@ -252,5 +340,77 @@ mod tests {
             report["evidence"]["tokenQueries"].as_array().unwrap().len(),
             16
         );
+    }
+
+    #[test]
+    fn fixed_token_matrix_retains_errors_without_failed_buffer_values() {
+        let observation = Observer::fixed_probe();
+        let mut calls = Vec::new();
+        observation.compare_token_queries(|api, kind, buffer, bytes, length| {
+            calls.push((serde_json::to_value(api).unwrap(), kind, bytes));
+            if let Some(buffer) = buffer {
+                buffer[0] = 0xdead_beef;
+                buffer[1] = 0xcafe_babe;
+            }
+            *length = 8;
+            (false, 0x8007_0057)
+        });
+        assert_eq!(
+            calls,
+            [
+                ("get_token_information", 29, 0),
+                ("get_token_information", 29, 4),
+                ("get_token_information", 29, 8),
+                ("get_token_information", 46, 0),
+                ("get_token_information", 46, 4),
+                ("get_token_information", 46, 8),
+                ("nt_query_information_token", 46, 0),
+                ("nt_query_information_token", 46, 4),
+                ("nt_query_information_token", 46, 8),
+            ]
+            .map(|(api, kind, bytes)| (serde_json::json!(api), kind, bytes))
+        );
+        // Repeated observation cannot create an unbounded query loop.
+        observation.compare_token_queries(|_, _, _, _, _| panic!("duplicate matrix"));
+        let report = observation.snapshot().unwrap();
+        let comparisons = report["evidence"]["tokenComparisons"].as_array().unwrap();
+        assert_eq!(comparisons.len(), 9);
+        for result in comparisons {
+            assert_eq!(result["success"], false);
+            assert_eq!(result["status"], 0x8007_0057u32);
+            assert_eq!(result["returnedBytes"], 8);
+            assert_eq!(result["lengthWritten"], true);
+            assert!(result["firstDword"].is_null());
+            assert_eq!(result["bufferWritten"], result["bufferBytes"] != 0);
+        }
+        let encoded = report.to_string();
+        assert!(!encoded.contains(&0xdead_beefu32.to_string()));
+        assert!(!encoded.contains(&0xcafe_babeu32.to_string()));
+    }
+
+    #[test]
+    fn successful_token_diagnostic_keeps_only_first_dword() {
+        let result =
+            TokenComparison::capture(TokenApi::GetTokenInformation, 46, 8, |buffer, _, length| {
+                let buffer = buffer.unwrap();
+                buffer[0] = 1;
+                buffer[1] = 0xcafe_babe;
+                *length = 4;
+                (true, 0)
+            });
+        let report = serde_json::to_value(result).unwrap();
+        assert_eq!(report["firstDword"], 1);
+        assert_eq!(report["returnedBytes"], 4);
+        assert_eq!(report["bufferWritten"], true);
+        assert!(!report.to_string().contains(&0xcafe_babeu32.to_string()));
+        let null_result =
+            TokenComparison::capture(TokenApi::NtQueryInformationToken, 46, 0, |buffer, _, _| {
+                assert!(buffer.is_none());
+                (true, 0)
+            });
+        let report = serde_json::to_value(null_result).unwrap();
+        assert!(report["firstDword"].is_null());
+        assert_eq!(report["bufferWritten"], false);
+        assert_eq!(report["lengthWritten"], false);
     }
 }
