@@ -4,6 +4,11 @@ use crate::services::assistant::process::{self, Child};
 use std::{io, path::Path, time::Duration};
 use tokio::task::JoinHandle;
 
+#[cfg(windows)]
+pub use super::windows_sandbox::{
+    probe_windows_document_engines, run_windows_engine_limited, verify_windows_document_engines,
+};
+
 /// How long one engine run may take before it is killed.
 pub const ENGINE_TIMEOUT: Duration = Duration::from_secs(60);
 

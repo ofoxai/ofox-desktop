@@ -124,7 +124,7 @@ jobs:
         shell: pwsh
 
       - name: Build Windows probes
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin verify_chatgpt_install --bin verify_tool_lifecycle
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --bin verify_chatgpt_install --bin verify_tool_lifecycle --bin verify_document_engine
 
       - name: Upload probe artifact
         uses: actions/upload-artifact@v7
@@ -182,6 +182,33 @@ jobs:
       - name: Windows lifecycle checks
         run: .\scripts\test-windows.ps1 -BackendOnly -OutputDirectory artifacts/windows-tests/ci
         shell: powershell
+
+      - name: Package document engine client acceptance
+        id: document-package
+        run: .\scripts\package-document-acceptance.ps1 -Commit $env:GITHUB_SHA -OutDirectory artifacts/document-engine-acceptance
+        shell: powershell
+
+      - name: Native document engine safety and functionality probes
+        run: .\artifacts\document-engine-acceptance\test-document-engine.ps1 -OutDirectory artifacts/document-engine-results
+        shell: powershell
+
+      - name: Upload document engine client acceptance package
+        if: ${{ always() && steps.document-package.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: document-engine-acceptance-${{ github.sha }}
+          path: artifacts/document-engine-acceptance/
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Upload native document engine results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: document-engine-results-${{ github.sha }}
+          path: artifacts/document-engine-results/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: Upload Windows verification logs
         if: always()

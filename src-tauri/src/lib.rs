@@ -79,6 +79,8 @@ pub use mcp::{
 };
 pub use provider::{Provider, ProviderMeta};
 pub use services::assistant;
+#[cfg(windows)]
+pub use services::assistant::documents::runner::verify_windows_document_engines;
 pub use services::library::{
     apply_operation as apply_resource_operation, assistant_target, delete_mcp_draft,
     preview_mcp_resource, recover_operation as recover_resource_operation, save_mcp_draft,

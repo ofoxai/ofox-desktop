@@ -1,7 +1,7 @@
 {
-  "_note": "binary wheels: version, file name and SHA-256 are copied from pyodide-lock.json of the pyodide npm package (the lock is the source of truth for Pyodide's own builds), pinned at the canonical jsDelivr URL; assistant-prepare.mjs honors OFOX_PYODIDE_BASE_URL to download them from a mirror and still verifies the SHA-256. pure wheels: the single py3-none-any wheel of each release on PyPI; the SHA-256 is PyPI's digest and was checked against the downloaded file. font: NotoSansSC-Regular.otf (Noto Sans CJK, SIL Open Font License 1.1) from the notofonts/noto-cjk release tag Sans2.004 (commit 523d033d6cb47f4a80c58a35753646f5c3608a78), downloaded once over TLS and its SHA-256 pinned here (trust on first verified download); the OFL text is pinned from the same tag. The Python engine is offered on macOS only, so only the platforms listed here stage it.",
+  "_note": "binary wheels: version, file name and SHA-256 are copied from pyodide-lock.json of the pyodide npm package (the lock is the source of truth for Pyodide's own builds), pinned at the canonical jsDelivr URL; assistant-prepare.mjs honors OFOX_PYODIDE_BASE_URL to download them from a mirror and still verifies the SHA-256. pure wheels: the single py3-none-any wheel of each release on PyPI; the SHA-256 is PyPI's digest and was checked against the downloaded file. font: NotoSansSC-Regular.otf (Noto Sans CJK, SIL Open Font License 1.1) from the notofonts/noto-cjk release tag Sans2.004 (commit 523d033d6cb47f4a80c58a35753646f5c3608a78), downloaded once over TLS and its SHA-256 pinned here (trust on first verified download); the OFL text is pinned from the same tag. Resources are staged on the listed macOS and Windows x64 targets; runtime Python admission additionally requires a working platform sandbox.",
   "pyodide": "314.0.7",
-  "platforms": ["darwin-arm64", "darwin-x64"],
+  "platforms": ["darwin-arm64", "darwin-x64", "win32-x64"],
   "binary": [
     {
       "name": "numpy",

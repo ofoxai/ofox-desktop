@@ -871,33 +871,43 @@ pub(super) fn open_page(page: &Path) -> Result<(fs::File, u64), String> {
 /// either) and the file is opened without blocking: a link, pipe or device
 /// left in its place is refused instead of read or waited on.
 pub(super) fn open_written(page: &Path, max: u64) -> Result<(fs::File, u64), String> {
-    let real = |path: &Path, dir: bool| {
-        fs::symlink_metadata(path).is_ok_and(
-            |meta| {
-                if dir {
-                    meta.is_dir()
-                } else {
-                    meta.is_file()
-                }
-            },
-        )
-    };
-    if !page.parent().is_some_and(|folder| real(folder, true)) || !real(page, false) {
-        return Err(UNREADABLE.into());
-    }
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let root = page.parent().ok_or(UNREADABLE)?;
+        let file = super::documents::windows_sandbox::open_regular(root, page, max)
+            .map_err(|_| UNREADABLE)?;
+        let size = file.metadata().map_err(|_| UNREADABLE)?.len();
+        return Ok((file, size));
     }
-    let file = options.open(page).map_err(|_| UNREADABLE)?;
-    let meta = file.metadata().map_err(|_| UNREADABLE)?;
-    if !meta.is_file() || meta.len() > max {
-        return Err(UNREADABLE.into());
+    #[cfg(not(windows))]
+    {
+        let real =
+            |path: &Path, dir: bool| {
+                fs::symlink_metadata(path).is_ok_and(|meta| {
+                    if dir {
+                        meta.is_dir()
+                    } else {
+                        meta.is_file()
+                    }
+                })
+            };
+        if !page.parent().is_some_and(|folder| real(folder, true)) || !real(page, false) {
+            return Err(UNREADABLE.into());
+        }
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(page).map_err(|_| UNREADABLE)?;
+        let meta = file.metadata().map_err(|_| UNREADABLE)?;
+        if !meta.is_file() || meta.len() > max {
+            return Err(UNREADABLE.into());
+        }
+        Ok((file, meta.len()))
     }
-    Ok((file, meta.len()))
 }
 
 /// The MIME type of `source`, by its extension.
