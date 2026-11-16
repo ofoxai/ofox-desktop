@@ -376,6 +376,82 @@ fn document_fixed_probe_errors_keep_only_numeric_native_statuses() {
 }
 
 #[test]
+fn document_fixed_probe_worker_failure_keeps_numeric_evidence_after_cleanup() {
+    let mut trace = ProbeTrace::new();
+    trace.engine(ProbeStage::NodeIsolation);
+    let observation = trace.observation.clone();
+    observation.enter(Phase::TokenMitigations);
+    observation.evidence(|evidence| {
+        evidence.app_container = Some(1);
+        evidence.less_privileged = Some(1);
+        evidence.package_matches = Some(true);
+        evidence.capability_groups = Some(1);
+        evidence.capability_matches = Some(true);
+        evidence.integrity_subauthorities = Some(1);
+        evidence.integrity_rid = Some(4096);
+        evidence.child_policy = Some(1);
+        evidence.image_policy = Some(0);
+        evidence.native_status = Some(5);
+        evidence.stderr_receive = Some(Receive::Disconnected);
+    });
+    observation.failed();
+    observation.enter(Phase::TaskCleanup);
+    observation.evidence(|evidence| evidence.task_cleanup = Some(true));
+    observation.enter(Phase::ProfileCleanup);
+    observation.evidence(|evidence| evidence.profile_cleanup = Some(true));
+    let private =
+        r"C:\Users\private-account\credentials S-1-5-21-111111-222222-333333-1001 condition-secret";
+    let error = trace.failure(private, &["windowsBuild", "condition-secret"]);
+    let detail: serde_json::Value =
+        serde_json::from_str(error.split_once(":probe ").unwrap().1).unwrap();
+    assert_eq!(detail["worker"]["firstFailure"], "token_mitigations");
+    assert_eq!(detail["worker"]["stage"], "profile_cleanup");
+    assert_eq!(detail["worker"]["evidence"]["imagePolicy"], 0);
+    assert_eq!(detail["worker"]["evidence"]["nativeStatus"], 5);
+    assert_eq!(
+        detail["worker"]["evidence"]["stderrReceive"],
+        "disconnected"
+    );
+    assert_eq!(detail["worker"]["evidence"]["taskCleanup"], true);
+    assert_eq!(detail["worker"]["evidence"]["profileCleanup"], true);
+    assert!(detail["engine"].is_null());
+    assert_eq!(
+        detail["completedChecks"],
+        serde_json::json!(["windowsBuild"])
+    );
+    for secret in [
+        "private-account",
+        "credentials",
+        "111111",
+        "condition-secret",
+        "C:\\Users",
+    ] {
+        assert!(!error.contains(secret));
+    }
+}
+
+#[test]
+fn document_fixed_probe_owner_mismatch_keeps_original_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let user = current_user().unwrap();
+    let path = root.path().join("owned-cache-fixture");
+    create_directory(&path, &private_sddl(&user)).unwrap();
+    let observation = Observer::fixed_probe();
+    let error =
+        owned_directory_observed(&path, "synthetic mismatched owner", &observation).unwrap_err();
+    observation.failed();
+    assert_eq!(error, UNAVAILABLE);
+    assert_eq!(
+        owned_directory(&path, "synthetic mismatched owner").unwrap_err(),
+        error
+    );
+    let report = observation.snapshot().unwrap();
+    assert_eq!(report["firstFailure"], "cache_owner_match");
+    assert_eq!(report["evidence"]["cacheOwnerMatches"], false);
+    assert!(!report.to_string().contains(&user));
+}
+
+#[test]
 fn document_win32_paths_are_lexical_extended_absolute_paths() {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;

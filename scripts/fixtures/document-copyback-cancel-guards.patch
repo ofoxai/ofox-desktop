@@ -1,6 +1,6 @@
 --- a/src-tauri/src/services/assistant/documents/windows_sandbox.rs
 +++ b/src-tauri/src/services/assistant/documents/windows_sandbox.rs
-@@ -764,6 +764,9 @@
+@@ -934,6 +934,9 @@
              // Cancelling during a potentially large staging write/fsync must
              // delete this owned temporary, not publish it afterwards. Only
              // the single native rename itself is non-interruptible.
@@ -10,15 +10,15 @@
              // CREATE_NEW above omitted FILE_FLAG_OVERLAPPED, so this file
              // handle has synchronous I/O and these buffers outlive the call.
              // Win32's class-3 wrapper rejects relative RootDirectory on the
-@@ -1787,6 +1790,7 @@
-             .map_err(|_| UNAVAILABLE.to_owned())?;
+@@ -2147,6 +2150,7 @@
+         observation.enter(Phase::Copyback);
          #[cfg(test)]
          pause_copyback(&cwd, CopybackPoint::Drained)?;
 +        was_cancelled |= cancelled.load(Ordering::Acquire);
          if !timed_out && !was_cancelled && status == 0 {
              let outputs = files(&task.0, MAX_TASK_BYTES)?;
              // Original cwd is never granted to the LPAC. Keep its directory handle
-@@ -1795,6 +1799,10 @@
+@@ -2155,6 +2159,10 @@
              #[cfg(test)]
              let mut published = 0;
              for (relative, bytes) in outputs {
@@ -29,7 +29,7 @@
                  if relative.starts_with(home_relative) {
                      continue;
                  }
-@@ -1839,7 +1847,13 @@
+@@ -2212,7 +2220,13 @@
      if task_cleanup.is_err() || profile_cleanup.is_err() {
          return Err(cleanup_failed());
      }

@@ -4,6 +4,8 @@
 //! No caller may advertise Python merely because this module compiles. The
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{EngineOutput, DEAD_PROXY};
+mod probe;
+use probe::{Observer, Phase, Receive};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
@@ -32,8 +34,8 @@ use windows::{
     },
     Win32::{
         Foundation::{
-            LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, HLOCAL,
-            NTSTATUS, STATUS_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
+            GetLastError, LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAGS,
+            HANDLE_FLAG_INHERIT, HLOCAL, NTSTATUS, STATUS_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{
@@ -239,14 +241,16 @@ fn sid_string(sid: PSID) -> Result<String, String> {
         result
     }
 }
-fn token_buffer(
+fn token_buffer_observed(
     token: HANDLE,
     kind: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
+    observation: &Observer,
 ) -> Result<Vec<usize>, String> {
     let mut length = 0;
     unsafe {
         let _ = GetTokenInformation(token, kind, None, 0, &mut length);
     }
+    observation.token_query(kind.0, length);
     if length == 0 || length > 64 * 1024 {
         return Err(UNAVAILABLE.into());
     }
@@ -263,6 +267,9 @@ fn token_buffer(
     Ok(data)
 }
 fn current_user() -> Result<String, String> {
+    current_user_observed(&Observer::default())
+}
+fn current_user_observed(observation: &Observer) -> Result<String, String> {
     let mut token = HANDLE::default();
     unsafe {
         win(OpenProcessToken(
@@ -272,7 +279,7 @@ fn current_user() -> Result<String, String> {
         ))?;
     }
     let token = handle(token);
-    let data = token_buffer(raw(&token), TokenUser)?;
+    let data = token_buffer_observed(raw(&token), TokenUser, observation)?;
     sid_string(unsafe { (*(data.as_ptr().cast::<TOKEN_USER>())).User.Sid })
 }
 
@@ -284,6 +291,9 @@ struct RuntimeCapability {
 }
 impl RuntimeCapability {
     fn new() -> Result<Self, String> {
+        Self::new_observed(&Observer::default())
+    }
+    fn new_observed(observation: &Observer) -> Result<Self, String> {
         let name = wide(RUNTIME_CAPABILITY)?;
         let (mut groups, mut count, mut sids, mut sid_count) =
             (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
@@ -295,6 +305,10 @@ impl RuntimeCapability {
                 &mut sids,
                 &mut sid_count,
             ))?;
+            observation.evidence(|evidence| {
+                evidence.capability_count = Some(sid_count);
+                evidence.capability_array_present = Some(!sids.is_null());
+            });
             let mut allocations = Vec::new();
             for i in 0..count {
                 allocations.push(Local((*groups.add(i as usize)).0));
@@ -354,12 +368,22 @@ fn private_sddl(user: &str) -> String {
     // group owner. Bind ownership to the actual caller SID explicitly.
     format!("O:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
 }
+#[cfg(test)]
 fn owned_directory(path: &Path, user: &str) -> Result<File, String> {
+    owned_directory_observed(path, user, &Observer::default())
+}
+fn owned_directory_observed(
+    path: &Path,
+    user: &str,
+    observation: &Observer,
+) -> Result<File, String> {
+    observation.enter(Phase::CacheOwnerOpen);
     let file = open_path(path, true)?;
     let mut owner = PSID::default();
     let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    observation.enter(Phase::CacheOwnerQuery);
     unsafe {
-        GetSecurityInfo(
+        let queried = GetSecurityInfo(
             HANDLE(file.as_raw_handle()),
             SE_FILE_OBJECT,
             OWNER_SECURITY_INFORMATION,
@@ -368,11 +392,15 @@ fn owned_directory(path: &Path, user: &str) -> Result<File, String> {
             None,
             None,
             Some(&mut descriptor),
-        )
-        .ok()
-        .map_err(|_| UNAVAILABLE.to_owned())?;
+        );
+        if queried.0 != 0 {
+            observation.evidence(|evidence| evidence.native_status = Some(queried.0));
+        }
+        queried.ok().map_err(|_| UNAVAILABLE.to_owned())?;
         let allocation = Local(descriptor.0);
+        observation.enter(Phase::CacheOwnerMatch);
         let matches = sid_string(owner)? == user;
+        observation.evidence(|evidence| evidence.cache_owner_matches = Some(matches));
         drop(allocation);
         if !matches {
             return Err(UNAVAILABLE.into());
@@ -1003,27 +1031,44 @@ fn cache_runtime(
     capability: &RuntimeCapability,
     user: &str,
 ) -> Result<CachedRuntime, String> {
+    cache_runtime_observed(source, capability, user, &Observer::default())
+}
+fn cache_runtime_observed(
+    source: &Path,
+    capability: &RuntimeCapability,
+    user: &str,
+    observation: &Observer,
+) -> Result<CachedRuntime, String> {
+    observation.enter(Phase::CacheSource);
     let source = io(source.canonicalize())?;
+    observation.enter(Phase::CacheSourceDigest);
     let digest = tree_digest_at(&source, MAX_TREE_BYTES)?;
+    observation.enter(Phase::CacheDescriptor);
     let cap = sid_string(capability.sid)?;
     let expected_acl = format!(
         "{}(A;OICI;FRFX;;;{cap})S:(ML;OICI;NW;;;ME)",
         private_sddl(user)
     );
+    observation.enter(Phase::CacheLock);
     let mut cached = CACHE
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| UNAVAILABLE)?;
     if let Some(runtime) = cached.get(&source) {
         if runtime.digest == digest {
-            let pin = owned_directory(&runtime.root, user)?;
+            observation.evidence(|evidence| evidence.cache_hit = Some(true));
+            let pin = owned_directory_observed(&runtime.root, user, observation)?;
+            observation.enter(Phase::CacheAcl);
             verify_cache_acl(&pin, &expected_acl)?;
+            observation.enter(Phase::CacheDigest);
             if tree_digest_at(&runtime.root, MAX_TREE_BYTES)? != digest {
                 return Err(UNSAFE_FILE.into());
             }
             return Ok(runtime.clone());
         }
     }
+    observation.evidence(|evidence| evidence.cache_hit = Some(false));
+    observation.enter(Phase::CacheParent);
     let private_parent = std::env::temp_dir().join(format!(
         "ofox-document-runtime-{}",
         &format!("{:x}", Sha256::digest(user.as_bytes()))[..16]
@@ -1031,16 +1076,20 @@ fn cache_runtime(
     if !private_parent.exists() {
         create_directory(&private_parent, &private_sddl(user))?;
     }
-    let _parent = owned_directory(&private_parent, user)?;
+    let _parent = owned_directory_observed(&private_parent, user, observation)?;
     let root = private_parent.join(&digest);
     if !root.exists() {
+        observation.enter(Phase::CacheSourceRead);
         let contents = files(&source, MAX_TREE_BYTES)?;
         if tree_digest(&contents) != digest {
             return Err(RUNTIME_CHANGED.into());
         }
         let staging = private_parent.join(format!("staging-{}", uuid::Uuid::new_v4().simple()));
+        observation.enter(Phase::CacheStagingCreate);
         create_directory(&staging, &expected_acl)?;
+        observation.enter(Phase::CacheStagingWrite);
         let prepared = write_files(&staging, &contents).and_then(|()| {
+            observation.enter(Phase::CacheStagingDigest);
             if tree_digest_at(&staging, MAX_TREE_BYTES)? != digest {
                 return Err(UNSAFE_FILE.into());
             }
@@ -1050,6 +1099,7 @@ fn cache_runtime(
             let _ = fs::remove_dir_all(&staging);
             return Err(error);
         }
+        observation.enter(Phase::CachePublish);
         if fs::rename(&staging, &root).is_err() {
             let _ = fs::remove_dir_all(&staging);
             // A concurrent complete publisher is acceptable only after all
@@ -1059,8 +1109,10 @@ fn cache_runtime(
             }
         }
     }
-    let root_handle = owned_directory(&root, user)?;
+    let root_handle = owned_directory_observed(&root, user, observation)?;
+    observation.enter(Phase::CacheAcl);
     verify_cache_acl(&root_handle, &expected_acl)?;
+    observation.enter(Phase::CacheDigest);
     if tree_digest_at(&root, MAX_TREE_BYTES)? != digest {
         return Err(UNSAFE_FILE.into());
     }
@@ -1102,25 +1154,39 @@ impl Profile {
             disposed: false,
         })
     }
+    #[cfg(test)]
     fn make_low_profile(&mut self) -> Result<(), String> {
+        self.make_low_profile_observed(&Observer::default())
+    }
+    fn make_low_profile_observed(&mut self, observation: &Observer) -> Result<(), String> {
+        observation.enter(Phase::ProfileFolder);
         let sid = wide(sid_string(self.sid.0)?)?;
         let folder = unsafe { win(GetAppContainerFolderPath(PCWSTR(sid.as_ptr())))? };
+        observation.enter(Phase::ProfileFolderDecode);
         let result = unsafe { folder.to_string().map_err(|_| UNAVAILABLE.to_owned()) };
         unsafe {
             CoTaskMemFree(Some(folder.0.cast()));
         }
         let path = PathBuf::from(result?);
-        if !path
+        observation.enter(Phase::ProfileFolderValidate);
+        let folder_is_ac = path
             .file_name()
-            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("AC"))
-        {
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("AC"));
+        observation.evidence(|evidence| {
+            evidence.profile_folder_is_ac = Some(folder_is_ac);
+            evidence.profile_folder_has_parent = Some(path.parent().is_some());
+        });
+        if !folder_is_ac {
             return Err(UNAVAILABLE.into());
         }
         let path = path.parent().ok_or(UNAVAILABLE)?.to_path_buf();
         // Profile is freshly created, before untrusted code can plant links.
+        observation.enter(Phase::ProfilePin);
         self.pins = pin_ancestors(&path)?;
+        observation.evidence(|evidence| evidence.profile_pin_complete = Some(true));
         self.root_pinned = true;
         self.directory = Some(path.clone());
+        observation.enter(Phase::ProfileLabelOpen);
         let name = wide_path(&path)?;
         // LABEL_SECURITY_INFORMATION requires WRITE_OWNER, which is never
         // requested on an engine-created or caller-supplied object.
@@ -1135,6 +1201,7 @@ impl Profile {
                 None,
             ))?)
         };
+        observation.enter(Phase::ProfileLabelDescriptor);
         let descriptor = security_descriptor("S:(ML;OICI;NW;;;LW)")?;
         let (mut present, mut defaulted, mut acl) = (BOOL(0), BOOL(0), std::ptr::null_mut());
         unsafe {
@@ -1144,7 +1211,8 @@ impl Profile {
                 &mut acl,
                 &mut defaulted,
             ))?;
-            SetSecurityInfo(
+            observation.enter(Phase::ProfileLabelSet);
+            let labelled = SetSecurityInfo(
                 raw(&file),
                 SE_FILE_OBJECT,
                 LABEL_SECURITY_INFORMATION,
@@ -1152,9 +1220,11 @@ impl Profile {
                 None,
                 None,
                 Some(acl),
-            )
-            .ok()
-            .map_err(|_| UNAVAILABLE.to_owned())?;
+            );
+            if labelled.0 != 0 {
+                observation.evidence(|evidence| evidence.native_status = Some(labelled.0));
+            }
+            labelled.ok().map_err(|_| UNAVAILABLE.to_owned())?;
         }
         Ok(())
     }
@@ -1235,15 +1305,24 @@ fn task_directory(user: &str, sid: PSID) -> Result<TaskDirectory, String> {
 }
 
 fn os_version() -> Result<OSVERSIONINFOW, String> {
+    os_version_observed(&Observer::default())
+}
+fn os_version_observed(observation: &Observer) -> Result<OSVERSIONINFOW, String> {
     let mut version = OSVERSIONINFOW {
         dwOSVersionInfoSize: size_of::<OSVERSIONINFOW>() as u32,
         ..Default::default()
     };
     unsafe {
-        RtlGetVersion(&mut version)
-            .ok()
-            .map_err(|_| UNAVAILABLE.to_owned())?;
+        let status = RtlGetVersion(&mut version);
+        if status.0 != 0 {
+            observation.evidence(|evidence| evidence.native_status = Some(status.0 as u32));
+        }
+        status.ok().map_err(|_| UNAVAILABLE.to_owned())?;
     }
+    observation.evidence(|evidence| {
+        evidence.os_major = Some(version.dwMajorVersion);
+        evidence.os_build = Some(version.dwBuildNumber);
+    });
     if version.dwMajorVersion < 10 || version.dwBuildNumber < 17763 {
         return Err(UNAVAILABLE.into());
     }
@@ -1400,49 +1479,76 @@ impl Drop for Process {
         }
     }
 }
-fn verify_token(process: HANDLE, package: PSID, capability: PSID) -> Result<(), String> {
+fn verify_token(
+    process: HANDLE,
+    package: PSID,
+    capability: PSID,
+    observation: &Observer,
+) -> Result<(), String> {
+    observation.enter(Phase::TokenOpen);
     let mut token = HANDLE::default();
     unsafe {
         win(OpenProcessToken(process, TOKEN_QUERY, &mut token))?;
     }
     let token = handle(token);
+    observation.enter(Phase::TokenContainer);
     for kind in [TokenIsAppContainer, TokenIsLessPrivilegedAppContainer] {
-        if token_buffer(raw(&token), kind)?[0] as u32 != 1 {
+        let value = token_buffer_observed(raw(&token), kind, observation)?[0] as u32;
+        observation.evidence(|evidence| {
+            if kind == TokenIsAppContainer {
+                evidence.app_container = Some(value);
+            } else {
+                evidence.less_privileged = Some(value);
+            }
+        });
+        if value != 1 {
             return Err(UNAVAILABLE.into());
         }
     }
-    let package_data = token_buffer(raw(&token), TokenAppContainerSid)?;
+    observation.enter(Phase::TokenPackage);
+    let package_data = token_buffer_observed(raw(&token), TokenAppContainerSid, observation)?;
     let actual_package = unsafe {
         &*package_data
             .as_ptr()
             .cast::<TOKEN_APPCONTAINER_INFORMATION>()
     };
     unsafe {
-        win(EqualSid(actual_package.TokenAppContainer, package))?;
+        let matched = EqualSid(actual_package.TokenAppContainer, package);
+        observation.evidence(|evidence| evidence.package_matches = Some(matched.is_ok()));
+        win(matched)?;
     }
-    let capabilities = token_buffer(raw(&token), TokenCapabilities)?;
+    observation.enter(Phase::TokenCapabilities);
+    let capabilities = token_buffer_observed(raw(&token), TokenCapabilities, observation)?;
     let groups = unsafe { &*capabilities.as_ptr().cast::<TOKEN_GROUPS>() };
+    observation.evidence(|evidence| evidence.capability_groups = Some(groups.GroupCount));
     if groups.GroupCount != 1 {
         return Err(UNAVAILABLE.into());
     }
     unsafe {
-        win(EqualSid(groups.Groups[0].Sid, capability))?;
+        let matched = EqualSid(groups.Groups[0].Sid, capability);
+        observation.evidence(|evidence| evidence.capability_matches = Some(matched.is_ok()));
+        win(matched)?;
     }
-    let data = token_buffer(raw(&token), TokenIntegrityLevel)?;
+    observation.enter(Phase::TokenIntegrity);
+    let data = token_buffer_observed(raw(&token), TokenIntegrityLevel, observation)?;
     let label = unsafe { &*data.as_ptr().cast::<TOKEN_MANDATORY_LABEL>() };
+    let subauthorities = unsafe { *GetSidSubAuthorityCount(label.Label.Sid) };
+    observation.evidence(|evidence| {
+        evidence.integrity_subauthorities = Some(subauthorities);
+    });
     let integrity = unsafe {
         *GetSidSubAuthority(
             label.Label.Sid,
-            (*GetSidSubAuthorityCount(label.Label.Sid) as u32)
-                .checked_sub(1)
-                .ok_or(UNAVAILABLE)?,
+            (subauthorities as u32).checked_sub(1).ok_or(UNAVAILABLE)?,
         )
     };
+    observation.evidence(|evidence| evidence.integrity_rid = Some(integrity));
     if integrity > 4096 {
         return Err(UNAVAILABLE.into());
     }
     // Both policies have a DWORD flags layout. Verify actual kernel state,
     // not just successful construction of the startup attribute list.
+    observation.enter(Phase::TokenMitigations);
     let (mut child, mut image) = (0u32, 0u32);
     unsafe {
         win(GetProcessMitigationPolicy(
@@ -1451,12 +1557,14 @@ fn verify_token(process: HANDLE, package: PSID, capability: PSID) -> Result<(), 
             (&mut child as *mut u32).cast(),
             size_of::<u32>(),
         ))?;
+        observation.evidence(|evidence| evidence.child_policy = Some(child));
         win(GetProcessMitigationPolicy(
             process,
             ProcessImageLoadPolicy,
             (&mut image as *mut u32).cast(),
             size_of::<u32>(),
         ))?;
+        observation.evidence(|evidence| evidence.image_policy = Some(image));
     }
     if child & 1 == 0 || image & 3 != 3 {
         return Err(UNAVAILABLE.into());
@@ -1493,7 +1601,9 @@ fn launch(
     profile: &Profile,
     cap: &RuntimeCapability,
     limit: usize,
+    observation: &Observer,
 ) -> Result<Launch, String> {
+    observation.enter(Phase::Command);
     let app = wide(exe)?;
     let mut cmd = quote(exe.as_os_str())?;
     for arg in args {
@@ -1502,7 +1612,9 @@ fn launch(
     }
     let mut command = wide(cmd)?;
     let cwd = wide(cwd)?;
+    observation.enter(Phase::Environment);
     let env = environment(home)?;
+    observation.enter(Phase::Pipes);
     let (stdin_read, stdin_write) = pipe()?;
     let (stdout_read, stdout_write) = pipe()?;
     let (stderr_read, stderr_write) = pipe()?;
@@ -1528,6 +1640,7 @@ fn launch(
         Reserved: 0,
     };
     let mitigations = NO_REMOTE_IMAGES | NO_LOW_LABEL_IMAGES | PREFER_SYSTEM32;
+    observation.enter(Phase::Attributes);
     let mut attributes = Attributes::new(5)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &security)?;
     attributes.set(
@@ -1549,9 +1662,11 @@ fn launch(
     startup.StartupInfo.hStdInput = inherited[0];
     startup.StartupInfo.hStdOutput = inherited[1];
     startup.StartupInfo.hStdError = inherited[2];
+    observation.enter(Phase::JobCreate);
     let job = unsafe { handle(win(CreateJobObjectW(None, PCWSTR::null()))?) };
     let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    observation.enter(Phase::JobLimits);
     unsafe {
         win(SetInformationJobObject(
             raw(&job),
@@ -1561,6 +1676,7 @@ fn launch(
         ))?;
     }
     let mut info = PROCESS_INFORMATION::default();
+    observation.enter(Phase::ProcessCreate);
     unsafe {
         win(CreateProcessW(
             PCWSTR(app.as_ptr()),
@@ -1583,14 +1699,24 @@ fn launch(
         job,
     };
     let thread = handle(info.hThread);
+    observation.enter(Phase::JobAssign);
     unsafe {
         win(AssignProcessToJobObject(
             raw(&process.job),
             raw(&process.process),
         ))?;
     }
-    verify_token(raw(&process.process), profile.sid.0, cap.sid)?;
-    if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
+    verify_token(raw(&process.process), profile.sid.0, cap.sid, observation)?;
+    observation.enter(Phase::Resume);
+    let resumed = unsafe { ResumeThread(raw(&thread)) };
+    let resume_error = (resumed == u32::MAX).then(|| unsafe { GetLastError().0 });
+    observation.evidence(|evidence| {
+        evidence.resume_result = Some(resumed);
+        if let Some(code) = resume_error {
+            evidence.native_status = Some(code);
+        }
+    });
+    if resumed == u32::MAX {
         return Err(UNAVAILABLE.into());
     }
     drop(thread);
@@ -1748,6 +1874,36 @@ async fn run_candidate(
     limit: usize,
     trusted_probe: bool,
 ) -> Result<EngineOutput, String> {
+    run_candidate_observed(
+        exe,
+        args,
+        cwd,
+        home,
+        read_root,
+        timeout,
+        limit,
+        trusted_probe,
+        Observer::default(),
+    )
+    .await
+}
+#[allow(clippy::too_many_arguments)]
+async fn run_candidate_observed(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    limit: usize,
+    trusted_probe: bool,
+    observation: Observer,
+) -> Result<EngineOutput, String> {
+    let observation = if trusted_probe {
+        observation
+    } else {
+        Observer::default()
+    };
     let python = args
         .first()
         .is_some_and(|arg| Path::new(arg).ends_with("python/runner.mjs"));
@@ -1771,11 +1927,12 @@ async fn run_candidate(
     );
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = CancelOnDrop(cancelled.clone());
+    let worker_observation = observation.clone();
     let answer = tokio::task::spawn_blocking(move || {
         // Keep this owned guard in the worker: cancelling the awaiting future
         // must not admit another Pyodide before its Job/disposal is complete.
         let _python_turn = python_turn;
-        run_blocking(
+        let result = run_blocking(
             &exe,
             &args,
             &cwd,
@@ -1785,10 +1942,22 @@ async fn run_candidate(
             limit,
             &cancelled,
             trusted_probe,
-        )
+            &worker_observation,
+        );
+        if result.is_err() {
+            worker_observation.failed();
+        }
+        result
     })
     .await
-    .map_err(|_| UNAVAILABLE.to_owned())?;
+    .map_err(|error| {
+        observation.evidence(|evidence| {
+            evidence.worker_join_panicked = Some(error.is_panic());
+            evidence.worker_join_cancelled = Some(error.is_cancelled());
+        });
+        observation.failed();
+        UNAVAILABLE.to_owned()
+    })?;
     drop(guard);
     answer
 }
@@ -1803,12 +1972,17 @@ fn run_blocking(
     limit: usize,
     cancelled: &AtomicBool,
     trusted_probe: bool,
+    observation: &Observer,
 ) -> Result<EngineOutput, String> {
-    os_version()?;
-    let user = current_user()?;
-    let capability = RuntimeCapability::new()?;
-    let runtime = cache_runtime(read_root, &capability, &user)?;
+    observation.enter(Phase::OsVersion);
+    os_version_observed(observation)?;
+    observation.enter(Phase::CurrentUser);
+    let user = current_user_observed(observation)?;
+    observation.enter(Phase::RuntimeCapability);
+    let capability = RuntimeCapability::new_observed(observation)?;
+    let runtime = cache_runtime_observed(read_root, &capability, &user, observation)?;
     if !trusted_probe {
+        observation.enter(Phase::Admission);
         let admitted = ADMITTED
             .get_or_init(Default::default)
             .lock()
@@ -1817,6 +1991,7 @@ fn run_blocking(
             return Err("assistant_document_sandbox_unproven_runtime".into());
         }
     }
+    observation.enter(Phase::InputPaths);
     let cwd = io(cwd.canonicalize())?;
     let home = io(home.canonicalize())?;
     let home_relative = home
@@ -1828,23 +2003,36 @@ fn run_blocking(
     {
         return Err(UNSAFE_FILE.into());
     }
+    observation.enter(Phase::InputSnapshot);
     let inputs = files(&cwd, MAX_TASK_BYTES)?;
+    observation.enter(Phase::ProfileCreate);
     let mut profile = Profile::new(&capability)?;
-    if let Err(error) = profile.make_low_profile() {
-        dispose_profile(&mut profile)?;
+    if let Err(error) = profile.make_low_profile_observed(observation) {
+        observation.failed();
+        observation.enter(Phase::ProfileCleanup);
+        let cleanup = dispose_profile(&mut profile);
+        observation.evidence(|evidence| evidence.profile_cleanup = Some(cleanup.is_ok()));
+        cleanup?;
         return Err(error);
     }
+    observation.enter(Phase::TaskCreate);
     let mut task = match task_directory(&user, profile.sid.0) {
         Ok(task) => task,
         Err(error) => {
-            dispose_profile(&mut profile)?;
+            observation.failed();
+            observation.enter(Phase::ProfileCleanup);
+            let cleanup = dispose_profile(&mut profile);
+            observation.evidence(|evidence| evidence.profile_cleanup = Some(cleanup.is_ok()));
+            cleanup?;
             return Err(error);
         }
     };
     #[cfg(test)]
     let mut active = None;
     let executed: Result<(EngineOutput, serde_json::Value, bool), String> = (|| {
+        observation.enter(Phase::TaskCopy);
         write_files(&task.0, &inputs)?;
+        observation.enter(Phase::TaskHome);
         let task_home = task.0.join(home_relative);
         io(fs::create_dir_all(&task_home))?;
         let actual_exe = PathBuf::from(remap(&exe.to_string_lossy(), &runtime, &cwd, &task.0)?);
@@ -1863,6 +2051,7 @@ fn run_blocking(
             &profile,
             &capability,
             limit,
+            observation,
         )?;
         #[cfg(test)]
         {
@@ -1870,8 +2059,16 @@ fn run_blocking(
         }
         let deadline = Instant::now() + timeout;
         let mut was_cancelled = false;
+        observation.enter(Phase::ProcessWait);
         let timed_out = loop {
             let state = unsafe { WaitForSingleObject(raw(&launched.process.process), 25) };
+            let wait_error = (state.0 == u32::MAX).then(|| unsafe { GetLastError().0 });
+            observation.evidence(|evidence| {
+                evidence.process_wait = Some(state.0);
+                if let Some(code) = wait_error {
+                    evidence.native_status = Some(code);
+                }
+            });
             if state == WAIT_OBJECT_0 {
                 break false;
             }
@@ -1886,22 +2083,39 @@ fn run_blocking(
                 break true;
             }
         };
+        observation.evidence(|evidence| {
+            evidence.timed_out = Some(timed_out);
+            evidence.cancelled = Some(was_cancelled);
+        });
         let mut status = 0u32;
         if !timed_out && !was_cancelled {
+            observation.enter(Phase::ProcessStatus);
             unsafe {
                 win(GetExitCodeProcess(
                     raw(&launched.process.process),
                     &mut status,
                 ))?;
             }
+            observation.evidence(|evidence| evidence.process_status = Some(status));
         }
         // Stop/wait the whole owned Job before any privileged read or cleanup.
+        observation.enter(Phase::JobStop);
         unsafe {
             win(TerminateJobObject(raw(&launched.process.job), 1))?;
         }
-        if unsafe { WaitForSingleObject(raw(&launched.process.process), 5000) } != WAIT_OBJECT_0 {
+        observation.enter(Phase::JobProcessWait);
+        let stopped = unsafe { WaitForSingleObject(raw(&launched.process.process), 5000) };
+        let wait_error = (stopped.0 == u32::MAX).then(|| unsafe { GetLastError().0 });
+        observation.evidence(|evidence| {
+            evidence.job_process_wait = Some(stopped.0);
+            if let Some(code) = wait_error {
+                evidence.native_status = Some(code);
+            }
+        });
+        if stopped != WAIT_OBJECT_0 {
             return Err(UNAVAILABLE.into());
         }
+        observation.enter(Phase::JobAccounting);
         let stopped_by = Instant::now() + Duration::from_secs(5);
         loop {
             let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
@@ -1914,6 +2128,9 @@ fn run_blocking(
                     None,
                 ))?;
             }
+            observation.evidence(|evidence| {
+                evidence.job_active_processes = Some(accounting.ActiveProcesses);
+            });
             if accounting.ActiveProcesses == 0 {
                 break;
             }
@@ -1922,14 +2139,15 @@ fn run_blocking(
             }
             std::thread::sleep(Duration::from_millis(25));
         }
-        let stdout = launched
-            .stdout
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| UNAVAILABLE.to_owned())?;
-        let stderr = launched
-            .stderr
-            .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| UNAVAILABLE.to_owned())?;
+        observation.enter(Phase::StdoutReceive);
+        let stdout = launched.stdout.recv_timeout(Duration::from_secs(2));
+        observation.evidence(|evidence| evidence.stdout_receive = Some(receive_outcome(&stdout)));
+        let stdout = stdout.map_err(|_| UNAVAILABLE.to_owned())?;
+        observation.enter(Phase::StderrReceive);
+        let stderr = launched.stderr.recv_timeout(Duration::from_secs(2));
+        observation.evidence(|evidence| evidence.stderr_receive = Some(receive_outcome(&stderr)));
+        let stderr = stderr.map_err(|_| UNAVAILABLE.to_owned())?;
+        observation.enter(Phase::Copyback);
         #[cfg(test)]
         pause_copyback(&cwd, CopybackPoint::Drained)?;
         was_cancelled |= cancelled.load(Ordering::Acquire);
@@ -1984,8 +2202,21 @@ fn run_blocking(
             was_cancelled,
         ))
     })();
+    if executed.is_err() {
+        observation.failed();
+    }
+    observation.enter(Phase::TaskCleanup);
     let task_cleanup = task.dispose();
+    observation.evidence(|evidence| evidence.task_cleanup = Some(task_cleanup.is_ok()));
+    if task_cleanup.is_err() {
+        observation.failed();
+    }
+    observation.enter(Phase::ProfileCleanup);
     let profile_cleanup = profile.dispose();
+    observation.evidence(|evidence| evidence.profile_cleanup = Some(profile_cleanup.is_ok()));
+    if profile_cleanup.is_err() {
+        observation.failed();
+    }
     if task_cleanup.is_err() || profile_cleanup.is_err() {
         return Err(cleanup_failed());
     }
@@ -2011,7 +2242,16 @@ fn run_blocking(
     if was_cancelled {
         return Err(CANCELLED.into());
     }
+    observation.enter(Phase::Complete);
     Ok(output)
+}
+
+fn receive_outcome<T>(result: &Result<T, std::sync::mpsc::RecvTimeoutError>) -> Receive {
+    match result {
+        Ok(_) => Receive::Ok,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Receive::Timeout,
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Receive::Disconnected,
+    }
 }
 
 // Deliberately embedded trusted code. The acceptance binary never accepts
@@ -2142,6 +2382,7 @@ struct ProbeTrace {
     stage_started: Instant,
     timings: Vec<serde_json::Value>,
     engine: Option<serde_json::Value>,
+    observation: Observer,
 }
 impl ProbeTrace {
     fn new() -> Self {
@@ -2151,6 +2392,7 @@ impl ProbeTrace {
             stage_started: Instant::now(),
             timings: Vec::new(),
             engine: None,
+            observation: Observer::default(),
         }
     }
     fn enter(&mut self, stage: ProbeStage) {
@@ -2163,6 +2405,7 @@ impl ProbeTrace {
     fn engine(&mut self, stage: ProbeStage) {
         self.enter(stage);
         self.engine = None;
+        self.observation = Observer::fixed_probe();
     }
     fn success(&mut self, output: EngineOutput) -> Result<EngineOutput, String> {
         // Only our fixed stderr checkpoint grammar is retained. No exception
@@ -2271,6 +2514,7 @@ impl ProbeTrace {
         let detail = serde_json::json!({
             "stage":self.stage.name(), "reason":reason, "native":native,
             "engine":self.engine, "completedChecks":completed,
+            "worker":self.observation.snapshot(),
             "elapsedMs":self.started.elapsed().as_millis(),
             "stageElapsedMs":self.stage_started.elapsed().as_millis(),
             "completedStages":self.timings
@@ -2473,8 +2717,9 @@ async fn probe_inner(
     let canvas = runtime_root.join("runtime/node_modules/@napi-rs/canvas");
     let node = runtime_root.join("node/node.exe");
     trace.engine(ProbeStage::NodeIsolation);
+    let observation = trace.observation.clone();
     trace.success(
-        run_candidate(
+        run_candidate_observed(
             &node,
             &[
                 "-e",
@@ -2488,6 +2733,7 @@ async fn probe_inner(
             Duration::from_secs(30),
             16 * 1024,
             true,
+            observation,
         )
         .await?,
     )?;
@@ -2518,8 +2764,9 @@ async fn probe_inner(
         "lint.json".into(),
     ];
     trace.engine(ProbeStage::PythonCreate);
+    let observation = trace.observation.clone();
     trace.success(
-        run_candidate(
+        run_candidate_observed(
             &node,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             &cwd,
@@ -2528,6 +2775,7 @@ async fn probe_inner(
             Duration::from_secs(90),
             16 * 1024,
             true,
+            observation,
         )
         .await?,
     )?;
@@ -2548,8 +2796,9 @@ async fn probe_inner(
         } else {
             ProbeStage::OfficeSvg
         });
+        let observation = trace.observation.clone();
         let output = trace.success(
-            run_candidate(
+            run_candidate_observed(
                 officecli,
                 &args,
                 &cwd,
@@ -2558,6 +2807,7 @@ async fn probe_inner(
                 Duration::from_secs(60),
                 4 * 1024 * 1024,
                 true,
+                observation,
             )
             .await?,
         )?;
@@ -2594,8 +2844,9 @@ async fn probe_inner(
         cwd.join("source-meta.json").to_string_lossy().into_owned(),
     ]);
     trace.engine(ProbeStage::PythonSourceEdit);
+    let observation = trace.observation.clone();
     trace.success(
-        run_candidate(
+        run_candidate_observed(
             &node,
             &edit_args.iter().map(String::as_str).collect::<Vec<_>>(),
             &cwd,
@@ -2604,6 +2855,7 @@ async fn probe_inner(
             Duration::from_secs(90),
             16 * 1024,
             true,
+            observation,
         )
         .await?,
     )?;
