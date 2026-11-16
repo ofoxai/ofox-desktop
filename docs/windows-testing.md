@@ -94,6 +94,15 @@ Cargo.toml 的 features/profile，兼容恢复旧 v2 依赖；断言失败仍保
 e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能代替完整 Windows Probe、
 发布同 SHA 门禁、安装版 UI 或 Windows 10/11 客户端验收。
 
+本轮 `0xc0000142` 启动定位仅在上述 GitHub Actions 开发入口的精确功能用例
+周围采集一次有界 ETW；本地入口保留原行为，不自动要求 ETW 管理权限。
+采集使用独立 GUID/name 的自有 SystemTraceProvider session，省略含 SID、命令行
+的 PROCESS 事件。原始 ETL/XML/NDJSON 位于上传目录之外的私有 RUNNER_TEMP，
+正常清理后删除；artifact 仅保留固定元信息及按真实 child PID/TID、IRP 关联的
+脱敏观察。未知格式、丢事件或归属不明保持 inconclusive，最后加载 DLL 或某次
+拒绝均不能自动认作故障原因。强制终止采集器而未确认 owned stop 时，报告清理
+未确认，由该次临时 CI VM 销毁收尾；不得作为本地持久采集的清理保证。
+
 运行时测试入口会先准备完整生产资源，再验证打包依赖与清单；Windows Probe
 同时安装根目录依赖，供 PPT 来源和覆盖率维护测试使用。上游 PPT 资源禁止 Git
 换行转换，来源哈希始终核对原始字节。

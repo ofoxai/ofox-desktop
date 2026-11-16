@@ -109,6 +109,8 @@ pub(super) struct Evidence {
     pub child_policy: Option<u32>,
     pub image_policy: Option<u32>,
     pub resume_result: Option<u32>,
+    pub child_pid: Option<u32>,
+    pub primary_tid: Option<u32>,
     pub process_wait: Option<u32>,
     pub process_status: Option<u32>,
     pub timed_out: Option<bool>,

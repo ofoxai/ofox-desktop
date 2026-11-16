@@ -1,17 +1,22 @@
 // Focused native diagnostics only; never release or installed-client evidence.
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { closeSync, lstatSync, openSync, readSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
   open,
   realpath,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createInterface } from "node:readline";
+import { decodeDocumentEngineTrace } from "./document-startup-trace.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sandbox = "services::assistant::documents::windows_sandbox::tests::";
@@ -88,7 +93,7 @@ export function assertRustResult(result, exact) {
   return { total, passed, failed, ignored, measured };
 }
 
-export async function runDevelopmentChecks(invoke) {
+export async function runDevelopmentChecks(invoke, { functionalCapture } = {}) {
   const report = {
     schemaVersion: 1,
     scope: "document-engine-development-checks",
@@ -101,6 +106,10 @@ export async function runDevelopmentChecks(invoke) {
         "capability gate remains off; enable separately after native core evidence",
     },
     success: false,
+    startupTrace: {
+      requested: typeof functionalCapture === "function",
+      attempted: false,
+    },
     steps: [],
   };
   for (const check of checks) {
@@ -113,8 +122,14 @@ export async function runDevelopmentChecks(invoke) {
     };
     report.steps.push(step);
     try {
-      const result = await invoke(check);
+      if (check.name === "functional-prerequisite" && functionalCapture)
+        report.startupTrace.attempted = true;
+      const result =
+        check.name === "functional-prerequisite" && functionalCapture
+          ? await functionalCapture(() => invoke(check))
+          : await invoke(check);
       step.exitCode = result.exitCode;
+      if (result.trace) step.trace = result.trace;
       step.counts = assertRustResult(result, check.exact);
       step.status = "passed";
     } catch {
@@ -126,6 +141,479 @@ export async function runDevelopmentChecks(invoke) {
   }
   report.success = true;
   return report;
+}
+
+export function extractTraceTargets(output) {
+  const candidates = [output];
+  // Rust's panic Debug representation quotes/escapes a String error. Decode
+  // only bounded string literals containing our fixed probe grammar.
+  for (const match of output.matchAll(/"(?:[^"\\]|\\.)*"/g)) {
+    if (candidates.length >= 16) break;
+    if (match[0].length > 1048576 || !match[0].includes(":probe ")) continue;
+    try {
+      const value = JSON.parse(match[0]);
+      if (typeof value === "string") candidates.push(value);
+    } catch {}
+  }
+  const targets = new Map();
+  for (const candidate of candidates) {
+    for (
+      let marker = candidate.indexOf(":probe ");
+      marker >= 0;
+      marker = candidate.indexOf(":probe ", marker + 7)
+    ) {
+      const tail = candidate.slice(marker + 7, marker + 7 + 1048576);
+      if (!tail.startsWith("{")) continue;
+      let depth = 0,
+        quoted = false,
+        escaped = false;
+      for (let index = 0; index < tail.length; index++) {
+        const character = tail[index];
+        if (quoted) {
+          if (escaped) escaped = false;
+          else if (character === "\\") escaped = true;
+          else if (character === '"') quoted = false;
+        } else if (character === '"') quoted = true;
+        else if (character === "{") depth++;
+        else if (character === "}" && --depth === 0) {
+          try {
+            const evidence = JSON.parse(tail.slice(0, index + 1)).worker
+              ?.evidence;
+            const { childPid, primaryTid } = evidence ?? {};
+            if (
+              [childPid, primaryTid].every(
+                (n) => Number.isInteger(n) && n > 0 && n <= 0xffffffff,
+              )
+            )
+              targets.set(`${childPid}:${primaryTid}`, {
+                childPid,
+                primaryTid,
+              });
+          } catch {}
+          break;
+        }
+      }
+    }
+  }
+  return [...targets.values()].slice(0, 8);
+}
+
+function* privateEvents(filename) {
+  const info = lstatSync(filename);
+  assert.ok(
+    info.isFile() &&
+      !info.isSymbolicLink() &&
+      info.nlink === 1 &&
+      info.size <= 512 * 1024 * 1024,
+    "trace input bound",
+  );
+  const descriptor = openSync(filename, "r");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const bytes = Buffer.alloc(64 * 1024);
+  let pending = "",
+    total = 0,
+    count = 0;
+  try {
+    while (true) {
+      const length = readSync(descriptor, bytes);
+      total += length;
+      assert.ok(total <= 512 * 1024 * 1024, "trace input bound");
+      pending += decoder.decode(bytes.subarray(0, length), {
+        stream: length !== 0,
+      });
+      let newline;
+      while ((newline = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        assert.ok(
+          line.length <= 131072 && ++count <= 2000000,
+          "trace event bound",
+        );
+        if (line) yield JSON.parse(line);
+      }
+      assert.ok(pending.length <= 131072, "trace event bound");
+      if (length === 0) break;
+    }
+    assert.equal(pending, "", "trace input incomplete");
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+export function safeMetadata(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const boolean = (value) => (typeof value === "boolean" ? value : null);
+  const tools = {};
+  for (const name of ["xperf", "wpr", "cdb", "gflags", "tracerpt"]) {
+    const tool = value?.tools?.[name];
+    tools[name] = { available: boolean(tool?.available) };
+    if (tool && typeof tool === "object" && !Array.isArray(tool))
+      Object.assign(tools[name], {
+        version: /^\d+(?:\.\d+){3}$/.test(tool.version ?? "")
+          ? tool.version
+          : null,
+        sha256: /^[a-f0-9]{64}$/.test(tool.sha256 ?? "") ? tool.sha256 : null,
+        signatureValid: boolean(tool.signatureValid),
+        microsoftSigned: boolean(tool.microsoftSigned),
+      });
+  }
+  return {
+    tools,
+    userInteractive: boolean(value?.userInteractive),
+    sessionId:
+      Number.isInteger(value?.sessionId) && value.sessionId >= 0
+        ? value.sessionId
+        : null,
+    windowsAliasCount:
+      Number.isInteger(value?.windowsAliasCount) &&
+      value.windowsAliasCount >= 0 &&
+      value.windowsAliasCount <= 4
+        ? value.windowsAliasCount
+        : null,
+    windowsDeviceAliasAvailable: boolean(value?.windowsDeviceAliasAvailable),
+    windowsAliasStatus:
+      Number.isInteger(value?.windowsAliasStatus) &&
+      value.windowsAliasStatus >= 0 &&
+      value.windowsAliasStatus <= 0xffffffff
+        ? value.windowsAliasStatus
+        : null,
+    maximumFileMiB: 128,
+    deadlineSeconds: 900,
+    flags: [
+      "THREAD",
+      "LOADER",
+      "FILE_IO",
+      "FILE_IO_INIT",
+      "REGISTRY",
+      "NO_SYSCONFIG",
+    ],
+  };
+}
+
+export function nativeOutput(stdoutChunks, stderrChunks) {
+  const output = Buffer.concat(stdoutChunks).toString("utf8");
+  return {
+    output,
+    diagnosticOutput: `${Buffer.concat(stderrChunks).toString("utf8")}\n${output}`,
+  };
+}
+
+function traceFailure(reason, metadata, cleanup = null) {
+  return {
+    scope: "windows-node-loader-diagnostic",
+    releaseGate: false,
+    status: "inconclusive",
+    reason,
+    metadata,
+    cleanup,
+  };
+}
+
+function safeControllerFailure(value) {
+  const stages = new Set([
+    "controller_failure",
+    "tool_inventory_failed",
+    "required_tool_unavailable",
+    "native_controller_compile_failed",
+    "capture_start_failed",
+    "capture_deadline",
+    "capture_stop_failed",
+    "trace_decode_failed",
+    "decode_ack_deadline",
+    "start_trace",
+    "query_trace",
+    "owner_layout",
+    "owner_mismatch",
+    "stop_trace",
+    "xml_bound",
+    "xml_field_bound",
+    "ndjson_bound",
+    "xml_deadline",
+  ]);
+  return {
+    stage: stages.has(value?.reason) ? value.reason : "controller_failure",
+    compilerCodes: Array.isArray(value?.compilerCodes)
+      ? value.compilerCodes
+          .filter((code) => typeof code === "string" && /^CS\d{4}$/.test(code))
+          .slice(0, 8)
+      : [],
+    nativeCode:
+      Number.isInteger(value?.nativeCode) &&
+      value.nativeCode >= 0 &&
+      value.nativeCode <= 0xffffffff
+        ? value.nativeCode
+        : null,
+  };
+}
+
+function protocolQueue(input) {
+  const reader = createInterface({ input, crlfDelay: Infinity });
+  const queue = [],
+    waiters = [];
+  let ended = false;
+  const deliver = (value) => {
+    const waiting = waiters.shift();
+    if (waiting) {
+      clearTimeout(waiting.timer);
+      waiting.resolve(value);
+    } else if (queue.length < 16) queue.push(value);
+  };
+  reader.on("line", (line) => {
+    let value = { state: "invalid" };
+    if (line.length <= 32768) {
+      try {
+        const parsed = JSON.parse(line);
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          !Array.isArray(parsed) &&
+          ["started", "failed", "raw-ready", "cleaned"].includes(parsed.state)
+        )
+          value = parsed;
+      } catch {}
+    }
+    deliver(value);
+  });
+  reader.on("close", () => {
+    ended = true;
+    while (waiters.length) deliver(null);
+  });
+  return {
+    next(milliseconds) {
+      if (queue.length) return Promise.resolve(queue.shift());
+      if (ended) return Promise.resolve(null);
+      return new Promise((resolve, reject) => {
+        const waiting = { resolve, timer: null };
+        waiting.timer = setTimeout(() => {
+          const index = waiters.indexOf(waiting);
+          if (index >= 0) waiters.splice(index, 1);
+          reject(new Error("trace protocol deadline"));
+        }, milliseconds);
+        waiters.push(waiting);
+      });
+    },
+    close() {
+      reader.close();
+    },
+  };
+}
+
+export async function startNativeTrace(
+  environment,
+  {
+    spawnController = spawn,
+    startupTimeoutMs = 60000,
+    cleanupTimeoutMs = 30000,
+    decodeTimeoutMs = 600000,
+  } = {},
+) {
+  const raw = path.join(
+    await realpath(environment.RUNNER_TEMP),
+    `ofox-document-etw-${randomUUID()}`,
+  );
+  await mkdir(raw, { mode: 0o700 });
+  const controller = spawnController(
+    "pwsh",
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      path.join(root, "scripts/document-engine-etw.ps1"),
+      "-RawDirectory",
+      raw,
+    ],
+    {
+      cwd: root,
+      env: environment,
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+  controller.stdin.on("error", () => {});
+  controller.stderr.on("data", () => {}); // Never forward native messages/paths.
+  const completion = new Promise((resolve) => {
+    controller.on("error", () => resolve(null));
+    controller.on("close", resolve);
+  });
+  const protocol = protocolQueue(controller.stdout);
+  let metadata = null,
+    startFailure = null;
+  async function finalize(command) {
+    controller.stdin.end(command);
+    let cleanup = null;
+    const until = Date.now() + cleanupTimeoutMs;
+    try {
+      while (Date.now() < until) {
+        const value = await protocol.next(Math.max(1, until - Date.now()));
+        if (!value) break;
+        if (value.state === "started")
+          metadata ??= safeMetadata(value.metadata);
+        if (value.state === "failed")
+          startFailure ??= safeControllerFailure(value);
+        if (value.state === "cleaned") {
+          cleanup = {
+            ownedStopSucceeded: value.ownedStopSucceeded === true,
+            rawRemoved: value.rawRemoved === true,
+            forcedTermination: false,
+          };
+          break;
+        }
+      }
+    } catch {}
+    // A failed notification precedes PowerShell's finally. Never kill merely
+    // because that notification arrived; drain the owned-stop acknowledgement.
+    if (!cleanup) {
+      controller.kill();
+      cleanup = {
+        ownedStopSucceeded: false,
+        rawRemoved: false,
+        forcedTermination: true,
+        limitation: "unconfirmed-session-cleanup-requires-disposable-ci-vm",
+      };
+    }
+    let closeTimer;
+    const closed = await Promise.race([
+      completion.then(() => true),
+      new Promise((resolve) => {
+        closeTimer = setTimeout(() => resolve(false), 5000);
+      }),
+    ]);
+    clearTimeout(closeTimer);
+    if (!closed) {
+      controller.kill();
+      controller.stdout.destroy();
+      controller.stderr.destroy();
+      controller.unref?.();
+      cleanup.forcedTermination = true;
+    }
+    protocol.close();
+    if (cleanup.ownedStopSucceeded || cleanup.rawRemoved) {
+      try {
+        await rm(raw, { recursive: true, force: true });
+      } catch {
+        cleanup.rawRemoved = false;
+      }
+    }
+    return cleanup;
+  }
+  try {
+    const started = await protocol.next(startupTimeoutMs);
+    assert.ok(started, "trace controller exited");
+    metadata = safeMetadata(started.metadata);
+    if (started.state === "failed")
+      startFailure = safeControllerFailure(started);
+    assert.equal(started.state, "started", "trace did not start");
+  } catch {
+    const cleanup = await finalize();
+    return {
+      failed: {
+        ...traceFailure("capture-start-failed", metadata, cleanup),
+        controller: startFailure,
+      },
+    };
+  }
+  return {
+    async finish(output) {
+      let report = traceFailure("trace-decode-incomplete", metadata),
+        cleanup = null;
+      try {
+        controller.stdin.write("STOP\n");
+        const ready = await protocol.next(decodeTimeoutMs);
+        assert.ok(ready, "trace controller exited");
+        if (ready.state === "failed")
+          report.controller = safeControllerFailure(ready);
+        assert.equal(ready.state, "raw-ready", "trace decode unavailable");
+        const counters = ready.lossCounters;
+        assert.ok(
+          counters?.ownedStopSucceeded === true &&
+            [
+              "eventsLost",
+              "logBuffersLost",
+              "realTimeBuffersLost",
+              "buffersWritten",
+            ].every(
+              (key) =>
+                Number.isInteger(counters[key]) &&
+                counters[key] >= 0 &&
+                counters[key] <= 0xffffffff,
+            ),
+          "trace counters invalid",
+        );
+        const roots = JSON.parse(
+          await readFile(path.join(raw, "roots.json"), "utf8"),
+        );
+        const decoded = decodeDocumentEngineTrace({
+          events: () => privateEvents(path.join(raw, "events.ndjson")),
+          lossCounters: counters,
+          targets: extractTraceTargets(output),
+          roots: {
+            ...roots,
+            runtime: [path.join(root, "assistant-runtime/resources")],
+          },
+        });
+        report = {
+          scope: "windows-node-loader-diagnostic",
+          releaseGate: false,
+          metadata,
+          lossCounters: counters,
+          diagnostic: decoded,
+        };
+      } catch {
+        /* Retain the original native result and a fixed inconclusive diagnostic. */
+      } finally {
+        cleanup = await finalize("CLEAN\n");
+      }
+      report.cleanup = cleanup;
+      if (!cleanup?.ownedStopSucceeded || !cleanup?.rawRemoved)
+        return traceFailure("trace-cleanup-incomplete", metadata, cleanup);
+      return report;
+    },
+  };
+}
+
+export function shouldCaptureDevelopmentTrace(environment) {
+  return (
+    environment.GITHUB_ACTIONS === "true" &&
+    environment.GITHUB_WORKFLOW === "Document Engine Development Checks"
+  );
+}
+
+export async function captureFunctional(invoke, start) {
+  let capture;
+  try {
+    capture = await start();
+  } catch {
+    return {
+      exitCode: null,
+      output: "",
+      outputLimited: false,
+      trace: traceFailure("capture-start-failed", null),
+    };
+  }
+  if (capture.failed)
+    return {
+      exitCode: null,
+      output: "",
+      outputLimited: false,
+      trace: capture.failed,
+    };
+  let result;
+  try {
+    result = await invoke();
+  } catch {
+    result = { exitCode: null, output: "", outputLimited: false };
+  } finally {
+    let trace;
+    try {
+      trace = await capture.finish(
+        result?.diagnosticOutput ?? result?.output ?? "",
+      );
+    } catch {
+      trace = traceFailure("trace-decode-incomplete", null);
+    }
+    result = { ...result, trace };
+  }
+  return result;
 }
 
 async function invokeNative(check, output, environment) {
@@ -142,6 +630,7 @@ async function invokeNative(check, output, environment) {
   args.push("--nocapture", "--test-threads=1");
   const log = await open(path.join(output, `${check.name}.log`), "wx", 0o600);
   const chunks = [];
+  const stderrChunks = [];
   let bytes = 0,
     limited = false,
     writeFailed = false,
@@ -160,6 +649,7 @@ async function invokeNative(check, output, environment) {
           return;
         }
         if (stdout) chunks.push(chunk);
+        else stderrChunks.push(chunk);
         process.stdout.write(chunk);
         writes = writes.then(async () => {
           try {
@@ -177,7 +667,7 @@ async function invokeNative(check, output, environment) {
     await writes;
     return {
       exitCode,
-      output: Buffer.concat(chunks).toString("utf8"),
+      ...nativeOutput(chunks, stderrChunks),
       outputLimited: limited || writeFailed,
     };
   } finally {
@@ -220,8 +710,14 @@ export async function main(argv = process.argv.slice(2)) {
     await mkdir(environment[key]);
   }
   try {
-    const report = await runDevelopmentChecks((check) =>
-      invokeNative(check, output, environment),
+    const report = await runDevelopmentChecks(
+      (check) => invokeNative(check, output, environment),
+      shouldCaptureDevelopmentTrace(environment)
+        ? {
+            functionalCapture: (invoke) =>
+              captureFunctional(invoke, () => startNativeTrace(environment)),
+          }
+        : {},
     );
     await writeFile(
       path.join(output, "summary.json"),

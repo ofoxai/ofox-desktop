@@ -1988,6 +1988,10 @@ fn create_suspended(
             &mut info,
         ))?;
     }
+    observation.evidence(|evidence| {
+        evidence.child_pid = Some(info.dwProcessId);
+        evidence.primary_tid = Some(info.dwThreadId);
+    });
     let process = Process {
         process: handle(info.hProcess),
         job,

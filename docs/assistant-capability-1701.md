@@ -157,3 +157,18 @@ Job 和 mitigation 检查保留；普通 AppContainer 成对反控前置到原�
 该行为证明依据 [LPAC 语义](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ne-winnt-token_information_class)
 与 [AccessCheck](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-accesscheck)
 组合，不声称微软提供了专用的 IsLPAC Win32 查询契约。
+
+开发运行 43921430351（`2de81c59`）中，前置的真实 suspended LPAC/普通
+AppContainer 成对控制均已通过，随后 bundled Node 的全部 token/mitigation
+校验与四项 AccessCheck 矩阵也通过。Node 恢复后约 2 ms 以 `0xc0000142
+(STATUS_DLL_INIT_FAILED)` 退出，尚未输出任何 JavaScript 检查点；不是此前的
+token 查询失败，也没有进程超时或管道排空失败。Job active=0、task/profile
+清理成功。当前仅能确认启动初始化失败，具体 DLL/系统资源原因待最小原生诊断；
+Python、Office 和其余回归仍未进入，Windows 能力继续关闭。
+
+下一次定位保留原样启动与安全条件，只添加可信 PID/TID 观察及开发 CI 的私有、
+有界 ETW。以文档化 XML 解码 THREAD、ImageLoad、FileIO/OpEnd、Registry，
+不捕获 PROCESS 的 SID/命令行，也不导出原始 trace。独立审查发现的 opaque IRP、
+跨进程 TID 归属和采集超时清理竞态均已补回归，pinned Node 下针对测试 29/29
+通过。此结果验证采集逻辑与脱敏，不代表 PowerShell/ETW 原生已运行；下一次
+原生证据仍 pending。未调整 capability、资源 ACL、mitigation 或引擎超时。

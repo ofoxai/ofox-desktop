@@ -1,10 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import os from "node:os";
+import path from "node:path";
 import {
   assertRustResult,
+  captureFunctional,
   checks,
+  extractTraceTargets,
+  nativeOutput,
+  safeMetadata,
+  shouldCaptureDevelopmentTrace,
+  startNativeTrace,
   runDevelopmentChecks,
 } from "../../scripts/document-engine-development-check.mjs";
 import { successfulProbe } from "../../scripts/check-windows-probe.mjs";
@@ -113,6 +123,282 @@ test("functional prerequisite failure starts no whole-sandbox or follow-up cases
   assert.equal(report.steps[1].status, "failed");
   assert.equal(report.success, false);
   assert.equal(report.releaseGate, false);
+});
+
+test("failed ETW start prevents the functional process from running without trace", async () => {
+  const calls = [];
+  let captureCalls = 0;
+  const report = await runDevelopmentChecks(
+    async (check) => {
+      calls.push(check.name);
+      return nativeResult(1);
+    },
+    {
+      functionalCapture: async () => {
+        captureCalls += 1;
+        throw new Error("fixed synthetic start failure");
+      },
+    },
+  );
+  assert.equal(captureCalls, 1);
+  assert.deepEqual(calls, ["acl-prerequisite"]);
+  assert.equal(report.success, false);
+  assert.equal(report.steps.at(-1).name, "functional-prerequisite");
+});
+
+test("capture stops after native failure and retains the original failed result", async () => {
+  const order = [];
+  const native = {
+    exitCode: 101,
+    output: "fixed native failure",
+    outputLimited: false,
+  };
+  const result = await captureFunctional(
+    async () => {
+      order.push("native");
+      return native;
+    },
+    async () => {
+      order.push("start");
+      return {
+        finish: async (output) => {
+          order.push("stop");
+          assert.equal(output, native.output);
+          return { status: "inconclusive" };
+        },
+      };
+    },
+  );
+  assert.deepEqual(order, ["start", "native", "stop"]);
+  assert.equal(result.exitCode, 101);
+  assert.equal(result.output, native.output);
+  assert.equal(result.trace.status, "inconclusive");
+  const decodeFailure = await captureFunctional(
+    async () => native,
+    async () => ({
+      finish: async () => {
+        throw new Error("C:\\private-account S-1-5-21-private");
+      },
+    }),
+  );
+  assert.equal(decodeFailure.exitCode, 101);
+  assert.equal(decodeFailure.trace.status, "inconclusive");
+  assert.ok(!JSON.stringify(decodeFailure.trace).includes("private"));
+});
+
+test("capture start failure executes no native test and preserves only safe diagnostics", async () => {
+  let invoked = false;
+  const result = await captureFunctional(
+    async () => {
+      invoked = true;
+    },
+    async () => {
+      throw new Error("C:\\private-account token-secret");
+    },
+  );
+  assert.equal(invoked, false);
+  assert.equal(result.exitCode, null);
+  assert.equal(result.trace.reason, "capture-start-failed");
+  assert.ok(!JSON.stringify(result).includes("private-account"));
+});
+
+test("trace target discovery includes panic stderr without changing stdout count evidence", async () => {
+  const panic = `error:probe ${JSON.stringify({ worker: { evidence: { childPid: 66, primaryTid: 99 } } })}`;
+  const result = await captureFunctional(
+    async () => ({
+      ...nativeResult(1),
+      diagnosticOutput: `${nativeResult(1).output}\n${panic}`,
+    }),
+    async () => ({
+      finish: async (text) => ({ targets: extractTraceTargets(text) }),
+    }),
+  );
+  assert.equal(assertRustResult(result, true).passed, 1);
+  assert.deepEqual(result.trace.targets, [{ childPid: 66, primaryTid: 99 }]);
+});
+
+test("ETW target identity is taken only from bounded fixed probe numeric evidence", () => {
+  const failure = `assistant_document_sandbox_unavailable:probe ${JSON.stringify({ worker: { evidence: { childPid: 44, primaryTid: 88 } } })}`;
+  assert.deepEqual(extractTraceTargets(`panic ${JSON.stringify(failure)}`), [
+    { childPid: 44, primaryTid: 88 },
+  ]);
+  assert.deepEqual(extractTraceTargets(failure.repeat(2)), [
+    { childPid: 44, primaryTid: 88 },
+  ]);
+  assert.deepEqual(
+    extractTraceTargets("childPid=44 primaryTid=88 C:\\private-account"),
+    [],
+  );
+  assert.deepEqual(
+    extractTraceTargets(
+      'error:probe {"worker":{"evidence":{"childPid":-1,"primaryTid":88}}}',
+    ),
+    [],
+  );
+});
+
+test("interleaved pipe delivery never splices stdout into a split panic JSON", () => {
+  const panic = `panic ${JSON.stringify(`error:probe ${JSON.stringify({ worker: { evidence: { childPid: 321, primaryTid: 654 } } })}`)}`;
+  const stdout = [],
+    stderr = [];
+  const middle = Math.floor(panic.length / 2);
+  stderr.push(Buffer.from(panic.slice(0, middle)));
+  stdout.push(Buffer.from(nativeResult(1).output));
+  stderr.push(Buffer.from(panic.slice(middle)));
+  const result = nativeOutput(stdout, stderr);
+  assert.equal(assertRustResult({ ...result, exitCode: 0 }, true).passed, 1);
+  assert.deepEqual(extractTraceTargets(result.diagnosticOutput), [
+    { childPid: 321, primaryTid: 654 },
+  ]);
+});
+
+test("missing inventory metadata stays unknown and arbitrary strings are omitted", () => {
+  assert.equal(safeMetadata(null), null);
+  const metadata = safeMetadata({
+    userInteractive: "C:\\private-account",
+    windowsDeviceAliasAvailable: "S-1-5-21-private",
+    tools: {
+      xperf: {
+        version: "token-secret",
+        available: "unknown",
+        signatureValid: "private",
+      },
+      wpr: { available: false },
+    },
+  });
+  assert.equal(metadata.userInteractive, null);
+  assert.equal(metadata.windowsDeviceAliasAvailable, null);
+  assert.equal(metadata.tools.xperf.available, null);
+  assert.equal(metadata.tools.xperf.signatureValid, null);
+  assert.equal(metadata.tools.cdb.available, null);
+  assert.equal(metadata.tools.wpr.available, false);
+  for (const text of ["private", "token-secret", "C:\\"])
+    assert.ok(!JSON.stringify(metadata).includes(text));
+});
+
+function fakeController() {
+  const child = new EventEmitter();
+  child.stdin = new PassThrough();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.killed = false;
+  child.send = (message) => child.stdout.write(`${JSON.stringify(message)}\n`);
+  child.close = () => {
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", 0);
+  };
+  child.kill = () => {
+    child.killed = true;
+    child.close();
+    return true;
+  };
+  return child;
+}
+
+test("late started and failed messages are drained through owned-stop cleanup after startup timeout", async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), "document-etw-protocol-"),
+  );
+  const child = fakeController();
+  let syntheticSessionActive = false;
+  child.stdin.on("finish", () => {
+    setTimeout(() => {
+      syntheticSessionActive = true;
+      child.send({ state: "started" });
+    }, 5);
+    setTimeout(
+      () => child.send({ state: "failed", reason: "controller_failure" }),
+      10,
+    );
+    setTimeout(() => {
+      syntheticSessionActive = false;
+      child.send({
+        state: "cleaned",
+        ownedStopSucceeded: true,
+        rawRemoved: true,
+      });
+      child.close();
+    }, 25);
+  });
+  try {
+    const result = await startNativeTrace(
+      { RUNNER_TEMP: temporary },
+      {
+        spawnController: () => child,
+        startupTimeoutMs: 5,
+        cleanupTimeoutMs: 100,
+      },
+    );
+    assert.equal(child.killed, false);
+    assert.equal(syntheticSessionActive, false);
+    assert.equal(result.failed.cleanup.ownedStopSucceeded, true);
+    assert.equal(result.failed.cleanup.rawRemoved, true);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("decode failure waits for the controller finally cleanup instead of killing on failed", async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), "document-etw-protocol-"),
+  );
+  const child = fakeController();
+  queueMicrotask(() => child.send({ state: "started" }));
+  child.stdin.on("data", (data) => {
+    if (!data.toString().includes("STOP")) return;
+    setTimeout(
+      () => child.send({ state: "failed", reason: "trace_decode_failed" }),
+      5,
+    );
+    setTimeout(() => {
+      child.send({
+        state: "cleaned",
+        ownedStopSucceeded: true,
+        rawRemoved: true,
+      });
+      child.close();
+    }, 20);
+  });
+  try {
+    const capture = await startNativeTrace(
+      { RUNNER_TEMP: temporary },
+      {
+        spawnController: () => child,
+        startupTimeoutMs: 100,
+        cleanupTimeoutMs: 100,
+      },
+    );
+    const report = await capture.finish("fixed native failure");
+    assert.equal(child.killed, false);
+    assert.equal(report.cleanup.ownedStopSucceeded, true);
+    assert.equal(report.status, "inconclusive");
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("local development keeps its original gate without ETW prerequisites", async () => {
+  assert.equal(shouldCaptureDevelopmentTrace({}), false);
+  assert.equal(
+    shouldCaptureDevelopmentTrace({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "Windows Probe",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldCaptureDevelopmentTrace({
+      GITHUB_ACTIONS: "true",
+      GITHUB_WORKFLOW: "Document Engine Development Checks",
+    }),
+    true,
+  );
+  const report = await runDevelopmentChecks(async (check) =>
+    nativeResult(check.exact ? 1 : 7),
+  );
+  assert.equal(report.success, true);
+  assert.deepEqual(report.startupTrace, { requested: false, attempted: false });
 });
 
 test("only dispatch or the exact development workflow bootstrap can trigger this diagnostic job", async () => {
