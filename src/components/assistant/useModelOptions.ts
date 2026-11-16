@@ -87,8 +87,7 @@ export function useModelOptions(
           // A speech model is billed per character read, or per token of the
           // text in and the audio out; never by its chat prices (0 / 0).
           const pricing = model.audio.pricing as
-            | NonNullable<AssistantModel["audio"]>["pricing"]
-            | undefined;
+            NonNullable<AssistantModel["audio"]>["pricing"] | undefined;
           const perThousand = (rate: string) =>
             String(Number((Number(rate) * 1000).toPrecision(6)));
           const price =

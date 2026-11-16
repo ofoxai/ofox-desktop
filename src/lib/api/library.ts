@@ -86,10 +86,7 @@ export interface SkillDefinition {
 }
 export type SkillMode = "auto" | "manual";
 export type SkillOrigin =
-  | "reviewed"
-  | "unreviewed"
-  | "assistantCreated"
-  | "local";
+  "reviewed" | "unreviewed" | "assistantCreated" | "local";
 export interface AssistantSkill {
   name: string;
   description: string;

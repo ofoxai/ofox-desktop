@@ -63,10 +63,7 @@ export interface WorkBuddyEndpointStatus {
 }
 
 export type CompatibilityProtocol =
-  | "responses"
-  | "chatCompletions"
-  | "anthropic"
-  | "gemini";
+  "responses" | "chatCompletions" | "anthropic" | "gemini";
 
 export interface CompatibilityResult {
   app: string;

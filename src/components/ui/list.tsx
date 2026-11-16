@@ -56,8 +56,10 @@ export const ListHead = React.forwardRef<
 ));
 ListHead.displayName = "ListHead";
 
-export interface ListFoldProps
-  extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "onChange"> {
+export interface ListFoldProps extends Omit<
+  React.ButtonHTMLAttributes<HTMLButtonElement>,
+  "onChange"
+> {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** A faint figure after the label, such as how many rows are folded. */

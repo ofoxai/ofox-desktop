@@ -157,10 +157,7 @@ export interface ProviderMeta {
   // - "openai_responses": OpenAI Responses API 格式，需要格式转换
   // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
   apiFormat?:
-    | "anthropic"
-    | "openai_chat"
-    | "openai_responses"
-    | "gemini_native";
+    "anthropic" | "openai_chat" | "openai_responses" | "gemini_native";
   // 通用认证绑定
   authBinding?: AuthBinding;
   // Claude 认证字段名
@@ -189,10 +186,7 @@ export type SkillStorageLocation = "cc_switch" | "unified";
 // - "openai_responses": OpenAI Responses API 格式，需要格式转换
 // - "gemini_native": Gemini Native generateContent API 格式，需要格式转换
 export type ClaudeApiFormat =
-  | "anthropic"
-  | "openai_chat"
-  | "openai_responses"
-  | "gemini_native";
+  "anthropic" | "openai_chat" | "openai_responses" | "gemini_native";
 
 // Claude 认证字段类型
 export type ClaudeApiKeyField = "ANTHROPIC_AUTH_TOKEN" | "ANTHROPIC_API_KEY";
@@ -358,12 +352,7 @@ export interface Settings {
 
 /** Where a session's title came from (session_manager/title.rs). */
 export type SessionTitleSource =
-  | "custom"
-  | "agent"
-  | "prompt"
-  | "message"
-  | "task"
-  | "directory";
+  "custom" | "agent" | "prompt" | "message" | "task" | "directory";
 
 export interface SessionMeta {
   providerId: string;

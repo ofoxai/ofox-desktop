@@ -4,23 +4,14 @@ import type { UnbindReport } from "@/lib/api/ofoxBind";
 
 /** How the program was installed; `unknown` means it has to be removed by hand. */
 export type UninstallSource =
-  | "homebrew"
-  | "npm"
-  | "pnpm"
-  | "bun"
-  | "native"
-  | "app"
-  | "unknown";
+  "homebrew" | "npm" | "pnpm" | "bun" | "native" | "app" | "unknown";
 
 /** What happens to the tool's Ofox key: revoked, kept for another tool sharing it, or none recorded. */
 export type UninstallKeyPlan = "revoke" | "keepShared" | "none";
 
 /** Why the uninstall cannot be started from here. */
 export type UninstallBlockedReason =
-  | "unknownSource"
-  | "appRunning"
-  | "busy"
-  | "unsupportedPlatform";
+  "unknownSource" | "appRunning" | "busy" | "unsupportedPlatform";
 
 /** Dry run: nothing was changed to produce it. */
 export interface UninstallPreview {

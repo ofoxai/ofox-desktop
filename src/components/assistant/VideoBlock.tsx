@@ -55,9 +55,9 @@ export function VideoBlock({
   const media = shown ?? message.media;
   const pending = Boolean(
     media &&
-      ["submitting", "queued", "in_progress", "downloading"].includes(
-        media.status,
-      ),
+    ["submitting", "queued", "in_progress", "downloading"].includes(
+      media.status,
+    ),
   );
   useEffect(() => {
     if (!pending) return;
