@@ -23,6 +23,11 @@ export const checks = [
     filter: `${sandbox}document_cache_requires_exact_specific_file_read_execute_acl`,
     exact: true,
   },
+  {
+    name: "functional-prerequisite",
+    filter: `${sandbox}document_lpac_proves_python_office_and_escape_denials`,
+    exact: true,
+  },
   { name: "windows-sandbox", filter: sandbox, exact: false },
   {
     name: "attachment-old-roundtrip",

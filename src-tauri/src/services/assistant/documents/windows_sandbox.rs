@@ -47,10 +47,11 @@ use windows::{
             Isolation::{
                 CreateAppContainerProfile, DeleteAppContainerProfile, GetAppContainerFolderPath,
             },
-            TokenAppContainerSid, TokenCapabilities, TokenIntegrityLevel, TokenIsAppContainer,
-            TokenIsLessPrivilegedAppContainer, TokenUser, DACL_SECURITY_INFORMATION,
-            LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-            SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+            SetSecurityDescriptorControl, TokenAppContainerSid, TokenCapabilities,
+            TokenIntegrityLevel, TokenIsAppContainer, TokenIsLessPrivilegedAppContainer, TokenUser,
+            DACL_SECURITY_INFORMATION, LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION,
+            PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
+            SECURITY_DESCRIPTOR_CONTROL, SE_SACL_AUTO_INHERITED, SID_AND_ATTRIBUTES,
             TOKEN_APPCONTAINER_INFORMATION, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
             TOKEN_USER,
         },
@@ -501,6 +502,37 @@ fn descriptor_string(descriptor: PSECURITY_DESCRIPTOR) -> Result<String, String>
     }
 }
 
+fn descriptor_comparison_key(
+    descriptor: PSECURITY_DESCRIPTOR,
+) -> Result<(u16, u32, String), String> {
+    let (mut control, mut revision) = (0u16, 0u32);
+    unsafe {
+        win(GetSecurityDescriptorControl(
+            descriptor,
+            &mut control,
+            &mut revision,
+        ))?;
+    }
+    // Native Server 2022 reports only SE_SACL_AUTO_INHERITED in addition to
+    // our exact template (0x9814 vs 0x9014). Normalize that bookkeeping bit
+    // on a freshly allocated descriptor copy, never the filesystem object or
+    // original snapshot. Every other control bit, ACE, mask, SID, protection
+    // and mandatory-label field remains part of the exact comparison.
+    let copy = security_descriptor(&descriptor_string(descriptor)?)?;
+    unsafe {
+        win(SetSecurityDescriptorControl(
+            PSECURITY_DESCRIPTOR(copy.0),
+            SE_SACL_AUTO_INHERITED,
+            SECURITY_DESCRIPTOR_CONTROL(0),
+        ))?;
+    }
+    Ok((
+        control & !SE_SACL_AUTO_INHERITED.0,
+        revision,
+        descriptor_string(PSECURITY_DESCRIPTOR(copy.0))?,
+    ))
+}
+
 /// Diagnostic shape only, never an ACL acceptance rule. Keep permission/control
 /// differences visible without logging account SIDs or conditional ACE payloads.
 fn descriptor_shape(text: &str) -> serde_json::Value {
@@ -619,8 +651,8 @@ fn verify_cache_acl(root: &File, expected: &str) -> Result<(), String> {
     }
     let allocation = Local(actual.0);
     let expected = security_descriptor(expected)?;
-    let matches =
-        descriptor_string(actual)? == descriptor_string(PSECURITY_DESCRIPTOR(expected.0))?;
+    let matches = descriptor_comparison_key(actual)?
+        == descriptor_comparison_key(PSECURITY_DESCRIPTOR(expected.0))?;
     let diagnostic = if matches {
         None
     } else {

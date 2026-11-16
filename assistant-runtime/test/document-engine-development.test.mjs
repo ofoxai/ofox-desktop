@@ -75,10 +75,16 @@ test("all focused checks run serially after ACL and count real tests", async () 
     calls,
     checks.map((check) => check.name),
   );
-  assert.equal(calls.length, 8);
+  assert.equal(calls.length, 9);
   assert.match(
     checks[0].filter,
     /::document_cache_requires_exact_specific_file_read_execute_acl$/,
+  );
+  assert.equal(checks[1].name, "functional-prerequisite");
+  assert.equal(checks[1].exact, true);
+  assert.match(
+    checks[1].filter,
+    /::document_lpac_proves_python_office_and_escape_denials$/,
   );
   assert.ok(
     checks.every(
@@ -87,6 +93,26 @@ test("all focused checks run serially after ACL and count real tests", async () 
         !check.filter.includes("one_guarded_task"),
     ),
   );
+});
+
+test("functional prerequisite failure starts no whole-sandbox or follow-up cases", async () => {
+  const calls = [];
+  const report = await runDevelopmentChecks(async (check) => {
+    calls.push(check.name);
+    return check.name === "acl-prerequisite"
+      ? nativeResult(1)
+      : {
+          exitCode: 101,
+          output:
+            "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;",
+        };
+  });
+  assert.deepEqual(calls, ["acl-prerequisite", "functional-prerequisite"]);
+  assert.equal(report.steps.length, 2);
+  assert.equal(report.steps[0].status, "passed");
+  assert.equal(report.steps[1].status, "failed");
+  assert.equal(report.success, false);
+  assert.equal(report.releaseGate, false);
 });
 
 test("only dispatch or the exact development workflow bootstrap can trigger this diagnostic job", async () => {

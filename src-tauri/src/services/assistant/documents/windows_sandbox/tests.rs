@@ -222,6 +222,57 @@ fn document_cache_requires_exact_specific_file_read_execute_acl() {
     create_directory(&unsafe_root, &write_allowed).unwrap();
     let unsafe_pinned = owned_directory(&unsafe_root, &user).unwrap();
     assert!(verify_cache_acl(&unsafe_pinned, &exact).is_err());
+    for (name, changed) in [
+        ("low-label", exact.replace(";;;ME)", ";;;LW)")),
+        ("unprotected", exact.replace("D:P", "D:")),
+        ("wrong-capability", exact.replace(&cap, "S-1-1-0")),
+        ("extra-ace", exact.replace("S:", "(A;OICI;FRFX;;;WD)S:")),
+    ] {
+        let altered = temp.path().join(name);
+        create_directory(&altered, &changed).unwrap();
+        let altered_pinned = owned_directory(&altered, &user).unwrap();
+        assert!(
+            verify_cache_acl(&altered_pinned, &exact).is_err(),
+            "an actual {name} cache must fail the exact ACL contract"
+        );
+    }
+}
+
+#[test]
+fn document_acl_comparison_ignores_only_sacl_auto_inherited_on_owned_copies() {
+    use windows::Win32::Security::SE_DACL_AUTO_INHERITED;
+    let exact = "D:P(A;OICI;FA;;;SY)(A;OICI;FRFX;;;S-1-15-3-1)S:(ML;OICI;NW;;;ME)";
+    let expected = security_descriptor(exact).unwrap();
+    let expected_key = descriptor_comparison_key(PSECURITY_DESCRIPTOR(expected.0)).unwrap();
+    let sacl_ai = security_descriptor(&exact.replace("S:", "S:AI")).unwrap();
+    let original = descriptor_diagnostic(PSECURITY_DESCRIPTOR(sacl_ai.0)).unwrap();
+    assert!(descriptor_comparison_key(PSECURITY_DESCRIPTOR(sacl_ai.0)).unwrap() == expected_key);
+    assert_eq!(
+        descriptor_diagnostic(PSECURITY_DESCRIPTOR(sacl_ai.0)).unwrap(),
+        original,
+        "canonicalization must not mutate the original snapshot"
+    );
+    let dacl_ai = security_descriptor(&exact.replace("D:P", "D:PAI")).unwrap();
+    let dacl_key = descriptor_comparison_key(PSECURITY_DESCRIPTOR(dacl_ai.0)).unwrap();
+    assert_eq!(dacl_key.0 ^ expected_key.0, SE_DACL_AUTO_INHERITED.0);
+    assert!(
+        dacl_key != expected_key,
+        "DACL auto-inheritance is not normalized"
+    );
+    for changed in [
+        exact.replace(";;;ME)", ";;;LW)"),
+        exact.replace("D:P", "D:"),
+        exact.replace("FRFX", "FRFXFW"),
+        exact.replace("S-1-15-3-1", "S-1-15-3-2"),
+        exact.replace("S:", "(A;OICI;FRFX;;;WD)S:"),
+        exact.split("S:").next().unwrap().to_owned(),
+    ] {
+        let actual = security_descriptor(&changed).unwrap();
+        assert!(
+            descriptor_comparison_key(PSECURITY_DESCRIPTOR(actual.0)).unwrap() != expected_key,
+            "permissions, identity, protection and label differences must remain exact"
+        );
+    }
 }
 
 #[test]
