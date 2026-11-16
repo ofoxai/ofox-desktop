@@ -1,0 +1,131 @@
+{
+  "id": "studio",
+  "family": "poster",
+  "names": { "zh": "Studio 黑黄海报", "en": "Studio", "ja": "Studio ポスター" },
+  "intro": {
+    "zh": "近黑底配电光黄大字，黑黄两种画布交替；适合创意提案、品牌展示和需要强烈态度的发布。",
+    "en": "Electric-yellow display type on near-black, alternating with yellow pages; for creative pitches, brand showcases and loud launches.",
+    "ja": "黒に近い背景と電光イエローの大きな文字、黄色のページと交互に構成。クリエイティブ提案やブランド紹介向け。"
+  },
+  "routing": {
+    "scenarios": ["product-launch", "creative"],
+    "density": "low",
+    "scheme": "dark",
+    "tone": ["bold", "graphic"],
+    "suits": { "data": 1, "formulas": 0, "images": 2, "longText": 0 },
+    "avoid": "Quiet, institutional or text-heavy academic material."
+  },
+  "theme": {
+    "colors": {
+      "background": "1C1C1C",
+      "card": "242422",
+      "primary": "F5D200",
+      "secondary": "F5D200",
+      "accent": "F5D200",
+      "text": "F5D200",
+      "textSecondary": "C2A912",
+      "textMuted": "8F7E1C",
+      "line": "4A4526",
+      "accentTint": "3A3410",
+      "dark": "1C1C1C",
+      "onDark": "F5D200",
+      "onDarkMuted": "C2A912",
+      "surface": "242422",
+      "chart": ["F5D200", "8F7E1C", "C2A912", "5E5416", "EDE7C4", "3A3410"]
+    },
+    "fonts": {
+      "latin": { "title": "Arial", "body": "Arial", "data": "Consolas" },
+      "zh": { "title": "Microsoft YaHei", "body": "Microsoft YaHei" },
+      "ja": { "title": "Yu Gothic", "body": "Yu Gothic" }
+    },
+    "sizes": {
+      "hero": [96, 80, 66, 54, 44],
+      "statement": [60, 54, 44, 36, 30],
+      "title": [36, 32, 28, 24],
+      "subtitle": [22, 20, 18],
+      "body": [22, 20, 18, 16],
+      "card": [18, 16, 14, 13],
+      "caption": [14, 12, 11],
+      "kpi": [66, 54, 44]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": true,
+        "canvases": {
+          "yellow": {
+            "bg": "F5D200",
+            "title": "1C1C1C",
+            "body": "1C1C1C",
+            "muted": "4A4208",
+            "faint": "6B5F0C",
+            "accent": "1C1C1C",
+            "line": "B39B12",
+            "card": "F0CC00",
+            "surface": "F0CC00",
+            "accentTint": "E6C300"
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "yellow",
+          "statement": "base",
+          "content": ["yellow", "base"],
+          "closing": "yellow"
+        },
+        "cover": {
+          "title": { "x": 0.72, "y": 0.45, "w": 11.9, "h": 2.7 },
+          "meta": { "x": 0.72, "y": 6.72, "w": 9 },
+          "shapes": [
+            { "kind": "rect", "x": 0.72, "y": 6.55, "w": 11.9, "h": 0.012, "fill": "line" }
+          ]
+        },
+        "section": {
+          "title": { "x": 0.72, "y": 3.6, "w": 11.9, "h": 3.0, "anchor": "bottom", "sizes": [66, 54, 44, 36] },
+          "number": { "x": 0.72, "y": 0.5, "w": 4, "h": 0.5, "size": 16 }
+        },
+        "statement": {
+          "title": { "x": 0.72, "y": 2.4, "w": 11.2, "h": 4.1, "anchor": "bottom" }
+        },
+        "content": {
+          "title": { "x": 0.72, "y": 0.62, "w": 11.9, "h": 0.8 },
+          "shapes": [
+            { "kind": "rect", "x": 0.72, "y": 0.42, "w": 11.9, "h": 0.012, "fill": "line" }
+          ]
+        },
+        "closing": {
+          "title": { "x": 0.72, "y": 0.4, "w": 11.9, "h": 5.3, "sizes": [110, 96, 80, 66, 54] },
+          "meta": { "x": 0.72, "y": 6.72, "w": 11.9 },
+          "shapes": [
+            { "kind": "rect", "x": 0.72, "y": 6.55, "w": 11.9, "h": 0.012, "fill": "line" }
+          ]
+        },
+        "card": { "shape": "rect", "fill": "none", "line": "none", "bar": "top", "titleColor": "title" },
+        "kpi": { "style": "rule" },
+        "steps": { "style": "numbered" }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Oversized uppercase display type pinned to a page edge; near-black and electric-yellow canvases alternate; one hairline rule and mono captions.",
+    "components": "Open ruled blocks and bare numerals, never rounded card grids. One image region at most, never under the title.",
+    "narrative": "Claim, proof, offer, before/after, numbers, ask.",
+    "nativeCoverage": "Cover, chapter, statement, split text with image region, stat row, list, quote, comparison, bar chart and closing as native text, shapes and chart; source entrance animation, Barlow type and image placeholders are not reproduced."
+  },
+  "pageMapping": [
+    { "page": 1, "archetype": "cover", "native": "cover_slide", "status": "adapted", "differences": "Image placeholder omitted unless an asset is planned." },
+    { "page": 2, "archetype": "chapter", "native": "section_slide", "status": "adapted", "differences": "" },
+    { "page": 3, "archetype": "statement", "native": "statement_slide", "status": "adapted", "differences": "" },
+    { "page": 4, "archetype": "split-image", "native": "content_slide + bullets + image", "status": "approximate", "differences": "Image region is filled only by a planned asset; otherwise the text column widens." },
+    { "page": 5, "archetype": "stats", "native": "content_slide + kpi", "status": "adapted", "differences": "" },
+    { "page": 6, "archetype": "list", "native": "content_slide + bullets", "status": "adapted", "differences": "Two-column title/list offset is approximated by regions." },
+    { "page": 7, "archetype": "quote", "native": "statement_slide", "status": "adapted", "differences": "" },
+    { "page": 8, "archetype": "comparison", "native": "content_slide + card", "status": "adapted", "differences": "Centre divider is drawn by the two open blocks." },
+    { "page": 9, "archetype": "chapter", "native": "section_slide", "status": "adapted", "differences": "Source uses the dark canvas for this chapter; native chapters use the yellow canvas." },
+    { "page": 10, "archetype": "statement", "native": "statement_slide", "status": "approximate", "differences": "Source statement sits on yellow; native statements use the dark canvas." },
+    { "page": 11, "archetype": "chart-bar", "native": "content_slide + native_chart", "status": "adapted", "differences": "Native chart with editable data; highlighted last bar is not styled separately." },
+    { "page": 12, "archetype": "closing", "native": "closing_slide", "status": "adapted", "differences": "Two contact columns become one meta line." }
+  ]
+}

@@ -26,7 +26,9 @@ describe("resource target catalogue parity", () => {
     expect(TOOL_ORDER).toHaveLength(10);
     expect(resourceClientIds).toEqual(TOOL_ORDER);
     expect(RESOURCE_TARGET_IDS).toHaveLength(9);
-    expect(MCP_TABLE_TOOLS).toEqual(RESOURCE_TARGET_IDS);
+    expect(MCP_TABLE_TOOLS).toEqual([...RESOURCE_TARGET_IDS, "ofox-assistant"]);
+    expect(RESOURCE_TARGET_IDS).not.toContain("ofox-assistant");
+    expect(TOOL_ORDER).not.toContain("ofox-assistant");
     expect(
       skillColumns(
         targetIds.map((id) => ({

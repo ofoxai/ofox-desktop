@@ -59,9 +59,20 @@ test("the request is one POST to /v1/responses with the exact body and bearer ke
     include: ["web_search_call.action.sources"],
     max_tool_calls: 1,
     reasoning: { effort: "low" },
-    max_output_tokens: 1500,
+    max_output_tokens: 3000,
+    text: body.text,
   });
   assert.deepEqual(body, searchRequestBody("Pi coding agent SDK", MODEL));
+  // The search model lists results as JSON instead of answering.
+  assert.equal(body.text.format.type, "json_schema");
+  assert.equal(body.text.format.strict, true);
+  assert.deepEqual(body.text.format.schema.properties.results.items.required, [
+    "title",
+    "url",
+    "published",
+    "excerpt",
+  ]);
+  assert.match(body.input, /Do not answer it and do not summarize\./);
   assert.equal(typeof body.input, "string");
   assert.ok(body.input.endsWith("Pi coding agent SDK"), body.input);
   assert.ok(body.input.length > "Pi coding agent SDK".length);
@@ -164,6 +175,127 @@ test("a real one-search response yields citations first, then sources, deduped",
     assert.ok(item.title.length > 0);
   }
   assert.match(parsed.summary, /^Here are the most relevant/);
+});
+
+test("a real structured answer lists its results with excerpts first, then the other sources", async () => {
+  const parsed = parseSearchResponse(
+    await fixture("responses-structured.json"),
+    MODEL,
+  );
+  assert.deepEqual(parsed.usage, {
+    searchCalls: 1,
+    inputTokens: 8145,
+    outputTokens: 888,
+    model: "openai/gpt-5-nano",
+  });
+  assert.equal(parsed.summary, "");
+  assert.deepEqual(
+    parsed.results.map(({ title, url, published }) => ({
+      title,
+      url,
+      published,
+    })),
+    [
+      {
+        title: "内閣総理大臣 - Wikipedia",
+        url: "https://ja.wikipedia.org/wiki/%E5%86%85%E9%96%A3%E7%B7%8F%E7%90%86%E5%A4%A7%E8%87%A3",
+        published: undefined,
+      },
+      {
+        title: "List of Ministers | Cabinet | Prime Minister's Office of Japan",
+        url: "https://japan.kantei.go.jp/105/meibo/daijin/index.html",
+        published: "2026-11-02",
+      },
+      {
+        title: "2026 Japanese general election - Wikipedia",
+        url: "https://en.wikipedia.org/wiki/2026_Japanese_general_election",
+        published: "2026-11-06",
+      },
+      {
+        title: "zh.wikipedia.org",
+        url: "https://zh.wikipedia.org/wiki/%E6%97%A5%E6%9C%AC%E5%85%A7%E9%96%A3%E7%B8%BD%E7%90%86%E5%A4%A7%E8%87%A3%E5%88%97%E8%A1%A8",
+        published: undefined,
+      },
+      {
+        title: "ja.wikipedia.org",
+        url: "https://ja.wikipedia.org/wiki/%E5%86%85%E9%96%A3%E7%B7%8F%E7%90%86%E5%A4%A7%E8%87%A3%E3%81%AE%E4%B8%80%E8%A6%A7",
+        published: undefined,
+      },
+    ],
+  );
+  assert.match(parsed.results[1].snippet, /^List of Ministers/);
+  assert.equal(parsed.results[3].snippet, undefined);
+});
+
+// A search that returned https://a.example/page, and a list that names it
+// with extra tracking parameters, a page the search never returned and junk.
+const listing = (results, sources = ["https://a.example/page"]) => ({
+  model: MODEL,
+  output: [
+    {
+      type: "web_search_call",
+      action: {
+        type: "search",
+        sources: sources.map((url) => ({ type: "url", url })),
+      },
+    },
+    {
+      type: "message",
+      content: [
+        {
+          type: "output_text",
+          text:
+            typeof results === "string" ? results : JSON.stringify({ results }),
+          annotations: [],
+        },
+      ],
+    },
+  ],
+});
+
+test("a listed result counts only when the search returned its page, as the search spelled it", () => {
+  const parsed = parseSearchResponse(
+    listing([
+      {
+        title: "Made up",
+        url: "https://evil.example/c?d=private",
+        published: null,
+        excerpt: "x",
+      },
+      {
+        title: "  Page\nA  ",
+        url: "https://a.example/page?utm_source=x&utm_d=private#top",
+        published: "Updated 2026-10-01 (Thursday)",
+        excerpt: ` ${"e".repeat(700)} `,
+      },
+      { title: "No URL", url: 42, published: null, excerpt: "x" },
+      null,
+    ]),
+    MODEL,
+  );
+  assert.equal(parsed.summary, "");
+  assert.deepEqual(parsed.results, [
+    {
+      title: "Page A",
+      url: "https://a.example/page",
+      snippet: "e".repeat(600),
+      published: "2026-10-01",
+    },
+  ]);
+});
+
+test("an answer that is no list keeps its text as the summary; a list cut short does not", () => {
+  const prose = parseSearchResponse(listing("Plain answer."), MODEL);
+  assert.equal(prose.summary, "Plain answer.");
+  assert.deepEqual(prose.results, [
+    { title: "a.example", url: "https://a.example/page" },
+  ]);
+  const cut = parseSearchResponse(
+    listing('{"results":[{"title":"A","url":"https://a.exa'),
+    MODEL,
+  );
+  assert.equal(cut.summary, "");
+  assert.deepEqual(cut.results, prose.results);
 });
 
 test("every web_search_call item counts as a billed search call", async () => {

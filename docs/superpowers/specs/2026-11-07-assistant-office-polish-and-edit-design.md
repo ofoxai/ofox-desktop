@@ -1,0 +1,272 @@
+# 助手 M3：Office 产出精美化并可修改 — 设计稿
+
+日期：2026-11-07。前置：M1/M2（`docs/superpowers/specs/2026-11-07-assistant-deliverables-and-media-design.md`，
+分支 `feat/assistant-deliverables`）。路线图：`docs/assistant-roadmap.md` 第 1 项与第 3 项。
+
+## 为什么做
+
+M1/M2 让助手能稳定生成真实、可打开、安全的 PDF / Word / PPT / Excel。但 2026-11-07 的本机验证暴露了产出质量的上限：
+
+- 版式完全由模型按坐标写。同一个提示，GPT-6 Luna、GPT-6.1 Terra、DeepSeek V4.1 Flash 做出来的东西差别很大，用户要说“做得精美一点”才能得到第二版。
+- 质量检查在事后：officecli 只能查出溢出、出界这类硬伤，查到后回传模型重做，于是同一条回复里出现两张同名卡片。
+- 生成后不能只改一页；用户上传的文件完全不能改。
+
+产品定位已定：助手直接产出**一份**用户要的、精美的 Office 文件，首轮即可用，并且能继续改。精美度不能靠模型当次发挥，要由代码保证。
+
+## 目标
+
+1. **模型写内容，代码排版。** 新建 PPT 时模型只输出结构化内容（页型 + 文字 + 数据），由渲染器按主题生成 officecli 批处理。
+2. **三套主题，一次出一份。** 出卡片前自动质检并修正溢出、出界、低对比度；一次请求只产生一张卡片；修改和重做替换卡片而不是新增。
+3. **能改。** 助手生成的文件可以“改第 3 页”，用户上传的 docx / pptx / xlsx 可以做保留原版式的修改（改文字、加减页、改表格数据、换图），源文件字节不变。
+4. **像用户的。** 偏好套件（公司名、品牌色、logo、默认主题、语言）自动套用。
+5. **可度量。** 一套可选的真实模型回归集给出首轮成功率，作为本里程碑的验收和后续改动的回归。
+
+## 不做的（这一轮）
+
+- Word、Excel 的结构化渲染器和主题（M3 后半段 M3d，本稿只定方向）。PDF 的 Typst 主题（字体、标题块、配色、页眉页脚公司名）很小，**在 M3a 做**，回归集里的 PDF 用例按它验收；偏好套件在 M3a–c 对 pptx 和 PDF 生效，对 Word / Excel 在 M3d 生效。
+- 把用户上传的文件整体换成我们的主题重排。它不是“编辑”，而是“基于这份内容重做一份精美版”（inspect 抽内容 → 内容模型 → 渲染），放在 M3d，不进第一版验收。
+- 右侧在线预览面板（路线图第 2 项）。本稿只保证宿主产出每一页的 SVG，供预览面板和缩略图使用。
+- 视觉模型审稿（让模型看渲染图再修）。第一版的质检是确定性的。
+- 自定义母版 / 版式文件、用户自带 .potx 模板、Morph 转场、动画。
+- Linux；Windows 的编译与验收是发布门槛，不在本稿。
+
+## 反目标（做到了也算失败）
+
+- 三个模型里有一个做出来明显难看或经常溢出。
+- 为了精美把内容砍掉、缩到比字号表更小，或把用户的文字改写。
+- 修改用户文件时碰了没要求改的地方，或改变了原有主题、字体、母版。
+- 任何一条路径绕过宿主的批处理校验器或沙箱。
+
+## 约束
+
+**引擎（officecli 1.0.160，已随包）**
+- `create` 只能建空白文件，没有模板参数；`slidelayout` 是只读容器（可以 set 名称和背景、在其下加形状，不能新建或删除）。因此**主题不是母版文件，而是渲染器里的样式表**：每个形状显式写字体、字号、颜色、位置（AionUi 的 officecli-pptx 技能也是这个原则：不依赖主题默认值）。
+- `view svg --start N --end N` 能单独导出第 N 页（1920×1080）。`view issues --json` 返回 `{id, type, severity, path, message}`，溢出消息里带 `suggest.height=…`；类型包括文本溢出、`shape_off_slide`、`low_contrast`。
+- `view outline` 给出每页标题和形状数；`get /slide[N] --depth 1` 给出每个形状的稳定 `@id`、文字、位置、字体；批处理路径可用 `[@id=…]`、`[@paraId=…]`、`[@name=…]`。
+- 一个批处理最多 2000 条命令，内容最多 2 MiB（宿主现有上限，不改）。
+
+**安全边界（不变）**
+- 任何批处理，不论是渲染器生成的还是模型直接写的，都经过宿主现有的校验器（命令白名单、属性分类、文件键只收 `data:` URI、xlsx 公式白名单）和 macOS `sandbox-exec`。
+- app 本身永不加载文档文件；预览只用宿主在沙箱里渲染的 SVG / PNG。
+- 编辑用户文件时，引擎只看到工作目录里的副本；源附件不进引擎的可写范围。
+
+**运行环境**
+- 渲染器写在 Node sidecar（`assistant-runtime/src/`），没有 Python；宿主是 Rust。
+- 必须在 GPT-6.1 Terra、GPT-6 Luna、DeepSeek V4.1 Flash 三个模型上都能用；DeepSeek 对 JSON 结构的遵从最弱，内容模型的解析要宽容（可强制转换的就转换，未知字段丢弃并记警告，缺必填字段才拒绝）。
+- i18n：新增文案 zh / en / ja 齐全。开源边界：不引入 Anthropic 的 docx / pptx 技能，可参考 Apache-2.0 / MIT 的内容并保留 notices。
+- 字体：主题指定的拉丁和 CJK 字体，要在 macOS 的 Keynote / PowerPoint 和 Windows 的 PowerPoint 上都不出现明显错位（实现者选具体字体，用 SVG 渲染和真机各验一次）。
+
+## 方案总览
+
+一份文档有三条路，都汇到同一个宿主管线（创建 → 批处理 → 校验 → 质检 → 导入附件）：
+
+| 路径 | 输入 | 谁排版 | 用于 |
+|---|---|---|---|
+| A 结构化生成 | 内容模型（deck 对象） | 渲染器（代码） | 新建 PPT（默认） |
+| B 修改 | B1：改过的 deck 对象 + `revises`；B2：对上传文件的 set/add/remove 批处理 | B1 渲染器；B2 模型 | B1 改助手生成的文件；B2 改用户上传的文件 |
+| C 专家模式 | 原始批处理（现状） | 模型 | 兜底、模型想做内容模型做不了的事 |
+
+### A. 内容模型（pptx，第一版）
+
+2026-11-08 用户决定：页型、配色和排版常数按 AionUi 的做法取，即 OfficeCLI 随附的 morph-ppt 技能
+（Apache-2.0，`skills/morph-ppt/reference/pptx-design.md` §4、`decision-rules.md`、`styles/`）。AionUi 自己没有 PPT 技能，
+内嵌的就是这一份。我们只取它的页型词汇、调色板角色和字号地板；排版由我们的渲染器做，模型不写坐标。
+调研记录：`docs/superpowers/research/2026-11-07-slide-types-and-themes.md`。
+
+`create_document` 保持一个工具。`format: "pptx"` 时 `content` 可以是 **deck 对象**（路径 A）或 **批处理数组**（路径 C）；运行时按形状区分。deck 对象：
+
+```json
+{
+  "kind": "deck",
+  "title": "认识 Ofox",
+  "language": "zh",
+  "theme": "navy",
+  "slides": [
+    { "type": "hero", "title": "认识 Ofox", "subtitle": "让想法更快变成答案与作品", "meta": "团队分享 · 2026 年 11 月" },
+    { "type": "statement", "statement": "从自动化到自主：为什么现在需要 agent", "note": "可选的一句补充" },
+    { "type": "pillars", "title": "三项核心能力", "pillars": [{ "heading": "感知", "body": "文本、图像、语音多模态输入" }, { "heading": "推理", "body": "…" }, { "heading": "执行", "body": "…" }] },
+    { "type": "evidence", "title": "数据", "metrics": [{ "value": "118%", "label": "NRR", "note": "同比" }], "detail": ["EMEA 三月上线", "续约率 +12%"] },
+    { "type": "timeline", "title": "推进节奏", "steps": [{ "heading": "试点", "body": "Q1，运营牵头" }, { "heading": "推广", "body": "Q2" }, { "heading": "复盘", "body": "Q3" }] },
+    { "type": "comparison", "title": "RNN 与 Transformer", "left": { "heading": "RNN", "points": ["逐词计算", "长句衰减"] }, "right": { "heading": "Transformer", "points": ["并行计算", "全句可见"] } },
+    { "type": "grid", "title": "今天讲什么", "items": [{ "heading": "背景", "body": "…" }, { "heading": "机制", "body": "…" }, { "heading": "结构", "body": "…" }, { "heading": "应用", "body": "…" }] },
+    { "type": "quote", "quote": "把任务说清楚，剩下的交给它。", "source": "用户反馈" },
+    { "type": "showcase", "title": "收入", "media": { "chart": { "kind": "bar", "categories": ["Q1", "Q2"], "series": [{ "name": "收入", "values": [12, 15] }] } }, "caption": "单位：百万" },
+    { "type": "cta", "title": "开始构建你的 agent", "subtitle": "app.ofox.ai", "contact": "…" }
+  ]
+}
+```
+
+- 页型固定十种，取自 morph-ppt：`hero`（开场）、`statement`（一句关键信息 / 过渡）、`pillars`（2–4 栏并列）、`evidence`（数据与指标）、
+  `timeline`（流程 / 时间线）、`comparison`（左右对比）、`grid`（3–8 个条目）、`quote`（引言，留白）、`cta`（收尾号召）、`showcase`（大面积展示一张图、一张图表或一张表）。
+  **没有 bullets 页型**：列表内容用 `pillars`（2–4 条）或 `grid`（3–8 条）表达，技能里写明。
+- 每种页型的字段、条数上限、每条字数上限写在 JSON Schema 里，并在技能里用一张表告诉模型。上限按 officecli 检查器的常数核过，
+  在渲染要点列的字号下都放得下；单位是中文字符，拉丁字符按两倍计：
+
+| 页型 | 字段 | 上限 | 渲染要点 |
+|---|---|---|---|
+| `hero` | title、subtitle?、meta? | 18 / 30 / 30 | 深底居中，标题 44–60pt 按长度选，logo 右下 |
+| `statement` | statement、note? | 40 / 60 | 深底或浅底居中，32–40pt，最多两行 |
+| `pillars` | title、pillars[{heading, body}] | 2–4 栏；12 / 60；标题 22 | 等宽卡片，3 栏正文 16pt、4 栏 14pt |
+| `evidence` | title、metrics[{value, label, note?}]、detail?[] | 1–4 个；6 字符 / 12 / 30；detail ≤ 3 × 40 | 1–2 个 72pt，3 个 60pt，4 个 48pt；detail 右侧 18pt |
+| `timeline` | title、steps[{heading, body}] | 3–6 步；10 / 30 | 横向编号卡片 |
+| `comparison` | title、left{heading, points[]}、right{…} | 每侧 heading 12，points ≤ 4 × 30 | 50/50 两栏，18pt，对比色 |
+| `grid` | title、items[{heading, body}] | 3–8 个；10 / 30 | 两行各 ≤ 4，14pt |
+| `quote` | quote、source? | 60 / 20 | 居中 28–32pt，极少装饰 |
+| `cta` | title、subtitle?、contact? | 18 / 40 / 30 | 深底居中 |
+| `showcase` | title、media（三选一：image \| chart \| table）、caption?、body? | chart ≤ 8 类别 × ≤ 3 系列，饼图 2–6 片；table ≤ 6 列 × 6 行（含表头），表头 8、单元格 12；caption 30、body 100 | 媒体占中央 20 × 11 cm，body 在右 18pt |
+| deck | title、language、theme?、slides[]、每页 notes? | 3–30 页；notes 300 | 超过 30 页拒绝并建议拆成两份 |
+
+- 文本只有纯文本和换行；没有富文本、没有坐标、没有字号。模型写不了“这个框多高”，所以也写不坏。
+- 图片来源：模型写不出几百 KB 的 base64，所以 `showcase.media.image`（以及 B2 换图、PDF 内嵌图）接受 **`attachment:<id>`**，指向本会话的附件，包括 `generate_image` 生成的图。宿主在校验器之前把它解析成 `data:` URI（pptx / docx / xlsx）或复制进工作目录的 `assets/<id>`（Typst 用 `image("assets/<id>")`），只接受 PNG / JPEG / SVG、单张 ≤ 5 MB、仅限本会话可见的附件；校验器对文件键的规则不变（引擎仍然只看到 data URI 或工作目录里的文件）。`data:` URI 仍然接受。
+- `notes` 每页可选，进演讲者备注。`language` 决定 CJK 字体与标点；`theme` 可省略，省略时取偏好套件的默认主题，再退到 `navy`。
+- 解析宽容但不删内容：数组给成字符串就拆行；数字给成字符串就转；未知字段丢弃。**超出条数或字数上限一律拒绝整个调用**，错误里点名是第几页、哪个字段、上限多少，让模型拆页或精简后重发；渲染器绝不截断或改写用户的文字（反目标）。未知页型同样拒绝并列出可用页型。被拒绝的调用不产生文件，也就没有卡片。
+
+### 主题与排版规则（渲染器）
+
+- 三套主题作为样式表随运行时发布，角色和字体槽位照 morph-ppt 的 `style.md`：颜色 `background`、`card`、`primary`、`secondary`、`accent`、
+  `text_primary`、`text_secondary`、`text_muted`，加 `dark`（hero / statement / cta 的深底色，其上文字用 `on_dark`）和 `chart[]`（4–6 个图表系列色，
+  由 primary / secondary / accent 及其浅色推导）；字体 `title_en`、`title_cn`、`body`、`data`。装饰：标题样式（下划线 / 色条 / 无）、圆角（0 或 0.3 cm）、
+  页脚（页码、公司名）。起始数值取自 morph 风格库（实现者可微调，保留 Apache-2.0 来源说明）：
+
+| 主题 | 来源风格 | background / card | primary / secondary / accent | text 主 / 次 / 弱 | dark |
+|---|---|---|---|---|---|
+| `navy`（商务） | light--minimal-corporate + light--project-proposal | FFFFFF / E8EEF4 | 1E3A5F / D4A84B / 3498DB | 333333 / 666666 / 999999 | 1E3A5F |
+| `forest`（稳重自然） | warm--earth-organic | F5F0E8 / E8D5B0 | 6B8E6B / 8B6F47 / D4956B | 3C2415 / 6B5B4A / 9E8E7A | 3C2415 |
+| `warm`（活泼） | light--training-interactive | FFF9E6 / FFFFFF | FF6B6B / 4ECDC4 / FFE66D | 2D3436 / 636E72 / B2BEC3 | 2D3436 |
+
+  字体：拉丁标题 Arial Black、拉丁正文 / 数据 Arial，中文标题与正文 Microsoft YaHei，日文 Yu Gothic；都随 Office 在 macOS 与 Windows 发布。
+  深底判定用 OfficeCLI 的亮度公式 `(R×299 + G×587 + B×114) / 1000`，亮度 < 128 的底色上文字亮度 ≥ 80%。
+- 画布 16:9（33.867 × 19.05 cm）。内容边距 2.33 cm，标题带高约 3.7 cm，内容区从 y ≈ 5 cm 起到 17.78 cm，块间距 0.76 cm，N 张卡片宽 = (29.21 − (N − 1) × 0.76) ÷ N。这些数字来自现有 `ofox-office-pptx` 技能，改为代码常量。
+  内容页的整块内容在内容区里竖直居中，内容多到放满时从顶端开始；卡片有最小高度（pillars 6 cm，grid 与 timeline 的卡片 4 cm），文字仍贴卡片顶部（2026-11-08 真机验收后定）。
+- 字号表（morph 的舞台档）：hero 44–60，statement 32–40，内容页标题 36–44，副标题与卡片标题 20–24，正文 18–24，卡片正文与表格 14–18，说明 13–16，KPI 数字 48–72；13pt 以下一律不用。
+  渲染器按内容量在区间内选字号，估算常数与 officecli 检查器一致：CJK 字宽 = 字号 × 0.0353 cm，拉丁 = 0.55 倍；行高 = 字号 × 0.0466 cm（1.32 倍行距）；
+  文本框左右内边距各 0.254 cm、上下各 0.127 cm。超出就先降字号到区间下限；到下限仍放不下的记 issue 交给质检闭环处理，**不缩到区间以下，不截断，不改写文字**（内容量由内容模型的上限在解析时挡住，见上）。
+- 渲染器输出的是和模型写的一样的 officecli 批处理，所以宿主的校验器原样生效。
+- 偏好套件覆盖主题：`brand.primary` / `accent` 替换调色板对应项，`chart[]` 随之重新推导；公司名进页脚；logo（data URI，≤ 200 KB）放 hero 右下。
+
+### 生成前先给大纲（技能规则）
+
+- 技能要求模型：页数 ≥ 6 或用户没说清用途、受众时，先在回复里给出大纲（每页标题 + 一句内容），问**一个**确认问题；用户说“直接出”或已经给了明确结构就直接生成。
+- 大纲就是 deck 对象的 title 列表，确认后不重新构思，直接填内容调用工具。
+
+### 质检闭环（宿主）
+
+批处理跑完、`validate` 通过后：
+
+1. `view issues --json`。
+2. 自动修正（最多两轮，只对本次生成或本次批处理触碰过的形状）：
+   - 文本溢出且带 `suggest.height`：`set` 该形状高度为建议值；若会越过内容区底部，则把字号降一级后重试。
+   - `shape_off_slide`：把形状夹回画布内。
+   - `low_contrast`：把文字色换成主题的深底或浅底文字色。
+3. 再跑一次 `view issues`，剩余的作为 warning 回传模型并显示在卡片上，和现状一致。
+4. 渲染全部页面为 SVG，存在附件旁（`pages/<n>.svg`）；缩略图照旧取第一页。officecli 的 SVG 把文字放在 foreignObject 里，画布读不到，所以运行时先画形状，再把文字取出来按原样式换行画上；SVG 不是合法 XML 时不给缩略图，免得模型看到一张没有字的页。
+5. 修正用的 `set` 批处理同样过校验器。路径 B2（用户文件）**不做自动修正**，只报告，避免碰到没要求改的形状。
+
+### 一次只出一份：卡片替换
+
+- 生成记录和附件增加 `revises: <attachmentId>`。**源附件是助手生成的（`origin = generated`）就被替代**，不论新文件来自渲染器（B1）还是 `edit_document`（B2）；只有用户上传的源附件不被替代。
+- `superseded` 不单独存储，由“存在一个未删除的附件 `revises` 它”推导，所以分叉、重试、删除消息后自然保持一致。
+- 显示：最新一份的卡片完整显示，带“历史版本”可展开列出被它替代的各版（可保存）；被替代的卡片在它原来的消息里折叠成一行“已重做，见最新版本”，点开可展开原卡片。跨轮修改时旧消息里是折叠行，新消息里是完整卡片。
+- 模型侧规则：同一轮里因 issues 重做、用户要求“改第 N 页”、“做得精美一点”，都用 `revises` 指向上一份；只有用户明确要“另存一份 / 两个版本”才不带。
+- 结构化生成每次都是整份重渲染（渲染器确定性，没改的页面字节级一致），所以“只改一页”是体验承诺，不是实现要求；第一版不做局部重渲染。
+- 每份结构化生成的 deck 对象保存在附件旁（`content.json`）。`inspect_document` 对带 `content.json` 的附件直接返回这份 deck（原样 JSON 放在纯文本结果里；“纯文本”指结果不包信封，不指内容不能是 JSON），所以压缩上下文、分叉或换模型后模型仍能拿到上一份再改。被 `edit_document` 手改过的文件没有 `content.json`（手改后内容模型已过期），对它只能继续 B2，或 inspect 后重做一份；技能里写明。
+
+### B2. 修改用户上传的文件
+
+两个新工具，三种格式都支持（机制共用，精美化只对 PPT）：
+
+- `inspect_document({ id, where? })`：宿主在沙箱里对附件副本跑 officecli，返回**纯文本**：
+  - pptx：`view outline` 全部，加 `where` 指定页的 `get /slide[N] --depth 1`（形状 `@id`、文字、位置、字体、表格与图表摘要）；
+  - docx：`view outline`，加指定段落区间的 `get /body/p[N]`；
+  - xlsx：各表的 `view text` 区间，加指定单元格的 `get`。
+  - 输出有上限（实现者定，建议 20k 字符），超出时告诉模型如何缩小 `where`。
+- `edit_document({ id, name?, content: <批处理> })`：宿主把源附件复制到工作目录，在副本上跑批处理（现有命令与属性校验全部沿用，图片只收 `data:` URI），`validate`，`view issues`（只报告），导入为新附件（默认名 `<原名>-edited.<ext>`，带 `revises: <源 id>`；源是用户上传的就不被替代，源是助手生成的就按卡片替换规则被替代），源字节不变（测试断言）。工具结果里附上改过的元素的读回（`get` 改后路径），让模型自查。
+- 技能规则（取自 deepseek-harness 和 AionUi 的做法）：先 inspect，绝不盲改；只改用户要求的内容；匹配文件已有的字体、主题和母版，不套我们的主题；改完以结果里的读回核对，不确定就再 inspect 一次；旧格式（.doc/.ppt）、加密、带宏的文件不处理，直接告诉用户。
+
+### 偏好套件
+
+- `prefs.json` 新增 `brand: { company, primary, secondary, accent, logo, defaultTheme, language }`，全部可空；logo 存为 `data:` URI（≤ 200 KB，PNG/JPEG/SVG）。
+- 助手设置页新增一小节（文字字段、颜色选择、logo 选择、主题下拉），zh / en / ja。
+- 宿主随 `documents` 参数把 `brand` 下发给运行时；渲染器套用；技能告诉模型“偏好套件已自动套用，不要再问品牌色”。
+
+### 技能与工具描述
+
+- `ofox-office-pptx/SKILL.md` 改写：页型表、字段上限、叙事结构建议（problem_solution / insight_driven / vision_driven / educational，取自 morph-ppt `decision-rules.md`）、
+  “列表用 pillars 或 grid、相邻两页页型不同”、大纲先行规则（待调研后定）、`revises` 规则、修改规则；专家模式（原始批处理）压缩到末尾一节。`ofox-office-docx` / `xlsx` 增加 inspect / edit 的用法。
+- `create_document` 的描述与 guidelines 说明 deck 对象优先、批处理为专家模式。
+- 工具结果一律纯文本（路线图第 8 项的审计随本里程碑对这三个工具完成）。
+
+### 真实模型回归集
+
+- `scripts/assistant-real-eval.mjs`，可选，不进 CI 默认门禁。key 由脚本从钥匙串读取（`ai.ofox.desktop.apikey` / `opencode`），绝不写进日志或上下文。
+- 用例：设计稿的四个验收提示（PDF 四川、8 页 Transformer PPT、三科成绩表、Word 周报）加两条修改用例（“把第 2 页标题改成 X”、上传 docx 改标题），每条在 terra、Luna、DeepSeek Flash 上各跑一次。
+- 断言：工具只被调用一次或带 `revises`；最终只有一份未被替代的附件；`validate` 通过；warning 数为 0；文本里无字面 `\n`；运行时间和 token 记录。
+- 输出一份 Markdown 报告（每条用例 × 模型一行），直接贴进 `docs/assistant-engines.md` 的验收表。
+- 有条件时把真实流量录成磁带供离线回放（实现者可以先只做录制）。
+
+## 最容易出问题的地方（每条都要有测试）
+
+1. **文字适配的估算和真实字体不一致**：用 CJK、拉丁、混排各一组样本，渲染 SVG 后用 `view issues` 为零作为断言；字号区间和截断规则有单元测试。
+2. **自动修正的循环**：最多两轮，第二轮仍有溢出就停止并报告；修正批处理必须过校验器；修正不得移动或改动本次没碰过的形状。
+3. **内容模型的宽容解析**：DeepSeek 风格的输入（数字写成字符串、bullets 写成一段带换行的字符串、多余字段）都要能渲染；缺标题、未知页型要拒绝并给出可用页型。
+4. **卡片替换**：带 `revises` 的生成替换卡片、旧版本可展开；不带的新增；`edit_document` 的源附件永不标 superseded；会话导出 / 备份 / 分叉里 `revises` 的引用保持有效。
+5. **用户文件编辑的边界**：源字节不变；`@id` 路径在增删页后仍然有效（用 id 不用序号）；inspect 输出超限时的提示；旧格式、加密文件的拒绝文案。
+6. **偏好套件**：logo 大小上限；颜色格式校验；没有设置时主题默认值不变。
+7. **工具结果纯文本**：inspect、edit、create 的结果都不包 JSON；有断言。
+8. **沙箱**：副本在工作目录内；引擎对源附件目录无写权限；现有 sandbox 测试覆盖 edit 路径。
+
+## 验收
+
+- 现有门禁全绿：`pnpm typecheck`、`format:check`、`test:unit`、`cargo fmt --check`、`clippy -D warnings`、`cargo test`、`pnpm assistant:prepare`、`assistant:test`、`assistant:smoke`。
+- 假模型 e2e（`src-tauri/tests/assistant_host.rs` 风格）：deck 对象 → 8 页 PPTX、`validate` 通过、issues 为零、`pages/1..8.svg` 存在；带 `revises` 的第二次生成替换卡片；上传 docx 改标题 → 新附件、源字节不变；非法页型 → 拒绝、无文件；偏好套件的公司名出现在页脚。
+- 真实模型回归集：六条用例 × 三个模型共 18 次，首轮成功率 ≥ 90%（即最多 1 次失败；成功 = 一份、零 warning、文件有效）。没过就改技能或渲染器后**整套重跑**，不允许挑最好的一次；结果如实记录。M3c 没过不阻塞 M3a / M3b 合并，但里程碑不算完成。脚本谁有 key 谁跑：默认由用户跑（和验收表一致），实现者环境里有 key 时也可以跑。三个模型的观感由用户抽看。
+- 用户本机：四个验收提示各一份，“保存并打开”无告警；“把第 2 页标题改成 X”只多一个版本不多一张卡片；上传一份自己的 PPT 改两处文字，原版式不变。
+
+## 里程碑
+
+2026-11-07 用户决定：M3a 拆成三个切片，按下表顺序做。每个切片单独写实施计划、单独验收，验收通过
+（含真实模型脚本）再开下一个，不把十项交付攒成一大段再验。
+
+| 顺序 | 切片 | 交付 | 验收 |
+|---|---|---|---|
+| 1 | M3a-1 生成骨架 | deck 内容模型与 Schema（宽容解析、超限拒绝）、`navy` 一套主题、渲染器、宿主质检闭环、全页 SVG、`ofox-office-pptx` 技能的页型表与上限表、最小真实回归脚本（4 个生成提示 × 3 模型） | 假模型 e2e：deck → 8 页 PPTX、`validate` 通过、issues 为零、`pages/1..8.svg` 存在；非法页型、超限内容被拒绝且无文件。真实脚本 12 次：每次一份、零警告、无字面 `\n` |
+| 2 | M3a-2 一次只出一份 | `revises` 与卡片替换（折叠旧版、历史版本）、`content.json` 保存、技能里的 `revises` 规则、大纲规则（待调研后定，见路线图） | e2e：带 `revises` 的第二次生成替换卡片，不带的新增；真实用例“把第 2 页标题改成 X”只多一个版本不多一张卡片 |
+| 3 | M3b 修改 | `inspect_document`（含对生成文件返回 `content.json` 的 deck）、`edit_document`（三种格式）、技能规则、源字节不变测试 | e2e：上传 docx 改标题 → 新附件、源字节不变；真实用例上传 PPT 改两处文字，原版式不变 |
+| 4 | M3a-3 像用户的 | `forest` / `warm` 两套主题、偏好套件（pptx 与 PDF）、PDF 主题、`attachment:<id>` 图片 | e2e：偏好套件的公司名出现在页脚；三套主题各出一份同内容 deck 的 SVG 供抽看 |
+| 5 | M3c 度量 | 回归脚本补两条修改用例、token 与时间统计、验收表 | 六用例 × 三模型 18 次，最多失败 1 次 |
+| 6 | M3d 后半段 | Word / Excel 渲染器与主题（偏好套件随之生效）、“基于内容重做精美版” | 另立计划 |
+
+## 已决定（本稿作者的决定，用户可推翻）
+
+1. 主题是渲染器样式表，不是母版文件（引擎无法新建版式）。
+2. 一个工具 `create_document`，`content` 兼收 deck 对象与批处理；不另开 `create_deck`。
+3. 改助手生成的文件 = 重发整份 deck 对象 + `revises`，整份重渲染；第一版不做局部重渲染。
+4. 用户文件的编辑不做自动修正，只报告。
+5. 渲染器在 Node 运行时；质检闭环在 Rust 宿主（它拥有引擎和沙箱）。
+6. 大纲先行：要不要做、阈值多少，2026-11-07 决定先调研其他产品的做法再定（路线图“待调研”第 1 条）；本稿原建议是页数 ≥ 6 或用途、受众不明时先给大纲。
+7. 三套主题的名字和基调：navy / forest / warm；来源风格见“主题与排版规则”。
+8. M3 第一版覆盖 PPT 的精美化和三种格式的编辑；Word / Excel 的精美化在 M3d。
+9. 内容超限一律拒绝调用，渲染器绝不截断（审稿后定）。
+10. 图片用 `attachment:<id>` 引用会话附件，宿主在校验器前解析；PDF 内嵌图同机制（审稿后定）。
+11. `superseded` 由 `revises` 推导；助手生成的源一律被替代，用户上传的源不被替代；旧卡片折叠成一行（审稿后定）。
+12. `inspect_document` 返回生成文件的 deck 原文；手改过的文件没有内容模型，只能继续 B2（审稿后定）。
+13. PDF 主题进 M3a；偏好套件先对 pptx 和 PDF 生效（审稿后定）。
+14. 回归集 18 次最多失败 1 次，整套重跑，不挑最好（审稿后定）。
+15. M3a 拆成 M3a-1 / M3a-2 / M3a-3，执行顺序 M3a-1 → M3a-2 → M3b → M3a-3 → M3c；每个切片单独计划、单独验收（2026-11-07 用户定）。
+16. 真实模型回归脚本的最小版随 M3a-1 交付，只跑 4 个生成提示 × 3 模型；之后每个切片都用它做门槛，M3c 补全（2026-11-07 用户定）。
+17. 第 9 条维持：超限拒绝整个调用，渲染器绝不截断；排版规则里残留的截断句已删（2026-11-07 用户定）。
+18. 页型、配色、常数按 AionUi（即 OfficeCLI morph-ppt 技能）取：十种页型 hero / statement / pillars / evidence / timeline / comparison / grid / quote / cta / showcase，
+    没有 bullets 页型；主题角色与字体槽位照 `style.md`，三套主题的起始数值来自其风格库；排版仍由我们的渲染器做，模型不写坐标（2026-11-08 用户定）。
+19. 渲染器的文字估算常数与 officecli 检查器一致（字宽、行距、内边距），避免质检闭环反复发现溢出（调研结论）。
+20. 内容页整块竖直居中并给卡片最小高度；给模型的缩略图自己画出 foreignObject 里的文字（2026-11-08 真机验收发现内容页上重下轻、缩略图无字，用户定修）。
+
+## 留给实现者决定
+
+- JSON Schema 的具体字段名、各页型的条数与字数上限、宽容解析的边界。
+- 主题的具体字体、配色数值、装饰元素；文字宽度估算系数的校准方法。
+- `pages/<n>.svg` 的存放与清理；`content.json` 的格式版本号。
+- inspect 的输出格式、截断上限、`where` 参数的语法。
+- 自动修正批处理的生成方式与两轮的判定细节。
+- 偏好套件在设置页的具体布局；颜色选择器的实现。
+- 真实模型回归集的驱动方式（直接驱动运行时或走宿主）、报告格式、磁带录制是否做。
+- 模块拆分与文件命名；`documents/create.rs` 是否借此拆分。

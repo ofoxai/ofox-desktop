@@ -1,0 +1,445 @@
+{
+  "id": "bold-poster",
+  "family": "poster",
+  "names": {
+    "zh": "Bold Poster 红黑海报",
+    "en": "Bold Poster",
+    "ja": "Bold Poster 赤黒ポスター"
+  },
+  "intro": {
+    "zh": "白底上的超大衬线标题，配一种正红色：整页红色的引语、红色数字和细线方框；适合品牌宣言、创始人愿景、编辑类提案和年度报告。",
+    "en": "Huge serif display type on white with one fire-engine red: full red quotation pages, red numerals and ruled boxes; for brand manifestos, founder vision decks, editorial pitches and annual reports.",
+    "ja": "白地に特大のセリフ見出しと一色の赤。全面赤の引用ページ、赤い数字、罫線の枠。ブランドマニフェスト、創業者のビジョン、編集系の提案向け。"
+  },
+  "routing": {
+    "scenarios": [
+      "creative",
+      "product-launch",
+      "business-review"
+    ],
+    "density": "low",
+    "scheme": "light",
+    "tone": [
+      "bold",
+      "editorial"
+    ],
+    "suits": {
+      "data": 1,
+      "formulas": 0,
+      "images": 1,
+      "longText": 0
+    },
+    "avoid": "Pages that must carry dense detail or long paragraphs."
+  },
+  "theme": {
+    "colors": {
+      "background": "FFFFFF",
+      "card": "F5F2EF",
+      "primary": "1C1410",
+      "secondary": "D8000F",
+      "accent": "D8000F",
+      "text": "1C1410",
+      "textSecondary": "5F5752",
+      "textMuted": "8E8884",
+      "line": "1C1410",
+      "accentTint": "F5F2EF",
+      "dark": "1C1410",
+      "onDark": "FFFFFF",
+      "onDarkMuted": "BDB6B0",
+      "surface": "F5F2EF",
+      "chart": [
+        "D8000F",
+        "1C1410",
+        "8E8884",
+        "C9C3BE",
+        "5F5752",
+        "EE8088"
+      ]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Georgia",
+        "body": "Arial",
+        "data": "Georgia"
+      },
+      "zh": {
+        "title": "SimSun",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Mincho",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [
+        110,
+        96,
+        80,
+        66,
+        54
+      ],
+      "statement": [
+        44,
+        40,
+        36,
+        30
+      ],
+      "title": [
+        30,
+        28,
+        26
+      ],
+      "subtitle": [
+        18,
+        16
+      ],
+      "body": [
+        18,
+        16,
+        14
+      ],
+      "card": [
+        14,
+        13
+      ],
+      "caption": [
+        12,
+        11
+      ],
+      "kpi": [
+        44
+      ]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "canvases": {
+          "red": {
+            "bg": "D8000F",
+            "title": "FFFFFF",
+            "body": "FFFFFF",
+            "muted": "FBD9DB",
+            "faint": "F3B3B7",
+            "accent": "FFFFFF",
+            "line": "F3B3B7",
+            "card": "C4000D",
+            "surface": "C4000D",
+            "accentTint": "B8000C",
+            "chart": [
+              "FFFFFF",
+              "1C1410",
+              "F3B3B7",
+              "7A0008",
+              "FBD9DB",
+              "4A0005"
+            ]
+          },
+          "ink": {
+            "bg": "1C1410",
+            "title": "FFFFFF",
+            "body": "F5F2EF",
+            "muted": "BDB6B0",
+            "faint": "8E8884",
+            "accent": "F0303C",
+            "line": "5F5752",
+            "card": "2A211C",
+            "surface": "2A211C",
+            "accentTint": "2A211C",
+            "chart": [
+              "F0303C",
+              "F5F2EF",
+              "8E8884",
+              "BDB6B0",
+              "5F5752",
+              "EE8088"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "ink",
+          "statement": "red",
+          "content": [
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "base",
+            "ink",
+            "base",
+            "base",
+            "base"
+          ],
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 0.9,
+            "y": 0.6,
+            "w": 10.6,
+            "h": 3.7
+          },
+          "kicker": {
+            "x": 7.4,
+            "y": 5.75,
+            "w": 5.03,
+            "align": "right",
+            "size": 10,
+            "color": "accent"
+          },
+          "subtitle": {
+            "x": 7.4,
+            "y": 6.05,
+            "w": 5.03,
+            "align": "right",
+            "size": 13,
+            "color": "body"
+          },
+          "meta": {
+            "x": 0.9,
+            "y": 0.28,
+            "w": 8,
+            "size": 9,
+            "color": "faint"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0,
+              "y": 7.42,
+              "w": 1.4,
+              "h": 0.08,
+              "fill": "accent",
+              "name": "red progress rule"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 0.9,
+            "y": 2.6,
+            "w": 10.6,
+            "h": 2.6,
+            "sizes": [
+              66,
+              54,
+              44,
+              36
+            ]
+          },
+          "number": {
+            "x": 0.9,
+            "y": 1.6,
+            "w": 4,
+            "size": 36,
+            "color": "accent"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0,
+              "y": 7.42,
+              "w": 4,
+              "h": 0.08,
+              "fill": "accent",
+              "name": "red progress rule"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 2.87,
+            "y": 1.5,
+            "w": 7.6,
+            "h": 3.9,
+            "align": "center",
+            "anchor": "middle"
+          },
+          "kicker": {
+            "x": 2.87,
+            "y": 0.9,
+            "w": 7.6,
+            "size": 10,
+            "color": "muted"
+          },
+          "shapes": []
+        },
+        "content": {
+          "title": {
+            "x": 0.9,
+            "y": 0.7,
+            "w": 11.53,
+            "h": 0.75
+          },
+          "body": {
+            "x": 0.9,
+            "y": 1.85,
+            "w": 11.53,
+            "h": 4.8
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0,
+              "y": 7.42,
+              "w": 6.6,
+              "h": 0.08,
+              "fill": "accent",
+              "name": "red progress rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.87,
+            "y": 0.9,
+            "w": 9.6,
+            "h": 2.7,
+            "align": "center",
+            "anchor": "bottom",
+            "color": "accent",
+            "sizes": [
+              120,
+              110,
+              96,
+              80
+            ]
+          },
+          "meta": {
+            "x": 1.87,
+            "y": 5.4,
+            "w": 9.6,
+            "align": "center",
+            "size": 10,
+            "color": "body"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 6.07,
+              "y": 5.72,
+              "w": 1.2,
+              "h": 0.03,
+              "fill": "accent",
+              "name": "link rule"
+            },
+            {
+              "kind": "rect",
+              "x": 0,
+              "y": 7.42,
+              "w": 13.333,
+              "h": 0.08,
+              "fill": "accent",
+              "name": "red progress rule"
+            }
+          ]
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "none",
+          "line": "none",
+          "bar": "left",
+          "barColor": "accent",
+          "barW": 0.04
+        },
+        "kpi": {
+          "style": "block",
+          "fill": "none",
+          "line": "line",
+          "lineW": 1.5,
+          "shape": "rect",
+          "valueColor": "accent"
+        },
+        "steps": {
+          "style": "numbered",
+          "numberColor": "accent",
+          "arrow": false
+        },
+        "titleBold": false
+      }
+    }
+  },
+  "recipe": {
+    "composition": "White pages with a very large serif title pinned top-left on the cover; quotations fill the page in red with centred white type, chapter openers and an occasional content page turn near-black. A red rule runs along the bottom edge.",
+    "components": "Red serif numerals in dark ruled boxes, text blocks behind a red rule at the left, red numbered columns. A few large statements per page, never paragraphs or soft card grids.",
+    "narrative": "Poster cover, a quotation, summary with figures, performance figures, one hero number, service lines, roadmap, pillars, presence, thank you.",
+    "nativeCoverage": "Cover, red quotation, ruled stat boxes, red-ruled blocks, a dark roadmap page, numbered pillars and closing as native text and shapes; Shrikhand and Libre Baskerville, the two-colour cover title, the tilted closing title, joined stat grids, the single hero numeral and the 2×2 block layouts are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "Source title mixes a black line, a red line and a smaller word in one block; the native title is one colour and one size."
+    },
+    {
+      "page": 2,
+      "archetype": "quote",
+      "native": "statement_slide",
+      "status": "adapted",
+      "differences": ""
+    },
+    {
+      "page": 3,
+      "archetype": "stats",
+      "native": "content_slide + text + kpi",
+      "status": "approximate",
+      "differences": "Source sets two columns of paragraphs above three figures that share one ruled box; the native sample shows only the row of figures, each in its own ruled box."
+    },
+    {
+      "page": 4,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source is a joined 3×2 ruled grid of six figures; native draws one row of separate ruled boxes."
+    },
+    {
+      "page": 5,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Source centres a single hero numeral about four times the size of the three figures below it, with no page title; native figures are equal in size, in ruled boxes under a title."
+    },
+    {
+      "page": 6,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source arranges four red-ruled blocks 2×2 in a narrow centred column with bullet lists; native sets the blocks in one row across the page."
+    },
+    {
+      "page": 7,
+      "archetype": "cards",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "Source is a 2×2 roadmap of phases with red mono labels and no page title; native shows a titled row of red-ruled blocks on the same dark canvas."
+    },
+    {
+      "page": 8,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "approximate",
+      "differences": "Source pillars sit on a pale band across the page, divided by vertical rules, with no title; native shows red numbered columns under a title without the band."
+    },
+    {
+      "page": 9,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "Each source ruled box holds a place name, a paragraph and two small red figures, 2×2; a native ruled box holds one figure, its label and a note, in one row."
+    },
+    {
+      "page": 10,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "approximate",
+      "differences": "Source title is tilted and followed by three underlined links; the native title is level and the links become one meta line."
+    }
+  ]
+}

@@ -273,6 +273,9 @@ pub const PREFERRED_MODEL_IDS: &[&str] = &[
 /// `DEFAULT_SEARCH_MODEL`). The host prices every search at its catalog row.
 pub const SEARCH_MODEL: &str = "openai/gpt-5-nano";
 
+/// What an Exa search reports as its model (search-mcp's `EXA_MODEL`): free.
+pub const EXA_SEARCH_MODEL: &str = "exa";
+
 /// What web searches cost, from the catalog row of [`SEARCH_MODEL`]: USD per
 /// search (`pricing.web_search`) and per input and output token. A run keeps
 /// the price it started with; it prices only searches made with `model`.
@@ -288,6 +291,17 @@ pub struct SearchPrice {
 }
 
 impl SearchPrice {
+    /// The price of Exa's searches: nothing, for searches made with
+    /// [`EXA_SEARCH_MODEL`] only.
+    pub fn free_exa() -> Self {
+        Self {
+            model: EXA_SEARCH_MODEL.into(),
+            per_search: Decimal::ZERO,
+            per_input_token: Decimal::ZERO,
+            per_output_token: Decimal::ZERO,
+        }
+    }
+
     /// `searches` paid searches that used these tokens; `None` on overflow.
     pub fn cost(&self, searches: u64, input: u64, output: u64) -> Option<Decimal> {
         let part = |price: Decimal, count: u64| price.checked_mul(Decimal::from(count));
@@ -1505,6 +1519,17 @@ mod tests {
         search_price(&v1(
             json!({"data": [entry("chat/model", &["/v1/chat/completions"], &["text"], &["text"]), search_row(pricing)]}),
         ))
+    }
+
+    #[test]
+    fn an_exa_search_costs_nothing_and_is_priced_only_for_exa() {
+        let free = SearchPrice::free_exa();
+        assert_eq!(free.model, EXA_SEARCH_MODEL);
+        assert_eq!(free.cost(3, 0, 0).unwrap().normalize().to_string(), "0");
+        assert_eq!(
+            serde_json::to_value(&free).unwrap(),
+            json!({"model": "exa", "perSearch": "0", "perInputToken": "0", "perOutputToken": "0"})
+        );
     }
 
     #[test]

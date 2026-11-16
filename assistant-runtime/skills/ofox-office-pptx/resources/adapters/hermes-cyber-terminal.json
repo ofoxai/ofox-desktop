@@ -1,0 +1,495 @@
+{
+  "id": "hermes-cyber-terminal",
+  "family": "technical",
+  "names": {
+    "zh": "Hermes 终端",
+    "en": "Hermes Cyber Terminal",
+    "ja": "Hermes ターミナル"
+  },
+  "intro": {
+    "zh": "黑色终端底，绿色等宽大字标题，章节和结尾前有“//”提示符，内容放在细绿边的面板里；适合命令行工具、Agent 评测和工程复盘。",
+    "en": "Black terminal canvas, large green monospace titles, a // prompt before chapter and closing titles, thin green-bordered panels; for CLI tools, agent reviews and engineering write-ups.",
+    "ja": "黒いターミナルの背景に緑の等幅の大きな見出し、章と締めの見出しの前に「//」プロンプト、細い緑枠のパネル。CLI ツール、エージェント評価、技術レビュー向け。"
+  },
+  "routing": {
+    "scenarios": ["technical", "product-launch"],
+    "density": "medium",
+    "scheme": "dark",
+    "tone": ["hacker", "terse", "technical"],
+    "suits": {
+      "data": 2,
+      "formulas": 0,
+      "images": 0,
+      "longText": 0
+    },
+    "avoid": "Non-technical audiences, printed handouts and image-led storytelling."
+  },
+  "theme": {
+    "colors": {
+      "background": "0A0C10",
+      "card": "12141A",
+      "primary": "E4E2D8",
+      "secondary": "64DFDF",
+      "accent": "7ED3A4",
+      "text": "E4E2D8",
+      "textSecondary": "A3A1AA",
+      "textMuted": "8A8892",
+      "line": "1F302B",
+      "accentTint": "15231E",
+      "dark": "0C0D12",
+      "onDark": "D8D4C8",
+      "onDarkMuted": "8A8892",
+      "surface": "12141A",
+      "palette": ["12141A", "15151B"],
+      "chart": ["7ED3A4", "E9C58A", "64DFDF", "D4A0B9", "FF6B6B", "8A8892"]
+    },
+    "fonts": {
+      "latin": {
+        "title": "Consolas",
+        "body": "Arial",
+        "data": "Consolas"
+      },
+      "zh": {
+        "title": "Microsoft YaHei",
+        "body": "Microsoft YaHei"
+      },
+      "ja": {
+        "title": "Yu Gothic",
+        "body": "Yu Gothic"
+      }
+    },
+    "sizes": {
+      "hero": [60, 54, 44, 36],
+      "statement": [66, 54, 44, 36],
+      "title": [28, 26, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 14, 13],
+      "caption": [14, 13, 12],
+      "kpi": [44, 36, 30]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": false,
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "base"
+        },
+        "cover": {
+          "title": {
+            "x": 0.72,
+            "y": 2.75,
+            "w": 11,
+            "h": 1.9,
+            "color": "accent"
+          },
+          "kicker": {
+            "x": 0.72,
+            "y": 2.3,
+            "w": 8,
+            "size": 13,
+            "color": "accent"
+          },
+          "meta": {
+            "x": 0.72,
+            "y": 7.0,
+            "w": 9
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "FF6B6B",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 0.96,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "E9C58A",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 1.2,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "7ED3A4",
+              "name": "window dot"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "1F302B",
+              "name": "footer rule"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 1.95,
+            "y": 2.9,
+            "w": 10.4,
+            "h": 1.5,
+            "color": "accent"
+          },
+          "number": {
+            "x": 0.72,
+            "y": 2.4,
+            "w": 6,
+            "size": 14,
+            "color": "accent"
+          },
+          "subtitle": {
+            "x": 0.72,
+            "y": 4.6,
+            "w": 9,
+            "size": 16,
+            "color": "muted"
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "FF6B6B",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 0.96,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "E9C58A",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 1.2,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "7ED3A4",
+              "name": "window dot"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "1F302B",
+              "name": "footer rule"
+            },
+            {
+              "kind": "rect",
+              "x": 1.05,
+              "y": 3.08,
+              "w": 0.1,
+              "h": 0.82,
+              "fill": "7ED3A4",
+              "name": "slash",
+              "rot": 20
+            },
+            {
+              "kind": "rect",
+              "x": 1.41,
+              "y": 3.08,
+              "w": 0.1,
+              "h": 0.82,
+              "fill": "7ED3A4",
+              "name": "slash",
+              "rot": 20
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 0.72,
+            "y": 2.4,
+            "w": 10.8,
+            "h": 2.6,
+            "color": "accent",
+            "sizes": [44, 40, 36, 30]
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "FF6B6B",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 0.96,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "E9C58A",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 1.2,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "7ED3A4",
+              "name": "window dot"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "1F302B",
+              "name": "footer rule"
+            }
+          ]
+        },
+        "content": {
+          "title": {
+            "x": 0.72,
+            "y": 0.85,
+            "w": 11.9,
+            "h": 0.65
+          },
+          "body": {
+            "x": 0.72,
+            "y": 1.95,
+            "w": 11.9,
+            "h": 4.8
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "FF6B6B",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 0.96,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "E9C58A",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 1.2,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "7ED3A4",
+              "name": "window dot"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "1F302B",
+              "name": "footer rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 1.95,
+            "y": 2.9,
+            "w": 10.4,
+            "h": 1.5,
+            "color": "accent",
+            "sizes": [66, 54, 44, 36]
+          },
+          "subtitle": {
+            "x": 0.72,
+            "y": 4.6,
+            "w": 9,
+            "size": 16,
+            "color": "muted"
+          },
+          "meta": {
+            "x": 0.72,
+            "y": 7.0,
+            "w": 9
+          },
+          "shapes": [
+            {
+              "kind": "oval",
+              "x": 0.72,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "FF6B6B",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 0.96,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "E9C58A",
+              "name": "window dot"
+            },
+            {
+              "kind": "oval",
+              "x": 1.2,
+              "y": 0.5,
+              "w": 0.14,
+              "h": 0.14,
+              "fill": "7ED3A4",
+              "name": "window dot"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 6.93,
+              "w": 11.9,
+              "h": 0.012,
+              "fill": "1F302B",
+              "name": "footer rule"
+            },
+            {
+              "kind": "rect",
+              "x": 1.05,
+              "y": 3.08,
+              "w": 0.1,
+              "h": 0.82,
+              "fill": "7ED3A4",
+              "name": "slash",
+              "rot": 20
+            },
+            {
+              "kind": "rect",
+              "x": 1.41,
+              "y": 3.08,
+              "w": 0.1,
+              "h": 0.82,
+              "fill": "7ED3A4",
+              "name": "slash",
+              "rot": 20
+            }
+          ]
+        },
+        "card": {
+          "shape": "round",
+          "radius": 0.08,
+          "fill": "none",
+          "line": "line",
+          "lineW": 1.0,
+          "shadow": [0, 0, "card"],
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "box",
+          "valueColor": "accent"
+        },
+        "steps": {
+          "style": "block",
+          "shape": "round",
+          "radius": 0.08,
+          "fill": "none",
+          "line": "line",
+          "lineW": 1.0,
+          "shadow": [0, 0, "card"],
+          "gap": 0.25,
+          "numberColor": "accent"
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "A black terminal window: three window dots at the top left, a hairline above the footer, text flush left. Cover, chapter and closing titles are large green monospace; chapter and closing titles sit behind a drawn // prompt. Write short command-like kickers such as `$ whoami`.",
+    "components": "Thin green-bordered dark panels, green mono stat values, numbered panels for steps, a code panel for traces and commands. Green is the signal colour, amber and red only for warnings.",
+    "narrative": "Who am I, setup, out-of-box numbers, real trace, benchmark, verdict, try it yourself, exit.",
+    "nativeCoverage": "Cover, chapter, stat panels, code panels, bar chart, two-panel comparison and closing as native text, shapes and chart. Not reproduced: the blinking typing cursor, green text glow, tag chips, coloured trace syntax, outlined translucent chart bars, JetBrains Mono (Consolas is used; Chinese titles fall back to a sans face)."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "approximate",
+      "differences": "The typing cursor after the title, the green glow and the row of bordered tag chips are not drawn."
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "adapted",
+      "differences": "The // prompt is drawn as two slanted bars; title glow is not reproduced."
+    },
+    {
+      "page": 3,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "approximate",
+      "differences": "The two verdict panels under the three stat panels are not part of the native stat page."
+    },
+    {
+      "page": 4,
+      "archetype": "code",
+      "native": "content_slide + code",
+      "status": "adapted",
+      "differences": "Coloured trace tags and the prompt line above the panel are not reproduced."
+    },
+    {
+      "page": 5,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source draws two agents as outlined translucent bars in green and amber with a legend; native is an editable solid-bar chart with one series."
+    },
+    {
+      "page": 6,
+      "archetype": "comparison",
+      "native": "content_slide + card",
+      "status": "approximate",
+      "differences": "The giant glowing score above the two lists is not drawn; native shows the two bordered list panels under a page title."
+    },
+    {
+      "page": 7,
+      "archetype": "code",
+      "native": "content_slide + code",
+      "status": "adapted",
+      "differences": "Tag chips under the code panel are omitted."
+    },
+    {
+      "page": 8,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "The // prompt is drawn as two slanted bars; typing cursor and glow are not reproduced."
+    }
+  ]
+}

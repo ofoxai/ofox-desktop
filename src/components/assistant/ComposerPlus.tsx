@@ -7,6 +7,7 @@ import {
   ImageIcon,
   Paperclip,
   Plus,
+  Presentation,
   X,
 } from "lucide-react";
 import type {
@@ -92,6 +93,8 @@ export function ComposerPlus({
   canAttach,
   onAttach,
   disabled,
+  canPresentation = false,
+  onPresentation,
 }: {
   models: ReadonlyArray<AssistantModel>;
   media: AssistantMediaDefaults;
@@ -99,12 +102,15 @@ export function ComposerPlus({
   canAttach: boolean;
   onAttach: () => void;
   disabled: boolean;
+  canPresentation?: boolean;
+  onPresentation?: (trigger?: HTMLButtonElement | null) => void;
 }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState<AssistantGenerationKind | null>(null);
   // An entry that moves focus on (the file dialog, a chip's parameters)
   // keeps the menu from handing it back to "+".
   const focusMoves = useRef(false);
+  const trigger = useRef<HTMLButtonElement>(null);
   const hints = media.hints ?? [];
   const setHints = (next: AssistantGenerationKind[]) =>
     onMedia({ ...media, hints: next });
@@ -117,6 +123,7 @@ export function ComposerPlus({
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
+            ref={trigger}
             variant="icon"
             aria-label={t("assistant.generation.plus")}
             title={t("assistant.generation.plus")}
@@ -144,6 +151,18 @@ export function ComposerPlus({
             {t("assistant.generation.attach")}
           </DropdownMenuItem>
           <DropdownMenuSeparator />
+          {onPresentation && (
+            <DropdownMenuItem
+              disabled={!canPresentation}
+              onSelect={() => {
+                focusMoves.current = true;
+                onPresentation(trigger.current);
+              }}
+            >
+              <Presentation aria-hidden className="h-3.5 w-3.5" />
+              {t("assistant.presentation.open")}
+            </DropdownMenuItem>
+          )}
           {GENERATION_KINDS.map((kind) => {
             const Icon = ICONS[kind];
             return (

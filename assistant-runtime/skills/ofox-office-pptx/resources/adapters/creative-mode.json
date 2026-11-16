@@ -1,0 +1,425 @@
+{
+  "id": "creative-mode",
+  "family": "color-block",
+  "names": {
+    "zh": "Creative Mode 奶油色块",
+    "en": "Creative Mode",
+    "ja": "Creative Mode カラーブロック"
+  },
+  "intro": {
+    "zh": "奶油纸底上放绿、粉、橙、黄四色实心色块，黑色细描边配粗重大写无衬线标题，结尾整页转绿；适合创意机构提案、设计工作室介绍和概念评审。",
+    "en": "Cream paper with solid green, pink, orange and yellow blocks, thin black outlines and heavy uppercase titles, closing on a full green page; for agency pitches, studio decks and concept reviews.",
+    "ja": "クリーム色の紙に緑・ピンク・オレンジ・黄色のベタ塗りブロック、細い黒の輪郭線と太い大文字グロテスク見出し、最後は全面グリーン。制作会社の提案やコンセプトレビュー向け。"
+  },
+  "routing": {
+    "scenarios": ["creative", "product-launch", "business-review", "general"],
+    "density": "medium",
+    "scheme": "light",
+    "tone": ["graphic", "expressive", "confident"],
+    "suits": { "data": 2, "formulas": 0, "images": 1, "longText": 1 },
+    "avoid": "Material that needs institutional restraint; the saturated multi-colour blocks read as expressive, not formal."
+  },
+  "theme": {
+    "colors": {
+      "background": "EFE9D9",
+      "card": "E4DCC4",
+      "primary": "0F0F0F",
+      "secondary": "1F8A4C",
+      "accent": "E85A1F",
+      "text": "0F0F0F",
+      "textSecondary": "2A2A2A",
+      "textMuted": "5C574A",
+      "line": "0F0F0F",
+      "accentTint": "F5C518",
+      "dark": "0F0F0F",
+      "onDark": "EFE9D9",
+      "onDarkMuted": "E4DCC4",
+      "surface": "EFE9D9",
+      "palette": ["1F8A4C", "F06CA8", "F5C518", "E85A1F"],
+      "chart": ["1F8A4C", "F06CA8", "E85A1F", "F5C518", "0F0F0F", "136636"]
+    },
+    "fonts": {
+      "latin": { "title": "Arial", "body": "Arial", "data": "Arial" },
+      "zh": { "title": "Microsoft YaHei", "body": "Microsoft YaHei" },
+      "ja": { "title": "Yu Gothic", "body": "Yu Gothic" }
+    },
+    "sizes": {
+      "hero": [72, 60, 54, 44],
+      "statement": [60, 54, 44, 36, 30],
+      "title": [36, 32, 28, 24],
+      "subtitle": [20, 18, 16],
+      "body": [20, 18, 16],
+      "card": [16, 15, 14],
+      "caption": [14, 12, 11],
+      "kpi": [72, 66, 60]
+    },
+    "decor": {
+      "titleRule": "none",
+      "pageNumber": true,
+      "composition": "spec",
+      "layout": {
+        "upper": true,
+        "canvases": {
+          "green": {
+            "bg": "1F8A4C",
+            "title": "EFE9D9",
+            "body": "EFE9D9",
+            "muted": "EFE9D9",
+            "faint": "E4DCC4",
+            "accent": "F5C518",
+            "line": "0F0F0F",
+            "card": "136636",
+            "surface": "136636",
+            "accentTint": "F5C518",
+            "chart": [
+              "F5C518",
+              "F06CA8",
+              "EFE9D9",
+              "0F0F0F",
+              "E85A1F",
+              "E4DCC4"
+            ]
+          }
+        },
+        "tones": {
+          "cover": "base",
+          "section": "base",
+          "statement": "base",
+          "content": "base",
+          "closing": "green"
+        },
+        "cover": {
+          "title": {
+            "x": 0.72,
+            "y": 2.55,
+            "w": 6.3,
+            "h": 2.6,
+            "anchor": "middle"
+          },
+          "kicker": {
+            "x": 1.25,
+            "y": 1.2,
+            "w": 5.5,
+            "size": 11,
+            "color": "title"
+          },
+          "subtitle": { "x": 0.72, "y": 5.75, "w": 5.6, "size": 13 },
+          "meta": { "x": 0.72, "y": 6.9, "w": 6, "size": 10 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.3,
+              "w": 0.38,
+              "h": 0.015,
+              "fill": "0F0F0F",
+              "name": "kicker rule"
+            },
+            {
+              "kind": "rect",
+              "x": 7.4,
+              "y": 1.05,
+              "w": 5.2,
+              "h": 5.5,
+              "fill": "1F8A4C",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "name": "green field"
+            },
+            {
+              "kind": "rect",
+              "x": 9.0,
+              "y": 2.85,
+              "w": 2.6,
+              "h": 2.6,
+              "fill": "E85A1F",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "name": "orange square"
+            },
+            {
+              "kind": "rect",
+              "x": 8.7,
+              "y": 2.5,
+              "w": 2.6,
+              "h": 2.6,
+              "fill": "F06CA8",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "name": "pink square"
+            },
+            {
+              "kind": "rect",
+              "x": 9.2,
+              "y": 3.05,
+              "w": 1.6,
+              "h": 1.5,
+              "fill": "EFE9D9",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "rot": -6,
+              "name": "paper card"
+            }
+          ]
+        },
+        "section": {
+          "title": {
+            "x": 0.72,
+            "y": 2.65,
+            "w": 7.6,
+            "h": 2.4,
+            "sizes": [66, 54, 44, 36]
+          },
+          "number": {
+            "x": 0.72,
+            "y": 1.93,
+            "w": 0.95,
+            "h": 0.32,
+            "size": 13,
+            "align": "center",
+            "color": "EFE9D9"
+          },
+          "subtitle": {
+            "x": 0.95,
+            "y": 5.57,
+            "w": 6.0,
+            "size": 16,
+            "color": "0F0F0F"
+          },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.9,
+              "w": 0.95,
+              "h": 0.36,
+              "fill": "0F0F0F",
+              "name": "tag"
+            },
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 5.35,
+              "w": 6.5,
+              "h": 0.8,
+              "fill": "F06CA8",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "name": "pink bar"
+            },
+            {
+              "kind": "rect",
+              "x": 9.3,
+              "y": 2.0,
+              "w": 3.3,
+              "h": 3.3,
+              "fill": "1F8A4C",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "name": "green square"
+            },
+            {
+              "kind": "oval",
+              "x": 10.1,
+              "y": 2.8,
+              "w": 1.7,
+              "h": 1.7,
+              "fill": "F5C518",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "name": "yellow circle"
+            }
+          ]
+        },
+        "statement": {
+          "title": {
+            "x": 0.72,
+            "y": 1.7,
+            "w": 9.6,
+            "h": 3.6,
+            "anchor": "middle"
+          },
+          "kicker": {
+            "x": 0.72,
+            "y": 0.9,
+            "w": 8,
+            "size": 12,
+            "color": "title"
+          },
+          "attribution": { "x": 0.72, "y": 5.95, "w": 9, "size": 14 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 5.65,
+              "w": 0.06,
+              "h": 0.03,
+              "fill": "0F0F0F",
+              "repeat": { "count": 60, "dx": 0.16, "dy": 0 },
+              "name": "dotted rule"
+            },
+            {
+              "kind": "rect",
+              "x": 10.9,
+              "y": 1.2,
+              "w": 1.5,
+              "h": 0.5,
+              "fill": "F5C518",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "rot": -5,
+              "name": "yellow tag"
+            },
+            {
+              "kind": "rect",
+              "x": 10.7,
+              "y": 3.9,
+              "w": 1.7,
+              "h": 1.7,
+              "fill": "F06CA8",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "rot": 8,
+              "name": "pink badge"
+            }
+          ]
+        },
+        "content": {
+          "title": { "x": 0.72, "y": 0.6, "w": 10.4, "h": 0.95 },
+          "body": { "x": 0.72, "y": 2.15, "w": 11.9, "h": 4.55 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 0.72,
+              "y": 1.95,
+              "w": 0.06,
+              "h": 0.03,
+              "fill": "0F0F0F",
+              "repeat": { "count": 60, "dx": 0.2, "dy": 0 },
+              "name": "dotted rule"
+            }
+          ]
+        },
+        "closing": {
+          "title": {
+            "x": 0.72,
+            "y": 1.6,
+            "w": 9.2,
+            "h": 3.6,
+            "anchor": "bottom",
+            "sizes": [120, 96, 80, 66]
+          },
+          "meta": { "x": 0.72, "y": 6.9, "w": 9, "size": 10 },
+          "shapes": [
+            {
+              "kind": "rect",
+              "x": 10.4,
+              "y": 4.1,
+              "w": 1.9,
+              "h": 1.9,
+              "fill": "F06CA8",
+              "line": "0F0F0F",
+              "lineW": 1.5,
+              "rot": 8,
+              "name": "pink badge"
+            },
+            {
+              "kind": "oval",
+              "x": 10.6,
+              "y": 4.3,
+              "w": 1.5,
+              "h": 1.5,
+              "line": "EFE9D9",
+              "lineW": 1.5,
+              "name": "badge ring"
+            }
+          ]
+        },
+        "card": {
+          "shape": "rect",
+          "fill": "card",
+          "line": "0F0F0F",
+          "lineW": 1.5,
+          "bar": "none"
+        },
+        "kpi": {
+          "style": "block",
+          "fill": "palette",
+          "line": "0F0F0F",
+          "lineW": 1.5
+        },
+        "steps": {
+          "style": "block",
+          "fill": "palette",
+          "line": "0F0F0F",
+          "lineW": 1.5,
+          "gap": 0.12
+        }
+      }
+    }
+  },
+  "recipe": {
+    "composition": "Cream paper pages with a heavy uppercase grotesque title at left over a dotted rule; the cover and chapter pair the title with a large outlined green field holding pink, orange and yellow shapes; the closing page turns fully green with a tilted pink badge.",
+    "components": "Flat saturated blocks in green, pink, yellow and orange with 1.5pt black outlines for figures and steps, cream outlined boxes for plain cards, yellow for the highlighted box. Square corners, no gradients or soft shadows.",
+    "narrative": "Title, chapter opener, figures, system, chart, process, options compared, sign-off.",
+    "nativeCoverage": "Cover, chapter, figure blocks, bar chart, four-block process, table and green closing as native shapes, text, chart and table. Two-colour title lines, the staggered layer stack, per-bar colours, colour-filled table columns, mono labels and pills, and Archivo Black / Space Grotesk are not reproduced."
+  },
+  "pageMapping": [
+    {
+      "page": 1,
+      "archetype": "cover",
+      "native": "cover_slide",
+      "status": "adapted",
+      "differences": "Source sets the second title line in orange; the native title is one colour."
+    },
+    {
+      "page": 2,
+      "archetype": "chapter",
+      "native": "section_slide",
+      "status": "approximate",
+      "differences": "Source adds a three-paragraph text column between the title and the green square; the native chapter page keeps the title, tag, pink bar and square only."
+    },
+    {
+      "page": 3,
+      "archetype": "stats",
+      "native": "content_slide + kpi",
+      "status": "adapted",
+      "differences": "Source arranges four tiles two by two with one cream outlined tile; the sample shows three colour tiles in a row."
+    },
+    {
+      "page": 4,
+      "archetype": "hierarchy",
+      "native": "content_slide + pyramid",
+      "status": "approximate",
+      "differences": "Source staggers four colour layers with hard shadows inside a green field beside a text column and legend; native is a centred stack of bars with one accent level."
+    },
+    {
+      "page": 5,
+      "archetype": "chart-bar",
+      "native": "content_slide + native_chart",
+      "status": "approximate",
+      "differences": "Source colours bars by series in turn with black outlines and value labels; the native single-series chart is one colour without outlines."
+    },
+    {
+      "page": 6,
+      "archetype": "process",
+      "native": "content_slide + steps",
+      "status": "adapted",
+      "differences": "First block is green rather than cream outlined; the small triangles between blocks are omitted."
+    },
+    {
+      "page": 7,
+      "archetype": "table",
+      "native": "content_slide + table",
+      "status": "approximate",
+      "differences": "Source fills each option column with its own colour and adds a tilted yellow tag; the native table has a black header and plain cream rows."
+    },
+    {
+      "page": 8,
+      "archetype": "closing",
+      "native": "closing_slide",
+      "status": "adapted",
+      "differences": "Badge is drawn without its counter text."
+    }
+  ]
+}

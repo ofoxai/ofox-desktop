@@ -6,6 +6,7 @@ import {
   copyFile,
   cp,
   mkdir,
+  mkdtemp,
   readFile,
   readdir,
   rename,
@@ -14,8 +15,10 @@ import {
   writeFile,
   realpath,
 } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { entitlementsFor } from "./assistant-entitlements.mjs";
 import {
   clearInstallStamp,
   installIsCurrent,
@@ -23,6 +26,7 @@ import {
   writeInstallStamp,
 } from "./assistant-install-stamp.mjs";
 import { pruneProduction } from "./assistant-prune.mjs";
+import { pyodideWheelUrl, pythonEngineOffered } from "./python-assets.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const runtime = path.join(root, "assistant-runtime");
@@ -40,33 +44,50 @@ const node = path.join(
   process.platform === "win32" ? "node.exe" : "node",
 );
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+const pythonPinsFile = path.join(root, "scripts", "python-downloads.json");
+const pythonPinsBytes = await readFile(pythonPinsFile);
+const pythonPins = JSON.parse(pythonPinsBytes);
 const cache = path.join(runtime, ".cache");
 await mkdir(cache, { recursive: true });
 
-async function cachedDownload() {
-  const archive = path.join(cache, download.archive);
+async function cachedDownload({ url, archive: name, sha256 }) {
+  const archive = path.join(cache, name);
   let bytes;
   try {
     bytes = await readFile(archive);
   } catch {
     /* download a missing cache entry */
   }
-  if (!bytes || digest(bytes) !== download.sha256) {
-    const response = await fetch(
-      `https://nodejs.org/dist/v${manifest.version}/${download.archive}`,
-    );
+  if (!bytes || digest(bytes) !== sha256) {
+    const response = await fetch(url);
     if (!response.ok)
-      throw new Error(`Node download failed (${response.status})`);
+      throw new Error(`Download of ${url} failed (${response.status})`);
     bytes = Buffer.from(await response.arrayBuffer());
-    if (digest(bytes) !== download.sha256)
+    if (digest(bytes) !== sha256)
       throw new Error(
-        "Downloaded Node SHA-256 differs from the pinned manifest",
+        `Downloaded ${name} SHA-256 differs from the pinned manifest`,
       );
     const temporary = `${archive}.partial`;
     await writeFile(temporary, bytes, { mode: 0o600 });
     await rename(temporary, archive);
   }
   return archive;
+}
+
+function extractArchive(archive, directory) {
+  let tar = "tar";
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+    if (!systemRoot || !path.win32.isAbsolute(systemRoot))
+      throw new Error(
+        "An absolute Windows SystemRoot is required to extract bundled archives",
+      );
+    // Git Bash prepends GNU tar, which treats drive-letter paths as remote
+    // hosts and cannot unpack ZIPs. Windows' bsdtar supports the Node and
+    // engine archives.
+    tar = path.win32.join(systemRoot, "System32", "tar.exe");
+  }
+  execFileSync(tar, ["-xf", archive, "-C", directory], { stdio: "inherit" });
 }
 
 async function prepareNode() {
@@ -87,22 +108,15 @@ async function prepareNode() {
   } catch {
     /* replace only our generated runtime */
   }
-  const archive = await cachedDownload();
+  const archive = await cachedDownload({
+    url: `https://nodejs.org/dist/v${manifest.version}/${download.archive}`,
+    archive: download.archive,
+    sha256: download.sha256,
+  });
   const extraction = path.join(cache, `extract-${target}`);
   await rm(extraction, { recursive: true, force: true });
   await mkdir(extraction, { recursive: true });
-  let tar = "tar";
-  if (process.platform === "win32") {
-    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
-    if (!systemRoot || !path.win32.isAbsolute(systemRoot))
-      throw new Error(
-        "An absolute Windows SystemRoot is required to extract bundled Node",
-      );
-    // Git Bash prepends GNU tar, which treats drive-letter paths as remote
-    // hosts and cannot unpack ZIPs. Windows' bsdtar supports the Node archive.
-    tar = path.win32.join(systemRoot, "System32", "tar.exe");
-  }
-  execFileSync(tar, ["-xf", archive, "-C", extraction], { stdio: "inherit" });
+  extractArchive(archive, extraction);
   const prefix = `node-v${manifest.version}-${process.platform === "win32" ? "win" : process.platform}-${process.arch}`;
   await mkdir(nodeDirectory, { recursive: true });
   await copyFile(path.join(extraction, prefix, download.executable), node);
@@ -223,11 +237,13 @@ async function signMacFiles(directory) {
         const args = ["--force", "--sign", identity];
         // Notarization needs a secure timestamp on every signed Mach-O.
         if (identity !== "-") args.push("--options", "runtime", "--timestamp");
-        if (filename === node)
-          args.push(
-            "--entitlements",
-            path.join(runtime, "node-entitlements.plist"),
-          );
+        // Throws for an engine executable with no entry (assistant-entitlements.mjs).
+        const entitlements = entitlementsFor(
+          filename,
+          path.join(resources, "engines"),
+        );
+        if (entitlements)
+          args.push("--entitlements", path.join(runtime, entitlements));
         execFileSync("codesign", [...args, filename], { stdio: "inherit" });
       }
     }
@@ -282,6 +298,235 @@ async function prepareSearchServer() {
   await writeInstallStamp(stampFile, wanted);
 }
 
+// The document engines are builds pinned by engine-downloads.json. Both
+// officecli and typst keep state under HOME and officecli may start a resident
+// process or update itself, so they only ever run here and in the smoke test
+// with a throwaway HOME and those behaviors turned off.
+async function engineVersion(executable) {
+  const home = await mkdtemp(path.join(tmpdir(), "ofox-engine-"));
+  const env = {
+    OFFICECLI_NO_AUTO_RESIDENT: "1",
+    OFFICECLI_SKIP_UPDATE: "1",
+    HOME: home,
+    USERPROFILE: home,
+    TMPDIR: home,
+    TEMP: home,
+    TMP: home,
+  };
+  for (const key of ["PATH", "SystemRoot"])
+    if (process.env[key]) env[key] = process.env[key];
+  try {
+    // A hung engine fails the prepare instead of stalling it.
+    return execFileSync(executable, ["--version"], {
+      encoding: "utf8",
+      env,
+      timeout: 60_000,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+async function engineIsCurrent(executable, version) {
+  try {
+    await access(path.join(path.dirname(executable), "LICENSE"));
+    return (await engineVersion(executable)).includes(version);
+  } catch {
+    return false;
+  }
+}
+
+async function installEngine(name, engine, pinned, directory, executable) {
+  const downloaded = await cachedDownload({
+    url: pinned.url,
+    archive: `${name}-${engine.version}-${pinned.archive ?? path.basename(pinned.url)}`,
+    sha256: pinned.sha256,
+  });
+  const extraction = path.join(cache, `extract-${name}-${target}`);
+  await rm(extraction, { recursive: true, force: true });
+  let source = downloaded;
+  const licenses = [];
+  if (pinned.archive) {
+    // The release archive carries its own LICENSE and NOTICE next to the binary.
+    await mkdir(extraction, { recursive: true });
+    extractArchive(downloaded, extraction);
+    source = path.join(extraction, pinned.executable);
+    for (const file of ["LICENSE", "NOTICE"])
+      licenses.push([file, path.join(path.dirname(source), file)]);
+  } else {
+    // A bare binary has none; they come from the repository at the release tag.
+    for (const [file, license] of Object.entries(engine.licenses))
+      licenses.push([
+        file,
+        await cachedDownload({
+          url: license.url,
+          archive: `${name}-${engine.version}-${file}`,
+          sha256: license.sha256,
+        }),
+      ]);
+  }
+  await rm(directory, { recursive: true, force: true });
+  await mkdir(directory, { recursive: true });
+  await copyFile(source, executable);
+  await chmod(executable, 0o755);
+  for (const [file, from] of licenses) {
+    const license = path.join(directory, file);
+    await copyFile(from, license);
+    await chmod(license, 0o644);
+  }
+  await rm(extraction, { recursive: true, force: true });
+}
+
+// The Python engine is not a binary: Pyodide's wheels, pure-Python wheels and
+// a CJK font pinned by python-downloads.json, staged under
+// resources/engines/python/ where the runner reads them. Pyodide itself comes
+// from the runtime's npm dependency. The engine is offered on the platforms
+// the pins list (macOS). Elsewhere nothing is staged and pruneProduction drops
+// the pyodide package, so those installers carry none of it.
+async function preparePython(installed) {
+  const downloads = pythonPins;
+  if (!pythonEngineOffered(target, downloads)) {
+    process.stdout.write(`Python engine is not offered on ${target}\n`);
+    return null;
+  }
+  const directory = path.join(resources, "engines", "python");
+  const assetsFile = path.join(directory, "assets.json");
+  const stamp = { version: downloads.pyodide, sha256: digest(pythonPinsBytes) };
+  const { font } = downloads;
+  const files = [
+    ...downloads.binary.map((pin) => ({
+      to: `wheels/${pin.file}`,
+      pin,
+      url: pyodideWheelUrl(pin),
+    })),
+    ...downloads.pure.map((pin) => ({
+      to: `wheels/${pin.file}`,
+      pin,
+      url: pin.url,
+    })),
+    { to: `fonts/${font.file}`, pin: font, url: font.url },
+    {
+      to: `fonts/${font.license.file}`,
+      pin: font.license,
+      url: font.license.url,
+    },
+  ];
+  // `files` lists every staged file: the host offers the engine only when each
+  // of them is there.
+  const assetsText =
+    JSON.stringify(
+      {
+        pyodide: downloads.pyodide,
+        binary: downloads.binary.map((pin) => pin.name),
+        pure: downloads.pure.map((pin) => pin.file),
+        font: `fonts/${font.file}`,
+        files: files.map(({ to }) => to),
+      },
+      null,
+      2,
+    ) + "\n";
+  // Current means the stamp matches, assets.json is the one this script
+  // writes and every staged file still has its pinned digest; assets.json is
+  // written last, so an interrupted copy has none.
+  const isCurrent = async () => {
+    if (JSON.stringify(installed.python) !== JSON.stringify(stamp))
+      return false;
+    try {
+      if ((await readFile(assetsFile, "utf8")) !== assetsText) return false;
+      for (const { to, pin } of files)
+        if (digest(await readFile(path.join(directory, to))) !== pin.sha256)
+          return false;
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await isCurrent())) {
+    await rm(directory, { recursive: true, force: true });
+    for (const { to, pin, url } of files) {
+      const cached = await cachedDownload({
+        url,
+        archive: `python-${pin.file}`,
+        sha256: pin.sha256,
+      });
+      await mkdir(path.dirname(path.join(directory, to)), { recursive: true });
+      await copyFile(cached, path.join(directory, to));
+      // The cache keeps its files private; the bundle's must be readable.
+      await chmod(path.join(directory, to), 0o644);
+    }
+    await writeFile(assetsFile, assetsText);
+    process.stdout.write(
+      `Staged the Python engine (Pyodide ${stamp.version})\n`,
+    );
+  }
+  return {
+    stamp,
+    entry: {
+      path: path.posix.join("engines", "python", "assets.json"),
+      runner: "runtime/src/python/runner.mjs",
+      version: downloads.pyodide,
+    },
+  };
+}
+
+// resources/engines/source.json records what is installed. While it matches
+// the pins and the engine reports its version, the next prepare skips the
+// engine. Returns the manifest entry of each engine with a build for this
+// platform.
+async function prepareEngines() {
+  const downloads = JSON.parse(
+    await readFile(path.join(runtime, "engine-downloads.json"), "utf8"),
+  );
+  const stampFile = path.join(resources, "engines", "source.json");
+  let installed = {};
+  try {
+    installed = JSON.parse(await readFile(stampFile, "utf8"));
+  } catch {
+    /* replace only our generated engines */
+  }
+  const stamps = {};
+  const entries = {};
+  for (const name of ["officecli", "typst"]) {
+    const engine = downloads[name];
+    const pinned = engine[target];
+    if (!pinned) {
+      process.stdout.write(
+        `${name} ${engine.version} has no ${target} build\n`,
+      );
+      continue;
+    }
+    const directory = path.join(resources, "engines", name);
+    const executable = path.join(directory, path.basename(pinned.executable));
+    const stamp = {
+      version: engine.version,
+      platform: target,
+      sha256: pinned.sha256,
+    };
+    if (
+      JSON.stringify(installed[name]) !== JSON.stringify(stamp) ||
+      !(await engineIsCurrent(executable, engine.version))
+    ) {
+      await installEngine(name, engine, pinned, directory, executable);
+      if (!(await engineIsCurrent(executable, engine.version)))
+        throw new Error(`Bundled ${name} does not report ${engine.version}`);
+    }
+    stamps[name] = stamp;
+    await writeFile(stampFile, JSON.stringify(stamps, null, 2) + "\n");
+    entries[name] = {
+      path: path.posix.join("engines", name, path.basename(pinned.executable)),
+      version: engine.version,
+    };
+  }
+  const python = await preparePython(installed);
+  if (python) {
+    stamps.python = python.stamp;
+    await writeFile(stampFile, JSON.stringify(stamps, null, 2) + "\n");
+    entries.python = python.entry;
+  }
+  return entries;
+}
+
 await prepareNode();
 if (process.argv.includes("--node-only")) {
   process.stdout.write(`${node}\n`);
@@ -295,10 +540,12 @@ if (process.argv.includes("--node-only")) {
   const stampFile = path.join(resources, "runtime-install.json");
   const wanted = await installStamp({
     runtime,
-    // A change to how the tree is installed or pruned redoes both.
+    // A change to how the tree is installed or pruned redoes both; the Python
+    // pins decide whether the pyodide package is pruned.
     scripts: [
       fileURLToPath(import.meta.url),
       path.join(root, "scripts", "assistant-prune.mjs"),
+      pythonPinsFile,
     ],
     nodeVersion: manifest.version,
     platform: target,
@@ -317,7 +564,9 @@ if (process.argv.includes("--node-only")) {
         path.join(production, filename),
       );
     await install(production);
-    await pruneProduction(production);
+    await pruneProduction(production, {
+      pythonEngine: pythonEngineOffered(target, pythonPins),
+    });
     await writeInstallStamp(stampFile, wanted);
   }
   // The runtime's own source is copied every time: it changes without the lockfile.
@@ -336,6 +585,8 @@ if (process.argv.includes("--node-only")) {
   await rm(notices, { recursive: true, force: true });
   await cp(path.join(runtime, "notices"), notices, { recursive: true });
   await prepareSearchServer();
+  // Before signing, so the engines' Mach-O files are signed with the rest.
+  const engines = await prepareEngines();
   await signMacFiles(resources);
   const stamp = path.join(nodeDirectory, "source.json");
   const source = JSON.parse(await readFile(stamp, "utf8"));
@@ -347,17 +598,27 @@ if (process.argv.includes("--node-only")) {
       2,
     ) + "\n",
   );
+  const { version: sdkVersion } = JSON.parse(
+    await readFile(
+      path.join(
+        production,
+        "node_modules/@earendil-works/pi-coding-agent/package.json",
+      ),
+      "utf8",
+    ),
+  );
   await writeFile(
     path.join(resources, "manifest.json"),
     JSON.stringify(
       {
         protocolVersion: 1,
-        sdkVersion: "1.4.0",
+        sdkVersion,
         nodeVersion: manifest.version,
         platform: target,
         node: `node/${path.basename(node)}`,
         entry: "runtime/src/main.mjs",
         searchServer: "search-mcp/ofox-search-mcp.mjs",
+        engines,
         minimumMacOS: await applicationMinimumMacOS(),
       },
       null,
@@ -365,6 +626,6 @@ if (process.argv.includes("--node-only")) {
     ) + "\n",
   );
   process.stdout.write(
-    `Prepared assistant runtime (${target}, Node ${manifest.version}, Pi SDK 1.4.0)\n`,
+    `Prepared assistant runtime (${target}, Node ${manifest.version}, Pi SDK ${sdkVersion})\n`,
   );
 }

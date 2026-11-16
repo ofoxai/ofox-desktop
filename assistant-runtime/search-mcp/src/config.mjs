@@ -1,4 +1,6 @@
 export const DEFAULT_SEARCH_MODEL = "openai/gpt-5-nano";
+// Where web_search searches: Ofox (paid, the default) or Exa (free, keyless).
+export const SEARCH_PROVIDERS = ["ofox", "exa"];
 
 const OFOX_GATEWAYS = new Set(["https://api.ofox.ai", "https://api.ofox.io"]);
 // Printable ASCII without spaces: anything else cannot be sent in a header.
@@ -20,6 +22,12 @@ export class ConfigError extends Error {
 // assistant-runtime/src/security.mjs).
 function isLocalGateway(value) {
   const port = /^http:\/\/localhost:([1-9]\d{0,4})$/.exec(value)?.[1];
+  return port !== undefined && Number(port) <= 65535;
+}
+
+// A test's stand-in for Exa: plain localhost on an explicit port, with a path.
+function isLocalExa(value) {
+  const port = /^http:\/\/localhost:([1-9]\d{0,4})\/[\w/-]*$/.exec(value)?.[1];
   return port !== undefined && Number(port) <= 65535;
 }
 
@@ -68,5 +76,17 @@ export function loadConfig(env = process.env) {
   const model = env.OFOX_SEARCH_MODEL || DEFAULT_SEARCH_MODEL;
   if (!MODEL_PATTERN.test(model))
     throw new ConfigError("OFOX_SEARCH_MODEL is not a valid model id");
-  return { apiKey, baseUrl, model, proxy: proxyConfig(env) };
+  const provider = env.OFOX_SEARCH_PROVIDER || "ofox";
+  if (!SEARCH_PROVIDERS.includes(provider))
+    throw new ConfigError("OFOX_SEARCH_PROVIDER must be ofox or exa");
+  const config = { apiKey, baseUrl, model, provider, proxy: proxyConfig(env) };
+  const exaUrl = env.OFOX_EXA_URL;
+  if (exaUrl) {
+    if (env.OFOX_ALLOW_LOCAL_GATEWAY !== "1" || !isLocalExa(exaUrl))
+      throw new ConfigError(
+        "OFOX_EXA_URL is only for tests, with a localhost URL and the local gateway flag",
+      );
+    config.exaUrl = exaUrl;
+  }
+  return config;
 }

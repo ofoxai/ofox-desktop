@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
@@ -674,7 +675,9 @@ export function SkillDetails({
           defaultValue: t("library.unknown"),
         })}
       </p>
-      {query.isPending && <p role="status">{t("library.loading")}</p>}
+      {query.isPending && (
+        <FoxLoader size="block" label={t("library.loading")} />
+      )}
       {query.isError && (
         <p role="alert" className="text-danger">
           {libraryError(query.error, t)}
@@ -1041,11 +1044,7 @@ export function SkillImporter({
           </ListCard>
         </>
       )}
-      {loading && (
-        <p role="status" className="text-ink-muted">
-          {t("library.loading")}
-        </p>
-      )}
+      {loading && <FoxLoader size="block" label={t("library.loading")} />}
     </div>
   );
 }

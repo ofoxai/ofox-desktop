@@ -72,6 +72,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-windows.ps1 -
 `.github/workflows/windows-probe.yml` 已使用相同后端入口。代码推送后，Windows
 workflow 将构建两个探针并上传验证日志；全量前端检查继续由主 CI 执行。
 
+运行时测试入口会先准备完整生产资源，再验证打包依赖与清单；Windows Probe
+同时安装根目录依赖，供 PPT 来源和覆盖率维护测试使用。上游 PPT 资源禁止 Git
+换行转换，来源哈希始终核对原始字节。
+
+英文 Windows CI 镜像没有 CJK 字体，因此缩略图像素测试使用固定提交及 SHA256
+的 Noto Sans CJK SC（SIL OFL 1.1），仅下载到 runner 临时目录并在测试中注册。
+这不证明未安装 CJK 字体的用户系统能正确回退，也不会把字体打包进应用。
+
 资源库 MCP 检查的 Windows Job、取消后子进程回收、stdio/HTTP/SSE 也包含在完整 Rust 测试中。它们使用本机 Node 和临时模拟服务器，不执行已配置的真实 MCP。必须在 Windows 原生运行；macOS 交叉类型检查不能验收 Job 行为。实现边界见 [MCP 检查](mcp-connection-checks.md)。
 
 ## 用量与资源库补充验收

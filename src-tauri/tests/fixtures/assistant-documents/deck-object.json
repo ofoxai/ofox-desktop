@@ -1,0 +1,35 @@
+{
+  "kind": "deck",
+  "title": "Transformer 入门",
+  "language": "zh",
+  "slides": [
+    {"type": "hero", "title": "Transformer 入门", "subtitle": "注意力机制如何改变深度学习", "meta": "团队技术分享 · 2026 年 11 月"},
+    {"type": "statement", "statement": "让每个词都能直接看到整句话", "note": "2017 年 Transformer 取代 RNN，成为今天大模型的共同基础", "notes": "先抛结论：注意力让模型一步看到全句，后面几页解释为什么这很重要。"},
+    {"type": "pillars", "title": "为什么需要 Transformer", "pillars": [
+      {"heading": "RNN 逐词计算", "body": "必须按顺序处理每个词，GPU 无法并行，训练很慢"},
+      {"heading": "长句信息衰减", "body": "距离越远的词，信息在逐步传递中越容易丢失"},
+      {"heading": "注意力取代循环", "body": "每个词一步直接关注全句，既能并行，也不怕距离"}
+    ], "notes": "三个痛点对应三个收益：并行、长距离依赖、训练规模。"},
+    {"type": "timeline", "title": "从注意力到大模型", "steps": [
+      {"heading": "2014 年", "body": "注意力首次用于 RNN 翻译"},
+      {"heading": "2017 年", "body": "Transformer 论文发表"},
+      {"heading": "2018 年", "body": "BERT 与 GPT 相继出现"},
+      {"heading": "2022 年", "body": "大模型走向公众"}
+    ], "notes": "四个节点只讲一句话，重点放在 2017 年。"},
+    {"type": "comparison", "title": "RNN 与 Transformer", "left": {"heading": "RNN", "points": ["逐词顺序计算", "长距离依赖容易丢失", "训练难以并行", "结构简单，参数较少"]}, "right": {"heading": "Transformer", "points": ["整句并行计算", "任意两词直接关联", "充分利用 GPU", "计算量随句长平方增长"]}, "notes": "先讲 RNN 的局限，再讲 Transformer 的优势，最后坦率提到它的计算成本。"},
+    {"type": "evidence", "title": "落地效果：Q1 收入 +18%", "metrics": [
+      {"value": "+18%", "label": "Q1 收入", "note": "相对上季度"},
+      {"value": "3×", "label": "GPU 训练速度", "note": "对比 RNN 基线"},
+      {"value": "-40%", "label": "推理延迟", "note": "同等精度下"}
+    ], "detail": ["数据来自内部 A/B 测试，样本为 2026 年 Q1"], "notes": "三个指标都来自内部 A/B 测试：先讲收入，再讲训练速度和延迟。"},
+    {"type": "grid", "title": "Transformer 的应用", "items": [
+      {"heading": "文本", "body": "翻译、摘要与对话"},
+      {"heading": "图像", "body": "ViT 把图片切成小块处理"},
+      {"heading": "语音", "body": "识别与合成同样适用"},
+      {"heading": "代码", "body": "补全、解释与审查"},
+      {"heading": "视频", "body": "按时空小块建模与生成"},
+      {"heading": "多模态", "body": "图文音统一在一个模型里"}
+    ], "notes": "六个场景共用同一套结构，这正是它流行的原因。"},
+    {"type": "cta", "title": "谢谢，欢迎提问", "subtitle": "下一步：用 PyTorch 实现一个小型 Transformer", "contact": "ai-club@example.com"}
+  ]
+}

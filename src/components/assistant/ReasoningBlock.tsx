@@ -6,10 +6,7 @@ import type { AssistantThinking } from "./useAssistant";
 /** Whole seconds as both captions say them: rounded, never less than one. */
 const seconds = (ms: number) => Math.max(1, Math.round(ms / 1000));
 
-/**
- * One box for every state, so nothing moves when the reasoning text arrives
- * or the reply finishes; only a reply with reasoning text can be opened.
- */
+/** A disclosure needs actual reasoning; elapsed time alone stays a quiet line. */
 const BOX =
   "group/reasoning mb-3 rounded-ctl bg-card-2 px-3 py-2 text-ctl text-ink-ctl";
 
@@ -18,17 +15,20 @@ const BOX =
  * (the host's `thinking_start` and `thinking_end`) gives a live "Thinking for
  * N seconds"; afterwards, and for a saved reply, it is "Thought for N
  * seconds" from `reasoningMs`, with the reasoning text behind it when there
- * is any. A reply with no reasoning shows nothing, and one saved before
- * durations were kept keeps its plain "Reasoning" disclosure.
+ * is any. A reply with neither text nor elapsed time shows nothing, and one
+ * saved before durations were kept keeps its plain "Reasoning" disclosure.
  */
 export function ReasoningBlock({
   reasoning,
   reasoningMs,
   thinking,
+  compact = false,
 }: {
   reasoning?: string | null;
   reasoningMs?: number | null;
   thinking?: AssistantThinking | null;
+  /** A live task card already announces progress; keep reasoning secondary. */
+  compact?: boolean;
 }) {
   const { t } = useTranslation();
   const [, tick] = useReducer((count: number) => count + 1, 0);
@@ -44,25 +44,31 @@ export function ReasoningBlock({
   const spentMs = thinking
     ? thinking.doneMs + (since !== null ? Math.max(0, Date.now() - since) : 0)
     : (reasoningMs ?? null);
+  const hasReasoning = Boolean(reasoning?.trim());
+  const hasElapsed =
+    typeof spentMs === "number" && Number.isFinite(spentMs) && spentMs > 0;
   const label = live
     ? t("assistant.thinking.live", { count: seconds(spentMs ?? 0) })
-    : spentMs !== null
+    : hasElapsed
       ? t("assistant.thinking.done", { count: seconds(spentMs) })
       : t("assistant.reasoning");
 
-  if (!live && spentMs === null && !reasoning) return null;
+  if (compact && !hasReasoning) return null;
+  if (!live && !hasElapsed && !hasReasoning) return null;
   // The spinner and the disclosure chevron sit beside the words, which stay
   // where they are as either comes and goes.
   const caption = (
     <span className="flex items-center gap-1.5">
-      {live && (
+      {live && !compact && (
         <Loader2
           aria-hidden
           className="h-3 w-3 flex-none animate-spin motion-reduce:animate-none"
         />
       )}
-      <span className="min-w-0">{label}</span>
-      {reasoning && (
+      <span className="min-w-0">
+        {compact ? t("assistant.progress.reasoning") : label}
+      </span>
+      {hasReasoning && (
         <ChevronRight
           aria-hidden
           className="h-3 w-3 flex-none opacity-70 transition-transform duration-150 ease-soft group-open/reasoning:rotate-90 motion-reduce:transition-none"
@@ -73,15 +79,20 @@ export function ReasoningBlock({
   return (
     <>
       {/* The ticking caption is no live region: say once that it began. */}
-      {live && (
+      {live && !compact && (
         <span role="status" className="sr-only">
           {t("assistant.typing")}
         </span>
       )}
       {/* The reasoning text can follow a little after the first sign of
           thinking: until then there is only the caption. */}
-      {reasoning ? (
-        <details data-reasoning className={BOX}>
+      {hasReasoning ? (
+        <details
+          data-reasoning
+          className={
+            compact ? "group/reasoning mb-3 text-note text-ink-muted" : BOX
+          }
+        >
           <summary className="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
             {caption}
           </summary>
@@ -90,9 +101,9 @@ export function ReasoningBlock({
           </div>
         </details>
       ) : (
-        <div data-reasoning className={BOX}>
+        <p data-reasoning="caption" className="mb-2 text-note text-ink-muted">
           {caption}
-        </div>
+        </p>
       )}
     </>
   );

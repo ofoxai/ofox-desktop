@@ -2,14 +2,18 @@ import { describe, expect, it } from "vitest";
 import {
   hasMathMarkers,
   loadMarkdownMath,
+  markdownMathPlugins,
   markdownMathReady,
   rewriteMathDelimiters,
 } from "@/lib/markdownMath";
 
 describe("hasMathMarkers", () => {
-  it.each(["$$x^2$$", "a \\(x\\) b", "\\[\nx\n\\]", "序列长度 $n$，维度 $d$"])("sees %j", (content) => {
-    expect(hasMathMarkers(content)).toBe(true);
-  });
+  it.each(["$$x^2$$", "a \\(x\\) b", "\\[\nx\n\\]", "序列长度 $n$，维度 $d$"])(
+    "sees %j",
+    (content) => {
+      expect(hasMathMarkers(content)).toBe(true);
+    },
+  );
 
   it.each([
     "",
@@ -19,19 +23,16 @@ describe("hasMathMarkers", () => {
     "约 $0.014–$0.028 每次",
     "$5,$10",
     "price: $ 5 $",
-  ])(
-    "does not see %j",
-    (content) => {
-      expect(hasMathMarkers(content)).toBe(false);
-    },
-  );
+  ])("does not see %j", (content) => {
+    expect(hasMathMarkers(content)).toBe(false);
+  });
 });
 
 describe("rewriteMathDelimiters", () => {
   it("writes $…$ as text math, as Pandoc reads it", () => {
-    expect(rewriteMathDelimiters("长度 $n$，输入 $X\\in\\mathbb{R}^{n\\times d}$。")).toBe(
-      "长度 $$n$$，输入 $$X\\in\\mathbb{R}^{n\\times d}$$。",
-    );
+    expect(
+      rewriteMathDelimiters("长度 $n$，输入 $X\\in\\mathbb{R}^{n\\times d}$。"),
+    ).toBe("长度 $$n$$，输入 $$X\\in\\mathbb{R}^{n\\times d}$$。");
     expect(rewriteMathDelimiters("若 $X' = PX$（$P$ 为置换）")).toBe(
       "若 $$X' = PX$$（$$P$$ 为置换）",
     );
@@ -162,6 +163,252 @@ describe("rewriteMathDelimiters", () => {
   it("leaves a lone backtick and plain text as they were", () => {
     const text = "a ` b and (c) [d] $5";
     expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+});
+
+describe("rewriteMathDelimiters: money beside Chinese text", () => {
+  it("leaves two prices with Chinese words between them as text", () => {
+    const text = "token × $0.412/M。里的「补偿$待核」要等这个数";
+    expect(rewriteMathDelimiters(text)).toBe(text);
+    expect(hasMathMarkers(text)).toBe(false);
+  });
+
+  it("still reads a formula whose Chinese words sit in \\text", () => {
+    expect(rewriteMathDelimiters("$\\text{面积}=\\pi r^2$")).toBe(
+      "$$\\text{面积}=\\pi r^2$$",
+    );
+  });
+});
+
+describe("rewriteMathDelimiters: $$ blocks", () => {
+  it("puts the fences of a formula that shares their lines on lines of their own", () => {
+    expect(rewriteMathDelimiters("由\n\n$$a<b\n\\Rightarrow\nc$$\n\n后")).toBe(
+      "由\n\n$$\na<b\n\\Rightarrow\nc\n$$\n\n后",
+    );
+  });
+
+  it("writes a $$ formula alone on its line as a block", () => {
+    expect(rewriteMathDelimiters("$$E=mc^2$$")).toBe("$$\nE=mc^2\n$$");
+    expect(rewriteMathDelimiters("前文\n$$E=mc^2$$\n后文")).toBe(
+      "前文\n$$\nE=mc^2\n$$\n后文",
+    );
+  });
+
+  it("puts the words after a closing $$ on a line after the block", () => {
+    expect(rewriteMathDelimiters("$$a+b\n=c$$ 所以成立。")).toBe(
+      "$$\na+b\n=c\n$$\n所以成立。",
+    );
+  });
+
+  it("keeps a quote's marker and a list item's indent on every line", () => {
+    expect(rewriteMathDelimiters("> $$a\n> =b$$\n\n后文")).toBe(
+      "> $$\n> a\n> =b\n> $$\n\n后文",
+    );
+    expect(rewriteMathDelimiters("1. 推导：\n\n   $$a\n   =b$$")).toBe(
+      "1. 推导：\n\n   $$\n   a\n   =b\n   $$",
+    );
+  });
+
+  it("leaves a block whose fences stand alone as it was, blank lines and all", () => {
+    for (const text of ["$$\nx\n$$", "a\n\n$$\na\n\nb\n$$\n\nb"])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("keeps a $$ formula inside a sentence inline", () => {
+    for (const text of ["面积 $$\\pi r^2$$ 即可", "$$a$$ 与 $$b$$ 相等"])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("shows a $$ that never closes as text", () => {
+    expect(rewriteMathDelimiters("$$x+1\n\n## 标题")).toBe(
+      "\\$\\$x+1\n\n## 标题",
+    );
+    expect(rewriteMathDelimiters("a $$x")).toBe("a \\$\\$x");
+  });
+
+  it("does not close a $$ that has words after it across a blank line", () => {
+    expect(rewriteMathDelimiters("$$x\n\n正文 $$y$$")).toBe(
+      "\\$\\$x\n\n正文 $$y$$",
+    );
+  });
+
+  it("writes the vertical bars of a formula in a table row as \\vert", () => {
+    expect(
+      rewriteMathDelimiters(
+        "| 式 | 义 |\n|---|---|\n| $|x|$ | 绝对值 |\n| $\\|v\\|$ | 范数 |",
+      ),
+    ).toBe(
+      "| 式 | 义 |\n|---|---|\n| $$\\vert x\\vert $$ | 绝对值 |\n| $$\\Vert v\\Vert $$ | 范数 |",
+    );
+    expect(rewriteMathDelimiters("$|x|$")).toBe("$$|x|$$");
+  });
+});
+
+describe("rewriteMathDelimiters: review follow-ups", () => {
+  it("still reads formulas with Chinese in subscripts and bold", () => {
+    expect(
+      rewriteMathDelimiters(
+        "合力 $F_{合}=ma$，速度 $v_{平均}$，区间 $x\\in[0，1]$，$\\mathbf{力}$",
+      ),
+    ).toBe(
+      "合力 $$F_{合}=ma$$，速度 $$v_{平均}$$，区间 $$x\\in[0，1]$$，$$\\mathbf{力}$$",
+    );
+    expect(hasMathMarkers("速度 $v_{平均}$")).toBe(true);
+  });
+
+  it("does not pair dollars across the rows of a table", () => {
+    for (const [text, out] of [
+      [
+        "| $$ | PID |\n|---|---|\n| $$x$$ | 公式 |",
+        "| \\$\\$ | PID |\n|---|---|\n| $$x$$ | 公式 |",
+      ],
+      [
+        "| a | b |\n|---|---|\n| $x | 1 |\n| y$ | 2 |",
+        "| a | b |\n|---|---|\n| $x | 1 |\n| y$ | 2 |",
+      ],
+    ])
+      expect(rewriteMathDelimiters(text)).toBe(out);
+  });
+
+  it("reads a one-column table's delimiter row", () => {
+    expect(rewriteMathDelimiters("| 式 |\n|---\n| $|x|$ |")).toBe(
+      "| 式 |\n|---\n| $$\\vert x\\vert $$ |",
+    );
+  });
+
+  it("keeps an escaped backslash before a bar in a table formula", () => {
+    expect(rewriteMathDelimiters("| a |\n|---|\n| $a \\\\| b$ |")).toBe(
+      "| a |\n|---|\n| $$a \\\\\\vert  b$$ |",
+    );
+  });
+
+  it("writes a formula in a list item as a block under the item", () => {
+    expect(rewriteMathDelimiters("- $$a\n  =b$$")).toBe(
+      "- $$\n  a\n  =b\n  $$",
+    );
+    const fenced = "- $$\n  a\n\n  b\n  $$";
+    expect(rewriteMathDelimiters(fenced)).toBe(fenced);
+  });
+
+  it("writes a formula opened mid-sentence and closed on its own line as a block", () => {
+    expect(rewriteMathDelimiters("公式为 $$\na+b\n$$\n\n后文")).toBe(
+      "公式为\n$$\na+b\n$$\n\n后文",
+    );
+  });
+
+  it("leaves a block whose formula is indented four spaces as it was", () => {
+    const text = "$$\n\n    E = mc^2\n\n$$";
+    expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("keeps the words moved after a closing $$ from starting a list or heading", () => {
+    expect(rewriteMathDelimiters("$$a\n=b$$ - 1")).toBe("$$\na\n=b\n$$\n\\- 1");
+    expect(rewriteMathDelimiters("$$a\n=b$$ # 注")).toBe(
+      "$$\na\n=b\n$$\n\\# 注",
+    );
+  });
+
+  it("indents a list item's or a quote's formula lines that left their indent out", () => {
+    expect(rewriteMathDelimiters("- $$a\n=b$$\n\n后文")).toBe(
+      "- $$\n  a\n  =b\n  $$\n\n后文",
+    );
+    expect(rewriteMathDelimiters("> $$a\n=b$$")).toBe("> $$\n> a\n> =b\n> $$");
+    expect(rewriteMathDelimiters("- 公式为 $$\na+b\n$$")).toBe(
+      "- 公式为\n  $$\n  a+b\n  $$",
+    );
+  });
+
+  it("leaves indented code after a block whose closing fence stood alone", () => {
+    const text = "$$a=b\n$$\n\n代码：\n\n    echo $HOME$PATH";
+    expect(rewriteMathDelimiters(text)).toBe(
+      "$$\na=b\n$$\n\n代码：\n\n    echo $HOME$PATH",
+    );
+  });
+
+  it("ends a table at a $$ block", () => {
+    const text = "| 1 | 2 |\n|---|---|\n| a | b |\n$$\nx\n$$\n\n后文";
+    expect(rewriteMathDelimiters(text)).toBe(text);
+  });
+
+  it("reads a one-column delimiter row with a closing bar", () => {
+    expect(rewriteMathDelimiters("| 式 |\n---|\n| $|x|$ |")).toBe(
+      "| 式 |\n---|\n| $$\\vert x\\vert $$ |",
+    );
+  });
+
+  it("keeps a formula line that starts with > under a list item", () => {
+    for (const text of [
+      "- $$\n  f(x)\n  > 0\n  $$",
+      "- $$\n  a\n  >= b\n  $$",
+      "> - $$\n>   f(x)\n>   > 0\n>   $$",
+    ])
+      expect(rewriteMathDelimiters(text)).toBe(text);
+    expect(rewriteMathDelimiters("- $$f(x)\n  > 0$$")).toBe(
+      "- $$\n  f(x)\n  > 0\n  $$",
+    );
+  });
+
+  it("leaves indented code alone after a stray $$ in a sentence", () => {
+    expect(
+      rewriteMathDelimiters(
+        "在 bash 里 $$ 是进程号。\n\n    echo $$\n    echo $HOME$PATH",
+      ),
+    ).toBe("在 bash 里 \\$\\$ 是进程号。\n\n    echo $$\n    echo $HOME$PATH");
+    expect(rewriteMathDelimiters("成本 $$$\n\n$$\n\n    E = mc^2\n\n$$")).toBe(
+      "成本 \\$\\$$\n\n$$\n\n    E = mc^2\n\n$$",
+    );
+    const after = "公式为\n$$\na+b\n$$\n\n代码：\n\n    echo $HOME$PATH";
+    expect(rewriteMathDelimiters(after)).toBe(after);
+    expect(
+      rewriteMathDelimiters(
+        "公式为 $$\na+b\n$$\n\n代码：\n\n    echo $HOME$PATH",
+      ),
+    ).toBe(after);
+  });
+
+  it("reads delimiter rows without bars at the edges", () => {
+    expect(rewriteMathDelimiters("名称 | 式\n--- | ---\n模 | $|x|$")).toBe(
+      "名称 | 式\n--- | ---\n模 | $$\\vert x\\vert $$",
+    );
+  });
+
+  it("keeps a table row that starts with a formula", () => {
+    expect(rewriteMathDelimiters("| a | b |\n|--|--|\n$$x$$ | $|y|$ |")).toBe(
+      "| a | b |\n|--|--|\n$$x$$ | $$\\vert y\\vert $$ |",
+    );
+  });
+
+  it("leaves indented code alone after a $$ formula opened mid-line", () => {
+    const code = "\n\n    echo $HOME$PATH";
+    expect(rewriteMathDelimiters("由 $$a + b\n= c$$" + code)).toBe(
+      "由 $$a + b\n= c$$" + code,
+    );
+    expect(rewriteMathDelimiters("公式为 $$E = mc^2\n$$" + code)).toBe(
+      "公式为\n$$\nE = mc^2\n$$" + code,
+    );
+    expect(rewriteMathDelimiters("x $$a$$ $$b\n$$" + code)).toBe(
+      "x $$a$$\n$$\nb\n$$" + code,
+    );
+    expect(
+      rewriteMathDelimiters(
+        "当前 shell 的 PID 是 $$\n\n    echo $$\n    echo $HOME$PATH",
+      ),
+    ).toBe("当前 shell 的 PID 是 \\$\\$\n\n    echo $$\n    echo $HOME$PATH");
+  });
+
+  it("keeps a block with an indented formula after a formula opened mid-line", () => {
+    expect(
+      rewriteMathDelimiters("由 $$a\n$$ 得\n\n$$\n\n    E = mc^2\n\n$$"),
+    ).toBe("由\n$$\na\n$$\n得\n\n$$\n\n    E = mc^2\n\n$$");
+  });
+
+  it("asks KaTeX for muted errors", async () => {
+    await loadMarkdownMath();
+    const rehype = markdownMathPlugins()?.rehype ?? [];
+    const options = (
+      rehype[0] as unknown as [unknown, { errorColor?: string }]
+    )[1];
+    expect(options.errorColor).toBe("rgb(var(--ink-muted))");
   });
 });
 

@@ -126,8 +126,8 @@ export function localTools(runtime, context) {
     operations: {},
     exposeSessionEnvironment: false,
   });
-  tools.push(
-    runtime.wrapTool(
+  tools.push({
+    ...runtime.wrapTool(
       context,
       shellSample.name,
       shellSample.description,
@@ -170,7 +170,10 @@ export function localTools(runtime, context) {
         );
       },
     ),
-  );
+    promptGuidelines: [
+      `To list, find, search or read files use ls, find, grep and read: they need no approval. A ${shellSample.name} command may wait up to two minutes for the user to approve it; after assistant_approval_timeout nobody is there to approve, so do not ask again and go on another way.`,
+    ],
+  });
   const direct = (name, description, properties, transform = (args) => args) =>
     runtime.wrapTool(
       context,

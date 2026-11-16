@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import { MCP_TABLE_TOOLS } from "./mcpTableCells";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -290,7 +291,9 @@ function RecipePreparation({
           {error}
         </p>
       )}
-      {!ready && !error && <p role="status">{t("library.loading")}</p>}
+      {!ready && !error && (
+        <FoxLoader size="block" label={t("library.loading")} />
+      )}
       {ready && (
         <>
           {savedReceipt.current ? (

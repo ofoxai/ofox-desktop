@@ -10,7 +10,11 @@ export default defineConfig({
     },
   },
   test: {
-    exclude: [...configDefaults.exclude, "assistant-runtime/**"],
+    exclude: [
+      ...configDefaults.exclude,
+      "assistant-runtime/**",
+      ".real-eval/**",
+    ],
     environment: "jsdom",
     setupFiles: ["./tests/setupGlobals.ts", "./tests/setupTests.ts"],
     globals: true,

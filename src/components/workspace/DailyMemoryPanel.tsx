@@ -1,3 +1,4 @@
+import { FoxLoader } from "@/components/ui/fox-loader";
 import React, {
   useState,
   useEffect,
@@ -314,8 +315,8 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
           }
         >
           {loadingContent ? (
-            <div className="flex items-center justify-center h-64 text-muted-foreground">
-              {t("prompts.loading")}
+            <div className="flex items-center justify-center h-64">
+              <FoxLoader size="block" label={t("prompts.loading")} />
             </div>
           ) : (
             <MarkdownEditor
@@ -486,8 +487,8 @@ const DailyMemoryPanel: React.FC<DailyMemoryPanelProps> = ({
             )
           ) : // --- Normal file list ---
           loadingList ? (
-            <div className="flex items-center justify-center h-48 text-muted-foreground">
-              {t("prompts.loading")}
+            <div className="flex items-center justify-center h-48">
+              <FoxLoader size="block" label={t("prompts.loading")} />
             </div>
           ) : files.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-48 text-muted-foreground gap-3">

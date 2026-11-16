@@ -16,7 +16,7 @@ fn tool_supported(kind: &ResourceKind, tool: &str) -> bool {
         return tool == "shared" || crate::services::library::skill_targets::find(tool).is_some();
     }
     if *kind == ResourceKind::Mcp {
-        return crate::services::library::mcp_targets::TOOLS.contains(&tool);
+        return crate::services::library::mcp_targets::supported(tool);
     }
     ["claude", "codex", "gemini", "opencode", "hermes"].contains(&tool)
 }
@@ -115,7 +115,7 @@ pub(super) fn build(
                 .chain(["shared"])
                 .collect()
         } else if kind == ResourceKind::Mcp {
-            crate::services::library::mcp_targets::TOOLS.to_vec()
+            crate::services::library::mcp_targets::all_tools()
         } else {
             vec!["claude", "codex", "gemini", "opencode", "hermes", "shared"]
         };
@@ -581,7 +581,10 @@ pub(super) fn write_group(journal: &Journal, index: usize) -> Result<(), AppErro
     let group = &journal.groups[index];
     if journal.kind == ResourceKind::Skills {
         let member = &group.members[0];
-        return skill_resource::write(&journal.plans[member.child].targets[member.target]);
+        let operation = &journal.plans[member.child];
+        let target = &operation.targets[member.target];
+        let enabling = super::super::assistant_target::is_newly_enabled(operation, target);
+        return super::super::assistant_target::write_target(target, enabling);
     }
     if io::physical_id(Path::new(&group.path))? != group.physical_target
         || io::fingerprint(
@@ -591,6 +594,9 @@ pub(super) fn write_group(journal: &Journal, index: usize) -> Result<(), AppErro
         ) != group.before_hash
     {
         return Err(error("targetChanged"));
+    }
+    if Path::new(&group.path) == super::super::assistant_target::mcp_config_path() {
+        return super::super::mcp_targets::write_assistant(&group.after_text);
     }
     if group.before_hash != group.after_hash {
         // Literal MCP secrets keep the file owner-only, as a single apply does.

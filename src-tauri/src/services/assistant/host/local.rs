@@ -156,7 +156,7 @@ impl AssistantHost {
             .remove(&session_key(owner, sid));
     }
 
-    fn local_binding(&self, run: &RunControl) -> Binding {
+    pub(in crate::services::assistant) fn local_binding(&self, run: &RunControl) -> Binding {
         Binding {
             owner: run.identity.owner.clone(),
             session_id: run.session_id.clone(),
@@ -232,6 +232,115 @@ impl AssistantHost {
         Ok(request.mode)
     }
 
+    /// Internal sidecar admission: annotations come from Pi's registered tool,
+    /// never from model arguments. Bind grants to config + registered tool schema.
+    pub(in crate::services::assistant) async fn authorize_mcp(
+        &self,
+        run: &Arc<RunControl>,
+        params: &Value,
+    ) -> Result<Value, String> {
+        self.validate_run(run)?;
+        self.ensure_current(&run.identity, run.mcp_generation)
+            .await?;
+        let call: registry::Call = serde_json::from_value(params.clone()).map_err(|_| PROTOCOL)?;
+        if call.session_id != run.session_id
+            || call.run_id != run.run_id
+            || call.operation_id != run.operation_id
+            || call.tool_call_id.is_empty()
+            || call.tool_call_id.len() > 200
+            || run.compact_only
+        {
+            return Err("assistant_runtime_identity_mismatch".into());
+        }
+        if run.mcp["snapshot"].is_null() || call.args["snapshot"] != run.mcp["snapshot"] {
+            return Err("assistant_mcp_snapshot_changed".into());
+        }
+        let current = super::super::mcp::current(self.env.config_dir()).await?;
+        if current["snapshot"] != run.mcp["snapshot"] {
+            return Err("assistant_mcp_snapshot_changed".into());
+        }
+        let name = call.args["toolName"]
+            .as_str()
+            .filter(|s| !s.is_empty() && s.len() <= 128)
+            .ok_or(PROTOCOL)?;
+        let schema = call.args["identity"]
+            .as_str()
+            .filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+            .ok_or(PROTOCOL)?;
+        let read_only = call.args["readOnly"].as_bool().ok_or(PROTOCOL)?;
+        let server = call.args["server"].as_str();
+        if server.is_some_and(|s| {
+            run.mcp["servers"]
+                .get(s)
+                .is_none_or(|config| config["unavailable"] == true)
+        }) || (server.is_none()
+            && !matches!(
+                name,
+                "tool_search"
+                    | "list_mcp_resources"
+                    | "list_mcp_resource_templates"
+                    | "read_mcp_resource"
+            ))
+        {
+            return Err("assistant_mcp_unknown_tool".into());
+        }
+        let fingerprint = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&call.args).map_err(|_| PROTOCOL)?)
+        );
+        {
+            let mut calls = run.local_calls.0.lock().map_err(|_| STATE)?;
+            if let Some((previous, result)) = calls.get(&call.tool_call_id) {
+                if previous != &fingerprint {
+                    return Err("assistant_tool_call_conflict".into());
+                }
+                return result
+                    .clone()
+                    .unwrap_or_else(|| Err("assistant_tool_pending".into()));
+            }
+            if calls.len() >= capabilities::local_config().limits.max_tool_calls * 4 {
+                return Err("assistant_tool_limit".into());
+            }
+            calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
+        }
+        let result = async {
+            let key = session_key(&run.identity.owner,&run.session_id);
+            let grant = format!("mcp:{}:{schema}:{name}",run.mcp["snapshot"].as_str().ok_or(PROTOCOL)?);
+            let free = {
+                let mut states=self.local_states.lock().map_err(|_|STATE)?;
+                let state=states.entry(key.clone()).or_default();
+                read_only || state.mode == PermissionMode::FullAuto || state.grants.contains(&grant)
+            };
+            if !free {
+                let (preview,truncated)=super::super::mcp::arguments_preview(&call.args["args"],&run.mcp)?;
+                let binding=self.local_binding(run);
+                let (id,pending)=self.local_approvals.request(binding.clone())?;
+                let display=json!({"approvalId":id,"toolCallId":call.tool_call_id,"name":name,"category":"mcp","details":{"server":server,"tool":name},"argumentsPreview":preview,"argumentsTruncated":truncated,"allowSession":true,"expectedOwner":binding.owner,"expectedGeneration":binding.generation});
+                self.local_approvals.describe(&id,display.clone());
+                self.emit(run,"approval",display);
+                let timeout=run.deadline.saturating_duration_since(tokio::time::Instant::now()).min(Duration::from_secs(120));
+                let choice=self.local_approvals.wait(&id,pending,run.cancel.subscribe(),timeout).await;
+                self.emit(run,"approval_end",json!({"approvalId":id}));
+                self.validate_run(run)?;
+                self.ensure_current(&run.identity,run.mcp_generation).await?;
+                if super::super::mcp::current(self.env.config_dir()).await?["snapshot"] != run.mcp["snapshot"] { return Err("assistant_mcp_snapshot_changed".into()); }
+                match choice? {
+                    Choice::Deny => return Ok(json!({"approved":false})),
+                    Choice::Session => { self.local_states.lock().map_err(|_|STATE)?.entry(key).or_default().grants.insert(grant); }
+                    Choice::Once => {}
+                }
+            }
+            self.validate_run(run)?;
+            Ok(json!({"approved":true}))
+        }.await;
+        run.local_calls
+            .0
+            .lock()
+            .map_err(|_| STATE)?
+            .insert(call.tool_call_id, (fingerprint, Some(result.clone())));
+        result
+    }
+
     pub(super) async fn dispatch_tool(
         &self,
         run: &Arc<RunControl>,
@@ -253,7 +362,48 @@ impl AssistantHost {
             return Err("assistant_invalid_tool".into());
         }
         let tool = registry::get(&call.name)?;
+        if super::super::skill_tools::is_tool(tool.name) {
+            if self
+                .runs
+                .lock()
+                .map_err(|_| STATE)?
+                .get(&run.session_id)
+                .is_none_or(|active| active.run_id != run.run_id)
+            {
+                return Err("not_in_results".into());
+            }
+            let reply = run.reply_id();
+            let mut state = run.skill_tools.lock().map_err(|_| STATE)?;
+            if state.closed {
+                return Err("not_in_results".into());
+            }
+            if state.reply_id != reply {
+                let epoch = state.epoch + 1;
+                *state = super::super::skill_tools::State {
+                    reply_id: reply,
+                    epoch,
+                    ..Default::default()
+                };
+            }
+        }
         registry::validate_args(tool, &call.args)?;
+        // A new search replaces the earlier results; an invalid one does not.
+        if call.name == "find_skills"
+            && !run
+                .local_calls
+                .0
+                .lock()
+                .map_err(|_| STATE)?
+                .contains_key(&call.tool_call_id)
+        {
+            let mut skills = run.skill_tools.lock().map_err(|_| STATE)?;
+            skills.epoch += 1;
+            skills.results.clear();
+            skills.installed.clear();
+        }
+        if call.name == "install_skill" {
+            self.check_skill_result(run, &call.args)?;
+        }
         let record = blocking({
             let store = self.store(&run.identity.owner)?;
             let sid = run.session_id.clone();
@@ -261,8 +411,9 @@ impl AssistantHost {
         })
         .await?;
         capabilities::validate(&record.session.assistant_id, &record.session.capabilities)?;
-        if !run.local_enabled
-            || !capabilities::enabled(&record.session.capabilities)
+        if (tool.name != "use_skill"
+            && !super::super::skill_tools::is_tool(tool.name)
+            && (!run.local_enabled || !capabilities::enabled(&record.session.capabilities)))
             || record.session.deleted_at.is_some()
             || run.compact_only
         {
@@ -292,9 +443,19 @@ impl AssistantHost {
             }
             calls.insert(call.tool_call_id.clone(), (fingerprint.clone(), None));
         }
-        let result = self
-            .execute_local(run, tool, &call.args, &fingerprint, &call.tool_call_id)
-            .await;
+        let result = if super::super::skill_tools::is_tool(tool.name) {
+            self.dispatch_skill_tool(run, &call).await
+        } else if tool.name == "use_skill" {
+            self.load_run_skill(
+                run,
+                call.args["name"].as_str().ok_or("assistant_invalid_tool")?,
+                false,
+            )
+            .await
+        } else {
+            self.execute_local(run, tool, &call.args, &fingerprint, &call.tool_call_id)
+                .await
+        };
         run.local_calls
             .0
             .lock()
@@ -327,6 +488,7 @@ impl AssistantHost {
             return Ok(json!({"approved":true}));
         }
         let (paths, scope) = self.local_scope().await?;
+        let scope = self.skill_scope(run, scope).await?;
         let requested = args["path"]
             .as_str()
             .or_else(|| args["folder"].as_str())
@@ -362,8 +524,17 @@ impl AssistantHost {
         if generic_write && !checked.as_ref().is_some_and(|p| scope.in_root(&p.path)) {
             tool.category = policy::Category::Exec;
         }
-        let forbidden =
-            access == Access::Forbidden || (shell && commands::forbidden(command)) || bundled;
+        let forbidden = access == Access::Forbidden
+            || (shell
+                && (commands::forbidden(command)
+                    || commands::protected_operation(
+                        command,
+                        requested.as_deref().unwrap_or(&paths.home),
+                        &paths.home,
+                        &scope,
+                    )))
+            || bundled
+            || (generic_write && requested.as_ref().is_some_and(|p| scope.write_forbidden(p)));
         let grant = match tool.category {
             policy::Category::WriteConfig => "write_config".to_string(),
             policy::Category::Exec if shell => commands::program(command)
@@ -471,6 +642,12 @@ impl AssistantHost {
                         .await
                 }
                 "bash" | "powershell" => {
+                    let scope = self.skill_scope(run, scope.clone()).await?;
+                    if scope.check(&path)?.access == Access::Forbidden
+                        || commands::protected_operation(command, &path, &paths.home, &scope)
+                    {
+                        return Err("assistant_operation_denied".into());
+                    }
                     let a: registry::ExecArgs = registry::decode(args)?;
                     execute::run(&a.command, &path, &paths.home, a.timeout).await
                 }
@@ -493,7 +670,7 @@ impl AssistantHost {
                         return Err(IDENTITY_CHANGED.into());
                     }
                     let _io = crate::config_io::lock();
-                    if scope.check(&path)?.path != path {
+                    if scope.write_forbidden(&path) || scope.check(&path)?.path != path {
                         return Err("assistant_restore_conflict".into());
                     }
                     let original = if path.exists() {
@@ -531,28 +708,38 @@ impl AssistantHost {
                 }
                 "read" | "stat" | "ls" | "find" | "grep" => {
                     let args = args.clone();
-                    blocking(move || match tool.name {
-                        "read" => Ok(json!(files::read(&scope, &path, outside)?)),
-                        "stat" => files::stat(&scope, &path, outside),
-                        "ls" => Ok(json!(files::list(
-                            &scope,
-                            &path,
-                            registry::decode::<registry::ListArgs>(&args)?.limit,
-                            outside
-                        )?)),
-                        "find" => {
-                            let a: registry::SearchArgs = registry::decode(&args)?;
-                            Ok(json!(files::find(
-                                &scope, &path, &a.pattern, a.limit, outside
-                            )?))
-                        }
-                        "grep" => {
-                            let a: registry::SearchArgs = registry::decode(&args)?;
-                            Ok(json!(files::grep(
-                                &scope, &path, &a.pattern, a.limit, outside
-                            )?))
-                        }
-                        _ => Err("assistant_unknown_tool".into()),
+                    let env = self.env.clone();
+                    let grants = run.skills.lock().map_err(|_| STATE)?.grants();
+                    let target = path.clone();
+                    blocking(move || {
+                        super::super::skills::read_in_skill(
+                            env.as_ref(),
+                            grants,
+                            &target,
+                            Box::new(move || match tool.name {
+                                "read" => Ok(json!(files::read(&scope, &path, outside)?)),
+                                "stat" => files::stat(&scope, &path, outside),
+                                "ls" => Ok(json!(files::list(
+                                    &scope,
+                                    &path,
+                                    registry::decode::<registry::ListArgs>(&args)?.limit,
+                                    outside
+                                )?)),
+                                "find" => {
+                                    let a: registry::SearchArgs = registry::decode(&args)?;
+                                    Ok(json!(files::find(
+                                        &scope, &path, &a.pattern, a.limit, outside
+                                    )?))
+                                }
+                                "grep" => {
+                                    let a: registry::SearchArgs = registry::decode(&args)?;
+                                    Ok(json!(files::grep(
+                                        &scope, &path, &a.pattern, a.limit, outside
+                                    )?))
+                                }
+                                _ => Err("assistant_unknown_tool".into()),
+                            }),
+                        )
                     })
                     .await
                 }

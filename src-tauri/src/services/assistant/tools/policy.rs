@@ -2,6 +2,8 @@
 //! ask, `AutoEdit` also lets configuration changes through, `FullAuto` lets
 //! everything through. Protected stores stay denied in every mode. Command
 //! classification is computed by the host, never accepted from model arguments.
+//! Skill read/execute grants never grant writes: the host marks private-tree
+//! mutations forbidden before this permission-mode decision.
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

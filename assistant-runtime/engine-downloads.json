@@ -1,0 +1,63 @@
+{
+  "_note": "officecli sha256 values are copied from the release's SHA256SUMS (https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.160/SHA256SUMS) and match the digests GitHub reports for each asset. The officecli LICENSE and NOTICE are pinned from the repository at tag v1.0.160. Typst publishes no checksum file: each archive was downloaded once over TLS from the release URL and its sha256 pinned here (trust on first verified download); the values equal the digests GitHub reports for the release assets.",
+  "officecli": {
+    "version": "1.0.160",
+    "licenses": {
+      "LICENSE": {
+        "url": "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/v1.0.160/LICENSE",
+        "sha256": "7e282402a5a6db33995fe638bb3fe79013f9884d8f7d15a42e481c1e86aadda1"
+      },
+      "NOTICE": {
+        "url": "https://raw.githubusercontent.com/iOfficeAI/OfficeCLI/v1.0.160/NOTICE",
+        "sha256": "3a4715b268e148a8e9566f5e835f766f5c95c3da4d6e5ddd908806a258a2f07b"
+      }
+    },
+    "darwin-arm64": {
+      "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.160/officecli-mac-arm64",
+      "sha256": "fe2b31c6c27534dfbbf155386b6b9105420f9315bbb606335ec61490d171386d",
+      "executable": "officecli"
+    },
+    "darwin-x64": {
+      "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.160/officecli-mac-x64",
+      "sha256": "55b27f6d422f9e0bcd2aa40abb262606110ff957a4a5253db7a8ba0460cd81c7",
+      "executable": "officecli"
+    },
+    "linux-x64": {
+      "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.160/officecli-linux-x64",
+      "sha256": "baa084b64ec634bd9d41a0592db3ed85f11658b358bab898679537ea7f3e73a9",
+      "executable": "officecli"
+    },
+    "win32-x64": {
+      "url": "https://github.com/iOfficeAI/OfficeCLI/releases/download/v1.0.160/officecli-win-x64.exe",
+      "sha256": "c590ca9d464f2b03362825b0f2615efcae33ce3fc0edaeeef29f7ddacb4c5424",
+      "executable": "officecli.exe"
+    }
+  },
+  "typst": {
+    "version": "0.15.1",
+    "darwin-arm64": {
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-aarch64-apple-darwin.tar.xz",
+      "sha256": "48f62ed034aa3a7978309579ac6ca00045e2ef0da73114e8af27cfd8e74dc05a",
+      "archive": "typst-aarch64-apple-darwin.tar.xz",
+      "executable": "typst-aarch64-apple-darwin/typst"
+    },
+    "darwin-x64": {
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-apple-darwin.tar.xz",
+      "sha256": "7f9fdd9584866245de9a79e0add8f9236fae6f40a8a45e2c4771ccc14db4e0fa",
+      "archive": "typst-x86_64-apple-darwin.tar.xz",
+      "executable": "typst-x86_64-apple-darwin/typst"
+    },
+    "linux-x64": {
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-unknown-linux-musl.tar.xz",
+      "sha256": "a6d077d0a95eed5a2eba715b2dae06be954f624ccbf85758a03f389ded33118c",
+      "archive": "typst-x86_64-unknown-linux-musl.tar.xz",
+      "executable": "typst-x86_64-unknown-linux-musl/typst"
+    },
+    "win32-x64": {
+      "url": "https://github.com/typst/typst/releases/download/v0.15.1/typst-x86_64-pc-windows-msvc.zip",
+      "sha256": "19ce3551153c2fe7ee9fa2f95208310c8f4d3209fedb699e0333faf8913f6736",
+      "archive": "typst-x86_64-pc-windows-msvc.zip",
+      "executable": "typst-x86_64-pc-windows-msvc/typst.exe"
+    }
+  }
+}

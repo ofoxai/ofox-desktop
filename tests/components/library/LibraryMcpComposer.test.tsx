@@ -822,3 +822,49 @@ describe("MCP multi-import identities", () => {
     );
   });
 });
+
+it("blocks the builtin assistant for maintained sign-in hosts before saving", async () => {
+  const change = vi.fn();
+  i18n.addResourceBundle(
+    "zh",
+    "translation",
+    {
+      library: {
+        assistantTarget: { label: "Ofox 助手" },
+        assistantMcpSignInUnsupported: "该服务需要登录，Ofox 助手暂不支持",
+      },
+    },
+    true,
+    true,
+  );
+  await i18n.changeLanguage("zh");
+  render(
+    <LibraryMcpForm
+      value={createMcpDraft({
+        name: "Sentry",
+        transport: "http",
+        url: "https://MCP.SENTRY.DEV.:443/mcp",
+      })}
+      onChange={vi.fn()}
+      onSave={vi.fn()}
+      targets={[
+        {
+          toolId: "ofox-assistant",
+          available: true,
+          discoveryStatus: "available",
+          path: "",
+          targetGroupId: "assistant",
+          status: "unassigned",
+        },
+      ]}
+      onToolsChange={change}
+    />,
+  );
+  const target = screen.getByRole("button", { name: "Ofox 助手" });
+  expect(target).toHaveAttribute("aria-disabled", "true");
+  expect(target).toHaveAccessibleDescription(
+    "该服务需要登录，Ofox 助手暂不支持",
+  );
+  await userEvent.click(target);
+  expect(change).not.toHaveBeenCalled();
+});
