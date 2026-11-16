@@ -151,6 +151,19 @@ fn document_output_publishes_new_and_existing_files_by_parent_handle() {
 }
 
 #[test]
+fn document_rename_rejects_pending_informational_and_failed_completion_statuses() {
+    assert!(check_rename_completion(NTSTATUS(0), NTSTATUS(0)).is_ok());
+    for other in [
+        STATUS_PENDING,
+        NTSTATUS(0x40000000),
+        NTSTATUS(0xc000000d_u32 as i32),
+    ] {
+        assert!(check_rename_completion(other, NTSTATUS(0)).is_err());
+        assert!(check_rename_completion(NTSTATUS(0), other).is_err());
+    }
+}
+
+#[test]
 fn document_long_unicode_paths_support_regular_reads_cache_and_atomic_publication() {
     let temp = tempfile::tempdir().unwrap();
     let source = temp.path().join("public resources 中文 日本語");

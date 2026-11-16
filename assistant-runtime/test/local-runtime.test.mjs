@@ -179,7 +179,7 @@ test("a rejected thirty-third tool scope still allows verification of a pending 
     t,
     [
       () => call("rebind_tool", { tool: "claude" }),
-      () => call("verify_in_folder", { tool: "codex", folder: "/problem-0" }),
+      () => call("verify_in_folder", { tool: "codex", folder: "problem-0" }),
       reply,
     ],
     (name, args) => {
@@ -191,17 +191,18 @@ test("a rejected thirty-third tool scope still allows verification of a pending 
       return { folder: args.folder, verified: true };
     },
   );
-  f.params.localConfig.taskState = {
-    changed: true,
-    targets: Array.from({ length: 32 }, (_, i) => ({
-      tool: "codex",
-      folder: `/problem-${i}`,
-      verified: i !== 0,
-    })),
-  };
+  // A restored Host snapshot contains absolute paths. Root-relative
+  // POSIX strings become drive-absolute paths in the Windows SDK adapter.
+  const targets = Array.from({ length: 32 }, (_, i) => ({
+    tool: "codex",
+    folder: path.join(f.params.localConfig.cwd, `problem-${i}`),
+    verified: i !== 0,
+  }));
+  f.params.localConfig.taskState = { changed: true, targets };
   const result = await f.run();
   assert.equal(result.status, "completed");
   assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].args.folder, targets[0].folder);
   assert.equal(f.requests.length, 3);
   assert.equal(result.localTaskState, null);
 });

@@ -24,11 +24,16 @@ use std::{
 };
 use windows::{
     core::{BOOL, PCWSTR, PWSTR},
-    Wdk::System::SystemServices::RtlGetVersion,
+    Wdk::{
+        Storage::FileSystem::{
+            FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
+        },
+        System::SystemServices::RtlGetVersion,
+    },
     Win32::{
         Foundation::{
             LocalFree, SetHandleInformation, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, HLOCAL,
-            WAIT_OBJECT_0, WAIT_TIMEOUT,
+            NTSTATUS, STATUS_PENDING, WAIT_OBJECT_0, WAIT_TIMEOUT,
         },
         Security::{
             Authorization::{
@@ -50,13 +55,12 @@ use windows::{
             TOKEN_USER,
         },
         Storage::FileSystem::{
-            CreateDirectoryW, CreateFileW, FileDispositionInfo, FileRenameInfo,
-            GetFileInformationByHandle, GetFinalPathNameByHandleW, SetFileInformationByHandle,
-            BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
-            FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
-            FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED, FILE_RENAME_INFO, FILE_SHARE_READ,
-            FILE_SHARE_WRITE, OPEN_EXISTING,
+            CreateDirectoryW, CreateFileW, FileDispositionInfo, GetFileInformationByHandle,
+            GetFinalPathNameByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+            FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
         System::{
             Com::CoTaskMemFree,
@@ -82,6 +86,7 @@ use windows::{
                 PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
                 PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, STARTF_USESTDHANDLES, STARTUPINFOEXW,
             },
+            IO::IO_STATUS_BLOCK,
         },
     },
 };
@@ -89,6 +94,7 @@ use windows::{
 const UNAVAILABLE: &str = "assistant_document_sandbox_unavailable";
 const UNSAFE_FILE: &str = "assistant_document_sandbox_unsafe_file";
 const CANCELLED: &str = "assistant_document_sandbox_cancelled";
+const RUNTIME_CHANGED: &str = "assistant_document_sandbox_runtime_changed";
 const MAX_TREE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_TASK_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_TREE_FILES: usize = 30_000;
@@ -112,6 +118,18 @@ fn win<T>(result: windows::core::Result<T>) -> Result<T, String> {
 }
 fn io<T>(result: std::io::Result<T>) -> Result<T, String> {
     result.map_err(|_| UNSAFE_FILE.to_owned())
+}
+
+fn check_rename_completion(status: NTSTATUS, completion: NTSTATUS) -> Result<(), String> {
+    // NT_SUCCESS also accepts pending/informational statuses. Publication is
+    // complete only when both the call and its IO_STATUS_BLOCK say SUCCESS.
+    if status.0 != 0 || completion.0 != 0 {
+        return Err(format!(
+            "assistant_document_sandbox_rename_status_{:08x}_completion_{:08x}",
+            status.0 as u32, completion.0 as u32
+        ));
+    }
+    Ok(())
 }
 fn wide(value: impl AsRef<OsStr>) -> Result<Vec<u16>, String> {
     let value: Vec<_> = value.as_ref().encode_wide().collect();
@@ -723,11 +741,11 @@ fn publish_output_cancellable(
             .as_os_str()
             .encode_wide()
             .collect();
-        // The documented allocation is sizeof(struct) plus the name bytes;
-        // keep an additional zero WCHAR for Win32's string conversion too.
-        let length = size_of::<FILE_RENAME_INFO>() + (filename.len() + 1) * 2;
+        // Satisfy the documented native structure+name buffer bound, keeping
+        // zero terminator space without counting it in FileNameLength.
+        let length = size_of::<FILE_RENAME_INFORMATION>() + (filename.len() + 1) * 2;
         let mut storage = vec![0usize; length.div_ceil(size_of::<usize>())];
-        let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
         unsafe {
             (*rename).Anonymous.ReplaceIfExists = true;
             (*rename).RootDirectory = HANDLE(pins.last().ok_or(UNSAFE_FILE)?.as_raw_handle());
@@ -750,12 +768,21 @@ fn publish_output_cancellable(
             if cancelled.load(Ordering::Acquire) {
                 return Err(CANCELLED.into());
             }
-            win(SetFileInformationByHandle(
+            // CREATE_NEW above omitted FILE_FLAG_OVERLAPPED, so this file
+            // handle has synchronous I/O and these buffers outlive the call.
+            // Win32's class-3 wrapper rejects relative RootDirectory on the
+            // tested Server 2022 host; native class 10 preserves our anchored
+            // directory boundary without converting back to a pathname.
+            let mut completion = IO_STATUS_BLOCK::default();
+            completion.Anonymous.Status = STATUS_PENDING;
+            let status = NtSetInformationFile(
                 HANDLE(owned.file.as_raw_handle()),
-                FileRenameInfo,
+                &mut completion,
                 rename.cast(),
                 length as u32,
-            ))?;
+                FileRenameInformation,
+            );
+            check_rename_completion(status, completion.Anonymous.Status)?;
         }
         owned.committed = true;
         Ok(())
@@ -868,7 +895,7 @@ fn cache_runtime(
     if !root.exists() {
         let contents = files(&source, MAX_TREE_BYTES)?;
         if tree_digest(&contents) != digest {
-            return Err("assistant_document_sandbox_runtime_changed".into());
+            return Err(RUNTIME_CHANGED.into());
         }
         let staging = private_parent.join(format!("staging-{}", uuid::Uuid::new_v4().simple()));
         create_directory(&staging, &expected_acl)?;
@@ -2062,7 +2089,7 @@ async fn prove_runtime_locked(
     .await
     .map_err(|_| UNAVAILABLE.to_owned())??;
     if before.digest != after.digest {
-        return Err("assistant_document_sandbox_runtime_changed".into());
+        return Err(RUNTIME_CHANGED.into());
     }
     ADMITTED
         .get_or_init(Default::default)

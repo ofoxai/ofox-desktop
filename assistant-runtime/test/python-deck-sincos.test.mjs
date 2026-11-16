@@ -7,6 +7,7 @@ import {
   officecli,
   options,
   run,
+  scratch,
   zipEntries,
 } from "./fixtures/python-engine.mjs";
 
@@ -67,12 +68,14 @@ test(
       3,
     );
     assert.deepEqual(JSON.parse(await readFile(result.lint, "utf8")), []);
+    const home = await scratch(t);
     const verdict = await promisify(execFile)(
       officecli,
       ["validate", result.out, "--json"],
       {
         env: {
           PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+          HOME: home,
           OFFICECLI_NO_AUTO_RESIDENT: "1",
           OFFICECLI_SKIP_UPDATE: "1",
         },

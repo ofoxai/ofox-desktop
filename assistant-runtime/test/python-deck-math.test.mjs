@@ -171,6 +171,7 @@ test(
           PATH: "/usr/bin:/bin",
           HOME: result.home,
           OFFICECLI_NO_AUTO_RESIDENT: "1",
+          OFFICECLI_SKIP_UPDATE: "1",
         },
         timeout: 60_000,
       },
