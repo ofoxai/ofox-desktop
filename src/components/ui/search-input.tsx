@@ -3,11 +3,10 @@ import { Search, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { cn } from "@/lib/utils";
 
-export interface SearchInputProps
-  extends Omit<
-    React.InputHTMLAttributes<HTMLInputElement>,
-    "value" | "onChange" | "type"
-  > {
+export interface SearchInputProps extends Omit<
+  React.InputHTMLAttributes<HTMLInputElement>,
+  "value" | "onChange" | "type"
+> {
   value: string;
   onChange: (value: string) => void;
   /** Classes for the frame (width, margins); the field fills it. */

@@ -7,8 +7,9 @@ export interface SegmentedItem<T extends string = string> {
   label: React.ReactNode;
 }
 
-export interface SegmentedNavItem<T extends string = string>
-  extends SegmentedItem<T> {
+export interface SegmentedNavItem<
+  T extends string = string,
+> extends SegmentedItem<T> {
   /** id of the panel this tab shows, for `aria-controls`. */
   controls?: string;
 }

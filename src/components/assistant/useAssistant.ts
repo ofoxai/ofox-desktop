@@ -1137,8 +1137,8 @@ export function useAssistant(enabled: boolean) {
         const local = runRef.current;
         const preparing = Boolean(
           local &&
-            pendingSends.current.has(local.runId) &&
-            !value.session.activeRun,
+          pendingSends.current.has(local.runId) &&
+          !value.session.activeRun,
         );
         // A reply still running (also after a restart) keeps streaming into
         // the same bubble instead of showing a saved copy next to it.
@@ -3720,17 +3720,17 @@ export function useAssistant(enabled: boolean) {
   );
   const queueAvailable = Boolean(
     enabled &&
-      interactionActive &&
-      connected &&
-      bootstrap?.runtime.available &&
-      bootstrap.owner &&
-      bootstrap.authorityGeneration !== undefined &&
-      chatModel &&
-      !busy &&
-      !loading &&
-      !showTrash &&
-      detail?.session.id === selectedId &&
-      detail?.session.deletedAt == null,
+    interactionActive &&
+    connected &&
+    bootstrap?.runtime.available &&
+    bootstrap.owner &&
+    bootstrap.authorityGeneration !== undefined &&
+    chatModel &&
+    !busy &&
+    !loading &&
+    !showTrash &&
+    detail?.session.id === selectedId &&
+    detail?.session.deletedAt == null,
   );
 
   /** Only text is queued; attachment imports remain disabled during a reply. */
@@ -4352,8 +4352,8 @@ export function useAssistant(enabled: boolean) {
     bootstrap?.search?.provider ?? "ofox";
   const webSearchWaits = Boolean(
     followedSearch &&
-      webSearch !== followedSearch.requested &&
-      webSearch !== (followedSearch.got ?? followedSearch.requested),
+    webSearch !== followedSearch.requested &&
+    webSearch !== (followedSearch.got ?? followedSearch.requested),
   );
 
   // The followed run's reply, while it goes on.

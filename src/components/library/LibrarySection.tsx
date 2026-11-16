@@ -137,13 +137,7 @@ export type Resource = InstructionSet | McpDefinition | SkillDefinition;
 type OpenViewBody =
   | {
       type:
-        | "edit"
-        | "targets"
-        | "details"
-        | "delete"
-        | "copy"
-        | "update"
-        | "check";
+        "edit" | "targets" | "details" | "delete" | "copy" | "update" | "check";
       resource: Resource;
       targets: ResourceTarget[];
       focusPath?: string[];
@@ -363,9 +357,7 @@ export function LibrarySection({
           createMcpDraft({
             name: next.resource.name,
             transport: (next.resource as McpDefinition).transport as
-              | "stdio"
-              | "http"
-              | "sse",
+              "stdio" | "http" | "sse",
           }),
         );
       setDraftStore(store);
@@ -407,8 +399,7 @@ export function LibrarySection({
       if (!running.current) {
         if (view?.type === "update") {
           const checked = draftStore.values.get("skillUpdateCheck") as
-            | import("@/lib/api/library").SkillUpdateCheck
-            | undefined;
+            import("@/lib/api/library").SkillUpdateCheck | undefined;
           if (checked?.candidate)
             void libraryApi
               .discardSkillUpdate(checked.candidate.ticketId)

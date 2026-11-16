@@ -122,11 +122,10 @@ export interface AnalyticsDistribution {
   excludedSessions: number;
   unquantifiedSourceGaps: boolean;
 }
-export interface AnalyticsPage
-  extends Pick<
-    UsageReceipt,
-    "appliedQuery" | "queryFingerprint" | "snapshotVersion"
-  > {
+export interface AnalyticsPage extends Pick<
+  UsageReceipt,
+  "appliedQuery" | "queryFingerprint" | "snapshotVersion"
+> {
   analyticsSnapshotId: string;
   data: AnalyticsSession[];
   total: number;

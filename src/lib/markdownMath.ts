@@ -65,7 +65,7 @@ export function hasMathMarkers(content: string): boolean {
 
 /** A `$ … $` formula somewhere in `content`. */
 function hasDollarMath(content: string): boolean {
-  for (let index = content.indexOf("$"); index >= 0; ) {
+  for (let index = content.indexOf("$"); index >= 0;) {
     const lone =
       content[index - 1] !== "$" &&
       content[index - 1] !== "\\" &&
@@ -86,7 +86,7 @@ function closing(
   closer: string,
   limit = text.length,
 ): number {
-  for (let index = from; index < limit; ) {
+  for (let index = from; index < limit;) {
     if (text[index] === "\\") {
       if (text[index + 1] === closer) return index;
       index += 2;
@@ -125,7 +125,7 @@ const priceSpan = (span: string) =>
 function dollarClose(text: string, from: number, limit = text.length): number {
   const first = text[from + 1];
   if (first === undefined || first === "$" || /\s/.test(first)) return -1;
-  for (let index = from + 1; index < limit; ) {
+  for (let index = from + 1; index < limit;) {
     const char = text[index];
     if (char === "\\") {
       index += 2;
@@ -208,7 +208,7 @@ function doubleDollarClose(
   block: boolean,
   limit: number,
 ): number {
-  for (let index = from; index < limit; ) {
+  for (let index = from; index < limit;) {
     const char = text[index];
     if (char === "\\") index += 2;
     else if (char === "$" && text[index + 1] === "$") return index;

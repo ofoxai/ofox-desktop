@@ -12,11 +12,7 @@ import {
 import { useShellLayout, type ShellLayout } from "./useShellLayout";
 
 export type ShellPage =
-  | "tools"
-  | "sessions"
-  | "library"
-  | "usage"
-  | "assistant";
+  "tools" | "sessions" | "library" | "usage" | "assistant";
 
 /** The sidebar's groups and their pages, in order. */
 export const SHELL_GROUPS: ReadonlyArray<{

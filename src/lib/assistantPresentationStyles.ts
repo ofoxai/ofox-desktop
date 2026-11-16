@@ -26,9 +26,7 @@ export type PresentationLanguage = "zh" | "en" | "ja";
 type LocalizedText = Partial<Record<PresentationLanguage, string>>;
 export type PresentationScheme = "light" | "dark" | "mixed";
 export type PresentationMappingStatus =
-  | "adapted"
-  | "approximate"
-  | "unsupported";
+  "adapted" | "approximate" | "unsupported";
 
 /** How one actual source page is carried by the native generator. */
 export interface PresentationNativePage {

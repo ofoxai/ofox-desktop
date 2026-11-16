@@ -57,13 +57,7 @@ import {
 } from "./utils";
 
 type ProviderFilter =
-  | "all"
-  | "codex"
-  | "claude"
-  | "opencode"
-  | "openclaw"
-  | "gemini"
-  | "hermes";
+  "all" | "codex" | "claude" | "opencode" | "openclaw" | "gemini" | "hermes";
 
 export function SessionManagerPage({ appId }: { appId: string }) {
   const { t } = useTranslation();

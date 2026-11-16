@@ -2,8 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ToolBindingStatus } from "@/lib/api/ofoxBind";
 
 export type ModelSelection =
-  | { kind: "single"; model: string }
-  | { kind: "models"; models: string[] };
+  { kind: "single"; model: string } | { kind: "models"; models: string[] };
 
 export interface ToolModelSnapshot {
   toolId: string;

@@ -11,13 +11,7 @@ import { fmtTokens } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
 
 type Metric =
-  | "tokens"
-  | "output"
-  | "cost"
-  | "records"
-  | "messages"
-  | "sessions"
-  | "active";
+  "tokens" | "output" | "cost" | "records" | "messages" | "sessions" | "active";
 export type UsageMetric = Metric;
 type TrendPoint = Pick<
   UsageSeriesPoint,
