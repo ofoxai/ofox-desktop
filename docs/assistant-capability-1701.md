@@ -172,3 +172,20 @@ Python、Office 和其余回归仍未进入，Windows 能力继续关闭。
 跨进程 TID 归属和采集超时清理竞态均已补回归，pinned Node 下针对测试 29/29
 通过。此结果验证采集逻辑与脱敏，不代表 PowerShell/ETW 原生已运行；下一次
 原生证据仍 pending。未调整 capability、资源 ACL、mitigation 或引擎超时。
+
+开发运行 43932638031（`f97e97fb`）确认原样 Node 仍以 `0xc0000142` 退出。
+私有 ETW 会话启动与 owned stop 原生成功，临时原始文件已删除且没有强杀采集器；
+但后续解码失败，只能报告 inconclusive，尚无具体失败操作可据以修权限。实际
+工具清单确认已有 Microsoft 签名 CDB/gflags 10.0.26100.4202；controller 位于
+session 2 且 UserInteractive=true，不能将故障归因于非交互 session 0。
+下一步仅用已有 CDB 为同一可信 suspended Node 捕获进程内 loader snaps，完整
+验证 token 后、核对目标与标志读回后才允许原 Resume；调试器结果不作为功能验收。
+
+CDB 接线仅在 test cfg 的首个固定 Node 使用：原挂起线程计数必须为 1，配对
+探测恢复后由原 Host Resume 返回 1，再发送普通 `g`。取消、配置不符或未知文案
+均拒绝；原 Job 停止后先等待 owned debugger 退出，再排空标准流。私有 raw
+日志保留至读取和 CLEAN 确认，失败阶段与 cleanup 状态分别保存。调试执行即使
+成功也强制停止，不写 admission。pinned Node 的控制器／投影组合测试 27/27、
+旧 ETW 投影回归 13/13、纯 Rust fence 4/4、observer 4/4、Windows 目标模块及
+测试 all-targets Clippy 和格式检查通过。合成日志不证明 CDB 原生文案兼容，
+`-pb` 下首次 Resume 前的真实握手及本轮原生结果仍 pending。

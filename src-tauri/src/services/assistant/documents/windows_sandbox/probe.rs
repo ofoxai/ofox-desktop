@@ -61,6 +61,12 @@ pub(super) enum Phase {
     TokenLpacAllPackages,
     TokenLpacCapability,
     TokenLpacForeign,
+    #[cfg(test)]
+    CdbHandshake,
+    #[cfg(test)]
+    CdbHold,
+    #[cfg(test)]
+    CdbStop,
     Resume,
     ProcessWait,
     ProcessStatus,
@@ -123,6 +129,23 @@ pub(super) struct Evidence {
     pub profile_cleanup: Option<bool>,
     pub worker_join_panicked: Option<bool>,
     pub worker_join_cancelled: Option<bool>,
+    #[cfg(test)]
+    pub loader_diagnostic: Option<LoaderDiagnostic>,
+}
+
+#[cfg(test)]
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct LoaderDiagnostic {
+    pub diagnostic_only: bool,
+    pub stage: Option<&'static str>,
+    pub config_confirmed: Option<bool>,
+    pub before_flags: Option<u32>,
+    pub after_flags: Option<u32>,
+    pub suspend_previous: Option<u32>,
+    pub paired_resume_previous: Option<u32>,
+    pub host_resume_previous: Option<u32>,
+    pub debugger_closed: Option<bool>,
 }
 
 #[derive(serde::Serialize)]
@@ -231,6 +254,8 @@ struct State {
     first_failure: Option<Phase>,
     completed: Vec<Timing>,
     evidence: Evidence,
+    #[cfg(test)]
+    loader_requested: bool,
 }
 
 /// Default is inert. Only the private fixed-probe orchestration allocates state.
@@ -245,6 +270,8 @@ impl Observer {
             first_failure: None,
             completed: Vec::new(),
             evidence: Evidence::default(),
+            #[cfg(test)]
+            loader_requested: false,
         }))))
     }
 
@@ -271,6 +298,17 @@ impl Observer {
 
     pub fn evidence(&self, update: impl FnOnce(&mut Evidence)) {
         self.update(|state| update(&mut state.evidence));
+    }
+
+    #[cfg(test)]
+    pub fn request_loader(&self) {
+        self.update(|state| state.loader_requested = true);
+    }
+    #[cfg(test)]
+    pub fn loader_requested(&self) -> bool {
+        let mut requested = false;
+        self.update(|state| requested = state.loader_requested);
+        requested
     }
 
     pub fn failed(&self) {

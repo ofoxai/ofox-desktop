@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import os from "node:os";
@@ -13,11 +13,13 @@ import {
   extractTraceTargets,
   nativeOutput,
   safeMetadata,
+  safeDebuggerState,
   shouldCaptureDevelopmentTrace,
   startNativeTrace,
   runDevelopmentChecks,
 } from "../../scripts/document-engine-development-check.mjs";
 import { successfulProbe } from "../../scripts/check-windows-probe.mjs";
+import { projectDocumentLoaderSnaps } from "../../scripts/document-loader-snaps.mjs";
 
 test("document development checks have a separate manual workflow", () => {
   assert.ok(
@@ -378,6 +380,93 @@ test("decode failure waits for the controller finally cleanup instead of killing
   }
 });
 
+test("failed debugger retains private evidence through STOP and removes it only after CLEAN", async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), "document-cdb-evidence-"),
+  );
+  const child = fakeController();
+  let raw,
+    sawStop = false,
+    cleanedAfterStop = false;
+  const spawnController = (_exe, args) => {
+    raw = args[args.indexOf("-RawDirectory") + 1];
+    queueMicrotask(() => child.send({ state: "started" }));
+    child.stdin.on("data", async (chunk) => {
+      const command = chunk.toString();
+      if (command.includes("STOP")) {
+        sawStop = true;
+        await Promise.all([
+          writeFile(
+            path.join(raw, "debugger-state.json"),
+            JSON.stringify({
+              stage: "debugger_closed",
+              debuggerStarted: true,
+              debuggerExited: true,
+              debuggerClosed: true,
+              stdoutLines: 9,
+            }),
+          ),
+          writeFile(
+            path.join(raw, "roots.json"),
+            JSON.stringify({ windows: ["C:\\Windows"] }),
+          ),
+          writeFile(
+            path.join(raw, "debugger.log"),
+            [
+              "OFOX_CDB_V1 BEFORE pid=2a tid=2b flags=70 END",
+              "OFOX_CDB_V1 AFTER pid=2a tid=2b flags=72 END",
+              "OFOX_CDB_V1 READY END",
+              '2a:2b @ 100 - LdrpInitializeNode - ERROR: Init routine 00007FFF12345678 for DLL "C:\\Windows\\System32\\KERNELBASE.dll" failed during DLL_PROCESS_ATTACH',
+              "C:\\private-account secret-token",
+            ].join("\n"),
+          ),
+        ]);
+        child.send({ state: "failed", reason: "debugger_exited" });
+      }
+      if (command.includes("CLEAN")) {
+        cleanedAfterStop =
+          sawStop && existsSync(path.join(raw, "debugger.log"));
+        await rm(raw, { recursive: true, force: true });
+        child.send({
+          state: "cleaned",
+          ownedStopSucceeded: true,
+          rawRemoved: true,
+        });
+        child.close();
+      }
+    });
+    return child;
+  };
+  try {
+    const result = await captureFunctional(
+      async () => ({
+        exitCode: 101,
+        outputLimited: false,
+        output: `error:probe ${JSON.stringify({ worker: { evidence: { childPid: 42, primaryTid: 43 } } })}`,
+      }),
+      () =>
+        startNativeTrace(
+          { RUNNER_TEMP: temporary },
+          { spawnController, startupTimeoutMs: 100, cleanupTimeoutMs: 100 },
+        ),
+    );
+    assert.equal(result.exitCode, 101);
+    assert.equal(result.trace.controllerState.stage, "debugger_closed");
+    assert.equal(
+      result.trace.diagnostic.observations[0].module,
+      "kernelbase.dll",
+    );
+    assert.equal(cleanedAfterStop, true);
+    assert.equal(existsSync(raw), false);
+    assert.equal(result.trace.cleanup.rawRemoved, true);
+    assert.equal(child.killed, false);
+    for (const secret of ["private-account", "secret-token", "12345678"])
+      assert.ok(!JSON.stringify(result.trace).includes(secret));
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("local development keeps its original gate without ETW prerequisites", async () => {
   assert.equal(shouldCaptureDevelopmentTrace({}), false);
   assert.equal(
@@ -399,6 +488,85 @@ test("local development keeps its original gate without ETW prerequisites", asyn
   );
   assert.equal(report.success, true);
   assert.deepEqual(report.startupTrace, { requested: false, attempted: false });
+});
+
+test("only the fixed functional process receives the private CDB diagnostic request", async () => {
+  const received = [];
+  const report = await runDevelopmentChecks(
+    async (check, overrides) => {
+      received.push([check.name, overrides]);
+      return nativeResult(check.exact ? 1 : 7);
+    },
+    {
+      functionalCapture: (invoke) =>
+        captureFunctional(invoke, async () => ({
+          environment: {
+            OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT: "synthetic-private-directory",
+          },
+          finish: async () => ({ diagnosticOnly: true }),
+        })),
+    },
+  );
+  assert.equal(report.success, true);
+  assert.deepEqual(
+    received.filter(([, env]) => env),
+    [
+      [
+        "functional-prerequisite",
+        { OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT: "synthetic-private-directory" },
+      ],
+    ],
+  );
+});
+
+test("controller raw setup markers coexist with normalized loader proof without spoofing it", async () => {
+  const source = await readFile(
+    new URL("../../scripts/document-engine-cdb.ps1", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /OFOX_CDB_RAW_V1 TARGET/);
+  assert.ok(!source.includes("OFOX_CDB_V1 TARGET"));
+  const raw = [
+    "OFOX_CDB_RAW_V1 TARGET_BEGIN",
+    "OFOX_CDB_RAW_V1 TARGET 2a 2b END",
+    "OFOX_CDB_RAW_V1 BEFORE_BEGIN",
+    "Current NtGlobalFlag contents: 0x00000070",
+    "OFOX_CDB_RAW_V1 BEFORE_END",
+    "OFOX_CDB_RAW_V1 AFTER_BEGIN",
+    "Current NtGlobalFlag contents: 0x00000072",
+    "OFOX_CDB_RAW_V1 AFTER_END",
+    "OFOX_CDB_RAW_V1 CONFIG_END",
+  ];
+  const normalized = [
+    "OFOX_CDB_V1 BEFORE pid=2a tid=2b flags=70 END",
+    "OFOX_CDB_V1 AFTER pid=2a tid=2b flags=72 END",
+    "OFOX_CDB_V1 READY END",
+  ];
+  const result = projectDocumentLoaderSnaps({
+    text: [
+      ...raw,
+      ...normalized,
+      '2a:2b @ 100 - LdrpInitializeNode - ERROR: Init routine 00007FFF12345678 for DLL "C:\\Windows\\System32\\KERNELBASE.dll" failed during DLL_PROCESS_ATTACH',
+    ].join("\n"),
+    target: { childPid: 42, primaryTid: 43 },
+    roots: { windows: "C:\\Windows" },
+  });
+  assert.equal(result.handshake.status, "matched");
+  assert.equal(result.observations[0].module, "kernelbase.dll");
+  assert.match(
+    source,
+    /Read-Json 'go\.json'[\s\S]*?abort\.json[\s\S]*?if \(\$debugger\.HasExited\)[\s\S]*?WriteLine\('g'\)/,
+  );
+  const unknown = safeDebuggerState({
+    stage: "C:\\private\\secret",
+    debuggerExited: "maybe",
+    capturedBytes: -1,
+    private: "S-1-5-21-secret",
+  });
+  assert.equal(unknown.stage, "unknown");
+  assert.equal(unknown.debuggerExited, null);
+  assert.equal(unknown.capturedBytes, null);
+  assert.ok(!JSON.stringify(unknown).includes("secret"));
 });
 
 test("only dispatch or the exact development workflow bootstrap can trigger this diagnostic job", async () => {

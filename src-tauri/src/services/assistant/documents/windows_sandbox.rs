@@ -4,6 +4,10 @@
 //! No caller may advertise Python merely because this module compiles. The
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{EngineOutput, DEAD_PROXY};
+#[cfg(test)]
+mod cdb;
+#[cfg(test)]
+mod cdb_protocol;
 mod probe;
 use probe::{AccessCase, AccessObservation, Observer, Phase, Receive, TokenApi};
 use sha2::{Digest, Sha256};
@@ -1783,6 +1787,8 @@ struct Launch {
     process: Process,
     stdout: std::sync::mpsc::Receiver<Vec<u8>>,
     stderr: std::sync::mpsc::Receiver<Vec<u8>>,
+    #[cfg(test)]
+    debugger: Option<cdb::Guard>,
 }
 
 #[derive(Clone, Copy)]
@@ -1795,6 +1801,10 @@ enum ContainerPolicy {
 }
 
 struct SuspendedLaunch {
+    #[cfg(test)]
+    pid: u32,
+    #[cfg(test)]
+    tid: u32,
     thread: OwnedHandle,
     process: Process,
     stdin_read: OwnedHandle,
@@ -1829,6 +1839,7 @@ fn launch(
     cap: &RuntimeCapability,
     limit: usize,
     observation: &Observer,
+    _cancelled: &AtomicBool,
 ) -> Result<Launch, String> {
     let suspended = create_suspended(
         exe,
@@ -1846,6 +1857,15 @@ fn launch(
         cap.sid,
         observation,
     )?;
+    #[cfg(test)]
+    let mut debugger = cdb::Guard::begin(
+        raw(&suspended.process.process),
+        raw(&suspended.thread),
+        suspended.pid,
+        suspended.tid,
+        observation,
+        _cancelled,
+    )?;
     let SuspendedLaunch {
         thread,
         process,
@@ -1854,7 +1874,16 @@ fn launch(
         stdout_write,
         stderr_read,
         stderr_write,
+        #[cfg(test)]
+            pid: _,
+        #[cfg(test)]
+            tid: _,
     } = suspended;
+    #[cfg(test)]
+    if debugger.is_some() && _cancelled.load(Ordering::Acquire) {
+        observation.failed();
+        return Err(CANCELLED.into());
+    }
     observation.enter(Phase::Resume);
     let resumed = unsafe { ResumeThread(raw(&thread)) };
     let resume_error = (resumed == u32::MAX).then(|| unsafe { GetLastError().0 });
@@ -1867,6 +1896,10 @@ fn launch(
     if resumed == u32::MAX {
         return Err(UNAVAILABLE.into());
     }
+    #[cfg(test)]
+    if let Some(debugger) = &mut debugger {
+        debugger.resumed(resumed, _cancelled)?;
+    }
     drop(thread);
     drop(stdin_read);
     drop(stdout_write);
@@ -1875,6 +1908,8 @@ fn launch(
         process,
         stdout: drain(stdout_read, limit),
         stderr: drain(stderr_read, limit),
+        #[cfg(test)]
+        debugger,
     })
 }
 
@@ -2005,6 +2040,10 @@ fn create_suspended(
         ))?;
     }
     Ok(SuspendedLaunch {
+        #[cfg(test)]
+        pid: info.dwProcessId,
+        #[cfg(test)]
+        tid: info.dwThreadId,
         thread,
         process,
         stdin_read,
@@ -2337,7 +2376,10 @@ fn run_blocking(
             &capability,
             limit,
             observation,
+            cancelled,
         )?;
+        #[cfg(test)]
+        let mut launched = launched;
         #[cfg(test)]
         {
             active = Some(ActiveTask::new(cwd.clone(), task.0.clone()));
@@ -2387,6 +2429,10 @@ fn run_blocking(
         observation.enter(Phase::JobStop);
         unsafe {
             win(TerminateJobObject(raw(&launched.process.job), 1))?;
+        }
+        #[cfg(test)]
+        if let Some(debugger) = &mut launched.debugger {
+            debugger.finish()?;
         }
         observation.enter(Phase::JobProcessWait);
         let stopped = unsafe { WaitForSingleObject(raw(&launched.process.process), 5000) };
@@ -3003,6 +3049,12 @@ async fn probe_inner(
     let canvas = runtime_root.join("runtime/node_modules/@napi-rs/canvas");
     let node = runtime_root.join("node/node.exe");
     trace.engine(ProbeStage::NodeIsolation);
+    #[cfg(test)]
+    let loader_diagnostic = std::env::var_os(cdb::ENV_ROOT).is_some();
+    #[cfg(test)]
+    if loader_diagnostic {
+        trace.observation.request_loader();
+    }
     let observation = trace.observation.clone();
     trace.success(
         run_candidate_observed(
@@ -3023,6 +3075,12 @@ async fn probe_inner(
         )
         .await?,
     )?;
+    #[cfg(test)]
+    if loader_diagnostic {
+        // Debugger execution is an observation, never engine admission. Stop
+        // after this fixed Node fixture even if observing changes its outcome.
+        return Err(UNAVAILABLE.into());
+    }
     trace.enter(ProbeStage::NodePostconditions);
     if listener.accept().is_ok() || io(fs::read(&outside))? != b"synthetic private data" {
         return Err(UNAVAILABLE.into());

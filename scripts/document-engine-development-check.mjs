@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { closeSync, lstatSync, openSync, readSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
-import { decodeDocumentEngineTrace } from "./document-startup-trace.mjs";
+import { projectDocumentLoaderSnaps } from "./document-loader-snaps.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sandbox = "services::assistant::documents::windows_sandbox::tests::";
@@ -126,7 +126,7 @@ export async function runDevelopmentChecks(invoke, { functionalCapture } = {}) {
         report.startupTrace.attempted = true;
       const result =
         check.name === "functional-prerequisite" && functionalCapture
-          ? await functionalCapture(() => invoke(check))
+          ? await functionalCapture((overrides) => invoke(check, overrides))
           : await invoke(check);
       step.exitCode = result.exitCode;
       if (result.trace) step.trace = result.trace;
@@ -198,46 +198,18 @@ export function extractTraceTargets(output) {
   return [...targets.values()].slice(0, 8);
 }
 
-function* privateEvents(filename) {
+async function privateRead(filename, limit) {
   const info = lstatSync(filename);
   assert.ok(
     info.isFile() &&
       !info.isSymbolicLink() &&
       info.nlink === 1 &&
-      info.size <= 512 * 1024 * 1024,
-    "trace input bound",
+      info.size <= limit,
+    "private diagnostic input bound",
   );
-  const descriptor = openSync(filename, "r");
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  const bytes = Buffer.alloc(64 * 1024);
-  let pending = "",
-    total = 0,
-    count = 0;
-  try {
-    while (true) {
-      const length = readSync(descriptor, bytes);
-      total += length;
-      assert.ok(total <= 512 * 1024 * 1024, "trace input bound");
-      pending += decoder.decode(bytes.subarray(0, length), {
-        stream: length !== 0,
-      });
-      let newline;
-      while ((newline = pending.indexOf("\n")) >= 0) {
-        const line = pending.slice(0, newline);
-        pending = pending.slice(newline + 1);
-        assert.ok(
-          line.length <= 131072 && ++count <= 2000000,
-          "trace event bound",
-        );
-        if (line) yield JSON.parse(line);
-      }
-      assert.ok(pending.length <= 131072, "trace event bound");
-      if (length === 0) break;
-    }
-    assert.equal(pending, "", "trace input incomplete");
-  } finally {
-    closeSync(descriptor);
-  }
+  const bytes = await readFile(filename);
+  assert.ok(bytes.length <= limit, "private diagnostic input bound");
+  return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 }
 
 export function safeMetadata(value) {
@@ -277,16 +249,11 @@ export function safeMetadata(value) {
       value.windowsAliasStatus <= 0xffffffff
         ? value.windowsAliasStatus
         : null,
-    maximumFileMiB: 128,
+    mode: "cdb-loader-snaps",
+    debuggerJobKillOnClose: boolean(value?.debuggerJobKillOnClose),
+    maximumFileMiB: 4,
     deadlineSeconds: 900,
-    flags: [
-      "THREAD",
-      "LOADER",
-      "FILE_IO",
-      "FILE_IO_INIT",
-      "REGISTRY",
-      "NO_SYSCONFIG",
-    ],
+    flags: ["cdb-pb", "process-local-sls"],
   };
 }
 
@@ -329,6 +296,27 @@ function safeControllerFailure(value) {
     "xml_field_bound",
     "ndjson_bound",
     "xml_deadline",
+    "target_not_seen",
+    "target_mismatch",
+    "gflag_before_unreadable",
+    "gflag_after_unreadable",
+    "gflag_changed_unexpectedly",
+    "init_tail_missing",
+    "debugger_exited",
+    "deadline",
+    "cancelled",
+    "debugger_inventory",
+    "debugger_attach_start",
+    "debugger_handshake",
+    "controller_job_setup",
+    "native_controller_compile",
+    "controller_setup",
+    "debugger_unavailable",
+    "debugger_untrusted",
+    "output_bound",
+    "host_resume_mismatch",
+    "debugger_stop_unconfirmed",
+    "debugger_drain_unconfirmed",
   ]);
   return {
     stage: stages.has(value?.reason) ? value.reason : "controller_failure",
@@ -344,6 +332,62 @@ function safeControllerFailure(value) {
         ? value.nativeCode
         : null,
   };
+}
+
+export function safeDebuggerState(value) {
+  const stages = new Set([
+    "target_not_seen",
+    "target_mismatch",
+    "gflag_before_unreadable",
+    "gflag_after_unreadable",
+    "gflag_changed_unexpectedly",
+    "init_tail_missing",
+    "debugger_exited",
+    "deadline",
+    "cancelled",
+    "debugger_closed",
+    "debugger_inventory",
+    "debugger_attach_start",
+    "debugger_handshake",
+    "controller_job_setup",
+    "native_controller_compile",
+    "controller_setup",
+    "waiting_host_resume",
+    "running_diagnostic",
+    "output_bound",
+    "host_resume_mismatch",
+  ]);
+  const result = {
+    stage: stages.has(value?.stage) ? value.stage : "unknown",
+    cleanupFailure:
+      value?.cleanupFailure === "debugger_cleanup_unconfirmed"
+        ? value.cleanupFailure
+        : null,
+  };
+  for (const name of [
+    "debuggerStarted",
+    "debuggerExited",
+    "debuggerClosed",
+    "targetSeen",
+    "beforeReadable",
+    "afterReadable",
+    "initTailSeen",
+  ])
+    result[name] = typeof value?.[name] === "boolean" ? value[name] : null;
+  for (const name of ["stdoutLines", "stderrLines", "capturedBytes"])
+    result[name] =
+      Number.isInteger(value?.[name]) &&
+      value[name] >= 0 &&
+      value[name] <= 0xffffffff
+        ? value[name]
+        : null;
+  result.debuggerExitCode =
+    Number.isInteger(value?.debuggerExitCode) &&
+    value.debuggerExitCode >= -0x80000000 &&
+    value.debuggerExitCode <= 0xffffffff
+      ? value.debuggerExitCode
+      : null;
+  return result;
 }
 
 function protocolQueue(input) {
@@ -419,7 +463,7 @@ export async function startNativeTrace(
       "-NoProfile",
       "-NonInteractive",
       "-File",
-      path.join(root, "scripts/document-engine-etw.ps1"),
+      path.join(root, "scripts/document-engine-cdb.ps1"),
       "-RawDirectory",
       raw,
     ],
@@ -513,6 +557,7 @@ export async function startNativeTrace(
     };
   }
   return {
+    environment: { OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT: raw },
     async finish(output) {
       let report = traceFailure("trace-decode-incomplete", metadata),
         cleanup = null;
@@ -522,30 +567,25 @@ export async function startNativeTrace(
         assert.ok(ready, "trace controller exited");
         if (ready.state === "failed")
           report.controller = safeControllerFailure(ready);
-        assert.equal(ready.state, "raw-ready", "trace decode unavailable");
-        const counters = ready.lossCounters;
         assert.ok(
-          counters?.ownedStopSucceeded === true &&
-            [
-              "eventsLost",
-              "logBuffersLost",
-              "realTimeBuffersLost",
-              "buffersWritten",
-            ].every(
-              (key) =>
-                Number.isInteger(counters[key]) &&
-                counters[key] >= 0 &&
-                counters[key] <= 0xffffffff,
-            ),
-          "trace counters invalid",
+          ["raw-ready", "failed"].includes(ready.state),
+          "debugger data unavailable",
         );
+        const state = JSON.parse(
+          await privateRead(path.join(raw, "debugger-state.json"), 32768),
+        );
+        const safeState = safeDebuggerState(state);
         const roots = JSON.parse(
-          await readFile(path.join(raw, "roots.json"), "utf8"),
+          await privateRead(path.join(raw, "roots.json"), 32768),
         );
-        const decoded = decodeDocumentEngineTrace({
-          events: () => privateEvents(path.join(raw, "events.ndjson")),
-          lossCounters: counters,
-          targets: extractTraceTargets(output),
+        const targets = extractTraceTargets(output);
+        const text = await privateRead(
+          path.join(raw, "debugger.log"),
+          4 * 1024 * 1024,
+        );
+        const diagnostic = projectDocumentLoaderSnaps({
+          text,
+          target: targets.length === 1 ? targets[0] : null,
           roots: {
             ...roots,
             runtime: [path.join(root, "assistant-runtime/resources")],
@@ -554,10 +594,15 @@ export async function startNativeTrace(
         report = {
           scope: "windows-node-loader-diagnostic",
           releaseGate: false,
+          diagnosticOnly: true,
           metadata,
-          lossCounters: counters,
-          diagnostic: decoded,
+          controllerState: safeState,
+          diagnostic,
         };
+        if (ready.state === "failed") {
+          report.status = "inconclusive";
+          report.controller = safeControllerFailure(ready);
+        }
       } catch {
         /* Retain the original native result and a fixed inconclusive diagnostic. */
       } finally {
@@ -599,7 +644,7 @@ export async function captureFunctional(invoke, start) {
     };
   let result;
   try {
-    result = await invoke();
+    result = await invoke(capture.environment ?? {});
   } catch {
     result = { exitCode: null, output: "", outputLimited: false };
   } finally {
@@ -711,7 +756,8 @@ export async function main(argv = process.argv.slice(2)) {
   }
   try {
     const report = await runDevelopmentChecks(
-      (check) => invokeNative(check, output, environment),
+      (check, overrides) =>
+        invokeNative(check, output, { ...environment, ...overrides }),
       shouldCaptureDevelopmentTrace(environment)
         ? {
             functionalCapture: (invoke) =>
