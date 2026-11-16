@@ -129,16 +129,16 @@ test("a provider failure after a change keeps its own error and is not retried b
   assert.equal(f.requests.length, 3);
   assert.equal(result.localTaskState.changed, true);
 });
-test("a repair with no named folder completes after verification in the home folder", async (t) => {
+test("a known tool repair with no named folder completes after verification in its home folder", async (t) => {
   const f = await fixture(
     t,
     [
-      () => call("write", { path: "/configuration", content: "safe" }),
+      () => call("rebind_tool", { tool: "opencode" }),
       () => call("verify_in_folder", { tool: "opencode" }),
       reply,
     ],
     (name, args) =>
-      name === "write"
+      name === "rebind_tool"
         ? { changed: true }
         : { folder: args.folder, verified: true },
   );
@@ -150,6 +150,82 @@ test("a repair with no named folder completes after verification in the home fol
     f.params.localConfig.cwd,
   );
   assert.equal(result.localTaskState, null);
+});
+test("an unscoped write cannot be cleared by guessing a home verification tool", async (t) => {
+  const f = await fixture(
+    t,
+    [
+      () => call("write", { path: "/configuration", content: "safe" }),
+      () => call("verify_in_folder", { tool: "opencode" }),
+      reply,
+      reply,
+      reply,
+    ],
+    (name, args) =>
+      name === "write"
+        ? { changed: true }
+        : { folder: args.folder, verified: true },
+  );
+  const result = await f.run();
+  assert.equal(result.status, "error");
+  assert.equal(result.errorCode, "assistant_verification_required");
+  assert.equal(result.localTaskState.changed, true);
+  assert.equal(result.localTaskState.scopeIncomplete, true);
+  assert.deepEqual(result.localTaskState.targets, []);
+  assert.equal(f.requests.length, 5);
+});
+test("a rejected thirty-third tool scope still allows verification of a pending original target", async (t) => {
+  const f = await fixture(
+    t,
+    [
+      () => call("rebind_tool", { tool: "claude" }),
+      () => call("verify_in_folder", { tool: "codex", folder: "/problem-0" }),
+      reply,
+    ],
+    (name, args) => {
+      assert.equal(
+        name,
+        "verify_in_folder",
+        "the rejected mutation never reaches the Host",
+      );
+      return { folder: args.folder, verified: true };
+    },
+  );
+  f.params.localConfig.taskState = {
+    changed: true,
+    targets: Array.from({ length: 32 }, (_, i) => ({
+      tool: "codex",
+      folder: `/problem-${i}`,
+      verified: i !== 0,
+    })),
+  };
+  const result = await f.run();
+  assert.equal(result.status, "completed");
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.requests.length, 3);
+  assert.equal(result.localTaskState, null);
+});
+test("normalized unknown lifecycle outcomes cannot complete from later prose", async (t) => {
+  for (const operation of ["install_tool", "update_tool", "uninstall_tool"]) {
+    const f = await fixture(
+      t,
+      [() => call(operation, { tool: "codex" }), reply],
+      () => {
+        throw new Error("assistant_mutation_outcome_unknown");
+      },
+    );
+    const result = await f.run();
+    assert.equal(result.status, "error", operation);
+    assert.match(result.errorMessage, /assistant_mutation_outcome_unknown/);
+    assert.equal(f.calls.length, 1);
+    assert.ok(
+      !f.events.some(
+        (event) =>
+          event.type === "task_status" &&
+          event.data.warning === "verification_required",
+      ),
+    );
+  }
 });
 test("pending verification from an earlier run still has to be done", async (t) => {
   const f = await fixture(t, [reply, reply, reply, reply], () => ({}), {});

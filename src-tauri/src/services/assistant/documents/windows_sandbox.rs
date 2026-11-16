@@ -570,7 +570,17 @@ fn write_files(root: &Path, contents: &[(PathBuf, Vec<u8>)]) -> Result<(), Strin
     Ok(())
 }
 
+#[cfg(test)]
 fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+    publish_output_cancellable(root, relative, bytes, &AtomicBool::new(false))
+}
+
+fn publish_output_cancellable(
+    root: &Path,
+    relative: &Path,
+    bytes: &[u8],
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
     let parts: Vec<_> = relative.components().collect();
     if parts.is_empty() || parts.iter().any(|part| !matches!(part, Component::Normal(name) if !name.to_string_lossy().contains(':'))) {
         return Err(UNSAFE_FILE.into());
@@ -659,6 +669,14 @@ fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), Stri
             // guards; keep all no-delete directory handles and use their
             // physical RootDirectory for the final relative rename.
             write_locks.clear();
+            #[cfg(test)]
+            pause_copyback(root, CopybackPoint::BeforeRename)?;
+            // Cancelling during a potentially large staging write/fsync must
+            // delete this owned temporary, not publish it afterwards. Only
+            // the single native rename itself is non-interruptible.
+            if cancelled.load(Ordering::Acquire) {
+                return Err(CANCELLED.into());
+            }
             win(SetFileInformationByHandle(
                 HANDLE(owned.file.as_raw_handle()),
                 FileRenameInfo,
@@ -1391,6 +1409,40 @@ static RUN_RECEIPTS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::ne
 #[cfg(test)]
 static ACTIVE_TASKS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
 #[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopybackPoint {
+    Drained,
+    Published(usize),
+    BeforeRename,
+}
+#[cfg(test)]
+struct CopybackGate {
+    point: CopybackPoint,
+    reached: std::sync::mpsc::SyncSender<()>,
+    resume: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+#[cfg(test)]
+static COPYBACK_GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<CopybackGate>>>> = OnceLock::new();
+#[cfg(test)]
+fn pause_copyback(cwd: &Path, point: CopybackPoint) -> Result<(), String> {
+    let gate = COPYBACK_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .get(cwd)
+        .filter(|gate| gate.point == point)
+        .cloned();
+    if let Some(gate) = gate {
+        gate.reached.try_send(()).map_err(|_| UNAVAILABLE)?;
+        gate.resume
+            .lock()
+            .map_err(|_| UNAVAILABLE)?
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| UNAVAILABLE)?;
+    }
+    Ok(())
+}
+#[cfg(test)]
 struct ActiveTask(PathBuf);
 #[cfg(test)]
 impl ActiveTask {
@@ -1637,16 +1689,37 @@ fn run_blocking(
             .stderr
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| UNAVAILABLE.to_owned())?;
+        #[cfg(test)]
+        pause_copyback(&cwd, CopybackPoint::Drained)?;
+        was_cancelled |= cancelled.load(Ordering::Acquire);
         if !timed_out && !was_cancelled && status == 0 {
             let outputs = files(&task.0, MAX_TASK_BYTES)?;
             // Original cwd is never granted to the LPAC. Keep its directory handle
             // pinned, and reject pre-existing aliases before atomic replacement.
             let _destination = pin_ancestors(&cwd)?;
+            #[cfg(test)]
+            let mut published = 0;
             for (relative, bytes) in outputs {
+                if cancelled.load(Ordering::Acquire) {
+                    was_cancelled = true;
+                    break;
+                }
                 if relative.starts_with(home_relative) {
                     continue;
                 }
-                publish_output(&cwd, &relative, &bytes)?;
+                match publish_output_cancellable(&cwd, &relative, &bytes, cancelled) {
+                    Ok(()) => {}
+                    Err(error) if error == CANCELLED => {
+                        was_cancelled = true;
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                }
+                #[cfg(test)]
+                {
+                    published += 1;
+                    pause_copyback(&cwd, CopybackPoint::Published(published))?;
+                }
             }
         }
         let receipt = serde_json::json!({
@@ -1675,7 +1748,13 @@ fn run_blocking(
     if task_cleanup.is_err() || profile_cleanup.is_err() {
         return Err(cleanup_failed());
     }
-    let (output, mut receipt, was_cancelled) = executed?;
+    let (mut output, mut receipt, was_cancelled) = executed?;
+    let was_cancelled = was_cancelled || cancelled.load(Ordering::Acquire);
+    if was_cancelled {
+        output.status = None;
+        receipt["status"] = serde_json::Value::Null;
+        receipt["cancelled"] = serde_json::json!(true);
+    }
     receipt["sequence"] = serde_json::json!(RUN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1);
     receipt["cleanupComplete"] = serde_json::json!(true);
     receipt["taskRemoved"] = serde_json::json!(true);

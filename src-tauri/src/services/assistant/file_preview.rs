@@ -559,6 +559,23 @@ impl AssistantHost {
         crate::config::create_private_dir_all(&home).map_err(|_| ERROR)?;
         let at = request.page.to_string();
         let args = ["view", render_file, "svg", "--start", &at, "--end", &at];
+        #[cfg(windows)]
+        let output = {
+            super::documents::runner::ensure_windows_document_engine_ready(&runtime)
+                .await
+                .map_err(|_| "assistant_preview_sandbox_unavailable")?;
+            super::documents::runner::run_windows_engine_limited(
+                &office,
+                &args,
+                &folder,
+                &home,
+                &runtime,
+                Duration::from_secs(60),
+                super::documents::runner::SVG_OUTPUT_LIMIT,
+            )
+            .await?
+        };
+        #[cfg(not(windows))]
         let output = if let Some(sandbox) = self.env.sandbox_exec() {
             let doc = format!("DOC={}", folder.display());
             let engine = format!("ENGINE={}", runtime.display());
@@ -611,36 +628,50 @@ impl AssistantHost {
             .parent()
             .ok_or(ERROR)?
             .join("file-preview-page.mjs");
-        let sandbox = self
-            .env
-            .sandbox_exec()
-            .ok_or("assistant_preview_sandbox_unavailable")?;
         let node = loaded.node.canonicalize().map_err(|_| ERROR)?;
-        let doc = format!("DOC={}", folder.display());
-        let engine = format!("ENGINE={}", runtime.display());
-        let exe = format!("EXE={}", node.display());
-        let node_text = node.to_string_lossy();
-        let helper_text = helper.to_string_lossy();
-        let output = super::documents::runner::run_engine_limited(
-            &sandbox,
-            &[
-                "-D",
-                &doc,
-                "-D",
-                &engine,
-                "-D",
-                &exe,
-                "-p",
-                super::documents::create::PYTHON_SANDBOX,
-                &node_text,
-                &helper_text,
-            ],
+        #[cfg(windows)]
+        let output = super::documents::runner::run_windows_engine_limited(
+            &node,
+            &[&helper.to_string_lossy()],
             &folder,
             &home,
+            &runtime,
             Duration::from_secs(60),
             8192,
         )
         .await?;
+        #[cfg(not(windows))]
+        let output = {
+            let sandbox = self
+                .env
+                .sandbox_exec()
+                .ok_or("assistant_preview_sandbox_unavailable")?;
+            let doc = format!("DOC={}", folder.display());
+            let engine = format!("ENGINE={}", runtime.display());
+            let exe = format!("EXE={}", node.display());
+            let node_text = node.to_string_lossy();
+            let helper_text = helper.to_string_lossy();
+            super::documents::runner::run_engine_limited(
+                &sandbox,
+                &[
+                    "-D",
+                    &doc,
+                    "-D",
+                    &engine,
+                    "-D",
+                    &exe,
+                    "-p",
+                    super::documents::create::PYTHON_SANDBOX,
+                    &node_text,
+                    &helper_text,
+                ],
+                &folder,
+                &home,
+                Duration::from_secs(60),
+                8192,
+            )
+            .await?
+        };
         if output.status != Some(0) {
             return Err(ERROR.into());
         }

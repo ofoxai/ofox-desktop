@@ -583,6 +583,10 @@ describe("assistant error messages", () => {
       { code: "assistant_presentation_source_changed" },
       "assistant.errors.presentationSourceChanged",
     ],
+    [
+      "assistant_verification_target_limit",
+      "assistant.errors.localVerificationTargetLimit",
+    ],
   ])("maps %o to its own message", (error, key) => {
     expect(assistantErrorKey(error)).toBe(key);
   });

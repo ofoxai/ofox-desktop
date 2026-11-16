@@ -1,0 +1,46 @@
+--- a/src-tauri/src/services/assistant/documents/windows_sandbox.rs
++++ b/src-tauri/src/services/assistant/documents/windows_sandbox.rs
+@@ -674,6 +674,9 @@
+             // Cancelling during a potentially large staging write/fsync must
+             // delete this owned temporary, not publish it afterwards. Only
+             // the single native rename itself is non-interruptible.
++            if cancelled.load(Ordering::Acquire) {
++                return Err(CANCELLED.into());
++            }
+             win(SetFileInformationByHandle(
+                 HANDLE(owned.file.as_raw_handle()),
+                 FileRenameInfo,
+@@ -1688,6 +1691,7 @@
+             .map_err(|_| UNAVAILABLE.to_owned())?;
+         #[cfg(test)]
+         pause_copyback(&cwd, CopybackPoint::Drained)?;
++        was_cancelled |= cancelled.load(Ordering::Acquire);
+         if !timed_out && !was_cancelled && status == 0 {
+             let outputs = files(&task.0, MAX_TASK_BYTES)?;
+             // Original cwd is never granted to the LPAC. Keep its directory handle
+@@ -1696,6 +1700,10 @@
+             #[cfg(test)]
+             let mut published = 0;
+             for (relative, bytes) in outputs {
++                if cancelled.load(Ordering::Acquire) {
++                    was_cancelled = true;
++                    break;
++                }
+                 if relative.starts_with(home_relative) {
+                     continue;
+                 }
+@@ -1740,7 +1748,13 @@
+     if task_cleanup.is_err() || profile_cleanup.is_err() {
+         return Err(cleanup_failed());
+     }
+-    let (output, mut receipt, was_cancelled) = executed?;
++    let (mut output, mut receipt, was_cancelled) = executed?;
++    let was_cancelled = was_cancelled || cancelled.load(Ordering::Acquire);
++    if was_cancelled {
++        output.status = None;
++        receipt["status"] = serde_json::Value::Null;
++        receipt["cancelled"] = serde_json::json!(true);
++    }
+     receipt["sequence"] = serde_json::json!(RUN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1);
+     receipt["cleanupComplete"] = serde_json::json!(true);
+     receipt["taskRemoved"] = serde_json::json!(true);

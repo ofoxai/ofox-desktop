@@ -25,6 +25,226 @@ pub(super) struct LocalState {
     // A repair still waiting for verification, carried into the next run of
     // the conversation. Memory only: a restart does not resume tasks.
     task: Option<Value>,
+    verification: VerificationTargets,
+    // Host evidence can outlive a cancelled callback. Only an actual matching
+    // Host verification may clear it; a runtime empty snapshot cannot.
+    verification_debt: HashSet<(String, String)>,
+}
+
+const MAX_VERIFICATION_TARGETS: usize = 32;
+const TARGET_LIMIT: &str = "assistant_verification_target_limit";
+const VERIFICATION_MUTATIONS: &[&str] = &[
+    "repair_launcher",
+    "rebind_tool",
+    "install_tool",
+    "update_tool",
+    "uninstall_tool",
+    "set_tool_model",
+];
+
+#[derive(Default)]
+struct ReservedTarget {
+    retained: bool,
+    pending: usize,
+}
+
+/// Capacity is checked against Host-resolved paths, before approval or effects.
+/// Pending slots count too; a refused/failed no-effect call gives its slot back.
+#[derive(Default)]
+struct VerificationTargets {
+    run_id: String,
+    targets: HashMap<(String, String), ReservedTarget>,
+}
+
+impl VerificationTargets {
+    fn reserve(
+        &mut self,
+        run_id: &str,
+        task: Option<&Value>,
+        tool: &str,
+        folder: &str,
+        mutation: bool,
+    ) -> Result<Option<(String, String)>, String> {
+        if folder.trim().is_empty() || folder.len() > 4096 {
+            return Err("assistant_invalid_path".into());
+        }
+        if self.run_id != run_id {
+            self.run_id = run_id.into();
+            self.targets.clear();
+            if let Some(targets) = task.and_then(|task| task["targets"].as_array()) {
+                for target in targets.iter().take(MAX_VERIFICATION_TARGETS) {
+                    if let (Some(tool), Some(folder)) =
+                        (target["tool"].as_str(), target["folder"].as_str())
+                    {
+                        self.targets.insert(
+                            (tool.into(), folder.into()),
+                            ReservedTarget {
+                                retained: true,
+                                pending: 0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        // A mutation keeps that tool's original problem folders. Home is the
+        // fallback only when no successfully observed scope exists for it.
+        if mutation
+            && self
+                .targets
+                .iter()
+                .any(|((known, _), target)| known == tool && target.retained)
+        {
+            return Ok(None);
+        }
+        let key = (tool.into(), folder.into());
+        if !self.targets.contains_key(&key) && self.targets.len() >= MAX_VERIFICATION_TARGETS {
+            return Err(TARGET_LIMIT.into());
+        }
+        let target = self.targets.entry(key.clone()).or_default();
+        target.pending = target.pending.checked_add(1).ok_or(STATE)?;
+        Ok(Some(key))
+    }
+
+    fn finish(&mut self, run_id: &str, key: &(String, String), retained: bool) {
+        if self.run_id != run_id {
+            return;
+        }
+        if let Some(target) = self.targets.get_mut(key) {
+            target.pending = target.pending.saturating_sub(1);
+            target.retained |= retained;
+            if target.pending == 0 && !target.retained {
+                self.targets.remove(key);
+            }
+        }
+    }
+}
+
+struct TargetReservation<'a> {
+    host: &'a AssistantHost,
+    session: String,
+    run_id: String,
+    key: (String, String),
+    retained: bool,
+}
+
+impl Drop for TargetReservation<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut states) = self.host.local_states.lock() {
+            if let Some(state) = states.get_mut(&self.session) {
+                state
+                    .verification
+                    .finish(&self.run_id, &self.key, self.retained);
+            }
+        }
+    }
+}
+
+/// Armed only immediately before entering a known mutator. Dropping an
+/// interrupted future cannot erase effects it may already have committed.
+struct MutationDebt<'a> {
+    host: &'a AssistantHost,
+    session: String,
+    run_id: &'a str,
+    tool: &'static str,
+    folder: &'a Path,
+    started: AtomicBool,
+}
+
+impl Drop for MutationDebt<'_> {
+    fn drop(&mut self) {
+        if !self.started.load(Ordering::Acquire) {
+            return;
+        }
+        let Ok(mut states) = self.host.local_states.lock() else {
+            return;
+        };
+        let Some(state) = states.get_mut(&self.session) else {
+            return;
+        };
+        let mut scopes = state.verification_debt.clone();
+        if state.verification.run_id == self.run_id {
+            for (key, target) in &mut state.verification.targets {
+                if target.retained || (key.0 == self.tool && target.pending > 0) {
+                    scopes.insert(key.clone());
+                    target.retained = true;
+                }
+            }
+        }
+        if !scopes.iter().any(|(tool, _)| tool == self.tool) {
+            if let Some(folder) = self.folder.to_str() {
+                scopes.insert((self.tool.into(), folder.into()));
+            }
+        }
+        // Like the runtime's changed result, a new effect invalidates the
+        // earlier checks for all retained problem folders in this task.
+        if let Some(targets) = state
+            .task
+            .as_ref()
+            .and_then(|task| task["targets"].as_array())
+        {
+            for target in targets {
+                if let (Some(tool), Some(folder)) =
+                    (target["tool"].as_str(), target["folder"].as_str())
+                {
+                    scopes.insert((tool.into(), folder.into()));
+                }
+            }
+        }
+        state.verification_debt = scopes;
+        state.task = merge_verification_debt(state.task.take(), &state.verification_debt);
+    }
+}
+
+impl LocalState {
+    fn verified(&mut self, tool: &str, folder: &str) {
+        self.verification_debt.remove(&(tool.into(), folder.into()));
+        if let Some(targets) = self
+            .task
+            .as_mut()
+            .and_then(|task| task["targets"].as_array_mut())
+        {
+            for target in targets
+                .iter_mut()
+                .filter(|target| target["tool"] == tool && target["folder"] == folder)
+            {
+                target["verified"] = json!(true);
+            }
+        }
+    }
+}
+
+fn merge_verification_debt(
+    reported: Option<Value>,
+    debt: &HashSet<(String, String)>,
+) -> Option<Value> {
+    if debt.is_empty() {
+        return reported;
+    }
+    let mut state = reported.unwrap_or_else(|| json!({"changed":true,"targets":[]}));
+    state["changed"] = json!(true);
+    let targets = state["targets"]
+        .as_array_mut()
+        .expect("sanitized pending targets");
+    let mut missing: Vec<_> = debt.iter().collect();
+    missing.sort();
+    let mut overflow = false;
+    for (tool, folder) in missing {
+        if let Some(target) = targets
+            .iter_mut()
+            .find(|target| target["tool"] == *tool && target["folder"] == *folder)
+        {
+            target["verified"] = json!(false);
+        } else if targets.len() < MAX_VERIFICATION_TARGETS {
+            targets.push(json!({"tool":tool,"folder":folder,"verified":false}));
+        } else {
+            overflow = true;
+        }
+    }
+    if overflow {
+        state["scopeIncomplete"] = json!(true);
+    }
+    Some(state)
 }
 
 /// Keeps only the pending-verification shape the runtime's task gate reads.
@@ -32,21 +252,40 @@ fn task_state(value: &Value) -> Option<Value> {
     if value.get("changed") != Some(&Value::Bool(true)) {
         return None;
     }
-    let targets: Vec<Value> = value["targets"]
-        .as_array()
-        .map(|targets| {
+    let raw = value["targets"].as_array();
+    let mut incomplete = value
+        .get("scopeIncomplete")
+        .is_some_and(|scope| scope != &Value::Bool(false))
+        || raw.is_none_or(|targets| targets.is_empty() || targets.len() > MAX_VERIFICATION_TARGETS);
+    let mut seen = HashSet::new();
+    let mut targets = vec![];
+    for target in raw.into_iter().flatten().take(MAX_VERIFICATION_TARGETS) {
+        let tool = target["tool"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && s.len() <= 64);
+        let folder = target["folder"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && s.len() <= 4096);
+        let valid_verified = target.get("verified").is_none_or(Value::is_boolean);
+        if let (Some(tool), Some(folder), true) = (tool, folder, valid_verified) {
+            let tool = registry::supported_tool(tool)
+                .map(|tool| tool.as_str())
+                .unwrap_or(tool);
+            if !seen.insert((tool, folder)) {
+                incomplete = true;
+                continue;
+            }
             targets
-                .iter()
-                .take(32)
-                .filter_map(|t| {
-                    let tool = t["tool"].as_str().filter(|s| s.len() <= 64)?;
-                    let folder = t["folder"].as_str().filter(|s| s.len() <= 4096)?;
-                    Some(json!({"tool":tool,"folder":folder,"verified":t["verified"] == true}))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(json!({"changed":true,"targets":targets}))
+                .push(json!({"tool":tool,"folder":folder,"verified":target["verified"] == true}));
+        } else {
+            incomplete = true;
+        }
+    }
+    let mut state = json!({"changed":true,"targets":targets});
+    if incomplete {
+        state["scopeIncomplete"] = Value::Bool(true);
+    }
+    Some(state)
 }
 
 /// What an approval card shows, and what "always allow" would remember.
@@ -64,6 +303,15 @@ fn rebind_overwrites(status: &Value) -> Option<Vec<String>> {
         .filter_map(|f| f.as_str().map(str::to_owned))
         .collect();
     (status["status"] == "modified" && !fields.is_empty()).then_some(fields)
+}
+
+fn check_local_home(run: &RunControl, paths: &LocalPaths) -> Result<(), String> {
+    if let Some(admitted) = &run.local_home {
+        if crate::services::assistant::tools::scope::resolve(&paths.home)? != *admitted {
+            return Err("assistant_local_scope_changed".into());
+        }
+    }
+    Ok(())
 }
 
 pub(super) static MUTATIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -103,6 +351,41 @@ pub struct PermissionRequest {
 }
 
 impl AssistantHost {
+    fn reserve_verification_target(
+        &self,
+        run: &RunControl,
+        name: &str,
+        args: &Value,
+        folder: &Path,
+    ) -> Result<Option<TargetReservation<'_>>, String> {
+        let mutation = VERIFICATION_MUTATIONS.contains(&name);
+        if name != "diagnose_in_folder" && !mutation {
+            return Ok(None);
+        }
+        let tool =
+            registry::supported_tool(args["tool"].as_str().ok_or("assistant_invalid_tool")?)?;
+        let folder = folder.to_str().ok_or("assistant_invalid_path")?;
+        let session = session_key(&run.identity.owner, &run.session_id);
+        let key = {
+            let mut states = self.local_states.lock().map_err(|_| STATE)?;
+            let state = states.entry(session.clone()).or_default();
+            state.verification.reserve(
+                &run.run_id,
+                state.task.as_ref(),
+                tool.as_str(),
+                folder,
+                mutation,
+            )?
+        };
+        Ok(key.map(|key| TargetReservation {
+            host: self,
+            session,
+            run_id: run.run_id.clone(),
+            key,
+            retained: false,
+        }))
+    }
+
     pub(crate) fn local_permission(&self, owner: &str, sid: &str) -> PermissionMode {
         self.local_states
             .lock()
@@ -124,20 +407,23 @@ impl AssistantHost {
     }
 
     /// A finished run reports the verification it still owes; a run that
-    /// failed before reporting leaves the earlier state in place.
+    /// failed before reporting leaves the earlier state in place. Host-observed
+    /// effects survive an empty report until a matching Host check succeeds.
     pub(super) fn keep_local_task(&self, run: &RunControl, result: &Value) {
-        let Some(state) = result.get("localTaskState") else {
+        let Some(reported) = result.get("localTaskState") else {
             return;
         };
         if !run.local_enabled {
             return;
         }
-        self.local_states
+        let mut states = self
+            .local_states
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+            .unwrap_or_else(PoisonError::into_inner);
+        let state = states
             .entry(session_key(&run.identity.owner, &run.session_id))
-            .or_default()
-            .task = task_state(state);
+            .or_default();
+        state.task = merge_verification_debt(task_state(reported), &state.verification_debt);
     }
 
     pub(crate) fn local_task_state(&self, owner: &str, sid: &str) -> Value {
@@ -488,6 +774,7 @@ impl AssistantHost {
             return Ok(json!({"approved":true}));
         }
         let (paths, scope) = self.local_scope().await?;
+        check_local_home(run, &paths)?;
         let scope = self.skill_scope(run, scope).await?;
         let requested = args["path"]
             .as_str()
@@ -495,6 +782,16 @@ impl AssistantHost {
             .map(PathBuf::from);
         let checked = requested.as_ref().map(|p| scope.check(p)).transpose()?;
         let access = checked.as_ref().map_or(Access::Inside, |p| p.access);
+        let verification_folder = if VERIFICATION_MUTATIONS.contains(&tool.name) {
+            scope.check(&paths.home)?.path
+        } else {
+            match checked.as_ref() {
+                Some(path) => path.path.clone(),
+                None => scope.check(&paths.home)?.path,
+            }
+        };
+        let mut reservation =
+            self.reserve_verification_target(run, tool.name, args, &verification_folder)?;
         let shell = matches!(tool.name, "bash" | "powershell");
         let command = args["command"].as_str().unwrap_or("");
         let read_only = shell && commands::read_only(command, cfg!(windows));
@@ -563,10 +860,26 @@ impl AssistantHost {
         if self.identity().await? != run.identity {
             return Err(IDENTITY_CHANGED.into());
         }
+        check_local_home(run, &self.env.local_paths().await?)?;
         let path = checked
             .map(|p| p.path)
-            .unwrap_or_else(|| paths.home.clone());
+            .unwrap_or_else(|| verification_folder.clone());
         let outside = access == Access::Outside;
+        let mutation = if VERIFICATION_MUTATIONS.contains(&tool.name) {
+            Some(MutationDebt {
+                host: self,
+                session: session_key(&run.identity.owner, &run.session_id),
+                run_id: &run.run_id,
+                tool: registry::supported_tool(
+                    args["tool"].as_str().ok_or("assistant_invalid_tool")?,
+                )?
+                .as_str(),
+                folder: &verification_folder,
+                started: AtomicBool::new(false),
+            })
+        } else {
+            None
+        };
         let operation = async {
             match tool.name {
                 "repair_launcher" | "rebind_tool" | "set_tool_model" => {
@@ -579,6 +892,8 @@ impl AssistantHost {
                     if self.identity().await? != run.identity {
                         return Err(IDENTITY_CHANGED.into());
                     }
+                    check_local_home(run, &self.env.local_paths().await?)?;
+                    self.validate_run(run)?;
                     let journal = journal::Journal::open(
                         &self.local_changes_dir(&run.identity.owner, &run.session_id)?,
                         &key,
@@ -596,6 +911,9 @@ impl AssistantHost {
                         error: Mutex::new(None),
                         observed: AtomicBool::new(false),
                     });
+                    if let Some(debt) = &mutation {
+                        debt.started.store(true, Ordering::Release);
+                    }
                     let result = transaction::ACTIVE
                         .scope(
                             context.clone(),
@@ -637,6 +955,9 @@ impl AssistantHost {
                     let selected = registry::supported_tool(
                         args["tool"].as_str().ok_or("assistant_invalid_tool")?,
                     )?;
+                    if let Some(debt) = &mutation {
+                        debt.started.store(true, Ordering::Release);
+                    }
                     self.env
                         .local_mutate(tool.name, selected, None, call_id)
                         .await
@@ -669,6 +990,8 @@ impl AssistantHost {
                     if self.identity().await? != run.identity {
                         return Err(IDENTITY_CHANGED.into());
                     }
+                    check_local_home(run, &self.env.local_paths().await?)?;
+                    self.validate_run(run)?;
                     let _io = crate::config_io::lock();
                     if scope.write_forbidden(&path) || scope.check(&path)?.path != path {
                         return Err("assistant_restore_conflict".into());
@@ -766,15 +1089,69 @@ impl AssistantHost {
             }
         };
         let mut cancel = run.cancel.subscribe();
-        let mut result = tokio::select! {
+        let result = tokio::select! {
             biased;
             _=cancel.changed()=>return Err(CANCELLED.into()),
             _=tokio::time::sleep_until(run.deadline)=>return Err("assistant_run_timeout".into()),
-            result=operation=>result?,
+            result=operation=>result,
         };
+        // Lifecycle adapters use this older bare spelling. Normalize at the
+        // Host boundary so both retained debt and the runtime's current run
+        // classify it as an unknown mutation, rather than a retryable refusal.
+        let result = result.map_err(|error| {
+            if mutation.is_some() && error == "unknown_outcome" {
+                "assistant_mutation_outcome_unknown".into()
+            } else {
+                error
+            }
+        });
+        if let Some(debt) = &mutation {
+            let effect = match &result {
+                Ok(value) => value["changed"] == true,
+                Err(error) => {
+                    error.contains("assistant_local_partial_change")
+                        || error.contains("outcome_unknown")
+                        || error.contains("assistant_journal_unavailable")
+                }
+            };
+            if !effect {
+                debt.started.store(false, Ordering::Release);
+            }
+        }
+        if let Some(reservation) = reservation.as_mut() {
+            reservation.retained = match &result {
+                Ok(value) => tool.name == "diagnose_in_folder" || value["changed"] == true,
+                Err(error) => {
+                    error.contains("assistant_local_partial_change")
+                        || error.contains("outcome_unknown")
+                }
+            };
+        }
+        let mut result = result?;
+        if VERIFICATION_MUTATIONS.contains(&tool.name) {
+            result["tool"] = json!(registry::supported_tool(
+                args["tool"].as_str().ok_or("assistant_invalid_tool")?
+            )?
+            .as_str());
+            result["verificationFolder"] = json!(verification_folder);
+        }
         self.validate_run(run)?;
         if self.identity().await? != run.identity {
             return Err(IDENTITY_CHANGED.into());
+        }
+        if tool.name == "verify_in_folder" && result["verified"] == true {
+            let selected =
+                registry::supported_tool(args["tool"].as_str().ok_or("assistant_invalid_tool")?)?;
+            if let Some(folder) = verification_folder.to_str() {
+                if let Some(state) = self
+                    .local_states
+                    .lock()
+                    .map_err(|_| STATE)?
+                    .get_mut(&session_key(&run.identity.owner, &run.session_id))
+                {
+                    state.verified(selected.as_str(), folder);
+                }
+            }
         }
         fn scrub(value: &mut Value) {
             match value {
@@ -987,7 +1364,7 @@ mod tests {
         assert_eq!(super::task_state(&json!({"changed":"yes"})), None);
         assert_eq!(
             super::task_state(&json!({"changed":true})),
-            Some(json!({"changed":true,"targets":[]}))
+            Some(json!({"changed":true,"targets":[],"scopeIncomplete":true}))
         );
         let kept = super::task_state(&json!({"changed":true,"extra":1,"targets":[
             {"tool":"codex","folder":"/p","verified":true,"x":1},
@@ -996,8 +1373,190 @@ mod tests {
         .unwrap();
         assert_eq!(
             kept,
-            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":true}]})
+            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":true}],"scopeIncomplete":true})
         );
+    }
+
+    #[test]
+    fn local_task_state_keeps_complete_scopes_and_never_hides_lost_evidence() {
+        let complete = json!({"changed":true,"targets":[
+            {"tool":"codex","folder":"/p","verified":false},
+            {"tool":"claude","folder":"/home","verified":true}
+        ]});
+        assert_eq!(super::task_state(&complete), Some(complete.clone()));
+        for malformed in [
+            json!({"changed":true,"targets":[]}),
+            json!({"changed":true,"targets":"broken"}),
+            json!({"changed":true,"targets":[{"tool":"","folder":"/p"}]}),
+            json!({"changed":true,"targets":[{"tool":"codex","folder":" "}]}),
+            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p","verified":"yes"}]}),
+            json!({"changed":true,"targets":[{"tool":"codex","folder":"/p"},{"tool":"codex","folder":"/p"}]}),
+        ] {
+            assert_eq!(
+                super::task_state(&malformed).unwrap()["scopeIncomplete"],
+                true
+            );
+        }
+        for flag in [json!(true), json!(null), json!("false")] {
+            let mut value = complete.clone();
+            value["scopeIncomplete"] = flag;
+            assert_eq!(super::task_state(&value).unwrap()["scopeIncomplete"], true);
+        }
+        let targets: Vec<_> = (0..33)
+            .map(|i| json!({"tool":"codex","folder":format!("/p{i}"),"verified":true}))
+            .collect();
+        let kept = super::task_state(&json!({"changed":true,"targets":targets})).unwrap();
+        assert_eq!(kept["targets"].as_array().unwrap().len(), 32);
+        assert_eq!(kept["scopeIncomplete"], true);
+    }
+
+    #[test]
+    fn canonical_target_capacity_blocks_new_work_but_allows_existing_scope() {
+        let mut scopes = super::VerificationTargets::default();
+        for i in 0..32 {
+            let key = scopes
+                .reserve("run", None, "codex", &format!("/p{i}"), false)
+                .unwrap()
+                .unwrap();
+            scopes.finish("run", &key, true);
+        }
+        for mutation in [false, true] {
+            let tool = if mutation { "claude" } else { "codex" };
+            let mut effects = 0;
+            let result = scopes
+                .reserve("run", None, tool, "/new", mutation)
+                .map(|_| effects += 1);
+            assert_eq!(result.unwrap_err(), super::TARGET_LIMIT);
+            assert_eq!(effects, 0);
+        }
+        let duplicate = scopes
+            .reserve("run", None, "codex", "/p0", false)
+            .unwrap()
+            .unwrap();
+        scopes.finish("run", &duplicate, false);
+        assert_eq!(scopes.targets.len(), 32);
+        assert!(scopes
+            .reserve("run", None, "codex", "/home", true)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn target_reservations_release_no_effect_failures_and_keep_concurrent_success() {
+        let mut scopes = super::VerificationTargets::default();
+        for i in 0..31 {
+            let key = scopes
+                .reserve("run", None, "codex", &format!("/p{i}"), false)
+                .unwrap()
+                .unwrap();
+            scopes.finish("run", &key, true);
+        }
+        let key = scopes
+            .reserve("run", None, "claude", "/home", true)
+            .unwrap()
+            .unwrap();
+        assert!(scopes.reserve("run", None, "codex", "/new", false).is_err());
+        scopes.finish("run", &key, false);
+        assert_eq!(scopes.targets.len(), 31);
+        let first = scopes
+            .reserve("run", None, "claude", "/home", true)
+            .unwrap()
+            .unwrap();
+        let second = scopes
+            .reserve("run", None, "claude", "/home", true)
+            .unwrap()
+            .unwrap();
+        scopes.finish("run", &first, false);
+        assert_eq!(scopes.targets.len(), 32);
+        scopes.finish("run", &second, true);
+        assert_eq!(scopes.targets.len(), 32);
+    }
+
+    #[test]
+    fn host_debt_survives_empty_reports_until_the_matching_scope_verifies() {
+        let debt = std::collections::HashSet::from([("codex".into(), "/original".into())]);
+        let mut state = super::LocalState {
+            task: super::merge_verification_debt(None, &debt),
+            verification_debt: debt,
+            ..Default::default()
+        };
+        state.verified("claude", "/original");
+        state.verified("codex", "/other");
+        assert_eq!(state.verification_debt.len(), 1);
+        assert_eq!(
+            super::merge_verification_debt(None, &state.verification_debt).unwrap()["targets"][0]
+                ["verified"],
+            false
+        );
+        state.verified("codex", "/original");
+        assert!(state.verification_debt.is_empty());
+        assert!(super::merge_verification_debt(None, &state.verification_debt).is_none());
+    }
+
+    #[test]
+    fn new_run_seeds_pending_targets_and_ignores_prior_reservation_cleanup() {
+        let mut scopes = super::VerificationTargets::default();
+        let old = scopes
+            .reserve("old", None, "codex", "/old", false)
+            .unwrap()
+            .unwrap();
+        let pending = json!({"changed":true,"targets":[
+            {"tool":"claude","folder":"/pending","verified":false}
+        ]});
+        let current = scopes
+            .reserve("new", Some(&pending), "codex", "/new", false)
+            .unwrap()
+            .unwrap();
+        scopes.finish("old", &old, false);
+        assert_eq!(scopes.targets.len(), 2);
+        scopes.finish("new", &current, false);
+        assert_eq!(scopes.targets.len(), 1);
+        assert!(scopes
+            .targets
+            .contains_key(&("claude".into(), "/pending".into())));
+    }
+
+    #[test]
+    fn unrepresentable_target_scope_is_refused_before_reservation() {
+        let mut scopes = super::VerificationTargets::default();
+        for folder in [String::new(), " ".into(), "中".repeat(1366)] {
+            assert_eq!(
+                scopes
+                    .reserve("run", None, "codex", &folder, false)
+                    .unwrap_err(),
+                "assistant_invalid_path"
+            );
+            assert!(scopes.targets.is_empty());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_alias_at_capacity_reuses_its_existing_diagnosis() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canonical = super::super::super::tools::scope::resolve(&real).unwrap();
+        let aliased = super::super::super::tools::scope::resolve(&alias).unwrap();
+        assert_eq!(canonical, aliased);
+        let mut scopes = super::VerificationTargets::default();
+        let key = scopes
+            .reserve("run", None, "codex", &canonical.to_string_lossy(), false)
+            .unwrap()
+            .unwrap();
+        scopes.finish("run", &key, true);
+        for i in 0..31 {
+            let key = scopes
+                .reserve("run", None, "codex", &format!("/p{i}"), false)
+                .unwrap()
+                .unwrap();
+            scopes.finish("run", &key, true);
+        }
+        assert!(scopes
+            .reserve("run", None, "codex", &aliased.to_string_lossy(), false)
+            .is_ok());
     }
 
     #[test]

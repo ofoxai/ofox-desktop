@@ -34,6 +34,18 @@ const MAX_MESSAGE_BYTES: usize = 128_000;
 /// The turn to show is not a user turn of the conversation's native history.
 const VERSION_UNAVAILABLE: &str = "assistant_version_unavailable";
 
+fn local_task_paths(
+    mut paths: super::tools::context::LocalPaths,
+) -> Result<super::tools::context::LocalPaths, String> {
+    // Pin the same physical home that Host diagnostics report, including
+    // partial mutations that have no structured verificationFolder result.
+    paths.home = super::tools::scope::resolve(&paths.home)?;
+    if !paths.home.is_dir() {
+        return Err("assistant_local_unavailable".into());
+    }
+    Ok(paths)
+}
+
 fn apply_presentation_text_budget(
     policy: Option<&super::presentation::VisualPolicy>,
     local_config: &mut Option<Value>,
@@ -142,6 +154,7 @@ impl AssistantHost {
         .await
         .unwrap_or_default();
         // Documents only with the runtime that registers their tool.
+        self.prepare_document_engines().await;
         let runtime = match self.runtime() {
             Ok(r) => json!({"available":true,"reason":null,"version":r.version,
                 "documents":{"formats":self.engines().formats(),"python":self.python_offered()}}),
@@ -699,8 +712,10 @@ impl AssistantHost {
 
         // Local configuration where this computer offers it: a conversation
         // still chats when its paths are unavailable.
+        self.prepare_document_engines().await;
+        self.ensure_current(&identity, generation).await?;
         let local_paths = if super::capabilities::enabled(&record.session.capabilities) {
-            match self.env.local_paths().await {
+            match self.env.local_paths().await.and_then(local_task_paths) {
                 Ok(paths) => Some(paths),
                 Err(error) => {
                     log::warn!("[Assistant] local configuration is unavailable: {error}");
@@ -710,6 +725,7 @@ impl AssistantHost {
         } else {
             None
         };
+        let admitted_home = local_paths.as_ref().map(|paths| paths.home.clone());
         let mut local_config = local_paths.map(|paths| {
             json!({"cwd":paths.home,"platform":std::env::consts::OS,"skillPath":paths.skill,"definition":super::capabilities::local_config(),"searchPrice":search_price,"taskState":self.local_task_state(&identity.owner, &request.session_id)})
         });
@@ -719,6 +735,7 @@ impl AssistantHost {
             crate::settings::get_settings().language.as_deref(),
         );
         let mut control = RunControl::new(identity.clone(), &request, key.clone());
+        control.local_home = admitted_home;
         control.presentation_style_id = branch.presentation_style_id.clone();
         control.file_references = branch.file_references.clone();
         control.presentation = std::sync::Mutex::new(super::presentation::State::new(
@@ -2174,6 +2191,29 @@ pub(super) fn publish_turn(
 mod tests {
     use super::*;
     use crate::services::assistant::host::Identity;
+
+    #[test]
+    #[cfg(unix)]
+    fn local_task_home_is_pinned_before_partial_mutation_results() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let paths = super::super::tools::context::LocalPaths {
+            home: alias.clone(),
+            config_roots: vec![],
+            shell_files: vec![],
+            skill: real.join("SKILL.md"),
+        };
+        let pinned = local_task_paths(paths).unwrap();
+        assert_eq!(pinned.home, real.canonicalize().unwrap());
+        std::fs::remove_file(&alias).unwrap();
+        let other = temp.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        assert_ne!(pinned.home, alias.canonicalize().unwrap());
+    }
 
     #[test]
     #[serial_test::serial]

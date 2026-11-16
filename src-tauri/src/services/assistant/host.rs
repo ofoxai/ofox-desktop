@@ -233,6 +233,8 @@ pub struct RunControl {
     /// the language its documents are set in.
     pub(super) ui_language: String,
     pub(super) local_enabled: bool,
+    /// Physical home captured when this run's local capability was admitted.
+    pub(super) local_home: Option<PathBuf>,
     pub identity: Identity,
     pub session_id: String,
     pub run_id: String,
@@ -276,6 +278,7 @@ impl RunControl {
             artifact: None,
             ui_language: "zh".into(),
             local_enabled: false,
+            local_home: None,
             identity,
             session_id: request.session_id.clone(),
             run_id: request.run_id.clone(),
@@ -1047,12 +1050,39 @@ impl AssistantHost {
     /// content is then refused before the engine runs again.
     pub(super) fn python_offered(&self) -> bool {
         let engines = self.engines();
+        #[cfg(windows)]
+        let isolation =
+            self.env.runtime_dir().ok().is_some_and(|root| {
+                super::documents::runner::windows_document_engine_proven(&root)
+            });
+        #[cfg(not(windows))]
+        let isolation = self.env.sandbox_exec().is_some_and(|path| path.is_file());
         engines.python.is_some()
             && engines.officecli.is_some()
-            && self.env.sandbox_exec().is_some_and(|path| path.is_file())
+            && isolation
             && !self.office_sandbox.failed()
             && !self.python_sandbox.failed()
             && !self.python_broken.load(Ordering::Relaxed)
+    }
+
+    /// Windows advertises model-code execution only after real functional and
+    /// negative probes on the current complete runtime digest. The launcher
+    /// independently rechecks that proof before each process creation.
+    pub(super) async fn prepare_document_engines(&self) {
+        #[cfg(windows)]
+        {
+            if self.engines().python.is_none() {
+                return;
+            }
+            let ready = match self.env.runtime_dir() {
+                Ok(root) => super::documents::runner::ensure_windows_document_engine_ready(&root)
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+            self.office_sandbox.record_windows_probe(ready);
+            self.python_sandbox.record_windows_probe(ready);
+        }
     }
 
     /// The lock over one conversation's native history (see [`session_key`]):
@@ -2275,17 +2305,25 @@ impl AssistantHost {
     pub(super) async fn finish(
         self: &Arc<Self>,
         control: &Arc<RunControl>,
-        outcome: Result<Finish, Failure>,
+        mut outcome: Result<Finish, Failure>,
     ) {
-        let stopped = match &outcome {
-            Ok(finish) => *finish == Finish::Stopped,
-            Err(_) => control.cancelled(),
-        };
-        let completed = matches!(outcome, Ok(Finish::Completed));
+        let stopped = matches!(outcome, Ok(Finish::Stopped)) || control.cancelled();
         // A file the reply previewed and never delivered is delivered from
-        // its folder before the folders go.
-        self.deliver_previews(control).await;
+        // its folder before the folders go. Preserve an earlier provider
+        // failure, and never publish a stopped reply's previews.
+        if !stopped {
+            if let Err(code) = self.deliver_previews(control).await {
+                if matches!(outcome, Ok(Finish::Completed)) {
+                    // Saving a local file makes no additional paid request;
+                    // keep the model's already returned usage/cost evidence.
+                    outcome = Err(Failure::unsent(code));
+                }
+            }
+        }
         self.remove_document_folders(control).await;
+        // Stop may arrive while a preview is being kept or its folders go.
+        let stopped = stopped || control.cancelled();
+        let completed = matches!(outcome, Ok(Finish::Completed)) && !stopped;
         // A failure that cost nothing leaves the session's cost known.
         let unbilled = matches!(&outcome, Err(failure) if failure.unbilled && !stopped);
         let error_code = outcome.as_ref().err().map(|failure| failure.code.clone());
@@ -2575,6 +2613,8 @@ pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("host/local_interruption_tests.rs");
 
     #[tokio::test]
     async fn local_write_journals_and_restores_only_after_the_run_ends() {
@@ -3642,6 +3682,42 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_callback_refuses_a_home_alias_retargeted_after_admission() {
+        let (tmp, env, host) = fixture_with_env();
+        let original = tmp.path().join("original-home");
+        let other = tmp.path().join("other-home");
+        std::fs::create_dir_all(original.join("config")).unwrap();
+        std::fs::create_dir_all(other.join("config")).unwrap();
+        let alias = tmp.path().join("home-alias");
+        std::os::unix::fs::symlink(&original, &alias).unwrap();
+        *env.local_home.lock().unwrap() = Some(alias.clone());
+        let sid = host
+            .store(&identity().owner)
+            .unwrap()
+            .create("test/model", false)
+            .unwrap()
+            .session
+            .id;
+        let mut run = control(&sid);
+        let state = Arc::get_mut(&mut run).unwrap();
+        state.local_enabled = true;
+        state.local_home = Some(original.canonicalize().unwrap());
+        host.register_run(run.clone(), host.generation(), || Ok(()))
+            .unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&other, &alias).unwrap();
+        let call = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+            "toolCallId":"retargeted","name":"bash","args":{"folder":alias.join("config"),
+            "command":"pwd","timeout":2}});
+        let result = host.dispatch_tool(&run, &call).await;
+        assert_eq!(result.unwrap_err(), "assistant_local_scope_changed");
+        assert!(!other.join("config/probe-marker").exists());
+        assert!(approvals(&env).is_empty());
+        host.release_run(&run);
+    }
+
     /// Dispatches one call and answers the approval it raises with `choice`.
     async fn dispatch_answering(
         host: &Arc<AssistantHost>,
@@ -4018,6 +4094,9 @@ mod tests {
     /// `/v1` catalog whose fetches are counted, an empty Anthropic one; no key
     /// or runtime.
     struct FixedEnvironment {
+        local_home: Mutex<Option<PathBuf>>,
+        local_mutation_fixture: Mutex<Option<Arc<LocalMutationFixture>>>,
+        local_key_barrier: Mutex<Option<Arc<LocalKeyBarrier>>>,
         skill_refresh_fail: AtomicBool,
         skill_db: Mutex<Option<Arc<crate::Database>>>,
         apex: Mutex<String>,
@@ -4040,6 +4119,36 @@ mod tests {
     }
 
     impl Environment for FixedEnvironment {
+        fn local_mutate<'a>(
+            &'a self,
+            _name: &'a str,
+            tool: crate::app_config::BindableTool,
+            _model: Option<&'a str>,
+            _operation: &'a str,
+        ) -> BoxFuture<'a, Result<Value, String>> {
+            let fixture = self.local_mutation_fixture.lock().unwrap().clone();
+            Box::pin(async move {
+                let fixture = fixture.ok_or("assistant_local_unavailable")?;
+                if !fixture.change {
+                    return Err("assistant_local_unavailable".into());
+                }
+                let guard = super::super::tools::transaction::begin(
+                    None,
+                    tool.as_str(),
+                    vec![fixture.path.clone()],
+                )?;
+                crate::config::atomic_write(&fixture.path, b"changed")
+                    .map_err(|_| "assistant_write_failed")?;
+                drop(guard);
+                fixture.written.notify_one();
+                if let Some(error) = fixture.fail_after_write {
+                    return Err(error.into());
+                }
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        }
+
         fn skill_database(&self) -> Result<Arc<crate::Database>, String> {
             self.skill_db
                 .lock()
@@ -4119,18 +4228,31 @@ mod tests {
             super::super::skills::read_verified(&db, proof, access, read)
         }
         fn local_journal_key(&self) -> BoxFuture<'_, Result<zeroize::Zeroizing<[u8; 32]>, String>> {
-            Box::pin(async { Ok(zeroize::Zeroizing::new([7; 32])) })
+            let barrier = self.local_key_barrier.lock().unwrap().clone();
+            Box::pin(async move {
+                if let Some(barrier) = barrier {
+                    barrier.entered.notify_one();
+                    barrier.release.notified().await;
+                }
+                Ok(zeroize::Zeroizing::new([7; 32]))
+            })
         }
 
         fn local_paths(
             &self,
         ) -> BoxFuture<'_, Result<super::super::tools::context::LocalPaths, String>> {
             Box::pin(async {
+                let home = self
+                    .local_home
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_else(|| self.config.clone());
                 Ok(super::super::tools::context::LocalPaths {
-                    home: self.config.clone(),
-                    config_roots: vec![self.config.join("config")],
-                    shell_files: vec![self.config.join(".zshrc")],
-                    skill: self.config.join("skills/SKILL.md"),
+                    config_roots: vec![home.join("config")],
+                    shell_files: vec![home.join(".zshrc")],
+                    skill: home.join("skills/SKILL.md"),
+                    home,
                 })
             })
         }
@@ -4219,6 +4341,9 @@ mod tests {
     fn fixture_with_env() -> (tempfile::TempDir, Arc<FixedEnvironment>, Arc<AssistantHost>) {
         let config = tempfile::tempdir().unwrap();
         let env = Arc::new(FixedEnvironment {
+            local_home: Mutex::new(None),
+            local_mutation_fixture: Mutex::new(None),
+            local_key_barrier: Mutex::new(None),
             skill_refresh_fail: AtomicBool::new(false),
             skill_db: Mutex::new(None),
             apex: Mutex::new("ofox.ai".into()),

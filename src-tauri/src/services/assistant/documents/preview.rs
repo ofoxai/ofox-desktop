@@ -160,8 +160,27 @@ pub(crate) async fn raster(
     .map_err(|_| "assistant_preview_unavailable")?;
     let home = temp.path().join("home");
     crate::config::create_private_dir_all(&home).map_err(|_| "assistant_preview_unavailable")?;
-    let node = loaded.node.to_string_lossy();
     let helper = helper.to_string_lossy();
+    #[cfg(windows)]
+    let output = {
+        // Existing raster callers supply a macOS executable (or None). On
+        // Windows the exact runtime's native proof is the authority instead.
+        let _ = sandbox;
+        super::runner::ensure_windows_document_engine_ready(&runtime).await?;
+        super::runner::run_windows_engine_limited(
+            &loaded.node,
+            &[&helper],
+            temp.path(),
+            &home,
+            &runtime,
+            Duration::from_secs(60),
+            8192,
+        )
+        .await?
+    };
+    #[cfg(not(windows))]
+    let node = loaded.node.to_string_lossy();
+    #[cfg(not(windows))]
     let output = if let Some(sandbox) = sandbox {
         let doc = format!(
             "DOC={}",

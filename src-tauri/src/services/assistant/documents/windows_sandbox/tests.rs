@@ -316,6 +316,121 @@ async fn cancelling_an_active_document_job_cleans_before_receipt_and_no_late_wri
 
 #[tokio::test]
 #[serial_test::serial]
+async fn cancelling_after_exit_stops_all_copyback_publication() {
+    cancel_at_copyback(CopybackPoint::Drained).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cancelling_between_copyback_files_stops_remaining_publication() {
+    cancel_at_copyback(CopybackPoint::Published(1)).await;
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cancelling_after_staging_fsync_does_not_publish_the_staged_file() {
+    cancel_at_copyback(CopybackPoint::BeforeRename).await;
+}
+
+async fn cancel_at_copyback(point: CopybackPoint) {
+    let regression = match point {
+        CopybackPoint::Drained => "COPYBACK_CANCEL_REGRESSION_AFTER_EXIT",
+        CopybackPoint::Published(_) => "COPYBACK_CANCEL_REGRESSION_BETWEEN_FILES",
+        CopybackPoint::BeforeRename => "COPYBACK_CANCEL_REGRESSION_BEFORE_RENAME",
+    };
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let canonical = task.path().canonicalize().unwrap();
+    let (reached, started) = std::sync::mpsc::sync_channel(1);
+    let (resume, resumed) = std::sync::mpsc::sync_channel(1);
+    COPYBACK_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(
+            canonical.clone(),
+            Arc::new(CopybackGate {
+                point,
+                reached,
+                resume: Mutex::new(resumed),
+            }),
+        );
+    let original = task.path().to_path_buf();
+    let runtime = root.clone();
+    let sequence = RUN_SEQUENCE.load(Ordering::Acquire);
+    let running = tokio::spawn(async move {
+        run_windows_engine_limited(&runtime.join("node/node.exe"),
+                &["-e", "const f=require('node:fs'); f.writeFileSync('a.txt','first'); f.writeFileSync('b.txt','second');"],
+                &original, &home, &runtime, Duration::from_secs(30), 4096).await
+    });
+    tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(60)))
+        .await
+        .unwrap()
+        .expect("controlled successful child must reach the copyback handshake");
+    let sandbox = ACTIVE_TASKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .get(&canonical)
+        .cloned()
+        .unwrap();
+    running.abort();
+    let _ = running.await;
+    resume.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while ACTIVE_TASKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .contains_key(&canonical)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    COPYBACK_GATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(&canonical);
+    assert_eq!(
+        task.path().join("a.txt").exists(),
+        point == CopybackPoint::Published(1),
+        "{regression}: first output was published after cancellation"
+    );
+    assert!(
+        !task.path().join("b.txt").exists(),
+        "{regression}: remaining output was published after cancellation"
+    );
+    assert!(fs::read_dir(task.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with(".ofox-publish-")));
+    assert!(!sandbox.exists());
+    let receipts = windows_document_sandbox_receipts(sequence);
+    let row = receipts
+        .iter()
+        .find(|row| row["taskId"].as_str() == sandbox.file_name().and_then(OsStr::to_str))
+        .unwrap();
+    assert_eq!(
+        row["cancelled"], true,
+        "{regression}: cancellation was lost"
+    );
+    assert_eq!(
+        row["status"],
+        serde_json::Value::Null,
+        "{regression}: cancelled copyback reported successful completion"
+    );
+    assert_eq!(row["cleanupComplete"], true);
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn public_runner_refuses_unproven_or_changed_runtime_before_launch() {
     let public = tempfile::tempdir().unwrap();
     fs::create_dir(public.path().join("node")).unwrap();

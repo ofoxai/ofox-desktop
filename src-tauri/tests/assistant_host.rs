@@ -19,6 +19,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[path = "assistant_host/parity.rs"]
+mod parity_eval;
+
 const KEY: &str = "synthetic-assistant-key-Q7v2Lm9X";
 const NEW_KEY: &str = "synthetic-assistant-key-replacement-T4n8";
 const MODEL: &str = "test/chat-model";

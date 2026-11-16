@@ -1,5 +1,32 @@
 # Known limitations and prior review dispositions
 
+## Desktop assistant capability acceptance (#1701)
+
+Verification snapshots remain memory-only; incomplete or legacy scopes stay
+unverified rather than guessing a tool identity. Preview persistence retry
+reuses files only within the current run, without durable cross-run recovery.
+The Windows LPAC adapter requires native verification against the delivery SHA;
+resource staging and compilation do not certify Python availability. Windows
+10/11 installed-client checks and the budgeted live-model campaign are separate
+gates. Missing credentials or client results remain pending. See the
+[implementation record](assistant-capability-1701.md).
+
+The accepted structured Office/deck fallback remains available when native
+Python admission fails; that fallback is not claimed to have LPAC isolation.
+Python-derived files, source edits and uploaded-file previews must remain on
+the proven isolation path. Job termination, time/output limits and serialized
+Pyodide are implemented; Job memory/CPU or whole-workspace disk quotas are not.
+Graceful engine cancellation/crash cleanup is implemented, with native test
+results still pending; a forcibly killed Host
+does not yet have a durable profile/workspace recovery journal.
+
+Verification debt retention covers known tool mutations. A generic write/edit
+may commit before a later identity fence rejects its result; the encrypted
+change journal remains, but this slice does not add durable task recovery for
+that existing interruption window. External installers also keep their existing
+lifecycle limits: retaining unknown verification debt is not a promise that an
+opened Terminal installer or every platform-specific descendant has stopped.
+
 This ledger preserves the accepted non-blocking findings from the implementation review. Deferred means known and not claimed fixed. It is not a claim that these paths were validated on Windows. Windows native execution and installed-agent version checks remain separate acceptance work.
 
 ## Assistant command verification scope (2026-11-14)
