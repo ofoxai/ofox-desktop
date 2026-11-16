@@ -38,6 +38,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Diagnostic matrix only: rejected API combinations are retained in logs,
+      # while the native Rust core tests below remain the production gate.
+      - name: Diagnose directory-relative document rename APIs
+        continue-on-error: true
+        run: .\scripts\tests\test-document-rename-api.ps1
+        shell: pwsh
+
       - name: Setup Node.js for bundled assistant verification
         uses: actions/setup-node@v7
         with:

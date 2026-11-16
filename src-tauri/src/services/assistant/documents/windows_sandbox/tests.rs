@@ -111,6 +111,22 @@ fn document_output_rejects_hardlinks_and_reparse_points() {
     .is_err());
     assert!(publish_output(&task, Path::new("junction/new.txt"), b"must not escape").is_err());
     assert!(!other.join("new.txt").exists());
+    // A junction whose target is still inside root must also be rejected.
+    // In a verbatim path `/` would hide the junction inside one Normal
+    // component; raw Win32 encoding must not reinterpret that after pinning.
+    let inside = task.join("inside");
+    fs::create_dir(&inside).unwrap();
+    fs::write(inside.join("secret"), b"inside fixture").unwrap();
+    let status = std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(task.join("inside-junction"))
+        .arg(&inside)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let verbatim = task.canonicalize().unwrap();
+    let hidden_ancestor = PathBuf::from(format!(r"{}\inside-junction/secret", verbatim.display()));
+    assert!(open_regular(&verbatim, &hidden_ancestor, 4096).is_err());
     if symlink_dir(&other, task.join("symlink")).is_ok() {
         assert!(open_regular(&task, &task.join("symlink/secret"), 4096).is_err());
     }
@@ -132,6 +148,111 @@ fn document_output_publishes_new_and_existing_files_by_parent_handle() {
         fs::read(root.path().join("nested/new.txt")).unwrap(),
         b"second"
     );
+}
+
+#[test]
+fn document_long_unicode_paths_support_regular_reads_cache_and_atomic_publication() {
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("public resources 中文 日本語");
+    let mut relative = PathBuf::new();
+    for index in 0..5 {
+        relative.push(format!("{index} 中文 空 格 {}", "n".repeat(45)));
+    }
+    relative.push("payload 中文 空 格.txt");
+    let input = source.join(&relative);
+    fs::create_dir_all(input.parent().unwrap()).unwrap();
+    fs::write(&input, b"long path public fixture").unwrap();
+    assert!(input.as_os_str().encode_wide().count() > 260);
+    // std::fs creates this successfully using its own extended-path handling;
+    // the raw Win32 no-reparse reader must address the very same object.
+    let mut bytes = Vec::new();
+    open_regular(&source, &input, 1024)
+        .unwrap()
+        .read_to_end(&mut bytes)
+        .unwrap();
+    assert_eq!(bytes, b"long path public fixture");
+    let capability = RuntimeCapability::new().unwrap();
+    let cached = cache_runtime(&source, &capability, &current_user().unwrap()).unwrap();
+    assert_eq!(
+        tree_digest_at(&source, 1024).unwrap(),
+        tree_digest_at(&cached.root, 1024).unwrap()
+    );
+    let output = temp.path().join("document output 中文 空 格");
+    fs::create_dir(&output).unwrap();
+    publish_output(&output, &relative, b"first version").unwrap();
+    publish_output(&output, &relative, b"replacement version").unwrap();
+    assert_eq!(
+        fs::read(output.join(&relative)).unwrap(),
+        b"replacement version"
+    );
+}
+
+#[test]
+fn document_cache_requires_exact_specific_file_read_execute_acl() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("immutable-public-cache");
+    let user = current_user().unwrap();
+    let capability = RuntimeCapability::new().unwrap();
+    let cap = sid_string(capability.sid).unwrap();
+    let exact = format!(
+        "{}(A;OICI;FRFX;;;{cap})S:(ML;OICI;NW;;;ME)",
+        private_sddl(&user)
+    );
+    create_directory(&root, &exact).unwrap();
+    let pinned = owned_directory(&root, &user).unwrap();
+    verify_cache_acl(&pinned, &exact).unwrap();
+    let write_allowed = format!(
+        "{}(A;OICI;FRFXFW;;;{cap})S:(ML;OICI;NW;;;ME)",
+        private_sddl(&user)
+    );
+    let unsafe_root = temp.path().join("unsafe-writable-public-cache");
+    create_directory(&unsafe_root, &write_allowed).unwrap();
+    let unsafe_pinned = owned_directory(&unsafe_root, &user).unwrap();
+    assert!(verify_cache_acl(&unsafe_pinned, &exact).is_err());
+}
+
+#[test]
+fn document_win32_paths_are_lexical_extended_absolute_paths() {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    for (input, expected) in [
+        (
+            r"C:\public resources\中文\file",
+            r"\\?\C:\public resources\中文\file",
+        ),
+        (
+            r"C:/public resources/中文/file",
+            r"\\?\C:\public resources\中文\file",
+        ),
+        (
+            r"\\server\share\中文\file",
+            r"\\?\UNC\server\share\中文\file",
+        ),
+        (
+            r"//server/share/中文/file",
+            r"\\?\UNC\server\share\中文\file",
+        ),
+        (
+            r"\\?\C:\public resources\中文\file",
+            r"\\?\C:\public resources\中文\file",
+        ),
+    ] {
+        let encoded = wide_path(Path::new(input)).unwrap();
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(OsString::from_wide(&encoded[..encoded.len() - 1]), expected);
+    }
+    for invalid in [
+        r"relative\file",
+        r"C:relative\file",
+        r"C:\public\..\secret",
+        r"C:\public\.\file",
+        r"\\?\C:\public/../secret",
+        r"\\?\C:\public/normal/file",
+        r"\\?\UNC\server\share\public/../secret",
+        r"\\.\PhysicalDrive0",
+    ] {
+        assert!(wide_path(Path::new(invalid)).is_err());
+    }
 }
 
 #[test]

@@ -10,6 +10,9 @@ resource staging and compilation do not certify Python availability. Windows
 10/11 installed-client checks and the budgeted live-model campaign are separate
 gates. Missing credentials or client results remain pending. See the
 [implementation record](assistant-capability-1701.md).
+Extended-path handling covers runtime resources and document/backup reads and
+publication. Arbitrarily long process working directories are not certified;
+native launch failure keeps Python unavailable.
 
 The accepted structured Office/deck fallback remains available when native
 Python admission fails; that fallback is not claimed to have LPAC isolation.
@@ -1640,7 +1643,6 @@ fully previewable; it is not a quality certification. Every style stays
 - **Deck images: count, reuse and backgrounds (2026-11-12).** The image setting is none / auto (a ceiling the model fills as it sees fit) / a set number, up to eight generated images a deck (and a reply). Pictures the conversation already holds (generated earlier, or from the user) are listed to the model each presentation turn and placed free as `user-image` visuals, so changing a deck keeps its images; a deck places at most twelve pictures. With images off, a picture the user's message asks for is still generated as an ordinary image and then placed. These are instructions to the model, not Host guarantees: it may still drop a picture, plan fewer than a set number, or generate an asked-for picture it then fails to place. One picture per page, so a page cannot carry both a background and a side image. A background image gets the page colour laid over it at 60%; very busy pictures can still leave small text hard to read. The running-steps list shows a failed step that was done again as "Retried".
 - **A reply that runs out of output while reasoning (2026-11-13).** When the model spends its whole output limit on reasoning (no text, no tool call), the runtime asks it again without showing a user message, twice at most; a run that still has no answer ends as an error instead of "completed". A long answer cut off at the limit is kept as it is. Office round trips of sampled decks were checked only with headless LibreOffice (which drops embedded chart workbooks and native equations on save) and one read-only open in an unactivated PowerPoint; editing, saving and reopening in WPS or an activated PowerPoint, and Windows, remain unverified.
 - **Presentation styles in real runs (2026-11-13).** All 24 catalog styles and navy now have a real generated deck (kept outside the repository; covers in `assets/readme/presentation-styles.webp`). On `architectural-plan` pages (title in a side panel), content across the panel edge or over its title is now refused with the regions to use; a real rerun laid every page out inside them, so the refusal itself is covered only by a test. Text in a code-drawn figure that names a Latin-only font now gets a CJK font of the same kind first; only covered by a test, not seen again in a real run. Two real runs failed on the provider's temporary refusals (request burst, server overload) and passed when run again.
-
 
 ## Recovered working-tree changes (2026-11-15)
 

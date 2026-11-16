@@ -10,7 +10,7 @@ use std::{
     ffi::{c_void, OsStr},
     fs::{self, File},
     io::{Read, Write},
-    mem::{offset_of, size_of},
+    mem::size_of,
     os::windows::{
         ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
@@ -54,9 +54,9 @@ use windows::{
             GetFileInformationByHandle, GetFinalPathNameByHandleW, SetFileInformationByHandle,
             BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
             FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-            FILE_NAME_NORMALIZED, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE,
-            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ,
+            FILE_GENERIC_WRITE, FILE_NAME_NORMALIZED, FILE_RENAME_INFO, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_EXISTING,
         },
         System::{
             Com::CoTaskMemFree,
@@ -119,6 +119,72 @@ fn wide(value: impl AsRef<OsStr>) -> Result<Vec<u16>, String> {
         return Err(UNAVAILABLE.into());
     }
     Ok(value.into_iter().chain(Some(0)).collect())
+}
+
+/// Raw Win32 filesystem calls do not receive Rust std's long-path conversion.
+/// Add the extended prefix lexically: canonicalize would follow a junction
+/// before the no-reparse handle checks. Keep SDDL and command text on `wide`.
+fn wide_path(path: &Path) -> Result<Vec<u16>, String> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::Prefix;
+    // Ancestor checks parse the original path too. Verbatim Windows paths
+    // treat `/` as component data; do not turn it into new uninspected levels.
+    if path
+        .as_os_str()
+        .encode_wide()
+        .any(|unit| unit == b'/' as u16)
+        && matches!(path.components().next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _)))
+    {
+        return Err(UNSAFE_FILE.into());
+    }
+    // DOS/UNC components already recognize both separators. Normalize them
+    // lexically before adding the verbatim prefix, without resolving links.
+    let units: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == b'/' as u16 {
+                b'\\' as u16
+            } else {
+                unit
+            }
+        })
+        .collect();
+    if units.contains(&0)
+        || units
+            .split(|unit| *unit == b'\\' as u16)
+            .any(|part| part == [b'.' as u16] || part == [b'.' as u16, b'.' as u16])
+    {
+        return Err(UNSAFE_FILE.into());
+    }
+    let path = PathBuf::from(OsString::from_wide(&units));
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(UNSAFE_FILE.into());
+    }
+    let Some(Component::Prefix(prefix)) = path.components().next() else {
+        return Err(UNSAFE_FILE.into());
+    };
+    let normalized: PathBuf = path.components().collect();
+    let name: Vec<u16> = normalized.as_os_str().encode_wide().collect();
+    let mut extended: Vec<u16> = match prefix.kind() {
+        Prefix::VerbatimDisk(_) | Prefix::VerbatimUNC(_, _) => name,
+        Prefix::Disk(_) => r"\\?\".encode_utf16().chain(name).collect(),
+        Prefix::UNC(_, _) => r"\\?\UNC\"
+            .encode_utf16()
+            .chain(name.into_iter().skip(2))
+            .collect(),
+        _ => return Err(UNSAFE_FILE.into()),
+    };
+    if extended.len() >= 32767 {
+        return Err(UNSAFE_FILE.into());
+    }
+    extended.push(0);
+    Ok(extended)
 }
 fn handle(raw: HANDLE) -> OwnedHandle {
     // SAFETY: every caller transfers one newly created, owned kernel handle.
@@ -261,7 +327,7 @@ fn create_directory(path: &Path, sddl: &str) -> Result<(), String> {
         lpSecurityDescriptor: descriptor.0,
         bInheritHandle: BOOL(0),
     };
-    let name = wide(path)?;
+    let name = wide_path(path)?;
     unsafe { win(CreateDirectoryW(PCWSTR(name.as_ptr()), Some(&attrs))) }
 }
 fn private_sddl(user: &str) -> String {
@@ -297,11 +363,17 @@ fn owned_directory(path: &Path, user: &str) -> Result<File, String> {
 }
 
 fn open_path(path: &Path, directory: bool) -> Result<File, String> {
-    let name = wide(path)?;
+    let name = wide_path(path)?;
     let handle = unsafe {
         win(CreateFileW(
             PCWSTR(name.as_ptr()),
-            FILE_GENERIC_READ.0,
+            // Directory handles anchor relative rename operations. They need
+            // traverse/read-attributes, not directory enumeration/read-data.
+            if directory {
+                FILE_GENERIC_EXECUTE.0
+            } else {
+                FILE_GENERIC_READ.0
+            },
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             None,
             OPEN_EXISTING,
@@ -609,7 +681,7 @@ fn publish_output_cancellable(
     }
     let temporary = parent.join(format!(".ofox-publish-{}", uuid::Uuid::new_v4().simple()));
     let result = (|| {
-        let path = wide(&temporary)?;
+        let path = wide_path(&temporary)?;
         // The staging name is unpublished. Hold its one CREATE_NEW handle
         // through writing, fsync and the final atomic rename; using the general
         // atomic_write here would perform another parent-opening rename while
@@ -651,8 +723,9 @@ fn publish_output_cancellable(
             .as_os_str()
             .encode_wide()
             .collect();
-        let length = (offset_of!(FILE_RENAME_INFO, FileName) + filename.len() * 2)
-            .max(size_of::<FILE_RENAME_INFO>());
+        // The documented allocation is sizeof(struct) plus the name bytes;
+        // keep an additional zero WCHAR for Win32's string conversion too.
+        let length = size_of::<FILE_RENAME_INFO>() + (filename.len() + 1) * 2;
         let mut storage = vec![0usize; length.div_ceil(size_of::<usize>())];
         let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
@@ -719,7 +792,7 @@ impl Drop for PendingOutput {
 }
 
 fn lock_publish_directory(path: &Path) -> Result<File, String> {
-    let name = wide(path)?;
+    let name = wide_path(path)?;
     let owned = unsafe {
         win(CreateFileW(
             PCWSTR(name.as_ptr()),
@@ -766,7 +839,7 @@ fn cache_runtime(
     let digest = tree_digest_at(&source, MAX_TREE_BYTES)?;
     let cap = sid_string(capability.sid)?;
     let expected_acl = format!(
-        "{}(A;OICI;GRGX;;;{cap})S:(ML;OICI;NW;;;ME)",
+        "{}(A;OICI;FRFX;;;{cap})S:(ML;OICI;NW;;;ME)",
         private_sddl(user)
     );
     let mut cached = CACHE
@@ -880,7 +953,7 @@ impl Profile {
         self.pins = pin_ancestors(&path)?;
         self.root_pinned = true;
         self.directory = Some(path.clone());
-        let name = wide(&path)?;
+        let name = wide_path(&path)?;
         // LABEL_SECURITY_INFORMATION requires WRITE_OWNER, which is never
         // requested on an engine-created or caller-supplied object.
         let file = unsafe {
@@ -1813,7 +1886,7 @@ fn aap_read_fixture(path: &Path) -> Result<(), String> {
     let descriptor = security_descriptor(&format!(
         "D:P(A;;FA;;;SY)(A;;FA;;;{user})(A;;GR;;;S-1-15-2-1)"
     ))?;
-    let name = wide(path)?;
+    let name = wide_path(path)?;
     let file = unsafe {
         handle(win(CreateFileW(
             PCWSTR(name.as_ptr()),
