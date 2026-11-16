@@ -290,6 +290,92 @@ fn document_acl_diagnostics_keep_rights_and_flags_without_account_sid_values() {
 }
 
 #[test]
+fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
+    let mut trace = ProbeTrace::new();
+    trace.engine(ProbeStage::NodeIsolation);
+    let private =
+        r"C:\Users\private-account\credentials S-1-5-21-111111-222222-333333-1001 condition-secret";
+    let output = EngineOutput {
+        status: Some(7),
+        stdout: private.into(),
+        stderr: format!("{private}\nOFOX_LPAC_PROBE_STAGE:9\nOFOX_LPAC_PROBE_STAGE:99\nOFOX_LPAC_PROBE_STAGE:{private}\n"),
+        timed_out: false,
+    };
+    assert!(trace.success(output).is_err());
+    let error = trace.failure(
+        private,
+        &["windowsBuild", "nativeCanvas", "condition-secret"],
+    );
+    let detail: serde_json::Value =
+        serde_json::from_str(error.split_once(":probe ").unwrap().1).unwrap();
+    assert_eq!(detail["stage"], "node_isolation");
+    assert_eq!(detail["reason"], "other");
+    assert_eq!(detail["engine"]["status"], 7);
+    assert_eq!(detail["engine"]["timedOut"], false);
+    assert_eq!(detail["engine"]["nodeCheckpointBeforeStep"], 9);
+    assert_eq!(
+        detail["completedChecks"],
+        serde_json::json!(["windowsBuild", "nativeCanvas"])
+    );
+    for secret in [
+        "private-account",
+        "credentials",
+        "111111",
+        "222222",
+        "333333",
+        "condition-secret",
+        "C:\\Users",
+    ] {
+        assert!(!error.contains(secret));
+    }
+    trace.engine(ProbeStage::PythonCreate);
+    assert!(trace
+        .success(EngineOutput {
+            status: None,
+            stdout: String::new(),
+            stderr: private.into(),
+            timed_out: true
+        })
+        .is_err());
+    let error = trace.failure(UNAVAILABLE, &["windowsBuild"]);
+    let detail: serde_json::Value =
+        serde_json::from_str(error.split_once(":probe ").unwrap().1).unwrap();
+    assert_eq!(detail["stage"], "python_create");
+    assert_eq!(detail["engine"]["timedOut"], true);
+    assert_eq!(detail["engine"]["status"], serde_json::Value::Null);
+    assert_eq!(detail["reason"], "process_timeout");
+    assert!(detail["engine"]["nodeCheckpointBeforeStep"].is_null());
+    assert_eq!(
+        detail["completedChecks"],
+        serde_json::json!(["windowsBuild"])
+    );
+}
+
+#[test]
+fn document_fixed_probe_errors_keep_only_numeric_native_statuses() {
+    let trace = ProbeTrace::new();
+    let error = trace.failure("assistant_document_sandbox_win32_80070005_at_123", &[]);
+    let detail: serde_json::Value =
+        serde_json::from_str(error.split_once(":probe ").unwrap().1).unwrap();
+    assert_eq!(detail["native"]["code"], "80070005");
+    assert_eq!(detail["native"]["sourceLine"], 123);
+    let error = trace.failure(
+        "assistant_document_sandbox_win32_80070005_at_123 C:\\private\\secret",
+        &[],
+    );
+    assert!(!error.contains("secret"));
+    assert!(!error.contains("80070005"));
+    let raw = format!("{UNAVAILABLE}:cache_acl_mismatch {{\"actual\":{{\"control\":\"9814\",\"revision\":1,\"private\":\"S-1-5-21-private condition-secret\"}},\"expected\":{{\"control\":\"9014\",\"revision\":1}}}}");
+    let error = trace.failure(&raw, &[]);
+    let detail: serde_json::Value =
+        serde_json::from_str(error.split_once(":probe ").unwrap().1).unwrap();
+    assert_eq!(detail["native"]["actualControl"], "9814");
+    assert_eq!(detail["native"]["expectedControl"], "9014");
+    assert!(!error.contains("private"));
+    assert!(!error.contains("condition-secret"));
+}
+
+#[test]
 fn document_win32_paths_are_lexical_extended_absolute_paths() {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;

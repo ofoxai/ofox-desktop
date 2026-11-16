@@ -2017,31 +2017,46 @@ fn run_blocking(
 // Deliberately embedded trusted code. The acceptance binary never accepts
 // arbitrary Python/JavaScript, host files, gateway URLs, or model credentials.
 const NODE_PROBE: &str = r#"
+const checkpoint = n => console.error('OFOX_LPAC_PROBE_STAGE:' + n);
+checkpoint(1);
 const fs = require('node:fs');
 const assert = require('node:assert/strict');
 const net = require('node:net');
 const cp = require('node:child_process');
 const outside = OUTSIDE_PATH;
 const outsideAap = OUTSIDE_AAP_PATH;
+checkpoint(2);
 assert.equal(process.versions.node, '22.23.4');
+checkpoint(3);
 assert.throws(() => fs.readFileSync(outside));
+checkpoint(4);
 assert.throws(() => fs.readFileSync(outsideAap), 'LPAC read an ALL APPLICATION PACKAGES fixture');
+checkpoint(5);
 assert.throws(() => fs.writeFileSync(outside, 'changed'));
 assert.throws(() => fs.writeFileSync(process.execPath, 'changed'));
+checkpoint(6);
 for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'OFOX_DOCUMENT_PROBE_SECRET'])
   assert.equal(process.env[name], undefined);
+checkpoint(7);
 const spawned = cp.spawnSync(process.execPath, ['-e', "require('node:fs').writeFileSync('child-marker', 'bad')"]);
 assert.ok(spawned.error, 'child process creation was allowed');
 assert.equal(fs.existsSync('child-marker'), false);
 const native = process.argv[1];
+checkpoint(8);
 require(native); // Prove the original binary actually loads before the denial.
+checkpoint(9);
 fs.copyFileSync(native, 'untrusted.node');
+checkpoint(10);
 assert.throws(() => require(require('node:path').resolve('untrusted.node')),
   'a DLL copied into the writable low-label workspace loaded');
+checkpoint(11);
 fs.unlinkSync('untrusted.node');
+checkpoint(12);
 const canvas = require(process.argv[2]).createCanvas(320, 180);
 canvas.getContext('2d').fillText('Windows 中文 日本語', 10, 40);
+checkpoint(13);
 fs.writeFileSync('probe.png', canvas.toBuffer('image/png'));
+checkpoint(14);
 const socket = net.connect({host: '127.0.0.1', port: PROBE_PORT});
 socket.on('connect', () => { console.error('network was allowed'); process.exit(1); });
 socket.on('error', () => { fs.writeFileSync('isolation.json', JSON.stringify({outsideRead:false,outsideWrite:false,child:false,lowImage:false,network:false,canvas:true})); process.exit(0); });
@@ -2089,11 +2104,179 @@ fn aap_read_fixture(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn success(output: EngineOutput) -> Result<EngineOutput, String> {
-    if output.status != Some(0) || output.timed_out {
-        return Err(UNAVAILABLE.into());
+#[derive(Clone, Copy)]
+enum ProbeStage {
+    RuntimeBefore,
+    Setup,
+    NodeIsolation,
+    NodePostconditions,
+    PythonCreate,
+    PythonArtifact,
+    OfficeValidate,
+    OfficeSvg,
+    PythonSourceEdit,
+    SourcePreservation,
+    RuntimeAfter,
+}
+impl ProbeStage {
+    fn name(self) -> &'static str {
+        match self {
+            Self::RuntimeBefore => "runtime_before",
+            Self::Setup => "setup",
+            Self::NodeIsolation => "node_isolation",
+            Self::NodePostconditions => "node_postconditions",
+            Self::PythonCreate => "python_create",
+            Self::PythonArtifact => "python_artifact",
+            Self::OfficeValidate => "office_validate",
+            Self::OfficeSvg => "office_svg",
+            Self::PythonSourceEdit => "python_source_edit",
+            Self::SourcePreservation => "source_preservation",
+            Self::RuntimeAfter => "runtime_after",
+        }
     }
-    Ok(output)
+}
+
+struct ProbeTrace {
+    stage: ProbeStage,
+    started: Instant,
+    stage_started: Instant,
+    timings: Vec<serde_json::Value>,
+    engine: Option<serde_json::Value>,
+}
+impl ProbeTrace {
+    fn new() -> Self {
+        Self {
+            stage: ProbeStage::RuntimeBefore,
+            started: Instant::now(),
+            stage_started: Instant::now(),
+            timings: Vec::new(),
+            engine: None,
+        }
+    }
+    fn enter(&mut self, stage: ProbeStage) {
+        self.timings.push(serde_json::json!({
+            "stage":self.stage.name(), "elapsedMs":self.stage_started.elapsed().as_millis()
+        }));
+        self.stage = stage;
+        self.stage_started = Instant::now();
+    }
+    fn engine(&mut self, stage: ProbeStage) {
+        self.enter(stage);
+        self.engine = None;
+    }
+    fn success(&mut self, output: EngineOutput) -> Result<EngineOutput, String> {
+        // Only our fixed stderr checkpoint grammar is retained. No exception
+        // message, stdout/stderr text, source path, account SID or Python code.
+        let marker = output
+            .stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("OFOX_LPAC_PROBE_STAGE:"))
+            .filter_map(|value| value.parse::<u8>().ok())
+            .rfind(|value| (1..=14).contains(value));
+        self.engine = Some(serde_json::json!({
+            "status":output.status, "timedOut":output.timed_out,
+            "stdoutBytes":output.stdout.len(), "stderrBytes":output.stderr.len(),
+            "nodeCheckpointBeforeStep":marker
+        }));
+        if output.status != Some(0) || output.timed_out {
+            return Err(UNAVAILABLE.into());
+        }
+        Ok(output)
+    }
+    fn failure(&self, error: &str, checks: &[&'static str]) -> String {
+        let mut reason = match error {
+            UNAVAILABLE => "unavailable",
+            UNSAFE_FILE => "unsafe_file_or_io",
+            CANCELLED => "cancelled",
+            RUNTIME_CHANGED => "runtime_changed",
+            "assistant_document_sandbox_cleanup_failed" => "cleanup_failed",
+            "assistant_document_sandbox_unproven_runtime" => "unproven_runtime",
+            _ => "other",
+        };
+        let mut native = None;
+        if error == UNAVAILABLE {
+            if let Some(engine) = &self.engine {
+                if engine["timedOut"] == true {
+                    reason = "process_timeout";
+                } else if engine["status"].as_i64().is_some_and(|status| status != 0) {
+                    reason = "process_exit";
+                }
+            }
+        }
+        let hex = |value: &str| {
+            (value.len() == 8 && value.bytes().all(|c| c.is_ascii_hexdigit()))
+                .then(|| value.to_owned())
+        };
+        if let Some(tail) = error.strip_prefix("assistant_document_sandbox_win32_") {
+            if let Some((code, line)) = tail.split_once("_at_") {
+                if let (Some(code), Ok(line)) = (hex(code), line.parse::<u32>()) {
+                    reason = "win32";
+                    native = Some(serde_json::json!({"code":code,"sourceLine":line}));
+                }
+            }
+        } else if let Some(tail) = error.strip_prefix("assistant_document_sandbox_rename_status_") {
+            if let Some((status, completion)) = tail.split_once("_completion_") {
+                if let (Some(status), Some(completion)) = (hex(status), hex(completion)) {
+                    reason = "rename_status";
+                    native = Some(serde_json::json!({"status":status,"completion":completion}));
+                }
+            }
+        } else if let Some(code) = error.strip_prefix(&format!("{UNAVAILABLE}:cache_acl_query_")) {
+            if let Some(code) = hex(code) {
+                reason = "cache_acl_query";
+                native = Some(serde_json::json!({"code":code}));
+            }
+        } else if let Some(raw) = error.strip_prefix(&format!("{UNAVAILABLE}:cache_acl_mismatch "))
+        {
+            reason = "cache_acl_mismatch";
+            // Keep the original descriptor's numeric control evidence without
+            // forwarding an arbitrary nested JSON/error payload.
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+                let control = |which: &str| {
+                    value[which]["control"].as_str().filter(|code| {
+                        code.len() == 4 && code.bytes().all(|c| c.is_ascii_hexdigit())
+                    })
+                };
+                native = Some(serde_json::json!({
+                    "actualControl":control("actual"), "expectedControl":control("expected"),
+                    "actualRevision":value["actual"]["revision"].as_u64().filter(|n| *n <= u32::MAX as u64),
+                    "expectedRevision":value["expected"]["revision"].as_u64().filter(|n| *n <= u32::MAX as u64)
+                }));
+            }
+        }
+        let allowed = [
+            "windowsBuild",
+            "outsideReadWriteDenied",
+            "allApplicationPackagesReadDenied",
+            "childProcessDenied",
+            "lowImageDenied",
+            "networkDenied",
+            "nativeCanvas",
+            "pythonPptx",
+            "officeValidation",
+            "officeSvg",
+            "frozenSourceEdit",
+        ];
+        let completed: Vec<_> = checks
+            .iter()
+            .filter(|check| allowed.contains(check))
+            .collect();
+        let code = match error {
+            UNSAFE_FILE
+            | CANCELLED
+            | RUNTIME_CHANGED
+            | "assistant_document_sandbox_cleanup_failed" => error,
+            _ => UNAVAILABLE,
+        };
+        let detail = serde_json::json!({
+            "stage":self.stage.name(), "reason":reason, "native":native,
+            "engine":self.engine, "completedChecks":completed,
+            "elapsedMs":self.started.elapsed().as_millis(),
+            "stageElapsedMs":self.stage_started.elapsed().as_millis(),
+            "completedStages":self.timings
+        });
+        format!("{code}:probe {detail}")
+    }
 }
 
 /// Prove both engines and the launcher's negative properties. This function
@@ -2211,40 +2394,48 @@ async fn prove_runtime_locked(
     officecli: &Path,
     checks: &mut Vec<&'static str>,
 ) -> Result<String, String> {
-    let root = runtime_root.to_path_buf();
-    let before = tokio::task::spawn_blocking(move || {
-        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
-    })
-    .await
-    .map_err(|_| UNAVAILABLE.to_owned())??;
-    ADMITTED
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| UNAVAILABLE)?
-        .remove(&before.source);
-    probe_inner(runtime_root, officecli, checks).await?;
-    let root = runtime_root.to_path_buf();
-    let after = tokio::task::spawn_blocking(move || {
-        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
-    })
-    .await
-    .map_err(|_| UNAVAILABLE.to_owned())??;
-    if before.digest != after.digest {
-        return Err(RUNTIME_CHANGED.into());
+    let mut trace = ProbeTrace::new();
+    let result: Result<String, String> = async {
+        let root = runtime_root.to_path_buf();
+        let before = tokio::task::spawn_blocking(move || {
+            cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
+        })
+        .await
+        .map_err(|_| UNAVAILABLE.to_owned())??;
+        ADMITTED
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| UNAVAILABLE)?
+            .remove(&before.source);
+        probe_inner(runtime_root, officecli, checks, &mut trace).await?;
+        trace.engine(ProbeStage::RuntimeAfter);
+        let root = runtime_root.to_path_buf();
+        let after = tokio::task::spawn_blocking(move || {
+            cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
+        })
+        .await
+        .map_err(|_| UNAVAILABLE.to_owned())??;
+        if before.digest != after.digest {
+            return Err(RUNTIME_CHANGED.into());
+        }
+        ADMITTED
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| UNAVAILABLE)?
+            .insert(after.source, after.digest.clone());
+        Ok(after.digest)
     }
-    ADMITTED
-        .get_or_init(Default::default)
-        .lock()
-        .map_err(|_| UNAVAILABLE)?
-        .insert(after.source, after.digest.clone());
-    Ok(after.digest)
+    .await;
+    result.map_err(|error| trace.failure(&error, checks))
 }
 
 async fn probe_inner(
     runtime_root: &Path,
     officecli: &Path,
     checks: &mut Vec<&'static str>,
+    trace: &mut ProbeTrace,
 ) -> Result<(), String> {
+    trace.enter(ProbeStage::Setup);
     os_version()?;
     checks.push("windowsBuild");
     let runtime_root = io(runtime_root.canonicalize())?;
@@ -2281,7 +2472,8 @@ async fn probe_inner(
         .join("runtime/node_modules/@napi-rs/canvas-win32-x64-msvc/skia.win32-x64-msvc.node");
     let canvas = runtime_root.join("runtime/node_modules/@napi-rs/canvas");
     let node = runtime_root.join("node/node.exe");
-    success(
+    trace.engine(ProbeStage::NodeIsolation);
+    trace.success(
         run_candidate(
             &node,
             &[
@@ -2299,6 +2491,7 @@ async fn probe_inner(
         )
         .await?,
     )?;
+    trace.enter(ProbeStage::NodePostconditions);
     if listener.accept().is_ok() || io(fs::read(&outside))? != b"synthetic private data" {
         return Err(UNAVAILABLE.into());
     }
@@ -2324,7 +2517,8 @@ async fn probe_inner(
         "--lint".into(),
         "lint.json".into(),
     ];
-    success(
+    trace.engine(ProbeStage::PythonCreate);
+    trace.success(
         run_candidate(
             &node,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2337,6 +2531,7 @@ async fn probe_inner(
         )
         .await?,
     )?;
+    trace.enter(ProbeStage::PythonArtifact);
     let deck = cwd.join("out.pptx");
     let mut bytes = Vec::new();
     io(open_regular(&cwd, &deck, 25 * 1024 * 1024)?.read_to_end(&mut bytes))?;
@@ -2348,7 +2543,12 @@ async fn probe_inner(
         vec!["validate", "out.pptx", "--json"],
         vec!["view", "out.pptx", "svg", "--start", "1", "--end", "1"],
     ] {
-        let output = success(
+        trace.engine(if args[0] == "validate" {
+            ProbeStage::OfficeValidate
+        } else {
+            ProbeStage::OfficeSvg
+        });
+        let output = trace.success(
             run_candidate(
                 officecli,
                 &args,
@@ -2393,7 +2593,8 @@ async fn probe_inner(
         "--source-meta".into(),
         cwd.join("source-meta.json").to_string_lossy().into_owned(),
     ]);
-    success(
+    trace.engine(ProbeStage::PythonSourceEdit);
+    trace.success(
         run_candidate(
             &node,
             &edit_args.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2406,6 +2607,7 @@ async fn probe_inner(
         )
         .await?,
     )?;
+    trace.enter(ProbeStage::SourcePreservation);
     if io(fs::read(cwd.join("source-deck.pptx")))? != bytes {
         return Err(UNAVAILABLE.into());
     }
