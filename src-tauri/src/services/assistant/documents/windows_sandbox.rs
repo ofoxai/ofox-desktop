@@ -6,18 +6,18 @@
 use super::runner::{EngineOutput, DEAD_PROXY};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::{c_void, OsStr},
     fs::{self, File},
     io::{Read, Write},
-    mem::size_of,
+    mem::{offset_of, size_of},
     os::windows::{
         ffi::OsStrExt,
         io::{AsRawHandle, FromRawHandle, OwnedHandle},
     },
     path::{Component, Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Duration, Instant},
@@ -32,24 +32,28 @@ use windows::{
         },
         Security::{
             Authorization::{
-                ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
-                GetSecurityInfo, SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
+                ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
+                SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
             },
-            DeriveCapabilitySidsFromName, FreeSid, GetSecurityDescriptorSacl, GetSidSubAuthority,
-            GetSidSubAuthorityCount, GetTokenInformation,
+            DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetSecurityDescriptorSacl,
+            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
             Isolation::{
                 CreateAppContainerProfile, DeleteAppContainerProfile, GetAppContainerFolderPath,
             },
-            TokenIntegrityLevel, TokenIsAppContainer, TokenIsLessPrivilegedAppContainer, TokenUser,
+            TokenAppContainerSid, TokenCapabilities, TokenIntegrityLevel, TokenIsAppContainer,
+            TokenIsLessPrivilegedAppContainer, TokenUser, DACL_SECURITY_INFORMATION,
             LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
-            SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SE_GROUP_ENABLED, SID_AND_ATTRIBUTES,
-            TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+            SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SID_AND_ATTRIBUTES,
+            TOKEN_APPCONTAINER_INFORMATION, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+            TOKEN_USER,
         },
         Storage::FileSystem::{
-            CreateDirectoryW, CreateFileW, GetFileInformationByHandle, GetFinalPathNameByHandleW,
-            BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-            FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ,
-            FILE_NAME_NORMALIZED, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            CreateDirectoryW, CreateFileW, FileRenameInfo, GetFileInformationByHandle,
+            GetFinalPathNameByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_NAME_NORMALIZED,
+            FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
         },
         System::{
             Com::CoTaskMemFree,
@@ -62,6 +66,7 @@ use windows::{
             },
             Pipes::CreatePipe,
             SystemInformation::OSVERSIONINFOW,
+            SystemServices::SE_GROUP_ENABLED,
             Threading::{
                 CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
                 GetExitCodeProcess, GetProcessMitigationPolicy, InitializeProcThreadAttributeList,
@@ -92,8 +97,15 @@ const NO_LOW_LABEL_IMAGES: u64 = 1 << 56;
 const PREFER_SYSTEM32: u64 = 1 << 60;
 const RUNTIME_CAPABILITY: &str = "ofoxDocumentRuntimeReadV1";
 
+#[track_caller]
 fn win<T>(result: windows::core::Result<T>) -> Result<T, String> {
-    result.map_err(|_| UNAVAILABLE.to_owned())
+    let line = std::panic::Location::caller().line();
+    result.map_err(|error| {
+        format!(
+            "assistant_document_sandbox_win32_{:08x}_at_{line}",
+            error.code().0 as u32
+        )
+    })
 }
 fn io<T>(result: std::io::Result<T>) -> Result<T, String> {
     result.map_err(|_| UNSAFE_FILE.to_owned())
@@ -329,8 +341,9 @@ fn final_path(file: &File) -> Result<PathBuf, String> {
 /// multi-link files, and bind every ancestor and the opened handle to root.
 /// Ancestor directory handles deny rename while the file is opened.
 pub(crate) fn open_regular(root: &Path, path: &Path, max: u64) -> Result<File, String> {
-    let root_handle = open_path(root, true)?;
-    let physical_root = final_path(&root_handle)?;
+    let mut directories = pin_ancestors(root)?;
+    let root_handle = directories.last().ok_or(UNSAFE_FILE)?;
+    let physical_root = final_path(root_handle)?;
     let relative = path
         .strip_prefix(root)
         .map_err(|_| UNSAFE_FILE.to_owned())?;
@@ -338,7 +351,6 @@ pub(crate) fn open_regular(root: &Path, path: &Path, max: u64) -> Result<File, S
     if parts.is_empty() || parts.iter().any(|c| !matches!(c, Component::Normal(_))) {
         return Err(UNSAFE_FILE.into());
     }
-    let mut directories = vec![root_handle];
     let mut cursor = root.to_path_buf();
     for part in &parts[..parts.len() - 1] {
         cursor.push(part.as_os_str());
@@ -356,14 +368,82 @@ pub(crate) fn open_regular(root: &Path, path: &Path, max: u64) -> Result<File, S
     Ok(file)
 }
 
+/// Do not trust a lexically normal parent reached through a junction higher
+/// in the path. Keep every ancestor handle open through extraction/cleanup.
+fn pin_ancestors(path: &Path) -> Result<Vec<File>, String> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|part| matches!(part, Component::ParentDir | Component::CurDir))
+    {
+        return Err(UNSAFE_FILE.into());
+    }
+    let ancestors: Vec<_> = path
+        .ancestors()
+        .filter(|p| !p.as_os_str().is_empty())
+        .collect();
+    ancestors
+        .into_iter()
+        .rev()
+        .map(|p| open_path(p, true))
+        .collect()
+}
+
+fn descriptor_string(descriptor: PSECURITY_DESCRIPTOR) -> Result<String, String> {
+    let mut text = PWSTR::null();
+    unsafe {
+        win(ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            &mut text,
+            None,
+        ))?;
+        let allocation = Local(text.0.cast());
+        let result = text.to_string().map_err(|_| UNAVAILABLE.to_owned());
+        drop(allocation);
+        result
+    }
+}
+fn verify_cache_acl(root: &File, expected: &str) -> Result<(), String> {
+    let mut actual = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        GetSecurityInfo(
+            HANDLE(root.as_raw_handle()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            Some(&mut actual),
+        )
+        .ok()
+        .map_err(|_| UNAVAILABLE.to_owned())?;
+    }
+    let allocation = Local(actual.0);
+    let expected = security_descriptor(expected)?;
+    let matches =
+        descriptor_string(actual)? == descriptor_string(PSECURITY_DESCRIPTOR(expected.0))?;
+    drop(allocation);
+    if !matches {
+        return Err(UNAVAILABLE.into());
+    }
+    Ok(())
+}
+
 fn files(root: &Path, max: u64) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     let _pin = open_path(root, true)?;
     let mut pending = vec![root.to_path_buf()];
-    let (mut result, mut total) = (Vec::new(), 0u64);
+    let (mut result, mut total, mut entries) = (Vec::new(), 0u64, 0usize);
     while let Some(directory) = pending.pop() {
         let _directory = open_path(&directory, true)?;
         for item in io(fs::read_dir(&directory))? {
             let item = io(item)?;
+            entries += 1;
+            if entries > MAX_TREE_FILES {
+                return Err(UNSAFE_FILE.into());
+            }
             let metadata = io(fs::symlink_metadata(item.path()))?;
             use std::os::windows::fs::MetadataExt;
             if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
@@ -407,6 +487,69 @@ fn tree_digest(files: &[(PathBuf, Vec<u8>)]) -> String {
     }
     format!("{:x}", hash.finalize())
 }
+
+/// Hash warm public resources without retaining a second whole runtime in RAM.
+fn tree_digest_at(root: &Path, max: u64) -> Result<String, String> {
+    let _pins = pin_ancestors(root)?;
+    let (mut pending, mut names, mut entries) = (vec![root.to_path_buf()], Vec::new(), 0usize);
+    while let Some(directory) = pending.pop() {
+        let _directory = open_path(&directory, true)?;
+        for item in io(fs::read_dir(&directory))? {
+            let item = io(item)?;
+            entries += 1;
+            if entries > MAX_TREE_FILES {
+                return Err(UNSAFE_FILE.into());
+            }
+            let metadata = io(fs::symlink_metadata(item.path()))?;
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+                return Err(UNSAFE_FILE.into());
+            }
+            if metadata.is_dir() {
+                pending.push(item.path());
+            } else if metadata.is_file() {
+                names.push(
+                    item.path()
+                        .strip_prefix(root)
+                        .map_err(|_| UNSAFE_FILE)?
+                        .to_path_buf(),
+                );
+            } else {
+                return Err(UNSAFE_FILE.into());
+            }
+        }
+    }
+    names.sort();
+    let (mut hash, mut total, mut chunk) = (Sha256::new(), 0u64, [0u8; 64 * 1024]);
+    for relative in names {
+        let mut file = open_regular(root, &root.join(&relative), max)?;
+        let length = io(file.metadata())?.len();
+        total = total.checked_add(length).ok_or(UNSAFE_FILE)?;
+        if total > max {
+            return Err(UNSAFE_FILE.into());
+        }
+        let name = relative.to_string_lossy();
+        hash.update((name.len() as u64).to_le_bytes());
+        hash.update(name.as_bytes());
+        hash.update(length.to_le_bytes());
+        let mut read = 0u64;
+        loop {
+            let n = io(file.read(&mut chunk))?;
+            if n == 0 {
+                break;
+            }
+            read = read.checked_add(n as u64).ok_or(UNSAFE_FILE)?;
+            if read > length {
+                return Err(UNSAFE_FILE.into());
+            }
+            hash.update(&chunk[..n]);
+        }
+        if read != length {
+            return Err(UNSAFE_FILE.into());
+        }
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
 fn write_files(root: &Path, contents: &[(PathBuf, Vec<u8>)]) -> Result<(), String> {
     for (relative, bytes) in contents {
         let path = root.join(relative);
@@ -422,6 +565,120 @@ fn write_files(root: &Path, contents: &[(PathBuf, Vec<u8>)]) -> Result<(), Strin
     Ok(())
 }
 
+fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parts: Vec<_> = relative.components().collect();
+    if parts.is_empty() || parts.iter().any(|part| !matches!(part, Component::Normal(name) if !name.to_string_lossy().contains(':'))) {
+        return Err(UNSAFE_FILE.into());
+    }
+    let mut pins = pin_ancestors(root)?;
+    let physical_root = final_path(pins.last().ok_or(UNSAFE_FILE)?)?;
+    // While path-based atomic_write creates the fresh temporary sibling, do
+    // not permit another writer to turn its parent into a reparse point.
+    pins.push(lock_publish_directory(root)?);
+    let mut parent = root.to_path_buf();
+    for part in &parts[..parts.len() - 1] {
+        parent.push(part.as_os_str());
+        if !parent.exists() {
+            io(fs::create_dir(&parent))?;
+        }
+        let pin = lock_publish_directory(&parent)?;
+        if !final_path(&pin)?.starts_with(&physical_root) {
+            return Err(UNSAFE_FILE.into());
+        }
+        pins.push(pin);
+    }
+    let destination = root.join(relative);
+    if destination.exists() {
+        let _checked = open_regular(root, &destination, MAX_TASK_BYTES)?;
+    }
+    let temporary = parent.join(format!(".ofox-publish-{}", uuid::Uuid::new_v4().simple()));
+    // atomic_write sees only a fresh unpredictable staging name, never an
+    // engine-controlled final name (it intentionally follows user symlinks).
+    crate::config::atomic_write(&temporary, bytes).map_err(|_| UNSAFE_FILE.to_owned())?;
+    let result = (|| {
+        let checked = open_regular(root, &temporary, MAX_TASK_BYTES)?;
+        drop(checked);
+        let path = wide(&temporary)?;
+        let owned = unsafe {
+            handle(win(CreateFileW(
+                PCWSTR(path.as_ptr()),
+                FILE_GENERIC_READ.0 | 0x10000,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            ))?)
+        };
+        let filename: Vec<u16> = parts
+            .last()
+            .ok_or(UNSAFE_FILE)?
+            .as_os_str()
+            .encode_wide()
+            .collect();
+        let length = offset_of!(FILE_RENAME_INFO, FileName) + filename.len() * 2;
+        let mut storage = vec![
+            0usize;
+            length
+                .max(size_of::<FILE_RENAME_INFO>())
+                .div_ceil(size_of::<usize>())
+        ];
+        let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*rename).Anonymous.ReplaceIfExists = true;
+            (*rename).RootDirectory = HANDLE(pins.last().ok_or(UNSAFE_FILE)?.as_raw_handle());
+            (*rename).FileNameLength = (filename.len() * 2) as u32;
+            std::ptr::copy_nonoverlapping(
+                filename.as_ptr(),
+                std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(),
+                filename.len(),
+            );
+            win(SetFileInformationByHandle(
+                raw(&owned),
+                FileRenameInfo,
+                rename.cast(),
+                length as u32,
+            ))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    // pins survive until the atomic, directory-relative final rename completes.
+    drop(pins);
+    result
+}
+
+fn lock_publish_directory(path: &Path) -> Result<File, String> {
+    let name = wide(path)?;
+    let owned = unsafe {
+        win(CreateFileW(
+            PCWSTR(name.as_ptr()),
+            FILE_GENERIC_READ.0,
+            FILE_SHARE_READ,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        ))?
+    };
+    let file = unsafe { File::from_raw_handle(owned.0) };
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        win(GetFileInformationByHandle(
+            HANDLE(file.as_raw_handle()),
+            &mut information,
+        ))?;
+    }
+    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+    {
+        return Err(UNSAFE_FILE.into());
+    }
+    Ok(file)
+}
+
 #[derive(Clone)]
 struct CachedRuntime {
     source: PathBuf,
@@ -429,22 +686,33 @@ struct CachedRuntime {
     digest: String,
 }
 static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLock::new();
+static ADMITTED: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
 fn cache_runtime(
     source: &Path,
     capability: &RuntimeCapability,
     user: &str,
 ) -> Result<CachedRuntime, String> {
     let source = io(source.canonicalize())?;
+    let digest = tree_digest_at(&source, MAX_TREE_BYTES)?;
+    let cap = sid_string(capability.sid)?;
+    let expected_acl = format!(
+        "{}(A;OICI;GRGX;;;{cap})S:(ML;OICI;NW;;;ME)",
+        private_sddl(user)
+    );
     let mut cached = CACHE
         .get_or_init(Default::default)
         .lock()
         .map_err(|_| UNAVAILABLE)?;
     if let Some(runtime) = cached.get(&source) {
-        let _pin = owned_directory(&runtime.root, user)?;
-        return Ok(runtime.clone());
+        if runtime.digest == digest {
+            let pin = owned_directory(&runtime.root, user)?;
+            verify_cache_acl(&pin, &expected_acl)?;
+            if tree_digest_at(&runtime.root, MAX_TREE_BYTES)? != digest {
+                return Err(UNSAFE_FILE.into());
+            }
+            return Ok(runtime.clone());
+        }
     }
-    let contents = files(&source, MAX_TREE_BYTES)?;
-    let digest = tree_digest(&contents);
     let private_parent = std::env::temp_dir().join(format!(
         "ofox-document-runtime-{}",
         &format!("{:x}", Sha256::digest(user.as_bytes()))[..16]
@@ -453,22 +721,36 @@ fn cache_runtime(
         create_directory(&private_parent, &private_sddl(user))?;
     }
     let _parent = owned_directory(&private_parent, user)?;
-    // A fresh immutable directory per process prevents adopting unknown ACLs
-    // or concurrently replacing a cache another Desktop instance is using.
-    let root = private_parent.join(format!("{digest}-{}", uuid::Uuid::new_v4().simple()));
-    let cap = sid_string(capability.sid)?;
-    create_directory(
-        &root,
-        &format!(
-            "{}(A;OICI;GRGX;;;{cap})S:(ML;OICI;NW;;;ME)",
-            private_sddl(user)
-        ),
-    )?;
-    if let Err(error) = write_files(&root, &contents) {
-        let _ = fs::remove_dir_all(&root);
-        return Err(error);
+    let root = private_parent.join(&digest);
+    if !root.exists() {
+        let contents = files(&source, MAX_TREE_BYTES)?;
+        if tree_digest(&contents) != digest {
+            return Err("assistant_document_sandbox_runtime_changed".into());
+        }
+        let staging = private_parent.join(format!("staging-{}", uuid::Uuid::new_v4().simple()));
+        create_directory(&staging, &expected_acl)?;
+        let prepared = write_files(&staging, &contents).and_then(|()| {
+            if tree_digest_at(&staging, MAX_TREE_BYTES)? != digest {
+                return Err(UNSAFE_FILE.into());
+            }
+            Ok(())
+        });
+        if let Err(error) = prepared {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        if fs::rename(&staging, &root).is_err() {
+            let _ = fs::remove_dir_all(&staging);
+            // A concurrent complete publisher is acceptable only after all
+            // the same ownership, ACL and content checks below.
+            if !root.exists() {
+                return Err(UNAVAILABLE.into());
+            }
+        }
     }
-    if tree_digest(&files(&root, MAX_TREE_BYTES)?) != digest {
+    let root_handle = owned_directory(&root, user)?;
+    verify_cache_acl(&root_handle, &expected_acl)?;
+    if tree_digest_at(&root, MAX_TREE_BYTES)? != digest {
         return Err(UNSAFE_FILE.into());
     }
     let runtime = CachedRuntime {
@@ -483,6 +765,8 @@ fn cache_runtime(
 struct Profile {
     name: Vec<u16>,
     sid: Sid,
+    directory: Option<PathBuf>,
+    pins: Vec<File>,
 }
 impl Profile {
     fn new(capability: &RuntimeCapability) -> Result<Self, String> {
@@ -499,9 +783,11 @@ impl Profile {
         Ok(Self {
             name,
             sid: Sid(sid),
+            directory: None,
+            pins: Vec::new(),
         })
     }
-    fn make_low_profile(&self) -> Result<(), String> {
+    fn make_low_profile(&mut self) -> Result<(), String> {
         let sid = wide(sid_string(self.sid.0)?)?;
         let folder = unsafe { win(GetAppContainerFolderPath(PCWSTR(sid.as_ptr())))? };
         let result = unsafe { folder.to_string().map_err(|_| UNAVAILABLE.to_owned()) };
@@ -509,8 +795,16 @@ impl Profile {
             CoTaskMemFree(Some(folder.0.cast()));
         }
         let path = PathBuf::from(result?);
+        if !path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("AC"))
+        {
+            return Err(UNAVAILABLE.into());
+        }
+        let path = path.parent().ok_or(UNAVAILABLE)?.to_path_buf();
         // Profile is freshly created, before untrusted code can plant links.
-        let _pin = open_path(&path, true)?;
+        self.pins = pin_ancestors(&path)?;
+        self.directory = Some(path.clone());
         let name = wide(&path)?;
         // LABEL_SECURITY_INFORMATION requires WRITE_OWNER, which is never
         // requested on an engine-created or caller-supplied object.
@@ -551,15 +845,26 @@ impl Profile {
 }
 impl Drop for Profile {
     fn drop(&mut self) {
+        if let Some(directory) = &self.directory {
+            // std's Windows remove_dir_all unlinks junctions/reparse points;
+            // it does not traverse them. Release only this root's delete lock,
+            // keeping all its ancestors pinned until cleanup is complete.
+            self.pins.pop();
+            if fs::remove_dir_all(directory).is_err() {
+                log::warn!("[Assistant] document sandbox profile cleanup incomplete");
+                return;
+            }
+        }
         unsafe {
             let _ = DeleteAppContainerProfile(PCWSTR(self.name.as_ptr()));
         }
     }
 }
 
-struct TaskDirectory(PathBuf);
+struct TaskDirectory(PathBuf, Vec<File>);
 impl Drop for TaskDirectory {
     fn drop(&mut self) {
+        self.1.pop();
         let _ = fs::remove_dir_all(&self.0);
     }
 }
@@ -577,7 +882,8 @@ fn task_directory(user: &str, sid: PSID) -> Result<TaskDirectory, String> {
             private_sddl(user)
         ),
     )?;
-    Ok(TaskDirectory(path))
+    let pins = pin_ancestors(&path)?;
+    Ok(TaskDirectory(path, pins))
 }
 
 fn os_version() -> Result<OSVERSIONINFOW, String> {
@@ -746,7 +1052,7 @@ impl Drop for Process {
         }
     }
 }
-fn verify_token(process: HANDLE) -> Result<(), String> {
+fn verify_token(process: HANDLE, package: PSID, capability: PSID) -> Result<(), String> {
     let mut token = HANDLE::default();
     unsafe {
         win(OpenProcessToken(process, TOKEN_QUERY, &mut token))?;
@@ -756,6 +1062,23 @@ fn verify_token(process: HANDLE) -> Result<(), String> {
         if token_buffer(raw(&token), kind)?[0] as u32 != 1 {
             return Err(UNAVAILABLE.into());
         }
+    }
+    let package_data = token_buffer(raw(&token), TokenAppContainerSid)?;
+    let actual_package = unsafe {
+        &*package_data
+            .as_ptr()
+            .cast::<TOKEN_APPCONTAINER_INFORMATION>()
+    };
+    unsafe {
+        win(EqualSid(actual_package.TokenAppContainer, package))?;
+    }
+    let capabilities = token_buffer(raw(&token), TokenCapabilities)?;
+    let groups = unsafe { &*capabilities.as_ptr().cast::<TOKEN_GROUPS>() };
+    if groups.GroupCount != 1 {
+        return Err(UNAVAILABLE.into());
+    }
+    unsafe {
+        win(EqualSid(groups.Groups[0].Sid, capability))?;
     }
     let data = token_buffer(raw(&token), TokenIntegrityLevel)?;
     let label = unsafe { &*data.as_ptr().cast::<TOKEN_MANDATORY_LABEL>() };
@@ -813,6 +1136,7 @@ fn drain(handle: OwnedHandle, limit: usize) -> std::sync::mpsc::Receiver<Vec<u8>
     });
     recv
 }
+#[allow(clippy::too_many_arguments)]
 fn launch(
     exe: &Path,
     args: &[String],
@@ -917,7 +1241,7 @@ fn launch(
             raw(&process.process),
         ))?;
     }
-    verify_token(raw(&process.process))?;
+    verify_token(raw(&process.process), profile.sid.0, cap.sid)?;
     if unsafe { ResumeThread(raw(&thread)) } == u32::MAX {
         return Err(UNAVAILABLE.into());
     }
@@ -942,7 +1266,10 @@ fn remap(
     if !path.is_absolute() {
         return Ok(value.to_owned());
     }
-    for (from, to) in [(&runtime.source, &runtime.root), (source, task)] {
+    for (from, to) in [
+        (runtime.source.as_path(), runtime.root.as_path()),
+        (source, task),
+    ] {
         if let Ok(relative) = path.strip_prefix(from) {
             return Ok(to.join(relative).to_string_lossy().into_owned());
         }
@@ -970,8 +1297,27 @@ impl Drop for CancelOnDrop {
     }
 }
 
+static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static RUN_RECEIPTS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::new();
+/// In-memory evidence for native acceptance. A platform cfg or a successful
+/// fallback cannot manufacture one of these receipts. Retain only 512 runs.
+pub fn windows_document_sandbox_receipts(after_sequence: u64) -> Vec<serde_json::Value> {
+    RUN_RECEIPTS
+        .get_or_init(Default::default)
+        .lock()
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| item["sequence"].as_u64().unwrap_or_default() > after_sequence)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Same result/limits as the ordinary runner, with a mandatory LPAC boundary.
 /// The sandbox never receives ACL access to the host's original document tree.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_windows_engine_limited(
     exe: &Path,
     args: &[&str],
@@ -980,6 +1326,20 @@ pub async fn run_windows_engine_limited(
     read_root: &Path,
     timeout: Duration,
     limit: usize,
+) -> Result<EngineOutput, String> {
+    run_candidate(exe, args, cwd, home, read_root, timeout, limit, false).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_candidate(
+    exe: &Path,
+    args: &[&str],
+    cwd: &Path,
+    home: &Path,
+    read_root: &Path,
+    timeout: Duration,
+    limit: usize,
+    trusted_probe: bool,
 ) -> Result<EngineOutput, String> {
     let (exe, args, cwd, home, root) = (
         exe.to_path_buf(),
@@ -991,7 +1351,17 @@ pub async fn run_windows_engine_limited(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = CancelOnDrop(cancelled.clone());
     let answer = tokio::task::spawn_blocking(move || {
-        run_blocking(&exe, &args, &cwd, &home, &root, timeout, limit, &cancelled)
+        run_blocking(
+            &exe,
+            &args,
+            &cwd,
+            &home,
+            &root,
+            timeout,
+            limit,
+            &cancelled,
+            trusted_probe,
+        )
     })
     .await
     .map_err(|_| UNAVAILABLE.to_owned())?;
@@ -1008,11 +1378,21 @@ fn run_blocking(
     timeout: Duration,
     limit: usize,
     cancelled: &AtomicBool,
+    trusted_probe: bool,
 ) -> Result<EngineOutput, String> {
     os_version()?;
     let user = current_user()?;
     let capability = RuntimeCapability::new()?;
     let runtime = cache_runtime(read_root, &capability, &user)?;
+    if !trusted_probe {
+        let admitted = ADMITTED
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| UNAVAILABLE)?;
+        if admitted.get(&runtime.source) != Some(&runtime.digest) {
+            return Err("assistant_document_sandbox_unproven_runtime".into());
+        }
+    }
     let cwd = io(cwd.canonicalize())?;
     let home = io(home.canonicalize())?;
     let home_relative = home
@@ -1025,7 +1405,7 @@ fn run_blocking(
         return Err(UNSAFE_FILE.into());
     }
     let inputs = files(&cwd, MAX_TASK_BYTES)?;
-    let profile = Profile::new(&capability)?;
+    let mut profile = Profile::new(&capability)?;
     profile.make_low_profile()?;
     let task = task_directory(&user, profile.sid.0)?;
     write_files(&task.0, &inputs)?;
@@ -1080,18 +1460,25 @@ fn run_blocking(
     if unsafe { WaitForSingleObject(raw(&launched.process.process), 5000) } != WAIT_OBJECT_0 {
         return Err(UNAVAILABLE.into());
     }
-    let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-    unsafe {
-        win(QueryInformationJobObject(
-            Some(raw(&launched.process.job)),
-            JobObjectBasicAccountingInformation,
-            (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-            size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-            None,
-        ))?;
-    }
-    if accounting.ActiveProcesses != 0 {
-        return Err(UNAVAILABLE.into());
+    let stopped_by = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            win(QueryInformationJobObject(
+                Some(raw(&launched.process.job)),
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            ))?;
+        }
+        if accounting.ActiveProcesses == 0 {
+            break;
+        }
+        if Instant::now() >= stopped_by {
+            return Err(UNAVAILABLE.into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
     let stdout = launched
         .stdout
@@ -1105,19 +1492,27 @@ fn run_blocking(
         let outputs = files(&task.0, MAX_TASK_BYTES)?;
         // Original cwd is never granted to the LPAC. Keep its directory handle
         // pinned, and reject pre-existing aliases before atomic replacement.
-        let _destination = open_path(&cwd, true)?;
+        let _destination = pin_ancestors(&cwd)?;
         for (relative, bytes) in outputs {
             if relative.starts_with(home_relative) {
                 continue;
             }
-            let into = cwd.join(&relative);
-            if into.exists() {
-                let _ = open_regular(&cwd, &into, MAX_TASK_BYTES)?;
-            }
-            if let Some(parent) = into.parent() {
-                io(fs::create_dir_all(parent))?;
-            }
-            crate::config::atomic_write(&into, &bytes).map_err(|_| UNSAFE_FILE.to_owned())?;
+            publish_output(&cwd, &relative, &bytes)?;
+        }
+    }
+    let receipt = serde_json::json!({
+        "sequence":RUN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1,
+        "runId":uuid::Uuid::new_v4().to_string(), "runtimeSha256":runtime.digest,
+        "executable":actual_exe.strip_prefix(&runtime.root).map_err(|_| UNSAFE_FILE)?.to_string_lossy(),
+        "policy":"lpac-v1", "tokenVerified":true, "childProcessDenied":true,
+        "lowImageDenied":true, "jobStopped":true, "timedOut":timed_out,
+        "trustedProbe":trusted_probe,
+        "status":(!timed_out).then_some(status as i32)
+    });
+    if let Ok(mut receipts) = RUN_RECEIPTS.get_or_init(Default::default).lock() {
+        receipts.push_back(receipt);
+        if receipts.len() > 512 {
+            receipts.pop_front();
         }
     }
     drop(launched);
@@ -1177,7 +1572,82 @@ pub async fn probe_windows_document_engines(
     runtime_root: &Path,
     officecli: &Path,
 ) -> Result<(), String> {
-    probe_inner(runtime_root, officecli, &mut Vec::new()).await
+    prove_runtime(runtime_root, officecli, &mut Vec::new())
+        .await
+        .map(|_| ())
+}
+
+/// Call before bootstrap/send. The returned digest identifies the exact public
+/// bytes whose positive and negative native probes passed.
+pub async fn ensure_windows_document_engine_ready(runtime_root: &Path) -> Result<String, String> {
+    let root = runtime_root.to_path_buf();
+    let runtime = tokio::task::spawn_blocking(move || {
+        os_version()?;
+        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
+    })
+    .await
+    .map_err(|_| UNAVAILABLE.to_owned())??;
+    let ready = ADMITTED
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .get(&runtime.source)
+        == Some(&runtime.digest);
+    if ready {
+        return Ok(runtime.digest);
+    }
+    prove_runtime(
+        runtime_root,
+        &runtime_root.join("engines/officecli/officecli.exe"),
+        &mut Vec::new(),
+    )
+    .await
+}
+
+/// Presentation hint only. Actual execution always hashes the bytes again and
+/// requires a matching proof, even if this remembered hint is true.
+pub fn windows_document_engine_proven(runtime_root: &Path) -> bool {
+    let Ok(root) = runtime_root.canonicalize() else {
+        return false;
+    };
+    ADMITTED
+        .get_or_init(Default::default)
+        .lock()
+        .is_ok_and(|proofs| proofs.contains_key(&root))
+}
+
+async fn prove_runtime(
+    runtime_root: &Path,
+    officecli: &Path,
+    checks: &mut Vec<&'static str>,
+) -> Result<String, String> {
+    let root = runtime_root.to_path_buf();
+    let before = tokio::task::spawn_blocking(move || {
+        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
+    })
+    .await
+    .map_err(|_| UNAVAILABLE.to_owned())??;
+    ADMITTED
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .remove(&before.source);
+    probe_inner(runtime_root, officecli, checks).await?;
+    let root = runtime_root.to_path_buf();
+    let after = tokio::task::spawn_blocking(move || {
+        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
+    })
+    .await
+    .map_err(|_| UNAVAILABLE.to_owned())??;
+    if before.digest != after.digest {
+        return Err("assistant_document_sandbox_runtime_changed".into());
+    }
+    ADMITTED
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .insert(after.source, after.digest.clone());
+    Ok(after.digest)
 }
 
 async fn probe_inner(
@@ -1215,7 +1685,7 @@ async fn probe_inner(
     let canvas = runtime_root.join("runtime/node_modules/@napi-rs/canvas");
     let node = runtime_root.join("node/node.exe");
     success(
-        run_windows_engine_limited(
+        run_candidate(
             &node,
             &[
                 "-e",
@@ -1228,6 +1698,7 @@ async fn probe_inner(
             &runtime_root,
             Duration::from_secs(30),
             16 * 1024,
+            true,
         )
         .await?,
     )?;
@@ -1256,7 +1727,7 @@ async fn probe_inner(
         "lint.json".into(),
     ];
     success(
-        run_windows_engine_limited(
+        run_candidate(
             &node,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
             &cwd,
@@ -1264,6 +1735,7 @@ async fn probe_inner(
             &runtime_root,
             Duration::from_secs(90),
             16 * 1024,
+            true,
         )
         .await?,
     )?;
@@ -1279,7 +1751,7 @@ async fn probe_inner(
         vec!["view", "out.pptx", "svg", "--start", "1", "--end", "1"],
     ] {
         let output = success(
-            run_windows_engine_limited(
+            run_candidate(
                 officecli,
                 &args,
                 &cwd,
@@ -1287,6 +1759,7 @@ async fn probe_inner(
                 &runtime_root,
                 Duration::from_secs(60),
                 4 * 1024 * 1024,
+                true,
             )
             .await?,
         )?;
@@ -1323,7 +1796,7 @@ async fn probe_inner(
         cwd.join("source-meta.json").to_string_lossy().into_owned(),
     ]);
     success(
-        run_windows_engine_limited(
+        run_candidate(
             &node,
             &edit_args.iter().map(String::as_str).collect::<Vec<_>>(),
             &cwd,
@@ -1331,6 +1804,7 @@ async fn probe_inner(
             &runtime_root,
             Duration::from_secs(90),
             16 * 1024,
+            true,
         )
         .await?,
     )?;
@@ -1346,7 +1820,7 @@ async fn probe_inner(
 pub async fn verify_windows_document_engines(runtime_root: &Path) -> serde_json::Value {
     let version = os_version().ok();
     let mut checks = Vec::new();
-    let result = probe_inner(
+    let result = prove_runtime(
         runtime_root,
         &runtime_root.join("engines/officecli/officecli.exe"),
         &mut checks,

@@ -41,6 +41,7 @@ foreach ($file in Get-ChildItem -LiteralPath $bundle -Recurse -File -Force) {
   if ($relative -ne 'acceptance-manifest.json' -and -not $seen.ContainsKey($relative)) { throw "Unlisted package file" }
 }
 if (-not $OutDirectory) { $OutDirectory = Join-Path ([IO.Path]::GetTempPath()) ("OfoxDocumentCheck-" + [Guid]::NewGuid().ToString('N')) }
+$OutDirectory = [IO.Path]::GetFullPath($OutDirectory)
 if (Test-Path -LiteralPath $OutDirectory) { throw "Use a new output directory to preserve earlier evidence" }
 New-Item -ItemType Directory -Path $OutDirectory | Out-Null
 $report = Join-Path $OutDirectory 'probe.json'
