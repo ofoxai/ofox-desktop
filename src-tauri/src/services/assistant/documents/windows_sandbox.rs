@@ -36,8 +36,9 @@ use windows::{
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
                 SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
             },
-            DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetSecurityDescriptorSacl,
-            GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation,
+            DeriveCapabilitySidsFromName, EqualSid, FreeSid, GetSecurityDescriptorDacl,
+            GetSecurityDescriptorSacl, GetSidSubAuthority, GetSidSubAuthorityCount,
+            GetTokenInformation,
             Isolation::{
                 CreateAppContainerProfile, DeleteAppContainerProfile, GetAppContainerFolderPath,
             },
@@ -49,11 +50,13 @@ use windows::{
             TOKEN_USER,
         },
         Storage::FileSystem::{
-            CreateDirectoryW, CreateFileW, FileRenameInfo, GetFileInformationByHandle,
-            GetFinalPathNameByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
-            FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
-            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_NAME_NORMALIZED,
-            FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+            CreateDirectoryW, CreateFileW, FileDispositionInfo, FileRenameInfo,
+            GetFileInformationByHandle, GetFinalPathNameByHandleW, SetFileInformationByHandle,
+            BY_HANDLE_FILE_INFORMATION, CREATE_NEW, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+            FILE_NAME_NORMALIZED, FILE_RENAME_INFO, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING,
         },
         System::{
             Com::CoTaskMemFree,
@@ -262,7 +265,9 @@ fn create_directory(path: &Path, sddl: &str) -> Result<(), String> {
     unsafe { win(CreateDirectoryW(PCWSTR(name.as_ptr()), Some(&attrs))) }
 }
 fn private_sddl(user: &str) -> String {
-    format!("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
+    // Elevated/Server tokens may default newly created objects to an admin
+    // group owner. Bind ownership to the actual caller SID explicitly.
+    format!("O:{user}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;{user})")
 }
 fn owned_directory(path: &Path, user: &str) -> Result<File, String> {
     let file = open_path(path, true)?;
@@ -572,57 +577,73 @@ fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), Stri
     }
     let mut pins = pin_ancestors(root)?;
     let physical_root = final_path(pins.last().ok_or(UNSAFE_FILE)?)?;
-    // While path-based atomic_write creates the fresh temporary sibling, do
+    // While path-based CREATE_NEW creates the fresh temporary sibling, do
     // not permit another writer to turn its parent into a reparse point.
-    pins.push(lock_publish_directory(root)?);
+    let mut write_locks = vec![lock_publish_directory(root)?];
     let mut parent = root.to_path_buf();
     for part in &parts[..parts.len() - 1] {
         parent.push(part.as_os_str());
         if !parent.exists() {
             io(fs::create_dir(&parent))?;
         }
-        let pin = lock_publish_directory(&parent)?;
+        let pin = open_path(&parent, true)?;
         if !final_path(&pin)?.starts_with(&physical_root) {
             return Err(UNSAFE_FILE.into());
         }
         pins.push(pin);
+        write_locks.push(lock_publish_directory(&parent)?);
     }
     let destination = root.join(relative);
     if destination.exists() {
         let _checked = open_regular(root, &destination, MAX_TASK_BYTES)?;
     }
     let temporary = parent.join(format!(".ofox-publish-{}", uuid::Uuid::new_v4().simple()));
-    // atomic_write sees only a fresh unpredictable staging name, never an
-    // engine-controlled final name (it intentionally follows user symlinks).
-    crate::config::atomic_write(&temporary, bytes).map_err(|_| UNSAFE_FILE.to_owned())?;
     let result = (|| {
-        let checked = open_regular(root, &temporary, MAX_TASK_BYTES)?;
-        drop(checked);
         let path = wide(&temporary)?;
-        let owned = unsafe {
-            handle(win(CreateFileW(
+        // The staging name is unpublished. Hold its one CREATE_NEW handle
+        // through writing, fsync and the final atomic rename; using the general
+        // atomic_write here would perform another parent-opening rename while
+        // the temporary write-denying directory guards are still held.
+        let created = unsafe {
+            win(CreateFileW(
                 PCWSTR(path.as_ptr()),
-                FILE_GENERIC_READ.0 | 0x10000,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_GENERIC_READ.0 | FILE_GENERIC_WRITE.0 | 0x10000,
+                FILE_SHARE_READ,
                 None,
-                OPEN_EXISTING,
+                CREATE_NEW,
                 FILE_FLAG_OPEN_REPARSE_POINT,
                 None,
-            ))?)
+            ))?
         };
+        let mut owned = PendingOutput {
+            file: unsafe { File::from_raw_handle(created.0) },
+            committed: false,
+        };
+        io(owned.file.write_all(bytes))?;
+        io(owned.file.sync_all())?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            win(GetFileInformationByHandle(
+                HANDLE(owned.file.as_raw_handle()),
+                &mut info,
+            ))?;
+        }
+        if info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT.0 | FILE_ATTRIBUTE_DIRECTORY.0)
+            != 0
+            || info.nNumberOfLinks != 1
+            || !final_path(&owned.file)?.starts_with(&physical_root)
+        {
+            return Err(UNSAFE_FILE.into());
+        }
         let filename: Vec<u16> = parts
             .last()
             .ok_or(UNSAFE_FILE)?
             .as_os_str()
             .encode_wide()
             .collect();
-        let length = offset_of!(FILE_RENAME_INFO, FileName) + filename.len() * 2;
-        let mut storage = vec![
-            0usize;
-            length
-                .max(size_of::<FILE_RENAME_INFO>())
-                .div_ceil(size_of::<usize>())
-        ];
+        let length = (offset_of!(FILE_RENAME_INFO, FileName) + filename.len() * 2)
+            .max(size_of::<FILE_RENAME_INFO>());
+        let mut storage = vec![0usize; length.div_ceil(size_of::<usize>())];
         let rename = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
             (*rename).Anonymous.ReplaceIfExists = true;
@@ -633,21 +654,50 @@ fn publish_output(root: &Path, relative: &Path, bytes: &[u8]) -> Result<(), Stri
                 std::ptr::addr_of_mut!((*rename).FileName).cast::<u16>(),
                 filename.len(),
             );
+            // The kernel opens the rename target parent for write. The fresh
+            // staging file is now owned by handle, so release write-denying
+            // guards; keep all no-delete directory handles and use their
+            // physical RootDirectory for the final relative rename.
+            write_locks.clear();
             win(SetFileInformationByHandle(
-                raw(&owned),
+                HANDLE(owned.file.as_raw_handle()),
                 FileRenameInfo,
                 rename.cast(),
                 length as u32,
             ))?;
         }
+        owned.committed = true;
         Ok(())
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
     // pins survive until the atomic, directory-relative final rename completes.
     drop(pins);
     result
+}
+
+struct PendingOutput {
+    file: File,
+    committed: bool,
+}
+impl Drop for PendingOutput {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // Cleanup remains bound to this CREATE_NEW object if a final rename
+        // failed after the temporary directory write guards were released.
+        let result = unsafe {
+            SetFileInformationByHandle(
+                HANDLE(self.file.as_raw_handle()),
+                FileDispositionInfo,
+                (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        };
+        if result.is_err() {
+            log::warn!("[Assistant] document output temporary cleanup incomplete");
+        }
+    }
 }
 
 fn lock_publish_directory(path: &Path) -> Result<File, String> {
@@ -687,6 +737,8 @@ struct CachedRuntime {
 }
 static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedRuntime>>> = OnceLock::new();
 static ADMITTED: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+static PROBE_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static PYTHON_TURN: OnceLock<Arc<tokio::sync::Mutex<()>>> = OnceLock::new();
 fn cache_runtime(
     source: &Path,
     capability: &RuntimeCapability,
@@ -767,6 +819,8 @@ struct Profile {
     sid: Sid,
     directory: Option<PathBuf>,
     pins: Vec<File>,
+    root_pinned: bool,
+    disposed: bool,
 }
 impl Profile {
     fn new(capability: &RuntimeCapability) -> Result<Self, String> {
@@ -785,6 +839,8 @@ impl Profile {
             sid: Sid(sid),
             directory: None,
             pins: Vec::new(),
+            root_pinned: false,
+            disposed: false,
         })
     }
     fn make_low_profile(&mut self) -> Result<(), String> {
@@ -804,6 +860,7 @@ impl Profile {
         let path = path.parent().ok_or(UNAVAILABLE)?.to_path_buf();
         // Profile is freshly created, before untrusted code can plant links.
         self.pins = pin_ancestors(&path)?;
+        self.root_pinned = true;
         self.directory = Some(path.clone());
         let name = wide(&path)?;
         // LABEL_SECURITY_INFORMATION requires WRITE_OWNER, which is never
@@ -842,30 +899,62 @@ impl Profile {
         }
         Ok(())
     }
-}
-impl Drop for Profile {
-    fn drop(&mut self) {
+    fn dispose(&mut self) -> Result<(), String> {
+        if self.disposed {
+            return Ok(());
+        }
         if let Some(directory) = &self.directory {
-            // std's Windows remove_dir_all unlinks junctions/reparse points;
-            // it does not traverse them. Release only this root's delete lock,
-            // keeping all its ancestors pinned until cleanup is complete.
-            self.pins.pop();
-            if fs::remove_dir_all(directory).is_err() {
-                log::warn!("[Assistant] document sandbox profile cleanup incomplete");
-                return;
+            if self.root_pinned {
+                self.pins.pop();
+                self.root_pinned = false;
+            }
+            match fs::remove_dir_all(directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("assistant_document_sandbox_cleanup_failed".into()),
             }
         }
         unsafe {
-            let _ = DeleteAppContainerProfile(PCWSTR(self.name.as_ptr()));
+            win(DeleteAppContainerProfile(PCWSTR(self.name.as_ptr())))?;
+        }
+        self.disposed = true;
+        Ok(())
+    }
+}
+impl Drop for Profile {
+    fn drop(&mut self) {
+        if self.dispose().is_err() {
+            log::warn!("[Assistant] document sandbox profile cleanup incomplete");
         }
     }
 }
 
-struct TaskDirectory(PathBuf, Vec<File>);
+struct TaskDirectory(PathBuf, Vec<File>, bool, bool);
+impl TaskDirectory {
+    fn dispose(&mut self) -> Result<(), String> {
+        if self.3 {
+            return Ok(());
+        }
+        if self.2 {
+            self.1.pop();
+            self.2 = false;
+        }
+        // Windows std::fs::remove_dir_all unlinks junctions/reparse points
+        // rather than following them; ancestor handles survive this call.
+        match fs::remove_dir_all(&self.0) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("assistant_document_sandbox_cleanup_failed".into()),
+        }
+        self.3 = true;
+        Ok(())
+    }
+}
 impl Drop for TaskDirectory {
     fn drop(&mut self) {
-        self.1.pop();
-        let _ = fs::remove_dir_all(&self.0);
+        if self.dispose().is_err() {
+            log::warn!("[Assistant] document sandbox task cleanup incomplete");
+        }
     }
 }
 fn task_directory(user: &str, sid: PSID) -> Result<TaskDirectory, String> {
@@ -883,7 +972,7 @@ fn task_directory(user: &str, sid: PSID) -> Result<TaskDirectory, String> {
         ),
     )?;
     let pins = pin_ancestors(&path)?;
-    Ok(TaskDirectory(path, pins))
+    Ok(TaskDirectory(path, pins, true, false))
 }
 
 fn os_version() -> Result<OSVERSIONINFOW, String> {
@@ -1299,6 +1388,31 @@ impl Drop for CancelOnDrop {
 
 static RUN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static RUN_RECEIPTS: OnceLock<Mutex<VecDeque<serde_json::Value>>> = OnceLock::new();
+#[cfg(test)]
+static ACTIVE_TASKS: OnceLock<Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+#[cfg(test)]
+struct ActiveTask(PathBuf);
+#[cfg(test)]
+impl ActiveTask {
+    fn new(original: PathBuf, sandbox: PathBuf) -> Self {
+        ACTIVE_TASKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(original.clone(), sandbox);
+        Self(original)
+    }
+}
+#[cfg(test)]
+impl Drop for ActiveTask {
+    fn drop(&mut self) {
+        ACTIVE_TASKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .remove(&self.0);
+    }
+}
 /// In-memory evidence for native acceptance. A platform cfg or a successful
 /// fallback cannot manufacture one of these receipts. Retain only 512 runs.
 pub fn windows_document_sandbox_receipts(after_sequence: u64) -> Vec<serde_json::Value> {
@@ -1341,6 +1455,20 @@ async fn run_candidate(
     limit: usize,
     trusted_probe: bool,
 ) -> Result<EngineOutput, String> {
+    let python = args
+        .first()
+        .is_some_and(|arg| Path::new(arg).ends_with("python/runner.mjs"));
+    let python_turn = if python {
+        Some(
+            PYTHON_TURN
+                .get_or_init(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+                .lock_owned()
+                .await,
+        )
+    } else {
+        None
+    };
     let (exe, args, cwd, home, root) = (
         exe.to_path_buf(),
         args.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>(),
@@ -1351,6 +1479,9 @@ async fn run_candidate(
     let cancelled = Arc::new(AtomicBool::new(false));
     let guard = CancelOnDrop(cancelled.clone());
     let answer = tokio::task::spawn_blocking(move || {
+        // Keep this owned guard in the worker: cancelling the awaiting future
+        // must not admit another Pyodide before its Job/disposal is complete.
+        let _python_turn = python_turn;
         run_blocking(
             &exe,
             &args,
@@ -1406,124 +1537,161 @@ fn run_blocking(
     }
     let inputs = files(&cwd, MAX_TASK_BYTES)?;
     let mut profile = Profile::new(&capability)?;
-    profile.make_low_profile()?;
-    let task = task_directory(&user, profile.sid.0)?;
-    write_files(&task.0, &inputs)?;
-    let task_home = task.0.join(home_relative);
-    io(fs::create_dir_all(&task_home))?;
-    let actual_exe = PathBuf::from(remap(&exe.to_string_lossy(), &runtime, &cwd, &task.0)?);
-    let actual_args = args
-        .iter()
-        .map(|arg| remap(arg, &runtime, &cwd, &task.0))
-        .collect::<Result<Vec<_>, _>>()?;
-    if cancelled.load(Ordering::Acquire) {
-        return Err(CANCELLED.into());
+    if let Err(error) = profile.make_low_profile() {
+        dispose_profile(&mut profile)?;
+        return Err(error);
     }
-    let launched = launch(
-        &actual_exe,
-        &actual_args,
-        &task.0,
-        &task_home,
-        &profile,
-        &capability,
-        limit,
-    )?;
-    let deadline = Instant::now() + timeout;
-    let timed_out = loop {
-        let state = unsafe { WaitForSingleObject(raw(&launched.process.process), 25) };
-        if state == WAIT_OBJECT_0 {
-            break false;
+    let mut task = match task_directory(&user, profile.sid.0) {
+        Ok(task) => task,
+        Err(error) => {
+            dispose_profile(&mut profile)?;
+            return Err(error);
         }
-        if state != WAIT_TIMEOUT {
-            return Err(UNAVAILABLE.into());
-        }
+    };
+    #[cfg(test)]
+    let mut active = None;
+    let executed: Result<(EngineOutput, serde_json::Value, bool), String> = (|| {
+        write_files(&task.0, &inputs)?;
+        let task_home = task.0.join(home_relative);
+        io(fs::create_dir_all(&task_home))?;
+        let actual_exe = PathBuf::from(remap(&exe.to_string_lossy(), &runtime, &cwd, &task.0)?);
+        let actual_args = args
+            .iter()
+            .map(|arg| remap(arg, &runtime, &cwd, &task.0))
+            .collect::<Result<Vec<_>, _>>()?;
         if cancelled.load(Ordering::Acquire) {
             return Err(CANCELLED.into());
         }
-        if Instant::now() >= deadline {
-            break true;
+        let launched = launch(
+            &actual_exe,
+            &actual_args,
+            &task.0,
+            &task_home,
+            &profile,
+            &capability,
+            limit,
+        )?;
+        #[cfg(test)]
+        {
+            active = Some(ActiveTask::new(cwd.clone(), task.0.clone()));
         }
-    };
-    let mut status = 0u32;
-    if !timed_out {
+        let deadline = Instant::now() + timeout;
+        let mut was_cancelled = false;
+        let timed_out = loop {
+            let state = unsafe { WaitForSingleObject(raw(&launched.process.process), 25) };
+            if state == WAIT_OBJECT_0 {
+                break false;
+            }
+            if state != WAIT_TIMEOUT {
+                return Err(UNAVAILABLE.into());
+            }
+            if cancelled.load(Ordering::Acquire) {
+                was_cancelled = true;
+                break false;
+            }
+            if Instant::now() >= deadline {
+                break true;
+            }
+        };
+        let mut status = 0u32;
+        if !timed_out && !was_cancelled {
+            unsafe {
+                win(GetExitCodeProcess(
+                    raw(&launched.process.process),
+                    &mut status,
+                ))?;
+            }
+        }
+        // Stop/wait the whole owned Job before any privileged read or cleanup.
         unsafe {
-            win(GetExitCodeProcess(
-                raw(&launched.process.process),
-                &mut status,
-            ))?;
+            win(TerminateJobObject(raw(&launched.process.job), 1))?;
         }
-    }
-    // Stop/wait the whole owned Job before any privileged read or cleanup.
-    unsafe {
-        win(TerminateJobObject(raw(&launched.process.job), 1))?;
-    }
-    if unsafe { WaitForSingleObject(raw(&launched.process.process), 5000) } != WAIT_OBJECT_0 {
-        return Err(UNAVAILABLE.into());
-    }
-    let stopped_by = Instant::now() + Duration::from_secs(5);
-    loop {
-        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-        unsafe {
-            win(QueryInformationJobObject(
-                Some(raw(&launched.process.job)),
-                JobObjectBasicAccountingInformation,
-                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                None,
-            ))?;
-        }
-        if accounting.ActiveProcesses == 0 {
-            break;
-        }
-        if Instant::now() >= stopped_by {
+        if unsafe { WaitForSingleObject(raw(&launched.process.process), 5000) } != WAIT_OBJECT_0 {
             return Err(UNAVAILABLE.into());
         }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    let stdout = launched
-        .stdout
-        .recv_timeout(Duration::from_secs(2))
-        .map_err(|_| UNAVAILABLE.to_owned())?;
-    let stderr = launched
-        .stderr
-        .recv_timeout(Duration::from_secs(2))
-        .map_err(|_| UNAVAILABLE.to_owned())?;
-    if !timed_out {
-        let outputs = files(&task.0, MAX_TASK_BYTES)?;
-        // Original cwd is never granted to the LPAC. Keep its directory handle
-        // pinned, and reject pre-existing aliases before atomic replacement.
-        let _destination = pin_ancestors(&cwd)?;
-        for (relative, bytes) in outputs {
-            if relative.starts_with(home_relative) {
-                continue;
+        let stopped_by = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+            unsafe {
+                win(QueryInformationJobObject(
+                    Some(raw(&launched.process.job)),
+                    JobObjectBasicAccountingInformation,
+                    (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    None,
+                ))?;
             }
-            publish_output(&cwd, &relative, &bytes)?;
+            if accounting.ActiveProcesses == 0 {
+                break;
+            }
+            if Instant::now() >= stopped_by {
+                return Err(UNAVAILABLE.into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
         }
+        let stdout = launched
+            .stdout
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| UNAVAILABLE.to_owned())?;
+        let stderr = launched
+            .stderr
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| UNAVAILABLE.to_owned())?;
+        if !timed_out && !was_cancelled && status == 0 {
+            let outputs = files(&task.0, MAX_TASK_BYTES)?;
+            // Original cwd is never granted to the LPAC. Keep its directory handle
+            // pinned, and reject pre-existing aliases before atomic replacement.
+            let _destination = pin_ancestors(&cwd)?;
+            for (relative, bytes) in outputs {
+                if relative.starts_with(home_relative) {
+                    continue;
+                }
+                publish_output(&cwd, &relative, &bytes)?;
+            }
+        }
+        let receipt = serde_json::json!({
+            "runId":uuid::Uuid::new_v4().to_string(), "runtimeSha256":runtime.digest,
+            "executable":actual_exe.strip_prefix(&runtime.root).map_err(|_| UNSAFE_FILE)?.to_string_lossy(),
+            "policy":"lpac-v1", "tokenVerified":true, "childProcessDenied":true,
+            "lowImageDenied":true, "jobStopped":true, "timedOut":timed_out,
+            "trustedProbe":trusted_probe, "cancelled":was_cancelled,
+            "taskId":task.0.file_name().ok_or(UNSAFE_FILE)?.to_string_lossy(),
+            "status":(!timed_out && !was_cancelled).then_some(status as i32)
+        });
+        drop(launched);
+        Ok((
+            EngineOutput {
+                status: (!timed_out && !was_cancelled).then_some(status as i32),
+                stdout: bounded_text(stdout, limit),
+                stderr: bounded_text(stderr, limit),
+                timed_out,
+            },
+            receipt,
+            was_cancelled,
+        ))
+    })();
+    let task_cleanup = task.dispose();
+    let profile_cleanup = profile.dispose();
+    if task_cleanup.is_err() || profile_cleanup.is_err() {
+        return Err(cleanup_failed());
     }
-    let receipt = serde_json::json!({
-        "sequence":RUN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1,
-        "runId":uuid::Uuid::new_v4().to_string(), "runtimeSha256":runtime.digest,
-        "executable":actual_exe.strip_prefix(&runtime.root).map_err(|_| UNSAFE_FILE)?.to_string_lossy(),
-        "policy":"lpac-v1", "tokenVerified":true, "childProcessDenied":true,
-        "lowImageDenied":true, "jobStopped":true, "timedOut":timed_out,
-        "trustedProbe":trusted_probe,
-        "status":(!timed_out).then_some(status as i32)
-    });
+    let (output, mut receipt, was_cancelled) = executed?;
+    receipt["sequence"] = serde_json::json!(RUN_SEQUENCE.fetch_add(1, Ordering::AcqRel) + 1);
+    receipt["cleanupComplete"] = serde_json::json!(true);
+    receipt["taskRemoved"] = serde_json::json!(true);
+    receipt["profileRemoved"] = serde_json::json!(true);
     if let Ok(mut receipts) = RUN_RECEIPTS.get_or_init(Default::default).lock() {
         receipts.push_back(receipt);
         if receipts.len() > 512 {
             receipts.pop_front();
         }
     }
-    drop(launched);
-    drop(task);
-    drop(profile);
-    Ok(EngineOutput {
-        status: (!timed_out).then_some(status as i32),
-        stdout: bounded_text(stdout, limit),
-        stderr: bounded_text(stderr, limit),
-        timed_out,
-    })
+    #[cfg(test)]
+    drop(active);
+    if was_cancelled {
+        return Err(CANCELLED.into());
+    }
+    Ok(output)
 }
 
 // Deliberately embedded trusted code. The acceptance binary never accepts
@@ -1534,8 +1702,10 @@ const assert = require('node:assert/strict');
 const net = require('node:net');
 const cp = require('node:child_process');
 const outside = OUTSIDE_PATH;
+const outsideAap = OUTSIDE_AAP_PATH;
 assert.equal(process.versions.node, '22.23.4');
 assert.throws(() => fs.readFileSync(outside));
+assert.throws(() => fs.readFileSync(outsideAap), 'LPAC read an ALL APPLICATION PACKAGES fixture');
 assert.throws(() => fs.writeFileSync(outside, 'changed'));
 assert.throws(() => fs.writeFileSync(process.execPath, 'changed'));
 for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'OFOX_DOCUMENT_PROBE_SECRET'])
@@ -1559,6 +1729,46 @@ setTimeout(() => { socket.destroy(); console.error('network refusal was not obse
 "#;
 const PYTHON_PROBE: &str = "prs = new_deck(title='Windows engine probe')\ncover_slide(prs, 'Windows engine probe', subtitle='中文 日本語')\n";
 
+fn aap_read_fixture(path: &Path) -> Result<(), String> {
+    let user = current_user()?;
+    let descriptor = security_descriptor(&format!(
+        "D:P(A;;FA;;;SY)(A;;FA;;;{user})(A;;GR;;;S-1-15-2-1)"
+    ))?;
+    let name = wide(path)?;
+    let file = unsafe {
+        handle(win(CreateFileW(
+            PCWSTR(name.as_ptr()),
+            FILE_GENERIC_READ.0 | 0x40000,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        ))?)
+    };
+    let (mut present, mut defaulted, mut acl) = (BOOL(0), BOOL(0), std::ptr::null_mut());
+    unsafe {
+        win(GetSecurityDescriptorDacl(
+            PSECURITY_DESCRIPTOR(descriptor.0),
+            &mut present,
+            &mut acl,
+            &mut defaulted,
+        ))?;
+        SetSecurityInfo(
+            raw(&file),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(acl),
+            None,
+        )
+        .ok()
+        .map_err(|_| UNAVAILABLE.to_owned())?;
+    }
+    Ok(())
+}
+
 fn success(output: EngineOutput) -> Result<EngineOutput, String> {
     if output.status != Some(0) || output.timed_out {
         return Err(UNAVAILABLE.into());
@@ -1580,6 +1790,31 @@ pub async fn probe_windows_document_engines(
 /// Call before bootstrap/send. The returned digest identifies the exact public
 /// bytes whose positive and negative native probes passed.
 pub async fn ensure_windows_document_engine_ready(runtime_root: &Path) -> Result<String, String> {
+    let result = ensure_ready(runtime_root).await;
+    if result.is_err() {
+        invalidate_admission();
+    }
+    result
+}
+
+fn invalidate_admission() {
+    // There is one production runtime. Clear every remembered hint on a failed
+    // recheck, including disappearance/unreadability before canonicalization.
+    if let Ok(mut proofs) = ADMITTED.get_or_init(Default::default).lock() {
+        proofs.clear();
+    }
+}
+
+fn cleanup_failed() -> String {
+    invalidate_admission();
+    "assistant_document_sandbox_cleanup_failed".into()
+}
+
+fn dispose_profile(profile: &mut Profile) -> Result<(), String> {
+    profile.dispose().map_err(|_| cleanup_failed())
+}
+
+async fn ensure_ready(runtime_root: &Path) -> Result<String, String> {
     let root = runtime_root.to_path_buf();
     let runtime = tokio::task::spawn_blocking(move || {
         os_version()?;
@@ -1596,7 +1831,24 @@ pub async fn ensure_windows_document_engine_ready(runtime_root: &Path) -> Result
     if ready {
         return Ok(runtime.digest);
     }
-    prove_runtime(
+    let _turn = PROBE_TURN.lock().await;
+    // Another bootstrap/send may have completed all probes while we waited.
+    let root = runtime_root.to_path_buf();
+    let runtime = tokio::task::spawn_blocking(move || {
+        cache_runtime(&root, &RuntimeCapability::new()?, &current_user()?)
+    })
+    .await
+    .map_err(|_| UNAVAILABLE.to_owned())??;
+    if ADMITTED
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| UNAVAILABLE)?
+        .get(&runtime.source)
+        == Some(&runtime.digest)
+    {
+        return Ok(runtime.digest);
+    }
+    prove_runtime_locked(
         runtime_root,
         &runtime_root.join("engines/officecli/officecli.exe"),
         &mut Vec::new(),
@@ -1610,13 +1862,31 @@ pub fn windows_document_engine_proven(runtime_root: &Path) -> bool {
     let Ok(root) = runtime_root.canonicalize() else {
         return false;
     };
+    let Some(caches) = CACHE.get() else {
+        return false;
+    };
+    let Ok(caches) = caches.lock() else {
+        return false;
+    };
+    let Some(runtime) = caches.get(&root) else {
+        return false;
+    };
     ADMITTED
         .get_or_init(Default::default)
         .lock()
-        .is_ok_and(|proofs| proofs.contains_key(&root))
+        .is_ok_and(|proofs| proofs.get(&root) == Some(&runtime.digest))
 }
 
 async fn prove_runtime(
+    runtime_root: &Path,
+    officecli: &Path,
+    checks: &mut Vec<&'static str>,
+) -> Result<String, String> {
+    let _turn = PROBE_TURN.lock().await;
+    prove_runtime_locked(runtime_root, officecli, checks).await
+}
+
+async fn prove_runtime_locked(
     runtime_root: &Path,
     officecli: &Path,
     checks: &mut Vec<&'static str>,
@@ -1664,6 +1934,9 @@ async fn probe_inner(
     io(fs::create_dir_all(&home))?;
     let outside = fixtures.path().join("outside-credential-fixture.txt");
     io(fs::write(&outside, b"synthetic private data"))?;
+    let outside_aap = fixtures.path().join("outside-aap-fixture.txt");
+    io(fs::write(&outside_aap, b"synthetic package-readable data"))?;
+    aap_read_fixture(&outside_aap)?;
     let listener = io(std::net::TcpListener::bind((
         std::net::Ipv4Addr::LOCALHOST,
         0,
@@ -1678,6 +1951,10 @@ async fn probe_inner(
         .replace(
             "OUTSIDE_PATH",
             &serde_json::to_string(&outside).map_err(|_| UNAVAILABLE)?,
+        )
+        .replace(
+            "OUTSIDE_AAP_PATH",
+            &serde_json::to_string(&outside_aap).map_err(|_| UNAVAILABLE)?,
         )
         .replace("PROBE_PORT", &address.port().to_string());
     let native = runtime_root
@@ -1707,6 +1984,7 @@ async fn probe_inner(
     }
     checks.extend([
         "outsideReadWriteDenied",
+        "allApplicationPackagesReadDenied",
         "childProcessDenied",
         "lowImageDenied",
         "networkDenied",

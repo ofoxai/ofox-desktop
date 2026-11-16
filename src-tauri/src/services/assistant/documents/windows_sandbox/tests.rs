@@ -7,6 +7,7 @@ fn runtime() -> PathBuf {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn document_lpac_proves_python_office_and_escape_denials() {
     let root = runtime();
     let office = root.join("engines/officecli/officecli.exe");
@@ -16,6 +17,7 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn document_lpac_keeps_source_inputs_and_cannot_modify_runtime() {
     let root = runtime();
     ensure_windows_document_engine_ready(&root).await.unwrap();
@@ -53,6 +55,7 @@ async fn document_lpac_keeps_source_inputs_and_cannot_modify_runtime() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn document_lpac_timeout_prevents_late_writes_and_bounds_output() {
     let root = runtime();
     ensure_windows_document_engine_ready(&root).await.unwrap();
@@ -117,6 +120,8 @@ fn document_output_rejects_hardlinks_and_reparse_points() {
 #[test]
 fn document_output_publishes_new_and_existing_files_by_parent_handle() {
     let root = tempfile::tempdir().unwrap();
+    publish_output(root.path(), Path::new("a"), b"short name").unwrap();
+    assert_eq!(fs::read(root.path().join("a")).unwrap(), b"short name");
     publish_output(root.path(), Path::new("nested/new.txt"), b"first").unwrap();
     assert_eq!(
         fs::read(root.path().join("nested/new.txt")).unwrap(),
@@ -137,7 +142,7 @@ fn document_workspace_cleanup_unlinks_junction_without_reading_target() {
     let user = current_user().unwrap();
     let mut profile = Profile::new(&cap).unwrap();
     profile.make_low_profile().unwrap();
-    let workspace = task_directory(&user, profile.sid.0).unwrap();
+    let mut workspace = task_directory(&user, profile.sid.0).unwrap();
     let status = std::process::Command::new("cmd.exe")
         .args(["/D", "/C", "mklink", "/J"])
         .arg(workspace.0.join("outside-junction"))
@@ -146,8 +151,8 @@ fn document_workspace_cleanup_unlinks_junction_without_reading_target() {
         .unwrap();
     assert!(status.success());
     let task_path = workspace.0.clone();
-    drop(workspace);
-    drop(profile);
+    workspace.dispose().unwrap();
+    profile.dispose().unwrap();
     assert!(!task_path.exists());
     assert_eq!(
         fs::read(outside.path().join("sentinel")).unwrap(),
@@ -155,7 +160,162 @@ fn document_workspace_cleanup_unlinks_junction_without_reading_target() {
     );
 }
 
+#[test]
+fn document_cleanup_failure_is_reported_and_can_be_retried() {
+    let capability = RuntimeCapability::new().unwrap();
+    let user = current_user().unwrap();
+    let mut profile = Profile::new(&capability).unwrap();
+    profile.make_low_profile().unwrap();
+    let mut workspace = task_directory(&user, profile.sid.0).unwrap();
+    fs::write(workspace.0.join("locked"), b"owned test data").unwrap();
+    let locked = open_regular(&workspace.0, &workspace.0.join("locked"), 1024).unwrap();
+    assert_eq!(
+        workspace.dispose().unwrap_err(),
+        "assistant_document_sandbox_cleanup_failed"
+    );
+    drop(locked);
+    workspace.dispose().unwrap();
+    profile.dispose().unwrap();
+    assert!(!workspace.0.exists());
+}
+
 #[tokio::test]
+#[serial_test::serial]
+async fn failed_profile_cleanup_revokes_admission_before_another_engine_can_start() {
+    // A synthetic executable must never be launched. Its deliberately seeded
+    // proof lets this exercise cleanup revocation without a paid/model run.
+    let public = tempfile::tempdir().unwrap();
+    fs::create_dir(public.path().join("node")).unwrap();
+    let node = public.path().join("node/node.exe");
+    fs::write(&node, b"synthetic executable; must never launch").unwrap();
+    let capability = RuntimeCapability::new().unwrap();
+    let cached = cache_runtime(public.path(), &capability, &current_user().unwrap()).unwrap();
+    ADMITTED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .insert(cached.source, cached.digest);
+    assert!(windows_document_engine_proven(public.path()));
+    let mut profile = Profile::new(&capability).unwrap();
+    profile.make_low_profile().unwrap();
+    let folder = profile.directory.as_ref().unwrap().clone();
+    let marker = folder.join("held-open-test-file");
+    fs::write(&marker, b"synthetic lock").unwrap();
+    let locked = open_regular(&folder, &marker, 1024).unwrap();
+    assert_eq!(
+        dispose_profile(&mut profile).unwrap_err(),
+        "assistant_document_sandbox_cleanup_failed"
+    );
+    assert!(!windows_document_engine_proven(public.path()));
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    assert_eq!(
+        run_windows_engine_limited(
+            &node,
+            &[],
+            task.path(),
+            &home,
+            public.path(),
+            Duration::from_secs(1),
+            1024
+        )
+        .await
+        .unwrap_err(),
+        "assistant_document_sandbox_unproven_runtime"
+    );
+    drop(locked);
+    dispose_profile(&mut profile).unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn document_child_crash_cleans_task_and_profile_before_receipt() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let sequence = RUN_SEQUENCE.load(Ordering::Acquire);
+    let out = run_windows_engine_limited(&root.join("node/node.exe"),
+        &["-e", "setTimeout(() => require('node:fs').writeFileSync('late', 'bad'), 2000); process.abort();"],
+        task.path(), &home, &root, Duration::from_secs(15), 4096).await.unwrap();
+    assert!(out.status.is_some_and(|status| status != 0));
+    let receipts = windows_document_sandbox_receipts(sequence);
+    let receipt = receipts
+        .iter()
+        .find(|row| row["trustedProbe"] == false)
+        .unwrap();
+    assert_eq!(receipt["cleanupComplete"], true);
+    assert!(!std::env::temp_dir()
+        .join(receipt["taskId"].as_str().unwrap())
+        .exists());
+    assert!(!task.path().join("late").exists());
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn cancelling_an_active_document_job_cleans_before_receipt_and_no_late_write() {
+    let root = runtime();
+    ensure_windows_document_engine_ready(&root).await.unwrap();
+    let task = tempfile::tempdir().unwrap();
+    let home = task.path().join("home");
+    fs::create_dir(&home).unwrap();
+    let canonical = task.path().canonicalize().unwrap();
+    let original = task.path().to_path_buf();
+    let sequence = RUN_SEQUENCE.load(Ordering::Acquire);
+    let running = tokio::spawn(async move {
+        run_windows_engine_limited(&root.join("node/node.exe"),
+            &["-e", "setTimeout(() => require('node:fs').writeFileSync('late', 'bad'), 4000); setInterval(() => {}, 1000);"],
+            &original, &home, &root, Duration::from_secs(30), 4096).await
+    });
+    let sandbox = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let active = ACTIVE_TASKS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .get(&canonical)
+                .cloned();
+            if let Some(path) = active {
+                break path;
+            }
+            assert!(
+                !running.is_finished(),
+                "the controlled job failed before starting"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    running.abort();
+    let _ = running.await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while ACTIVE_TASKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .contains_key(&canonical)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!sandbox.exists());
+    assert!(!task.path().join("late").exists());
+    let receipts = windows_document_sandbox_receipts(sequence);
+    let row = receipts
+        .iter()
+        .find(|row| row["taskId"].as_str() == sandbox.file_name().and_then(OsStr::to_str))
+        .unwrap();
+    assert_eq!(row["cancelled"], true);
+    assert_eq!(row["cleanupComplete"], true);
+}
+
+#[tokio::test]
+#[serial_test::serial]
 async fn public_runner_refuses_unproven_or_changed_runtime_before_launch() {
     let public = tempfile::tempdir().unwrap();
     fs::create_dir(public.path().join("node")).unwrap();

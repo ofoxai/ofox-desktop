@@ -877,7 +877,7 @@ pub(super) fn open_written(page: &Path, max: u64) -> Result<(fs::File, u64), Str
         let file = super::documents::windows_sandbox::open_regular(root, page, max)
             .map_err(|_| UNREADABLE)?;
         let size = file.metadata().map_err(|_| UNREADABLE)?.len();
-        return Ok((file, size));
+        Ok((file, size))
     }
     #[cfg(not(windows))]
     {
