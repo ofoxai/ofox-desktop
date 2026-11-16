@@ -15,11 +15,10 @@ import { TOOL_META } from "@/config/toolMeta";
 import type { UsageTotals } from "@/lib/api/usageOverview";
 import { fmtTokens, fmtCost } from "@/lib/format";
 import { formatUsageEstimate } from "@/lib/usageEstimate";
-interface Row
-  extends Pick<
-    UsageTotals,
-    "inputTokens" | "outputTokens" | "totalTokens" | "estimate"
-  > {
+interface Row extends Pick<
+  UsageTotals,
+  "inputTokens" | "outputTokens" | "totalTokens" | "estimate"
+> {
   id: string;
   label?: string;
   path?: string | null;

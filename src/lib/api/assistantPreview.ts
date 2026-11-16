@@ -58,8 +58,7 @@ export function assistantPresentationRevision(
   )
     return null;
   const value = file.details?.presentationRevision as
-    | Partial<PresentationRevision>
-    | undefined;
+    Partial<PresentationRevision> | undefined;
   if (
     !value ||
     typeof value !== "object" ||

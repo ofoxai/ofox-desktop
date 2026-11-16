@@ -62,26 +62,14 @@ export interface AssistantModel {
 }
 
 export type AssistantModelKind =
-  | "chat"
-  | "image"
-  | "video"
-  | "speech"
-  | "transcription";
+  "chat" | "image" | "video" | "speech" | "transcription";
 
 /** Pi's thinking levels, lowest first. */
 export type AssistantThinkingLevel =
-  | "off"
-  | "minimal"
-  | "low"
-  | "medium"
-  | "high"
-  | "xhigh"
-  | "max";
+  "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type AssistantModelProtocol =
-  | "openai-completions"
-  | "openai-responses"
-  | "anthropic-messages";
+  "openai-completions" | "openai-responses" | "anthropic-messages";
 
 /** Prices are decimal USD strings; token prices are per million tokens. */
 export interface AssistantImageCapabilities {
@@ -185,8 +173,7 @@ export interface AssistantAudioResult {
   };
 }
 export interface AssistantTranscribeRequest
-  extends AssistantPasteTarget,
-    AssistantRunRef {
+  extends AssistantPasteTarget, AssistantRunRef {
   inputId: string;
   modelId: string;
   keepOriginal?: boolean;
@@ -194,8 +181,7 @@ export interface AssistantTranscribeRequest
 }
 
 export interface AssistantSpeechRequest
-  extends AssistantPasteTarget,
-    AssistantRunRef {
+  extends AssistantPasteTarget, AssistantRunRef {
   modelId: string;
   input: string;
   voice: string;

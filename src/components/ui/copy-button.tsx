@@ -9,11 +9,10 @@ import { cn } from "@/lib/utils";
 /** How long the check stays after a copy (magpie's). */
 export const COPIED_MS = 1400;
 
-export interface CopyButtonProps
-  extends Omit<
-    React.ButtonHTMLAttributes<HTMLButtonElement>,
-    "onClick" | "children"
-  > {
+export interface CopyButtonProps extends Omit<
+  React.ButtonHTMLAttributes<HTMLButtonElement>,
+  "onClick" | "children"
+> {
   text: string;
   /** Names what is copied, e.g. "复制会话 ID". Defaults to 复制. */
   "aria-label"?: string;

@@ -12,9 +12,7 @@ import { Switch } from "@/components/ui/switch";
 import { useModelOptions } from "./useModelOptions";
 
 export type MediaFieldsValue =
-  | AssistantImageDefaults
-  | AssistantVideoDefaults
-  | AssistantSpeechDefaults;
+  AssistantImageDefaults | AssistantVideoDefaults | AssistantSpeechDefaults;
 
 /** The usable models of a generation kind, in catalog order. */
 export function generationModels(

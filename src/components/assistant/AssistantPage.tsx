@@ -337,8 +337,8 @@ function AssistantWorkspace() {
   const session = detail?.session;
   const available = Boolean(
     bootstrap?.runtime.available &&
-      bootstrap.models.length > 0 &&
-      assistant.connected,
+    bootstrap.models.length > 0 &&
+    assistant.connected,
   );
   const sessionTrashed = session?.deletedAt != null;
   const trashed = assistant.showTrash || sessionTrashed;
@@ -514,7 +514,7 @@ function AssistantWorkspace() {
     );
     return Boolean(
       question &&
-        (question.content.trim() || question.attachments?.some(isSendable)),
+      (question.content.trim() || question.attachments?.some(isSendable)),
     );
   };
   const files = assistant.attachments;
@@ -1504,11 +1504,11 @@ function AssistantWorkspace() {
                   <DropdownMenuItem
                     disabled={Boolean(
                       run ||
-                        busy ||
-                        assistant.loading ||
-                        trashed ||
-                        queueCount > 0 ||
-                        detail?.session.id !== assistant.selectedId,
+                      busy ||
+                      assistant.loading ||
+                      trashed ||
+                      queueCount > 0 ||
+                      detail?.session.id !== assistant.selectedId,
                     )}
                     onSelect={() => {
                       menuAction.current = () =>
@@ -1790,10 +1790,10 @@ function AssistantWorkspace() {
                             thinking={live ? assistant.thinking : undefined}
                             immutable={Boolean(
                               message.runId &&
-                                messages.some(
-                                  (item) =>
-                                    item.runId === message.runId && item.media,
-                                ),
+                              messages.some(
+                                (item) =>
+                                  item.runId === message.runId && item.media,
+                              ),
                             )}
                             mediaBlock={
                               message.media?.kind === "video" ? (
@@ -2547,9 +2547,9 @@ function AssistantWorkspace() {
       <PresentationStylePicker
         open={Boolean(
           presentationDialog &&
-            presentationDialog.scope === presentationScope &&
-            canPresentation &&
-            interactionActive,
+          presentationDialog.scope === presentationScope &&
+          canPresentation &&
+          interactionActive,
         )}
         value={assistant.presentationStyleId ?? "auto"}
         onOpenChange={(open) => {

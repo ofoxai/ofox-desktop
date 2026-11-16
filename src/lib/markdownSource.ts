@@ -14,7 +14,7 @@ const MATH_FENCE = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)?\$\$[ \t]*$/;
 /** How many `$$` `line` holds: not escaped, not in a longer run of dollars, not in code. */
 function doubleDollars(line: string): number {
   let found = 0;
-  for (let at = 0; at < line.length; ) {
+  for (let at = 0; at < line.length;) {
     const char = line[at];
     if (char === "`") {
       at = codeSpanEnd(line, at);
@@ -123,7 +123,7 @@ export function codeSpanEnd(text: string, from: number): number {
   let run = from;
   while (text[run] === "`") run += 1;
   const ticks = text.slice(from, run);
-  for (let index = run; index < text.length; ) {
+  for (let index = run; index < text.length;) {
     if (text[index] === "\n" && endsParagraph(text, index)) break;
     if (text[index] !== "`") {
       index += 1;

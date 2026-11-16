@@ -12,7 +12,7 @@ const integer = (value: unknown) =>
 function pageList(pages: number[]) {
   const sorted = [...new Set(pages)].sort((a, b) => a - b);
   const ranges: string[] = [];
-  for (let start = 0; start < sorted.length; ) {
+  for (let start = 0; start < sorted.length;) {
     let end = start;
     while (sorted[end + 1] === sorted[end] + 1) end += 1;
     ranges.push(

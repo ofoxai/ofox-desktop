@@ -194,9 +194,8 @@ export default function OfoxSettingsDialog({
    */
   const ensureNotificationPermission = useCallback(async () => {
     try {
-      const { isPermissionGranted, requestPermission } = await import(
-        "@tauri-apps/plugin-notification"
-      );
+      const { isPermissionGranted, requestPermission } =
+        await import("@tauri-apps/plugin-notification");
       const granted = await isPermissionGranted();
       if (granted) return;
       const next = await requestPermission();

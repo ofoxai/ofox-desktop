@@ -34,12 +34,7 @@ export interface AssistantAudioInputProps {
   onClose: () => void;
 }
 type Phase =
-  | "idle"
-  | "picking"
-  | "starting"
-  | "recording"
-  | "stopping"
-  | "transcribing";
+  "idle" | "picking" | "starting" | "recording" | "stopping" | "transcribing";
 const usd = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",

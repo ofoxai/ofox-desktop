@@ -418,7 +418,7 @@ export function AssistantFileWorkspace({
 function pageRanges(pages: number[]) {
   pages = [...pages].sort((a, b) => a - b);
   const ranges: string[] = [];
-  for (let start = 0; start < pages.length; ) {
+  for (let start = 0; start < pages.length;) {
     let end = start;
     while (end + 1 < pages.length && pages[end + 1] === pages[end] + 1)
       end += 1;
@@ -1020,9 +1020,9 @@ function PptxPreview({
           }
           warning={Boolean(
             manifest.warnings.length ||
-              visible?.mathUnverified ||
-              (initialPage !== undefined && !validInitial) ||
-              lastPage < manifest.totalPages,
+            visible?.mathUnverified ||
+            (initialPage !== undefined && !validInitial) ||
+            lastPage < manifest.totalPages,
           )}
         >
           <DropdownMenuSeparator />

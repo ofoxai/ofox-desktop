@@ -756,8 +756,7 @@ export function LibrarySkillsPage({
     if (busy || checking) return;
     if (dialog?.type === "update") {
       const checked = dialog.store.values.get("skillUpdateCheck") as
-        | SkillUpdateCheck
-        | undefined;
+        SkillUpdateCheck | undefined;
       if (checked?.candidate)
         void libraryApi
           .discardSkillUpdate(checked.candidate.ticketId)

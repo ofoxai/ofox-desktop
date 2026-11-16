@@ -6,12 +6,7 @@ import { settingsApi, type AppId } from "@/lib/api";
 import type { SettingsFormState } from "./useSettingsForm";
 
 type AppDirectoryKey =
-  | "claude"
-  | "codex"
-  | "gemini"
-  | "opencode"
-  | "openclaw"
-  | "hermes";
+  "claude" | "codex" | "gemini" | "opencode" | "openclaw" | "hermes";
 type DirectoryKey = "appConfig" | AppDirectoryKey;
 
 export interface ResolvedDirectories {
