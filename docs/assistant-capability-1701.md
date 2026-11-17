@@ -474,3 +474,11 @@ NtConnectPort 及映射均成功；最后两项为 `\Device\ConDrv\Server` 与�
 在 ConDrv Server/Reference 之后是否出现进程创建及其 NTSTATUS（预期子进程被
 策略阻止时为 `0xc000049d`）。若成立，再针对性修复启动标志；若未出现，则失败点在
 控制台初始化的其他步骤，继续缩小。相关九个文件 74/74、0 skip。
+
+运行 [44062635550](https://github.com/ofoxai/ofox-desktop/actions/runs/44062635550)
+（`fcb87187`）15 个入口断点全部安装核验通过，覆盖完整、`firstRejection` 为空；
+配对的 14 次调用与 44058284863 完全一致，ConDrv `\Reference` 之后**没有**任何
+NtCreateUserProcess 调用，KernelBase 随即初始化失败、0142 退出。因此“conhost
+创建被子进程策略阻止”的具体推断被否定：失败点仍在创建 ConDrv 句柄之后、任何
+进程创建之前，具体操作不在当前 15 个观察 API 内。启动标志与隔离条件均未修改；
+下一步需在扩大观察或无调试器的控制台模式对照之间选择。
