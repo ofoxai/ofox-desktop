@@ -215,6 +215,58 @@ async function privateRead(filename, limit) {
 export function safeMetadata(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const boolean = (value) => (typeof value === "boolean" ? value : null);
+  const symbolShape = (source) => {
+    if (!source || typeof source !== "object" || Array.isArray(source))
+      return null;
+    const result = {};
+    for (const name of [
+      "capturedBytes",
+      "nulEvenBytes",
+      "nulOddBytes",
+      "crBytes",
+      "lfBytes",
+      "individualPassLines",
+      "failedTotalLines",
+      "passedTotalLines",
+      "failedFiles",
+      "passedOrIgnoredFiles",
+    ]) {
+      const number = source[name];
+      result[name] =
+        Number.isInteger(number) && number >= 0 && number <= 0xffffffff
+          ? number
+          : null;
+    }
+    result.bom = ["none", "utf8", "utf16le", "utf16be"].includes(source.bom)
+      ? source.bom
+      : null;
+    result.usageMention = boolean(source.usageMention);
+    const allowed = new Set([
+      "SYMCHK",
+      "SYMSRV",
+      "DBGHELP",
+      "PASSED",
+      "FAILED",
+      "IGNORED",
+      "FILES",
+      "NTDLL.DLL",
+      "NTDLL.PDB",
+      "USAGE",
+      ":",
+      "=",
+      "+",
+      "?",
+    ]);
+    result.tokenRows = Array.isArray(source.tokenRows)
+      ? source.tokenRows
+          .slice(0, 8)
+          .filter(Array.isArray)
+          .map((row) =>
+            row.slice(0, 16).map((token) => (allowed.has(token) ? token : "?")),
+          )
+      : null;
+    return result;
+  };
   const tools = {};
   for (const name of ["xperf", "wpr", "cdb", "symchk", "gflags", "tracerpt"]) {
     const tool = value?.tools?.[name];
@@ -252,6 +304,12 @@ export function safeMetadata(value) {
     mode: "cdb-loader-snaps",
     debuggerJobKillOnClose: boolean(value?.debuggerJobKillOnClose),
     symbolPreparation: {
+      outputShape: Object.fromEntries(
+        ["stdout", "stderr"].map((name) => [
+          name,
+          symbolShape(value?.symbolPreparation?.outputShape?.[name]),
+        ]),
+      ),
       ...Object.fromEntries(
         ["started", "closed", "passedFile"].map((name) => [
           name,

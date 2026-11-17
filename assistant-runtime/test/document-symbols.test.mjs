@@ -65,6 +65,8 @@ test(
         assert.equal(report.state.started, mode !== "cancel", mode);
         assert.ok(!result.stdout.includes("private-token"), mode);
         assert.equal(report.state.passedFile, mode === "success", mode);
+        assert.ok(report.state.outputShape.stdout.capturedBytes >= 0, mode);
+        assert.ok(report.state.outputShape.stderr.capturedBytes >= 0, mode);
         assert.deepEqual(report.arguments, [
           "/op",
           "/pt",
@@ -93,6 +95,7 @@ test("symbol metadata projects fixed bounded fields without exposing tool output
     },
   });
   assert.deepEqual(report.symbolPreparation, {
+    outputShape: { stdout: null, stderr: null },
     started: true,
     closed: true,
     passedFile: true,
@@ -111,3 +114,84 @@ test("symbol metadata projects fixed bounded fields without exposing tool output
   for (const name of ["started", "exitCode", "failedFiles"])
     assert.equal(bad.symbolPreparation[name], null);
 });
+
+test(
+  "native symbol output shape preserves only counts and fixed vocabulary",
+  { skip: !pwsh },
+  () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "ofox-symbol-shape-"));
+    try {
+      const result = spawnSync(
+        pwsh,
+        [
+          "-NoLogo",
+          "-NoProfile",
+          "-NonInteractive",
+          "-File",
+          fileURLToPath(
+            new URL("./fixtures/document-symbols.ps1", import.meta.url),
+          ),
+          "-Mode",
+          "shape",
+        ],
+        {
+          env: {
+            ...process.env,
+            HOME: root,
+            USERPROFILE: root,
+            APPDATA: root,
+            LOCALAPPDATA: root,
+            POWERSHELL_TELEMETRY_OPTOUT: "1",
+          },
+          encoding: "utf8",
+          timeout: 10000,
+          maxBuffer: 16384,
+        },
+      );
+      assert.equal(result.status, 0);
+      for (const secret of [
+        "private-account",
+        "private-token",
+        "12345",
+        "S-1-5",
+      ])
+        assert.ok(!result.stdout.includes(secret));
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.plain.individualPassLines, 1);
+      assert.equal(report.plain.failedFiles, 0);
+      assert.equal(report.plain.passedOrIgnoredFiles, 1);
+      assert.equal(report.plain.bom, "none");
+      assert.equal(report.wide.bom, "utf16le");
+      assert.ok(report.wide.nulOddBytes > 0);
+      assert.equal(report.wide.individualPassLines, 0);
+      const safe = safeMetadata({
+        symbolPreparation: {
+          outputShape: { stdout: report.plain, stderr: report.wide },
+        },
+      });
+      assert.deepEqual(safe.symbolPreparation.outputShape.stdout, report.plain);
+      assert.deepEqual(safe.symbolPreparation.outputShape.stderr, report.wide);
+      const bad = safeMetadata({
+        symbolPreparation: {
+          outputShape: {
+            stdout: {
+              capturedBytes: -1,
+              bom: "private-token",
+              tokenRows: [["private-token", "PASSED"]],
+            },
+          },
+        },
+      });
+      assert.equal(
+        bad.symbolPreparation.outputShape.stdout.capturedBytes,
+        null,
+      );
+      assert.equal(bad.symbolPreparation.outputShape.stdout.bom, null);
+      assert.deepEqual(bad.symbolPreparation.outputShape.stdout.tokenRows, [
+        ["?", "PASSED"],
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);

@@ -1,6 +1,14 @@
 param([Parameter(Mandatory = $true)][string]$Mode)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../../../scripts/document-engine-symbols.ps1')
+if ($Mode -eq 'shape') {
+  $text = "SYMCHK: C:\private-account-123\ntdll.dll PASSED`nSYMCHK: FAILED files = 0`nSYMCHK: PASSED + IGNORED files = 1`nprivate-token S-1-5-21-12345`n"
+  $utf8 = [Text.Encoding]::UTF8.GetBytes($text)
+  $utf16 = [byte[]](@(255,254) + @([Text.Encoding]::Unicode.GetBytes($text)))
+  [Console]::Out.WriteLine((@{ plain = (Get-DocumentSymbolOutputShape $utf8 'C:\private-account-123\ntdll.dll')
+    wide = (Get-DocumentSymbolOutputShape $utf16 'C:\private-account-123\ntdll.dll') } | ConvertTo-Json -Depth 6 -Compress))
+  exit
+}
 if ($Mode -eq 'success') {
   $tokens = $null; $errors = $null
   $ast = [System.Management.Automation.Language.Parser]::ParseFile(
@@ -39,4 +47,4 @@ $failure = $null
 try { Invoke-DocumentSymbolCheck $start $control $state $(if ($Mode -eq 'deadline') { 100 } else { 5000 }) }
 catch { $failure = $_.Exception.Message }
 [Console]::Out.WriteLine((@{ state = $state; failure = $failure
-  arguments = @(Get-DocumentSymbolArguments 'private image' 'private cache') } | ConvertTo-Json -Compress))
+  arguments = @(Get-DocumentSymbolArguments 'private image' 'private cache') } | ConvertTo-Json -Depth 10 -Compress))
