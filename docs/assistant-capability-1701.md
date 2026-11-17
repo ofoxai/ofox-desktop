@@ -536,3 +536,17 @@ Node 正常运行。新增 test-only 候选 `detachedRegistryRead`：A1/A2 以
 `detachedRegistryRead`；独立审查对全部 A/B 行组合核对未发现放宽，协议单测 9/9
 （含每个计划只改一个条件），Windows 目标 lib/test Clippy 通过。产品标志与能力均未修改；即使 B 成功，也只说明候选有效，
 采用前仍需评估 registryRead 的授权范围并通过无调试器功能门禁。
+
+运行 [44076224990](https://github.com/ofoxai/ofox-desktop/actions/runs/44076224990)
+（`eb41eab5`）调试器部分与此前一致；无调试器 A-B-A 记为 **supports-candidate**：
+A1/A2 以 `DETACHED_PROCESS` 和单一 runtime capability 启动，均精确复现
+`0x80000003` 与 `WSAStartup` 10107；B 只追加 registryRead，exit 0、stdout 为精确
+19 字节标记、stderr 为空。三组 token、LPAC AccessCheck、子进程/映像策略、Low
+完整性、Resume1、清理与运行时摘要均一致，profile/task 清理确认。
+
+至此两层根因均由干预证实：`CREATE_NO_WINDOW` 的控制台初始化使 KernelBase 失败
+（0142）；去掉控制台后，libuv 初始化必调的 `WSAStartup` 在 LPAC 下返回 10107，
+追加 registryRead 后 Node 正常运行。二者缺一不可（44027445443 单加 registryRead、
+44068121826 单去控制台均不足）。这是诊断结论，产品启动标志与能力尚未修改：采用
+registryRead 会扩大 LPAC 的注册表读取范围，须先由用户确认，并补私有注册表等隔离
+负例、Python/OfficeCLI 同标志验证、无调试器功能门禁与 Win10/11 客户端验收。

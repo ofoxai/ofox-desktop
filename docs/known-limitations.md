@@ -34,8 +34,11 @@ is still unobserved. Unassisted A-B-A run 44068121826 shows that launching
 without a console (DETACHED_PROCESS) gets past KernelBase initialization while
 both CREATE_NO_WINDOW controls still fail, but Node then aborts with
 STATUS_BREAKPOINT because libuv's unconditional WSAStartup returns 10107
-(WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Production launch
-flags and capabilities are unchanged and Windows Python capability stays disabled.
+(WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Run 44076224990
+showed that the console-free launch plus the registryRead capability lets Node
+run normally under the same verified isolation. Production launch flags and
+capabilities are still unchanged pending a decision on registryRead and its
+isolation evidence, so Windows Python capability stays disabled.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,
