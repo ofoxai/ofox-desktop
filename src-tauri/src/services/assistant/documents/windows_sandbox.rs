@@ -14,7 +14,9 @@ mod probe;
 mod startup_comparison;
 #[cfg(test)]
 mod startup_comparison_protocol;
-use probe::{AccessCase, AccessObservation, Observer, Phase, Receive, TokenApi};
+use probe::{
+    AccessCase, AccessObservation, Observer, Phase, Receive, RegistryAccess, RegistryKey, TokenApi,
+};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
@@ -52,7 +54,7 @@ use windows::{
             Authorization::{
                 ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
                 ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo,
-                SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
+                SetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT, SE_REGISTRY_KEY,
             },
             DeriveCapabilitySidsFromName, DuplicateTokenEx, EqualSid, FreeSid,
             GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorSacl,
@@ -62,11 +64,12 @@ use windows::{
             },
             SecurityImpersonation, SetSecurityDescriptorControl, TokenAppContainerSid,
             TokenCapabilities, TokenImpersonation, TokenIntegrityLevel, TokenIsAppContainer,
-            TokenUser, DACL_SECURITY_INFORMATION, GENERIC_MAPPING, LABEL_SECURITY_INFORMATION,
-            OWNER_SECURITY_INFORMATION, PRIVILEGE_SET, PSECURITY_DESCRIPTOR, PSID,
-            SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES, SECURITY_DESCRIPTOR_CONTROL,
-            SE_SACL_AUTO_INHERITED, SID_AND_ATTRIBUTES, TOKEN_APPCONTAINER_INFORMATION,
-            TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+            TokenUser, DACL_SECURITY_INFORMATION, GENERIC_MAPPING, GROUP_SECURITY_INFORMATION,
+            LABEL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PRIVILEGE_SET,
+            PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SECURITY_CAPABILITIES,
+            SECURITY_DESCRIPTOR_CONTROL, SE_SACL_AUTO_INHERITED, SID_AND_ATTRIBUTES,
+            TOKEN_APPCONTAINER_INFORMATION, TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_MANDATORY_LABEL,
+            TOKEN_QUERY, TOKEN_USER,
         },
         Storage::FileSystem::{
             CreateDirectoryW, CreateFileW, FileDispositionInfo, GetFileInformationByHandle,
@@ -92,8 +95,8 @@ use windows::{
                 CreateProcessW, DeleteProcThreadAttributeList, GetCurrentProcess,
                 GetExitCodeProcess, GetProcessMitigationPolicy, InitializeProcThreadAttributeList,
                 OpenProcessToken, ProcessChildProcessPolicy, ProcessImageLoadPolicy, ResumeThread,
-                TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
-                CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+                TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
+                CREATE_UNICODE_ENVIRONMENT, DETACHED_PROCESS, EXTENDED_STARTUPINFO_PRESENT,
                 LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
                 PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
                 PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
@@ -306,8 +309,9 @@ fn current_user_observed(observation: &Observer) -> Result<String, String> {
     sid_string(unsafe { (*(data.as_ptr().cast::<TOKEN_USER>())).User.Sid })
 }
 
-/// One private custom capability authorizes only the immutable public cache.
-/// It is not an internet, COM, registry, or user-library capability.
+/// A capability SID derived by name. The private runtime capability authorizes
+/// only the immutable public cache (not internet, COM, registry or user
+/// libraries); the same type also derives Windows' read-only registryRead.
 struct RuntimeCapability {
     sid: PSID,
     allocations: Vec<Local>,
@@ -366,24 +370,22 @@ impl RuntimeCapability {
     }
 }
 
-// Only the fixed test comparison can construct a second capability. Ordinary
-// production creation remains the same singleton runtime-read capability.
+/// Windows' read-only registry capability. libuv initializes Winsock on every
+/// Node start, and WSAStartup returns 10107 in LPAC until the catalog keys
+/// granted to this capability are readable (native A-B-A 44076224990).
+const REGISTRY_READ_CAPABILITY: &str = "registryRead";
+
+// Production: exactly the private runtime capability plus registryRead. Every
+// launch re-derives both and verifies user-private registry keys stay denied.
+// Only the fixed test comparison can construct the runtime-only baseline.
 struct ProcessCapabilities<'a> {
     runtime: &'a RuntimeCapability,
-    #[cfg(test)]
     registry_read: Option<RuntimeCapability>,
 }
 impl<'a> ProcessCapabilities<'a> {
-    fn runtime(runtime: &'a RuntimeCapability) -> Self {
-        Self {
-            runtime,
-            #[cfg(test)]
-            registry_read: None,
-        }
-    }
-    #[cfg(test)]
-    fn startup_registry_read(runtime: &'a RuntimeCapability) -> Result<Self, String> {
-        let registry_read = RuntimeCapability::derive("registryRead", &Observer::default())?;
+    fn production(runtime: &'a RuntimeCapability) -> Result<Self, String> {
+        let registry_read =
+            RuntimeCapability::derive(REGISTRY_READ_CAPABILITY, &Observer::default())?;
         if unsafe { EqualSid(runtime.sid, registry_read.sid) }.is_ok() {
             return Err(UNAVAILABLE.into());
         }
@@ -392,16 +394,18 @@ impl<'a> ProcessCapabilities<'a> {
             registry_read: Some(registry_read),
         })
     }
+    #[cfg(test)]
+    fn runtime_only(runtime: &'a RuntimeCapability) -> Self {
+        Self {
+            runtime,
+            registry_read: None,
+        }
+    }
     fn entries(&self) -> Vec<SID_AND_ATTRIBUTES> {
-        let entries = vec![self.runtime.entry()];
-        #[cfg(test)]
-        let entries = if let Some(registry_read) = &self.registry_read {
-            let mut entries = entries;
+        let mut entries = vec![self.runtime.entry()];
+        if let Some(registry_read) = &self.registry_read {
             entries.push(registry_read.entry());
-            entries
-        } else {
-            entries
-        };
+        }
         entries
     }
 }
@@ -1682,6 +1686,7 @@ fn lpac_access_matches(verdicts: &[AccessVerdict; 4]) -> bool {
 fn verify_lpac_access(
     token: HANDLE,
     capability: PSID,
+    registry_read: bool,
     observation: &Observer,
 ) -> Result<(), String> {
     let duplicate = access_impersonation_token(token, observation)?;
@@ -1724,7 +1729,132 @@ fn verify_lpac_access(
     if !matched {
         return Err(UNAVAILABLE.into());
     }
+    // registryRead is a read grant on keys Windows marks for it. Positive
+    // control first: the Winsock catalog key is readable exactly when the token
+    // holds registryRead, so the denials below cannot be vacuous. The actual
+    // token must still be refused the user's private keys; fail closed.
+    observation.enter(Phase::TokenRegistryIsolation);
+    if registry_read_granted(raw(&duplicate), RegistryKey::WinsockCatalog, observation)?
+        != registry_read
+    {
+        return Err(UNAVAILABLE.into());
+    }
+    for key in [RegistryKey::UserEnvironment, RegistryKey::UserSoftware] {
+        if registry_read_granted(raw(&duplicate), key, observation)? {
+            return Err(UNAVAILABLE.into());
+        }
+    }
     Ok(())
+}
+
+/// KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS: the rights a read would need.
+const REGISTRY_READ_BITS: u32 = 0x0001 | 0x0008;
+/// READ_CONTROL, enough for the host to read the key's security descriptor.
+const REGISTRY_READ_CONTROL: u32 = 0x0002_0000;
+
+/// AccessCheck of the actual registry key DACL against `token` (an
+/// impersonation duplicate of the suspended child). MAXIMUM_ALLOWED reports
+/// every right the DACL and AppContainer intersection grant; only the read
+/// bits decide. Any open, descriptor or AccessCheck failure is an error.
+fn registry_read_granted(
+    token: HANDLE,
+    key: RegistryKey,
+    observation: &Observer,
+) -> Result<bool, String> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let (root, path) = match key {
+        RegistryKey::UserEnvironment => (HKEY_CURRENT_USER, "Environment"),
+        RegistryKey::UserSoftware => (HKEY_CURRENT_USER, "Software"),
+        RegistryKey::WinsockCatalog => (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Services\WinSock2\Parameters",
+        ),
+    };
+    let mut record = RegistryAccess {
+        key,
+        opened: false,
+        descriptor_read: false,
+        access_checked: false,
+        read_granted: None,
+    };
+    let result = registry_read_check(root, path, token, &mut record);
+    observation.evidence(|evidence| {
+        if evidence.registry_isolation.len() < 4 {
+            evidence.registry_isolation.push(record);
+        }
+    });
+    result
+}
+
+fn registry_read_check(
+    root: winreg::HKEY,
+    path: &str,
+    token: HANDLE,
+    record: &mut RegistryAccess,
+) -> Result<bool, String> {
+    let opened = winreg::RegKey::predef(root)
+        .open_subkey_with_flags(path, REGISTRY_READ_CONTROL)
+        .map_err(|_| UNAVAILABLE.to_owned())?;
+    record.opened = true;
+    Ok(registry_key_read_bits(HANDLE(opened.raw_handle() as _), token, record)? != 0)
+}
+
+/// The granted read bits (KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS) for one
+/// already-open key handle (READ_CONTROL); 0 when nothing is granted.
+fn registry_key_read_bits(
+    key: HANDLE,
+    token: HANDLE,
+    record: &mut RegistryAccess,
+) -> Result<u32, String> {
+    let mut descriptor = PSECURITY_DESCRIPTOR::default();
+    let status = unsafe {
+        GetSecurityInfo(
+            key,
+            SE_REGISTRY_KEY,
+            OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            None,
+            None,
+            Some(&mut descriptor),
+        )
+    };
+    if status.0 != 0 || descriptor.0.is_null() {
+        return Err(UNAVAILABLE.into());
+    }
+    let descriptor = Local(descriptor.0);
+    record.descriptor_read = true;
+    // KEY_READ, KEY_WRITE, KEY_EXECUTE (= KEY_READ) and KEY_ALL_ACCESS.
+    let mapping = GENERIC_MAPPING {
+        GenericRead: 0x0002_0019,
+        GenericWrite: 0x0002_0006,
+        GenericExecute: 0x0002_0019,
+        GenericAll: 0x000f_003f,
+    };
+    let mut privileges = PRIVILEGE_SET::default();
+    let mut privilege_bytes = size_of::<PRIVILEGE_SET>() as u32;
+    let (mut granted, mut allowed) = (0u32, BOOL(0));
+    unsafe {
+        AccessCheck(
+            PSECURITY_DESCRIPTOR(descriptor.0),
+            token,
+            0x0200_0000, // MAXIMUM_ALLOWED
+            &mapping,
+            Some(&mut privileges),
+            &mut privilege_bytes,
+            &mut granted,
+            &mut allowed,
+        )
+    }
+    .map_err(|_| UNAVAILABLE.to_owned())?;
+    record.access_checked = true;
+    let read = if allowed.as_bool() {
+        granted & REGISTRY_READ_BITS
+    } else {
+        0
+    };
+    record.read_granted = Some(read != 0);
+    Ok(read)
 }
 
 fn verify_token(
@@ -1733,14 +1863,19 @@ fn verify_token(
     capability: PSID,
     observation: &Observer,
 ) -> Result<(), String> {
+    // Derived independently of the launch so a wrong set cannot vouch for itself.
+    let registry_read = RuntimeCapability::derive(REGISTRY_READ_CAPABILITY, &Observer::default())?;
     verify_token_entries(
         process,
         package,
         capability,
-        &[SID_AND_ATTRIBUTES {
-            Sid: capability,
-            Attributes: SE_GROUP_ENABLED as u32,
-        }],
+        &[
+            SID_AND_ATTRIBUTES {
+                Sid: capability,
+                Attributes: SE_GROUP_ENABLED as u32,
+            },
+            registry_read.entry(),
+        ],
         observation,
     )
 }
@@ -1752,7 +1887,9 @@ fn verify_token_entries(
     expected: &[SID_AND_ATTRIBUTES],
     observation: &Observer,
 ) -> Result<(), String> {
-    if expected.is_empty() || expected.len() > if cfg!(test) { 2 } else { 1 } {
+    // Production requires {runtime, registryRead}; the runtime-only singleton
+    // exists solely as the fixed test comparison's baseline.
+    if !(expected.len() == 2 || (cfg!(test) && expected.len() == 1)) {
         return Err(UNAVAILABLE.into());
     }
     if expected[0].Attributes != SE_GROUP_ENABLED as u32
@@ -1760,9 +1897,9 @@ fn verify_token_entries(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(test)]
     if expected.len() == 2 {
-        let registry_read = RuntimeCapability::derive("registryRead", &Observer::default())?;
+        let registry_read =
+            RuntimeCapability::derive(REGISTRY_READ_CAPABILITY, &Observer::default())?;
         if expected[1].Attributes != SE_GROUP_ENABLED as u32
             || unsafe { EqualSid(expected[1].Sid, registry_read.sid) }.is_err()
             || unsafe { EqualSid(expected[0].Sid, expected[1].Sid) }.is_ok()
@@ -1858,7 +1995,11 @@ fn verify_token_entries(
                     })
             })
             .collect::<Vec<_>>();
-        let exact = capability_set::exact(&masks);
+        // Every actual capability must be present and enabled, not just named.
+        let enabled = actual
+            .iter()
+            .all(|entry| entry.Attributes == SE_GROUP_ENABLED as u32);
+        let exact = capability_set::exact(&masks) && enabled;
         observation.evidence(|evidence| evidence.capability_matches = Some(exact));
         if !exact {
             return Err(UNAVAILABLE.into());
@@ -1907,7 +2048,7 @@ fn verify_token_entries(
     // Class 46 is rejected with STATUS_INVALID_INFO_CLASS on native 20348.
     // Prove its documented LPAC authorization semantics on this actual token,
     // while it is still suspended, with both positive and negative controls.
-    verify_lpac_access(raw(&token), capability, observation)
+    verify_lpac_access(raw(&token), capability, expected.len() == 2, observation)
 }
 
 struct Launch {
@@ -1927,20 +2068,25 @@ enum ContainerPolicy {
     OrdinaryAppContainer,
 }
 
-/// Console allocation for the sandboxed child. Production keeps
-/// CREATE_NO_WINDOW; the detached form exists only for the fixed test A-B-A.
+#[cfg(test)]
+use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+
+/// Console allocation for the sandboxed child. Production launches detached
+/// with explicit pipe stdio: allocating a new hidden console (CREATE_NO_WINDOW)
+/// fails KernelBase initialization in this LPAC sandbox with 0xc0000142
+/// (native A-B-A 44068121826). Hidden remains only for that fixed comparison.
 #[derive(Clone, Copy)]
 enum ConsoleMode {
-    Hidden,
     #[cfg(test)]
+    Hidden,
     Detached,
 }
 impl ConsoleMode {
     fn creation_flags(self) -> PROCESS_CREATION_FLAGS {
         let console = match self {
-            Self::Hidden => CREATE_NO_WINDOW,
             #[cfg(test)]
-            Self::Detached => windows::Win32::System::Threading::DETACHED_PROCESS,
+            Self::Hidden => CREATE_NO_WINDOW,
+            Self::Detached => DETACHED_PROCESS,
         };
         console | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
     }
@@ -2076,9 +2222,9 @@ fn create_suspended(
         cwd,
         home,
         profile,
-        &ProcessCapabilities::runtime(cap),
+        &ProcessCapabilities::production(cap)?,
         policy,
-        ConsoleMode::Hidden,
+        ConsoleMode::Detached,
         observation,
     )
 }

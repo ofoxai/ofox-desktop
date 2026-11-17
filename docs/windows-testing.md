@@ -113,7 +113,8 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 有界脱敏记录；未知文案或握手失败保持 inconclusive。最后加载的 DLL 不能自动
 认作故障原因。原 Job 和进程句柄仍负责终止、等待及取退出状态，调试器退出不
 替代这些条件。调试模式始终停止在 Node 诊断，不产生引擎 admission；功能门禁
-最终必须在没有调试器的情况下通过。
+最终必须在没有调试器的情况下通过。因此调试器诊断现须在开发工作流显式设置
+`OFOX_DOCUMENT_STARTUP_TRACE=1` 才启用；默认不挂调试器，功能前置直接运行。
 
 仅显式设置 `OFOX_DOCUMENT_STARTUP_COMPARISON`（`registryRead`、`detachedConsole`
 或 `detachedRegistryRead`）且该固定用例已取得
@@ -124,18 +125,26 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 路径和输出正文的闭集收据写入该用例日志，不替代完整功能或客户端验收。
 原生运行 44027445443 的 A1/B/A2 均返回同一 0142，registryRead 单独不足；默认
 诊断不会重复该候选实验。
-同一对照另有 `detachedConsole` 候选：A1/A2 与产品相同使用 `CREATE_NO_WINDOW`，B 仅
-改为 `DETACHED_PROCESS`，capability、token、策略和输入均不变；`DETACHED_PROCESS`
-只存在于 test cfg，产品路径无法选择。开发工作流在该步骤显式设置此候选，回答
-控制台初始化是否为 0142 的原因；答案明确后移除该设置。B 成功也不改产品启动
-标志，修复须另行提交并通过无调试器的功能门禁。
+同一对照另有 `detachedConsole` 候选：A1/A2 使用修复前的产品启动
+`CREATE_NO_WINDOW`（现仅存在于 test cfg），B 仅改为 `DETACHED_PROCESS`，capability、
+token、策略和输入均不变。运行 44068121826 已回答控制台初始化是 0142 的原因。
 各组回执另含闭集 `stderrShape`：仅 kind（empty、libuv-fatal、node-assertion、
 node-fatal、v8-fatal、icu、openssl、unknown）；libuv-fatal 只在调用名属于固定
 Win32/libuv 词表时附该名与 i32 数字错误码，否则二者均为 `?`/null；逐行查找
 致命行，已知调用优先，不上传任何原文。
 `detachedRegistryRead` 的 A1/A2 均以 `DETACHED_PROCESS` 启动，且必须精确复现
 `WSAStartup` 10107 的 libuv 中止（`0x80000003`）；B 仅追加 registryRead。每个候选的
-基线启动与预期失败由协议固定，A1 不复现则不派 B。开发工作流当前设置此候选。
+基线启动与预期失败由协议固定，A1 不复现则不派 B。运行 44076224990 记为
+supports-candidate，工作流中的对照设置已移除，默认不再执行任何候选。
+
+产品沙箱现以 `DETACHED_PROCESS` 与显式管道 stdio 启动，不分配控制台；capability
+为私有 runtime 加 Windows `registryRead`，令牌须恰为这两项且均启用，校验时独立
+派生，并须实际处于启用状态。每次启动在挂起的实际 token 上先做正向对照：
+Winsock 目录键的可读性必须与是否持有 registryRead 一致；再对 `HKCU\Environment`
+与 `HKCU\Software` 的真实 DACL 做 AccessCheck，任一可查询或枚举即拒绝启动
+（fail closed）。原生测试另遍历整个 HKCU，逐键比较生产集合与仅 runtime 集合的读权限，
+registryRead 不得新增任何可读键；生产校验须拒绝仅 runtime 的子进程。
+启用调试器诊断需要同时修改工作流与固定该工作流的测试，属有意的显式操作。
 
 固定 Nt 观察保留原 V2/Host Resume1 门禁。对实际 child HANDLE 调用
 `IsWow64Process2`，要求成功、processMachine=UNKNOWN、nativeMachine=AMD64，

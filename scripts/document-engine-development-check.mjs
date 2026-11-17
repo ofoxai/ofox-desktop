@@ -770,10 +770,13 @@ export async function startNativeTrace(
   };
 }
 
+// The debugger diagnostic always stops the first Node and fails the functional
+// gate by design, so it runs only on explicit opt-in in the development job.
 export function shouldCaptureDevelopmentTrace(environment) {
   return (
     environment.GITHUB_ACTIONS === "true" &&
-    environment.GITHUB_WORKFLOW === "Document Engine Development Checks"
+    environment.GITHUB_WORKFLOW === "Document Engine Development Checks" &&
+    environment.OFOX_DOCUMENT_STARTUP_TRACE === "1"
   );
 }
 

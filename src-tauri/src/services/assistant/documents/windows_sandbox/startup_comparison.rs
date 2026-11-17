@@ -206,7 +206,7 @@ pub(super) fn compare(
             folder,
             &home,
             profile,
-            &ProcessCapabilities::runtime(&cap),
+            &ProcessCapabilities::runtime_only(&cap),
             console(plan.base_detached),
         ));
         if !startup_comparison_protocol::baseline(&rows[0], candidate) {
@@ -214,9 +214,9 @@ pub(super) fn compare(
         } // No candidate unless A1 reproduces the failure it addresses.
           // B changes exactly one launch condition from A1.
         let caps = if plan.extra {
-            ProcessCapabilities::startup_registry_read(&cap)?
+            ProcessCapabilities::production(&cap)?
         } else {
-            ProcessCapabilities::runtime(&cap)
+            ProcessCapabilities::runtime_only(&cap)
         };
         rows.push(case(
             &node,
@@ -234,7 +234,7 @@ pub(super) fn compare(
             folder,
             &home,
             profile,
-            &ProcessCapabilities::runtime(&cap),
+            &ProcessCapabilities::runtime_only(&cap),
             console(plan.base_detached),
         ));
         runtime_stable = tree_digest_at(&runtime.root, MAX_TREE_BYTES)? == runtime.digest;

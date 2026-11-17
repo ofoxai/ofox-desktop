@@ -550,3 +550,31 @@ A1/A2 以 `DETACHED_PROCESS` 和单一 runtime capability 启动，均精确复�
 44068121826 单去控制台均不足）。这是诊断结论，产品启动标志与能力尚未修改：采用
 registryRead 会扩大 LPAC 的注册表读取范围，须先由用户确认，并补私有注册表等隔离
 负例、Python/OfficeCLI 同标志验证、无调试器功能门禁与 Win10/11 客户端验收。
+
+## 产品修复（2026-11-17 用户批准）
+
+按已证实的两层根因修改产品沙箱，不调整版本、不发版：
+
+- 启动改为 `DETACHED_PROCESS`，stdio 仍为显式继承的管道；`CREATE_NO_WINDOW` 只
+  保留在 test cfg 供历史对照使用。不分配控制台不放宽任何权限。
+- 产品 capability 改为私有 runtime 加 Windows `registryRead`。令牌校验要求恰好
+  这两项、实际均启用且互不相同，并在校验时独立派生；runtime 单项只允许测试对照基线。
+- 新增每次启动的注册表隔离门禁：在挂起的实际 token 上先做正向对照（Winsock 目录键
+  可读当且仅当持有 registryRead，保证判定不是恒拒），再对 `HKCU\Environment`、
+  `HKCU\Software` 的真实 DACL 做 MAXIMUM_ALLOWED AccessCheck，任一授予查询或
+  枚举即拒绝启动；读取失败同样拒绝。证据只含固定键名与布尔值。
+- 新增原生测试：生产校验只接受生产集合；生产集合可读 Winsock 目录键，仅 runtime
+  不可读，两者用户键都拒绝；并遍历整个 HKCU，逐键比较两种 token 的读权限，要求
+  registryRead 不新增任何可读键。原 LPAC 控制测试改为两项 capability 并断言门禁证据。
+- 独立审查发现镜像交叉检查的全局 `allow(dead_code)` 掩盖了 release 构建的死代码
+  警告；已移除并复现、修复，同时补上 capability 实际启用校验与门禁正向对照。
+- 复审后：HKCU 遍历在键被删除时停止枚举并单独计数，按读权限位比较两种 token，
+  每次输出闭集计数；另以原始 token 证明正向对照在预期错误时必然拒绝。历史 A-B-A
+  工具保留，但其触发条件（生产路径 0142）在修复后不再成立，默认不会运行。
+- 调试器诊断改为显式 `OFOX_DOCUMENT_STARTUP_TRACE=1` 才启用，工作流移除对照设置，
+  使功能前置与完整 `windows_sandbox` 在无调试器下运行。
+
+本地验证：Windows 目标 lib/test Clippy（交叉检查）、rustfmt、Prettier 通过，CDB
+与开发检查相关 Node 测试 74/74、0 skip。上述都不是 Windows 原生证据；原生功能
+门禁、Python/OfficeCLI、完整 sandbox 套件、Windows Probe 与 Win10/11 客户端验收
+均待执行，Windows Python 能力保持关闭。

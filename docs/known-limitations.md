@@ -36,9 +36,13 @@ both CREATE_NO_WINDOW controls still fail, but Node then aborts with
 STATUS_BREAKPOINT because libuv's unconditional WSAStartup returns 10107
 (WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Run 44076224990
 showed that the console-free launch plus the registryRead capability lets Node
-run normally under the same verified isolation. Production launch flags and
-capabilities are still unchanged pending a decision on registryRead and its
-isolation evidence, so Windows Python capability stays disabled.
+run normally under the same verified isolation. Production now launches
+detached with exactly {runtime, registryRead} and refuses any launch whose actual
+token can read the user's Environment or Software registry keys. registryRead
+still widens LPAC read access to the HKLM keys Windows grants it; that scope is
+accepted for Winsock initialization. Windows Python capability stays disabled
+until the unassisted native functional gate and Windows 10/11 client acceptance
+pass.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

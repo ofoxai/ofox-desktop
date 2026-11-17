@@ -112,7 +112,8 @@ fn assert_suspended_lpac_access_controls() {
         let evidence = &report["evidence"];
         assert_eq!(evidence["appContainer"], 1);
         assert_eq!(evidence["packageMatches"], true);
-        assert_eq!(evidence["capabilityGroups"], 1);
+        // Production: exactly the private runtime capability plus registryRead.
+        assert_eq!(evidence["capabilityGroups"], 2);
         assert_eq!(evidence["capabilityMatches"], true);
         assert!(evidence["integrityRid"].as_u64().unwrap() <= 4096);
         assert_eq!(evidence["childPolicy"].as_u64().unwrap() & 1, 1);
@@ -141,6 +142,24 @@ fn assert_suspended_lpac_access_controls() {
             assert_eq!(check["accessStatus"], granted);
             assert_eq!(check["grantedAccess"], u32::from(granted));
         }
+        // The registry gate runs only after the LPAC matrix matched: the Winsock
+        // catalog positive control, then the user's private keys refused.
+        let registry = evidence["registryIsolation"].as_array().unwrap();
+        if lpac {
+            let keys: Vec<_> = registry.iter().map(|row| row["key"].clone()).collect();
+            assert_eq!(
+                keys,
+                ["winsock_catalog", "user_environment", "user_software"]
+            );
+            for (row, granted) in registry.iter().zip([true, false, false]) {
+                assert_eq!(row["opened"], true);
+                assert_eq!(row["descriptorRead"], true);
+                assert_eq!(row["accessChecked"], true);
+                assert_eq!(row["readGranted"], granted);
+            }
+        } else {
+            assert!(registry.is_empty());
+        }
         assert!(!marker.exists(), "suspended control must never execute");
         unsafe {
             win(TerminateJobObject(raw(&child.process.job), 1)).unwrap();
@@ -157,6 +176,191 @@ fn assert_suspended_lpac_access_controls() {
     }
     task.dispose().unwrap();
     profile.dispose().unwrap();
+}
+
+/// registryRead must grant exactly what libuv's WSAStartup needs and nothing
+/// private: with it the Winsock catalog key is readable, without it it is not,
+/// the user's Environment and Software keys stay refused either way, and no
+/// key anywhere in HKCU becomes readable because of it.
+#[test]
+#[serial_test::serial]
+fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
+    let cap = RuntimeCapability::new().unwrap();
+    let user = current_user().unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    let exe = system.join("System32").join("cmd.exe");
+    let mut profile = Profile::new(&cap).unwrap();
+    profile.make_low_profile().unwrap();
+    let mut task = task_directory(&user, profile.sid.0).unwrap();
+    let home = task.0.join("home");
+    fs::create_dir(&home).unwrap();
+    let marker = task.0.join("must-not-run");
+    // Never resumed: only each suspended child's actual token is examined.
+    let suspended_token = |caps: &ProcessCapabilities<'_>| {
+        let observation = Observer::fixed_probe();
+        let child = create_suspended_capabilities(
+            &exe,
+            &["/D".into(), "/C".into(), "echo bad>must-not-run".into()],
+            &task.0,
+            &home,
+            &profile,
+            caps,
+            ContainerPolicy::Lpac,
+            ConsoleMode::Detached,
+            &observation,
+        )
+        .unwrap();
+        // The production verifier accepts only the production set.
+        let verified = verify_token(
+            raw(&child.process.process),
+            profile.sid.0,
+            cap.sid,
+            &observation,
+        );
+        let mut token = HANDLE::default();
+        unsafe {
+            win(OpenProcessToken(
+                raw(&child.process.process),
+                TOKEN_QUERY | TOKEN_DUPLICATE,
+                &mut token,
+            ))
+            .unwrap();
+        }
+        let token = handle(token);
+        let duplicate = access_impersonation_token(raw(&token), &observation).unwrap();
+        unsafe {
+            win(TerminateJobObject(raw(&child.process.job), 1)).unwrap();
+            assert_eq!(
+                WaitForSingleObject(raw(&child.process.process), 5000),
+                WAIT_OBJECT_0
+            );
+        }
+        drop(child);
+        (verified.is_ok(), token, duplicate)
+    };
+    let (production_verified, production_primary, production) =
+        suspended_token(&ProcessCapabilities::production(&cap).unwrap());
+    let (runtime_verified, runtime_primary, runtime_only) =
+        suspended_token(&ProcessCapabilities::runtime_only(&cap));
+    // The positive control must refuse whenever its expectation is wrong.
+    let gate = |token: &OwnedHandle, registry_read| {
+        verify_lpac_access(raw(token), cap.sid, registry_read, &Observer::fixed_probe()).is_ok()
+    };
+    let gates = [
+        gate(&production_primary, true),
+        gate(&production_primary, false),
+        gate(&runtime_primary, false),
+        gate(&runtime_primary, true),
+    ];
+    let keys = [
+        RegistryKey::WinsockCatalog,
+        RegistryKey::UserEnvironment,
+        RegistryKey::UserSoftware,
+    ];
+    let observation = Observer::fixed_probe();
+    let reads = |token: &OwnedHandle| {
+        keys.map(|key| registry_read_granted(raw(token), key, &observation).unwrap())
+    };
+    let (production_reads, runtime_reads) = (reads(&production), reads(&runtime_only));
+    let scan = scan_user_hive([raw(&production), raw(&runtime_only)]);
+    assert!(
+        !marker.exists(),
+        "suspended registry controls must never execute"
+    );
+    task.dispose().unwrap();
+    profile.dispose().unwrap();
+    assert_eq!(
+        gates,
+        [true, false, true, false],
+        "registry gate expectations"
+    );
+    assert!(production_verified, "production set must pass verify_token");
+    assert!(!runtime_verified, "runtime-only set must fail verify_token");
+    assert_eq!(
+        production_reads,
+        [true, false, false],
+        "production capability set"
+    );
+    assert_eq!(runtime_reads, [false, false, false], "runtime-only control");
+    // Coverage is always logged so a shrinking walk is visible, not silent.
+    eprintln!("OFOX_HKCU_REGISTRY_SCAN {scan:?}");
+    assert!(scan.visited >= 100, "HKCU walk too small: {scan:?}");
+    assert_eq!(
+        scan.check_errors, 0,
+        "HKCU keys without a decision: {scan:?}"
+    );
+    assert_eq!(
+        scan.added_by_registry_read, 0,
+        "registryRead made HKCU keys readable: {scan:?}"
+    );
+}
+
+/// Counts only; no key name, path or value is recorded.
+#[derive(Debug, Default)]
+struct HiveScan {
+    visited: usize,
+    vanished: usize,
+    host_unopenable: usize,
+    enumeration_stopped: usize,
+    check_errors: usize,
+    added_by_registry_read: usize,
+}
+
+/// Walks the whole current-user hive and compares, key by key, the read
+/// decision for [production token, runtime-only token]. Bounded: exceeding the
+/// key limit is a test failure rather than silently partial evidence.
+fn scan_user_hive(tokens: [HANDLE; 2]) -> HiveScan {
+    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
+    const KEY_LIMIT: usize = 300_000;
+    const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
+    let flags = REGISTRY_READ_CONTROL | KEY_ENUMERATE_SUB_KEYS;
+    let mut scan = HiveScan::default();
+    let root = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("", flags)
+        .unwrap();
+    let mut pending = vec![root];
+    while let Some(key) = pending.pop() {
+        scan.visited += 1;
+        assert!(scan.visited <= KEY_LIMIT, "HKCU walk exceeded its bound");
+        // A key deleted while queued is not evidence either way.
+        if key.query_info().is_err() {
+            scan.vanished += 1;
+            continue;
+        }
+        let handle = HANDLE(key.raw_handle() as _);
+        let decide = |token| {
+            let mut record = RegistryAccess {
+                key: RegistryKey::UserSoftware,
+                opened: true,
+                descriptor_read: false,
+                access_checked: false,
+                read_granted: None,
+            };
+            registry_key_read_bits(handle, token, &mut record)
+        };
+        match (decide(tokens[0]), decide(tokens[1])) {
+            // Any read right registryRead adds counts, bit by bit.
+            (Ok(production), Ok(runtime_only)) => {
+                if production & !runtime_only != 0 {
+                    scan.added_by_registry_read += 1;
+                }
+            }
+            _ => scan.check_errors += 1,
+        }
+        // winreg keeps advancing past errors (e.g. ERROR_KEY_DELETED); stop at
+        // the first one instead of iterating the whole index space.
+        for name in key.enum_keys() {
+            let Ok(name) = name else {
+                scan.enumeration_stopped += 1;
+                break;
+            };
+            match key.open_subkey_with_flags(name, flags) {
+                Ok(child) => pending.push(child),
+                Err(_) => scan.host_unopenable += 1,
+            }
+        }
+    }
+    scan
 }
 
 #[test]

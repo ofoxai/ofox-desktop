@@ -61,6 +61,7 @@ pub(super) enum Phase {
     TokenLpacAllPackages,
     TokenLpacCapability,
     TokenLpacForeign,
+    TokenRegistryIsolation,
     #[cfg(test)]
     CdbHandshake,
     #[cfg(test)]
@@ -109,6 +110,7 @@ pub(super) struct Evidence {
     pub token_queries: Vec<TokenQuery>,
     pub token_comparisons: Vec<TokenComparison>,
     pub lpac_access_proof: Option<LpacAccessProof>,
+    pub registry_isolation: Vec<RegistryAccess>,
     pub app_container: Option<u32>,
     pub less_privileged: Option<u32>,
     pub package_matches: Option<bool>,
@@ -171,6 +173,26 @@ pub(super) enum AccessCase {
     AllApplicationPackages,
     RuntimeCapability,
     ForeignCapability,
+}
+
+/// Fixed registry keys checked against the actual suspended token's DACL
+/// intersection. Names are a closed set; no path, SID or value leaves.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RegistryKey {
+    UserEnvironment,
+    UserSoftware,
+    WinsockCatalog,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RegistryAccess {
+    pub key: RegistryKey,
+    pub opened: bool,
+    pub descriptor_read: bool,
+    pub access_checked: bool,
+    pub read_granted: Option<bool>,
 }
 
 #[derive(Default, serde::Serialize)]

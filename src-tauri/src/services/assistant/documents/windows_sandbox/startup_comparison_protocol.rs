@@ -1,11 +1,11 @@
 //! Fixed test receipts, never a runtime admission policy.
 use serde_json::Value;
 
-/// Production CreateProcessW flags: CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT
-/// | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED. A Windows test binds both
-/// values to the windows crate constants used by `ConsoleMode`.
+/// The pre-fix production flags, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT
+/// | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED, now used only by the A1/A2
+/// baselines. A Windows test binds both values to the `ConsoleMode` constants.
 pub(super) const HIDDEN_FLAGS: u32 = 0x0808_0404;
-/// The same launch with DETACHED_PROCESS in place of CREATE_NO_WINDOW.
+/// The same launch with DETACHED_PROCESS in place of CREATE_NO_WINDOW; production.
 pub(super) const DETACHED_FLAGS: u32 = 0x0008_040c;
 
 /// One launch condition changed in B relative to A1/A2.

@@ -479,12 +479,36 @@ test("local development keeps its original gate without ETW prerequisites", asyn
     }),
     false,
   );
+  // The debugger diagnostic forces the functional gate to fail by design, so
+  // it runs only on explicit opt-in inside the development workflow.
+  const development = {
+    GITHUB_ACTIONS: "true",
+    GITHUB_WORKFLOW: "Document Engine Development Checks",
+  };
+  assert.equal(shouldCaptureDevelopmentTrace(development), false);
+  for (const value of ["0", "true", " 1", ""])
+    assert.equal(
+      shouldCaptureDevelopmentTrace({
+        ...development,
+        OFOX_DOCUMENT_STARTUP_TRACE: value,
+      }),
+      false,
+      value,
+    );
+  assert.equal(
+    shouldCaptureDevelopmentTrace({
+      ...development,
+      OFOX_DOCUMENT_STARTUP_TRACE: "1",
+    }),
+    true,
+  );
   assert.equal(
     shouldCaptureDevelopmentTrace({
       GITHUB_ACTIONS: "true",
-      GITHUB_WORKFLOW: "Document Engine Development Checks",
+      GITHUB_WORKFLOW: "Windows Probe",
+      OFOX_DOCUMENT_STARTUP_TRACE: "1",
     }),
-    true,
+    false,
   );
   const report = await runDevelopmentChecks(async (check) =>
     nativeResult(check.exact ? 1 : 7),
@@ -596,23 +620,10 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     '  workflow_dispatch:\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
   );
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
-  // Rust requested() accepts only exact candidate names; a typo would skip it.
-  // Only the native-check step runs the comparison, so pin it to that step.
-  const candidates = [
-    ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_COMPARISON: (\S+)$/gm),
-  ].map((match) => match[1]);
-  assert.deepEqual(candidates, ["detachedRegistryRead"]);
-  const step = workflow
-    .split(/^ {6}- /m)
-    .find((block) =>
-      block.startsWith(
-        "name: ACL prerequisite then focused native regressions",
-      ),
-    );
-  assert.match(
-    step,
-    /^ {10}OFOX_DOCUMENT_STARTUP_COMPARISON: detachedRegistryRead$/m,
-  );
+  // The root-cause A-B-A and debugger trace are answered; the gate must now
+  // run the functional prerequisite and full suite unassisted.
+  assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_COMPARISON/);
+  assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_TRACE/);
   assert.match(
     workflow,
     /debug0-v3-.*hashFiles\('src-tauri\/Cargo.lock', 'src-tauri\/Cargo.toml'/,
