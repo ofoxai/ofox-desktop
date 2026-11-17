@@ -42,6 +42,10 @@ fn number(value: &serde_json::Value, name: &str) -> Result<u32, String> {
 }
 fn stage(value: &serde_json::Value) -> &'static str {
     match value["stage"].as_str() {
+        Some("operation_layout_unverified") => "operation_layout_unverified",
+        Some("operation_thread_unverified") => "operation_thread_unverified",
+        Some("operation_install_unverified") => "operation_install_unverified",
+        Some("operation_target_invalid") => "operation_target_invalid",
         Some("target_not_seen") => "target_not_seen",
         Some("target_mismatch") => "target_mismatch",
         Some("gflag_before_unreadable") => "gflag_before_unreadable",

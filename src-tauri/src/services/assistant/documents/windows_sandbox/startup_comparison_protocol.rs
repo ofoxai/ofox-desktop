@@ -1,6 +1,10 @@
 //! Fixed test receipts, never a runtime admission policy.
 use serde_json::Value;
 
+pub(super) fn requested(value: Option<&str>) -> bool {
+    value == Some("registryRead")
+}
+
 pub(super) fn eligible(error: &str) -> bool {
     let Some((_, data)) = error.split_once(":probe ") else {
         return false;
@@ -71,6 +75,19 @@ pub(super) fn supported(rows: &[Value]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_disproved_candidate_is_not_repeated_without_exact_opt_in() {
+        assert!(requested(Some("registryRead")));
+        for value in [
+            None,
+            Some(""),
+            Some("true"),
+            Some("RegistryRead"),
+            Some("registryRead "),
+        ] {
+            assert!(!requested(value));
+        }
+    }
     fn row(extra: bool) -> Value {
         serde_json::json!({"completed":true,"tokenVerified":true,"cleanupConfirmed":true,"resumePrevious":1,
             "timedOut":false,"capabilityCount":if extra{2}else{1},"lpacAccessMatched":true,"childPolicy":1,"imagePolicy":7,"integrityRid":4096,

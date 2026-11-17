@@ -13,7 +13,11 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
     let root = runtime();
     let office = root.join("engines/officecli/officecli.exe");
     let result = probe_windows_document_engines(&root, &office).await;
-    if std::env::var_os(cdb::ENV_ROOT).is_some()
+    if startup_comparison_protocol::requested(
+        std::env::var("OFOX_DOCUMENT_STARTUP_COMPARISON")
+            .ok()
+            .as_deref(),
+    ) && std::env::var_os(cdb::ENV_ROOT).is_some()
         && result
             .as_ref()
             .err()

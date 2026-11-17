@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 . (Join-Path $PSScriptRoot 'document-engine-stdio.ps1')
 . (Join-Path $PSScriptRoot 'document-engine-symbols.ps1')
+. (Join-Path $PSScriptRoot 'document-engine-operations.ps1')
 $controlReader = New-DocumentControlReader
 $ownsRaw = $false; $debugger = $null; $writer = $null; $metadata = $null
 $stage = 'controller_setup'; $debuggerStarted = $false; $debuggerClosed = $true
@@ -16,6 +17,7 @@ $reportedWin32Errors = @()
 $symbolState = @{ started = $false; closed = $true; exitCode = $null; failedFiles = $null; passedOrIgnoredFiles = $null; passedFile = $false }
 $gflagHints = @{ symbols = $false; types = $false; peb = $false; globalFlags = $false; failure = $false; extension = $false }
 $continueSent = $false; $hostResumeSeen = $false
+$operationSetup = $null
 
 function Send-Protocol($Value) { [Console]::Out.WriteLine(($Value | ConvertTo-Json -Depth 12 -Compress)); [Console]::Out.Flush() }
 function Write-Json([string]$Name, $Value) {
@@ -42,6 +44,7 @@ function Read-CdbLine([string]$Line, [bool]$Stderr) {
   $script:capturedBytes += [Text.Encoding]::UTF8.GetByteCount($Line) + 1
   if ($Line.Length -gt 16384 -or $script:capturedBytes -gt 4194304) { throw 'output_bound' }
   $script:writer.WriteLine($Line)
+  if ($null -ne $script:operationSetup) { Read-DocumentOperationSetupLine $script:operationSetup $Line }
   if ($Stderr) { $script:stderrLines++ } else { $script:stdoutLines++ }
   # Shape only: these counts never authorize READY and disclose no raw text.
   if ($Line -match '^(?:\d{1,3}:)?\d{1,3}:[a-fA-F0-9]{3}>') { $script:promptLines++ }
@@ -220,7 +223,7 @@ public static class DocumentCdbNative {
   if ($inputTask.IsCompleted) { throw 'symbol_cancelled' }
   Write-Json 'roots.json' @{ windows = @([DocumentCdbNative]::WindowsAliases($env:SystemRoot)) }
   $commands = Join-Path $RawDirectory 'init.cmd'
-  [IO.File]::WriteAllText($commands, @'
+  $initialCommands = @'
 .echo OFOX_CDB_RAW_V1 TARGET_BEGIN
 .printf "OFOX_CDB_RAW_V1 TARGET %x %x END\n", @$tpid, @$tid
 .echo OFOX_CDB_RAW_V1 BEFORE_BEGIN
@@ -230,8 +233,7 @@ public static class DocumentCdbNative {
 .echo OFOX_CDB_RAW_V1 AFTER_BEGIN
 !gflag
 .echo OFOX_CDB_RAW_V1 AFTER_END
-.echo OFOX_CDB_RAW_V1 CONFIG_END
-'@, [Text.UTF8Encoding]::new($false))
+'@
   Write-Json 'controller.json' @{ diagnosticOnly = $true; controllerReady = $true }
   Send-Protocol @{ state = 'started'; metadata = $metadata }
   $stage = 'target_not_seen'
@@ -246,6 +248,12 @@ public static class DocumentCdbNative {
   if ($target.childPid -isnot [long] -and $target.childPid -isnot [int]) { throw 'target_mismatch' }
   if ($target.primaryTid -isnot [long] -and $target.primaryTid -isnot [int]) { throw 'target_mismatch' }
   if ($target.childPid -le 0 -or $target.childPid -gt [uint32]::MaxValue -or $target.primaryTid -le 0 -or $target.primaryTid -gt [uint32]::MaxValue) { throw 'target_mismatch' }
+  $operationSetup = New-DocumentOperationSetup $target.childPid $target.primaryTid
+  $operationProgram = Get-DocumentOperationProgram $target.primaryTid
+  foreach ($file in $operationProgram.files.GetEnumerator()) {
+    [IO.File]::WriteAllText((Join-Path $RawDirectory $file.Key), $file.Value, [Text.UTF8Encoding]::new($false))
+  }
+  [IO.File]::WriteAllText($commands, ($initialCommands + "`n" + ($operationProgram.commands -join "`n") + "`n.echo OFOX_CDB_RAW_V1 CONFIG_END`n"), [Text.UTF8Encoding]::new($false))
   $writer = [IO.StreamWriter]::new((Join-Path $RawDirectory 'debugger.log'), $false, [Text.UTF8Encoding]::new($false))
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $cdb.path; $start.WorkingDirectory = $RawDirectory; $start.UseShellExecute = $false; $start.CreateNoWindow = $true
@@ -279,6 +287,8 @@ public static class DocumentCdbNative {
   if ($null -eq $before) { throw 'gflag_before_unreadable' }
   if ($null -eq $after) { throw 'gflag_after_unreadable' }
   if ($after -ne ($before -bor 2)) { throw 'gflag_changed_unexpectedly' }
+  Assert-DocumentOperationSetup $operationSetup
+  $writer.WriteLine(('OFOX_NT_V1 INSTALLED pid={0:x} tid={1:x} thread={2} count=14 END' -f $targetPid,$targetTid,$operationSetup.threadIndex))
   $writer.WriteLine(('OFOX_CDB_V2 BEFORE pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$before))
   $writer.WriteLine(('OFOX_CDB_V2 AFTER pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$after))
   $writer.WriteLine('OFOX_CDB_V2 READY END'); $writer.Flush()
@@ -323,6 +333,7 @@ public static class DocumentCdbNative {
   Write-Json 'finished.json' @{ stage = $stage; debuggerClosed = $debuggerClosed }
   $writer.Dispose(); $writer = $null
   Write-Json 'debugger-state.json' @{ stage = $stage; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed
+    operationSetup = (Get-DocumentOperationSetupState $operationSetup)
     debuggerExitCode = $debuggerExitCode; debuggerExited = $debuggerExited; stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes
     targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail; continueSent = $continueSent; hostResumeSeen = $hostResumeSeen
     promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors); gflagHints = $gflagHints }
@@ -332,6 +343,7 @@ public static class DocumentCdbNative {
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'CLEAN') { throw 'controller_eof' }
 } catch {
   $known = @('symbol_cancelled','symbol_deadline','symbol_check_failed','symbol_check_incomplete','symbol_output_bound','symbol_cleanup_unconfirmed','symbol_cache_invalid',
+    'operation_layout_unverified','operation_thread_unverified','operation_install_unverified','operation_target_invalid',
     'target_not_seen','target_mismatch','gflag_before_unreadable','gflag_after_unreadable','gflag_changed_unexpectedly',
     'init_tail_missing','debugger_exited','deadline','cancelled','output_bound','continue_mismatch','host_resume_mismatch','debugger_stop_unconfirmed','debugger_drain_unconfirmed',
     'debugger_unavailable','debugger_untrusted','private_directory_invalid','controller_eof','input_bound')
@@ -346,6 +358,7 @@ public static class DocumentCdbNative {
     Write-Json 'failed.json' @{ stage = $firstFailureStage; cleanupFailure = $cleanupFailure }
     Write-Json 'finished.json' @{ stage = $firstFailureStage; debuggerClosed = $debuggerClosed }
     Write-Json 'debugger-state.json' @{ stage = $firstFailureStage; cleanupFailure = $cleanupFailure; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed; debuggerExited = $debuggerExited; debuggerExitCode = $debuggerExitCode
+      operationSetup = (Get-DocumentOperationSetupState $operationSetup)
       stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes; targetSeen = $targetSeen
       beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail; continueSent = $continueSent; hostResumeSeen = $hostResumeSeen
       promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors); gflagHints = $gflagHints }

@@ -115,11 +115,24 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 替代这些条件。调试模式始终停止在 Node 诊断，不产生引擎 admission；功能门禁
 最终必须在没有调试器的情况下通过。
 
-只有该固定用例已取得完整原始启动证明且 Node 返回 0142 时，测试代码才追加
+仅显式设置 `OFOX_DOCUMENT_STARTUP_COMPARISON=registryRead` 且该固定用例已取得
+完整原始启动证明、Node 返回 0142 时，测试代码才追加
 无调试器的 A-B-A：同一临时 profile/输入，比较 runtime-only 与固定 registryRead
 候选。A1 不能重现则不派 B；每组都须验证实际精确 token/隔离属性和完整清理。
 候选成功也保留原用例失败，不改产品 capability 或 admission；没有 PID、SID、
 路径和输出正文的闭集收据写入该用例日志，不替代完整功能或客户端验收。
+原生运行 44027445443 的 A1/B/A2 均返回同一 0142，registryRead 单独不足；默认
+诊断不会重复该候选实验。
+
+固定 Nt 观察保留原 V2/Host Resume1 门禁。匹配的 ntdll PDB 必须先证明 x64
+OBJECT_ATTRIBUTES/UNICODE_STRING 布局；实际线程表与 `bl /L` 必须证明全部 14 个
+owned 入口断点已解析、启用并关联实际线程。每次调用的 owned 持久返回断点 30
+独立验证地址和线程，返回仅在同 TID、入口 RSP+8 和保存的返回地址上配对 EAX。
+ACCESS_MASK 取 EDX 低 32 位；ALPC PortName 与注册表 ValueName 不作访问掩码。
+名字按 UNICODE_STRING.Length 读取，最多 1024 字节；相对 RootDirectory 不推断
+绝对对象。原始名字/地址留在私有目录并清理，上传仅含固定 API、状态、掩码及闭集
+对象别名。嵌套、缺返回、未安装或超限均 inconclusive；失败操作不自动等于 DLL
+初始化失败的原因。这些合成文案回归通过也不证明原生 CDB 兼容。
 
 运行时测试入口会先准备完整生产资源，再验证打包依赖与清单；Windows Probe
 同时安装根目录依赖，供 PPT 来源和覆盖率维护测试使用。上游 PPT 资源禁止 Git

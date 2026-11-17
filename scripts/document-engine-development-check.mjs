@@ -17,6 +17,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import { projectDocumentLoaderSnaps } from "./document-loader-snaps.mjs";
+import { projectDocumentNativeOperations } from "./document-native-operations.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sandbox = "services::assistant::documents::windows_sandbox::tests::";
@@ -357,6 +358,10 @@ function traceFailure(reason, metadata, cleanup = null) {
 
 function safeControllerFailure(value) {
   const stages = new Set([
+    "operation_layout_unverified",
+    "operation_thread_unverified",
+    "operation_install_unverified",
+    "operation_target_invalid",
     "waiting_continue",
     "continue_mismatch",
     "symbol_inventory",
@@ -426,6 +431,10 @@ function safeControllerFailure(value) {
 
 export function safeDebuggerState(value) {
   const stages = new Set([
+    "operation_layout_unverified",
+    "operation_thread_unverified",
+    "operation_install_unverified",
+    "operation_target_invalid",
     "waiting_continue",
     "continue_mismatch",
     "target_not_seen",
@@ -456,6 +465,22 @@ export function safeDebuggerState(value) {
         ? value.cleanupFailure
         : null,
   };
+  if (value?.operationSetup && typeof value.operationSetup === "object") {
+    result.operationSetup = Object.fromEntries(
+      ["layoutVerified", "threadMatched", "installationVerified"].map((key) => [
+        key,
+        typeof value.operationSetup[key] === "boolean"
+          ? value.operationSetup[key]
+          : null,
+      ]),
+    );
+    result.operationSetup.breakpointRows =
+      Number.isInteger(value.operationSetup.breakpointRows) &&
+      value.operationSetup.breakpointRows >= 0 &&
+      value.operationSetup.breakpointRows <= 14
+        ? value.operationSetup.breakpointRows
+        : null;
+  }
   for (const name of [
     "debuggerStarted",
     "debuggerExited",
@@ -718,6 +743,10 @@ export async function startNativeTrace(
           metadata,
           controllerState: safeState,
           diagnostic,
+          nativeOperations: projectDocumentNativeOperations({
+            text,
+            target: targets.length === 1 ? targets[0] : null,
+          }),
         };
         if (ready.state === "failed") {
           report.status = "inconclusive";

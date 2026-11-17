@@ -24,8 +24,11 @@ and Windows 10/11 client validation remain required acceptance evidence.
 The current Windows Node startup still fails inside KernelBase DLL_PROCESS_ATTACH
 and reports STATUS_DLL_INIT_FAILED, after the actual LPAC token and complete
 debugger/manual-hold/Host-resume proof pass. The failing system operation is not
-yet known. A fixed test-only capability comparison is diagnostic evidence only;
-it does not change production capabilities or grant Python admission.
+yet known. Native A-B-A run 44027445443 confirmed that adding registryRead alone
+still exits with the same status in all three verified, unassisted cases. This
+does not change production capabilities or grant Python admission. Fixed Nt
+entry/return observations are a development diagnostic, with native compatibility
+still pending; completed operations and DLL failure do not establish causation.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

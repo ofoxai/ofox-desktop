@@ -347,3 +347,17 @@ A2 须再次 0142，B 只有 exit0 和精确固定 marker、运行时字节稳�
 不执行用户/模型代码，不导出 PID、SID、路径或输出正文。将来采用前仍须私有
 注册表及完整隔离负例、默认功能门禁和 Win10/11 客户端验收；当前没有产品授权
 能力变化或 A-B-A 原生结果。
+
+运行 [44027445443](https://github.com/ofoxai/ofox-desktop/actions/runs/44027445443)
+（`97a91cb7`）原生 control 4/4、ACL 1/1，原 CDB 完整 V2 与 KernelBase 初始化
+失败继续复现。无调试器 A1/B/A2 的 capability 数为 1/2/1，token/LPAC/IL/策略、
+Resume1、运行时 hash、stop/wait/drain 与全部清理均通过，但三个 exit 都为
+`0xc0000142`、零 stdout/stderr。registryRead 单独不足，产品权限不变；候选
+比较改为显式 opt-in，默认不重复。
+
+下一轮沿已验证链路观察 14 个固定 Nt 入口和返回：实际 PDB 布局、线程映射和
+`bl /L` 安装先核验，持久 owned 返回断点匹配同 TID、RSP+8 和返回地址后才记录
+EAX，并清除自身。访问掩码只读 EDX；端口/值名接口不套用文件参数。名字有界且
+只在私有目录，收据只含闭集别名。完整原 Host Resume1 仍为归因前置，缺失配对、
+嵌套或超限保持 inconclusive；实际失败操作与 DLL 失败分别记事实，不自动因果。
+本地合成/实际 PowerShell 协议测试不能替代待执行的 Windows 原生验证。
