@@ -403,6 +403,16 @@ export function safeDebuggerState(value) {
         )
         .slice(0, 8)
     : null;
+  result.gflagHints = Object.fromEntries(
+    ["symbols", "types", "peb", "globalFlags", "failure", "extension"].map(
+      (name) => [
+        name,
+        typeof value?.gflagHints?.[name] === "boolean"
+          ? value.gflagHints[name]
+          : null,
+      ],
+    ),
+  );
   return result;
 }
 

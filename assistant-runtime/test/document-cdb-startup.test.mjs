@@ -16,60 +16,89 @@ test(
   () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "ofox-cdb-arguments-"));
     try {
-      const result = spawnSync(
-        pwsh,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-File",
-          fileURLToPath(
-            new URL("./fixtures/document-cdb-arguments.ps1", import.meta.url),
-          ),
-        ],
-        {
-          env: {
-            ...process.env,
-            HOME: root,
-            USERPROFILE: root,
-            APPDATA: root,
-            LOCALAPPDATA: root,
-            POWERSHELL_TELEMETRY_OPTOUT: "1",
+      for (const mode of ["full", "short", "unreadable"]) {
+        const shortFlags = mode === "short";
+        const result = spawnSync(
+          pwsh,
+          [
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-File",
+            fileURLToPath(
+              new URL("./fixtures/document-cdb-arguments.ps1", import.meta.url),
+            ),
+            ...(shortFlags ? ["-ShortFlags"] : []),
+            ...(mode === "unreadable" ? ["-UnreadableFlags"] : []),
+          ],
+          {
+            env: {
+              ...process.env,
+              HOME: root,
+              USERPROFILE: root,
+              APPDATA: root,
+              LOCALAPPDATA: root,
+              POWERSHELL_TELEMETRY_OPTOUT: "1",
+            },
+            encoding: "utf8",
+            timeout: 10000,
+            maxBuffer: 16384,
           },
-          encoding: "utf8",
-          timeout: 10000,
-          maxBuffer: 16384,
-        },
-      );
-      assert.equal(result.error, undefined);
-      assert.equal(result.status, 0);
-      const report = JSON.parse(result.stdout);
-      const args = report.arguments;
-      assert.deepEqual(args.slice(-2), ["-p", "42"]);
-      assert.ok(args.indexOf("-cf") < args.indexOf("-p"));
-      assert.equal(args[args.indexOf("-xe") + 1], "ld:ntdll.dll");
-      assert.equal(args[args.indexOf("-cf") + 1], "private commands");
-      assert.equal(args[args.indexOf("-y") + 1], "private symbols");
-      for (const unsafe of ["-g", "-pr", "-o"])
-        assert.ok(!args.includes(unsafe));
-      assert.deepEqual(report.shape, {
-        promptLines: 2,
-        markerMentionLines: 2,
-        numericTargetLines: 1,
-        nullCharacters: 1,
-        targetSeen: false,
-        reportedWin32Errors: [5, 87],
-      });
-      assert.deepEqual(report.configured, {
-        targetSeen: true,
-        pid: 42,
-        tid: 43,
-        before: 0x70,
-        after: 0x72,
-        tail: true,
-        gflagValueLines: 3,
-      });
-      assert.ok(!result.stdout.includes("private-token"));
+        );
+        assert.equal(result.error, undefined);
+        assert.equal(result.status, 0);
+        const report = JSON.parse(result.stdout);
+        assert.ok(!result.stdout.includes("private-token"));
+        if (mode === "unreadable") {
+          assert.deepEqual(report, {
+            hints: {
+              symbols: true,
+              types: true,
+              peb: true,
+              globalFlags: true,
+              failure: true,
+              extension: true,
+            },
+            failureStage: "gflag_before_unreadable",
+            before: null,
+            tail: false,
+          });
+          continue;
+        }
+        assert.deepEqual(report.hints, {
+          symbols: false,
+          types: false,
+          peb: false,
+          globalFlags: true,
+          failure: false,
+          extension: false,
+        });
+        const args = report.arguments;
+        assert.deepEqual(args.slice(-2), ["-p", "42"]);
+        assert.ok(args.indexOf("-cf") < args.indexOf("-p"));
+        assert.equal(args[args.indexOf("-xe") + 1], "ld:ntdll.dll");
+        assert.equal(args[args.indexOf("-cf") + 1], "private commands");
+        assert.equal(args[args.indexOf("-y") + 1], "private symbols");
+        for (const unsafe of ["-g", "-pr", "-o"])
+          assert.ok(!args.includes(unsafe));
+        assert.deepEqual(report.shape, {
+          promptLines: 2,
+          markerMentionLines: 2,
+          numericTargetLines: 1,
+          nullCharacters: 1,
+          targetSeen: false,
+          reportedWin32Errors: [5, 87],
+        });
+        assert.deepEqual(report.configured, {
+          targetSeen: true,
+          pid: 42,
+          tid: 43,
+          before: shortFlags ? 0 : 0x70,
+          after: shortFlags ? 2 : 0x72,
+          tail: true,
+          gflagValueLines: 3,
+        });
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -112,5 +141,18 @@ test("startup output shape retains only bounded counts without granting handshak
     safeDebuggerState({ reportedWin32Errors: Array(20).fill(5) })
       .reportedWin32Errors.length,
     8,
+  );
+  const hints = {
+    symbols: true,
+    types: false,
+    peb: true,
+    globalFlags: true,
+    failure: false,
+    extension: false,
+  };
+  assert.deepEqual(safeDebuggerState({ gflagHints: hints }).gflagHints, hints);
+  assert.deepEqual(
+    safeDebuggerState({ gflagHints: { symbols: "private-token" } }).gflagHints,
+    Object.fromEntries(Object.keys(hints).map((key) => [key, null])),
   );
 });

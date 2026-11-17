@@ -243,3 +243,19 @@ attach 回放已有 ntdll 的加载事件时停止，使 CF 有机会在原线�
 原生确认。未加入 `-pr`、`-g`、`-o`、`gh`，不改变 token、权限或异常 handled；
 原完整身份、flags、尾标记和挂起计数门禁保持。目标仅为验证能否在 Suspend=1
 时完成 CF，成功后才读取实际 Node 启动记录；不是功能验收或权限修复。
+
+运行 [44006150325](https://github.com/ofoxai/ofox-desktop/actions/runs/44006150325)
+（`84bf8551`）首次执行了 CF：数值 TARGET 1 行、prompt 5 行，握手约 1.8 秒后
+明确拒绝为 `gflag_before_unreadable`，不再等待 15 秒。control 4/4、ACL 1/1、
+token/AccessCheck 仍通过；flags、配置、原 Resume 均为空，Python/Office 未进入。
+owned debugger 与 raw 清理确认，stop 72 ms。TARGET 被解析不等于整套身份门禁
+已通过；没有原 Node loader 故障证据。
+
+解析器另有回归已复现：原来只接受八位 flags，合法短 DWORD（`0`、`2`）会被
+拒绝。改为整行匹配一至八位十六进制，仍拒绝溢出、负数、尾随文本，并保留
+before/after 差值与全部身份/挂起计数门禁。这只是兼容性修复，尚不能归因为本次
+原生失败。两固定 gflag 块另记录 symbols/types/PEB/globalFlags/failure/extension
+六项词法布尔值，不含原文，不参与 READY，不据此单独认定原因。下一次定点
+原生检查只回答 flags 能否读回，或明确读回阻塞的类别；不增加超时、不降低隔离。
+真实 PS 解析回归先失败、修复后相关 Node 48/48、0 skip；另覆盖
+`GetExpression: not found: ntdll!NtGlobalFlag` 的词法观察，独立复核通过。

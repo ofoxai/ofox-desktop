@@ -12,6 +12,7 @@ $capturedBytes = 0; $stdoutLines = 0; $stderrLines = 0
 $setupStep = 0; $firstFailureStage = $null; $cleanupFailure = $null; $debuggerExited = $null; $debuggerExitCode = $null
 $promptLines = 0; $markerMentionLines = 0; $numericTargetLines = 0; $gflagValueLines = 0; $nullCharacters = 0
 $reportedWin32Errors = @()
+$gflagHints = @{ symbols = $false; types = $false; peb = $false; globalFlags = $false; failure = $false; extension = $false }
 
 function Send-Protocol($Value) { [Console]::Out.WriteLine(($Value | ConvertTo-Json -Depth 12 -Compress)); [Console]::Out.Flush() }
 function Write-Json([string]$Name, $Value) {
@@ -43,7 +44,17 @@ function Read-CdbLine([string]$Line, [bool]$Stderr) {
   if ($Line -match '^(?:\d{1,3}:)?\d{1,3}:[a-fA-F0-9]{3}>') { $script:promptLines++ }
   if ($Line.Contains('OFOX_CDB_RAW_V1')) { $script:markerMentionLines++ }
   if ($Line -match 'OFOX_CDB_RAW_V1 TARGET [a-fA-F0-9]{1,8} [a-fA-F0-9]{1,8} END') { $script:numericTargetLines++ }
-  if ($Line -match '(?:Current|New) NtGlobalFlag contents:\s*(?:0x)?[a-fA-F0-9]{8}') { $script:gflagValueLines++ }
+  if ($Line -match '^\s*(?:Current|New) NtGlobalFlag contents:\s*(?:0x)?[a-fA-F0-9]{1,8}\s*$') { $script:gflagValueLines++ }
+  # Lexical observations only, scoped to the two fixed gflag commands. They
+  # disclose no text and never establish a root cause or authorize READY.
+  if ($script:section -in @('before', 'after')) {
+    if ($Line -match '(?i)\bsymbols?\b|\bntdll!') { $script:gflagHints.symbols = $true }
+    if ($Line -match '(?i)\btypes?\b|GetField(?:Value|Offset)') { $script:gflagHints.types = $true }
+    if ($Line -match '(?i)\b_?PEB\b') { $script:gflagHints.peb = $true }
+    if ($Line -match '(?i)\bNtGlobalFlag\b') { $script:gflagHints.globalFlags = $true }
+    if ($Line -match '(?i)\b(?:error|failed|failure|unable|cannot|could not|couldn''t|not found|unresolved)\b') { $script:gflagHints.failure = $true }
+    if ($Line -match '(?i)\bextensions?\b') { $script:gflagHints.extension = $true }
+  }
   $script:nullCharacters += $Line.Length - $Line.Replace([string][char]0, '').Length
   if ($script:reportedWin32Errors.Count -lt 8 -and $Line -match '\bWin32 error (?:0n([0-9]{1,10})|0x([a-fA-F0-9]{1,8}))\b') {
     $value = if ($Matches[1]) { [uint64]::Parse($Matches[1]) } else { [Convert]::ToUInt64($Matches[2], 16) }
@@ -60,7 +71,7 @@ function Read-CdbLine([string]$Line, [bool]$Stderr) {
   } elseif ($Line -eq 'OFOX_CDB_RAW_V1 AFTER_BEGIN') { if ($script:setupStep -ne 3) { throw 'gflag_after_unreadable' }; $script:section = 'after'; $script:setupStep = 4
   } elseif ($Line -eq 'OFOX_CDB_RAW_V1 AFTER_END') { if ($script:setupStep -ne 4 -or $null -eq $script:after) { throw 'gflag_after_unreadable' }; $script:section = ''; $script:setupStep = 5
   } elseif ($Line -eq 'OFOX_CDB_RAW_V1 CONFIG_END') { if ($script:setupStep -ne 5) { throw 'init_tail_missing' }; $script:tail = $true; $script:setupStep = 6
-  } elseif ($Line -match '^\s*(?:Current|New) NtGlobalFlag contents:\s*(?:0x)?([a-fA-F0-9]{8})\s*$') {
+  } elseif ($Line -match '^\s*(?:Current|New) NtGlobalFlag contents:\s*(?:0x)?([a-fA-F0-9]{1,8})\s*$') {
     $number = [Convert]::ToUInt32($Matches[1], 16)
     if ($script:section -eq 'before') { if ($null -ne $script:before) { throw 'gflag_before_unreadable' }; $script:before = $number }
     if ($script:section -eq 'after') { if ($null -ne $script:after) { throw 'gflag_after_unreadable' }; $script:after = $number }
@@ -256,7 +267,7 @@ public static class DocumentCdbNative {
   Write-Json 'debugger-state.json' @{ stage = $stage; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed
     debuggerExitCode = $debuggerExitCode; debuggerExited = $debuggerExited; stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes
     targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail
-    promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors) }
+    promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors); gflagHints = $gflagHints }
   Send-Protocol @{ state = 'raw-ready'; metadata = $metadata }
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'STOP') { throw 'controller_eof' }
   $inputTask = $controlReader.ReadLineAsync()
@@ -278,7 +289,7 @@ public static class DocumentCdbNative {
     Write-Json 'debugger-state.json' @{ stage = $firstFailureStage; cleanupFailure = $cleanupFailure; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed; debuggerExited = $debuggerExited; debuggerExitCode = $debuggerExitCode
       stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes; targetSeen = $targetSeen
       beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail
-      promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors) }
+      promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors); gflagHints = $gflagHints }
   }
   Send-Protocol @{ state = 'failed'; reason = $firstFailureStage; metadata = $metadata }
   # The Rust guard consumes finished.json before Cargo returns. Retain it until
