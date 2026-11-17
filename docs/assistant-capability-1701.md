@@ -482,3 +482,15 @@ NtCreateUserProcess 调用，KernelBase 随即初始化失败、0142 退出。�
 创建被子进程策略阻止”的具体推断被否定：失败点仍在创建 ConDrv 句柄之后、任何
 进程创建之前，具体操作不在当前 15 个观察 API 内。启动标志与隔离条件均未修改；
 下一步需在扩大观察或无调试器的控制台模式对照之间选择。
+
+按用户选择，下一次定点运行做无调试器的控制台模式 A-B-A：A1/A2 与产品相同使用
+`CREATE_NO_WINDOW`，B 只改为 `DETACHED_PROCESS`（不分配控制台，因而不初始化
+ConDrv/conhost），capability、LPAC/token、子进程与映像策略、Job、输入和 profile
+均相同；A1 不能重现 0142 则不派 B。只有 A1/A2 均 0142、B exit0 且精确 marker、
+全部隔离证明与清理通过才记 supports-candidate，否则 inconclusive。`Detached`
+仅在 test cfg 存在，产品启动标志未改；开发工作流显式设置
+`OFOX_DOCUMENT_STARTUP_COMPARISON=detachedConsole`，并有测试固定该拼写及所在步骤。
+回执记录传给 CreateProcessW 的实际标志，A1/A2 须为 `0x08080404`、B 须为
+`0x0008040c`，Windows 单测将其绑定到 windows crate 常量；独立审查未发现严重问题。
+协议单测 5/5、相关 Node 九个文件 74/74 与工作流测试 19/19、0 skip；Windows 目标
+lib/test Clippy 交叉检查通过。原 CDB 观察与 registryRead 候选行为不变。

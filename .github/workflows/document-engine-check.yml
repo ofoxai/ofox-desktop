@@ -73,6 +73,11 @@ jobs:
       - name: ACL prerequisite then focused native regressions
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
+        env:
+          # Explicit test-only A-B-A after the debugger-confirmed 0142: the
+          # production CREATE_NO_WINDOW launch vs DETACHED_PROCESS, nothing else
+          # changed. Remove once the console question is answered.
+          OFOX_DOCUMENT_STARTUP_COMPARISON: detachedConsole
       - name: Upload development diagnostics
         if: always()
         uses: actions/upload-artifact@v7

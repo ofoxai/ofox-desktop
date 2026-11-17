@@ -13,17 +13,21 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
     let root = runtime();
     let office = root.join("engines/officecli/officecli.exe");
     let result = probe_windows_document_engines(&root, &office).await;
-    if startup_comparison_protocol::requested(
+    let candidate = startup_comparison_protocol::requested(
         std::env::var("OFOX_DOCUMENT_STARTUP_COMPARISON")
             .ok()
             .as_deref(),
-    ) && std::env::var_os(cdb::ENV_ROOT).is_some()
-        && result
-            .as_ref()
-            .err()
-            .is_some_and(|error| startup_comparison_protocol::eligible(error))
-    {
-        match tokio::task::spawn_blocking(move || startup_comparison::compare(&root)).await {
+    );
+    if let Some(candidate) = candidate.filter(|_| {
+        std::env::var_os(cdb::ENV_ROOT).is_some()
+            && result
+                .as_ref()
+                .err()
+                .is_some_and(|error| startup_comparison_protocol::eligible(error))
+    }) {
+        match tokio::task::spawn_blocking(move || startup_comparison::compare(&root, candidate))
+            .await
+        {
             Ok(receipt) => eprintln!("OFOX_STARTUP_COMPARISON_V1 {receipt}"),
             Err(_) => eprintln!(
                 "OFOX_STARTUP_COMPARISON_V1 {{\"status\":\"inconclusive\",\"joinFailure\":true}}"

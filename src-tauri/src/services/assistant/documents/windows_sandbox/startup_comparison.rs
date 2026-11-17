@@ -38,6 +38,7 @@ fn case(
     home: &Path,
     profile: &Profile,
     caps: &ProcessCapabilities<'_>,
+    console: ConsoleMode,
 ) -> serde_json::Value {
     let observation = Observer::fixed_probe(); // Fresh; never request_loader.
     let entries = caps.entries();
@@ -72,6 +73,7 @@ fn case(
             profile,
             caps,
             ContainerPolicy::Lpac,
+            console,
             &observation,
         )?;
         drop(stdin_read);
@@ -153,7 +155,13 @@ fn case(
         executed
     })();
     let evidence = observation.snapshot().unwrap_or_default();
-    serde_json::json!({"extraRegistryRead": entries.len()==2, "completed":result.is_ok(),
+    // The exact flags passed to CreateProcessW, so a label cannot misstate them.
+    let flags = console.creation_flags().0;
+    let console = match console {
+        ConsoleMode::Hidden => "hidden",
+        ConsoleMode::Detached => "detached",
+    };
+    serde_json::json!({"extraRegistryRead": entries.len()==2, "consoleMode":console, "creationFlags":flags, "completed":result.is_ok(),
         "stage": if result.is_ok() {"complete"} else {phase}, "tokenVerified":token_verified,
         "capabilityCount":evidence["evidence"]["capabilityGroups"], "capabilityAttributes":attrs,
         "lpacAccessMatched":evidence["evidence"]["lpacAccessProof"]["matched"],
@@ -162,7 +170,10 @@ fn case(
         "markerMatched":marker, "stdoutBytes":stdout_bytes, "stderrBytes":stderr_bytes, "cleanupConfirmed":cleanup})
 }
 
-pub(super) fn compare(root: &Path) -> serde_json::Value {
+pub(super) fn compare(
+    root: &Path,
+    candidate: startup_comparison_protocol::Candidate,
+) -> serde_json::Value {
     let mut profile = None;
     let mut task = None;
     let mut rows = Vec::new();
@@ -185,17 +196,30 @@ pub(super) fn compare(root: &Path) -> serde_json::Value {
             &home,
             profile,
             &ProcessCapabilities::runtime(&cap),
+            ConsoleMode::Hidden,
         ));
         if !startup_comparison_protocol::baseline(&rows[0]) {
             return Ok(false);
-        } // No extra cap unless A1 reproduces.
-        rows.push(case(
-            &node,
-            folder,
-            &home,
-            profile,
-            &ProcessCapabilities::startup_registry_read(&cap)?,
-        ));
+        } // No candidate unless A1 reproduces.
+          // B changes exactly one launch condition from A1.
+        rows.push(match candidate {
+            startup_comparison_protocol::Candidate::RegistryRead => case(
+                &node,
+                folder,
+                &home,
+                profile,
+                &ProcessCapabilities::startup_registry_read(&cap)?,
+                ConsoleMode::Hidden,
+            ),
+            startup_comparison_protocol::Candidate::DetachedConsole => case(
+                &node,
+                folder,
+                &home,
+                profile,
+                &ProcessCapabilities::runtime(&cap),
+                ConsoleMode::Detached,
+            ),
+        });
         if rows[1]["completed"] != true || rows[1]["cleanupConfirmed"] != true {
             return Ok(false);
         }
@@ -205,17 +229,41 @@ pub(super) fn compare(root: &Path) -> serde_json::Value {
             &home,
             profile,
             &ProcessCapabilities::runtime(&cap),
+            ConsoleMode::Hidden,
         ));
         runtime_stable = tree_digest_at(&runtime.root, MAX_TREE_BYTES)? == runtime.digest;
-        Ok(runtime_stable && startup_comparison_protocol::supported(&rows))
+        Ok(runtime_stable && startup_comparison_protocol::supported(&rows, candidate))
     })();
     let task_clean = task.as_mut().is_none_or(|task| task.dispose().is_ok());
     let profile_clean = profile
         .as_mut()
         .is_none_or(|profile| profile.dispose().is_ok());
-    serde_json::json!({"schemaVersion":1,"scope":"fixed-node-startup-capability-comparison",
+    serde_json::json!({"schemaVersion":1,"scope":"fixed-node-startup-launch-comparison",
         "diagnosticOnly":true,"releaseGate":false,"runtimePolicyChanged":false,"admissionGranted":false,
-        "candidate":"registryRead","sameProfileAndInputs":rows.len()==3,"runtimeStable":runtime_stable,"debuggerUsed":false,
+        "candidate":candidate.name(),"sameProfileAndInputs":rows.len()==3,"runtimeStable":runtime_stable,"debuggerUsed":false,
         "status":if result == Ok(true) && task_clean && profile_clean {"supports-candidate"} else {"inconclusive"},
         "taskCleanup":task_clean,"profileCleanup":profile_clean,"rows":rows})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn console_modes_differ_only_in_the_console_flag() {
+        let hidden = ConsoleMode::Hidden.creation_flags();
+        let detached = ConsoleMode::Detached.creation_flags();
+        assert_eq!(
+            hidden,
+            CREATE_NO_WINDOW
+                | CREATE_SUSPENDED
+                | CREATE_UNICODE_ENVIRONMENT
+                | EXTENDED_STARTUPINFO_PRESENT
+        );
+        assert_eq!(
+            hidden.0 ^ detached.0,
+            (CREATE_NO_WINDOW | windows::Win32::System::Threading::DETACHED_PROCESS).0
+        );
+        assert_eq!(hidden.0, startup_comparison_protocol::HIDDEN_FLAGS);
+        assert_eq!(detached.0, startup_comparison_protocol::DETACHED_FLAGS);
+    }
 }

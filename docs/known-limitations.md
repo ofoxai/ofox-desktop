@@ -27,8 +27,11 @@ debugger/manual-hold/Host-resume proof pass. The failing system operation is not
 yet known. Native A-B-A run 44027445443 confirmed that adding registryRead alone
 still exits with the same status in all three verified, unassisted cases. This
 does not change production capabilities or grant Python admission. Fixed Nt
-entry/return observations are a development diagnostic, with native compatibility
-still pending; completed operations and DLL failure do not establish causation.
+entry/return observations now pair natively (runs 44058284863, 44062635550): the
+last completed operations create the ConDrv console Server/Reference handles,
+and no process creation follows before the failure. The exact failing operation
+is still unobserved; a test-only console-mode A-B-A is pending. Completed
+operations and the DLL failure do not by themselves establish causation.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

@@ -596,6 +596,23 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     '  workflow_dispatch:\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
   );
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
+  // Rust requested() accepts only exact candidate names; a typo would skip it.
+  // Only the native-check step runs the comparison, so pin it to that step.
+  const candidates = [
+    ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_COMPARISON: (\S+)$/gm),
+  ].map((match) => match[1]);
+  assert.deepEqual(candidates, ["detachedConsole"]);
+  const step = workflow
+    .split(/^ {6}- /m)
+    .find((block) =>
+      block.startsWith(
+        "name: ACL prerequisite then focused native regressions",
+      ),
+    );
+  assert.match(
+    step,
+    /^ {10}OFOX_DOCUMENT_STARTUP_COMPARISON: detachedConsole$/m,
+  );
   assert.match(
     workflow,
     /debug0-v3-.*hashFiles\('src-tauri\/Cargo.lock', 'src-tauri\/Cargo.toml'/,

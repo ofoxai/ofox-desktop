@@ -94,7 +94,7 @@ use windows::{
                 OpenProcessToken, ProcessChildProcessPolicy, ProcessImageLoadPolicy, ResumeThread,
                 TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_NO_WINDOW,
                 CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-                LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+                LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_CREATION_FLAGS, PROCESS_INFORMATION,
                 PROC_THREAD_ATTRIBUTE_ALL_APPLICATION_PACKAGES_POLICY,
                 PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                 PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
@@ -1927,6 +1927,25 @@ enum ContainerPolicy {
     OrdinaryAppContainer,
 }
 
+/// Console allocation for the sandboxed child. Production keeps
+/// CREATE_NO_WINDOW; the detached form exists only for the fixed test A-B-A.
+#[derive(Clone, Copy)]
+enum ConsoleMode {
+    Hidden,
+    #[cfg(test)]
+    Detached,
+}
+impl ConsoleMode {
+    fn creation_flags(self) -> PROCESS_CREATION_FLAGS {
+        let console = match self {
+            Self::Hidden => CREATE_NO_WINDOW,
+            #[cfg(test)]
+            Self::Detached => windows::Win32::System::Threading::DETACHED_PROCESS,
+        };
+        console | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT
+    }
+}
+
 struct SuspendedLaunch {
     #[cfg(test)]
     pid: u32,
@@ -2059,6 +2078,7 @@ fn create_suspended(
         profile,
         &ProcessCapabilities::runtime(cap),
         policy,
+        ConsoleMode::Hidden,
         observation,
     )
 }
@@ -2072,6 +2092,7 @@ fn create_suspended_capabilities(
     profile: &Profile,
     caps: &ProcessCapabilities<'_>,
     policy: ContainerPolicy,
+    console: ConsoleMode,
     observation: &Observer,
 ) -> Result<SuspendedLaunch, String> {
     observation.enter(Phase::Command);
@@ -2163,10 +2184,7 @@ fn create_suspended_capabilities(
             None,
             None,
             true,
-            CREATE_NO_WINDOW
-                | CREATE_SUSPENDED
-                | CREATE_UNICODE_ENVIRONMENT
-                | EXTENDED_STARTUPINFO_PRESENT,
+            console.creation_flags(),
             Some(env.as_ptr().cast()),
             PCWSTR(cwd.as_ptr()),
             &startup.StartupInfo,
