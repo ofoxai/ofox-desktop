@@ -10,6 +10,8 @@ $targetSeen = $false; $targetPid = $null; $targetTid = $null
 $before = $null; $after = $null; $section = ''; $tail = $false
 $capturedBytes = 0; $stdoutLines = 0; $stderrLines = 0
 $setupStep = 0; $firstFailureStage = $null; $cleanupFailure = $null; $debuggerExited = $null; $debuggerExitCode = $null
+$promptLines = 0; $markerMentionLines = 0; $numericTargetLines = 0; $gflagValueLines = 0; $nullCharacters = 0
+$reportedWin32Errors = @()
 
 function Send-Protocol($Value) { [Console]::Out.WriteLine(($Value | ConvertTo-Json -Depth 12 -Compress)); [Console]::Out.Flush() }
 function Write-Json([string]$Name, $Value) {
@@ -37,6 +39,16 @@ function Read-CdbLine([string]$Line, [bool]$Stderr) {
   if ($Line.Length -gt 16384 -or $script:capturedBytes -gt 4194304) { throw 'output_bound' }
   $script:writer.WriteLine($Line)
   if ($Stderr) { $script:stderrLines++ } else { $script:stdoutLines++ }
+  # Shape only: these counts never authorize READY and disclose no raw text.
+  if ($Line -match '^(?:\d{1,3}:)?\d{1,3}:[a-fA-F0-9]{3}>') { $script:promptLines++ }
+  if ($Line.Contains('OFOX_CDB_RAW_V1')) { $script:markerMentionLines++ }
+  if ($Line -match 'OFOX_CDB_RAW_V1 TARGET [a-fA-F0-9]{1,8} [a-fA-F0-9]{1,8} END') { $script:numericTargetLines++ }
+  if ($Line -match '(?:Current|New) NtGlobalFlag contents:\s*(?:0x)?[a-fA-F0-9]{8}') { $script:gflagValueLines++ }
+  $script:nullCharacters += $Line.Length - $Line.Replace([string][char]0, '').Length
+  if ($script:reportedWin32Errors.Count -lt 8 -and $Line -match '\bWin32 error (?:0n([0-9]{1,10})|0x([a-fA-F0-9]{1,8}))\b') {
+    $value = if ($Matches[1]) { [uint64]::Parse($Matches[1]) } else { [Convert]::ToUInt64($Matches[2], 16) }
+    if ($value -le [uint32]::MaxValue) { $script:reportedWin32Errors += [uint32]$value }
+  }
   if ($Line -match '^OFOX_CDB_RAW_V1 TARGET ([a-fA-F0-9]{1,8}) ([a-fA-F0-9]{1,8}) END$') {
     if ($script:targetSeen -or $script:setupStep -ne 0) { throw 'target_mismatch' }
     $script:targetSeen = $true
@@ -186,7 +198,7 @@ public static class DocumentCdbNative {
   $start.Environment['SystemRoot'] = $env:SystemRoot; $start.Environment['WINDIR'] = $env:SystemRoot
   $start.Environment['PATH'] = Join-Path $env:SystemRoot 'System32'
   foreach ($key in @('TMP','TEMP','USERPROFILE','HOME','APPDATA','LOCALAPPDATA')) { $start.Environment[$key] = $RawDirectory }
-  foreach ($argument in @('-pb','-p', $target.childPid.ToString(), '-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-G','-y',$symbols,'-cf',$commands)) { $start.ArgumentList.Add($argument) }
+  foreach ($argument in (Get-DocumentCdbArguments $target.childPid $symbols $commands)) { $start.ArgumentList.Add($argument) }
   $debugger = [Diagnostics.Process]::new(); $debugger.StartInfo = $start
   $stage = 'debugger_attach_start'
   if ($inputTask.IsCompleted -or (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json'))) { throw 'cancelled' }
@@ -243,7 +255,8 @@ public static class DocumentCdbNative {
   $writer.Dispose(); $writer = $null
   Write-Json 'debugger-state.json' @{ stage = $stage; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed
     debuggerExitCode = $debuggerExitCode; debuggerExited = $debuggerExited; stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes
-    targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail }
+    targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail
+    promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors) }
   Send-Protocol @{ state = 'raw-ready'; metadata = $metadata }
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'STOP') { throw 'controller_eof' }
   $inputTask = $controlReader.ReadLineAsync()
@@ -254,6 +267,9 @@ public static class DocumentCdbNative {
     'debugger_unavailable','debugger_untrusted','private_directory_invalid','controller_eof','input_bound')
   if ($known -contains $_.Exception.Message) { $stage = $_.Exception.Message }
   $firstFailureStage = $stage
+  # Publish the diagnosis before killing CDB can signal the attached target.
+  # finished.json still waits for actual owned-debugger cleanup.
+  if ($ownsRaw) { try { Write-Json 'failed.json' @{ stage = $firstFailureStage } } catch { } }
   try { Stop-Cdb } catch { $debuggerClosed = $false; $cleanupFailure = 'debugger_cleanup_unconfirmed' }
   if ($null -ne $writer) { $writer.Dispose(); $writer = $null }
   if ($ownsRaw) {
@@ -261,7 +277,8 @@ public static class DocumentCdbNative {
     Write-Json 'finished.json' @{ stage = $firstFailureStage; debuggerClosed = $debuggerClosed }
     Write-Json 'debugger-state.json' @{ stage = $firstFailureStage; cleanupFailure = $cleanupFailure; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed; debuggerExited = $debuggerExited; debuggerExitCode = $debuggerExitCode
       stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes; targetSeen = $targetSeen
-      beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail }
+      beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail
+      promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors) }
   }
   Send-Protocol @{ state = 'failed'; reason = $firstFailureStage; metadata = $metadata }
   # The Rust guard consumes finished.json before Cargo returns. Retain it until

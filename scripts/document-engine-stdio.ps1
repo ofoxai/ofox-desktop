@@ -7,3 +7,8 @@ function New-DocumentControlReader {
     [Console]::OpenStandardInput(), [Text.UTF8Encoding]::new($false, $true),
     $false, 1024, $false)
 }
+
+function Get-DocumentCdbArguments([uint32]$TargetPid, [string]$Symbols, [string]$Commands) {
+  # Match the documented CDB grammar: all startup options before the target.
+  return @('-pb','-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-G','-y',$Symbols,'-cf',$Commands,'-p',$TargetPid.ToString())
+}

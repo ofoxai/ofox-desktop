@@ -210,3 +210,20 @@ STOP/CLEAN/EOF。专用预检还强制校验唯一完整 TAP、4 pass、0 skip�
 避免零项真实检查退出 0；该门禁回归 2/2 通过。相关 Node 测试合计 46/46、PS
 语法检查和独立复核通过。以上不是 Windows 证据。下一次只验证 Windows 控制
 reader、同一 suspended Node 的实际 CDB 握手与 loader 失败记录，不改隔离条件。
+
+运行 [43998374426](https://github.com/ofoxai/ofox-desktop/actions/runs/43998374426)
+（`cc42947e`）确认 Windows 实进程控制预检 4/4、0 skip，ACL 1/1；CDB 握手约
+15.2 秒后拒绝，清理等待降为 11 ms。控制器报告 `target_not_seen`，stdout
+50 行／2554 字节、stderr 0 行；配置和原 Resume 仍为空，owned debugger 和 raw
+清理成功。worker 的 `target_exited` 可能来自调试器清理导致附属进程退出，不能
+当作未恢复 Node 的真实 DLL 失败证据。原握手标记尚未得到认可，Node 原因仍未知。
+
+下一次只定位 CDB 启动协议：将启动选项置于 `-p PID` 目标之前，符合
+[官方语法](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/cdb-command-line-options)。
+这并未单凭文档证明旧顺序必错。新增的固定形态计数仅区分 prompt、标记提及、
+数值 TARGET、gflag 值和 NUL；另保留最多 8 个显式 Win32 uint32 错误码。它们
+不含原文、不参与 READY 或根因认定。失败记录先于 kill 发布，关闭确认仍须
+等实际完成。真实 PowerShell AST 执行生产行解析器，证明 prompt／回显不能置
+targetSeen，完整严格序列才配置；两项回归由 RED 修至 2/2 GREEN，独立复核通过。
+不扩大权限、不提前 Resume；新原生问题是命令文件是否执行，以及原握手为何
+未匹配。尚未取得 Node loader 失败的具体模块或操作。

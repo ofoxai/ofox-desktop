@@ -374,7 +374,16 @@ export function safeDebuggerState(value) {
     "initTailSeen",
   ])
     result[name] = typeof value?.[name] === "boolean" ? value[name] : null;
-  for (const name of ["stdoutLines", "stderrLines", "capturedBytes"])
+  for (const name of [
+    "stdoutLines",
+    "stderrLines",
+    "capturedBytes",
+    "promptLines",
+    "markerMentionLines",
+    "numericTargetLines",
+    "gflagValueLines",
+    "nullCharacters",
+  ])
     result[name] =
       Number.isInteger(value?.[name]) &&
       value[name] >= 0 &&
@@ -387,6 +396,13 @@ export function safeDebuggerState(value) {
     value.debuggerExitCode <= 0xffffffff
       ? value.debuggerExitCode
       : null;
+  result.reportedWin32Errors = Array.isArray(value?.reportedWin32Errors)
+    ? value.reportedWin32Errors
+        .filter(
+          (code) => Number.isInteger(code) && code >= 0 && code <= 0xffffffff,
+        )
+        .slice(0, 8)
+    : null;
   return result;
 }
 
