@@ -249,6 +249,7 @@ public static class DocumentCdbNative {
   if ($target.primaryTid -isnot [long] -and $target.primaryTid -isnot [int]) { throw 'target_mismatch' }
   if ($target.childPid -le 0 -or $target.childPid -gt [uint32]::MaxValue -or $target.primaryTid -le 0 -or $target.primaryTid -gt [uint32]::MaxValue) { throw 'target_mismatch' }
   $operationSetup = New-DocumentOperationSetup $target.childPid $target.primaryTid
+  Confirm-DocumentOperationArchitecture $operationSetup $target.architecture
   $operationProgram = Get-DocumentOperationProgram $target.primaryTid
   foreach ($file in $operationProgram.files.GetEnumerator()) {
     [IO.File]::WriteAllText((Join-Path $RawDirectory $file.Key), $file.Value, [Text.UTF8Encoding]::new($false))
@@ -288,7 +289,7 @@ public static class DocumentCdbNative {
   if ($null -eq $after) { throw 'gflag_after_unreadable' }
   if ($after -ne ($before -bor 2)) { throw 'gflag_changed_unexpectedly' }
   Assert-DocumentOperationSetup $operationSetup
-  $writer.WriteLine(('OFOX_NT_V1 INSTALLED pid={0:x} tid={1:x} thread={2} count=14 END' -f $targetPid,$targetTid,$operationSetup.threadIndex))
+  $writer.WriteLine(('OFOX_NT_V1 INSTALLED pid={0:x} tid={1:x} thread={2} count=14 arch=amd64 abi=windows-x64 END' -f $targetPid,$targetTid,$operationSetup.threadIndex))
   $writer.WriteLine(('OFOX_CDB_V2 BEFORE pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$before))
   $writer.WriteLine(('OFOX_CDB_V2 AFTER pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$after))
   $writer.WriteLine('OFOX_CDB_V2 READY END'); $writer.Flush()
@@ -343,7 +344,7 @@ public static class DocumentCdbNative {
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'CLEAN') { throw 'controller_eof' }
 } catch {
   $known = @('symbol_cancelled','symbol_deadline','symbol_check_failed','symbol_check_incomplete','symbol_output_bound','symbol_cleanup_unconfirmed','symbol_cache_invalid',
-    'operation_layout_unverified','operation_thread_unverified','operation_install_unverified','operation_target_invalid',
+    'operation_architecture_unverified','operation_layout_unverified','operation_thread_unverified','operation_install_unverified','operation_target_invalid',
     'target_not_seen','target_mismatch','gflag_before_unreadable','gflag_after_unreadable','gflag_changed_unexpectedly',
     'init_tail_missing','debugger_exited','deadline','cancelled','output_bound','continue_mismatch','host_resume_mismatch','debugger_stop_unconfirmed','debugger_drain_unconfirmed',
     'debugger_unavailable','debugger_untrusted','private_directory_invalid','controller_eof','input_bound')

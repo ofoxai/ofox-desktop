@@ -1,4 +1,8 @@
 //! Test-only startup fence. No debugger observation grants runtime admission.
+pub(super) fn native_x64(api_succeeded: bool, process_machine: u16, native_machine: u16) -> bool {
+    api_succeeded && process_machine == 0 && native_machine == 0x8664
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Configured {
     pub pid: u32,
@@ -114,6 +118,19 @@ impl Fence {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn architecture_requires_success_and_native_amd64_without_wow64() {
+        assert!(super::native_x64(true, 0, 0x8664));
+        for (success, process, native) in [
+            (false, 0, 0x8664),
+            (true, 0, 0),
+            (true, 0, 0xaa64),
+            (true, 0x14c, 0x8664),
+            (true, 0x8664, 0xaa64),
+        ] {
+            assert!(!super::native_x64(success, process, native));
+        }
+    }
     use super::*;
     fn valid() -> Configured {
         Configured {

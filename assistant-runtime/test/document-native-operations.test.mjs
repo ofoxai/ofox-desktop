@@ -9,7 +9,7 @@ import { projectDocumentNativeOperations } from "../../scripts/document-native-o
 import { safeDebuggerState } from "../../scripts/document-engine-development-check.mjs";
 
 const setup = [
-  "OFOX_NT_V1 INSTALLED pid=2a tid=2b thread=0 count=14 END",
+  "OFOX_NT_V1 INSTALLED pid=2a tid=2b thread=0 count=14 arch=amd64 abi=windows-x64 END",
   "OFOX_CDB_V2 BEFORE pid=2a tid=2b flags=0 END",
   "OFOX_CDB_V2 AFTER pid=2a tid=2b flags=2 END",
   "OFOX_CDB_V2 READY END",
@@ -23,7 +23,7 @@ const pwsh =
   (process.platform === "win32" ? "pwsh" : null);
 
 test(
-  "actual PowerShell requires matched x64 layout and enabled resolved thread-specific breakpoint rows",
+  "actual PowerShell requires a native x64 child receipt and enabled resolved thread-specific breakpoint rows",
   { skip: !pwsh },
   () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "ofox-operation-setup-"));
@@ -32,6 +32,13 @@ test(
         "valid",
         "alias",
         "layout",
+        "api-failed",
+        "wow64",
+        "arm64",
+        "architecture-type",
+        "architecture-missing",
+        "architecture-float",
+        "architecture-string",
         "foreign",
         "wrongthread",
         "unbound",
@@ -41,6 +48,13 @@ test(
         "symbol",
         "missing",
         "extra",
+        "dml",
+        "dml-disabled",
+        "dml-wrongthread",
+        "dml-unbound",
+        "dml-action",
+        "dml-echo",
+        "dml-echo-row",
       ]) {
         const result = spawnSync(
           pwsh,
@@ -74,15 +88,32 @@ test(
         assert.equal(result.error, undefined);
         assert.equal(result.status, 0, result.stderr);
         const report = JSON.parse(result.stdout);
-        assert.equal(report.verified, ["valid", "alias"].includes(mode), mode);
+        assert.equal(
+          report.verified,
+          ["valid", "alias", "dml", "dml-echo"].includes(mode),
+          mode,
+        );
         if (mode !== "valid") continue;
         assert.equal(report.threadIndex, 1);
+        assert.ok(report.program.commands.includes(".expr /s masm"));
+        assert.doesNotMatch(JSON.stringify(report.program), /&&|\|\|/);
+        assert.doesNotMatch(JSON.stringify(report.program), /@@c\+\+|LAYOUT/);
+        assert.ok(
+          report.program.files["operation-1.cmd"].includes("dwo(@r8) == 0x30"),
+        );
+        // The projector's MAX_CALLS mirrors this debugger-side call limit.
+        assert.ok(
+          report.program.files["operation-1.cmd"].includes("@$t0 >= 0n256"),
+        );
         assert.equal(Object.keys(report.program.files).length, 15);
         const entry = report.program.files["operation-1.cmd"],
           port = report.program.files["operation-10.cmd"],
           returned = report.program.files["operation-return.cmd"];
         assert.ok(entry.includes(", @edx, @$t6"));
         assert.ok(entry.includes("wo(@$t5) <= 0x400"));
+        assert.ok(entry.includes("$vvalid(@r8, 0x30)"));
+        assert.ok(entry.includes("$vvalid(@$t5, 0x10)"));
+        assert.ok(entry.includes("$vvalid(poi(@$t5 + 8), wo(@$t5))"));
         assert.ok(entry.includes("%msu"));
         assert.ok(!entry.includes("%mu"));
         assert.ok(port.includes("r @$t5 = @rdx"));
@@ -247,6 +278,75 @@ test("wrong return TID, stack, breakpoint ID, enabled state, address or thread c
   }
 });
 
+test("pairs the documented DML breakpoint row with a thread-qualified column", () => {
+  const dml = (lines) =>
+    lines.map((line) =>
+      line.startsWith("30 e ")
+        ? `    ${line
+            .replace("30 e ", "30 e Disable Clear  ")
+            .replace(" 0001 (0001) 0:000 ", "     0001 (0001)  0:~000 ")}`
+        : line,
+    );
+  const report = project(dml(call()));
+  assert.equal(report.status, "observed-failures");
+  assert.equal(report.coverage.completedCalls, 1);
+  // A prompt-prefixed command echo is never a breakpoint row.
+  const echoed = dml(call()).flatMap((line) =>
+    line.startsWith("OFOX_NT_RAW_V1 RETURN_BP_BEGIN")
+      ? [line, "0:000> bl /L 30"]
+      : [line],
+  );
+  assert.equal(project(echoed).status, "observed-failures");
+  const promptRow = dml(call()).map((line) =>
+    line.includes(" Clear  00000000") ? `0:000> ${line.trimStart()}` : line,
+  );
+  assert.equal(project(promptRow).status, "inconclusive");
+  for (const mutate of [
+    (line) => line.replace(" e Disable Clear ", " d Enable Clear "),
+    (line) => line.replace("Disable Clear", "Disable Private"),
+    (line) => line.replace("0:~000", "0:~001"),
+    (line) => line.replace("0:~000", "0:****"),
+  ]) {
+    const rejected = project(
+      dml(call()).map((line) =>
+        line.includes(" Clear  00000000") ? mutate(line) : line,
+      ),
+    );
+    assert.equal(rejected.status, "inconclusive");
+    assert.deepEqual(rejected.observations, []);
+  }
+});
+
+test("ordinary startup misses do not hide the last failed operation", () => {
+  const misses = Array.from({ length: 40 }, (_, index) =>
+    call({
+      seq: index + 1,
+      api: 1,
+      access: "20019",
+      name: "\\Registry\\Machine\\private-missing",
+      status: "c0000034",
+    }),
+  ).flat();
+  const report = project([...misses, ...call({ seq: 41 })]);
+  assert.equal(report.status, "observed-failures");
+  assert.equal(report.coverage.status, "complete-for-fixed-set");
+  assert.equal(report.coverage.completedCalls, 41);
+  assert.equal(report.observations.length, 41);
+  assert.deepEqual(report.observations.at(-1), {
+    sequence: 41,
+    api: "NtAlpcConnectPort",
+    status: "0xc0000022",
+    desiredAccess: null,
+    objectAlias: "csr-api-port",
+  });
+  const calls = (length) =>
+    Array.from({ length }, (_, index) =>
+      call({ seq: index + 1, status: "0" }),
+    ).flat();
+  assert.equal(project(calls(256)).status, "observed-operations");
+  assert.equal(project(calls(257)).status, "inconclusive");
+});
+
 test("missing returns, nesting, duplicate sequence, bad ABI and overflow remain inconclusive", () => {
   for (const lines of [
     call().slice(0, -1),
@@ -258,6 +358,9 @@ test("missing returns, nesting, duplicate sequence, bad ABI and overflow remain 
     [...call(), "OFOX_NT_RAW_V1 INVALID nested END"],
     [...call(), "OFOX_NT_RAW_V1 INVALID limit END"],
     call().map((line) => line.replace("bytes=32", "bytes=1000")),
+    call({ root: "2" }),
+    call({ api: 4, root: "2" }),
+    call({ api: 13, root: "2" }),
   ]) {
     const report = project(lines);
     assert.equal(report.status, "inconclusive");
@@ -321,10 +424,34 @@ test("status-only sibling port APIs never interpret an undocumented argument as 
   );
 });
 
+test("an unreadable optional object name still pairs its real operation result", () => {
+  const lines = call({ api: 1, access: "20019", root: "2" }).map((line) =>
+    line.includes(" NAME seq=")
+      ? "OFOX_NT_RAW_V1 NAME_UNKNOWN seq=1 END"
+      : line,
+  );
+  const report = project(lines);
+  assert.equal(report.status, "observed-failures");
+  assert.equal(report.observations[0].objectAlias, "unknown");
+  assert.equal(report.observations[0].desiredAccess, 0x20019);
+});
+
+test("every operation setup stage survives the debugger-state allowlist", () => {
+  for (const stage of [
+    "operation_architecture_unverified",
+    "operation_layout_unverified",
+    "operation_thread_unverified",
+    "operation_install_unverified",
+    "operation_target_invalid",
+  ])
+    assert.equal(safeDebuggerState({ stage }).stage, stage);
+  assert.equal(safeDebuggerState({ stage: "private-stage" }).stage, "unknown");
+});
+
 test("setup failure state retains only fixed booleans and a bounded breakpoint count", () => {
   const state = safeDebuggerState({
     operationSetup: {
-      layoutVerified: true,
+      abiVerified: true,
       threadMatched: false,
       installationVerified: "private-secret",
       breakpointRows: 14,
@@ -333,7 +460,7 @@ test("setup failure state retains only fixed booleans and a bounded breakpoint c
     },
   });
   assert.deepEqual(state.operationSetup, {
-    layoutVerified: true,
+    abiVerified: true,
     threadMatched: false,
     installationVerified: null,
     breakpointRows: 14,

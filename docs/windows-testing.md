@@ -124,15 +124,26 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 原生运行 44027445443 的 A1/B/A2 均返回同一 0142，registryRead 单独不足；默认
 诊断不会重复该候选实验。
 
-固定 Nt 观察保留原 V2/Host Resume1 门禁。匹配的 ntdll PDB 必须先证明 x64
-OBJECT_ATTRIBUTES/UNICODE_STRING 布局；实际线程表与 `bl /L` 必须证明全部 14 个
+固定 Nt 观察保留原 V2/Host Resume1 门禁。对实际 child HANDLE 调用
+`IsWow64Process2`，要求成功、processMachine=UNKNOWN、nativeMachine=AMD64，
+并核对原生 Windows 绑定的 size/offset；使用的是公开 Windows x64 ABI，不宣称
+PDB 布局读回。原有 SymChk 与 gflag 实测仍保留。实际线程表与 `bl /L` 须证明全部 14 个
 owned 入口断点已解析、启用并关联实际线程。每次调用的 owned 持久返回断点 30
 独立验证地址和线程，返回仅在同 TID、入口 RSP+8 和保存的返回地址上配对 EAX。
 ACCESS_MASK 取 EDX 低 32 位；ALPC PortName 与注册表 ValueName 不作访问掩码。
-名字按 UNICODE_STRING.Length 读取，最多 1024 字节；相对 RootDirectory 不推断
+每次属性调用先检查 OA 可读范围及 Length=0x30，US/Buffer 也先检查可读范围；
+不可读或长度不符只将可选名字标为 unknown，仍配对真实返回状态。名字按
+UNICODE_STRING.Length 读取，最多 1024 字节；相对 RootDirectory 不推断
 绝对对象。原始名字/地址留在私有目录并清理，上传仅含固定 API、状态、掩码及闭集
-对象别名。嵌套、缺返回、未安装或超限均 inconclusive；失败操作不自动等于 DLL
-初始化失败的原因。这些合成文案回归通过也不证明原生 CDB 兼容。
+对象别名。嵌套、缺返回、未安装或超过 256 次调用均 inconclusive；该上限内的
+全部失败状态都保留，正常启动的大量“不存在”不能挤掉最后的失败操作。失败操作
+不自动等于 DLL 初始化失败的原因。这些合成文案回归通过也不证明原生 CDB 兼容。
+生成命令显式使用 MASM；布尔比较以 and/or 连接，不混入 C++ 的逻辑运算符。
+CDB 会在提示符后回显 `-cf` 的每条命令；`bl` 解析跳过 `0:000>` 回显，带提示符
+的行不能计为断点行。按微软示例，当前 `bl` 在状态位后输出 DML 动作文字
+`Disable Clear`；解析接受该文字及线程列的 `~` 前缀，仍要求启用、地址和实际线程号。
+`OBJECT_ATTRIBUTES` 绑定只在 test cfg 使用，所需 `Wdk_Foundation` 以 Windows
+dev-dependency 的同一 pinned `windows` 提供，发布构建的特性集合不变。
 
 运行时测试入口会先准备完整生产资源，再验证打包依赖与清单；Windows Probe
 同时安装根目录依赖，供 PPT 来源和覆盖率维护测试使用。上游 PPT 资源禁止 Git

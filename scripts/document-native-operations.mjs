@@ -17,16 +17,23 @@ const APIS = [
   ["NtAlpcConnectPortEx", "none"],
   ["NtSecureConnectPort", "none"],
 ];
+// Matches the debugger script's 0n256 call limit. Each failure belongs to one
+// unique sequence, so the call bound also bounds retained observations; ordinary
+// startup misses must not evict the final failed operation.
+const MAX_CALLS = 256;
 const INSTALL =
-  /^OFOX_NT_V1 INSTALLED pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) thread=(\d{1,3}) count=14 END$/i;
+  /^OFOX_NT_V1 INSTALLED pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) thread=(\d{1,3}) count=14 arch=amd64 abi=windows-x64 END$/i;
 const ENTER =
-  /^OFOX_NT_RAW_V1 ENTER seq=(\d{1,3}) api=(\d{1,2}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) access=(none|[a-f\d]{1,8}) root=(none|0|1) END$/i;
+  /^OFOX_NT_RAW_V1 ENTER seq=(\d{1,3}) api=(\d{1,2}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) access=(none|[a-f\d]{1,8}) root=(none|0|1|2) END$/i;
 const NAME =
   /^OFOX_NT_RAW_V1 NAME seq=(\d{1,3}) bytes=(\d{1,4}) value="([^\r\n\0]*)" END$/;
 const RETURN =
   /^OFOX_NT_RAW_V1 RETURN seq=(\d{1,3}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) status=([a-f\d]{1,8}) END$/i;
+// A debugger prompt echo (for example `0:000> bl /L 30`) is never a row.
+const PROMPT = /^(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}>/i;
+// Same row grammar as the setup check: optional DML action text and ~thread.
 const BP =
-  /^\s*30 e ([a-f\d]{8}`[a-f\d]{8}|[a-f\d]{8,16})\s+0*1\s+\(0*1\)\s+0:(\d{3})\s+[^\r\n]*$/i;
+  /^\s*30 e (?:Disable Clear\s+)?([a-f\d]{8}`[a-f\d]{8}|[a-f\d]{8,16})\s+0*1\s+\(0*1\)\s+0:~?(\d{3})\s+[^\r\n]*$/i;
 const hex = (value) => Number.parseInt(value, 16);
 const pointer = (value) => BigInt(`0x${value.replaceAll("`", "")}`);
 function objectAlias(name, root) {
@@ -44,6 +51,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     scope: "fixed-windows-startup-operations",
     releaseGate: false,
     debuggerAssisted: true,
+    abiBasis: "documented-windows-x64",
     status: "inconclusive",
     cause: "undetermined",
     negativeConclusionAllowed: false,
@@ -113,7 +121,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
           else active.breakpointVerified = true;
         }
         listing = null;
-      } else if (line.trim()) listing.push(line);
+      } else if (line.trim() && !PROMPT.test(line)) listing.push(line);
       continue;
     }
     const entry = ENTER.exec(line);
@@ -123,7 +131,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
       if (
         active ||
         sequence !== next ||
-        sequence > 256 ||
+        sequence > MAX_CALLS ||
         !api ||
         !same(entry[3], entry[4])
       ) {
@@ -209,17 +217,14 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
       }
       const status = hex(returned[5]);
       report.coverage.completedCalls++;
-      if ((status & 0x80000000) !== 0) {
-        if (report.observations.length === 32) reject();
-        else
-          report.observations.push({
-            sequence: active.sequence,
-            api: active.api,
-            status: `0x${status.toString(16).padStart(8, "0")}`,
-            desiredAccess: active.access,
-            objectAlias: objectAlias(active.name, active.root),
-          });
-      }
+      if ((status & 0x80000000) !== 0)
+        report.observations.push({
+          sequence: active.sequence,
+          api: active.api,
+          status: `0x${status.toString(16).padStart(8, "0")}`,
+          desiredAccess: active.access,
+          objectAlias: objectAlias(active.name, active.root),
+        });
       active = null;
       continue;
     }

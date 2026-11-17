@@ -3,7 +3,16 @@ use super::{
     cdb_protocol::{Configured, Fence},
     *,
 };
-use windows::Win32::System::Threading::SuspendThread;
+use windows::{
+    Wdk::Foundation::OBJECT_ATTRIBUTES,
+    Win32::{
+        Foundation::UNICODE_STRING,
+        System::{
+            SystemInformation::IMAGE_FILE_MACHINE_UNKNOWN,
+            Threading::{IsWow64Process2, SuspendThread},
+        },
+    },
+};
 
 pub(super) const ENV_ROOT: &str = "OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT";
 
@@ -42,6 +51,7 @@ fn number(value: &serde_json::Value, name: &str) -> Result<u32, String> {
 }
 fn stage(value: &serde_json::Value) -> &'static str {
     match value["stage"].as_str() {
+        Some("operation_architecture_unverified") => "operation_architecture_unverified",
         Some("operation_layout_unverified") => "operation_layout_unverified",
         Some("operation_thread_unverified") => "operation_thread_unverified",
         Some("operation_install_unverified") => "operation_install_unverified",
@@ -109,6 +119,27 @@ impl Guard {
         if controller["diagnosticOnly"] != true || controller["controllerReady"] != true {
             return Err(UNAVAILABLE.into());
         }
+        guard.note("operation_architecture_unverified");
+        let mut process_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+        let mut native_machine = IMAGE_FILE_MACHINE_UNKNOWN;
+        let architecture =
+            unsafe { IsWow64Process2(process, &mut process_machine, Some(&mut native_machine)) };
+        // Published Windows x64 C ABI, checked against the native bindings.
+        // No dependency on private ntdll PDB object-type evaluation.
+        let compiled_layout = (
+            size_of::<OBJECT_ATTRIBUTES>(),
+            std::mem::offset_of!(OBJECT_ATTRIBUTES, RootDirectory),
+            std::mem::offset_of!(OBJECT_ATTRIBUTES, ObjectName),
+            size_of::<UNICODE_STRING>(),
+            std::mem::offset_of!(UNICODE_STRING, Length),
+            std::mem::offset_of!(UNICODE_STRING, MaximumLength),
+            std::mem::offset_of!(UNICODE_STRING, Buffer),
+        ) == (0x30, 8, 0x10, 0x10, 0, 2, 8);
+        if !compiled_layout
+            || !cdb_protocol::native_x64(architecture.is_ok(), process_machine.0, native_machine.0)
+        {
+            return Err(UNAVAILABLE.into());
+        }
         guard.note("pre_attach_hold_unverified");
         if cancelled.load(Ordering::Acquire) {
             guard.note("cancelled");
@@ -135,7 +166,9 @@ impl Guard {
         write(
             &guard.root,
             "target.json",
-            &serde_json::json!({"childPid":pid,"primaryTid":tid}),
+            &serde_json::json!({"childPid":pid,"primaryTid":tid,"architecture":{
+                "apiSucceeded":true,"processMachine":process_machine.0,"nativeMachine":native_machine.0,
+                "compiledLayoutVerified":true}}),
         )?;
         let configured = loop {
             if cancelled.load(Ordering::Acquire) {

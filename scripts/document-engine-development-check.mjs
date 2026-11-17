@@ -358,6 +358,7 @@ function traceFailure(reason, metadata, cleanup = null) {
 
 function safeControllerFailure(value) {
   const stages = new Set([
+    "operation_architecture_unverified",
     "operation_layout_unverified",
     "operation_thread_unverified",
     "operation_install_unverified",
@@ -431,6 +432,7 @@ function safeControllerFailure(value) {
 
 export function safeDebuggerState(value) {
   const stages = new Set([
+    "operation_architecture_unverified",
     "operation_layout_unverified",
     "operation_thread_unverified",
     "operation_install_unverified",
@@ -467,7 +469,7 @@ export function safeDebuggerState(value) {
   };
   if (value?.operationSetup && typeof value.operationSetup === "object") {
     result.operationSetup = Object.fromEntries(
-      ["layoutVerified", "threadMatched", "installationVerified"].map((key) => [
+      ["abiVerified", "threadMatched", "installationVerified"].map((key) => [
         key,
         typeof value.operationSetup[key] === "boolean"
           ? value.operationSetup[key]

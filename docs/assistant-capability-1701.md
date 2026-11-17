@@ -361,3 +361,46 @@ EAX，并清除自身。访问掩码只读 EDX；端口/值名接口不套用文
 只在私有目录，收据只含闭集别名。完整原 Host Resume1 仍为归因前置，缺失配对、
 嵌套或超限保持 inconclusive；实际失败操作与 DLL 失败分别记事实，不自动因果。
 本地合成/实际 PowerShell 协议测试不能替代待执行的 Windows 原生验证。
+
+运行 [44034826154](https://github.com/ofoxai/ofox-desktop/actions/runs/44034826154)
+（`ef5fef70`）control 4/4、ACL 1/1、原实际 token/LPAC 矩阵通过；新增观察器在
+`operation_layout_unverified` 拒绝，尚无 CF 尾确认、continue 或原 Host Resume。
+因此没有系统调用结果，也不能用于解释原始 0142；调试器、raw、task/profile
+清理确认。此前基线调试链原生通过的事实保持，新增类型求值依赖尚未成立。
+
+修正仅针对诊断：移除新增的 PDB sizeof/空指针字段取址依赖，按
+[公开结构](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes)
+与 Windows x64 ABI 使用固定偏移，先对同一实际进程句柄取得
+[IsWow64Process2](https://learn.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process2)
+成功的 UNKNOWN/AMD64 组合，并核对原生绑定 size/offset。每次 OA.Length 和可读
+范围再核对；可选名字未知不阻断真实状态配对。原符号/gflag/断点安装及完整
+V2/HostResume 门禁保留。另修正本轮发现的 MASM/C++ 逻辑运算符混用，显式使用
+MASM and/or。回归先 RED 后 GREEN；这些修正的原生运行尚待执行，不作 0142 修复。
+
+接手复核（本地，`ef5fef70` 之上，尚未取得新原生结果）：
+
+- 编译阻塞：临时 Windows 检查工程的特性列表与正式 Cargo.toml 一致，二者都缺
+  `Wdk_Foundation`，所以这是正式代码在 Windows test 构建中的真实错误。链接
+  工作区源码的 Windows 目标镜像先复现 E0432，仅出现在 lib test（`cdb.rs` 只在
+  test cfg 编译）。修正为 Windows dev-dependency 的同一 pinned `windows`
+  0.62.2 追加该特性；`cargo tree` 核对发布依赖边不含它，Cargo.lock 不变。
+  修正后镜像 lib 与 lib test 的 Clippy `-D warnings` 通过，属交叉检查。
+- 已有产物再核对：44034826154 的 promptLines=10、markerMentionLines=12，
+  恰为 `-cf` 前十条命令各带 `0:000>` 回显（六条标记命令的回显加输出）；
+  LAYOUT 行确有输出但数值不符，与已移除的类型求值依赖一致，不另作推断。
+  据此，断点区段紧接的 `bl /L 10-23` 回显会被旧解析当作非法行，下次原生
+  运行将必然在 `operation_install_unverified` 拒绝。现跳过提示符回显，带提示符
+  的伪断点行仍不计数，14 行、启用、地址和线程要求不变。
+- 微软 [bl 示例](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/getting-started-with-windbg)
+  显示当前输出为 `e Disable Clear  <地址> ... 0:****`。入口与返回断点解析均接受
+  这段 DML 文字和线程列 `~` 前缀；线程限定列的确切形态没有文档示例，待原生确认。
+- 失败观测原超过 32 条即整体 inconclusive，正常启动的注册表缺失可能借此
+  掩盖最后的失败操作；现与调试器 256 次调用上限一致并全部保留。
+
+回归均先 RED 后 GREEN：portable PowerShell 7.7.0、Node 24.21.0 下 CDB 相关
+九个测试文件 69/69、0 skip。夹具改用生产形态的 `ConvertFrom-Json` 收据
+（Int64），浮点、字符串、WOW64 与缺失均拒绝，删去 Int64 分支的变异会失败；
+另覆盖 operation 阶段白名单、256/257 调用边界和非属性接口的 `root=2` 拒绝。
+`cdb_protocol` 独立单测 8/8；独立审查未发现严重或重要问题。以上都不是 Windows
+原生证据，不改变 token、capability、ACL、mitigation、超时或 admission，
+不作 0142 修复。
