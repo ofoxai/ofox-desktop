@@ -4,6 +4,12 @@ function Get-DocumentSymbolArguments([string]$Image, [string]$Cache) {
   return @('/op','/pt',$Image,'/s',"SRV*$Cache*https://msdl.microsoft.com/download/symbols")
 }
 
+function Get-DocumentSymbolPassedPattern([string]$Image) {
+  # SDK 10.0.26100 appends PDB/other details after the exact PASSED status.
+  # Keep the target, record prefix and status token exact; details prove nothing.
+  return '^\s*SYMCHK:\s+(?:ntdll\.dll|' + [regex]::Escape($Image) + ')\s+PASSED(?:[ \t]+[^\r\n]*)?$'
+}
+
 function Get-DocumentSymbolOutputShape([byte[]]$Bytes, [string]$Image) {
   $shape = @{ capturedBytes = $Bytes.Length; bom = 'none'; nulEvenBytes = 0; nulOddBytes = 0; crBytes = 0; lfBytes = 0
     individualPassLines = 0; failedTotalLines = 0; passedTotalLines = 0; failedFiles = $null; passedOrIgnoredFiles = $null; usageMention = $false; tokenRows = @() }
@@ -15,7 +21,7 @@ function Get-DocumentSymbolOutputShape([byte[]]$Bytes, [string]$Image) {
     if ($Bytes[$i] -eq 13) { $shape.crBytes++ }; if ($Bytes[$i] -eq 10) { $shape.lfBytes++ }
   }
   $allowed = @('SYMCHK','SYMSRV','DBGHELP','PASSED','FAILED','IGNORED','FILES','NTDLL.DLL','NTDLL.PDB','USAGE',':','=','+')
-  $single = '^\s*SYMCHK:\s+(?:ntdll\.dll|' + [regex]::Escape($Image) + ')\s+PASSED\s*$'
+  $single = Get-DocumentSymbolPassedPattern $Image
   $failed = @(); $passed = @()
   # This replacement decoder is for shape only. The verifier below retains its
   # strict decoder and original stdout-only grammar until native evidence exists.
@@ -77,7 +83,7 @@ function Invoke-DocumentSymbolCheck($Start, $Control, [hashtable]$State, [int]$T
     $State.exitCode = $process.ExitCode
     if ($State.exitCode -ne 0) { throw 'symbol_check_failed' }
     $failed = @(); $passed = @(); $single = 0
-    $expected = '^\s*SYMCHK:\s+(?:ntdll\.dll|' + [regex]::Escape($Image) + ')\s+PASSED\s*$'
+    $expected = Get-DocumentSymbolPassedPattern $Image
     foreach ($line in ([Text.UTF8Encoding]::new($false, $true).GetString($output.ToArray()) -split '\r?\n')) {
       if ($line -match '^\s*SYMCHK:\s+FAILED files\s*=\s*([0-9]{1,6})\s*$') { $failed += [int]$Matches[1] }
       if ($line -match '^\s*SYMCHK:\s+PASSED \+ IGNORED files\s*=\s*([0-9]{1,6})\s*$') { $passed += [int]$Matches[1] }

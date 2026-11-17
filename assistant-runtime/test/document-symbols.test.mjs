@@ -18,6 +18,11 @@ test(
     try {
       for (const [mode, expected] of [
         ["success", null],
+        ["details", null],
+        ["pseudo", "symbol_check_incomplete"],
+        ["foreign", "symbol_check_incomplete"],
+        ["prefixed", "symbol_check_incomplete"],
+        ["doublepass", "symbol_check_incomplete"],
         ["nonzero", "symbol_check_failed"],
         ["empty", "symbol_check_incomplete"],
         ["duplicate", "symbol_check_incomplete"],
@@ -64,7 +69,11 @@ test(
         assert.equal(report.state.closed, true, mode);
         assert.equal(report.state.started, mode !== "cancel", mode);
         assert.ok(!result.stdout.includes("private-token"), mode);
-        assert.equal(report.state.passedFile, mode === "success", mode);
+        assert.equal(
+          report.state.passedFile,
+          ["success", "details"].includes(mode),
+          mode,
+        );
         assert.ok(report.state.outputShape.stdout.capturedBytes >= 0, mode);
         assert.ok(report.state.outputShape.stderr.capturedBytes >= 0, mode);
         assert.deepEqual(report.arguments, [

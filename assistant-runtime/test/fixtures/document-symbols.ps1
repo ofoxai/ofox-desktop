@@ -29,6 +29,11 @@ $start.UseShellExecute = $false; $start.CreateNoWindow = $true
 $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
 $command = switch ($Mode) {
   'success' { '[Console]::Out.WriteLine("private-token"); [Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
+  'details' { '[Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED - pdb: ntdll.pdb dbg: private-token"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
+  'pseudo' { '[Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED_WRONG - pdb: ntdll.pdb"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
+  'foreign' { '[Console]::Out.WriteLine("SYMCHK: foreign.dll PASSED - pdb: ntdll.pdb"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
+  'prefixed' { '[Console]::Out.WriteLine("note SYMCHK: ntdll.dll PASSED - pdb: ntdll.pdb"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
+  'doublepass' { '[Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED - pdb: ntdll.pdb"); [Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
   'nonzero' { '[Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1"); exit 7' }
   'empty' { '[Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 0")' }
   'duplicate' { '[Console]::Out.WriteLine("SYMCHK: ntdll.dll PASSED"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: FAILED files = 0"); [Console]::Out.WriteLine("SYMCHK: PASSED + IGNORED files = 1")' }
