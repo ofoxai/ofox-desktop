@@ -108,11 +108,15 @@ pub(super) fn supported(rows: &[Value], candidate: Candidate) -> bool {
         })
 }
 
-/// Win32/libuv calls named by libuv's `uv_fatal_error` ("%s: (%d) %s") during
-/// process and stdio initialization. Any other name is reported as "?".
-const FATAL_CALLS: [&str; 45] = [
+/// Win32/libuv calls named by libuv's `uv_fatal_error` ("%s: (%d) %s"), covering
+/// every Windows call site in the bundled Node's libuv 1.51, plus nearby stdio
+/// and console calls. Any other name is reported as "?".
+const FATAL_CALLS: [&str; 48] = [
     "WSAStartup",
     "uv__malloc",
+    "QueryPerformanceCounter",
+    "GetEnvironmentVariableW",
+    "UnregisterWaitEx",
     "GetModuleHandleA",
     "GetModuleHandleW",
     "GetProcAddress",
@@ -424,6 +428,37 @@ mod tests {
             for secret in ["private", "Users", "1234", "node.cc", "MaybeLocal"] {
                 assert!(!encoded.contains(secret), "{kind}:{secret}");
             }
+        }
+    }
+    #[test]
+    fn every_libuv_1_51_windows_fatal_call_is_named() {
+        // All uv_fatal_error call names in Node v22.23.4's deps/uv/src/win.
+        for call in [
+            "GetQueuedCompletionStatusEx",
+            "uv__malloc",
+            "CreateIoCompletionPort",
+            "PostQueuedCompletionStatus",
+            "CreateEvent",
+            "QueueUserWorkItem",
+            "CreateJobObjectW",
+            "SetInformationJobObject",
+            "AssignProcessToJobObject",
+            "GetEnvironmentVariableW",
+            "UnregisterWaitEx",
+            "RegisterWaitForSingleObject",
+            "DuplicateHandle",
+            "QueryPerformanceFrequency",
+            "QueryPerformanceCounter",
+            "GetModuleHandleA",
+            "GetProcAddress",
+            "WSAStartup",
+        ] {
+            let line = format!("{call}: (5) Access is denied.\r\r\n");
+            assert_eq!(
+                stderr_shape(line.as_bytes()),
+                serde_json::json!({"kind":"libuv-fatal","call":call,"code":5}),
+                "{call}"
+            );
         }
     }
     #[test]
