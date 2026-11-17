@@ -327,10 +327,177 @@ test("keeps low32 access masks and separates relative names and registry values 
     "private command",
     "2000",
     "1008",
-    "\\Registry",
-    "\\Sessions",
   ])
     assert.ok(!encoded.includes(secret), secret);
+  assert.deepEqual(
+    report.calls.map((row) => row.objectShape),
+    [
+      "\\Registry\\Machine\\SOFTWARE\\Microsoft",
+      "\\Registry\\Machine\\?",
+      "?",
+      "\\Sessions\\?\\Windows\\ApiPort",
+    ],
+  );
+});
+
+test("lists every paired call in order with only vocabulary object shapes", () => {
+  const unknownName = (lines) =>
+    lines.map((line) =>
+      line.includes(" NAME seq=")
+        ? line.replace(/ NAME seq=(\d+) .*$/, " NAME_UNKNOWN seq=$1 END")
+        : line,
+    );
+  const report = project([
+    ...call({
+      api: 1,
+      access: "80000000",
+      name: "\\Registry\\Machine\\software\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\node.exe",
+      status: "c0000022",
+    }),
+    ...call({
+      seq: 2,
+      api: 1,
+      access: "1",
+      root: "0",
+      name: "S-1-5-21-1-2-3-1001\\Session Manager",
+      status: "0",
+    }),
+    ...call({
+      seq: 3,
+      api: 4,
+      root: "none",
+      name: "GlobalFlag",
+      status: "c0000034",
+    }),
+    ...call({
+      seq: 4,
+      api: 5,
+      access: "4",
+      name: "\\KnownDlls\\KERNELBASE.dll",
+      status: "0",
+    }),
+    ...call({ seq: 5, name: "\\Sessions\\2\\Windows\\ApiPort", status: "0" }),
+    ...unknownName(
+      call({ seq: 6, api: 1, access: "1", root: "2", status: "0" }),
+    ),
+    ...unknownName(call({ seq: 7, api: 12, root: "none", status: "0" })),
+    ...call({
+      seq: 8,
+      api: 1,
+      access: "1",
+      name: "\\Registry".repeat(33),
+      status: "0",
+    }),
+  ]);
+  assert.equal(report.coverage.status, "complete-for-fixed-set");
+  assert.deepEqual(report.calls, [
+    {
+      sequence: 1,
+      api: "NtOpenKey",
+      status: "0xc0000022",
+      desiredAccess: 0x80000000,
+      root: "absolute",
+      objectShape:
+        "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\?",
+    },
+    {
+      sequence: 2,
+      api: "NtOpenKey",
+      status: "0x00000000",
+      desiredAccess: 1,
+      root: "relative",
+      // A non-vocabulary component masks everything after it.
+      objectShape: "?\\?",
+    },
+    {
+      sequence: 3,
+      api: "NtQueryValueKey",
+      status: "0xc0000034",
+      desiredAccess: null,
+      root: null,
+      objectShape: "GlobalFlag",
+    },
+    {
+      sequence: 4,
+      api: "NtOpenSection",
+      status: "0x00000000",
+      desiredAccess: 4,
+      root: "absolute",
+      objectShape: "\\KnownDlls\\kernelbase.dll",
+    },
+    {
+      sequence: 5,
+      api: "NtAlpcConnectPort",
+      status: "0x00000000",
+      desiredAccess: null,
+      root: "absolute",
+      objectShape: "\\Sessions\\?\\Windows\\ApiPort",
+    },
+    {
+      sequence: 6,
+      api: "NtOpenKey",
+      status: "0x00000000",
+      desiredAccess: 1,
+      root: "unknown",
+      objectShape: null,
+    },
+    {
+      sequence: 7,
+      api: "NtMapViewOfSection",
+      status: "0x00000000",
+      desiredAccess: null,
+      root: null,
+      objectShape: null,
+    },
+    {
+      sequence: 8,
+      api: "NtOpenKey",
+      status: "0x00000000",
+      desiredAccess: 1,
+      root: "absolute",
+      objectShape: "?overflow",
+    },
+  ]);
+  const encoded = JSON.stringify(report);
+  for (const secret of ["node.exe", "S-1-5", "1001", "software\\"])
+    assert.ok(!encoded.includes(secret), secret);
+});
+
+test("object shapes never print text after an unknown component", () => {
+  const shapes = (names) =>
+    project(
+      names.flatMap((name, index) =>
+        call({ seq: index + 1, api: 7, access: "1", name, status: "0" }),
+      ),
+    ).calls.map((row) => row.objectShape);
+  assert.deepEqual(
+    shapes([
+      "\\??\\C:\\Users\\Server\\AppData\\Local\\Temp\\x.docx",
+      "\\Device\\Mup\\Server\\Default\\Config",
+      "\\\u212AnownDlls\\ntdll.dll",
+      "\\Sessions\\2\\BaseNamedObjects",
+      "\\GLOBAL??\\?\\Windows",
+      `${"\\Registry".repeat(31)}`,
+    ]),
+    [
+      "\\??\\?\\?\\?\\?\\?\\?\\?",
+      "\\Device\\?\\?\\?\\?",
+      "\\?\\?",
+      "\\Sessions\\?\\BaseNamedObjects",
+      "\\GLOBAL??\\?\\?",
+      "\\Registry".repeat(31),
+    ],
+  );
+});
+
+test("a later rejection keeps earlier paired calls but stays inconclusive", () => {
+  const report = project([
+    ...call({ status: "0" }),
+    "OFOX_NT_RAW_V1 INVALID nested END",
+  ]);
+  assert.equal(report.status, "inconclusive");
+  assert.equal(report.calls.length, 1);
+  assert.equal(report.calls[0].status, "0x00000000");
 });
 
 test("does not attribute without the complete original Host Resume and independently verified installation", () => {

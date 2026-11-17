@@ -430,3 +430,24 @@ return、invalid-*、marker-unknown、unterminated、no-calls），不含原文�
 RED 复现与原生相同的整体拒绝，修正后相关九个文件 71/71、0 skip。下一次定点
 运行只回答：去掉粘连后能否配对出失败操作及 NTSTATUS；若仍不完整，由
 `firstRejection` 和 `promptJoined` 指出下一处断点，不改隔离、权限或超时。
+
+运行 [44055154306](https://github.com/ofoxai/ofox-desktop/actions/runs/44055154306)
+（`9ea2b34e`）首次取得原生系统调用配对：安装门禁、完整 V2、hold `1/2` 和原
+Host Resume1 均成立；`promptJoined=1` 证实首条 ENTER 粘在等待提示符后，
+`firstRejection` 为空，固定集合覆盖完整，14 次调用全部配对。三项失败依次为：
+NtOpenKey `0xc0000022`（GENERIC_READ）、NtOpenKey `0xc0000022`
+（KEY_QUERY_VALUE）、NtOpenKey `0xc0000034`（KEY_QUERY_VALUE），对象均只能
+归为 `machine-registry`；其后 11 次被观察调用均成功，Node 随后仍以
+KernelBase 初始化失败、0142 退出。control 4/4、ACL 1/1，清理全部确认。
+
+这是第一份失败操作证据，但不足以归因：被拒绝的具体 HKLM 键、成功调用的顺序
+及 KernelBase 初始化期间最后完成的操作都没有输出。registryRead 的 A-B-A 已证明
+单独不足，因此不据此调整 capability 或 ACL。
+
+下一步仅补可见性，不改观察范围或任何隔离条件：报告新增按序的全部配对调用
+`calls`（含成功），对象名按固定公开 Windows 词表投影为形态：首个词表外组件
+（SID、盘符、镜像名等）之后全部为 `?`，纯数字只遮蔽自身，仍属闭集，不上传原文。
+独立隐私审查以 18 个对抗性名字核对无原文外泄，并据其意见收紧遮蔽与 ASCII 匹配。下一次定点运行只回答：两次
+ACCESS_DENIED 的 HKLM 键是什么，以及 KernelBase 初始化失败前最后完成的被观察
+操作是哪些；若最后操作只是映射 KernelBase，则说明其 DllMain 的失败点不在当前
+14 个 API 内，需要另行扩大观察集合。相关九个文件 74/74、0 skip。
