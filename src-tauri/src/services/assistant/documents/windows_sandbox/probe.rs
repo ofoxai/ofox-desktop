@@ -64,6 +64,10 @@ pub(super) enum Phase {
     #[cfg(test)]
     CdbHandshake,
     #[cfg(test)]
+    CdbInitialHold,
+    #[cfg(test)]
+    CdbContinue,
+    #[cfg(test)]
     CdbHold,
     #[cfg(test)]
     CdbStop,
@@ -142,6 +146,11 @@ pub(super) struct LoaderDiagnostic {
     pub config_confirmed: Option<bool>,
     pub before_flags: Option<u32>,
     pub after_flags: Option<u32>,
+    pub pre_attach_suspend_previous: Option<u32>,
+    pub pre_attach_paired_resume_previous: Option<u32>,
+    pub release_probe_count: u32,
+    pub release_suspend_previous: Option<u32>,
+    pub release_paired_resume_previous: Option<u32>,
     pub suspend_previous: Option<u32>,
     pub paired_resume_previous: Option<u32>,
     pub host_resume_previous: Option<u32>,

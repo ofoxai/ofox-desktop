@@ -7,7 +7,11 @@ const LIMITS = {
   observations: 32,
 };
 const MARKER =
-  /^OFOX_CDB_V1 (BEFORE|AFTER) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) flags=([a-f\d]{1,8}) END$/i;
+  /^OFOX_CDB_V2 (BEFORE|AFTER) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) flags=([a-f\d]{1,8}) END$/i;
+const PRE_HOLD =
+  /^OFOX_CDB_V2 PRE_ATTACH_HOLD pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) suspend=1 paired=2 END$/i;
+const HOST_RESUMED =
+  /^OFOX_CDB_V2 HOST_RESUMED pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) hold=1 paired=2 previous=1 END$/i;
 const INIT =
   /^([a-f\d]{1,8}):([a-f\d]{1,8}) @ \d{1,20} - LdrpInitializeNode - ERROR: Init routine [a-f\d]{8,16} for DLL "([^"\r\n]+)" failed during DLL_PROCESS_ATTACH$/i;
 const SUBSYSTEM =
@@ -53,7 +57,7 @@ function moduleProjection(value, roots) {
 
 export function projectDocumentLoaderSnaps({ text, target, roots } = {}) {
   const report = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     scope: "windows-node-loader-diagnostic",
     releaseGate: false,
     debuggerAssisted: true,
@@ -88,7 +92,7 @@ export function projectDocumentLoaderSnaps({ text, target, roots } = {}) {
     invalid = false,
     before = null,
     after = null,
-    readyAt = -1;
+    continueAt = -1;
   for (let index = 0; index < lines.length; index++) {
     const line = lines[index];
     const marker = MARKER.exec(line);
@@ -111,15 +115,37 @@ export function projectDocumentLoaderSnaps({ text, target, roots } = {}) {
       if (stage === 0) before = values;
       else if (stage === 1) after = values;
       stage++;
-    } else if (line === "OFOX_CDB_V1 READY END") {
+    } else if (line === "OFOX_CDB_V2 READY END") {
       if (stage !== 2) invalid = true;
-      readyAt = index;
       stage++;
-    } else if (line.startsWith("OFOX_CDB_V1")) invalid = true;
+    } else if (PRE_HOLD.test(line)) {
+      const values = PRE_HOLD.exec(line);
+      if (
+        stage !== 3 ||
+        hex(values[1]) !== target.childPid ||
+        hex(values[2]) !== target.primaryTid
+      )
+        invalid = true;
+      stage = 4;
+    } else if (line === "OFOX_CDB_V2 CONTINUE_REQUESTED END") {
+      if (stage !== 4) invalid = true;
+      continueAt = index;
+      stage = 5;
+    } else if (HOST_RESUMED.test(line)) {
+      const values = HOST_RESUMED.exec(line);
+      if (
+        stage !== 5 ||
+        hex(values[1]) !== target.childPid ||
+        hex(values[2]) !== target.primaryTid
+      )
+        invalid = true;
+      stage = 6;
+    } else if (line.startsWith("OFOX_CDB_V")) invalid = true;
   }
   if (
     invalid ||
-    stage !== 3 ||
+    stage !== 6 ||
+    continueAt < 0 ||
     !before ||
     !after ||
     BigInt(after.flags) !== (BigInt(before.flags) | 2n)
@@ -127,9 +153,21 @@ export function projectDocumentLoaderSnaps({ text, target, roots } = {}) {
     report.reasons.push("handshake-unverified");
     return report;
   }
-  report.handshake = { status: "matched", before, after, ready: true };
-  for (const line of lines.slice(readyAt + 1)) {
-    if (!line) continue;
+  report.handshake = {
+    status: "matched",
+    before,
+    after,
+    ready: true,
+    preAttachHold: { suspendPrevious: 1, pairedResumePrevious: 2 },
+    finalHold: { suspendPrevious: 1, pairedResumePrevious: 2 },
+    hostResumePrevious: 1,
+    continueRequested: true,
+  };
+  // The actual target can fail before the Host ACK reaches the controller.
+  // Require the complete global proof, then retain only post-continue output;
+  // ACK placement is not an event timestamp and cannot discard that failure.
+  for (const line of lines.slice(continueAt + 1)) {
+    if (!line || line.startsWith("OFOX_CDB_V2 ")) continue;
     const init = INIT.exec(line),
       subsystem = SUBSYSTEM.exec(line);
     const match = init ?? subsystem;

@@ -15,6 +15,7 @@ $promptLines = 0; $markerMentionLines = 0; $numericTargetLines = 0; $gflagValueL
 $reportedWin32Errors = @()
 $symbolState = @{ started = $false; closed = $true; exitCode = $null; failedFiles = $null; passedOrIgnoredFiles = $null; passedFile = $false }
 $gflagHints = @{ symbols = $false; types = $false; peb = $false; globalFlags = $false; failure = $false; extension = $false }
+$continueSent = $false; $hostResumeSeen = $false
 
 function Send-Protocol($Value) { [Console]::Out.WriteLine(($Value | ConvertTo-Json -Depth 12 -Compress)); [Console]::Out.Flush() }
 function Write-Json([string]$Name, $Value) {
@@ -278,24 +279,37 @@ public static class DocumentCdbNative {
   if ($null -eq $before) { throw 'gflag_before_unreadable' }
   if ($null -eq $after) { throw 'gflag_after_unreadable' }
   if ($after -ne ($before -bor 2)) { throw 'gflag_changed_unexpectedly' }
-  $writer.WriteLine(('OFOX_CDB_V1 BEFORE pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$before))
-  $writer.WriteLine(('OFOX_CDB_V1 AFTER pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$after))
-  $writer.WriteLine('OFOX_CDB_V1 READY END'); $writer.Flush()
+  $writer.WriteLine(('OFOX_CDB_V2 BEFORE pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$before))
+  $writer.WriteLine(('OFOX_CDB_V2 AFTER pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$after))
+  $writer.WriteLine('OFOX_CDB_V2 READY END'); $writer.Flush()
   Write-Json 'ready.json' @{ childPid = $targetPid; primaryTid = $targetTid; beforeFlags = $before; afterFlags = $after; configConfirmed = $true }
+  $stage = 'waiting_continue'
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  Wait-DocumentCdbRecord $RawDirectory 'continue.json' $inputTask $deadline $debugger { Drain-Cdb }
+  $permission = Read-Json 'continue.json'
+  Assert-DocumentCdbRecord $permission 'continue' $targetPid $targetTid
+  Drain-Cdb
+  if ($inputTask.IsCompleted -or (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json'))) { throw 'cancelled' }
+  if ([DateTime]::UtcNow -ge $deadline) { throw 'deadline' }
+  if ($debugger.HasExited) { throw 'debugger_exited' }
+  $writer.WriteLine(('OFOX_CDB_V2 PRE_ATTACH_HOLD pid={0:x} tid={1:x} suspend=1 paired=2 END' -f $targetPid,$targetTid))
+  $writer.WriteLine('OFOX_CDB_V2 CONTINUE_REQUESTED END'); $writer.Flush()
+  # Release only the debugger's stop. The separately proven CREATE_SUSPENDED
+  # hold stays in force; Rust remeasures exact 1/paired2 before original Resume1.
+  if ($inputTask.IsCompleted -or (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json'))) { throw 'cancelled' }
+  if ([DateTime]::UtcNow -ge $deadline) { throw 'deadline' }
+  $debugger.StandardInput.WriteLine('g'); $debugger.StandardInput.Flush()
+  $continueSent = $true
   $stage = 'waiting_host_resume'
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
-  while (-not (Test-Path -LiteralPath (Join-Path $RawDirectory 'go.json'))) {
-    Drain-Cdb
-    if ($debugger.HasExited) { throw 'debugger_exited' }
-    if (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json')) { throw 'cancelled' }
-    if ([DateTime]::UtcNow -gt $deadline) { throw 'deadline' }
-    Start-Sleep -Milliseconds 5
-  }
+  # Continue bounded private draining to avoid pipe backpressure. Output or CDB
+  # exit can precede GO observation; the projector requires the complete global
+  # Host proof, never marker position alone. This stage never sends a second g.
+  Wait-DocumentCdbRecord $RawDirectory 'go.json' $inputTask $deadline $debugger { Drain-Cdb }
   $go = Read-Json 'go.json'
-  if ($go.hostResumeResult -ne 1) { throw 'host_resume_mismatch' }
-  if ($inputTask.IsCompleted -or (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json'))) { throw 'cancelled' }
-  if ($debugger.HasExited) { throw 'debugger_exited' }
-  $debugger.StandardInput.WriteLine('g'); $debugger.StandardInput.Flush()
+  Assert-DocumentCdbRecord $go 'go' $targetPid $targetTid
+  $hostResumeSeen = $true
+  $writer.WriteLine(('OFOX_CDB_V2 HOST_RESUMED pid={0:x} tid={1:x} hold=1 paired=2 previous=1 END' -f $targetPid,$targetTid)); $writer.Flush()
   $stage = 'running_diagnostic'
   $deadline = [DateTime]::UtcNow.AddSeconds(35)
   while (-not $debugger.HasExited) {
@@ -310,7 +324,7 @@ public static class DocumentCdbNative {
   $writer.Dispose(); $writer = $null
   Write-Json 'debugger-state.json' @{ stage = $stage; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed
     debuggerExitCode = $debuggerExitCode; debuggerExited = $debuggerExited; stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes
-    targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail
+    targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail; continueSent = $continueSent; hostResumeSeen = $hostResumeSeen
     promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors); gflagHints = $gflagHints }
   Send-Protocol @{ state = 'raw-ready'; metadata = $metadata }
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'STOP') { throw 'controller_eof' }
@@ -319,7 +333,7 @@ public static class DocumentCdbNative {
 } catch {
   $known = @('symbol_cancelled','symbol_deadline','symbol_check_failed','symbol_check_incomplete','symbol_output_bound','symbol_cleanup_unconfirmed','symbol_cache_invalid',
     'target_not_seen','target_mismatch','gflag_before_unreadable','gflag_after_unreadable','gflag_changed_unexpectedly',
-    'init_tail_missing','debugger_exited','deadline','cancelled','output_bound','host_resume_mismatch','debugger_stop_unconfirmed','debugger_drain_unconfirmed',
+    'init_tail_missing','debugger_exited','deadline','cancelled','output_bound','continue_mismatch','host_resume_mismatch','debugger_stop_unconfirmed','debugger_drain_unconfirmed',
     'debugger_unavailable','debugger_untrusted','private_directory_invalid','controller_eof','input_bound')
   if ($known -contains $_.Exception.Message) { $stage = $_.Exception.Message }
   $firstFailureStage = $stage
@@ -333,7 +347,7 @@ public static class DocumentCdbNative {
     Write-Json 'finished.json' @{ stage = $firstFailureStage; debuggerClosed = $debuggerClosed }
     Write-Json 'debugger-state.json' @{ stage = $firstFailureStage; cleanupFailure = $cleanupFailure; debuggerStarted = $debuggerStarted; debuggerClosed = $debuggerClosed; debuggerExited = $debuggerExited; debuggerExitCode = $debuggerExitCode
       stdoutLines = $stdoutLines; stderrLines = $stderrLines; capturedBytes = $capturedBytes; targetSeen = $targetSeen
-      beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail
+      beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail; continueSent = $continueSent; hostResumeSeen = $hostResumeSeen
       promptLines = $promptLines; markerMentionLines = $markerMentionLines; numericTargetLines = $numericTargetLines; gflagValueLines = $gflagValueLines; nullCharacters = $nullCharacters; reportedWin32Errors = @($reportedWin32Errors); gflagHints = $gflagHints }
   }
   Send-Protocol @{ state = 'failed'; reason = $firstFailureStage; metadata = $metadata }

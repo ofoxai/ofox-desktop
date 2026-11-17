@@ -357,6 +357,8 @@ function traceFailure(reason, metadata, cleanup = null) {
 
 function safeControllerFailure(value) {
   const stages = new Set([
+    "waiting_continue",
+    "continue_mismatch",
     "symbol_inventory",
     "symbol_prepare",
     "symbol_cancelled",
@@ -424,6 +426,8 @@ function safeControllerFailure(value) {
 
 export function safeDebuggerState(value) {
   const stages = new Set([
+    "waiting_continue",
+    "continue_mismatch",
     "target_not_seen",
     "target_mismatch",
     "gflag_before_unreadable",
@@ -460,6 +464,8 @@ export function safeDebuggerState(value) {
     "beforeReadable",
     "afterReadable",
     "initTailSeen",
+    "continueSent",
+    "hostResumeSeen",
   ])
     result[name] = typeof value?.[name] === "boolean" ? value[name] : null;
   for (const name of [

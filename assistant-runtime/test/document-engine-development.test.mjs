@@ -413,9 +413,12 @@ test("failed debugger retains private evidence through STOP and removes it only 
           writeFile(
             path.join(raw, "debugger.log"),
             [
-              "OFOX_CDB_V1 BEFORE pid=2a tid=2b flags=70 END",
-              "OFOX_CDB_V1 AFTER pid=2a tid=2b flags=72 END",
-              "OFOX_CDB_V1 READY END",
+              "OFOX_CDB_V2 BEFORE pid=2a tid=2b flags=70 END",
+              "OFOX_CDB_V2 AFTER pid=2a tid=2b flags=72 END",
+              "OFOX_CDB_V2 READY END",
+              "OFOX_CDB_V2 PRE_ATTACH_HOLD pid=2a tid=2b suspend=1 paired=2 END",
+              "OFOX_CDB_V2 CONTINUE_REQUESTED END",
+              "OFOX_CDB_V2 HOST_RESUMED pid=2a tid=2b hold=1 paired=2 previous=1 END",
               '2a:2b @ 100 - LdrpInitializeNode - ERROR: Init routine 00007FFF12345678 for DLL "C:\\Windows\\System32\\KERNELBASE.dll" failed during DLL_PROCESS_ATTACH',
               "C:\\private-account secret-token",
             ].join("\n"),
@@ -525,7 +528,7 @@ test("controller raw setup markers coexist with normalized loader proof without 
     "utf8",
   );
   assert.match(source, /OFOX_CDB_RAW_V1 TARGET/);
-  assert.ok(!source.includes("OFOX_CDB_V1 TARGET"));
+  assert.ok(!source.includes("OFOX_CDB_V2 TARGET"));
   const raw = [
     "OFOX_CDB_RAW_V1 TARGET_BEGIN",
     "OFOX_CDB_RAW_V1 TARGET 2a 2b END",
@@ -538,9 +541,12 @@ test("controller raw setup markers coexist with normalized loader proof without 
     "OFOX_CDB_RAW_V1 CONFIG_END",
   ];
   const normalized = [
-    "OFOX_CDB_V1 BEFORE pid=2a tid=2b flags=70 END",
-    "OFOX_CDB_V1 AFTER pid=2a tid=2b flags=72 END",
-    "OFOX_CDB_V1 READY END",
+    "OFOX_CDB_V2 BEFORE pid=2a tid=2b flags=70 END",
+    "OFOX_CDB_V2 AFTER pid=2a tid=2b flags=72 END",
+    "OFOX_CDB_V2 READY END",
+    "OFOX_CDB_V2 PRE_ATTACH_HOLD pid=2a tid=2b suspend=1 paired=2 END",
+    "OFOX_CDB_V2 CONTINUE_REQUESTED END",
+    "OFOX_CDB_V2 HOST_RESUMED pid=2a tid=2b hold=1 paired=2 previous=1 END",
   ];
   const result = projectDocumentLoaderSnaps({
     text: [
@@ -553,10 +559,13 @@ test("controller raw setup markers coexist with normalized loader proof without 
   });
   assert.equal(result.handshake.status, "matched");
   assert.equal(result.observations[0].module, "kernelbase.dll");
-  assert.match(
-    source,
-    /Read-Json 'go\.json'[\s\S]*?abort\.json[\s\S]*?if \(\$debugger\.HasExited\)[\s\S]*?WriteLine\('g'\)/,
+  const g = source.indexOf("WriteLine('g')");
+  assert.ok(
+    source.indexOf("Assert-DocumentCdbRecord $permission 'continue'") < g,
   );
+  assert.ok(source.indexOf("Read-Json 'go.json'") > g);
+  assert.equal(source.split("WriteLine('g')").length - 1, 1);
+  assert.match(source.slice(g), /Assert-DocumentCdbRecord \$go 'go'/);
   const unknown = safeDebuggerState({
     stage: "C:\\private\\secret",
     debuggerExited: "maybe",

@@ -302,3 +302,25 @@ PASSED 状态，后面附带详情，因此旧状态行尾假设未匹配。问�
 详情不作为证明。唯一单项、完整汇总、exit0、PDB 文件/匹配与实际 gflag/挂起
 门禁均保留。实际详情形态回归先 RED 后 GREEN，伪状态、外来模块、前缀回显、
 重复单项仍拒绝；17 种实进程模式及相关回归 51/51、0 skip。
+
+运行 [44015969522](https://github.com/ofoxai/ofox-desktop/actions/runs/44015969522)
+（`2cb13cde`）符号准备与私有 PDB 复制通过，实际 PID/TID、flags `0→2` 及 CF
+尾标记首次全部确认。随后 `cdb_hold` 测得 SuspendThread previous=2，旧门禁
+预期 1 而拒绝；没有配对 Resume 或原 Host Resume。握手约 2.04 秒、清理 61 ms，
+control 4/4、ACL 1/1、owned stop/raw 删除均确认。调试停止时测得 2，不足以
+单独证明该额外计数的来源，更不能直接把 2 当作放行条件；原 Node 根因仍未知。
+
+测试诊断改为分开证明两种暂停：在 target/attach 前实测原 hold `1→配对2`；
+身份和 flags 确认后只发送一次普通 g 释放调试停止，保留原手动 hold。依据
+[ResumeThread 文档](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-resumethread)，
+手动挂起的线程不因调试 continue 而恢复。随后在同一 30 秒总界限内重新测到
+`1→配对2` 才允许原 Host Resume1；中间的 2 只允许撤回本次探测增量，不能授权。
+异常计数、非配对返回、取消和过期均拒绝，产品 token/capability/权限不变。
+
+GO 现在只确认实际原 Resume，不再发送第二个 g；严格整数身份和实际 final hold
+一同确认。它可能晚于 Node 的 2 ms 失败、CDB 退出或清理 abort 被观察到，故
+持续有界 drain，并以完整 V2 全局证明加 continue 区段归因；缺少原 Resume1
+的 READY 或输出不能归因。包含该竞态、布尔/字符串计数拒绝、伪造/重复证明的
+相关 Node 56/56、0 skip，纯 fence 7/7、observer 4/4；模块及测试的 Windows
+目标 Clippy、全仓 Rust fmt、PS 解析及 Prettier 通过。交叉检查不是原生证明，
+新暂停流程和原 Node loader 失败仍待定点原生确认。

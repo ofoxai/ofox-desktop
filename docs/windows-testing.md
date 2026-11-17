@@ -104,8 +104,12 @@ e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能�
 Actions 开发入口，为精确功能用例的第一个固定可信 Node 使用已有 Microsoft
 签名 CDB；本地入口保留原行为。诊断必须先完成原 token 校验，再核对实际
 PID/TID、loader 标志读回和 primary thread 挂起计数，由原 Host 恢复执行。
-不修改 IFEO、capability、ACL 或 mitigation，不加载网络符号，不将异常统一标为
-handled。原始调试输出只写上传目录之外的私有临时目录并清理，artifact 仅保留
+不修改 IFEO、capability、ACL 或 mitigation，不将异常统一标为 handled。签名
+SymChk 只为固定系统 ntdll 从微软公开库提前准备私有匹配符号；CDB 只加载本地
+符号，不访问网络。attach 前与调试 continue 后各实测 `1→配对2`，再要求原
+Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项均不归因，
+但允许真实失败早于 Host 确认标记被观察到。原始调试输出只写上传目录之外的
+私有临时目录并清理，artifact 仅保留
 有界脱敏记录；未知文案或握手失败保持 inconclusive。最后加载的 DLL 不能自动
 认作故障原因。原 Job 和进程句柄仍负责终止、等待及取退出状态，调试器退出不
 替代这些条件。调试模式始终停止在 Node 诊断，不产生引擎 admission；功能门禁

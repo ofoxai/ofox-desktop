@@ -3,9 +3,14 @@ import assert from "node:assert/strict";
 import { projectDocumentLoaderSnaps } from "../../scripts/document-loader-snaps.mjs";
 
 // Synthetic grammar fixtures; native SDK output compatibility is unverified.
-const before = "OFOX_CDB_V1 BEFORE pid=2a tid=2b flags=70 END";
-const after = "OFOX_CDB_V1 AFTER pid=2a tid=2b flags=72 END";
-const ready = "OFOX_CDB_V1 READY END";
+const before = "OFOX_CDB_V2 BEFORE pid=2a tid=2b flags=70 END";
+const after = "OFOX_CDB_V2 AFTER pid=2a tid=2b flags=72 END";
+const ready = "OFOX_CDB_V2 READY END";
+const preHold =
+  "OFOX_CDB_V2 PRE_ATTACH_HOLD pid=2a tid=2b suspend=1 paired=2 END";
+const continuing = "OFOX_CDB_V2 CONTINUE_REQUESTED END";
+const host =
+  "OFOX_CDB_V2 HOST_RESUMED pid=2a tid=2b hold=1 paired=2 previous=1 END";
 const initFailure = (
   module = "C:\\Windows\\System32\\KERNELBASE.dll",
   identity = "2a:2b",
@@ -13,11 +18,21 @@ const initFailure = (
   `${identity} @ 100 - LdrpInitializeNode - ERROR: Init routine 00007FFF12345678 for DLL "${module}" failed during DLL_PROCESS_ATTACH`;
 const project = (lines, extra = {}) =>
   projectDocumentLoaderSnaps({
-    text: [before, after, ready, ...lines].join("\n"),
+    text: [before, after, ready, preHold, continuing, host, ...lines].join(
+      "\n",
+    ),
     target: { childPid: 42, primaryTid: 43 },
     roots: { windows: ["C:\\Windows", "\\Device\\HarddiskVolume3\\Windows"] },
     ...extra,
   });
+
+test("flags READY alone cannot attribute a loader failure without actual Host Resume proof", () => {
+  const report = project([], {
+    text: [before, after, ready, initFailure()].join("\n"),
+  });
+  assert.equal(report.handshake.status, "unknown");
+  assert.deepEqual(report.observations, []);
+});
 
 test("keeps actual PID/TID and the exact before-or-bit2 readback in a closed handshake", () => {
   const report = project([]);
@@ -34,6 +49,11 @@ test("keeps actual PID/TID and the exact before-or-bit2 readback in a closed han
   });
   assert.equal(report.negativeConclusionAllowed, false);
   assert.equal(report.releaseGate, false);
+  assert.equal(report.handshake.hostResumePrevious, 1);
+  assert.deepEqual(report.handshake.preAttachHold, {
+    suspendPrevious: 1,
+    pairedResumePrevious: 2,
+  });
 });
 
 test("projects an explicit target DLL initialization failure without borrowing a later status", () => {
@@ -140,7 +160,7 @@ test("incomplete, repeated, reordered or mismatched handshake never attributes l
     [`0:000> .echo ${before}`, after, ready],
   ]) {
     const report = project([], {
-      text: [...markers, initFailure()].join("\n"),
+      text: [...markers, preHold, continuing, host, initFailure()].join("\n"),
     });
     assert.equal(report.handshake.status, "unknown");
     assert.deepEqual(report.observations, []);
@@ -155,12 +175,85 @@ test("pre-READY failures and unknown native grammar cannot become target observa
       initFailure(),
       after,
       ready,
+      preHold,
+      continuing,
+      host,
       "future loader ERROR wording",
     ].join("\n"),
   });
   assert.deepEqual(report.observations, []);
   assert.equal(report.status, "inconclusive");
   assert.equal(report.negativeConclusionAllowed, false);
+});
+
+test("complete global Host proof retains an immediate failure before the ACK is observed", () => {
+  const report = project([], {
+    text: [before, after, ready, preHold, continuing, initFailure(), host].join(
+      "\n",
+    ),
+  });
+  assert.equal(report.handshake.status, "matched");
+  assert.equal(report.observations.length, 1);
+  assert.equal(report.observations[0].module, "kernelbase.dll");
+});
+
+test("missing, repeated, mismatched or early hold/continue/Host proof never attributes output", () => {
+  for (const records of [
+    [before, after, ready, preHold, continuing, initFailure()],
+    [before, after, ready, continuing, host, initFailure()],
+    [before, after, ready, preHold, host, initFailure()],
+    [before, after, ready, preHold, host, continuing, initFailure()],
+    [before, after, ready, preHold, continuing, host, host, initFailure()],
+    [
+      before,
+      after,
+      ready,
+      preHold.replace("pid=2a", "pid=2c"),
+      continuing,
+      host,
+      initFailure(),
+    ],
+    [
+      before,
+      after,
+      ready,
+      preHold.replace("paired=2", "paired=3"),
+      continuing,
+      host,
+      initFailure(),
+    ],
+    [
+      before,
+      after,
+      ready,
+      preHold,
+      continuing,
+      host.replace("previous=1", "previous=2"),
+      initFailure(),
+    ],
+    [
+      before,
+      after,
+      ready,
+      preHold,
+      continuing,
+      host.replace("hold=1", "hold=2"),
+      initFailure(),
+    ],
+    [
+      before,
+      after,
+      ready,
+      preHold,
+      continuing,
+      host.replace("tid=2b", "tid=2c"),
+      initFailure(),
+    ],
+  ]) {
+    const report = project([], { text: records.join("\n") });
+    assert.equal(report.handshake.status, "unknown");
+    assert.deepEqual(report.observations, []);
+  }
 });
 
 test("oversized inputs and excessive observations are bounded", () => {

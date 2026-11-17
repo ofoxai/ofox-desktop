@@ -9,6 +9,9 @@ pub(super) const ENV_ROOT: &str = "OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT";
 
 pub(super) struct Guard {
     root: PathBuf,
+    pid: u32,
+    tid: u32,
+    final_hold: Option<(u32, u32)>,
     _pins: Vec<File>,
     fence: Fence,
     observation: Observer,
@@ -44,6 +47,8 @@ fn stage(value: &serde_json::Value) -> &'static str {
         Some("gflag_before_unreadable") => "gflag_before_unreadable",
         Some("gflag_after_unreadable") => "gflag_after_unreadable",
         Some("gflag_changed_unexpectedly") => "gflag_changed_unexpectedly",
+        Some("continue_mismatch") => "continue_mismatch",
+        Some("host_resume_mismatch") => "host_resume_mismatch",
         Some("init_tail_missing") => "init_tail_missing",
         Some("debugger_exited") => "debugger_exited",
         Some("target_exited") => "target_exited",
@@ -75,7 +80,8 @@ impl Guard {
         if !observation.loader_requested() {
             return Ok(None);
         }
-        observation.enter(Phase::CdbHandshake);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        observation.enter(Phase::CdbInitialHold);
         let root = PathBuf::from(std::env::var_os(ENV_ROOT).ok_or(UNAVAILABLE)?);
         if !root.is_absolute() {
             return Err(UNAVAILABLE.into());
@@ -84,6 +90,9 @@ impl Guard {
         let _owner = owned_directory(&root, &current_user()?)?;
         let mut guard = Self {
             root,
+            pid,
+            tid,
+            final_hold: None,
             _pins: pins,
             fence: Fence::new(pid, tid),
             observation: observation.clone(),
@@ -96,12 +105,34 @@ impl Guard {
         if controller["diagnosticOnly"] != true || controller["controllerReady"] != true {
             return Err(UNAVAILABLE.into());
         }
+        guard.note("pre_attach_hold_unverified");
+        if cancelled.load(Ordering::Acquire) {
+            guard.note("cancelled");
+            return Err(CANCELLED.into());
+        }
+        let initial = unsafe { SuspendThread(thread) };
+        let mut initial_paired = None;
+        let initially_held = guard.fence.initial_hold(initial, || {
+            let paired = unsafe { ResumeThread(thread) };
+            initial_paired = Some(paired);
+            paired
+        });
+        guard.observation.evidence(|evidence| {
+            let diagnostic = evidence.loader_diagnostic.get_or_insert_default();
+            diagnostic.pre_attach_suspend_previous = Some(initial);
+            diagnostic.pre_attach_paired_resume_previous = initial_paired;
+        });
+        initially_held.map_err(|()| UNAVAILABLE.to_owned())?;
+        if cancelled.load(Ordering::Acquire) {
+            guard.note("cancelled");
+            return Err(CANCELLED.into());
+        }
+        guard.observation.enter(Phase::CdbHandshake);
         write(
             &guard.root,
             "target.json",
             &serde_json::json!({"childPid":pid,"primaryTid":tid}),
         )?;
-        let deadline = Instant::now() + Duration::from_secs(30);
         let configured = loop {
             if cancelled.load(Ordering::Acquire) {
                 guard.note("cancelled");
@@ -146,24 +177,77 @@ impl Guard {
             diagnostic.before_flags = Some(before);
             diagnostic.after_flags = Some(after);
         });
-        guard.observation.enter(Phase::CdbHold);
+        guard.note("debugger_release_wait");
+        guard.observation.enter(Phase::CdbContinue);
+        guard
+            .fence
+            .continuing()
+            .map_err(|()| UNAVAILABLE.to_owned())?;
+        if Instant::now() >= deadline {
+            guard.note("deadline");
+            return Err(UNAVAILABLE.into());
+        }
         if cancelled.load(Ordering::Acquire) {
             guard.note("cancelled");
             return Err(CANCELLED.into());
         }
-        let previous = unsafe { SuspendThread(thread) };
-        let mut paired = None;
-        let held = guard.fence.hold(previous, || {
-            let n = unsafe { ResumeThread(thread) };
-            paired = Some(n);
-            n
-        });
-        guard.observation.evidence(|evidence| {
-            let diagnostic = evidence.loader_diagnostic.get_or_insert_default();
-            diagnostic.suspend_previous = Some(previous);
-            diagnostic.paired_resume_previous = paired;
-        });
-        held.map_err(|()| UNAVAILABLE.to_owned())?;
+        write(
+            &guard.root,
+            "continue.json",
+            &serde_json::json!({
+                "childPid": pid, "primaryTid": tid, "continueRequested": true,
+                "preSuspendPrevious": initial, "prePairedResumePrevious": initial_paired,
+            }),
+        )?;
+        guard.observation.enter(Phase::CdbHold);
+        loop {
+            if cancelled.load(Ordering::Acquire) {
+                guard.note("cancelled");
+                return Err(CANCELLED.into());
+            }
+            if guard.root.join("failed.json").exists() {
+                guard.note(stage(&json(&guard.root, "failed.json")?));
+                return Err(UNAVAILABLE.into());
+            }
+            if unsafe { WaitForSingleObject(process, 0) } == WAIT_OBJECT_0 {
+                guard.note("target_exited");
+                return Err(UNAVAILABLE.into());
+            }
+            if Instant::now() >= deadline {
+                guard.note("deadline");
+                return Err(UNAVAILABLE.into());
+            }
+            let previous = unsafe { SuspendThread(thread) };
+            let mut paired = None;
+            let held = guard.fence.hold(previous, || {
+                let n = unsafe { ResumeThread(thread) };
+                paired = Some(n);
+                n
+            });
+            guard.observation.evidence(|evidence| {
+                let diagnostic = evidence.loader_diagnostic.get_or_insert_default();
+                diagnostic.release_probe_count = diagnostic.release_probe_count.saturating_add(1);
+                diagnostic.release_suspend_previous = Some(previous);
+                diagnostic.release_paired_resume_previous = paired;
+                if held == Ok(true) {
+                    diagnostic.suspend_previous = Some(previous);
+                    diagnostic.paired_resume_previous = paired;
+                }
+            });
+            if held.map_err(|()| UNAVAILABLE.to_owned())? {
+                guard.final_hold = paired.map(|value| (previous, value));
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if cancelled.load(Ordering::Acquire) {
+            guard.note("cancelled");
+            return Err(CANCELLED.into());
+        }
+        if Instant::now() >= deadline {
+            guard.note("deadline");
+            return Err(UNAVAILABLE.into());
+        }
         guard.note("configured_and_held");
         Ok(Some(guard))
     }
@@ -190,10 +274,12 @@ impl Guard {
             self.note("cancelled");
             return Err(CANCELLED.into());
         }
+        let (suspend, paired) = self.final_hold.ok_or(UNAVAILABLE)?;
         write(
             &self.root,
             "go.json",
-            &serde_json::json!({"hostResumeResult":previous}),
+            &serde_json::json!({"hostResumeResult":previous,"childPid":self.pid,"primaryTid":self.tid,
+                "finalSuspendPrevious":suspend,"finalPairedResumePrevious":paired}),
         )?;
         self.note("go_sent");
         Ok(())
