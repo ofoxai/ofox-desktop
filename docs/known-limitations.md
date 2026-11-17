@@ -42,9 +42,12 @@ token can read the user's Environment or Software registry keys. registryRead
 still widens LPAC read access to the HKLM keys Windows grants it; that scope is
 accepted for Winsock initialization. The first unassisted native run (44122597628)
 refused every launch at that gate because the actual token could read
-HKCU\Environment; whether registryRead or base LPAC grants that read is being
-measured. Windows Python capability stays disabled until the native functional
-gate and Windows 10/11 client acceptance pass.
+HKCU\Environment. Run 44133006077 showed registryRead grants that read: the
+production token can read HKCU\Environment, HKCU\Software and the HKCU root,
+while the runtime-only token cannot. registryRead therefore exposes the user's
+registry hive, not only HKLM, so production keeps refusing these launches until a
+narrower Winsock grant or a different runtime is chosen. Windows Python capability
+stays disabled.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

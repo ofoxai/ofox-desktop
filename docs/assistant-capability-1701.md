@@ -591,3 +591,16 @@ registryRead 会扩大 LPAC 的注册表读取范围，须先由用户确认，�
 对三个固定键的读取结果、两者的 verify_token 与门禁结果，以及整个 HKCU 遍历中
 基础 LPAC 可读、生产可读和 registryRead 新增的键数。不改产品逻辑；Windows
 Python 能力保持关闭。
+
+运行 [44133006077](https://github.com/ofoxai/ofox-desktop/actions/runs/44133006077)
+（`f3529780`）回答了上一轮的问题：读权限**来自 registryRead**。三个固定键
+（Winsock 目录、`HKCU\Environment`、`HKCU\Software`）对生产 token 均可读，对仅
+runtime token 均不可读；门禁四种组合中只有“仅 runtime 且不期望 registryRead”
+通过，生产校验因此拒绝。HKCU 根键同样只在 registryRead 下可读。由此 registryRead
+不只扩大 HKLM 只读范围，也让 LPAC 读取当前用户的注册表；这超出了批准修复时
+所述的范围，门禁拒绝是正确的，产品维持拒绝状态。
+
+同一运行暴露测试缺陷：HKCU 遍历打开键时未申请 KEY_QUERY_VALUE，导致
+`RegQueryInfoKey` 失败，13 个键中 12 个被误计为已消失，遍历提前结束。已在本地
+修正（打开时一并申请查询权限）；该遍历尚未取得有效全量结果。下一步需由用户在
+“接受 registryRead 的 HKCU 读取”与“改用更窄的 Winsock 授权或运行时”之间决定。

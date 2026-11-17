@@ -335,8 +335,11 @@ struct HiveScan {
 fn scan_user_hive(tokens: [HANDLE; 2]) -> HiveScan {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
     const KEY_LIMIT: usize = 300_000;
+    const KEY_QUERY_VALUE: u32 = 0x0001;
     const KEY_ENUMERATE_SUB_KEYS: u32 = 0x0008;
-    let flags = REGISTRY_READ_CONTROL | KEY_ENUMERATE_SUB_KEYS;
+    // RegQueryInfoKey (the vanished-key check) needs KEY_QUERY_VALUE; run
+    // 44133006077 counted 12 of 13 keys as vanished without it.
+    let flags = REGISTRY_READ_CONTROL | KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS;
     let mut scan = HiveScan::default();
     let root = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags("", flags)
