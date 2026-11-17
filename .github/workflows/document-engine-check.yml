@@ -73,6 +73,11 @@ jobs:
       - name: ACL prerequisite then focused native regressions
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
+        env:
+          # Test-only, CI-only A-B-A: B keeps the single runtime capability and
+          # runs while a temporary ACE lets it read the Winsock catalog (restored
+          # exactly afterwards). registryRead exposed HKCU in run 44133006077.
+          OFOX_DOCUMENT_STARTUP_COMPARISON: detachedWinsockGrant
       - name: Upload development diagnostics
         if: always()
         uses: actions/upload-artifact@v7

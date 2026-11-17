@@ -15,6 +15,9 @@ import {
   safeMetadata,
   safeDebuggerState,
   shouldCaptureDevelopmentTrace,
+  startupComparisonRequested,
+  comparisonCheck,
+  checkEnvironment,
   startNativeTrace,
   runDevelopmentChecks,
 } from "../../scripts/document-engine-development-check.mjs";
@@ -133,6 +136,63 @@ test("registry isolation failure starts no engine and keeps its evidence step", 
   assert.equal(report.steps.at(-1).name, "registry-isolation-prerequisite");
   assert.equal(report.steps.at(-1).status, "failed");
   assert.equal(report.success, false);
+});
+
+test("an explicitly requested launch comparison runs right after ACL, never by default", async () => {
+  const run = async (options) => {
+    const calls = [];
+    const report = await runDevelopmentChecks(async (check) => {
+      calls.push(check.name);
+      return nativeResult(check.exact ? 1 : 7);
+    }, options);
+    return { calls, report };
+  };
+  const plain = await run({});
+  assert.ok(!plain.calls.includes("launch-comparison"));
+  const requested = await run({ comparison: true });
+  assert.deepEqual(requested.calls.slice(0, 3), [
+    "acl-prerequisite",
+    "launch-comparison",
+    "registry-isolation-prerequisite",
+  ]);
+  assert.equal(requested.calls.length, checks.length + 1);
+  assert.equal(comparisonCheck.exact, true);
+  assert.match(
+    comparisonCheck.filter,
+    /::document_startup_launch_comparison_when_requested$/,
+  );
+  assert.equal(startupComparisonRequested({}), false);
+  assert.equal(
+    startupComparisonRequested({ OFOX_DOCUMENT_STARTUP_COMPARISON: "" }),
+    false,
+  );
+  assert.equal(
+    startupComparisonRequested({
+      OFOX_DOCUMENT_STARTUP_COMPARISON: "detachedWinsockGrant",
+    }),
+    true,
+  );
+});
+
+test("only the comparison step ever receives the comparison candidate", () => {
+  const shared = {
+    PATH: "fixture",
+    OFOX_DOCUMENT_STARTUP_COMPARISON: "detachedWinsockGrant",
+  };
+  for (const check of checks) {
+    const environment = checkEnvironment(shared, check);
+    assert.equal(
+      environment.OFOX_DOCUMENT_STARTUP_COMPARISON,
+      undefined,
+      check.name,
+    );
+    assert.equal(environment.PATH, "fixture");
+  }
+  assert.equal(
+    checkEnvironment(shared, comparisonCheck).OFOX_DOCUMENT_STARTUP_COMPARISON,
+    "detachedWinsockGrant",
+  );
+  assert.equal(shared.OFOX_DOCUMENT_STARTUP_COMPARISON, "detachedWinsockGrant");
 });
 
 test("functional prerequisite failure starts no whole-sandbox or follow-up cases", async () => {
@@ -658,8 +718,24 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
   // The root-cause A-B-A and debugger trace are answered; the gate must now
   // run the functional prerequisite and full suite unassisted.
-  assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_COMPARISON/);
   assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_TRACE/);
+  // The only comparison is the CI-only narrow Winsock grant, on the native
+  // check step; Rust accepts exact names only, so pin the spelling and place.
+  const candidates = [
+    ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_COMPARISON: (\S+)$/gm),
+  ].map((match) => match[1]);
+  assert.deepEqual(candidates, ["detachedWinsockGrant"]);
+  const step = workflow
+    .split(/^ {6}- /m)
+    .find((block) =>
+      block.startsWith(
+        "name: ACL prerequisite then focused native regressions",
+      ),
+    );
+  assert.match(
+    step,
+    /^ {10}OFOX_DOCUMENT_STARTUP_COMPARISON: detachedWinsockGrant$/m,
+  );
   assert.match(
     workflow,
     /debug0-v3-.*hashFiles\('src-tauri\/Cargo.lock', 'src-tauri\/Cargo.toml'/,

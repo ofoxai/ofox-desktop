@@ -77,6 +77,31 @@ export const checks = [
   },
 ];
 
+// Diagnostic-only A-B-A, inserted right after ACL only when a candidate is
+// explicitly requested; the Rust test refuses machine-ACL candidates off CI.
+export const comparisonCheck = {
+  name: "launch-comparison",
+  filter: `${sandbox}document_startup_launch_comparison_when_requested`,
+  exact: true,
+};
+
+export function startupComparisonRequested(environment) {
+  return (
+    typeof environment.OFOX_DOCUMENT_STARTUP_COMPARISON === "string" &&
+    environment.OFOX_DOCUMENT_STARTUP_COMPARISON.length > 0
+  );
+}
+
+// The candidate reaches the comparison step only: the whole-sandbox filter
+// also selects that test, which must stay a no-op there (it can change a
+// machine ACL on CI).
+export function checkEnvironment(environment, check) {
+  const scoped = { ...environment };
+  if (check.name !== comparisonCheck.name)
+    delete scoped.OFOX_DOCUMENT_STARTUP_COMPARISON;
+  return scoped;
+}
+
 export function assertRustResult(result, exact) {
   assert.equal(result.exitCode, 0, "native Cargo test failed");
   assert.ok(
@@ -104,7 +129,10 @@ export function assertRustResult(result, exact) {
   return { total, passed, failed, ignored, measured };
 }
 
-export async function runDevelopmentChecks(invoke, { functionalCapture } = {}) {
+export async function runDevelopmentChecks(
+  invoke,
+  { functionalCapture, comparison = false } = {},
+) {
   const report = {
     schemaVersion: 1,
     scope: "document-engine-development-checks",
@@ -123,7 +151,10 @@ export async function runDevelopmentChecks(invoke, { functionalCapture } = {}) {
     },
     steps: [],
   };
-  for (const check of checks) {
+  const planned = comparison
+    ? [checks[0], comparisonCheck, ...checks.slice(1)]
+    : checks;
+  for (const check of planned) {
     const started = Date.now();
     const step = {
       name: check.name,
@@ -921,13 +952,19 @@ export async function main(argv = process.argv.slice(2)) {
   try {
     const report = await runDevelopmentChecks(
       (check, overrides) =>
-        invokeNative(check, output, { ...environment, ...overrides }),
-      shouldCaptureDevelopmentTrace(environment)
-        ? {
-            functionalCapture: (invoke) =>
-              captureFunctional(invoke, () => startNativeTrace(environment)),
-          }
-        : {},
+        invokeNative(check, output, {
+          ...checkEnvironment(environment, check),
+          ...overrides,
+        }),
+      {
+        comparison: startupComparisonRequested(environment),
+        ...(shouldCaptureDevelopmentTrace(environment)
+          ? {
+              functionalCapture: (invoke) =>
+                captureFunctional(invoke, () => startNativeTrace(environment)),
+            }
+          : {}),
+      },
     );
     await writeFile(
       path.join(output, "summary.json"),

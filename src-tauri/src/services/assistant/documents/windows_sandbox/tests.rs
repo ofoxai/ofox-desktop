@@ -18,8 +18,10 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
             .ok()
             .as_deref(),
     );
-    if let Some(candidate) = candidate.filter(|_| {
-        std::env::var_os(cdb::ENV_ROOT).is_some()
+    // Machine-ACL candidates run only through their own opt-in CI step.
+    if let Some(candidate) = candidate.filter(|candidate| {
+        !candidate.plan().winsock_grant
+            && std::env::var_os(cdb::ENV_ROOT).is_some()
             && result
                 .as_ref()
                 .err()
@@ -35,6 +37,35 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
         }
     }
     result.expect("native Python + OfficeCLI and all LPAC negative probes must pass");
+}
+
+/// Diagnostic-only A-B-A, run as its own step when explicitly requested. With
+/// no candidate it does nothing. A candidate that changes a machine-wide ACL
+/// refuses to run anywhere but a disposable GitHub Actions runner.
+#[tokio::test]
+#[serial_test::serial]
+async fn document_startup_launch_comparison_when_requested() {
+    let Some(candidate) = startup_comparison_protocol::requested(
+        std::env::var("OFOX_DOCUMENT_STARTUP_COMPARISON")
+            .ok()
+            .as_deref(),
+    ) else {
+        return;
+    };
+    if candidate.plan().winsock_grant {
+        assert_eq!(
+            std::env::var("GITHUB_ACTIONS").as_deref(),
+            Ok("true"),
+            "machine-ACL candidates run only on disposable CI runners"
+        );
+    }
+    let root = runtime();
+    let receipt =
+        tokio::task::spawn_blocking(move || startup_comparison::compare(&root, candidate))
+            .await
+            .unwrap();
+    eprintln!("OFOX_STARTUP_COMPARISON_V1 {receipt}");
+    assert_eq!(receipt["status"], "supports-candidate");
 }
 
 #[test]

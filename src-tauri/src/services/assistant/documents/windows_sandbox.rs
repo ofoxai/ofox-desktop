@@ -14,6 +14,8 @@ mod probe;
 mod startup_comparison;
 #[cfg(test)]
 mod startup_comparison_protocol;
+#[cfg(test)]
+mod winsock_grant;
 use probe::{
     AccessCase, AccessObservation, Observer, Phase, Receive, RegistryAccess, RegistryKey, TokenApi,
 };
@@ -1876,15 +1878,21 @@ fn verify_token(
             },
             registry_read.entry(),
         ],
+        // registryRead grants the Winsock catalog read libuv needs.
+        true,
         observation,
     )
 }
 
+/// `winsock_readable`: whether this token is expected to read the Winsock
+/// catalog (production: via registryRead; test comparison: via a temporary
+/// CI-only grant). The registry gate requires exactly that answer.
 fn verify_token_entries(
     process: HANDLE,
     package: PSID,
     capability: PSID,
     expected: &[SID_AND_ATTRIBUTES],
+    winsock_readable: bool,
     observation: &Observer,
 ) -> Result<(), String> {
     // Production requires {runtime, registryRead}; the runtime-only singleton
@@ -2048,7 +2056,7 @@ fn verify_token_entries(
     // Class 46 is rejected with STATUS_INVALID_INFO_CLASS on native 20348.
     // Prove its documented LPAC authorization semantics on this actual token,
     // while it is still suspended, with both positive and negative controls.
-    verify_lpac_access(raw(&token), capability, expected.len() == 2, observation)
+    verify_lpac_access(raw(&token), capability, winsock_readable, observation)
 }
 
 struct Launch {

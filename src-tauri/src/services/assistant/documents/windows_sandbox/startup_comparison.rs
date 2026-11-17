@@ -39,6 +39,7 @@ fn case(
     profile: &Profile,
     caps: &ProcessCapabilities<'_>,
     console: ConsoleMode,
+    winsock_grant: bool,
 ) -> serde_json::Value {
     let observation = Observer::fixed_probe(); // Fresh; never request_loader.
     let entries = caps.entries();
@@ -89,6 +90,7 @@ fn case(
                 profile.sid.0,
                 caps.runtime.sid,
                 &entries,
+                entries.len() == 2 || winsock_grant,
                 &observation,
             )?;
             let mut token = HANDLE::default();
@@ -164,7 +166,8 @@ fn case(
         ConsoleMode::Hidden => "hidden",
         ConsoleMode::Detached => "detached",
     };
-    serde_json::json!({"extraRegistryRead": entries.len()==2, "consoleMode":console, "creationFlags":flags, "completed":result.is_ok(),
+    serde_json::json!({"extraRegistryRead": entries.len()==2, "consoleMode":console, "creationFlags":flags,
+        "winsockGrant":winsock_grant, "grantRestored":serde_json::Value::Null, "completed":result.is_ok(),
         "stage": if result.is_ok() {"complete"} else {phase}, "tokenVerified":token_verified,
         "capabilityCount":evidence["evidence"]["capabilityGroups"], "capabilityAttributes":attrs,
         "lpacAccessMatched":evidence["evidence"]["lpacAccessProof"]["matched"],
@@ -181,6 +184,10 @@ pub(super) fn compare(
     let mut task = None;
     let mut rows = Vec::new();
     let mut runtime_stable = false;
+    // None: not this candidate; Some(false): the CI-only ACE could not be set.
+    let mut grant_applied = None;
+    // Only when apply failed: whether the original catalog DACLs were proven.
+    let mut grant_failure_restored = None;
     let result: Result<bool, String> = (|| {
         let cap = RuntimeCapability::new()?;
         let user = current_user()?;
@@ -208,6 +215,7 @@ pub(super) fn compare(
             profile,
             &ProcessCapabilities::runtime_only(&cap),
             console(plan.base_detached),
+            false,
         ));
         if !startup_comparison_protocol::baseline(&rows[0], candidate) {
             return Ok(false);
@@ -218,14 +226,38 @@ pub(super) fn compare(
         } else {
             ProcessCapabilities::runtime_only(&cap)
         };
-        rows.push(case(
-            &node,
-            folder,
-            &home,
-            profile,
-            &caps,
-            console(plan.detached),
-        ));
+        if plan.winsock_grant {
+            // The ACE exists only for B's launch; A2 runs on the restored DACL.
+            grant_applied = Some(false);
+            let mut grant = match winsock_grant::WinsockCatalogGrant::apply(cap.sid) {
+                Ok(grant) => grant,
+                Err(failure) => {
+                    grant_failure_restored = Some(failure.restored);
+                    return Err(UNAVAILABLE.into());
+                }
+            };
+            grant_applied = Some(true);
+            rows.push(case(
+                &node,
+                folder,
+                &home,
+                profile,
+                &caps,
+                console(plan.detached),
+                true,
+            ));
+            rows[1]["grantRestored"] = serde_json::json!(grant.restore());
+        } else {
+            rows.push(case(
+                &node,
+                folder,
+                &home,
+                profile,
+                &caps,
+                console(plan.detached),
+                false,
+            ));
+        }
         if rows[1]["completed"] != true || rows[1]["cleanupConfirmed"] != true {
             return Ok(false);
         }
@@ -236,6 +268,7 @@ pub(super) fn compare(
             profile,
             &ProcessCapabilities::runtime_only(&cap),
             console(plan.base_detached),
+            false,
         ));
         runtime_stable = tree_digest_at(&runtime.root, MAX_TREE_BYTES)? == runtime.digest;
         Ok(runtime_stable && startup_comparison_protocol::supported(&rows, candidate))
@@ -246,7 +279,7 @@ pub(super) fn compare(
         .is_none_or(|profile| profile.dispose().is_ok());
     serde_json::json!({"schemaVersion":1,"scope":"fixed-node-startup-launch-comparison",
         "diagnosticOnly":true,"releaseGate":false,"runtimePolicyChanged":false,"admissionGranted":false,
-        "candidate":candidate.name(),"sameProfileAndInputs":rows.len()==3,"runtimeStable":runtime_stable,"debuggerUsed":false,
+        "candidate":candidate.name(),"winsockGrantApplied":grant_applied,"winsockGrantFailureRestored":grant_failure_restored,"sameProfileAndInputs":rows.len()==3,"runtimeStable":runtime_stable,"debuggerUsed":false,
         "status":if result == Ok(true) && task_clean && profile_clean {"supports-candidate"} else {"inconclusive"},
         "taskCleanup":task_clean,"profileCleanup":profile_clean,"rows":rows})
 }

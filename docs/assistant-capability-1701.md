@@ -604,3 +604,13 @@ runtime token 均不可读；门禁四种组合中只有“仅 runtime 且不期
 `RegQueryInfoKey` 失败，13 个键中 12 个被误计为已消失，遍历提前结束。已在本地
 修正（打开时一并申请查询权限）；该遍历尚未取得有效全量结果。下一步需由用户在
 “接受 registryRead 的 HKCU 读取”与“改用更窄的 Winsock 授权或运行时”之间决定。
+
+按用户选择，下一次定点运行测试更窄的 Winsock 授权，不改产品：新增 test-only 候选
+`detachedWinsockGrant`。A1/A2 以 `DETACHED_PROCESS` 和单一 runtime capability 启动，
+须复现 `WSAStartup` 10107；B 同样只持有 runtime capability，但在其运行期间临时为该
+capability 在 Winsock 目录根键加可继承的 KEY_READ ACE，结束后写回原 DACL，并以
+SDDL 逐键核对整棵目录子树完全复原；复原未证实即不支持。独立审查指出的四项（候选
+变量泄漏到完整套件导致二次授权、CI 限制放错层、失败复原不重试、只核对两个键）均已修正。门禁的
+Winsock 正向对照改为“本次是否应可读”，HKCU 用户键必须拒绝不变。该候选只在
+显式请求且 `GITHUB_ACTIONS=true` 时由独立用例执行，开发检查在 ACL 后插入此步骤。
+问题是：不授予 registryRead、只放开 Winsock 目录读取，Node 能否正常运行。

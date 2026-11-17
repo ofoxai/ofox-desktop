@@ -117,8 +117,8 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 最终必须在没有调试器的情况下通过。因此调试器诊断现须在开发工作流显式设置
 `OFOX_DOCUMENT_STARTUP_TRACE=1` 才启用；默认不挂调试器，功能前置直接运行。
 
-仅显式设置 `OFOX_DOCUMENT_STARTUP_COMPARISON`（`registryRead`、`detachedConsole`
-或 `detachedRegistryRead`）且该固定用例已取得
+仅显式设置 `OFOX_DOCUMENT_STARTUP_COMPARISON`（`registryRead`、`detachedConsole`、
+`detachedRegistryRead` 或 `detachedWinsockGrant`）且该固定用例已取得
 完整原始启动证明、Node 返回 0142 时，测试代码才追加
 无调试器的 A-B-A：同一临时 profile/输入，A1/A2 为该候选声明的基线启动，B 只改
 一个条件（追加 registryRead 或去掉控制台）。A1 不能重现则不派 B；每组都须验证实际精确 token/隔离属性和完整清理。
@@ -136,7 +136,15 @@ Win32/libuv 词表时附该名与 i32 数字错误码，否则二者均为 `?`/n
 `detachedRegistryRead` 的 A1/A2 均以 `DETACHED_PROCESS` 启动，且必须精确复现
 `WSAStartup` 10107 的 libuv 中止（`0x80000003`）；B 仅追加 registryRead。每个候选的
 基线启动与预期失败由协议固定，A1 不复现则不派 B。运行 44076224990 记为
-supports-candidate，工作流中的对照设置已移除，默认不再执行任何候选。
+supports-candidate，但运行 44133006077 证明 registryRead 也让 LPAC 读取 HKCU。
+`detachedWinsockGrant` 改为测试更窄的授权：A1/A2 与 B 都以 `DETACHED_PROCESS` 和单一
+runtime capability 启动，B 运行期间临时为该 capability 在
+`HKLM\SYSTEM\CurrentControlSet\Services\WinSock2\Parameters` 加可继承只读 ACE，结束后
+写回原 DACL，并以 SDDL 逐键核对整棵目录子树完全复原；复原未证实即不支持，且只缓存
+已证实的复原，析构时会重试。该候选修改机器级 ACL：施加授权的代码自身要求
+`GITHUB_ACTIONS=true`，只由独立用例 `document_startup_launch_comparison_when_requested`
+执行；开发检查仅在设置候选时于 ACL 之后插入该步骤，且候选变量只传给这一步，
+完整套件中的同名用例因此不会再次授权。开发机与默认运行均不执行。
 
 产品沙箱现以 `DETACHED_PROCESS` 与显式管道 stdio 启动，不分配控制台；capability
 为私有 runtime 加 Windows `registryRead`，令牌须恰为这两项且均启用，校验时独立

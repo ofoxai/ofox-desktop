@@ -19,6 +19,10 @@ pub(super) enum Candidate {
     /// Both A rows already run without a console and must reproduce libuv's
     /// WSAStartup 10107 abort (run 44071671054); B adds only registryRead.
     DetachedRegistryRead,
+    /// Same baseline; B keeps the single runtime capability but runs while a
+    /// temporary, CI-only ACE lets that capability read the Winsock catalog.
+    /// registryRead also exposed HKCU (run 44133006077).
+    DetachedWinsockGrant,
 }
 /// The launch shared by A1/A2 and the one condition set B changes.
 #[derive(Clone, Copy)]
@@ -26,6 +30,7 @@ pub(super) struct Plan {
     pub(super) base_detached: bool,
     pub(super) extra: bool,
     pub(super) detached: bool,
+    pub(super) winsock_grant: bool,
 }
 impl Candidate {
     pub(super) fn name(self) -> &'static str {
@@ -33,18 +38,21 @@ impl Candidate {
             Self::RegistryRead => "registryRead",
             Self::DetachedConsole => "detachedConsole",
             Self::DetachedRegistryRead => "detachedRegistryRead",
+            Self::DetachedWinsockGrant => "detachedWinsockGrant",
         }
     }
     pub(super) fn plan(self) -> Plan {
-        let (base_detached, extra, detached) = match self {
-            Self::RegistryRead => (false, true, false),
-            Self::DetachedConsole => (false, false, true),
-            Self::DetachedRegistryRead => (true, true, true),
+        let (base_detached, extra, detached, winsock_grant) = match self {
+            Self::RegistryRead => (false, true, false, false),
+            Self::DetachedConsole => (false, false, true, false),
+            Self::DetachedRegistryRead => (true, true, true, false),
+            Self::DetachedWinsockGrant => (true, false, true, true),
         };
         Plan {
             base_detached,
             extra,
             detached,
+            winsock_grant,
         }
     }
 }
@@ -54,6 +62,7 @@ pub(super) fn requested(value: Option<&str>) -> Option<Candidate> {
         Candidate::RegistryRead,
         Candidate::DetachedConsole,
         Candidate::DetachedRegistryRead,
+        Candidate::DetachedWinsockGrant,
     ]
     .into_iter()
     .find(|candidate| value == Some(candidate.name()))
@@ -131,6 +140,7 @@ pub(super) fn baseline(row: &Value, candidate: Candidate) -> bool {
             && row["stderrShape"] == serde_json::json!({"kind":"empty"})
     };
     launched(row, false, detached)
+        && row["winsockGrant"] == false
         && failed
         && row["markerMatched"] == false
         && row["stdoutBytes"] == 0
@@ -141,6 +151,9 @@ pub(super) fn supported(rows: &[Value], candidate: Candidate) -> bool {
         && baseline(&rows[0], candidate)
         && baseline(&rows[2], candidate)
         && launched(&rows[1], plan.extra, plan.detached)
+        && rows[1]["winsockGrant"] == plan.winsock_grant
+        // A temporary system ACL counts only if its exact restore was proven.
+        && (!plan.winsock_grant || rows[1]["grantRestored"] == true)
         && rows[1]["exitStatus"] == 0
         && rows[1]["markerMatched"] == true
         && rows[1]["stdoutBytes"] == "OFOX_SYSTEM_INIT_V1".len()
@@ -271,10 +284,11 @@ fn libuv_fatal(text: &str) -> Option<(&str, Option<i64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const ALL: [Candidate; 3] = [
+    const ALL: [Candidate; 4] = [
         Candidate::RegistryRead,
         Candidate::DetachedConsole,
         Candidate::DetachedRegistryRead,
+        Candidate::DetachedWinsockGrant,
     ];
     #[test]
     fn a_disproved_candidate_is_not_repeated_without_exact_opt_in() {
@@ -287,6 +301,10 @@ mod tests {
             Candidate::DetachedRegistryRead.name(),
             "detachedRegistryRead"
         );
+        assert_eq!(
+            Candidate::DetachedWinsockGrant.name(),
+            "detachedWinsockGrant"
+        );
         for value in [
             None,
             Some(""),
@@ -296,6 +314,7 @@ mod tests {
             Some("DetachedConsole"),
             Some("detached"),
             Some("DetachedRegistryRead"),
+            Some("detachedWinsock"),
         ] {
             assert_eq!(requested(value), None);
         }
@@ -317,7 +336,15 @@ mod tests {
             "timedOut":false,"capabilityCount":if extra{2}else{1},"lpacAccessMatched":true,"childPolicy":1,"imagePolicy":7,"integrityRid":4096,
             "capabilityAttributes":if extra{vec![4,4]}else{vec![4]},"stderrBytes":stderr,"stderrShape":shape,"extraRegistryRead":extra,"consoleMode":console,
             "creationFlags":if console == "detached" {DETACHED_FLAGS} else {HIDDEN_FLAGS},
-            "exitStatus":exit,"markerMatched":outcome == "ok","stdoutBytes":stdout})
+            "exitStatus":exit,"markerMatched":outcome == "ok","stdoutBytes":stdout,
+            "winsockGrant":false,"grantRestored":null})
+    }
+    /// B row of the CI-only candidate: the temporary catalog ACE was applied
+    /// for the launch and the exact original DACL was restored afterwards.
+    fn granted(mut row: Value) -> Value {
+        row["winsockGrant"] = serde_json::json!(true);
+        row["grantRestored"] = serde_json::json!(true);
+        row
     }
     /// The A1/A2 row and the B row each candidate expects.
     fn rows_for(candidate: Candidate) -> (Value, Value) {
@@ -330,9 +357,13 @@ mod tests {
                 row(false, "detached", "winsock"),
                 row(true, "detached", "ok"),
             ),
+            Candidate::DetachedWinsockGrant => (
+                row(false, "detached", "winsock"),
+                granted(row(false, "detached", "ok")),
+            ),
         }
     }
-    const FIELDS: [&str; 19] = [
+    const FIELDS: [&str; 20] = [
         "completed",
         "tokenVerified",
         "cleanupConfirmed",
@@ -352,6 +383,7 @@ mod tests {
         "exitStatus",
         "markerMatched",
         "stdoutBytes",
+        "winsockGrant",
     ];
     #[test]
     fn all_three_actual_verified_results_are_required() {
@@ -424,12 +456,32 @@ mod tests {
             &row(false, "other", "dll"),
             Candidate::RegistryRead
         ));
+        // The grant candidate needs a restored grant on B and none on A1/A2.
+        let (base, middle) = rows_for(Candidate::DetachedWinsockGrant);
+        let mut unrestored = middle.clone();
+        unrestored["grantRestored"] = serde_json::json!(false);
+        assert!(!supported(
+            &[base.clone(), unrestored, base.clone()],
+            Candidate::DetachedWinsockGrant
+        ));
+        assert!(!baseline(
+            &granted(base.clone()),
+            Candidate::DetachedWinsockGrant
+        ));
+        let mut missing = middle;
+        missing.as_object_mut().unwrap().remove("grantRestored");
+        assert!(!supported(
+            &[base.clone(), missing, base],
+            Candidate::DetachedWinsockGrant
+        ));
     }
     #[test]
     fn each_plan_changes_exactly_one_launch_condition() {
         for candidate in ALL {
             let plan = candidate.plan();
-            let changes = u8::from(plan.extra) + u8::from(plan.base_detached != plan.detached);
+            let changes = u8::from(plan.extra)
+                + u8::from(plan.base_detached != plan.detached)
+                + u8::from(plan.winsock_grant);
             assert_eq!(changes, 1, "{}", candidate.name());
         }
     }
