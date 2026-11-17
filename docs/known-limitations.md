@@ -21,6 +21,12 @@ AccessCheck APIs. This is a behavioral proof based on LPAC semantics, not a
 Microsoft-defined IsLPAC query contract. Its ordinary AppContainer controls
 and Windows 10/11 client validation remain required acceptance evidence.
 
+The current Windows Node startup still fails inside KernelBase DLL_PROCESS_ATTACH
+and reports STATUS_DLL_INIT_FAILED, after the actual LPAC token and complete
+debugger/manual-hold/Host-resume proof pass. The failing system operation is not
+yet known. A fixed test-only capability comparison is diagnostic evidence only;
+it does not change production capabilities or grant Python admission.
+
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,
 or failed observation. Targeted repetitions and the subsequent full run passed;

@@ -4,11 +4,16 @@
 //! No caller may advertise Python merely because this module compiles. The
 //! native functional/negative probes must pass on the actual installed assets.
 use super::runner::{EngineOutput, DEAD_PROXY};
+mod capability_set;
 #[cfg(test)]
 mod cdb;
 #[cfg(test)]
 mod cdb_protocol;
 mod probe;
+#[cfg(test)]
+mod startup_comparison;
+#[cfg(test)]
+mod startup_comparison_protocol;
 use probe::{AccessCase, AccessObservation, Observer, Phase, Receive, TokenApi};
 use sha2::{Digest, Sha256};
 use std::{
@@ -253,6 +258,13 @@ fn token_buffer_observed(
     kind: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
     observation: &Observer,
 ) -> Result<Vec<usize>, String> {
+    token_buffer_sized_observed(token, kind, observation).map(|(data, _)| data)
+}
+fn token_buffer_sized_observed(
+    token: HANDLE,
+    kind: windows::Win32::Security::TOKEN_INFORMATION_CLASS,
+    observation: &Observer,
+) -> Result<(Vec<usize>, usize), String> {
     let mut length = 0;
     unsafe {
         let _ = GetTokenInformation(token, kind, None, 0, &mut length);
@@ -262,6 +274,7 @@ fn token_buffer_observed(
         return Err(UNAVAILABLE.into());
     }
     let mut data = vec![0usize; (length as usize).div_ceil(size_of::<usize>())];
+    let requested = length;
     unsafe {
         win(GetTokenInformation(
             token,
@@ -271,7 +284,10 @@ fn token_buffer_observed(
             &mut length,
         ))?;
     }
-    Ok(data)
+    if length == 0 || length > requested {
+        return Err(UNAVAILABLE.into());
+    }
+    Ok((data, length as usize))
 }
 fn current_user() -> Result<String, String> {
     current_user_observed(&Observer::default())
@@ -347,6 +363,46 @@ impl RuntimeCapability {
             Sid: self.sid,
             Attributes: SE_GROUP_ENABLED as u32,
         }
+    }
+}
+
+// Only the fixed test comparison can construct a second capability. Ordinary
+// production creation remains the same singleton runtime-read capability.
+struct ProcessCapabilities<'a> {
+    runtime: &'a RuntimeCapability,
+    #[cfg(test)]
+    registry_read: Option<RuntimeCapability>,
+}
+impl<'a> ProcessCapabilities<'a> {
+    fn runtime(runtime: &'a RuntimeCapability) -> Self {
+        Self {
+            runtime,
+            #[cfg(test)]
+            registry_read: None,
+        }
+    }
+    #[cfg(test)]
+    fn startup_registry_read(runtime: &'a RuntimeCapability) -> Result<Self, String> {
+        let registry_read = RuntimeCapability::derive("registryRead", &Observer::default())?;
+        if unsafe { EqualSid(runtime.sid, registry_read.sid) }.is_ok() {
+            return Err(UNAVAILABLE.into());
+        }
+        Ok(Self {
+            runtime,
+            registry_read: Some(registry_read),
+        })
+    }
+    fn entries(&self) -> Vec<SID_AND_ATTRIBUTES> {
+        let entries = vec![self.runtime.entry()];
+        #[cfg(test)]
+        let entries = if let Some(registry_read) = &self.registry_read {
+            let mut entries = entries;
+            entries.push(registry_read.entry());
+            entries
+        } else {
+            entries
+        };
+        entries
     }
 }
 
@@ -1677,6 +1733,43 @@ fn verify_token(
     capability: PSID,
     observation: &Observer,
 ) -> Result<(), String> {
+    verify_token_entries(
+        process,
+        package,
+        capability,
+        &[SID_AND_ATTRIBUTES {
+            Sid: capability,
+            Attributes: SE_GROUP_ENABLED as u32,
+        }],
+        observation,
+    )
+}
+
+fn verify_token_entries(
+    process: HANDLE,
+    package: PSID,
+    capability: PSID,
+    expected: &[SID_AND_ATTRIBUTES],
+    observation: &Observer,
+) -> Result<(), String> {
+    if expected.is_empty() || expected.len() > if cfg!(test) { 2 } else { 1 } {
+        return Err(UNAVAILABLE.into());
+    }
+    if expected[0].Attributes != SE_GROUP_ENABLED as u32
+        || unsafe { EqualSid(expected[0].Sid, capability) }.is_err()
+    {
+        return Err(UNAVAILABLE.into());
+    }
+    #[cfg(test)]
+    if expected.len() == 2 {
+        let registry_read = RuntimeCapability::derive("registryRead", &Observer::default())?;
+        if expected[1].Attributes != SE_GROUP_ENABLED as u32
+            || unsafe { EqualSid(expected[1].Sid, registry_read.sid) }.is_err()
+            || unsafe { EqualSid(expected[0].Sid, expected[1].Sid) }.is_ok()
+        {
+            return Err(UNAVAILABLE.into());
+        }
+    }
     observation.enter(Phase::TokenOpen);
     let mut token = HANDLE::default();
     unsafe {
@@ -1726,16 +1819,50 @@ fn verify_token(
         win(matched)?;
     }
     observation.enter(Phase::TokenCapabilities);
-    let capabilities = token_buffer_observed(raw(&token), TokenCapabilities, observation)?;
+    let (capabilities, capability_bytes) =
+        token_buffer_sized_observed(raw(&token), TokenCapabilities, observation)?;
+    if capability_bytes < size_of::<TOKEN_GROUPS>() {
+        return Err(UNAVAILABLE.into());
+    }
     let groups = unsafe { &*capabilities.as_ptr().cast::<TOKEN_GROUPS>() };
     observation.evidence(|evidence| evidence.capability_groups = Some(groups.GroupCount));
-    if groups.GroupCount != 1 {
+    if groups.GroupCount as usize != expected.len() {
+        return Err(UNAVAILABLE.into());
+    }
+    let offset = std::mem::offset_of!(TOKEN_GROUPS, Groups);
+    let required = offset
+        .checked_add(
+            expected
+                .len()
+                .checked_mul(size_of::<SID_AND_ATTRIBUTES>())
+                .ok_or(UNAVAILABLE)?,
+        )
+        .ok_or(UNAVAILABLE)?;
+    if required > capability_bytes {
         return Err(UNAVAILABLE.into());
     }
     unsafe {
-        let matched = EqualSid(groups.Groups[0].Sid, capability);
-        observation.evidence(|evidence| evidence.capability_matches = Some(matched.is_ok()));
-        win(matched)?;
+        let actual = std::slice::from_raw_parts(groups.Groups.as_ptr(), expected.len());
+        let masks = actual
+            .iter()
+            .map(|entry| {
+                expected
+                    .iter()
+                    .enumerate()
+                    .fold(0u8, |mask, (index, want)| {
+                        mask | if EqualSid(entry.Sid, want.Sid).is_ok() {
+                            1 << index
+                        } else {
+                            0
+                        }
+                    })
+            })
+            .collect::<Vec<_>>();
+        let exact = capability_set::exact(&masks);
+        observation.evidence(|evidence| evidence.capability_matches = Some(exact));
+        if !exact {
+            return Err(UNAVAILABLE.into());
+        }
     }
     observation.enter(Phase::TokenIntegrity);
     let data = token_buffer_observed(raw(&token), TokenIntegrityLevel, observation)?;
@@ -1924,6 +2051,29 @@ fn create_suspended(
     policy: ContainerPolicy,
     observation: &Observer,
 ) -> Result<SuspendedLaunch, String> {
+    create_suspended_capabilities(
+        exe,
+        args,
+        cwd,
+        home,
+        profile,
+        &ProcessCapabilities::runtime(cap),
+        policy,
+        observation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_suspended_capabilities(
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+    home: &Path,
+    profile: &Profile,
+    caps: &ProcessCapabilities<'_>,
+    policy: ContainerPolicy,
+    observation: &Observer,
+) -> Result<SuspendedLaunch, String> {
     observation.enter(Phase::Command);
     let app = wide(exe)?;
     let mut cmd = quote(exe.as_os_str())?;
@@ -1953,11 +2103,11 @@ fn create_suspended(
     }
     drop(stdin_write);
     let inherited = [raw(&stdin_read), raw(&stdout_write), raw(&stderr_write)];
-    let mut capability = [cap.entry()];
+    let mut capability = caps.entries();
     let security = SECURITY_CAPABILITIES {
         AppContainerSid: profile.sid.0,
         Capabilities: capability.as_mut_ptr(),
-        CapabilityCount: 1,
+        CapabilityCount: capability.len().try_into().map_err(|_| UNAVAILABLE)?,
         Reserved: 0,
     };
     let mitigations = NO_REMOTE_IMAGES | NO_LOW_LABEL_IMAGES | PREFER_SYSTEM32;

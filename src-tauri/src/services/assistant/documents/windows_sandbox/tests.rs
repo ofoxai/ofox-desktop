@@ -12,9 +12,21 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
     assert_suspended_lpac_access_controls();
     let root = runtime();
     let office = root.join("engines/officecli/officecli.exe");
-    probe_windows_document_engines(&root, &office)
-        .await
-        .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
+    let result = probe_windows_document_engines(&root, &office).await;
+    if std::env::var_os(cdb::ENV_ROOT).is_some()
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(|error| startup_comparison_protocol::eligible(error))
+    {
+        match tokio::task::spawn_blocking(move || startup_comparison::compare(&root)).await {
+            Ok(receipt) => eprintln!("OFOX_STARTUP_COMPARISON_V1 {receipt}"),
+            Err(_) => eprintln!(
+                "OFOX_STARTUP_COMPARISON_V1 {{\"status\":\"inconclusive\",\"joinFailure\":true}}"
+            ),
+        }
+    }
+    result.expect("native Python + OfficeCLI and all LPAC negative probes must pass");
 }
 
 #[test]

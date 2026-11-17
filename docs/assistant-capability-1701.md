@@ -324,3 +324,26 @@ GO 现在只确认实际原 Resume，不再发送第二个 g；严格整数身�
 相关 Node 56/56、0 skip，纯 fence 7/7、observer 4/4；模块及测试的 Windows
 目标 Clippy、全仓 Rust fmt、PS 解析及 Prettier 通过。交叉检查不是原生证明，
 新暂停流程和原 Node loader 失败仍待定点原生确认。
+
+运行 [44020847288](https://github.com/ofoxai/ofox-desktop/actions/runs/44020847288)
+（`42f2edbb`）已原生证明整条诊断链：pre-attach `1/2`、flags `0→2`、5 次
+release 探测后 fresh `1/2`、原 Host Resume1；握手 1.36 秒、释放等待 40 ms，
+Node 实际运行后以 `0xc0000142` 退出，等待 95 ms、清理 52 ms。完整 V2 同
+PID/TID 明确记录 kernelbase.dll 在 DLL_PROCESS_ATTACH 初始化失败，继而
+kernel32.dll 子系统加载返回 `0xc0000142`；CDB、Job 与 raw 清理全部确认。
+这定位了失败模块，尚未识别导致初始化失败的具体系统操作。
+
+下一次仅做固定测试诊断 A-B-A：同一临时 profile/task/home、缓存 Node、固定打印
+样例与环境，只比较 runtime capability 和额外 registryRead。候选依据是
+[Chromium 共同添加该能力](https://chromium.googlesource.com/chromium/src/+/lkgr/sandbox/policy/win/sandbox_win.cc)
+及[其注册表读说明](https://chromium.googlesource.com/chromium/src/+/lkgr/docs/design/sandbox.md)，
+不能把 Chromium 的 broker/启动方式当成本项目的安全或因果证明。
+
+A1 无 CDB 且完整验证后仍为 0142 才派 B；每组 fresh Job、精确 SID 集合、四项
+LPAC AccessCheck、原 mitigation 与 Resume1 均须通过并确认 stop/wait/drain。
+A2 须再次 0142，B 只有 exit0 和精确固定 marker、运行时字节稳定且全部清理
+通过才记 supports-candidate；否则 inconclusive。两成员仅测试构造器可生成，
+发布构造器与 token 校验仍固定 runtime 单成员。原用例保留失败、不开 admission，
+不执行用户/模型代码，不导出 PID、SID、路径或输出正文。将来采用前仍须私有
+注册表及完整隔离负例、默认功能门禁和 Win10/11 客户端验收；当前没有产品授权
+能力变化或 A-B-A 原生结果。
