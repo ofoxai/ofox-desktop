@@ -140,7 +140,9 @@ UNICODE_STRING.Length 读取，最多 1024 字节；相对 RootDirectory 不推�
 不自动等于 DLL 初始化失败的原因。这些合成文案回归通过也不证明原生 CDB 兼容。
 生成命令显式使用 MASM；布尔比较以 and/or 连接，不混入 C++ 的逻辑运算符。
 CDB 会在提示符后回显 `-cf` 的每条命令；`bl` 解析跳过 `0:000>` 回显，带提示符
-的行不能计为断点行。按微软示例，当前 `bl` 在状态位后输出 DML 动作文字
+的行不能计为断点行。`-cf` 结束后 CDB 打印不换行的提示符等待 `g`，其后第一行
+输出会接在提示符后；投影只在提示符后紧接 `OFOX_NT_RAW_V1 ` 时剥离并计数
+`promptJoined`，另以闭集 `firstRejection` 报告首个拒绝原因，不含原文。按微软示例，当前 `bl` 在状态位后输出 DML 动作文字
 `Disable Clear`；解析接受该文字及线程列的 `~` 前缀，仍要求启用、地址和实际线程号。
 `OBJECT_ATTRIBUTES` 绑定只在 test cfg 使用，所需 `Wdk_Foundation` 以 Windows
 dev-dependency 的同一 pinned `windows` 提供，发布构建的特性集合不变。

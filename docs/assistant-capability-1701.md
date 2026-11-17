@@ -404,3 +404,29 @@ MASM and/or。回归先 RED 后 GREEN；这些修正的原生运行尚待执行�
 `cdb_protocol` 独立单测 8/8；独立审查未发现严重或重要问题。以上都不是 Windows
 原生证据，不改变 token、capability、ACL、mitigation、超时或 admission，
 不作 0142 修复。
+
+运行 [44049635186](https://github.com/ofoxai/ofox-desktop/actions/runs/44049635186)
+（`10bc4f72`）首次通过新增观察器的全部安装门禁：architecture/ABI、实际线程
+匹配、14 行已解析且启用的线程限定断点均为 true；完整 V2、flags `0→2`、
+pre-attach 与 final hold `1/2`、原 Host Resume1 成立。control 4/4、ACL 1/1，
+Node 在 Resume 后 154 ms 以 `0xc0000142` 退出，未超时、未被 Job 强杀；
+KernelBase DLL_PROCESS_ATTACH 失败及 kernel32 子系统加载 0142 再次复现，
+CDB/raw/task/profile 清理确认，没有任何 `Win32 error` 文案。
+
+但操作投影为 `completedCalls=0`、inconclusive，尚无失败操作或返回码。形态
+计数给出原因：本次与 44020847288 都恰好比 `-cf` 命令多一条提示符行（34/33、
+11/10）。CDB 在 `-cf` 后打印不换行的 `0:000> ` 等待 `g`，`g` 之后的第一行
+输出接在其后；加载器最早的 IFEO `NtOpenKey(Ex)` 早于任何 loader snaps，因此
+首条 ENTER 很可能被粘在提示符后而漏读，序号停在 1，之后每条调用都被拒绝。
+stdout 比 44020847288 多 137 行，扣除安装区段约 90 行属继续后的观察输出，
+说明入口断点确实命中；是否还存在返回断点等第二个问题，现有产物无法区分。
+
+修正只在投影：主循环中提示符后紧接 `OFOX_NT_RAW_V1 ` 时去掉该提示符，计数
+`promptJoined`；回显的命令仍不能成为标记，bl 列表内不剥离且带提示符的行仍不
+计数；多重提示符或其他大小写的残留标记一律拒绝。独立审查以 20 万条随机变异
+日志对比，除单个粘连标记外未接受基线拒绝的输入，观测结果无差异。
+另增闭集 `firstRejection`（enter-order/identity/arguments、name、listing、
+return、invalid-*、marker-unknown、unterminated、no-calls），不含原文。
+RED 复现与原生相同的整体拒绝，修正后相关九个文件 71/71、0 skip。下一次定点
+运行只回答：去掉粘连后能否配对出失败操作及 NTSTATUS；若仍不完整，由
+`firstRejection` 和 `promptJoined` 指出下一处断点，不改隔离、权限或超时。

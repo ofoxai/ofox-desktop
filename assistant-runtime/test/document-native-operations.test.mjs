@@ -183,6 +183,109 @@ test("pairs an actual thread and stack return with its verified persistent break
   assert.equal(report.negativeConclusionAllowed, false);
 });
 
+test("the first marker glued to the waiting CDB prompt still pairs", () => {
+  // Native run 44049635186: after -cf, CDB prints "0:000> " without a newline
+  // and the first output after the controller's g lands on that line.
+  const glued = call();
+  glued[0] = `0:000> ${glued[0]}`;
+  const report = project(glued);
+  assert.equal(report.status, "observed-failures");
+  assert.equal(report.coverage.completedCalls, 1);
+  assert.deepEqual(report.diagnostics, {
+    firstRejection: null,
+    promptJoined: 1,
+  });
+  // An echoed command after a prompt is never a marker.
+  const echoed = [
+    '0:000> .printf "OFOX_NT_RAW_V1 ENTER seq=%d END\\n", @$t0',
+    ...call(),
+  ];
+  const plain = project(echoed);
+  assert.equal(plain.status, "observed-failures");
+  assert.equal(plain.diagnostics.promptJoined, 0);
+  // A glued invalid marker is no longer silently ignored.
+  const invalid = project([
+    ...call(),
+    "0:000> OFOX_NT_RAW_V1 INVALID nested END",
+  ]);
+  assert.equal(invalid.diagnostics.firstRejection, "invalid-nested");
+  // Inside a bl listing a prompt line is skipped, never promoted to a marker.
+  const listed = call().flatMap((line) =>
+    line.startsWith("OFOX_NT_RAW_V1 RETURN_BP_END")
+      ? [`0:000> ${line}`]
+      : [line],
+  );
+  const inside = project(listed);
+  assert.equal(inside.status, "inconclusive");
+  assert.equal(inside.diagnostics.promptJoined, 0);
+  // Double prompts and other-case markers stay visible as rejections.
+  for (const extra of [
+    "0:000> 0:000> OFOX_NT_RAW_V1 INVALID limit END",
+    "0:000> ofox_nt_raw_v1 invalid nested end",
+    "ofox_nt_raw_v1 invalid nested end",
+  ])
+    assert.equal(
+      project([...call(), extra]).diagnostics.firstRejection,
+      "marker-unknown",
+      extra,
+    );
+});
+
+test("an inconclusive projection names only its first fixed rejection", () => {
+  const cases = [
+    [call(), null],
+    [[...call(), ...call()], "enter-order"],
+    [
+      call().map((l) => l.replace("tid=2b sp=1000", "tid=2c sp=1000")),
+      "enter-identity",
+    ],
+    [call({ access: "1234" }), "enter-arguments"],
+    [call({ api: 15, root: "none" }), "enter-arguments"],
+    [call({ api: 0, root: "none" }), "enter-arguments"],
+    [
+      call().map((l) =>
+        l.startsWith("OFOX_NT_RAW_V1 RETURN_BP_END")
+          ? l.replace("seq=1", "seq=2")
+          : l,
+      ),
+      "listing-row",
+    ],
+    [
+      call().flatMap((l) => (l.startsWith("30 e ") ? [l, l] : [l])),
+      "listing-row",
+    ],
+    [call().slice(1), "name-orphan"],
+    [call().map((l) => l.replace("bytes=32", "bytes=1000")), "name-shape"],
+    [call().filter((l) => !l.includes(" NAME seq=")), "listing-orphan"],
+    [call().map((l) => l.replace("30 e ", "30 d ")), "listing-row"],
+    [
+      call()
+        .filter((l) => !l.includes(" ENTER "))
+        .slice(4),
+      "return-orphan",
+    ],
+    [call().map((l) => l.replace("sp=1008", "sp=1010")), "return-mismatch"],
+    [[...call(), "OFOX_NT_RAW_V1 INVALID nested END"], "invalid-nested"],
+    [[...call(), "OFOX_NT_RAW_V1 INVALID limit END"], "invalid-limit"],
+    [
+      [...call(), "OFOX_NT_RAW_V1 INVALID return_pair END"],
+      "invalid-return-pair",
+    ],
+    [
+      [...call(), "OFOX_NT_RAW_V1 UNKNOWN private-secret END"],
+      "marker-unknown",
+    ],
+    [call().slice(0, -1), "unterminated"],
+    [[], "no-calls"],
+  ];
+  for (const [lines, expected] of cases) {
+    const report = project(lines);
+    assert.equal(report.diagnostics.firstRejection, expected, expected);
+    assert.equal(report.status === "inconclusive", expected !== null);
+    assert.ok(!JSON.stringify(report.diagnostics).includes("secret"));
+  }
+});
+
 test("keeps low32 access masks and separates relative names and registry values from absolute resources", () => {
   const report = project([
     ...call({

@@ -31,6 +31,17 @@ const RETURN =
   /^OFOX_NT_RAW_V1 RETURN seq=(\d{1,3}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) status=([a-f\d]{1,8}) END$/i;
 // A debugger prompt echo (for example `0:000> bl /L 30`) is never a row.
 const PROMPT = /^(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}>/i;
+// After -cf, CDB prints "0:000> " without a newline while it waits for the
+// controller's g; the first output after g lands on that line (native runs
+// 44020847288 and 44049635186 each show exactly one extra prompt line). Only
+// our own marker text directly after the prompt is recovered.
+const GLUED = /^(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}> (?=OFOX_NT_RAW_V1 )/i;
+const UNMATCHED = /^(?:(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}>\s*)*OFOX_NT_RAW_V/i;
+const INVALID = {
+  "OFOX_NT_RAW_V1 INVALID nested END": "invalid-nested",
+  "OFOX_NT_RAW_V1 INVALID limit END": "invalid-limit",
+  "OFOX_NT_RAW_V1 INVALID return_pair END": "invalid-return-pair",
+};
 // Same row grammar as the setup check: optional DML action text and ~thread.
 const BP =
   /^\s*30 e (?:Disable Clear\s+)?([a-f\d]{8}`[a-f\d]{8}|[a-f\d]{8,16})\s+0*1\s+\(0*1\)\s+0:~?(\d{3})\s+[^\r\n]*$/i;
@@ -62,6 +73,8 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     },
     observations: [],
     reasons: [],
+    // Closed-set shape only: a fixed code and a count, never raw text.
+    diagnostics: { firstRejection: null, promptJoined: 0 },
   };
   // Reuse the complete original V2 proof; operation markers cannot replace it.
   const loader = projectDocumentLoaderSnaps({ text, target });
@@ -91,14 +104,23 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     next = 1,
     listing = null,
     incomplete = false;
-  const reject = () => {
+  // firstRejection describes this pairing loop; earlier exits use reasons.
+  const reject = (code) => {
     incomplete = true;
+    report.diagnostics.firstRejection ??= code;
   };
   const same = (pid, tid) =>
     hex(pid) === target.childPid && hex(tid) === target.primaryTid;
-  for (const line of lines.slice(
+  for (const output of lines.slice(
     lines.indexOf("OFOX_CDB_V2 CONTINUE_REQUESTED END") + 1,
   )) {
+    // Inside a bl listing a prompt line is skipped below, never recovered.
+    const line = listing
+      ? output
+      : output.replace(GLUED, () => {
+          report.diagnostics.promptJoined++;
+          return "";
+        });
     const endList = /^OFOX_NT_RAW_V1 RETURN_BP_END seq=(\d{1,3}) END$/.exec(
       line,
     );
@@ -109,7 +131,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
           Number(endList[1]) !== active.sequence ||
           listing.length !== 1
         )
-          reject();
+          reject("listing-row");
         else {
           const row = BP.exec(listing[0]);
           if (
@@ -117,7 +139,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
             pointer(row[1]) !== active.returnAddress ||
             Number(row[2]) !== threadIndex
           )
-            reject();
+            reject("listing-row");
           else active.breakpointVerified = true;
         }
         listing = null;
@@ -128,26 +150,25 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     if (entry) {
       const sequence = Number(entry[1]),
         api = APIS[Number(entry[2]) - 1];
-      if (
-        active ||
-        sequence !== next ||
-        sequence > MAX_CALLS ||
-        !api ||
-        !same(entry[3], entry[4])
-      ) {
-        reject();
+      if (active || sequence !== next || sequence > MAX_CALLS) {
+        reject("enter-order");
         continue;
       }
-      const mode = api[1],
+      if (!same(entry[3], entry[4])) {
+        reject("enter-identity");
+        continue;
+      }
+      const mode = api?.[1],
         access = entry[7].toLowerCase(),
         root = entry[8];
       if (
+        !api ||
         (mode === "attributes" && (access === "none" || root === "none")) ||
         (mode !== "attributes" && access !== "none") ||
         (mode === "port" && root !== "1") ||
         (["none", "value"].includes(mode) && root !== "none")
       ) {
-        reject();
+        reject("enter-arguments");
         continue;
       }
       active = {
@@ -170,7 +191,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     if (name || unknown) {
       const match = name ?? unknown;
       if (!active || Number(match[1]) !== active.sequence || active.nameSeen) {
-        reject();
+        reject("name-orphan");
         continue;
       }
       active.nameSeen = true;
@@ -183,7 +204,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
           bytes !== Buffer.byteLength(name[3], "utf16le") ||
           /[\x00-\x1f]/.test(name[3])
         )
-          reject();
+          reject("name-shape");
         else active.name = name[3];
       }
       continue;
@@ -198,21 +219,23 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
         !active.nameSeen ||
         active.breakpointVerified
       )
-        reject();
+        reject("listing-orphan");
       listing = [];
       continue;
     }
     const returned = RETURN.exec(line);
     if (returned) {
+      if (!active || Number(returned[1]) !== active.sequence) {
+        reject("return-orphan");
+        continue;
+      }
       if (
-        !active ||
-        Number(returned[1]) !== active.sequence ||
         !same(returned[2], returned[3]) ||
         pointer(returned[4]) !== active.stack + 8n ||
         !active.nameSeen ||
         !active.breakpointVerified
       ) {
-        reject();
+        reject("return-mismatch");
         continue;
       }
       const status = hex(returned[5]);
@@ -228,9 +251,11 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
       active = null;
       continue;
     }
-    if (line.startsWith("OFOX_NT_RAW_V")) reject();
+    // Any other marker, in any case or behind further prompts, is visible.
+    if (UNMATCHED.test(line)) reject(INVALID[line] ?? "marker-unknown");
   }
-  if (active || listing || !report.coverage.completedCalls) reject();
+  if (active || listing) reject("unterminated");
+  if (!report.coverage.completedCalls) reject("no-calls");
   if (incomplete) report.reasons.push("operation-coverage-incomplete");
   else {
     report.coverage.status = "complete-for-fixed-set";
