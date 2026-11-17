@@ -127,8 +127,9 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 固定 Nt 观察保留原 V2/Host Resume1 门禁。对实际 child HANDLE 调用
 `IsWow64Process2`，要求成功、processMachine=UNKNOWN、nativeMachine=AMD64，
 并核对原生 Windows 绑定的 size/offset；使用的是公开 Windows x64 ABI，不宣称
-PDB 布局读回。原有 SymChk 与 gflag 实测仍保留。实际线程表与 `bl /L` 须证明全部 14 个
-owned 入口断点已解析、启用并关联实际线程。每次调用的 owned 持久返回断点 30
+PDB 布局读回。原有 SymChk 与 gflag 实测仍保留。实际线程表与 `bl /L` 须证明全部固定
+owned 入口断点（当前 15 个，含仅记录状态的 NtCreateUserProcess）已解析、启用并
+关联实际线程。每次调用的 owned 持久返回断点 30
 独立验证地址和线程，返回仅在同 TID、入口 RSP+8 和保存的返回地址上配对 EAX。
 ACCESS_MASK 取 EDX 低 32 位；ALPC PortName 与注册表 ValueName 不作访问掩码。
 每次属性调用先检查 OA 可读范围及 Length=0x30，US/Buffer 也先检查可读范围；

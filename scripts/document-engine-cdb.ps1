@@ -289,7 +289,7 @@ public static class DocumentCdbNative {
   if ($null -eq $after) { throw 'gflag_after_unreadable' }
   if ($after -ne ($before -bor 2)) { throw 'gflag_changed_unexpectedly' }
   Assert-DocumentOperationSetup $operationSetup
-  $writer.WriteLine(('OFOX_NT_V1 INSTALLED pid={0:x} tid={1:x} thread={2} count=14 arch=amd64 abi=windows-x64 END' -f $targetPid,$targetTid,$operationSetup.threadIndex))
+  $writer.WriteLine(('OFOX_NT_V1 INSTALLED pid={0:x} tid={1:x} thread={2} count={3} arch=amd64 abi=windows-x64 END' -f $targetPid,$targetTid,$operationSetup.threadIndex,@(Get-DocumentOperationDefinitions).Count))
   $writer.WriteLine(('OFOX_CDB_V2 BEFORE pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$before))
   $writer.WriteLine(('OFOX_CDB_V2 AFTER pid={0:x} tid={1:x} flags={2:x} END' -f $targetPid,$targetTid,$after))
   $writer.WriteLine('OFOX_CDB_V2 READY END'); $writer.Flush()

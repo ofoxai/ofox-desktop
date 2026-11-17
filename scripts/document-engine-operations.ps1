@@ -15,7 +15,9 @@ function Get-DocumentOperationDefinitions {
     @{ Name = 'NtConnectPort'; Kind = 'none' },
     @{ Name = 'NtMapViewOfSection'; Kind = 'none' },
     @{ Name = 'NtAlpcConnectPortEx'; Kind = 'none' },
-    @{ Name = 'NtSecureConnectPort'; Kind = 'none' }
+    @{ Name = 'NtSecureConnectPort'; Kind = 'none' },
+    # Status only: KernelBase launches conhost for a new console during attach.
+    @{ Name = 'NtCreateUserProcess'; Kind = 'none' }
   )
 }
 function New-DocumentOperationSetup([uint32]$PidValue, [uint32]$TidValue) {
@@ -46,6 +48,7 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
   $returned = '.if ((@$tid == 0n' + $TidValue + ') and (@rsp == (@$t2 + 8)) and (@rip == @$t3)) { .printf "OFOX_NT_RAW_V1 RETURN seq=%d pid=%x tid=%x sp=%I64x status=%x END\n", @$t0, @$tpid, @$tid, @rsp, @eax; bc 30; r @$t1 = 0; gc } .else { .echo OFOX_NT_RAW_V1 INVALID return_pair END; gc }'
   $files['operation-return.cmd'] = $returned
   $definitions = @(Get-DocumentOperationDefinitions)
+  $range = '10-' + (9 + $definitions.Count)
   for ($index = 0; $index -lt $definitions.Count; $index++) {
     $definition = $definitions[$index]; $id = 10 + $index; $api = $index + 1
     $body = @('r @$t1 = 1', 'r @$t0 = @$t0 + 1', 'r @$t2 = @rsp', 'r @$t3 = poi(@rsp)', 'r @$t5 = 0', 'r @$t6 = 2')
@@ -72,13 +75,13 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
     $body += 'bl /L 30'
     $body += '.printf "OFOX_NT_RAW_V1 RETURN_BP_END seq=%d END\n", @$t0'
     $body += 'gc'
-    $entry = '.if (@$t1 != 0) { .echo OFOX_NT_RAW_V1 INVALID nested END; gc } .elsif (@$t0 >= 0n256) { .echo OFOX_NT_RAW_V1 INVALID limit END; bd 10-23; gc } .else { ' + ($body -join '; ') + ' }'
+    $entry = '.if (@$t1 != 0) { .echo OFOX_NT_RAW_V1 INVALID nested END; gc } .elsif (@$t0 >= 0n256) { .echo OFOX_NT_RAW_V1 INVALID limit END; bd ' + $range + '; gc } .else { ' + ($body -join '; ') + ' }'
     # Fixed relative script names in the owned private working directory avoid
     # nested CommandString escaping. $>< executes the file as one command block.
     $files['operation-' + $api + '.cmd'] = $entry
     $commands += $thread + 'bp' + $id + ' ntdll!' + $definition.Name + ' "$><operation-' + $api + '.cmd"'
   }
-  return @{ commands = $commands + @('.echo OFOX_NT_RAW_V1 BREAKPOINTS_BEGIN', 'bl /L 10-23', '.echo OFOX_NT_RAW_V1 BREAKPOINTS_END'); files = $files }
+  return @{ commands = $commands + @('.echo OFOX_NT_RAW_V1 BREAKPOINTS_BEGIN', ('bl /L ' + $range), '.echo OFOX_NT_RAW_V1 BREAKPOINTS_END'); files = $files }
 }
 function Read-DocumentOperationSetupLine([hashtable]$State, [string]$Line) {
   if ($Line -eq 'OFOX_NT_RAW_V1 THREADS_BEGIN') {
@@ -88,7 +91,7 @@ function Read-DocumentOperationSetupLine([hashtable]$State, [string]$Line) {
   } elseif ($Line -eq 'OFOX_NT_RAW_V1 BREAKPOINTS_BEGIN') {
     if (-not $State.threadsDone -or $State.breakpointsDone -or $State.section) { throw 'operation_install_unverified' }; $State.section = 'breakpoints'
   } elseif ($Line -eq 'OFOX_NT_RAW_V1 BREAKPOINTS_END') {
-    if ($State.section -ne 'breakpoints' -or $State.rows.Count -ne 14) { throw 'operation_install_unverified' }; $State.section = ''; $State.breakpointsDone = $true
+    if ($State.section -ne 'breakpoints' -or $State.rows.Count -ne @(Get-DocumentOperationDefinitions).Count) { throw 'operation_install_unverified' }; $State.section = ''; $State.breakpointsDone = $true
   } elseif ($State.section -eq 'threads') {
     if ($Line -match '^\s*[.#]?\s*(\d{1,3})\s+Id:\s+([a-fA-F0-9]{1,8})\.([a-fA-F0-9]{1,8})\s+Suspend:') {
       if ([Convert]::ToUInt32($Matches[2], 16) -eq $State.pidValue -and [Convert]::ToUInt32($Matches[3], 16) -eq $State.tidValue) {
@@ -99,15 +102,17 @@ function Read-DocumentOperationSetupLine([hashtable]$State, [string]$Line) {
     # CDB echoes each -cf command after its prompt; an echo is never a row.
     # Current dbgeng prints DML action text after the state and may qualify a
     # thread-specific column with ~. Only enabled rows on the exact thread pass.
-    if ($Line -notmatch '^\s*(1[0-9]|2[0-3]) e (?:Disable Clear\s+)?(?:[a-fA-F0-9]{8}`[a-fA-F0-9]{8}|[a-fA-F0-9]{8,16})\s+0*1\s+\(0*1\)\s+0:~?(\d{3})\s+ntdll!((?:Nt|Zw)[A-Za-z]+)(?:\+0x0+)?(?:\s.*)?$') { throw 'operation_install_unverified' }
+    if ($Line -notmatch '^\s*(\d{2}) e (?:Disable Clear\s+)?(?:[a-fA-F0-9]{8}`[a-fA-F0-9]{8}|[a-fA-F0-9]{8,16})\s+0*1\s+\(0*1\)\s+0:~?(\d{3})\s+ntdll!((?:Nt|Zw)[A-Za-z]+)(?:\+0x0+)?(?:\s.*)?$') { throw 'operation_install_unverified' }
     $id = [int]$Matches[1]; $threadIndex = [int]$Matches[2]; $name = $Matches[3]
-    $expected = @(Get-DocumentOperationDefinitions)[$id - 10].Name
+    $definitions = @(Get-DocumentOperationDefinitions)
+    if ($id -lt 10 -or $id -ge 10 + $definitions.Count) { throw 'operation_install_unverified' }
+    $expected = $definitions[$id - 10].Name
     if ($threadIndex -ne $State.threadIndex -or $State.rows.ContainsKey($id) -or $name.Substring(2) -ne $expected.Substring(2)) { throw 'operation_install_unverified' }
     $State.rows[$id] = $true
   }
 }
 function Assert-DocumentOperationSetup([hashtable]$State) {
-  if (-not $State.abiVerified -or -not $State.threadsDone -or -not $State.breakpointsDone -or $State.section -or $State.rows.Count -ne 14) { throw 'operation_install_unverified' }
+  if (-not $State.abiVerified -or -not $State.threadsDone -or -not $State.breakpointsDone -or $State.section -or $State.rows.Count -ne @(Get-DocumentOperationDefinitions).Count) { throw 'operation_install_unverified' }
 }
 function Get-DocumentOperationSetupState($State) {
   return @{ abiVerified = ($null -ne $State -and $State.abiVerified -eq $true)

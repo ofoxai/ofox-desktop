@@ -9,7 +9,7 @@ import { projectDocumentNativeOperations } from "../../scripts/document-native-o
 import { safeDebuggerState } from "../../scripts/document-engine-development-check.mjs";
 
 const setup = [
-  "OFOX_NT_V1 INSTALLED pid=2a tid=2b thread=0 count=14 arch=amd64 abi=windows-x64 END",
+  "OFOX_NT_V1 INSTALLED pid=2a tid=2b thread=0 count=15 arch=amd64 abi=windows-x64 END",
   "OFOX_CDB_V2 BEFORE pid=2a tid=2b flags=0 END",
   "OFOX_CDB_V2 AFTER pid=2a tid=2b flags=2 END",
   "OFOX_CDB_V2 READY END",
@@ -55,6 +55,7 @@ test(
         "dml-action",
         "dml-echo",
         "dml-echo-row",
+        "outside",
       ]) {
         const result = spawnSync(
           pwsh,
@@ -105,7 +106,17 @@ test(
         assert.ok(
           report.program.files["operation-1.cmd"].includes("@$t0 >= 0n256"),
         );
-        assert.equal(Object.keys(report.program.files).length, 15);
+        assert.equal(Object.keys(report.program.files).length, 16);
+        assert.equal(report.definitions.at(-1).Name, "NtCreateUserProcess");
+        assert.ok(report.program.commands.includes("bl /L 10-24"));
+        assert.ok(
+          report.program.commands.includes(
+            '~~[0n43]bp24 ntdll!NtCreateUserProcess "$><operation-15.cmd"',
+          ),
+        );
+        assert.ok(
+          report.program.files["operation-15.cmd"].includes("bd 10-24"),
+        );
         const entry = report.program.files["operation-1.cmd"],
           port = report.program.files["operation-10.cmd"],
           returned = report.program.files["operation-return.cmd"];
@@ -240,7 +251,7 @@ test("an inconclusive projection names only its first fixed rejection", () => {
       "enter-identity",
     ],
     [call({ access: "1234" }), "enter-arguments"],
-    [call({ api: 15, root: "none" }), "enter-arguments"],
+    [call({ api: 16, root: "none" }), "enter-arguments"],
     [call({ api: 0, root: "none" }), "enter-arguments"],
     [
       call().map((l) =>
@@ -504,7 +515,8 @@ test("does not attribute without the complete original Host Resume and independe
   for (const records of [
     setup.slice(1),
     setup.slice(0, -1),
-    setup.map((line) => line.replace("count=14", "count=11")),
+    setup.map((line) => line.replace("count=15", "count=11")),
+    setup.map((line) => line.replace("count=15", "count=14")),
     [...setup, setup[0]],
     setup.map((line) => line.replace("tid=2b thread", "tid=2c thread")),
   ]) {
@@ -664,7 +676,7 @@ test("unknown objects never leak names and a successful operation cannot become 
 });
 
 test("status-only sibling port APIs never interpret an undocumented argument as a resource or access mask", () => {
-  const calls = [13, 14].flatMap((api, index) =>
+  const calls = [13, 14, 15].flatMap((api, index) =>
     call({ seq: index + 1, api, root: "none" }).map((line) =>
       line.includes(" NAME seq=")
         ? `OFOX_NT_RAW_V1 NAME_UNKNOWN seq=${index + 1} END`
@@ -687,6 +699,12 @@ test("status-only sibling port APIs never interpret an undocumented argument as 
       },
       {
         api: "NtSecureConnectPort",
+        desiredAccess: null,
+        objectAlias: "unknown",
+      },
+      // Status-only: a blocked conhost launch shows here without its arguments.
+      {
+        api: "NtCreateUserProcess",
         desiredAccess: null,
         objectAlias: "unknown",
       },
@@ -724,7 +742,7 @@ test("setup failure state retains only fixed booleans and a bounded breakpoint c
       abiVerified: true,
       threadMatched: false,
       installationVerified: "private-secret",
-      breakpointRows: 14,
+      breakpointRows: 15,
       address: "secret-pointer",
       raw: "secret-value",
     },
@@ -733,10 +751,10 @@ test("setup failure state retains only fixed booleans and a bounded breakpoint c
     abiVerified: true,
     threadMatched: false,
     installationVerified: null,
-    breakpointRows: 14,
+    breakpointRows: 15,
   });
   assert.ok(!JSON.stringify(state).includes("secret"));
-  for (const count of [-1, 15, "14", null])
+  for (const count of [-1, 16, "15", null])
     assert.equal(
       safeDebuggerState({ operationSetup: { breakpointRows: count } })
         .operationSetup.breakpointRows,

@@ -451,3 +451,26 @@ KernelBase 初始化失败、0142 退出。control 4/4、ACL 1/1，清理全部�
 ACCESS_DENIED 的 HKLM 键是什么，以及 KernelBase 初始化失败前最后完成的被观察
 操作是哪些；若最后操作只是映射 KernelBase，则说明其 DllMain 的失败点不在当前
 14 个 API 内，需要另行扩大观察集合。相关九个文件 74/74、0 skip。
+
+运行 [44058284863](https://github.com/ofoxai/ofox-desktop/actions/runs/44058284863)
+（`7faf49e6`）再次完整配对 14 次调用，`firstRejection` 为空，按序为：
+`\Registry\Machine\SYSTEM\CurrentControlSet\Control\Nls\CodePage`（GENERIC_READ）
+及 `…\Control\Session Manager`（KEY_QUERY_VALUE）的 NtOpenKey 均 `0xc0000022`；
+`…\Session Manager\Segment Heap` 为 `0xc0000034`；随后 `\KnownDlls`、程序目录、
+kernel32/kernelbase 的 section 打开与映射、`\Sessions\?\Windows\?` section、
+NtConnectPort 及映射均成功；最后两项为 `\Device\ConDrv\Server` 与相对的
+`\Reference` 的 NtCreateFile，均成功。此后 KernelBase DLL_PROCESS_ATTACH 失败。
+
+两次注册表拒绝发生在 ntdll 早期且加载随即正常推进，不按原因处理。最后的被观察
+操作是为新控制台创建 ConDrv Server/Reference。Node 以 `CREATE_NO_WINDOW` 创建，
+需要新控制台；自 Windows 8 起控制台宿主 conhost.exe 由客户端在初始化期间作为
+自身子进程启动，而沙箱以 `PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY` 限制子进程。
+当前推断：KernelBase 的控制台初始化无法创建 conhost 而失败。该创建调用不在
+14 个观察 API 内，因此尚属推断，未直接观测；产品创建标志暂不修改。
+
+为直接观测该推断，观察集合增加第 15 个固定入口 NtCreateUserProcess，按状态-only
+记录（不解释参数、不上传映像名）；断点范围、安装行数、`INSTALLED count` 与
+上传状态的行数上界都改为由同一定义表推导，范围外 ID 拒绝。下一次定点运行只回答：
+在 ConDrv Server/Reference 之后是否出现进程创建及其 NTSTATUS（预期子进程被
+策略阻止时为 `0xc000049d`）。若成立，再针对性修复启动标志；若未出现，则失败点在
+控制台初始化的其他步骤，继续缩小。相关九个文件 74/74、0 skip。

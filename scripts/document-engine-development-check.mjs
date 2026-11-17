@@ -17,7 +17,10 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
 import { projectDocumentLoaderSnaps } from "./document-loader-snaps.mjs";
-import { projectDocumentNativeOperations } from "./document-native-operations.mjs";
+import {
+  FIXED_OPERATION_APIS,
+  projectDocumentNativeOperations,
+} from "./document-native-operations.mjs";
 
 const root = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const sandbox = "services::assistant::documents::windows_sandbox::tests::";
@@ -479,7 +482,7 @@ export function safeDebuggerState(value) {
     result.operationSetup.breakpointRows =
       Number.isInteger(value.operationSetup.breakpointRows) &&
       value.operationSetup.breakpointRows >= 0 &&
-      value.operationSetup.breakpointRows <= 14
+      value.operationSetup.breakpointRows <= FIXED_OPERATION_APIS
         ? value.operationSetup.breakpointRows
         : null;
   }

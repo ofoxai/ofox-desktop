@@ -16,13 +16,16 @@ const APIS = [
   ["NtMapViewOfSection", "none"],
   ["NtAlpcConnectPortEx", "none"],
   ["NtSecureConnectPort", "none"],
+  // Status only: KernelBase launches conhost for a new console during attach.
+  ["NtCreateUserProcess", "none"],
 ];
+export const FIXED_OPERATION_APIS = APIS.length;
 // Matches the debugger script's 0n256 call limit. Each failure belongs to one
 // unique sequence, so the call bound also bounds retained observations; ordinary
 // startup misses must not evict the final failed operation.
 const MAX_CALLS = 256;
 const INSTALL =
-  /^OFOX_NT_V1 INSTALLED pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) thread=(\d{1,3}) count=14 arch=amd64 abi=windows-x64 END$/i;
+  /^OFOX_NT_V1 INSTALLED pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) thread=(\d{1,3}) count=(\d{1,2}) arch=amd64 abi=windows-x64 END$/i;
 const ENTER =
   /^OFOX_NT_RAW_V1 ENTER seq=(\d{1,3}) api=(\d{1,2}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) access=(none|[a-f\d]{1,8}) root=(none|0|1|2) END$/i;
 const NAME =
@@ -355,6 +358,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     !installed ||
     hex(installed[1]) !== target.childPid ||
     hex(installed[2]) !== target.primaryTid ||
+    Number(installed[4]) !== APIS.length ||
     installs[0].index >= lines.indexOf("OFOX_CDB_V2 READY END")
   ) {
     report.reasons.push("installation-unverified");
