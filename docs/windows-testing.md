@@ -81,9 +81,10 @@ workflow 将构建两个探针并上传验证日志；全量前端检查继续�
 此安排遵循 [GitHub 手动 workflow 的注册要求](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)，不修改 main。
 
 该入口准备 pinned 生产资源后，第一个 Cargo 测试只运行精确的 synthetic ACL
-用例；失败即停并上传日志。通过后精确运行 Python、OfficeCLI 及逃逸拒绝的功能
+用例；失败即停并上传日志。通过后先精确运行注册表隔离前置（两种 token 的固定键
+读权限与整个 HKCU 遍历，只输出闭集计数），再精确运行 Python、OfficeCLI 及逃逸拒绝的功能
 前置，成功才串行执行全部 `windows_sandbox`、三个附件备份及长路径回归、三个
-Host 中断／无副作用／未知结果回归，共九个固定命令。功能前置失败同样立即停，
+Host 中断／无副作用／未知结果回归，共十个固定命令。功能前置失败同样立即停，
 避免其余用例重复重型预检。每个命令都检查实际测试
 计数，零测试、跳过、失败或不完整输出均不能通过。开发 debug0 v3 缓存纳入
 Cargo.toml 的 features/profile，兼容恢复旧 v2 依赖；断言失败仍保存已完成依赖。

@@ -578,3 +578,16 @@ registryRead 会扩大 LPAC 的注册表读取范围，须先由用户确认，�
 与开发检查相关 Node 测试 74/74、0 skip。上述都不是 Windows 原生证据；原生功能
 门禁、Python/OfficeCLI、完整 sandbox 套件、Windows Probe 与 Win10/11 客户端验收
 均待执行，Windows Python 能力保持关闭。
+
+运行 [44122597628](https://github.com/ofoxai/ofox-desktop/actions/runs/44122597628)
+（`26dee61c`，推送自动触发，无调试器）：ACL 1/1 通过；功能前置在任何引擎恢复
+之前被新门禁拒绝。LPAC 矩阵匹配、capability 恰为 2 项且启用、Winsock 目录键
+正向对照可读，但 `HKCU\Environment` 对实际 token 可读，门禁按设计拒绝启动，Node
+未被恢复。门禁拦下的是用户环境变量这一私有数据面，结论正确；但尚不知该读权限
+来自 registryRead 还是基础 LPAC，二者处理不同。
+
+下一次定点运行只回答这一点：开发检查在 ACL 与功能前置之间新增精确的“注册表隔离
+前置”，运行原生注册表测试，并在断言前输出闭集证据：生产集合与仅 runtime 集合
+对三个固定键的读取结果、两者的 verify_token 与门禁结果，以及整个 HKCU 遍历中
+基础 LPAC 可读、生产可读和 registryRead 新增的键数。不改产品逻辑；Windows
+Python 能力保持关闭。

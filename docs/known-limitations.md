@@ -40,9 +40,11 @@ run normally under the same verified isolation. Production now launches
 detached with exactly {runtime, registryRead} and refuses any launch whose actual
 token can read the user's Environment or Software registry keys. registryRead
 still widens LPAC read access to the HKLM keys Windows grants it; that scope is
-accepted for Winsock initialization. Windows Python capability stays disabled
-until the unassisted native functional gate and Windows 10/11 client acceptance
-pass.
+accepted for Winsock initialization. The first unassisted native run (44122597628)
+refused every launch at that gate because the actual token could read
+HKCU\Environment; whether registryRead or base LPAC grants that read is being
+measured. Windows Python capability stays disabled until the native functional
+gate and Windows 10/11 client acceptance pass.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

@@ -32,6 +32,13 @@ export const checks = [
     filter: `${sandbox}document_cache_requires_exact_specific_file_read_execute_acl`,
     exact: true,
   },
+  // Registry isolation evidence for the production token, before any engine
+  // is resumed; its log line reports both tokens and the whole-HKCU walk.
+  {
+    name: "registry-isolation-prerequisite",
+    filter: `${sandbox}document_registry_read_opens_the_winsock_catalog_but_not_user_keys`,
+    exact: true,
+  },
   {
     name: "functional-prerequisite",
     filter: `${sandbox}document_lpac_proves_python_office_and_escape_denials`,

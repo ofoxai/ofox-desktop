@@ -269,6 +269,29 @@ fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
     );
     task.dispose().unwrap();
     profile.dispose().unwrap();
+    // Every observation is logged before any assertion, as closed-set values
+    // and counts only, so a failure still reports both tokens and the walk.
+    eprintln!(
+        "OFOX_REGISTRY_ISOLATION_V1 {}",
+        serde_json::json!({
+            "keys": ["winsock_catalog", "user_environment", "user_software"],
+            "production": production_reads,
+            "runtimeOnly": runtime_reads,
+            "productionVerified": production_verified,
+            "runtimeOnlyVerified": runtime_verified,
+            "gates": gates,
+            "scan": {
+                "visited": scan.visited,
+                "vanished": scan.vanished,
+                "hostUnopenable": scan.host_unopenable,
+                "enumerationStopped": scan.enumeration_stopped,
+                "checkErrors": scan.check_errors,
+                "readableByRuntimeOnly": scan.readable_by_runtime_only,
+                "readableByProduction": scan.readable_by_production,
+                "addedByRegistryRead": scan.added_by_registry_read,
+            },
+        })
+    );
     assert_eq!(
         gates,
         [true, false, true, false],
@@ -282,8 +305,6 @@ fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
         "production capability set"
     );
     assert_eq!(runtime_reads, [false, false, false], "runtime-only control");
-    // Coverage is always logged so a shrinking walk is visible, not silent.
-    eprintln!("OFOX_HKCU_REGISTRY_SCAN {scan:?}");
     assert!(scan.visited >= 100, "HKCU walk too small: {scan:?}");
     assert_eq!(
         scan.check_errors, 0,
@@ -303,6 +324,8 @@ struct HiveScan {
     host_unopenable: usize,
     enumeration_stopped: usize,
     check_errors: usize,
+    readable_by_runtime_only: usize,
+    readable_by_production: usize,
     added_by_registry_read: usize,
 }
 
@@ -341,6 +364,8 @@ fn scan_user_hive(tokens: [HANDLE; 2]) -> HiveScan {
         match (decide(tokens[0]), decide(tokens[1])) {
             // Any read right registryRead adds counts, bit by bit.
             (Ok(production), Ok(runtime_only)) => {
+                scan.readable_by_runtime_only += usize::from(runtime_only != 0);
+                scan.readable_by_production += usize::from(production != 0);
                 if production & !runtime_only != 0 {
                     scan.added_by_registry_read += 1;
                 }

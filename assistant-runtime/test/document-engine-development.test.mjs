@@ -87,15 +87,22 @@ test("all focused checks run serially after ACL and count real tests", async () 
     calls,
     checks.map((check) => check.name),
   );
-  assert.equal(calls.length, 9);
+  assert.equal(calls.length, 10);
   assert.match(
     checks[0].filter,
     /::document_cache_requires_exact_specific_file_read_execute_acl$/,
   );
-  assert.equal(checks[1].name, "functional-prerequisite");
+  // Registry isolation evidence is gathered before any engine is resumed.
+  assert.equal(checks[1].name, "registry-isolation-prerequisite");
   assert.equal(checks[1].exact, true);
   assert.match(
     checks[1].filter,
+    /::document_registry_read_opens_the_winsock_catalog_but_not_user_keys$/,
+  );
+  assert.equal(checks[2].name, "functional-prerequisite");
+  assert.equal(checks[2].exact, true);
+  assert.match(
+    checks[2].filter,
     /::document_lpac_proves_python_office_and_escape_denials$/,
   );
   assert.ok(
@@ -107,7 +114,7 @@ test("all focused checks run serially after ACL and count real tests", async () 
   );
 });
 
-test("functional prerequisite failure starts no whole-sandbox or follow-up cases", async () => {
+test("registry isolation failure starts no engine and keeps its evidence step", async () => {
   const calls = [];
   const report = await runDevelopmentChecks(async (check) => {
     calls.push(check.name);
@@ -119,10 +126,36 @@ test("functional prerequisite failure starts no whole-sandbox or follow-up cases
             "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;",
         };
   });
-  assert.deepEqual(calls, ["acl-prerequisite", "functional-prerequisite"]);
-  assert.equal(report.steps.length, 2);
+  assert.deepEqual(calls, [
+    "acl-prerequisite",
+    "registry-isolation-prerequisite",
+  ]);
+  assert.equal(report.steps.at(-1).name, "registry-isolation-prerequisite");
+  assert.equal(report.steps.at(-1).status, "failed");
+  assert.equal(report.success, false);
+});
+
+test("functional prerequisite failure starts no whole-sandbox or follow-up cases", async () => {
+  const calls = [];
+  const report = await runDevelopmentChecks(async (check) => {
+    calls.push(check.name);
+    return check.name !== "functional-prerequisite"
+      ? nativeResult(1)
+      : {
+          exitCode: 101,
+          output:
+            "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;",
+        };
+  });
+  assert.deepEqual(calls, [
+    "acl-prerequisite",
+    "registry-isolation-prerequisite",
+    "functional-prerequisite",
+  ]);
+  assert.equal(report.steps.length, 3);
   assert.equal(report.steps[0].status, "passed");
-  assert.equal(report.steps[1].status, "failed");
+  assert.equal(report.steps[1].status, "passed");
+  assert.equal(report.steps[2].status, "failed");
   assert.equal(report.success, false);
   assert.equal(report.releaseGate, false);
 });
@@ -143,7 +176,10 @@ test("failed ETW start prevents the functional process from running without trac
     },
   );
   assert.equal(captureCalls, 1);
-  assert.deepEqual(calls, ["acl-prerequisite"]);
+  assert.deepEqual(calls, [
+    "acl-prerequisite",
+    "registry-isolation-prerequisite",
+  ]);
   assert.equal(report.success, false);
   assert.equal(report.steps.at(-1).name, "functional-prerequisite");
 });
