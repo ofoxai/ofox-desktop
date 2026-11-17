@@ -129,6 +129,10 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 只存在于 test cfg，产品路径无法选择。开发工作流在该步骤显式设置此候选，回答
 控制台初始化是否为 0142 的原因；答案明确后移除该设置。B 成功也不改产品启动
 标志，修复须另行提交并通过无调试器的功能门禁。
+各组回执另含闭集 `stderrShape`：仅 kind（empty、libuv-fatal、node-assertion、
+node-fatal、v8-fatal、icu、openssl、unknown）；libuv-fatal 只在调用名属于固定
+Win32/libuv 词表时附该名与 i32 数字错误码，否则二者均为 `?`/null；逐行查找
+致命行，已知调用优先，不上传任何原文。
 
 固定 Nt 观察保留原 V2/Host Resume1 门禁。对实际 child HANDLE 调用
 `IsWow64Process2`，要求成功、processMachine=UNKNOWN、nativeMachine=AMD64，

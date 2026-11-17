@@ -52,6 +52,7 @@ fn case(
     let mut marker = false;
     let mut stdout_bytes = None;
     let mut stderr_bytes = None;
+    let mut stderr_shape = None;
     let result: Result<(), String> = (|| {
         let SuspendedLaunch {
             process,
@@ -148,6 +149,8 @@ fn case(
         }
         if let Ok(err) = err {
             stderr_bytes = Some(err.len());
+            // Closed-set kind/call/code only; the text never leaves the runner.
+            stderr_shape = Some(startup_comparison_protocol::stderr_shape(&err));
         }
         if !cleanup {
             return Err(UNAVAILABLE.into());
@@ -167,7 +170,7 @@ fn case(
         "lpacAccessMatched":evidence["evidence"]["lpacAccessProof"]["matched"],
         "childPolicy":evidence["evidence"]["childPolicy"], "imagePolicy":evidence["evidence"]["imagePolicy"], "integrityRid":evidence["evidence"]["integrityRid"],
         "resumePrevious":previous, "exitStatus":status, "timedOut":timed_out,
-        "markerMatched":marker, "stdoutBytes":stdout_bytes, "stderrBytes":stderr_bytes, "cleanupConfirmed":cleanup})
+        "markerMatched":marker, "stdoutBytes":stdout_bytes, "stderrBytes":stderr_bytes, "stderrShape":stderr_shape, "cleanupConfirmed":cleanup})
 }
 
 pub(super) fn compare(

@@ -108,6 +108,117 @@ pub(super) fn supported(rows: &[Value], candidate: Candidate) -> bool {
         })
 }
 
+/// Win32/libuv calls named by libuv's `uv_fatal_error` ("%s: (%d) %s") during
+/// process and stdio initialization. Any other name is reported as "?".
+const FATAL_CALLS: [&str; 45] = [
+    "WSAStartup",
+    "uv__malloc",
+    "GetModuleHandleA",
+    "GetModuleHandleW",
+    "GetProcAddress",
+    "LoadLibraryExA",
+    "CreateIoCompletionPort",
+    "GetQueuedCompletionStatus",
+    "GetQueuedCompletionStatusEx",
+    "PostQueuedCompletionStatus",
+    "CreateEvent",
+    "CreateEventA",
+    "CreateEventW",
+    "CreateJobObjectW",
+    "SetInformationJobObject",
+    "AssignProcessToJobObject",
+    "QueryPerformanceFrequency",
+    "SetConsoleCtrlHandler",
+    "DuplicateHandle",
+    "RegisterWaitForSingleObject",
+    "UnregisterWait",
+    "CreateFileW",
+    "ReadFile",
+    "WriteFile",
+    "CreateThread",
+    "QueueUserWorkItem",
+    "TlsAlloc",
+    "GetFileType",
+    "NtQueryInformationFile",
+    "NtSetInformationFile",
+    "NtQueryVolumeInformationFile",
+    "NtDeviceIoControlFile",
+    "socket",
+    "WSAIoctl",
+    "closesocket",
+    "CreateNamedPipeW",
+    "ConnectNamedPipe",
+    "SetNamedPipeHandleState",
+    "GetConsoleMode",
+    "SetConsoleMode",
+    "GetConsoleScreenBufferInfo",
+    "CancelIoEx",
+    "GetSystemInfo",
+    "OpenProcessToken",
+    "GetTokenInformation",
+];
+
+/// Closed-set shape of a failed child's stderr: a fixed kind, plus a
+/// vocabulary call name and numeric Win32 code for libuv fatal errors. No
+/// message text, path, PID or unknown word is ever returned.
+pub(super) fn stderr_shape(bytes: &[u8]) -> Value {
+    if bytes.is_empty() {
+        return serde_json::json!({"kind":"empty"});
+    }
+    let text = String::from_utf8_lossy(bytes);
+    // libuv's fatal line may follow other output; a known call name wins over
+    // an unknown one, and its fields come only from that line.
+    let fatal = text
+        .lines()
+        .filter_map(|line| libuv_fatal(line.trim_end_matches('\r')));
+    let mut unknown_call = false;
+    for (call, code) in fatal {
+        // The numeric code is reported only beside a known libuv call name.
+        if let Some(known) = FATAL_CALLS.into_iter().find(|known| *known == call) {
+            return serde_json::json!({"kind":"libuv-fatal","call":known,"code":code});
+        }
+        unknown_call = true;
+    }
+    if unknown_call {
+        return serde_json::json!({"kind":"libuv-fatal","call":"?","code":null});
+    }
+    let kind = if text.contains("Assertion") && text.contains("failed") {
+        "node-assertion"
+    } else if text.contains("FATAL ERROR:") {
+        "node-fatal"
+    } else if text.contains("# Fatal error") || text.contains("Check failed") {
+        "v8-fatal"
+    } else if text.contains("ICU") {
+        "icu"
+    } else if text.contains("OpenSSL") || text.contains("openssl") {
+        "openssl"
+    } else {
+        "unknown"
+    };
+    serde_json::json!({"kind":kind})
+}
+
+fn libuv_fatal(text: &str) -> Option<(&str, Option<i64>)> {
+    let (call, rest) = text.split_once(": (")?;
+    let identifier = call.len() <= 64
+        && call.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && call.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    let (digits, _) = rest.split_once(')')?;
+    let magnitude = digits.strip_prefix('-').unwrap_or(digits);
+    let numeric =
+        (1..=11).contains(&magnitude.len()) && magnitude.bytes().all(|b| b.is_ascii_digit());
+    if !identifier || !numeric {
+        return None;
+    }
+    // libuv prints the code with %d: only an i32 without leading zeros counts.
+    let canonical = magnitude == "0" || !magnitude.starts_with('0');
+    let code = digits
+        .parse::<i64>()
+        .ok()
+        .filter(|value| canonical && i32::try_from(*value).is_ok());
+    Some((call, code))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +345,86 @@ mod tests {
         let mut shifted = hidden.clone();
         shifted["creationFlags"] = serde_json::json!(DETACHED_FLAGS);
         assert!(!baseline(&shifted));
+    }
+    #[test]
+    fn stderr_is_reported_only_as_a_closed_shape() {
+        let shape = |text: &[u8]| stderr_shape(text);
+        assert_eq!(shape(b""), serde_json::json!({"kind":"empty"}));
+        assert_eq!(
+            shape(b"CreateIoCompletionPort: (5) Access is denied.\r\r\n"),
+            serde_json::json!({"kind":"libuv-fatal","call":"CreateIoCompletionPort","code":5})
+        );
+        assert_eq!(
+            shape(b"WSAStartup: (10091) WSAStartup cannot function at this time.\r\r\n"),
+            serde_json::json!({"kind":"libuv-fatal","call":"WSAStartup","code":10091})
+        );
+        // A call outside the vocabulary or an out-of-range code is masked.
+        assert_eq!(
+            shape(b"PrivateUserName: (5) Access is denied."),
+            serde_json::json!({"kind":"libuv-fatal","call":"?","code":null})
+        );
+        assert_eq!(
+            shape(b"WSAStartup: (99999999999) x"),
+            serde_json::json!({"kind":"libuv-fatal","call":"WSAStartup","code":null})
+        );
+        // The fatal line wins wherever it appears, and only its own fields count.
+        assert_eq!(
+            shape(b"\r\nwarning: private ICU note\r\nWSAStartup: (10091) x\r\r\n"),
+            serde_json::json!({"kind":"libuv-fatal","call":"WSAStartup","code":10091})
+        );
+        assert_eq!(
+            shape(b"uv__malloc: (14) Not enough memory.\r\r\n"),
+            serde_json::json!({"kind":"libuv-fatal","call":"uv__malloc","code":14})
+        );
+        for (text, code) in [
+            (
+                &b"WSAStartup: (-2147483648) x"[..],
+                Some(i64::from(i32::MIN)),
+            ),
+            (&b"WSAStartup: (2147483648) x"[..], None),
+            (&b"WSAStartup: (00005) x"[..], None),
+            (&b"WSAStartup: (0) x"[..], Some(0)),
+        ] {
+            assert_eq!(
+                shape(text),
+                serde_json::json!({"kind":"libuv-fatal","call":"WSAStartup","code":code})
+            );
+        }
+        for text in [
+            &b"WSAStartup: (-) x"[..],
+            b"WSAStartup: () x",
+            b"WSAStartup: (5 x",
+        ] {
+            assert_eq!(shape(text), serde_json::json!({"kind":"unknown"}));
+        }
+        for (text, kind) in [
+            (
+                &b"node[1234]: C:\\Users\\private\\src\\node.cc:1: Assertion `x' failed."[..],
+                "node-assertion",
+            ),
+            (
+                &b"FATAL ERROR: v8::ToLocalChecked Empty MaybeLocal"[..],
+                "node-fatal",
+            ),
+            (
+                &b"\n\n#\n# Fatal error in , line 0\n# Check failed: x.\n"[..],
+                "v8-fatal",
+            ),
+            (
+                &b"node: could not initialize ICU (check NODE_ICU_DATA)"[..],
+                "icu",
+            ),
+            (&b"OpenSSL configuration error: private-path"[..], "openssl"),
+            (&b"C:\\Users\\private: (5) Access is denied."[..], "unknown"),
+            (&b"\xff\xfe private-user"[..], "unknown"),
+        ] {
+            let value = shape(text);
+            assert_eq!(value, serde_json::json!({"kind":kind}), "{kind}");
+            let encoded = value.to_string();
+            for secret in ["private", "Users", "1234", "node.cc", "MaybeLocal"] {
+                assert!(!encoded.contains(secret), "{kind}:{secret}");
+            }
+        }
     }
     #[test]
     fn incomplete_or_wrong_original_failure_never_arms_comparison() {

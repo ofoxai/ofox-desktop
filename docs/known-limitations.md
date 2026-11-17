@@ -30,8 +30,11 @@ does not change production capabilities or grant Python admission. Fixed Nt
 entry/return observations now pair natively (runs 44058284863, 44062635550): the
 last completed operations create the ConDrv console Server/Reference handles,
 and no process creation follows before the failure. The exact failing operation
-is still unobserved; a test-only console-mode A-B-A is pending. Completed
-operations and the DLL failure do not by themselves establish causation.
+is still unobserved. Unassisted A-B-A run 44068121826 shows that launching
+without a console (DETACHED_PROCESS) gets past KernelBase initialization while
+both CREATE_NO_WINDOW controls still fail, but Node then aborts with
+STATUS_BREAKPOINT after a short stderr message, so production launch flags are
+unchanged and Windows Python capability stays disabled.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

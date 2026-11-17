@@ -494,3 +494,25 @@ ConDrv/conhost），capability、LPAC/token、子进程与映像策略、Job、�
 `0x0008040c`，Windows 单测将其绑定到 windows crate 常量；独立审查未发现严重问题。
 协议单测 5/5、相关 Node 九个文件 74/74 与工作流测试 19/19、0 skip；Windows 目标
 lib/test Clippy 交叉检查通过。原 CDB 观察与 registryRead 候选行为不变。
+
+运行 [44068121826](https://github.com/ofoxai/ofox-desktop/actions/runs/44068121826)
+（`ff5621b6`，推送工作流文件自动触发）调试器部分与上一轮一致，随后执行无调试器
+A-B-A：三组同一 profile/输入、token、LPAC AccessCheck、子进程/映像策略、完整性
+级别、Resume1 与清理全部核验一致，运行时摘要稳定。A1/A2 实际标志 `0x08080404`，
+均 `0xc0000142`、无输出；B 实际标志 `0x0008040c`，退出 `0x80000003`
+（STATUS_BREAKPOINT），stdout 0、stderr 48 字节。协议正确记为 inconclusive。
+
+由此以干预证实：0142 由 `CREATE_NO_WINDOW` 的控制台初始化路径引起，仅去掉控制台
+即越过 KernelBase 初始化。B 暴露第二层故障：Node 写出 48 字节 stderr 后以
+STATUS_BREAKPOINT 中止，这与 libuv/Node 致命错误调用 `DebugBreak()` 的表现
+一致，但内容未上传，尚不能定因。产品启动标志暂不修改：仅换标志仍不能让 Node
+运行，且调试器下的首个 Node 若触发断点异常会改变现有诊断的停止行为。
+
+下一次定点运行只补第二层故障的可见性：对照各组回执新增闭集 `stderrShape`，
+只给类别（empty/libuv-fatal/node-assertion/node-fatal/v8-fatal/icu/openssl/
+unknown）；libuv 致命错误仅在调用名属于固定 Win32/libuv 词表时附带该名和数字
+Win32 错误码，否则为 `?`/null，路径、PID 与消息原文均不上传。问题是：B 的
+48 字节 stderr 属于哪一类，若为 libuv 致命错误则是哪个调用、哪个错误码。独立
+隐私审查未发现泄露，据其意见改为逐行查找致命行、错误码限 i32 且无前导零。协议
+单测 6/6（含 RED→GREEN 的未知调用遮蔽与逐行查找），Windows 目标 lib/test Clippy 通过；
+A-B-A 判定、产品启动标志和隔离条件均未改。
