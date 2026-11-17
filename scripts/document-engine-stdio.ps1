@@ -10,5 +10,7 @@ function New-DocumentControlReader {
 
 function Get-DocumentCdbArguments([uint32]$TargetPid, [string]$Symbols, [string]$Commands) {
   # Match the documented CDB grammar: all startup options before the target.
-  return @('-pb','-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-G','-y',$Symbols,'-cf',$Commands,'-p',$TargetPid.ToString())
+  # -pb avoids a break-in thread. Request a stop on the replayed ntdll load event
+  # of waiting for a breakpoint that would require running the held target.
+  return @('-pb','-xe','ld:ntdll.dll','-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-G','-y',$Symbols,'-cf',$Commands,'-p',$TargetPid.ToString())
 }

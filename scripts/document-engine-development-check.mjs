@@ -253,7 +253,7 @@ export function safeMetadata(value) {
     debuggerJobKillOnClose: boolean(value?.debuggerJobKillOnClose),
     maximumFileMiB: 4,
     deadlineSeconds: 900,
-    flags: ["cdb-pb", "process-local-sls"],
+    flags: ["cdb-pb", "cdb-ntdll-load-break", "process-local-sls"],
   };
 }
 

@@ -47,6 +47,7 @@ test(
       const args = report.arguments;
       assert.deepEqual(args.slice(-2), ["-p", "42"]);
       assert.ok(args.indexOf("-cf") < args.indexOf("-p"));
+      assert.equal(args[args.indexOf("-xe") + 1], "ld:ntdll.dll");
       assert.equal(args[args.indexOf("-cf") + 1], "private commands");
       assert.equal(args[args.indexOf("-y") + 1], "private symbols");
       for (const unsafe of ["-g", "-pr", "-o"])

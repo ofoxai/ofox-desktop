@@ -227,3 +227,19 @@ reader、同一 suspended Node 的实际 CDB 握手与 loader 失败记录，不
 targetSeen，完整严格序列才配置；两项回归由 RED 修至 2/2 GREEN，独立复核通过。
 不扩大权限、不提前 Resume；新原生问题是命令文件是否执行，以及原握手为何
 未匹配。尚未取得 Node loader 失败的具体模块或操作。
+
+运行 [44003216099](https://github.com/ofoxai/ofox-desktop/actions/runs/44003216099)
+（`94f47bf3`）仍为 control 4/4、ACL 1/1，配置未完成且原 Resume 为空。
+CDB 40 行／1952 字节，但 prompt、标记提及、数值 TARGET、gflag、NUL 全部为
+0，已识别格式的 Win32 错误码为空；不能把这解释成没有错误。握手约 15.1 秒，
+清理 22 ms，owned debugger 和 raw 清理成功。启动选项规范化没有解决命令
+不执行的问题，不能将旧参数位置认定为原因。首失败已正确保留 `target_not_seen`。
+
+下一步只改变调试器停止事件：`-pb` 保留，增加 `-xe ld:ntdll.dll`，请求在
+attach 回放已有 ntdll 的加载事件时停止，使 CF 有机会在原线程仍挂起时执行。
+[DebugActiveProcess](https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-debugactiveprocess)
+记录已有 DLL 事件回放；[事件筛选](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/controlling-exceptions-and-events)
+支持 `ld[:Module]`，其默认只输出消息。这不保证当前 CDB 的组合行为，仍须
+原生确认。未加入 `-pr`、`-g`、`-o`、`gh`，不改变 token、权限或异常 handled；
+原完整身份、flags、尾标记和挂起计数门禁保持。目标仅为验证能否在 Suspend=1
+时完成 CF，成功后才读取实际 Node 启动记录；不是功能验收或权限修复。
