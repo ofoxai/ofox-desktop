@@ -216,7 +216,7 @@ export function safeMetadata(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const boolean = (value) => (typeof value === "boolean" ? value : null);
   const tools = {};
-  for (const name of ["xperf", "wpr", "cdb", "gflags", "tracerpt"]) {
+  for (const name of ["xperf", "wpr", "cdb", "symchk", "gflags", "tracerpt"]) {
     const tool = value?.tools?.[name];
     tools[name] = { available: boolean(tool?.available) };
     if (tool && typeof tool === "object" && !Array.isArray(tool))
@@ -251,6 +251,27 @@ export function safeMetadata(value) {
         : null,
     mode: "cdb-loader-snaps",
     debuggerJobKillOnClose: boolean(value?.debuggerJobKillOnClose),
+    symbolPreparation: {
+      ...Object.fromEntries(
+        ["started", "closed", "passedFile"].map((name) => [
+          name,
+          boolean(value?.symbolPreparation?.[name]),
+        ]),
+      ),
+      ...Object.fromEntries(
+        ["exitCode", "failedFiles", "passedOrIgnoredFiles"].map((name) => {
+          const number = value?.symbolPreparation?.[name];
+          return [
+            name,
+            Number.isInteger(number) &&
+            number >= -0x80000000 &&
+            number <= 0xffffffff
+              ? number
+              : null,
+          ];
+        }),
+      ),
+    },
     maximumFileMiB: 4,
     deadlineSeconds: 900,
     flags: ["cdb-pb", "cdb-ntdll-load-break", "process-local-sls"],
@@ -278,6 +299,15 @@ function traceFailure(reason, metadata, cleanup = null) {
 
 function safeControllerFailure(value) {
   const stages = new Set([
+    "symbol_inventory",
+    "symbol_prepare",
+    "symbol_cancelled",
+    "symbol_deadline",
+    "symbol_check_failed",
+    "symbol_check_incomplete",
+    "symbol_output_bound",
+    "symbol_cleanup_unconfirmed",
+    "symbol_cache_invalid",
     "controller_failure",
     "tool_inventory_failed",
     "required_tool_unavailable",

@@ -259,3 +259,23 @@ before/after 差值与全部身份/挂起计数门禁。这只是兼容性修复
 原生检查只回答 flags 能否读回，或明确读回阻塞的类别；不增加超时、不降低隔离。
 真实 PS 解析回归先失败、修复后相关 Node 48/48、0 skip；另覆盖
 `GetExpression: not found: ntdll!NtGlobalFlag` 的词法观察，独立复核通过。
+
+运行 [44010319498](https://github.com/ofoxai/ofox-desktop/actions/runs/44010319498)
+（`395dcb83`）仍拒绝 gflag 读回，握手 1.43 秒、清理 72 ms；control 4/4、ACL
+1/1、token/AccessCheck 通过。六项提示中 symbols/types/PEB/globalFlags/failure
+为 true、extension 为 false，未识别任何数值 flags；短 DWORD 不是此处阻塞的
+解释。原 Resume 仍为空，owned debugger/raw 清理成功，没有 Node loader 原因。
+
+后续只检验匹配的 ntdll 符号是否影响实际读回：在 controller-ready 与任何 target
+创建前，Microsoft 签名 SDK SymChk 对固定 System32/ntdll.dll 从微软公开库准备
+私有缓存，`/pt`、单文件 PASSED、唯一完整汇总及退出码均须成立。参见
+[官方选项](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/symchk-command-line-options)
+与[完整匹配下载说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/using-symchk)。
+含类型信息不保证所需字段可读，更不是 Node 根因结论。
+
+SymChk 与 CDB 同属自有 Job，环境清空；准备有 30 秒/取消界限，双流按小块读取，
+行 4 KiB、总 64 KiB 上限覆盖无换行输出。只取唯一普通、单链接、64 MiB 内的
+ntdll.pdb，拒绝 reparse 祖先，再用稳定只读句柄复制到私有平坦目录。CDB 仍禁用
+网络符号、正常匹配 PDB，完整身份/flags/挂起计数与 READY 门禁不变；准备失败
+不启动探针。所有原生符号准备及读回结果待定。真实 portable PS 子进程负例、
+C# 声明编译和布局检查、脱敏投影等相关回归 50/50、0 skip。
