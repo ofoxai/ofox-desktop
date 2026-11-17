@@ -189,3 +189,24 @@ CDB 接线仅在 test cfg 的首个固定 Node 使用：原挂起线程计数必
 旧 ETW 投影回归 13/13、纯 Rust fence 4/4、observer 4/4、Windows 目标模块及
 测试 all-targets Clippy 和格式检查通过。合成日志不证明 CDB 原生文案兼容，
 `-pb` 下首次 Resume 前的真实握手及本轮原生结果仍 pending。
+
+运行 [43943128991](https://github.com/ofoxai/ofox-desktop/actions/runs/43943128991)
+（`d40e36df`）的完整日志和诊断产物已核对：ACL 1/1 通过，原 Node 的 token
+与四项 AccessCheck 仍通过；随后 `cdb_handshake` 约 30 秒、`cdb_stop` 约 30 秒
+超时，配置、flags 和 Resume 全部为空。控制器最终在取消后启动 CDB，stdout、
+stderr 均 0 行；Node 侧确认 owned debugger 退出及 raw 删除。这次没有恢复原
+Node，不能据此判断其 DLL 初始化故障。Python/Office 和后续回归尚未进入。
+
+控制通道存在已复现的同步阻塞：Microsoft 文档明确 `Console.In.ReadLineAsync()`
+同步执行。原调用在返回 Task 之前等待 Node 的 STOP，而 STOP 要等 Cargo 完成后
+才发送；此前的超时和晚启动时间线与此一致。改为持久的普通 StreamReader 读取
+自有 stdin，保留预读的 STOP/CLEAN，并在已有 target 和实际启动前检查取消。
+同样的 ETW 控制通道共用该 reader。参见
+[API 合同](https://learn.microsoft.com/en-us/dotnet/api/system.io.textreader.readlineasync)。
+
+macOS ARM64 的官方 portable PowerShell 7.7.0／.NET 11.0.0 实进程回归先得到
+3 fail／1 pass，修复后 4/4 通过；包括静默 stdin 下取消与 deadline、合并发送的
+STOP/CLEAN/EOF。专用预检还强制校验唯一完整 TAP、4 pass、0 skip／fail／cancel，
+避免零项真实检查退出 0；该门禁回归 2/2 通过。相关 Node 测试合计 46/46、PS
+语法检查和独立复核通过。以上不是 Windows 证据。下一次只验证 Windows 控制
+reader、同一 suspended Node 的实际 CDB 握手与 loader 失败记录，不改隔离条件。

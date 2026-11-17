@@ -88,6 +88,11 @@ Host 中断／无副作用／未知结果回归，共九个固定命令。功能
 计数，零测试、跳过、失败或不完整输出均不能通过。开发 debug0 v3 缓存纳入
 Cargo.toml 的 features/profile，兼容恢复旧 v2 依赖；断言失败仍保存已完成依赖。
 
+任何 Cargo 命令之前先运行真实 PowerShell 控制通道预检，确认 stdin 静默时
+仍可轮询取消和 deadline，并完整读取 STOP/CLEAN/EOF。专用入口要求恰好
+4 pass、0 skip／fail／cancel 和唯一完整结果；工具缺失、子进程超时或只跳过
+真实进程用例均不能通过。macOS portable PowerShell 的结果不能代替这一步。
+
 日志及 `summary.json` 位于同 SHA、同 attempt 的
 `document-engine-development-<SHA>-<attempt>` artifact，不含发布包或账户配置。
 不运行全 sidecar、release probes、安装包或付费模型。默认 Windows Host pipeline

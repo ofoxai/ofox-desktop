@@ -7,6 +7,8 @@ param(
 # output and all ETL/XML/NDJSON stay in this private RUNNER_TEMP directory.
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'document-engine-stdio.ps1')
+$controlReader = New-DocumentControlReader
 $session = $null
 $rawReady = $false
 $failure = 'controller_failure'
@@ -21,7 +23,7 @@ function Send-Protocol($Value) {
 }
 
 function Read-Protocol([int]$Seconds) {
-  $read = [Console]::In.ReadLineAsync()
+  $read = $controlReader.ReadLineAsync()
   if (-not $read.Wait([TimeSpan]::FromSeconds($Seconds))) { throw 'protocol_deadline' }
   return $read.Result
 }
@@ -327,5 +329,6 @@ public static class DocumentEtwXml {
       $removed = -not (Test-Path -LiteralPath $RawDirectory)
     }
   } catch { }
+  try { $controlReader.Dispose() } catch { }
   Send-Protocol @{ state = 'cleaned'; ownedStopSucceeded = $stopped; rawRemoved = $removed; rawReady = $rawReady }
 }

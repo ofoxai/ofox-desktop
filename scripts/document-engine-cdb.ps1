@@ -1,6 +1,8 @@
 param([Parameter(Mandatory = $true)][string]$RawDirectory)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+. (Join-Path $PSScriptRoot 'document-engine-stdio.ps1')
+$controlReader = New-DocumentControlReader
 $ownsRaw = $false; $debugger = $null; $writer = $null; $metadata = $null
 $stage = 'controller_setup'; $debuggerStarted = $false; $debuggerClosed = $true
 $outTask = $null; $errTask = $null; $outDone = $false; $errDone = $false
@@ -163,7 +165,7 @@ public static class DocumentCdbNative {
     debuggerJobKillOnClose = $true }
   Write-Json 'controller.json' @{ diagnosticOnly = $true; controllerReady = $true }
   Send-Protocol @{ state = 'started'; metadata = $metadata }
-  $inputTask = [Console]::In.ReadLineAsync()
+  $inputTask = $controlReader.ReadLineAsync()
   $stage = 'target_not_seen'
   $deadline = [DateTime]::UtcNow.AddSeconds(900)
   while (-not (Test-Path -LiteralPath (Join-Path $RawDirectory 'target.json'))) {
@@ -171,6 +173,7 @@ public static class DocumentCdbNative {
     if ([DateTime]::UtcNow -gt $deadline) { throw 'deadline' }
     Start-Sleep -Milliseconds 10
   }
+  if ($inputTask.IsCompleted -or (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json'))) { throw 'cancelled' }
   $target = Read-Json 'target.json'
   if ($target.childPid -isnot [long] -and $target.childPid -isnot [int]) { throw 'target_mismatch' }
   if ($target.primaryTid -isnot [long] -and $target.primaryTid -isnot [int]) { throw 'target_mismatch' }
@@ -186,6 +189,7 @@ public static class DocumentCdbNative {
   foreach ($argument in @('-pb','-p', $target.childPid.ToString(), '-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-G','-y',$symbols,'-cf',$commands)) { $start.ArgumentList.Add($argument) }
   $debugger = [Diagnostics.Process]::new(); $debugger.StartInfo = $start
   $stage = 'debugger_attach_start'
+  if ($inputTask.IsCompleted -or (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json'))) { throw 'cancelled' }
   if (-not $debugger.Start()) { throw 'debugger_exited' }
   $debuggerStarted = $true; $debuggerClosed = $false
   $outTask = $debugger.StandardOutput.ReadLineAsync(); $errTask = $debugger.StandardError.ReadLineAsync()
@@ -242,7 +246,7 @@ public static class DocumentCdbNative {
     targetSeen = $targetSeen; beforeReadable = ($null -ne $before); afterReadable = ($null -ne $after); initTailSeen = $tail }
   Send-Protocol @{ state = 'raw-ready'; metadata = $metadata }
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'STOP') { throw 'controller_eof' }
-  $inputTask = [Console]::In.ReadLineAsync()
+  $inputTask = $controlReader.ReadLineAsync()
   if (-not $inputTask.Wait([TimeSpan]::FromSeconds(120)) -or $inputTask.Result -ne 'CLEAN') { throw 'controller_eof' }
 } catch {
   $known = @('target_not_seen','target_mismatch','gflag_before_unreadable','gflag_after_unreadable','gflag_changed_unexpectedly',
@@ -265,7 +269,7 @@ public static class DocumentCdbNative {
   try {
     if ($null -ne $inputTask -and $inputTask.Wait([TimeSpan]::FromSeconds(120))) {
       if ($null -ne $inputTask.Result -and $inputTask.Result -ne 'CLEAN') {
-        $inputTask = [Console]::In.ReadLineAsync()
+        $inputTask = $controlReader.ReadLineAsync()
         $inputTask.Wait([TimeSpan]::FromSeconds(120)) | Out-Null
       }
     }
@@ -274,6 +278,7 @@ public static class DocumentCdbNative {
   try { Stop-Cdb } catch { $debuggerClosed = $false }
   if ($null -ne $writer) { $writer.Dispose() }
   if ($null -ne $debugger) { $debugger.Dispose() }
+  try { $controlReader.Dispose() } catch { }
   $removed = $false
   if ($ownsRaw) { try { Remove-Item -LiteralPath $RawDirectory -Recurse -Force; $removed = -not (Test-Path -LiteralPath $RawDirectory) } catch { } }
   Send-Protocol @{ state = 'cleaned'; ownedStopSucceeded = $debuggerClosed; rawRemoved = $removed; rawReady = $false }

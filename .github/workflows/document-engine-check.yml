@@ -65,6 +65,9 @@ jobs:
       - name: Create frontend dist placeholder
         run: New-Item -ItemType Directory -Force -Path dist | Out-Null
         shell: pwsh
+      - name: Verify control reader stays responsive before native probes
+        run: .\assistant-runtime\resources\node\node.exe scripts/check-document-control.mjs
+        shell: pwsh
       # The runner's first Cargo command is the exact synthetic ACL test. A
       # failure stops immediately; subsequent fixed filters must run >0 tests.
       - name: ACL prerequisite then focused native regressions
