@@ -193,36 +193,39 @@ pub(super) fn compare(
         let home = folder.join("home");
         io(fs::create_dir(&home))?;
         let node = runtime.root.join("node/node.exe");
+        let plan = candidate.plan();
+        let console = |detached: bool| {
+            if detached {
+                ConsoleMode::Detached
+            } else {
+                ConsoleMode::Hidden
+            }
+        };
         rows.push(case(
             &node,
             folder,
             &home,
             profile,
             &ProcessCapabilities::runtime(&cap),
-            ConsoleMode::Hidden,
+            console(plan.base_detached),
         ));
-        if !startup_comparison_protocol::baseline(&rows[0]) {
+        if !startup_comparison_protocol::baseline(&rows[0], candidate) {
             return Ok(false);
-        } // No candidate unless A1 reproduces.
+        } // No candidate unless A1 reproduces the failure it addresses.
           // B changes exactly one launch condition from A1.
-        rows.push(match candidate {
-            startup_comparison_protocol::Candidate::RegistryRead => case(
-                &node,
-                folder,
-                &home,
-                profile,
-                &ProcessCapabilities::startup_registry_read(&cap)?,
-                ConsoleMode::Hidden,
-            ),
-            startup_comparison_protocol::Candidate::DetachedConsole => case(
-                &node,
-                folder,
-                &home,
-                profile,
-                &ProcessCapabilities::runtime(&cap),
-                ConsoleMode::Detached,
-            ),
-        });
+        let caps = if plan.extra {
+            ProcessCapabilities::startup_registry_read(&cap)?
+        } else {
+            ProcessCapabilities::runtime(&cap)
+        };
+        rows.push(case(
+            &node,
+            folder,
+            &home,
+            profile,
+            &caps,
+            console(plan.detached),
+        ));
         if rows[1]["completed"] != true || rows[1]["cleanupConfirmed"] != true {
             return Ok(false);
         }
@@ -232,7 +235,7 @@ pub(super) fn compare(
             &home,
             profile,
             &ProcessCapabilities::runtime(&cap),
-            ConsoleMode::Hidden,
+            console(plan.base_detached),
         ));
         runtime_stable = tree_digest_at(&runtime.root, MAX_TREE_BYTES)? == runtime.digest;
         Ok(runtime_stable && startup_comparison_protocol::supported(&rows, candidate))

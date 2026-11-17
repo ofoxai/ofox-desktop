@@ -115,11 +115,11 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 替代这些条件。调试模式始终停止在 Node 诊断，不产生引擎 admission；功能门禁
 最终必须在没有调试器的情况下通过。
 
-仅显式设置 `OFOX_DOCUMENT_STARTUP_COMPARISON`（`registryRead` 或
-`detachedConsole`）且该固定用例已取得
+仅显式设置 `OFOX_DOCUMENT_STARTUP_COMPARISON`（`registryRead`、`detachedConsole`
+或 `detachedRegistryRead`）且该固定用例已取得
 完整原始启动证明、Node 返回 0142 时，测试代码才追加
-无调试器的 A-B-A：同一临时 profile/输入，比较 runtime-only 与固定 registryRead
-候选。A1 不能重现则不派 B；每组都须验证实际精确 token/隔离属性和完整清理。
+无调试器的 A-B-A：同一临时 profile/输入，A1/A2 为该候选声明的基线启动，B 只改
+一个条件（追加 registryRead 或去掉控制台）。A1 不能重现则不派 B；每组都须验证实际精确 token/隔离属性和完整清理。
 候选成功也保留原用例失败，不改产品 capability 或 admission；没有 PID、SID、
 路径和输出正文的闭集收据写入该用例日志，不替代完整功能或客户端验收。
 原生运行 44027445443 的 A1/B/A2 均返回同一 0142，registryRead 单独不足；默认
@@ -133,6 +133,9 @@ Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项
 node-fatal、v8-fatal、icu、openssl、unknown）；libuv-fatal 只在调用名属于固定
 Win32/libuv 词表时附该名与 i32 数字错误码，否则二者均为 `?`/null；逐行查找
 致命行，已知调用优先，不上传任何原文。
+`detachedRegistryRead` 的 A1/A2 均以 `DETACHED_PROCESS` 启动，且必须精确复现
+`WSAStartup` 10107 的 libuv 中止（`0x80000003`）；B 仅追加 registryRead。每个候选的
+基线启动与预期失败由协议固定，A1 不复现则不派 B。开发工作流当前设置此候选。
 
 固定 Nt 观察保留原 V2/Host Resume1 门禁。对实际 child HANDLE 调用
 `IsWow64Process2`，要求成功、processMachine=UNKNOWN、nativeMachine=AMD64，

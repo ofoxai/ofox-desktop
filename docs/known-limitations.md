@@ -33,8 +33,9 @@ and no process creation follows before the failure. The exact failing operation
 is still unobserved. Unassisted A-B-A run 44068121826 shows that launching
 without a console (DETACHED_PROCESS) gets past KernelBase initialization while
 both CREATE_NO_WINDOW controls still fail, but Node then aborts with
-STATUS_BREAKPOINT after a short stderr message, so production launch flags are
-unchanged and Windows Python capability stays disabled.
+STATUS_BREAKPOINT because libuv's unconditional WSAStartup returns 10107
+(WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Production launch
+flags and capabilities are unchanged and Windows Python capability stays disabled.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

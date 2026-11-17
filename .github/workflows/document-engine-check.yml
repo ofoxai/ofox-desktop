@@ -74,10 +74,10 @@ jobs:
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
         env:
-          # Explicit test-only A-B-A after the debugger-confirmed 0142: the
-          # production CREATE_NO_WINDOW launch vs DETACHED_PROCESS, nothing else
-          # changed. Remove once the console question is answered.
-          OFOX_DOCUMENT_STARTUP_COMPARISON: detachedConsole
+          # Explicit test-only A-B-A after the debugger-confirmed 0142. Without a
+          # console (proven past KernelBase), A1/A2 must reproduce libuv's
+          # WSAStartup 10107 abort; B adds only registryRead. Remove once answered.
+          OFOX_DOCUMENT_STARTUP_COMPARISON: detachedRegistryRead
       - name: Upload development diagnostics
         if: always()
         uses: actions/upload-artifact@v7

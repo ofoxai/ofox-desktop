@@ -8,29 +8,55 @@ pub(super) const HIDDEN_FLAGS: u32 = 0x0808_0404;
 /// The same launch with DETACHED_PROCESS in place of CREATE_NO_WINDOW.
 pub(super) const DETACHED_FLAGS: u32 = 0x0008_040c;
 
-/// One launch condition changed in B; A1/A2 keep the production launch.
+/// One launch condition changed in B relative to A1/A2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Candidate {
     /// Adds the fixed registryRead capability (run 44027445443: insufficient).
     RegistryRead,
     /// DETACHED_PROCESS instead of CREATE_NO_WINDOW: no console to initialize.
+    /// Run 44068121826 got past KernelBase this way.
     DetachedConsole,
+    /// Both A rows already run without a console and must reproduce libuv's
+    /// WSAStartup 10107 abort (run 44071671054); B adds only registryRead.
+    DetachedRegistryRead,
+}
+/// The launch shared by A1/A2 and the one condition set B changes.
+#[derive(Clone, Copy)]
+pub(super) struct Plan {
+    pub(super) base_detached: bool,
+    pub(super) extra: bool,
+    pub(super) detached: bool,
 }
 impl Candidate {
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::RegistryRead => "registryRead",
             Self::DetachedConsole => "detachedConsole",
+            Self::DetachedRegistryRead => "detachedRegistryRead",
+        }
+    }
+    pub(super) fn plan(self) -> Plan {
+        let (base_detached, extra, detached) = match self {
+            Self::RegistryRead => (false, true, false),
+            Self::DetachedConsole => (false, false, true),
+            Self::DetachedRegistryRead => (true, true, true),
+        };
+        Plan {
+            base_detached,
+            extra,
+            detached,
         }
     }
 }
 
 pub(super) fn requested(value: Option<&str>) -> Option<Candidate> {
-    match value {
-        Some("registryRead") => Some(Candidate::RegistryRead),
-        Some("detachedConsole") => Some(Candidate::DetachedConsole),
-        _ => None,
-    }
+    [
+        Candidate::RegistryRead,
+        Candidate::DetachedConsole,
+        Candidate::DetachedRegistryRead,
+    ]
+    .into_iter()
+    .find(|candidate| value == Some(candidate.name()))
 }
 
 pub(super) fn eligible(error: &str) -> bool {
@@ -75,32 +101,51 @@ fn verified(row: &Value, count: u64) -> bool {
         && row["capabilityAttributes"]
             .as_array()
             .is_some_and(|v| v.len() == count as usize && v.iter().all(|v| v == 4))
-        && row["stderrBytes"] == 0
 }
-pub(super) fn baseline(row: &Value) -> bool {
-    verified(row, 1)
-        && row["extraRegistryRead"] == false
-        && row["consoleMode"] == "hidden"
-        && row["creationFlags"] == HIDDEN_FLAGS
-        && row["exitStatus"] == 0xc0000142u32
+/// Every isolation proof plus the exact capability set and console flags.
+fn launched(row: &Value, extra: bool, detached: bool) -> bool {
+    let (console, flags) = if detached {
+        ("detached", DETACHED_FLAGS)
+    } else {
+        ("hidden", HIDDEN_FLAGS)
+    };
+    verified(row, if extra { 2 } else { 1 })
+        && row["extraRegistryRead"] == extra
+        && row["consoleMode"] == console
+        && row["creationFlags"] == flags
+}
+/// A1/A2 must reproduce the failure the candidate addresses, exactly.
+pub(super) fn baseline(row: &Value, candidate: Candidate) -> bool {
+    let detached = candidate.plan().base_detached;
+    let failed = if detached {
+        row["exitStatus"] == 0x8000_0003u32
+            // Below the 1024-byte drain limit, so the shape saw the whole text.
+            && row["stderrBytes"]
+                .as_u64()
+                .is_some_and(|bytes| (1..1024).contains(&bytes))
+            && row["stderrShape"]
+                == serde_json::json!({"kind":"libuv-fatal","call":"WSAStartup","code":10107})
+    } else {
+        row["exitStatus"] == 0xc000_0142u32
+            && row["stderrBytes"] == 0
+            && row["stderrShape"] == serde_json::json!({"kind":"empty"})
+    };
+    launched(row, false, detached)
+        && failed
         && row["markerMatched"] == false
         && row["stdoutBytes"] == 0
 }
 pub(super) fn supported(rows: &[Value], candidate: Candidate) -> bool {
-    let (count, extra, console, flags) = match candidate {
-        Candidate::RegistryRead => (2, true, "hidden", HIDDEN_FLAGS),
-        Candidate::DetachedConsole => (1, false, "detached", DETACHED_FLAGS),
-    };
+    let plan = candidate.plan();
     rows.len() == 3
-        && baseline(&rows[0])
-        && baseline(&rows[2])
-        && verified(&rows[1], count)
-        && rows[1]["extraRegistryRead"] == extra
-        && rows[1]["consoleMode"] == console
-        && rows[1]["creationFlags"] == flags
+        && baseline(&rows[0], candidate)
+        && baseline(&rows[2], candidate)
+        && launched(&rows[1], plan.extra, plan.detached)
         && rows[1]["exitStatus"] == 0
         && rows[1]["markerMatched"] == true
         && rows[1]["stdoutBytes"] == "OFOX_SYSTEM_INIT_V1".len()
+        && rows[1]["stderrBytes"] == 0
+        && rows[1]["stderrShape"] == serde_json::json!({"kind":"empty"})
         && [1, 2].into_iter().all(|index| {
             ["childPolicy", "imagePolicy", "integrityRid"]
                 .into_iter()
@@ -226,15 +271,21 @@ fn libuv_fatal(text: &str) -> Option<(&str, Option<i64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    const ALL: [Candidate; 3] = [
+        Candidate::RegistryRead,
+        Candidate::DetachedConsole,
+        Candidate::DetachedRegistryRead,
+    ];
     #[test]
     fn a_disproved_candidate_is_not_repeated_without_exact_opt_in() {
+        for candidate in ALL {
+            assert_eq!(requested(Some(candidate.name())), Some(candidate));
+        }
+        assert_eq!(Candidate::RegistryRead.name(), "registryRead");
+        assert_eq!(Candidate::DetachedConsole.name(), "detachedConsole");
         assert_eq!(
-            requested(Some("registryRead")),
-            Some(Candidate::RegistryRead)
-        );
-        assert_eq!(
-            requested(Some("detachedConsole")),
-            Some(Candidate::DetachedConsole)
+            Candidate::DetachedRegistryRead.name(),
+            "detachedRegistryRead"
         );
         for value in [
             None,
@@ -244,20 +295,44 @@ mod tests {
             Some("registryRead "),
             Some("DetachedConsole"),
             Some("detached"),
+            Some("DetachedRegistryRead"),
         ] {
             assert_eq!(requested(value), None);
         }
-        assert_eq!(Candidate::RegistryRead.name(), "registryRead");
-        assert_eq!(Candidate::DetachedConsole.name(), "detachedConsole");
     }
-    fn row(extra: bool, console: &str, success: bool) -> Value {
+    /// outcome: "ok", "dll" (0xc0000142) or "winsock" (libuv WSAStartup abort).
+    fn row(extra: bool, console: &str, outcome: &str) -> Value {
+        let (exit, stdout, stderr, shape) = match outcome {
+            "ok" => (0u32, 19, 0, serde_json::json!({"kind":"empty"})),
+            "dll" => (0xc000_0142, 0, 0, serde_json::json!({"kind":"empty"})),
+            "winsock" => (
+                0x8000_0003,
+                0,
+                48,
+                serde_json::json!({"kind":"libuv-fatal","call":"WSAStartup","code":10107}),
+            ),
+            _ => unreachable!(),
+        };
         serde_json::json!({"completed":true,"tokenVerified":true,"cleanupConfirmed":true,"resumePrevious":1,
             "timedOut":false,"capabilityCount":if extra{2}else{1},"lpacAccessMatched":true,"childPolicy":1,"imagePolicy":7,"integrityRid":4096,
-            "capabilityAttributes":if extra{vec![4,4]}else{vec![4]},"stderrBytes":0,"extraRegistryRead":extra,"consoleMode":console,
+            "capabilityAttributes":if extra{vec![4,4]}else{vec![4]},"stderrBytes":stderr,"stderrShape":shape,"extraRegistryRead":extra,"consoleMode":console,
             "creationFlags":if console == "detached" {DETACHED_FLAGS} else {HIDDEN_FLAGS},
-            "exitStatus":if success{0}else{0xc0000142u32},"markerMatched":success,"stdoutBytes":if success{19}else{0}})
+            "exitStatus":exit,"markerMatched":outcome == "ok","stdoutBytes":stdout})
     }
-    const FIELDS: [&str; 18] = [
+    /// The A1/A2 row and the B row each candidate expects.
+    fn rows_for(candidate: Candidate) -> (Value, Value) {
+        match candidate {
+            Candidate::RegistryRead => (row(false, "hidden", "dll"), row(true, "hidden", "ok")),
+            Candidate::DetachedConsole => {
+                (row(false, "hidden", "dll"), row(false, "detached", "ok"))
+            }
+            Candidate::DetachedRegistryRead => (
+                row(false, "detached", "winsock"),
+                row(true, "detached", "ok"),
+            ),
+        }
+    }
+    const FIELDS: [&str; 19] = [
         "completed",
         "tokenVerified",
         "cleanupConfirmed",
@@ -270,6 +345,7 @@ mod tests {
         "integrityRid",
         "capabilityAttributes",
         "stderrBytes",
+        "stderrShape",
         "extraRegistryRead",
         "consoleMode",
         "creationFlags",
@@ -279,16 +355,10 @@ mod tests {
     ];
     #[test]
     fn all_three_actual_verified_results_are_required() {
-        for (candidate, middle) in [
-            (Candidate::RegistryRead, row(true, "hidden", true)),
-            (Candidate::DetachedConsole, row(false, "detached", true)),
-        ] {
-            let rows = [
-                row(false, "hidden", false),
-                middle,
-                row(false, "hidden", false),
-            ];
-            assert!(supported(&rows, candidate));
+        for candidate in ALL {
+            let (base, middle) = rows_for(candidate);
+            let rows = [base.clone(), middle, base];
+            assert!(supported(&rows, candidate), "{}", candidate.name());
             for length in 0..3 {
                 assert!(!supported(&rows[..length], candidate));
             }
@@ -311,36 +381,91 @@ mod tests {
     }
     #[test]
     fn a_candidate_varies_exactly_one_launch_condition() {
-        let hidden = row(false, "hidden", false);
-        // The console candidate keeps the single runtime capability.
-        let both = [hidden.clone(), row(true, "detached", true), hidden.clone()];
-        assert!(!supported(&both, Candidate::DetachedConsole));
-        assert!(!supported(&both, Candidate::RegistryRead));
-        // Each candidate's row cannot certify the other candidate.
-        let detached = [hidden.clone(), row(false, "detached", true), hidden.clone()];
-        assert!(!supported(&detached, Candidate::RegistryRead));
-        let registry = [hidden.clone(), row(true, "hidden", true), hidden.clone()];
-        assert!(!supported(&registry, Candidate::DetachedConsole));
-        // Baselines must use the production console mode.
-        let shifted = [
-            row(false, "detached", false),
-            row(false, "detached", true),
-            hidden,
-        ];
-        assert!(!supported(&shifted, Candidate::DetachedConsole));
-        assert!(!baseline(&row(false, "other", false)));
+        // Neither another candidate's B row nor its baseline can certify one.
+        for candidate in ALL {
+            let (base, middle) = rows_for(candidate);
+            for other in ALL.into_iter().filter(|other| *other != candidate) {
+                let (other_base, other_middle) = rows_for(other);
+                assert!(!supported(
+                    &[base.clone(), other_middle, base.clone()],
+                    candidate
+                ));
+                if other_base != base {
+                    assert!(!supported(
+                        &[other_base.clone(), middle.clone(), other_base],
+                        candidate
+                    ));
+                }
+            }
+        }
+        // A B row that changes both conditions only fits the staged candidate.
+        let both = row(true, "detached", "ok");
+        for candidate in [Candidate::RegistryRead, Candidate::DetachedConsole] {
+            let (base, _) = rows_for(candidate);
+            assert!(!supported(&[base.clone(), both.clone(), base], candidate));
+        }
+        // The console-free baseline must reproduce exactly WSAStartup 10107.
+        for (key, value) in [
+            ("code", serde_json::json!(10091)),
+            ("call", serde_json::json!("CreateEvent")),
+        ] {
+            let mut other = row(false, "detached", "winsock");
+            other["stderrShape"][key] = value;
+            assert!(!baseline(&other, Candidate::DetachedRegistryRead));
+        }
+        let mut silent = row(false, "detached", "winsock");
+        silent["stderrBytes"] = serde_json::json!(0);
+        assert!(!baseline(&silent, Candidate::DetachedRegistryRead));
+        assert!(!baseline(
+            &row(false, "detached", "dll"),
+            Candidate::DetachedRegistryRead
+        ));
+        assert!(!baseline(
+            &row(false, "other", "dll"),
+            Candidate::RegistryRead
+        ));
+    }
+    #[test]
+    fn each_plan_changes_exactly_one_launch_condition() {
+        for candidate in ALL {
+            let plan = candidate.plan();
+            let changes = u8::from(plan.extra) + u8::from(plan.base_detached != plan.detached);
+            assert_eq!(changes, 1, "{}", candidate.name());
+        }
+    }
+    #[test]
+    fn unexpected_stderr_on_a_silent_row_is_refused() {
+        for candidate in ALL {
+            let (base, middle) = rows_for(candidate);
+            let mut noisy = middle.clone();
+            noisy["stderrBytes"] = serde_json::json!(5);
+            assert!(!supported(&[base.clone(), noisy, base.clone()], candidate));
+            let mut shaped = middle;
+            shaped["stderrShape"] = serde_json::json!({"kind":"unknown"});
+            assert!(!supported(&[base.clone(), shaped, base], candidate));
+        }
+        let mut noisy = row(false, "hidden", "dll");
+        noisy["stderrBytes"] = serde_json::json!(5);
+        assert!(!baseline(&noisy, Candidate::RegistryRead));
+        let mut shaped = row(false, "hidden", "dll");
+        shaped["stderrShape"] = serde_json::json!({"kind":"unknown"});
+        assert!(!baseline(&shaped, Candidate::RegistryRead));
+        // At the drain limit the text may be truncated, so it cannot reproduce.
+        let mut truncated = row(false, "detached", "winsock");
+        truncated["stderrBytes"] = serde_json::json!(1024);
+        assert!(!baseline(&truncated, Candidate::DetachedRegistryRead));
     }
     #[test]
     fn the_receipt_binds_each_label_to_the_actual_creation_flags() {
         assert_eq!(HIDDEN_FLAGS, 0x0808_0404);
         assert_eq!(DETACHED_FLAGS, 0x0008_040c);
         assert_eq!(HIDDEN_FLAGS ^ DETACHED_FLAGS, 0x0800_0008);
-        let hidden = row(false, "hidden", false);
-        let mut mislabeled = row(false, "detached", true);
+        let hidden = row(false, "hidden", "dll");
+        let mut mislabeled = row(false, "detached", "ok");
         mislabeled["creationFlags"] = serde_json::json!(HIDDEN_FLAGS);
         let rows = [hidden.clone(), mislabeled, hidden.clone()];
         assert!(!supported(&rows, Candidate::DetachedConsole));
-        let mut both = row(false, "detached", true);
+        let mut both = row(false, "detached", "ok");
         both["creationFlags"] = serde_json::json!(HIDDEN_FLAGS | DETACHED_FLAGS);
         assert!(!supported(
             &[hidden.clone(), both, hidden.clone()],
@@ -348,7 +473,10 @@ mod tests {
         ));
         let mut shifted = hidden.clone();
         shifted["creationFlags"] = serde_json::json!(DETACHED_FLAGS);
-        assert!(!baseline(&shifted));
+        assert!(!baseline(&shifted, Candidate::DetachedConsole));
+        let mut detached = row(false, "detached", "winsock");
+        detached["creationFlags"] = serde_json::json!(HIDDEN_FLAGS);
+        assert!(!baseline(&detached, Candidate::DetachedRegistryRead));
     }
     #[test]
     fn stderr_is_reported_only_as_a_closed_shape() {

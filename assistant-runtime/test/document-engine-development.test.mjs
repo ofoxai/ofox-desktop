@@ -601,7 +601,7 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
   const candidates = [
     ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_COMPARISON: (\S+)$/gm),
   ].map((match) => match[1]);
-  assert.deepEqual(candidates, ["detachedConsole"]);
+  assert.deepEqual(candidates, ["detachedRegistryRead"]);
   const step = workflow
     .split(/^ {6}- /m)
     .find((block) =>
@@ -611,7 +611,7 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     );
   assert.match(
     step,
-    /^ {10}OFOX_DOCUMENT_STARTUP_COMPARISON: detachedConsole$/m,
+    /^ {10}OFOX_DOCUMENT_STARTUP_COMPARISON: detachedRegistryRead$/m,
   );
   assert.match(
     workflow,

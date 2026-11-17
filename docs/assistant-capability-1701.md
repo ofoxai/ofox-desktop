@@ -516,3 +516,23 @@ Win32 错误码，否则为 `?`/null，路径、PID 与消息原文均不上传�
 隐私审查未发现泄露，据其意见改为逐行查找致命行、错误码限 i32 且无前导零。协议
 单测 6/6（含 RED→GREEN 的未知调用遮蔽与逐行查找），Windows 目标 lib/test Clippy 通过；
 A-B-A 判定、产品启动标志和隔离条件均未改。
+
+运行 [44071671054](https://github.com/ofoxai/ofox-desktop/actions/runs/44071671054)
+（`ec902a2e`）重复了上一轮的全部结果：调试器部分一致；A-B-A 三组隔离证明与清理
+一致，A1/A2 为 0142、stderr 为空；B（`DETACHED_PROCESS`）以 `0x80000003` 退出，
+`stderrShape` 为 libuv 致命错误 `WSAStartup`、错误码 10107（WSASYSCALLFAILURE）。
+内置 Node v22.23.4 的 libuv 1.51 在初始化时无条件调用 `WSAStartup`，失败即
+`uv_fatal_error` 写 stderr 并 `DebugBreak()`，与退出码一致。`WSAStartup` 不建立
+连接，只加载本地 Winsock 目录；此前观测到 LPAC 读取多处 HKLM 键被拒，但目录读取
+是否即为原因尚未验证。registryRead 的 A-B-A（44027445443）在 0142 处即失败、
+从未到达 `WSAStartup`，因此它对第二层故障的作用仍未知。产品标志与能力均未修改。
+
+下一次定点运行只回答：不分配控制台时，registryRead 能否让 `WSAStartup` 成功并使
+Node 正常运行。新增 test-only 候选 `detachedRegistryRead`：A1/A2 以
+`DETACHED_PROCESS` 和产品单一 runtime capability 启动，须精确复现 `0x80000003` 与
+`WSAStartup` 10107；B 只追加 registryRead。对照协议改为由候选声明基线启动与预期
+失败，stderr 检查按结果精确约束（0142 组为空、WSAStartup 组须为该分类、成功组
+为空，WSAStartup 组字节数须小于 1024 的读取上限以排除截断）。工作流候选切换为
+`detachedRegistryRead`；独立审查对全部 A/B 行组合核对未发现放宽，协议单测 9/9
+（含每个计划只改一个条件），Windows 目标 lib/test Clippy 通过。产品标志与能力均未修改；即使 B 成功，也只说明候选有效，
+采用前仍需评估 registryRead 的授权范围并通过无调试器功能门禁。
