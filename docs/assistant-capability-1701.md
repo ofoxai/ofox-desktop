@@ -614,3 +614,15 @@ SDDL 逐键核对整棵目录子树完全复原；复原未证实即不支持。
 Winsock 正向对照改为“本次是否应可读”，HKCU 用户键必须拒绝不变。该候选只在
 显式请求且 `GITHUB_ACTIONS=true` 时由独立用例执行，开发检查在 ACL 后插入此步骤。
 问题是：不授予 registryRead、只放开 Winsock 目录读取，Node 能否正常运行。
+
+运行 [44142596063](https://github.com/ofoxai/ofox-desktop/actions/runs/44142596063)
+（`ad9aa76d`，推送自动触发）：ACL 1/1；`launch-comparison` 记为 inconclusive。
+`winsockGrantApplied=true`，B 的 `grantRestored=true`（整棵 Winsock 目录子树 SDDL
+逐键复原）。B 的 token 校验通过，即门禁正向对照看到授权下 Winsock 目录根键可读、
+HKCU 仍拒绝；但 B 与 A1/A2 一样以 `0x80000003` 退出，`stderrShape` 同为 `WSAStartup`
+10107。三组隔离证明、清理与运行时摘要一致。
+
+结论：仅放开 `WinSock2\Parameters` 子树不足以让 `WSAStartup` 成功；registryRead
+授予的范围中还有它需要的其他读取，目前未知。产品维持拒绝状态，不改 capability。
+下一步候选：用已验证的 Nt 观察器在“无控制台、仅 runtime”的 Node 上记录 libuv 中止前
+失败的系统调用与对象形态，以确定缺失的读取，再判断窄授权是否仍可行。
