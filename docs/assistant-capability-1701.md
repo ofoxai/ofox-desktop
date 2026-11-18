@@ -710,3 +710,24 @@ CDB 被结束，进程以 `0xC0000354` 退出。日志这次留在读取上限�
 结束，与未挂调试器一致；加载器快照投影的行数上限改为随 4 MiB 字节上限（按 16 字节一行）
 计算。这样即便仍出现洪水或二次机会停顿，它们也发生在 `WSAStartup` 之后，日志仍可解析，
 洪水中的异常只计入总数。
+
+运行 [44231498872](https://github.com/ofoxai/ofox-desktop/actions/runs/44231498872)
+（`b2d12b4d`，手动派发）**回答了问题**。ACL、`startup-trace` 通过（授权逐键复原、调试器
+证明成立），注册表隔离前置按已知原因失败。日志可解析：主线程 124 次调用全部配对
+（`complete-for-fixed-set`），`winsockStartup` 为 `returned`，进入前 120 次、返回时 121 次，
+返回值 **10107**。区间内只有一次被观察的调用：第 121 次 `NtOpenKeyEx`，对象为
+**`\Registry\Machine`（HKLM 根键本身）**，访问掩码 `0x2000000`（MAXIMUM_ALLOWED），
+返回 `0xC0000022`。这是 Windows 把预定义句柄 `HKEY_LOCAL_MACHINE` 映射为真实句柄的一步；
+它失败后 `ws2_32` 根本到不了 Winsock 目录，所以只放开目录子树（44142596063）无效。
+调试器事件同时证实了之前的推断：第 71 次调用后主线程出现首次机会 `0x80000003`
+（加载器调试器断点）；第 124 次后依次是 libuv `DebugBreak` 的首次、二次机会 `0x80000003`，
+以及 `abort()` 快速失败的二次机会 `0xC0000409` 反复通知（共 21731 条，在 `WSAStartup`
+之后，已不影响解析）。同一启动中其他组件也多次以 MAXIMUM_ALLOWED 打开 HKLM 根键或
+`\Registry\User\<user-sid>` 被拒，但不致命。
+
+结论：LPAC 下 `WSAStartup` 需要能打开 HKLM 根键。Windows 默认只通过 registryRead
+capability 向 LPAC 授予 HKLM 根键读取（并经继承覆盖大部分 HKLM），同一 capability 也
+覆盖当前用户 HKCU（44133006077）。不授予 registryRead 的窄方案必须修改 HKLM 根键的
+机器级 ACL（另加 Winsock 目录子树），需要管理员权限；而当前安装包为按用户安装
+（`wix/per-user-main.wxs`），安装时没有管理员权限。产品维持拒绝状态，下一步由用户
+在“接受 registryRead 的 HKCU 读取”“提权修改机器 ACL”“自建 Node/libuv”之间决定。
