@@ -806,3 +806,19 @@ Node 退出 1，未超时；其余原生步骤未执行。
 有无事件 4？若有，能否逐项核对调用者、进程创建时间、主线程与固定请求？
 开发诊断从同一已退出进程的句柄取得窗口，在运行器内检查候选记录，仅上传闭集结论。
 缺失、身份不符、匹配与查询错误均保留原功能前置的退出码。
+
+运行 [44249750166](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
+（`4713db57`，手动，第 1 次，Windows Server 2022）通过 ACL 和注册表前置，各 1/1。
+四种门禁依次为 `[true,false,true,false]`。生产令牌四键均可读，仅 runtime 均不可读。
+HKCU 遍历 3503 键，生产可读 1798、仅 runtime 可读 4，新增可读 1794。两者各可写 3，
+新增写权限和测量错误均为 0。
+
+功能前置在 `node_isolation` 检查点 7 返回 `UNKNOWN`，Node 退出 1，未超时，Cargo 退出 101。
+`childBlockEvent=no-event-in-window` 表示严格查询正常结束，在这个固定 Node 进程从创建
+到退出的精确时间内，KernelMode 通道没有事件 4。产物含 summary 和三个步骤日志。
+Pyodide、OfficeCLI、完整 sandbox、附件和 Host 回归均未执行。
+
+事件查询已回答本轮问题。要定位 `UNKNOWN`，还缺同一次固定请求的 Windows 调用结果：
+libuv 是否到达 `CreateProcessW`，若发生失败，转换成 libuv 错误之前的 Windows 错误是哪一类。
+现有 WSAStartup 专用 CDB 配置使用仅 runtime 的令牌并临时授权 Winsock 子树，复用该配置
+无法回答生产令牌上的问题。

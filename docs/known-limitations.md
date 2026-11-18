@@ -77,8 +77,10 @@ checkpoint 7 and timed out in the child-process denial check. In the subsequent
 the same request inherited stdio and returned `UNKNOWN` before the deadline.
 The functional gate rejected the result. A [follow-up kernel event check](https://github.com/ofoxai/ofox-desktop/actions/runs/44245924637)
 returned `no-match`. Its report combined an empty query with an event whose caller
-could not be verified. The cause of this child-process error,
-the remaining isolation checks, Pyodide and OfficeCLI still require native verification.
+could not be verified. The [lifetime-bounded Server 2022 query](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
+completed successfully and found no KernelMode event 4 during the fixed Node
+process's lifetime. The underlying Windows error remains unknown.
+The remaining isolation checks, Pyodide and OfficeCLI still require native verification.
 Windows Python capability stays disabled until the native functional gate and client acceptance pass.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
