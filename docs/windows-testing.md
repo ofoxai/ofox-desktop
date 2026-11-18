@@ -81,8 +81,9 @@ workflow 将构建两个探针并上传验证日志；全量前端检查继续�
 此安排遵循 [GitHub 手动 workflow 的注册要求](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)，不修改 main。
 
 该入口准备 pinned 生产资源后，第一个 Cargo 测试只运行精确的 synthetic ACL
-用例；失败即停并上传日志。通过后先精确运行注册表隔离前置（两种 token 的固定键
-读权限与整个 HKCU 遍历，只输出闭集计数），再精确运行 Python、OfficeCLI 及逃逸拒绝的功能
+用例；失败即停并上传日志。通过后先精确运行注册表范围前置（两种 token 的固定键
+读权限与整个 HKCU 遍历，只输出闭集计数；生产令牌须能读 Winsock 目录，HKCU 读取按
+已接受的残余风险记录，仅 runtime 的令牌须读不到任何 HKCU 键），再精确运行 Python、OfficeCLI 及逃逸拒绝的功能
 前置，成功才串行执行全部 `windows_sandbox`、三个附件备份及长路径回归、三个
 Host 中断／无副作用／未知结果回归，共十个固定命令。功能前置失败同样立即停，
 避免其余用例重复重型预检。每个命令都检查实际测试
@@ -157,18 +158,21 @@ runtime capability 启动，B 运行期间临时为该 capability 在
 
 产品沙箱现以 `DETACHED_PROCESS` 与显式管道 stdio 启动，不分配控制台；capability
 为私有 runtime 加 Windows `registryRead`，令牌须恰为这两项且均启用，校验时独立
-派生，并须实际处于启用状态。每次启动在挂起的实际 token 上先做正向对照：
-Winsock 目录键的可读性必须与是否持有 registryRead 一致；再对 `HKCU\Environment`
-与 `HKCU\Software` 的真实 DACL 做 AccessCheck，任一可查询或枚举即拒绝启动
-（fail closed）。原生测试另遍历整个 HKCU，逐键比较生产集合与仅 runtime 集合的读权限，
-registryRead 不得新增任何可读键；生产校验须拒绝仅 runtime 的子进程。
+派生，并须实际处于启用状态。每次启动在挂起的实际 token 上对真实 DACL 做
+AccessCheck：HKLM 根键与 Winsock 目录键必须可读（`WSAStartup` 先打开 HKLM 根键，
+原生跟踪 44231498872）；`HKCU\Environment` 与 `HKCU\Software` 也逐次测量，可读属
+用户已接受的残余风险，不再拒绝（见 known-limitations）；任何一项无法测量都拒绝启动
+（fail closed）。测量结果只在可信探针的证据中记录，普通启动不保留。原生测试另遍历
+整个 HKCU，逐键比较生产集合与仅 runtime 集合的读写权限：读取差异只计数（44221172203
+起的运行中共 3510 键，仅 runtime 可读 4 个、生产可读 1802 个），registryRead 不得新增
+任何写权限；生产校验须拒绝仅 runtime 的子进程。
 启用调试器诊断需要同时修改工作流与固定该工作流的测试，属有意的显式操作。
 
 固定 Nt 观察保留原 V2/Host Resume1 门禁。对实际 child HANDLE 调用
 `IsWow64Process2`，要求成功、processMachine=UNKNOWN、nativeMachine=AMD64，
 并核对原生 Windows 绑定的 size/offset；使用的是公开 Windows x64 ABI，不宣称
 PDB 布局读回。原有 SymChk 与 gflag 实测仍保留。实际线程表与 `bl /L` 须证明全部固定
-owned 入口断点（当前 15 个，含仅记录状态的 NtCreateUserProcess）已解析、启用并
+owned 入口断点（当前 19 个，含仅记录状态的 NtCreateUserProcess 与四个注册表句柄操作）已解析、启用并
 关联实际线程。每次调用的 owned 持久返回断点 30
 独立验证地址和线程，返回仅在同 TID、入口 RSP+8 和保存的返回地址上配对 EAX。
 ACCESS_MASK 取 EDX 低 32 位；ALPC PortName 与注册表 ValueName 不作访问掩码。

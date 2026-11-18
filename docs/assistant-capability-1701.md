@@ -731,3 +731,15 @@ capability 向 LPAC 授予 HKLM 根键读取（并经继承覆盖大部分 HKLM�
 机器级 ACL（另加 Winsock 目录子树），需要管理员权限；而当前安装包为按用户安装
 （`wix/per-user-main.wxs`），安装时没有管理员权限。产品维持拒绝状态，下一步由用户
 在“接受 registryRead 的 HKCU 读取”“提权修改机器 ACL”“自建 Node/libuv”之间决定。
+
+用户决定（2026-11-18）：接受 registryRead。生产令牌维持 {runtime, registryRead}、
+无控制台启动；门禁改为按 `RegistryScope` 判断：生产要求 HKLM 根键与 Winsock 目录均可读
+（正向对照对齐跟踪结论），用户 `Environment`、`Software` 两键每次照常在实际挂起令牌上
+测量，但可读不再拒绝（已接受的残余风险，写入 `docs/known-limitations.md`）；任何测量
+失败仍拒绝，结果只在可信探针证据中保留。测试专用的仅 runtime 令牌保持负对照：HKLM 根键
+与用户键必须拒绝，目录只在 CI 临时授权下可读。原生前置改名为
+`document_registry_scope_is_measured_and_adds_no_write_rights`（开发检查步骤
+`registry-scope-prerequisite`）：固定四键中仅 runtime 令牌一个都读不到；HKCU 遍历比较
+读写权限，读取差异只计数（此前运行：3510 键，仅 runtime 可读 4 个、生产 1802 个），
+registryRead 不得新增任何写权限。开发工作流去掉跟踪开关，下一次运行不挂调试器，依次验证注册表范围
+前置、Python／OfficeCLI 功能前置与完整 `windows_sandbox`。Windows Python 能力仍关闭。

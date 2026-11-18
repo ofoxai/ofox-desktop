@@ -21,10 +21,10 @@ AccessCheck APIs. This is a behavioral proof based on LPAC semantics, not a
 Microsoft-defined IsLPAC query contract. Its ordinary AppContainer controls
 and Windows 10/11 client validation remain required acceptance evidence.
 
-The current Windows Node startup still fails inside KernelBase DLL_PROCESS_ATTACH
-and reports STATUS_DLL_INIT_FAILED, after the actual LPAC token and complete
-debugger/manual-hold/Host-resume proof pass. The failing system operation is not
-yet known. Native A-B-A run 44027445443 confirmed that adding registryRead alone
+The Windows Node startup originally failed inside KernelBase DLL_PROCESS_ATTACH
+and reported STATUS_DLL_INIT_FAILED, after the actual LPAC token and complete
+debugger/manual-hold/Host-resume proof passed; the history below records how
+that was resolved. Native A-B-A run 44027445443 confirmed that adding registryRead alone
 still exits with the same status in all three verified, unassisted cases. This
 does not change production capabilities or grant Python admission. Fixed Nt
 entry/return observations now pair natively (runs 44058284863, 44062635550): the
@@ -36,18 +36,40 @@ both CREATE_NO_WINDOW controls still fail, but Node then aborts with
 STATUS_BREAKPOINT because libuv's unconditional WSAStartup returns 10107
 (WSASYSCALLFAILURE) in the LPAC sandbox (run 44071671054). Run 44076224990
 showed that the console-free launch plus the registryRead capability lets Node
-run normally under the same verified isolation. Production now launches
-detached with exactly {runtime, registryRead} and refuses any launch whose actual
-token can read the user's Environment or Software registry keys. registryRead
-still widens LPAC read access to the HKLM keys Windows grants it; that scope is
-accepted for Winsock initialization. The first unassisted native run (44122597628)
-refused every launch at that gate because the actual token could read
-HKCU\Environment. Run 44133006077 showed registryRead grants that read: the
-production token can read HKCU\Environment, HKCU\Software and the HKCU root,
-while the runtime-only token cannot. registryRead therefore exposes the user's
-registry hive, not only HKLM, so production keeps refusing these launches until a
-narrower Winsock grant or a different runtime is chosen. Windows Python capability
-stays disabled.
+run normally under the same verified isolation. Run 44133006077 showed that
+registryRead also lets the token read HKCU\Environment, HKCU\Software and the
+HKCU root, while the runtime-only token cannot. A CI-only grant of the Winsock
+catalog subtree alone was insufficient (44142596063), and a debugger trace
+(44231498872) showed why: WSAStartup first opens the HKLM root key itself, which
+Windows grants an LPAC only through registryRead. Avoiding registryRead would
+require either an elevated, machine-wide ACL change on the HKLM root, which the
+per-user installer cannot make, or a custom Node/libuv build that tolerates the
+Winsock failure.
+
+Accepted residual risk (user decision, 2026-11-18): production launches detached
+with exactly {runtime, registryRead}. On default ACLs registryRead grants read
+on the HKLM root and, by inheritance, most of HKLM (not walked key by key), and
+on the current user's hive: native walks found 1802 of 3510 HKCU keys readable
+with it, against 4 (the container's own keys) without it, and it adds no write
+right. The sharpest consequence: HKCU\Environment often holds API keys (this
+app itself detects ANTHROPIC_*, OPENAI_* and GEMINI_* variables there), so a
+registry read bypasses the environment scrubbing applied to sandboxed children;
+HKCU\Software may hold other applications' credentials. A read needs native
+code: model-written Python runs in Pyodide/WASM inside Node, which has no
+registry API; only bundled native code (Node, OfficeCLI, the bundled Skia canvas
+addon) runs, newly written native modules and child processes are denied. The
+realistic path is therefore an exploit, most plausibly a malicious attachment
+parsed by OfficeCLI (file previews run it on user files). The network stays
+denied, but output files in the task directory and tool stdout/stderr (up to
+4 MiB for an SVG preview) are returned and can reach the remote model provider
+or the user. Every launch measures the HKLM root and the Winsock catalog (both
+must be readable) and the user's Environment and Software keys (measured, never
+decisive) on the actual suspended token, and refuses on any failed measurement;
+a profile without HKCU\Environment would therefore be refused. Only the trusted
+probe keeps these results as evidence. The native prerequisite test additionally
+checks that the runtime-only token reads none of the fixed keys and that
+registryRead adds no HKCU write right. Windows Python capability stays disabled
+until the native functional gate and client acceptance pass.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,
