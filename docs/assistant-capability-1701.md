@@ -791,3 +791,18 @@ Node 进程、主线程和固定子进程命令记录了唯一的 KernelMode 子
 开发控制器仅在上述失败时查询现有日志。事件匹配只补充诊断证据，功能前置仍保留原退出码。
 未匹配、无法查询或无法核对命令都不足以判断原因。微软列出了子进程阻止及审计各自的事件 ID。
 [Microsoft Learn](https://learn.microsoft.com/en-us/defender-endpoint/exploit-protection)
+
+运行 [44245924637](https://github.com/ofoxai/ofox-desktop/actions/runs/44245924637)
+（`0ba77d22`，push，第 1 次，Windows Server 2022）通过 ACL 和注册表前置。
+四种门禁依次为 `[true,false,true,false]`。HKCU 遍历 3503 键，生产可读 1798、仅 runtime
+可读 4，两者各可写 3，新增写权限和测量错误为 0。功能前置在检查点 7 返回 `UNKNOWN`，
+Node 退出 1，未超时；其余原生步骤未执行。
+
+`childBlockEvent=no-match` 表明通道已启用、控制器取得了进程身份，但没有可归属的阻止事件。
+原查询把 PID 作为检索条件，查询返回零条和返回记录后无法核对身份共用该结果。此次产物无法
+区分这两种情况，也无法确认触发 `UNKNOWN` 的 Windows 错误。功能门禁继续拒绝。
+
+下一次 Windows Server 2022 定点运行要回答：这个 Node 进程从创建到退出的窗口内，通道中
+有无事件 4？若有，能否逐项核对调用者、进程创建时间、主线程与固定请求？
+开发诊断从同一已退出进程的句柄取得窗口，在运行器内检查候选记录，仅上传闭集结论。
+缺失、身份不符、匹配与查询错误均保留原功能前置的退出码。

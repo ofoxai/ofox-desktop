@@ -900,6 +900,8 @@ function queryChildBlockEvent(target) {
       String(target.primaryTid),
       "-CreationTime",
       target.childCreationFiletime,
+      "-ExitTime",
+      target.childExitFiletime,
     ],
     {
       encoding: "utf8",
@@ -986,7 +988,12 @@ export async function invokeNative(
         line.childBlockEvent = [
           "matched",
           "ambiguous",
-          "no-match",
+          "no-event-in-window",
+          "window-unverified",
+          "caller-absent",
+          "identity-unverified",
+          "lifetime-unverified",
+          "thread-unverified",
           "request-unverified",
           "channel-disabled",
           "query-unavailable",

@@ -75,7 +75,9 @@ rights and zero measurement errors). Node ran the fixed script through
 checkpoint 7 and timed out in the child-process denial check. In the subsequent
 [Server 2022 run](https://github.com/ofoxai/ofox-desktop/actions/runs/44242608733),
 the same request inherited stdio and returned `UNKNOWN` before the deadline.
-The functional gate rejected the result. The cause of this child-process error,
+The functional gate rejected the result. A [follow-up kernel event check](https://github.com/ofoxai/ofox-desktop/actions/runs/44245924637)
+returned `no-match`. Its report combined an empty query with an event whose caller
+could not be verified. The cause of this child-process error,
 the remaining isolation checks, Pyodide and OfficeCLI still require native verification.
 Windows Python capability stays disabled until the native functional gate and client acceptance pass.
 

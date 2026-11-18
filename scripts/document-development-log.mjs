@@ -466,17 +466,21 @@ export function functionalProbeFailure(stderr) {
 // integer range, so preserve the exact decimal string from GetProcessTimes.
 export function privateChildBlockTarget(stderr) {
   const evidence = privateFunctionalDetail(stderr)?.worker?.evidence;
+  const filetime = z.string().regex(/^[1-9][0-9]{0,18}$/);
   const result = z
     .object({
       childPid: count.positive(),
       primaryTid: count.positive(),
-      childCreationFiletime: z.string().regex(/^[1-9][0-9]{0,18}$/),
+      childCreationFiletime: filetime,
+      childExitFiletime: filetime,
     })
     .safeParse(evidence);
-  if (
-    !result.success ||
-    BigInt(result.data.childCreationFiletime) > 0x7fffffffffffffffn
-  )
+  if (!result.success) return null;
+  const start = BigInt(result.data.childCreationFiletime);
+  const end = BigInt(result.data.childExitFiletime);
+  // The unassisted Node probe times out after 30 seconds of execution. Bound
+  // the event search even when suspended-process verification was unusually slow.
+  if (end > 0x7fffffffffffffffn || end <= start || end - start > 600_000_000n)
     return null;
   return result.data;
 }

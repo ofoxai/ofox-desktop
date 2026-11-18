@@ -2426,34 +2426,6 @@ fn create_suspended_capabilities(
     observation.evidence(|evidence| {
         evidence.child_pid = Some(info.dwProcessId);
         evidence.primary_tid = Some(info.dwThreadId);
-        #[cfg(test)]
-        if std::env::var("OFOX_DOCUMENT_CHILD_BLOCK_EVENT").as_deref() == Ok("1")
-            && std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
-            && std::env::var("GITHUB_WORKFLOW").as_deref()
-                == Ok("Document Engine Development Checks")
-        {
-            use windows::Win32::Foundation::FILETIME;
-            use windows::Win32::System::Threading::GetProcessTimes;
-            let mut created = FILETIME::default();
-            let mut exit = FILETIME::default();
-            let mut kernel = FILETIME::default();
-            let mut user = FILETIME::default();
-            if unsafe {
-                GetProcessTimes(
-                    info.hProcess,
-                    &mut created,
-                    &mut exit,
-                    &mut kernel,
-                    &mut user,
-                )
-            }
-            .is_ok()
-            {
-                let ticks =
-                    (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
-                evidence.child_creation_filetime = Some(ticks.to_string());
-            }
-        }
     });
     let process = Process {
         process: handle(info.hProcess),
@@ -2851,7 +2823,11 @@ fn run_blocking(
                     &mut status,
                 ))?;
             }
-            observation.evidence(|evidence| evidence.process_status = Some(status));
+            observation.evidence(|evidence| {
+                evidence.process_status = Some(status);
+                #[cfg(test)]
+                evidence.record_child_lifetime(raw(&launched.process.process));
+            });
         }
         // Stop/wait the whole owned Job before any privileged read or cleanup.
         observation.enter(Phase::JobStop);

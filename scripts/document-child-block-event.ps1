@@ -1,5 +1,5 @@
 # Read-only, CI-only witness for one failed fixed child-creation probe.
-param([uint32]$CallerId, [uint32]$CallerTid, [long]$CreationTime)
+param([uint32]$CallerId, [uint32]$CallerTid, [long]$CreationTime, [long]$ExitTime)
 
 function Remove-DocumentPathPrefix([string]$Path) {
     foreach ($prefix in @('\\?\','\??\')) {
@@ -8,28 +8,47 @@ function Remove-DocumentPathPrefix([string]$Path) {
     return $Path
 }
 
-function Get-DocumentChildEventMatch([xml]$Record, [uint32]$CallerId, [uint32]$CallerTid, [long]$CreationTime) {
+function ConvertTo-DocumentEventFileTime([string]$Timestamp) {
+    # Event XML may zero-pad the 100 ns FILETIME value to nine fractional digits.
+    $Timestamp = $Timestamp -creplace '(\.\d{7})0{1,2}Z$', '$1Z'
+    $stamp = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParseExact($Timestamp, "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'",
+            [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$stamp) -and
+        $stamp.UtcDateTime -ge [datetime]::FromFileTimeUtc(0)) { return $stamp.UtcDateTime.ToFileTimeUtc() }
+    return $null
+}
+
+function Get-DocumentChildEventMatch([xml]$Record, [uint32]$CallerId, [uint32]$CallerTid, [long]$CreationTime, [long]$ExitTime) {
     $ns = [System.Xml.XmlNamespaceManager]::new($Record.NameTable)
     $ns.AddNamespace('e', 'http://schemas.microsoft.com/win/2004/08/events/event')
     $system = $Record.SelectSingleNode('/e:Event/e:System', $ns)
     if ($null -eq $system -or $system.SelectSingleNode('e:Provider', $ns).GetAttribute('Name') -cne 'Microsoft-Windows-Security-Mitigations' -or
         $system.SelectSingleNode('e:Channel', $ns).InnerText -cne 'Microsoft-Windows-Security-Mitigations/KernelMode' -or
-        $system.SelectSingleNode('e:EventID', $ns).InnerText -cne '4') { return 'no-match' }
+        $system.SelectSingleNode('e:EventID', $ns).InnerText -cne '4') { return 'identity-unverified' }
+
+    $timestampNode = $system.SelectSingleNode('e:TimeCreated/@SystemTime', $ns)
+    $eventTime = ConvertTo-DocumentEventFileTime $timestampNode.Value
+    if ($null -ne $eventTime -and ($eventTime -lt $CreationTime -or $eventTime -gt $ExitTime)) { return 'outside-window' }
+
+    $pidNodes = $Record.SelectNodes('/e:Event/e:EventData/e:Data[@Name="CallingProcessId"]', $ns)
+    $recordPid = [uint32]0
+    $knownPid = $pidNodes.Count -eq 1 -and [uint32]::TryParse($pidNodes[0].InnerText, [ref]$recordPid) -and $recordPid -gt 0
+    if ($null -eq $eventTime) {
+        if ($knownPid -and $recordPid -ne $CallerId) { return 'foreign-window-unverified' }
+        return 'window-unverified'
+    }
+    if (-not $knownPid) { return 'identity-unverified' }
+    if ($recordPid -ne $CallerId) { return 'caller-absent' }
 
     $fields = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
     foreach ($node in $Record.SelectNodes('/e:Event/e:EventData/e:Data', $ns)) {
         $name = $node.GetAttribute('Name')
-        if ($name -cnotin @('ProcessPath','ProcessCommandLine','CallingProcessId','CallingThreadId','CallingProcessCreateTime','ChildImagePathName','ChildCommandLine')) { continue }
-        if ($fields.ContainsKey($name)) { return 'no-match' }
+        if ($name -cnotin @('ProcessPath','ProcessCommandLine','CallingThreadId','CallingProcessCreateTime','ChildImagePathName','ChildCommandLine')) { continue }
+        if ($fields.ContainsKey($name)) { return 'identity-unverified' }
         $fields.Add($name, $node.InnerText)
     }
-    if ($fields['CallingProcessId'] -cne $CallerId.ToString() -or $fields['CallingThreadId'] -cne $CallerTid.ToString()) { return 'no-match' }
-    $stamp = [datetimeoffset]::MinValue
-    # Event XML may zero-pad the 100 ns FILETIME value to nine fractional digits.
-    $timestamp = $fields['CallingProcessCreateTime'] -creplace '(\.\d{7})0{1,2}Z$', '$1Z'
-    if (-not [datetimeoffset]::TryParseExact($timestamp, "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'",
-            [cultureinfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal, [ref]$stamp) -or
-        $stamp.UtcDateTime.ToFileTimeUtc() -ne $CreationTime) { return 'no-match' }
+    if ((ConvertTo-DocumentEventFileTime $fields['CallingProcessCreateTime']) -ne $CreationTime) { return 'lifetime-unverified' }
+    if ($fields['CallingThreadId'] -cne $CallerTid.ToString()) { return 'thread-unverified' }
 
     $image = $fields['ChildImagePathName']
     $command = $fields['ChildCommandLine']
@@ -51,41 +70,63 @@ function Get-DocumentChildEventMatch([xml]$Record, [uint32]$CallerId, [uint32]$C
     return 'matched'
 }
 
-function Read-DocumentChildBlockEvent([uint32]$CallerId, [uint32]$CallerTid, [long]$CreationTime) {
+function New-DocumentChildEventReader([string]$Channel, [string]$Filter) {
+    $query = [System.Diagnostics.Eventing.Reader.EventLogQuery]::new($Channel, [System.Diagnostics.Eventing.Reader.PathType]::LogName, $Filter)
+    $query.TolerateQueryErrors = $false
+    return [System.Diagnostics.Eventing.Reader.EventLogReader]::new($query)
+}
+
+function Read-DocumentChildBlockEvent([uint32]$CallerId, [uint32]$CallerTid, [long]$CreationTime, [long]$ExitTime) {
     if ($env:GITHUB_ACTIONS -cne 'true' -or $env:GITHUB_WORKFLOW -cne 'Document Engine Development Checks' -or
         $env:OFOX_DOCUMENT_CHILD_BLOCK_EVENT -cne '1') { return 'query-unavailable' }
+    if ($CreationTime -le 0 -or $ExitTime -le $CreationTime -or $ExitTime - $CreationTime -gt [timespan]::TicksPerMinute) {
+        return 'identity-unavailable'
+    }
     $ErrorActionPreference = 'Stop'
     $channel = 'Microsoft-Windows-Security-Mitigations/KernelMode'
+    $config = $reader = $null
     try {
-        if (-not (Get-WinEvent -ListLog $channel).IsEnabled) { return 'channel-disabled' }
-        $filter = @{
-            LogName = $channel
-            ProviderName = 'Microsoft-Windows-Security-Mitigations'
-            Id = 4
-            StartTime = [datetime]::FromFileTimeUtc($CreationTime).ToString('o', [cultureinfo]::InvariantCulture)
-            CallingProcessId = $CallerId.ToString()
+        $config = Get-WinEvent -ListLog $channel
+        if ($null -eq $config) { return 'query-unavailable' }
+        if (-not $config.IsEnabled) { return 'channel-disabled' }
+        # Query the enclosing milliseconds, then check the exact event timestamp.
+        $start = [datetime]::FromFileTimeUtc($CreationTime).ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [cultureinfo]::InvariantCulture)
+        $upper = [datetime]::FromFileTimeUtc($ExitTime)
+        $remainder = $ExitTime % [timespan]::TicksPerMillisecond
+        if ($remainder) { $upper = $upper.AddTicks([timespan]::TicksPerMillisecond - $remainder) }
+        $end = $upper.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", [cultureinfo]::InvariantCulture)
+        $filter = "*[System[Provider[@Name='Microsoft-Windows-Security-Mitigations'] and EventID=4 and TimeCreated[@SystemTime>='$start' and @SystemTime<='$end']]]"
+        $reader = New-DocumentChildEventReader $channel $filter
+        $reader.BatchSize = 1
+        $observed = [Collections.Generic.List[string]]::new()
+        for ($count = 0; ; $count++) {
+            $record = $reader.ReadEvent()
+            if ($null -eq $record) { break }
+            try {
+                if ($count -eq 32) { return 'record-limit' }
+                $observed.Add((Get-DocumentChildEventMatch ([xml]$record.ToXml()) $CallerId $CallerTid $CreationTime $ExitTime))
+            } finally { $record.Dispose() }
         }
-        $records = @(Get-WinEvent -FilterHashtable $filter -MaxEvents 33)
-        if ($records.Count -gt 32) { return 'record-limit' }
-        $matched = 0
-        $requestUnverified = $false
-        foreach ($record in $records) {
-            $verdict = Get-DocumentChildEventMatch ([xml]$record.ToXml()) $CallerId $CallerTid $CreationTime
-            if ($verdict -ceq 'matched') { $matched++ }
-            if ($verdict -ceq 'request-unverified') { $requestUnverified = $true }
+        if ($observed -ccontains 'matched') {
+            # Only records positively excluded by caller or event time cannot
+            # affect uniqueness. Missing fields leave a possible second match.
+            $possible = @($observed | Where-Object { $_ -cnotin @('outside-window','caller-absent','foreign-window-unverified') })
+            if ($possible.Count -eq 1) { return 'matched' }
+            return 'ambiguous'
         }
-        if ($matched -gt 1) { return 'ambiguous' }
-        if ($matched -eq 1) { return 'matched' }
-        if ($requestUnverified) { return 'request-unverified' }
-        return 'no-match'
+        foreach ($stage in @('request-unverified','thread-unverified','lifetime-unverified','identity-unverified','window-unverified','caller-absent')) {
+            if ($observed -ccontains $stage) { return $stage }
+        }
+        if ($observed -ccontains 'foreign-window-unverified') { return 'window-unverified' }
+        return 'no-event-in-window'
     } catch {
-        if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') { return 'no-match' }
         return 'query-unavailable'
     } finally {
-        foreach ($record in $records) { $record.Dispose() }
+        if ($null -ne $reader) { $reader.Dispose() }
+        if ($null -ne $config) { $config.Dispose() }
     }
 }
 
 if ($MyInvocation.InvocationName -ne '.') {
-    Read-DocumentChildBlockEvent $CallerId $CallerTid $CreationTime
+    Read-DocumentChildBlockEvent $CallerId $CallerTid $CreationTime $ExitTime
 }

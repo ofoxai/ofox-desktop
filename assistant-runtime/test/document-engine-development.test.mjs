@@ -1151,6 +1151,7 @@ test("an unknown child refusal in the CI functional gate records only a bounded 
     childPid: 897123,
     primaryTid: 897456,
     childCreationFiletime: "134390000000000001",
+    childExitFiletime: "134390000050000001",
     processStatus: 1,
     registryIsolation: [],
   };
@@ -1176,6 +1177,13 @@ test("an unknown child refusal in the CI functional gate records only a bounded 
   };
   const cases = [
     { reply: "matched", expected: "matched" },
+    { reply: "no-event-in-window", expected: "no-event-in-window" },
+    { reply: "caller-absent", expected: "caller-absent" },
+    { reply: "identity-unverified", expected: "identity-unverified" },
+    { reply: "lifetime-unverified", expected: "lifetime-unverified" },
+    { reply: "thread-unverified", expected: "thread-unverified" },
+    { exitTime: "134390000000000000", expected: "identity-unavailable" },
+    { exitTime: "134390010000000001", expected: "identity-unavailable" },
     { reply: "private-event-data", expected: "query-unavailable" },
     { optIn: "0" },
     { workflow: "Windows Probe" },
@@ -1186,6 +1194,7 @@ test("an unknown child refusal in the CI functional gate records only a bounded 
     const dir = await mkdtemp(path.join(os.tmpdir(), "document-child-event-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     evidence.childCreationFiletime = item.creationTime ?? "134390000000000001";
+    evidence.childExitFiletime = item.exitTime ?? "134390000050000001";
     const stderr =
       "native Python + OfficeCLI and all LPAC negative probes must pass: " +
       JSON.stringify(
@@ -1214,6 +1223,7 @@ test("an unknown child refusal in the CI functional gate records only a bounded 
           childPid: 897123,
           primaryTid: 897456,
           childCreationFiletime: evidence.childCreationFiletime,
+          childExitFiletime: evidence.childExitFiletime,
         });
         return item.reply;
       },
@@ -1223,7 +1233,7 @@ test("an unknown child refusal in the CI functional gate records only a bounded 
     const log = await readFile(path.join(dir, check.name + ".log"), "utf8");
     assert.doesNotMatch(
       log,
-      /897123|897456|134390000000000001|9223372036854775808|childPid|primaryTid|childCreationFiletime|private-event-data/,
+      /897123|897456|1343900[0-9]+|9223372036854775808|childPid|primaryTid|childExitFiletime|childCreationFiletime|private-event-data/,
     );
     const row = JSON.parse(log.trim().slice("OFOX_NATIVE_RESULT_V1 ".length));
     assert.equal(row.childBlockEvent, item.expected);

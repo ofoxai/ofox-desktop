@@ -126,6 +126,9 @@ pub(super) struct Evidence {
     #[cfg(test)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_creation_filetime: Option<String>,
+    #[cfg(test)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_exit_filetime: Option<String>,
     pub process_wait: Option<u32>,
     pub process_status: Option<u32>,
     pub timed_out: Option<bool>,
@@ -140,6 +143,36 @@ pub(super) struct Evidence {
     pub worker_join_cancelled: Option<bool>,
     #[cfg(test)]
     pub loader_diagnostic: Option<LoaderDiagnostic>,
+}
+
+#[cfg(test)]
+impl Evidence {
+    // The caller holds the signalled process handle. Preserve both ends of its
+    // lifetime without losing 100 ns FILETIME precision in the JS controller.
+    pub(super) fn record_child_lifetime(&mut self, process: windows::Win32::Foundation::HANDLE) {
+        use windows::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+
+        if std::env::var("OFOX_DOCUMENT_CHILD_BLOCK_EVENT").as_deref() != Ok("1")
+            || std::env::var("GITHUB_ACTIONS").as_deref() != Ok("true")
+            || std::env::var("GITHUB_WORKFLOW").as_deref()
+                != Ok("Document Engine Development Checks")
+        {
+            return;
+        }
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        if unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) }
+            .is_ok()
+        {
+            let ticks = |time: FILETIME| {
+                ((u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)).to_string()
+            };
+            self.child_creation_filetime = Some(ticks(created));
+            self.child_exit_filetime = Some(ticks(exited));
+        }
+    }
 }
 
 #[cfg(test)]
