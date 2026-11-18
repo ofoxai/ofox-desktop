@@ -44,6 +44,16 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
   $files = @{}
   $commands = @(
     '.expr /s masm',
+    # Run 44221172203 froze after DLL mapping: attaching sets BeingDebugged, so
+    # the loader executes its debugger break (int3) after the static imports
+    # are mapped and before any DllMain. Report that and every exception
+    # without stopping, each keeping its default handling (breakpoints:
+    # handled; others: passed to the target). Only the invalid-handle exception
+    # NtClose raises solely because a debugger is attached is set to handled,
+    # matching an undebugged run. Engine breakpoints (bp10-32) are unaffected.
+    'sxn ibp', 'sxn bpe', 'sxe -h ch', 'sxn ch', 'sxn av', 'sxn dm', 'sxn dz', 'sxn c000008e', 'sxn gp',
+    'sxn iov', 'sxn ip', 'sxn isc', 'sxn lsq', 'sxn sbo', 'sxn sov', 'sxn asrt', 'sxn wkd', 'sxn aph',
+    'sxn eh', 'sxn ii', 'sxn *',
     '.echo OFOX_NT_RAW_V1 THREADS_BEGIN', '~', '.echo OFOX_NT_RAW_V1 THREADS_END',
     'r @$t0 = 0', 'r @$t1 = 0', 'r @$t10 = 0'
   )

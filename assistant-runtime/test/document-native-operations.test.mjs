@@ -97,6 +97,44 @@ test(
         if (mode !== "valid") continue;
         assert.equal(report.threadIndex, 1);
         assert.ok(report.program.commands.includes(".expr /s masm"));
+        // Run 44221172203 froze after DLL mapping at the loader's debugger
+        // break. Breaks and exceptions are now reported without stopping, each
+        // with its default handling; only the invalid-handle exception, raised
+        // solely because a debugger is attached, is set to handled.
+        const sx = report.program.commands.filter((line) =>
+          line.startsWith("sx"),
+        );
+        assert.deepEqual(sx, [
+          "sxn ibp",
+          "sxn bpe",
+          "sxe -h ch",
+          "sxn ch",
+          "sxn av",
+          "sxn dm",
+          "sxn dz",
+          "sxn c000008e",
+          "sxn gp",
+          "sxn iov",
+          "sxn ip",
+          "sxn isc",
+          "sxn lsq",
+          "sxn sbo",
+          "sxn sov",
+          "sxn asrt",
+          "sxn wkd",
+          "sxn aph",
+          "sxn eh",
+          "sxn ii",
+          "sxn *",
+        ]);
+        // No exception is blanket-ignored or forced to handled.
+        assert.ok(!sx.some((line) => /^sx[id]\b/.test(line)));
+        assert.ok(
+          report.program.commands.indexOf("sxn *") <
+            report.program.commands.indexOf(
+              ".echo OFOX_NT_RAW_V1 BREAKPOINTS_BEGIN",
+            ),
+        );
         assert.doesNotMatch(JSON.stringify(report.program), /&&|\|\|/);
         assert.doesNotMatch(JSON.stringify(report.program), /@@c\+\+|LAYOUT/);
         assert.ok(
@@ -1000,4 +1038,74 @@ test("hive, package and catalog shapes stay visible while SIDs and entry numbers
     "private-value",
   ])
     assert.ok(!encoded.includes(secret), secret);
+});
+
+test("debugger exception events and stops are reported as closed-set positions", () => {
+  const report = project([
+    ...call({ status: "0" }),
+    "(2a.2b): Invalid handle - code c0000008 (first chance)",
+    "First chance exceptions are reported before any exception handling.",
+    "(2a.2c): Access violation - code c0000005 (first chance)",
+    "(99.2b): Access violation - code c0000005 (first chance)",
+    ...call({ seq: 2, status: "0" }),
+    "(2a.2b): Private secret text - code e06d7363 (!!! second chance !!!)",
+    "0:000> ",
+  ]);
+  assert.equal(report.coverage.status, "complete-for-fixed-set");
+  assert.deepEqual(report.debuggerEvents, [
+    {
+      afterCall: 1,
+      activeCall: null,
+      code: "0xc0000008",
+      chance: "first",
+      primaryThread: true,
+    },
+    {
+      afterCall: 1,
+      activeCall: null,
+      code: "0xc0000005",
+      chance: "first",
+      primaryThread: false,
+    },
+    {
+      afterCall: 2,
+      activeCall: null,
+      code: "0xe06d7363",
+      chance: "second",
+      primaryThread: true,
+    },
+  ]);
+  assert.deepEqual(report.debuggerStops, [
+    { afterCall: 2, activeCall: null, primaryThread: true },
+  ]);
+  assert.equal(report.debuggerEventsTotal, 3);
+  const encoded = JSON.stringify(report);
+  for (const secret of ["Private", "secret", "Invalid handle", "99"])
+    assert.ok(!encoded.includes(secret), secret);
+  // The first output after the waiting prompt may be an exception line, and
+  // a stop on another thread names only that it was not the primary one.
+  const glued = project([
+    "0:000> (2a.2b): Invalid handle - code c0000008 (first chance)",
+    ...call({ status: "0" }),
+    "0:003> ",
+  ]);
+  assert.equal(glued.debuggerEvents.length, 1);
+  assert.equal(glued.debuggerEvents[0].afterCall, 0);
+  assert.deepEqual(glued.debuggerStops, [
+    { afterCall: 1, activeCall: null, primaryThread: false },
+  ]);
+  // Events are bounded; the total still counts every one.
+  const many = project([
+    ...call({ status: "0" }),
+    ...Array.from(
+      { length: 40 },
+      () => "(2a.2b): Invalid handle - code c0000008 (first chance)",
+    ),
+  ]);
+  assert.equal(many.debuggerEvents.length, 32);
+  assert.equal(many.debuggerEventsTotal, 40);
+  // Without any event the fields are empty, never missing.
+  const quiet = project(call({ status: "0" }));
+  assert.deepEqual(quiet.debuggerEvents, []);
+  assert.deepEqual(quiet.debuggerStops, []);
 });

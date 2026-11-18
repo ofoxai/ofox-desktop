@@ -44,6 +44,16 @@ const SCOPE_ENTER =
   /^OFOX_NT_RAW_V1 SCOPE_ENTER seq=(\d{1,4}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) END$/i;
 const SCOPE_RETURN =
   /^OFOX_NT_RAW_V1 SCOPE_RETURN seq=(\d{1,4}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) result=([a-f\d]{1,8}) END$/i;
+// CDB's own exception notice, for example
+// "(1a2c.2b3c): Invalid handle - code c0000008 (first chance)". Only the code,
+// the chance and whether it was the primary thread leave; never the text.
+const EXCEPTION =
+  /^(?:(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}> )?\(([a-f\d]{1,8})\.([a-f\d]{1,8})\): [^\r\n]{1,96}? - code ([a-f\d]{8}) \((first chance|!!! second chance !!!)\)$/i;
+// A bare prompt after the controller's g: the debugger stopped the target and
+// waited for a command (run 44221172203 froze this way after DLL mapping).
+const STOP = /^(?:\d{1,3}:)?\d{1,3}:(\d{3})>\s*$/;
+const MAX_EVENTS = 32;
+const MAX_STOPS = 8;
 // A debugger prompt echo (for example `0:000> bl /L 30`) is never a row.
 const PROMPT = /^(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}>/i;
 // After -cf, CDB prints "0:000> " without a newline while it waits for the
@@ -412,6 +422,10 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     reasons: [],
     // Closed-set shape only: a fixed code and a count, never raw text.
     diagnostics: { firstRejection: null, promptJoined: 0 },
+    // Debugger exceptions and stops by position only (bounded; total kept).
+    debuggerEvents: [],
+    debuggerEventsTotal: 0,
+    debuggerStops: [],
     // Best-effort deferred breakpoint; absence never limits call coverage.
     winsockStartup: {
       status: "not-seen",
@@ -491,6 +505,31 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
         }
         listing = null;
       } else if (line.trim() && !PROMPT.test(line)) listing.push(line);
+      continue;
+    }
+    const exception = EXCEPTION.exec(line);
+    if (exception) {
+      if (hex(exception[1]) === target.childPid) {
+        report.debuggerEventsTotal++;
+        if (report.debuggerEvents.length < MAX_EVENTS)
+          report.debuggerEvents.push({
+            afterCall: next - 1,
+            activeCall: active?.sequence ?? null,
+            code: `0x${exception[3].toLowerCase()}`,
+            chance: /^first/i.test(exception[4]) ? "first" : "second",
+            primaryThread: hex(exception[2]) === target.primaryTid,
+          });
+      }
+      continue;
+    }
+    const stop = STOP.exec(line);
+    if (stop) {
+      if (report.debuggerStops.length < MAX_STOPS)
+        report.debuggerStops.push({
+          afterCall: next - 1,
+          activeCall: active?.sequence ?? null,
+          primaryThread: Number(stop[1]) === threadIndex,
+        });
       continue;
     }
     const entered = SCOPE_ENTER.exec(line);
