@@ -865,3 +865,30 @@ Win32 错误属于哪一类？
 修正后文档诊断测试 101/101 通过。Windows 目标的两种 Clippy 配置、独立复审和 macOS
 全目标 Clippy 均通过。macOS Rust 测试 4555 项通过、28 项忽略，前端 3377 项通过、1 项跳过。
 新读取方式尚待原生运行。
+
+### Windows 11 普通桌面的功能前置
+
+在 Windows 11 家庭版 25H2 x64（26200.9974）上，从 bundle 核对提交
+`d1af0ec44a5383a410952b1b75b1784dc9e9fcaa`。以下运行都使用同一测试二进制和
+内置 Node 22.23.4。每次只执行普通主机用例
+`document_lpac_proves_python_office_and_escape_denials`，调试器和 CI 诊断均未启用。
+
+1. SSH 服务会话使用管理员令牌。四个注册表键可读，LPAC 令牌检查通过；
+   Node 在第一个检查点之前以 `0xc0000142` 退出，未超时，也没有输出。
+   仅凭退出码无法确定此次初始化失败的具体位置。
+2. 同账户的交互桌面使用普通权限令牌。Node 到达检查点 7，固定子进程请求返回
+   `UNKNOWN`，Node 退出 1，未超时。Job 活动进程归零，任务目录和 AppContainer
+   配置文件均已清理。运行窗口内有一条 KernelMode 事件 4，调用进程、主线程、
+   子程序映像和固定参数都吻合。此次功能测试自身未记录进程创建时间和退出时间。
+3. 再次在普通桌面运行同一用例，验证上述内核事件能否归属到该次 Node 实例。宿主仅对
+   已核对映像的 Node 保留查询句柄，读取创建和退出时间。精确生存窗口内只有一条
+   KernelMode 事件 4。事件里的调用进程创建时间与句柄值精确一致，调用进程、主线程、
+   目标映像及固定参数全部匹配。Win11 内核确实阻止了这次固定请求。Node 仍在
+   检查点 7 返回 `UNKNOWN`，退出 1，未超时。Job 归零，任务目录及配置文件均已清理。
+   [微软对事件 4 的定义](https://learn.microsoft.com/en-us/defender-endpoint/exploit-protection#review-exploit-protection-events-in-windows-event-viewer)
+
+从 SSH 切到桌面时同时改变了会话和权限，无法区分各自对初始化的影响。普通桌面运行复现了
+Server 2022 的检查点 7 结果。功能前置仍失败，后续隔离检查、Pyodide 和 OfficeCLI
+尚未执行。事件 4 不含 `CreateProcessW` 返回点的 Win32 错误码。内置 libuv 会将未映射的
+错误归为 `UV_UNKNOWN`，无法从 Node 结果反推原值。Server 2022 的原始错误仍待独立诊断。
+[Node 22.23.4 的 libuv 错误映射](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/error.c#L153-L167)

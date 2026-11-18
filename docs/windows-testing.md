@@ -74,6 +74,19 @@ workflow 将构建两个探针并上传验证日志；全量前端检查继续�
 
 ### 文档引擎开发诊断
 
+普通 Windows 主机可在已登录用户的非提权 PowerShell 中单独运行功能前置。先在仓库根目录
+准备资源，再按完整测试名运行，并核对输出包含 `running 1 test`。
+
+```powershell
+pnpm assistant:prepare
+if ($LASTEXITCODE -ne 0) { throw "assistant:prepare failed" }
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib services::assistant::documents::windows_sandbox::tests::document_lpac_proves_python_office_and_escape_denials -- --exact --nocapture --test-threads=1
+```
+
+通过 SSH 操作主机时，记录测试进程实际所在的会话及是否提权。Win11 25H2 的同一测试
+在 SSH 服务会话和普通交互桌面上停在不同阶段。检查点 7 的 CDB 用例
+`document_observe_fixed_child_call` 仅供下文独立的 CI 诊断使用。
+
 [Document Engine Development Checks](../.github/workflows/document-engine-check.yml)
 是独立的定向开发入口。默认由 `workflow_dispatch` 手动触发；为让尚未进入默认
 分支的新 workflow 首次注册，只对 `codex/desktop-next` 上修改该 workflow 文件

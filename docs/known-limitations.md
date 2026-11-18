@@ -79,7 +79,12 @@ The functional gate rejected the result. A [follow-up kernel event check](https:
 returned `no-match`. Its report combined an empty query with an event whose caller
 could not be verified. The [lifetime-bounded Server 2022 query](https://github.com/ofoxai/ofox-desktop/actions/runs/44249750166)
 completed successfully and found no KernelMode event 4 during the fixed Node
-process's lifetime. The underlying Windows error remains unknown.
+process's lifetime. On Windows 11 25H2 (build 26200.9974), the same fixed request
+in a standard user's desktop session returned `UNKNOWN`. A unique KernelMode
+event 4 in the Node process's lifetime matched the process creation time,
+caller, main thread, child image and arguments. This confirms that the child
+process policy blocked this request on that Windows 11 host. The event contains
+no Win32 return code. The underlying error code remains unknown on both systems.
 The remaining isolation checks, Pyodide and OfficeCLI still require native verification.
 Windows Python capability stays disabled until the native functional gate and client acceptance pass.
 
