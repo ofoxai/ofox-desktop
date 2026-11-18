@@ -322,7 +322,9 @@ public static class DocumentCdbNative {
   $hostResumeSeen = $true
   $writer.WriteLine(('OFOX_CDB_V2 HOST_RESUMED pid={0:x} tid={1:x} hold=1 paired=2 previous=1 END' -f $targetPid,$targetTid)); $writer.Flush()
   $stage = 'running_diagnostic'
-  $deadline = [DateTime]::UtcNow.AddSeconds(35)
+  # Beyond the traced Node's 60 s timeout: libuv's abort stops the target in
+  # the debugger, and the Rust host's Job stop and abort record end this wait.
+  $deadline = [DateTime]::UtcNow.AddSeconds(75)
   while (-not $debugger.HasExited) {
     Drain-Cdb
     if (Test-Path -LiteralPath (Join-Path $RawDirectory 'abort.json')) { break }

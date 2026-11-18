@@ -15,6 +15,8 @@ mod startup_comparison;
 #[cfg(test)]
 mod startup_comparison_protocol;
 #[cfg(test)]
+mod trace_launch;
+#[cfg(test)]
 mod winsock_grant;
 use probe::{
     AccessCase, AccessObservation, Observer, Phase, Receive, RegistryAccess, RegistryKey, TokenApi,
@@ -2065,6 +2067,10 @@ struct Launch {
     stderr: std::sync::mpsc::Receiver<Vec<u8>>,
     #[cfg(test)]
     debugger: Option<cdb::Guard>,
+    /// Held only for its Drop. Last field: the catalog ACE is restored after
+    /// the process and debugger are gone.
+    #[cfg(test)]
+    _grant: Option<trace_launch::HeldGrant>,
 }
 
 #[derive(Clone, Copy)]
@@ -2141,22 +2147,20 @@ fn launch(
     observation: &Observer,
     _cancelled: &AtomicBool,
 ) -> Result<Launch, String> {
-    let suspended = create_suspended(
-        exe,
-        args,
-        cwd,
-        home,
-        profile,
-        cap,
-        ContainerPolicy::Lpac,
-        observation,
-    )?;
-    verify_token(
-        raw(&suspended.process.process),
-        profile.sid.0,
-        cap.sid,
-        observation,
-    )?;
+    // Declared first so it outlives (is dropped after) the suspended process.
+    #[cfg(test)]
+    let mut grant = None;
+    #[cfg(test)]
+    let suspended = if observation.loader_requested() {
+        let (suspended, held) =
+            trace_launch::create(exe, args, cwd, home, profile, cap, observation)?;
+        grant = Some(held);
+        suspended
+    } else {
+        create_verified(exe, args, cwd, home, profile, cap, observation)?
+    };
+    #[cfg(not(test))]
+    let suspended = create_verified(exe, args, cwd, home, profile, cap, observation)?;
     #[cfg(test)]
     let mut debugger = cdb::Guard::begin(
         raw(&suspended.process.process),
@@ -2210,7 +2214,39 @@ fn launch(
         stderr: drain(stderr_read, limit),
         #[cfg(test)]
         debugger,
+        #[cfg(test)]
+        _grant: grant,
     })
+}
+
+/// The production launch: {runtime, registryRead}, console-free, and the token
+/// (including the registry gate) verified while the process is still suspended.
+fn create_verified(
+    exe: &Path,
+    args: &[String],
+    cwd: &Path,
+    home: &Path,
+    profile: &Profile,
+    cap: &RuntimeCapability,
+    observation: &Observer,
+) -> Result<SuspendedLaunch, String> {
+    let suspended = create_suspended(
+        exe,
+        args,
+        cwd,
+        home,
+        profile,
+        cap,
+        ContainerPolicy::Lpac,
+        observation,
+    )?;
+    verify_token(
+        raw(&suspended.process.process),
+        profile.sid.0,
+        cap.sid,
+        observation,
+    )?;
+    Ok(suspended)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3377,6 +3413,12 @@ async fn probe_inner(
     if loader_diagnostic {
         trace.observation.request_loader();
     }
+    // Under the debugger every observed call costs two stops, and libuv's
+    // abort holds the target until this timeout; give the trace more room.
+    #[cfg(test)]
+    let node_timeout = Duration::from_secs(if loader_diagnostic { 60 } else { 30 });
+    #[cfg(not(test))]
+    let node_timeout = Duration::from_secs(30);
     let observation = trace.observation.clone();
     trace.success(
         run_candidate_observed(
@@ -3390,7 +3432,7 @@ async fn probe_inner(
             &cwd,
             &home,
             &runtime_root,
-            Duration::from_secs(30),
+            node_timeout,
             16 * 1024,
             true,
             observation,

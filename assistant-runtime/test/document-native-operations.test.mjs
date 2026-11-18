@@ -9,7 +9,7 @@ import { projectDocumentNativeOperations } from "../../scripts/document-native-o
 import { safeDebuggerState } from "../../scripts/document-engine-development-check.mjs";
 
 const setup = [
-  "OFOX_NT_V1 INSTALLED pid=2a tid=2b thread=0 count=15 arch=amd64 abi=windows-x64 END",
+  "OFOX_NT_V1 INSTALLED pid=2a tid=2b thread=0 count=19 arch=amd64 abi=windows-x64 END",
   "OFOX_CDB_V2 BEFORE pid=2a tid=2b flags=0 END",
   "OFOX_CDB_V2 AFTER pid=2a tid=2b flags=2 END",
   "OFOX_CDB_V2 READY END",
@@ -104,19 +104,56 @@ test(
         );
         // The projector's MAX_CALLS mirrors this debugger-side call limit.
         assert.ok(
-          report.program.files["operation-1.cmd"].includes("@$t0 >= 0n256"),
+          report.program.files["operation-1.cmd"].includes("@$t0 >= 0n1024"),
         );
-        assert.equal(Object.keys(report.program.files).length, 16);
-        assert.equal(report.definitions.at(-1).Name, "NtCreateUserProcess");
-        assert.ok(report.program.commands.includes("bl /L 10-24"));
+        // 19 entry scripts, the Nt return pair and the WSAStartup scope pair.
+        assert.equal(Object.keys(report.program.files).length, 22);
+        assert.deepEqual(
+          report.definitions.slice(15).map((row) => [row.Name, row.Kind]),
+          [
+            ["NtEnumerateKey", "none"],
+            ["NtQueryKey", "none"],
+            ["NtNotifyChangeKey", "none"],
+            ["NtNotifyChangeMultipleKeys", "none"],
+          ],
+        );
+        assert.ok(report.program.commands.includes("bl /L 10-28"));
         assert.ok(
           report.program.commands.includes(
             '~~[0n43]bp24 ntdll!NtCreateUserProcess "$><operation-15.cmd"',
           ),
         );
         assert.ok(
-          report.program.files["operation-15.cmd"].includes("bd 10-24"),
+          report.program.files["operation-15.cmd"].includes("bd 10-28"),
         );
+        // The WSAStartup scope is a deferred breakpoint set after the
+        // verified listing, so an unresolved scope never blocks the trace.
+        const scope = report.program.commands.indexOf(
+          '~~[0n43]bu31 ws2_32!WSAStartup "$><operation-scope.cmd"',
+        );
+        assert.ok(
+          scope >
+            report.program.commands.indexOf(
+              ".echo OFOX_NT_RAW_V1 BREAKPOINTS_END",
+            ),
+        );
+        assert.ok(report.program.commands.includes("r @$t10 = 0"));
+        const enter = report.program.files["operation-scope.cmd"],
+          leave = report.program.files["operation-scope-return.cmd"];
+        assert.ok(enter.startsWith(".if (@$tid != 0n43) { gc } .elsif"));
+        assert.ok(enter.includes("SCOPE_ENTER seq=%d"));
+        assert.ok(enter.includes("r @$t11 = @rsp"));
+        assert.ok(enter.includes("r @$t12 = poi(@rsp)"));
+        assert.ok(
+          enter.includes('~~[0n43]bp32 @$t12 "$><operation-scope-return.cmd"'),
+        );
+        assert.ok(enter.includes("INVALID scope END"));
+        assert.ok(leave.includes("@rsp == (@$t11 + 8)"));
+        assert.ok(leave.includes("@rip == @$t12"));
+        assert.ok(leave.includes("result=%x"));
+        assert.ok(leave.includes("@eax"));
+        assert.ok(leave.includes("bc 31; bc 32"));
+        assert.ok(leave.includes("INVALID scope_pair END"));
         const entry = report.program.files["operation-1.cmd"],
           port = report.program.files["operation-10.cmd"],
           returned = report.program.files["operation-return.cmd"];
@@ -251,7 +288,7 @@ test("an inconclusive projection names only its first fixed rejection", () => {
       "enter-identity",
     ],
     [call({ access: "1234" }), "enter-arguments"],
-    [call({ api: 16, root: "none" }), "enter-arguments"],
+    [call({ api: 20, root: "none" }), "enter-arguments"],
     [call({ api: 0, root: "none" }), "enter-arguments"],
     [
       call().map((l) =>
@@ -401,74 +438,79 @@ test("lists every paired call in order with only vocabulary object shapes", () =
     }),
   ]);
   assert.equal(report.coverage.status, "complete-for-fixed-set");
-  assert.deepEqual(report.calls, [
-    {
-      sequence: 1,
-      api: "NtOpenKey",
-      status: "0xc0000022",
-      desiredAccess: 0x80000000,
-      root: "absolute",
-      objectShape:
-        "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\?",
-    },
-    {
-      sequence: 2,
-      api: "NtOpenKey",
-      status: "0x00000000",
-      desiredAccess: 1,
-      root: "relative",
-      // A non-vocabulary component masks everything after it.
-      objectShape: "?\\?",
-    },
-    {
-      sequence: 3,
-      api: "NtQueryValueKey",
-      status: "0xc0000034",
-      desiredAccess: null,
-      root: null,
-      objectShape: "GlobalFlag",
-    },
-    {
-      sequence: 4,
-      api: "NtOpenSection",
-      status: "0x00000000",
-      desiredAccess: 4,
-      root: "absolute",
-      objectShape: "\\KnownDlls\\kernelbase.dll",
-    },
-    {
-      sequence: 5,
-      api: "NtAlpcConnectPort",
-      status: "0x00000000",
-      desiredAccess: null,
-      root: "absolute",
-      objectShape: "\\Sessions\\?\\Windows\\ApiPort",
-    },
-    {
-      sequence: 6,
-      api: "NtOpenKey",
-      status: "0x00000000",
-      desiredAccess: 1,
-      root: "unknown",
-      objectShape: null,
-    },
-    {
-      sequence: 7,
-      api: "NtMapViewOfSection",
-      status: "0x00000000",
-      desiredAccess: null,
-      root: null,
-      objectShape: null,
-    },
-    {
-      sequence: 8,
-      api: "NtOpenKey",
-      status: "0x00000000",
-      desiredAccess: 1,
-      root: "absolute",
-      objectShape: "?overflow",
-    },
-  ]);
+  // No WSAStartup scope marker: every call is outside it.
+  assert.ok(report.calls.every((row) => row.insideWsaStartup === false));
+  assert.deepEqual(
+    report.calls.map(({ insideWsaStartup, ...row }) => row),
+    [
+      {
+        sequence: 1,
+        api: "NtOpenKey",
+        status: "0xc0000022",
+        desiredAccess: 0x80000000,
+        root: "absolute",
+        objectShape:
+          "\\Registry\\Machine\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\?",
+      },
+      {
+        sequence: 2,
+        api: "NtOpenKey",
+        status: "0x00000000",
+        desiredAccess: 1,
+        root: "relative",
+        // A user SID is a fixed token; the hive path after it stays visible.
+        objectShape: "<user-sid>\\Session Manager",
+      },
+      {
+        sequence: 3,
+        api: "NtQueryValueKey",
+        status: "0xc0000034",
+        desiredAccess: null,
+        root: null,
+        objectShape: "GlobalFlag",
+      },
+      {
+        sequence: 4,
+        api: "NtOpenSection",
+        status: "0x00000000",
+        desiredAccess: 4,
+        root: "absolute",
+        objectShape: "\\KnownDlls\\kernelbase.dll",
+      },
+      {
+        sequence: 5,
+        api: "NtAlpcConnectPort",
+        status: "0x00000000",
+        desiredAccess: null,
+        root: "absolute",
+        objectShape: "\\Sessions\\?\\Windows\\ApiPort",
+      },
+      {
+        sequence: 6,
+        api: "NtOpenKey",
+        status: "0x00000000",
+        desiredAccess: 1,
+        root: "unknown",
+        objectShape: null,
+      },
+      {
+        sequence: 7,
+        api: "NtMapViewOfSection",
+        status: "0x00000000",
+        desiredAccess: null,
+        root: null,
+        objectShape: null,
+      },
+      {
+        sequence: 8,
+        api: "NtOpenKey",
+        status: "0x00000000",
+        desiredAccess: 1,
+        root: "absolute",
+        objectShape: "?overflow",
+      },
+    ],
+  );
   const encoded = JSON.stringify(report);
   for (const secret of ["node.exe", "S-1-5", "1001", "software\\"])
     assert.ok(!encoded.includes(secret), secret);
@@ -515,8 +557,8 @@ test("does not attribute without the complete original Host Resume and independe
   for (const records of [
     setup.slice(1),
     setup.slice(0, -1),
-    setup.map((line) => line.replace("count=15", "count=11")),
-    setup.map((line) => line.replace("count=15", "count=14")),
+    setup.map((line) => line.replace("count=19", "count=15")),
+    setup.map((line) => line.replace("count=19", "count=18")),
     [...setup, setup[0]],
     setup.map((line) => line.replace("tid=2b thread", "tid=2c thread")),
   ]) {
@@ -625,8 +667,8 @@ test("ordinary startup misses do not hide the last failed operation", () => {
     Array.from({ length }, (_, index) =>
       call({ seq: index + 1, status: "0" }),
     ).flat();
-  assert.equal(project(calls(256)).status, "observed-operations");
-  assert.equal(project(calls(257)).status, "inconclusive");
+  assert.equal(project(calls(1024)).status, "observed-operations");
+  assert.equal(project(calls(1025)).status, "inconclusive");
 });
 
 test("missing returns, nesting, duplicate sequence, bad ABI and overflow remain inconclusive", () => {
@@ -676,7 +718,7 @@ test("unknown objects never leak names and a successful operation cannot become 
 });
 
 test("status-only sibling port APIs never interpret an undocumented argument as a resource or access mask", () => {
-  const calls = [13, 14, 15].flatMap((api, index) =>
+  const calls = [13, 14, 15, 16, 17, 18, 19].flatMap((api, index) =>
     call({ seq: index + 1, api, root: "none" }).map((line) =>
       line.includes(" NAME seq=")
         ? `OFOX_NT_RAW_V1 NAME_UNKNOWN seq=${index + 1} END`
@@ -708,6 +750,13 @@ test("status-only sibling port APIs never interpret an undocumented argument as 
         desiredAccess: null,
         objectAlias: "unknown",
       },
+      // Status-only key operations on an already open handle.
+      ...[
+        "NtEnumerateKey",
+        "NtQueryKey",
+        "NtNotifyChangeKey",
+        "NtNotifyChangeMultipleKeys",
+      ].map((api) => ({ api, desiredAccess: null, objectAlias: "unknown" })),
     ],
   );
 });
@@ -754,10 +803,201 @@ test("setup failure state retains only fixed booleans and a bounded breakpoint c
     breakpointRows: 15,
   });
   assert.ok(!JSON.stringify(state).includes("secret"));
-  for (const count of [-1, 16, "15", null])
+  for (const count of [-1, 20, "15", null])
     assert.equal(
       safeDebuggerState({ operationSetup: { breakpointRows: count } })
         .operationSetup.breakpointRows,
       null,
     );
+});
+
+const scopeEnter = ({ seq = 1, tid = "2b", sp = "3000" } = {}) =>
+  `OFOX_NT_RAW_V1 SCOPE_ENTER seq=${seq} pid=2a tid=${tid} sp=${sp} ret=4000 END`;
+const scopeReturn = ({
+  seq = 3,
+  tid = "2b",
+  sp = "3008",
+  result = "277b",
+} = {}) =>
+  `OFOX_NT_RAW_V1 SCOPE_RETURN seq=${seq} pid=2a tid=${tid} sp=${sp} result=${result} END`;
+const catalogCalls = () => [
+  ...call({
+    seq: 2,
+    api: 1,
+    access: "20019",
+    root: "0",
+    name: "SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters",
+    status: "0",
+  }),
+  ...call({
+    seq: 3,
+    api: 1,
+    access: "20019",
+    root: "0",
+    name: "Protocol_Catalog9",
+    status: "c0000022",
+  }),
+];
+
+test("marks the calls made inside WSAStartup and keeps its result code", () => {
+  const report = project([
+    ...call({ status: "0" }),
+    scopeEnter(),
+    ...catalogCalls(),
+    scopeReturn(),
+    ...call({ seq: 4, status: "0" }),
+  ]);
+  assert.equal(report.status, "observed-failures");
+  assert.equal(report.coverage.status, "complete-for-fixed-set");
+  assert.deepEqual(report.winsockStartup, {
+    status: "returned",
+    callsBeforeEntry: 1,
+    callsAtReturn: 3,
+    result: 10107,
+  });
+  assert.deepEqual(
+    report.calls.map((row) => row.insideWsaStartup),
+    [false, true, true, false],
+  );
+  assert.deepEqual(
+    report.calls.slice(1, 3).map((row) => row.objectShape),
+    [
+      "SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters",
+      "Protocol_Catalog9",
+    ],
+  );
+  // An entry without its paired return keeps every later call inside.
+  const open = project([
+    ...call({ status: "0" }),
+    scopeEnter(),
+    ...catalogCalls(),
+  ]);
+  assert.equal(open.coverage.status, "complete-for-fixed-set");
+  assert.deepEqual(open.winsockStartup, {
+    status: "entered",
+    callsBeforeEntry: 1,
+    callsAtReturn: null,
+    result: null,
+  });
+  assert.deepEqual(
+    open.calls.map((row) => row.insideWsaStartup),
+    [false, true, true],
+  );
+  // The first marker after the waiting prompt may be a scope marker.
+  const glued = project([
+    ...call({ status: "0" }),
+    `0:000> ${scopeEnter()}`,
+    ...catalogCalls(),
+    scopeReturn(),
+  ]);
+  assert.equal(glued.winsockStartup.status, "returned");
+  assert.equal(glued.diagnostics.promptJoined, 1);
+  // A scope that never resolved leaves the full trace intact.
+  const unseen = project([...call({ status: "0" }), ...catalogCalls()]);
+  assert.equal(unseen.coverage.status, "complete-for-fixed-set");
+  assert.deepEqual(unseen.winsockStartup, {
+    status: "not-seen",
+    callsBeforeEntry: null,
+    callsAtReturn: null,
+    result: null,
+  });
+  assert.ok(unseen.calls.every((row) => row.insideWsaStartup === false));
+});
+
+test("an unpaired or misplaced WSAStartup scope stays inconclusive", () => {
+  const first = call({ status: "0" });
+  const cases = [
+    [[...first, ...catalogCalls(), scopeReturn()], "scope-order"],
+    [[...first, scopeEnter(), scopeEnter(), ...catalogCalls()], "scope-order"],
+    [[...first, scopeEnter({ seq: 5 }), ...catalogCalls()], "scope-order"],
+    [[...first, scopeEnter({ tid: "2c" }), ...catalogCalls()], "scope-order"],
+    [[first[0], scopeEnter({ seq: 0 }), ...first.slice(1)], "scope-order"],
+    [
+      [...first, scopeEnter(), ...catalogCalls(), scopeReturn({ sp: "3010" })],
+      "scope-order",
+    ],
+    [
+      [...first, scopeEnter(), ...catalogCalls(), scopeReturn({ seq: 2 })],
+      "scope-order",
+    ],
+    [
+      [...first, scopeEnter(), ...catalogCalls(), scopeReturn(), scopeReturn()],
+      "scope-order",
+    ],
+    // A scope marker can never stand in for a breakpoint listing row.
+    [
+      first.flatMap((line) =>
+        line.startsWith("30 e ") ? [line, scopeEnter({ seq: 0 })] : [line],
+      ),
+      "listing-row",
+    ],
+    [[...first, "OFOX_NT_RAW_V1 INVALID scope END"], "invalid-scope"],
+    [[...first, "OFOX_NT_RAW_V1 INVALID scope_pair END"], "invalid-scope-pair"],
+  ];
+  for (const [lines, expected] of cases) {
+    const report = project(lines);
+    assert.equal(report.status, "inconclusive", expected);
+    assert.equal(report.diagnostics.firstRejection, expected, expected);
+  }
+});
+
+test("hive, package and catalog shapes stay visible while SIDs and entry numbers are masked", () => {
+  const names = [
+    "\\REGISTRY\\USER\\S-1-5-21-1111111111-2222222222-3333333333-1001\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+    "\\REGISTRY\\USER\\S-1-5-21-1-2-3-1001_Classes\\Local Settings",
+    "\\Sessions\\1\\AppContainerNamedObjects\\S-1-15-2-1-2-3-4-5-6-7",
+    "\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\Protocol_Catalog9\\Catalog_Entries64\\000000000001",
+    "\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\NameSpace_Catalog5\\Catalog_Entries64\\000000000007",
+    "\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\AppId_Catalog\\0F1D2A3B",
+    "\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Winsock",
+    "\\REGISTRY\\USER\\S-1-5-21-1-2-3-1001-9\\Software",
+    "\\REGISTRY\\USER\\S-1-5-21-1-2-3\\Software",
+    "\\Sessions\\1\\AppContainerNamedObjects\\S-1-15-3-1024-1-2-3-4-5-6-7-8\\Windows",
+    "\\REGISTRY\\MACHINE\\1234567890123\\SYSTEM",
+  ];
+  const report = project(
+    names.flatMap((name, index) =>
+      call({ seq: index + 1, api: 1, access: "20019", name, status: "0" }),
+    ),
+  );
+  assert.deepEqual(
+    report.calls.map((row) => row.objectShape),
+    [
+      "\\Registry\\User\\<user-sid>\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+      "\\Registry\\User\\<user-sid>_Classes\\Local Settings",
+      "\\Sessions\\?\\AppContainerNamedObjects\\<package-sid>",
+      "\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\Protocol_Catalog9\\Catalog_Entries64\\?",
+      "\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\NameSpace_Catalog5\\Catalog_Entries64\\?",
+      "\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\WinSock2\\Parameters\\AppId_Catalog\\?",
+      "\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Winsock",
+      "\\Registry\\User\\?\\?",
+      "\\Registry\\User\\?\\?",
+      "\\Sessions\\?\\AppContainerNamedObjects\\?\\?",
+      "\\Registry\\Machine\\?\\?",
+    ],
+  );
+  const values = project(
+    [
+      "PackedCatalogItem",
+      "Num_Catalog_Entries64",
+      "Serial_Access_Num",
+      "private-value",
+    ].flatMap((name, index) =>
+      call({ seq: index + 1, api: 4, root: "none", name, status: "0" }),
+    ),
+  );
+  assert.deepEqual(
+    values.calls.map((row) => row.objectShape),
+    ["PackedCatalogItem", "Num_Catalog_Entries64", "Serial_Access_Num", "?"],
+  );
+  const encoded = JSON.stringify([report, values]);
+  for (const secret of [
+    "S-1-",
+    "1001",
+    "1111111111",
+    "0F1D2A3B",
+    "000000000001",
+    "private-value",
+  ])
+    assert.ok(!encoded.includes(secret), secret);
 });

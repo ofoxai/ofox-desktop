@@ -157,6 +157,13 @@ pub(super) struct LoaderDiagnostic {
     pub paired_resume_previous: Option<u32>,
     pub host_resume_previous: Option<u32>,
     pub debugger_closed: Option<bool>,
+    /// The traced launch's fixed configuration label and actual flags.
+    pub launch_profile: Option<&'static str>,
+    pub creation_flags: Option<u32>,
+    /// CI-only Winsock catalog ACE: set before the launch, and whether every
+    /// key of the subtree was proven back to its original DACL afterwards.
+    pub winsock_grant_applied: Option<bool>,
+    pub winsock_grant_restored: Option<bool>,
 }
 
 #[derive(serde::Serialize)]

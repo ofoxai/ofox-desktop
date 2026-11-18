@@ -12,31 +12,10 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
     assert_suspended_lpac_access_controls();
     let root = runtime();
     let office = root.join("engines/officecli/officecli.exe");
-    let result = probe_windows_document_engines(&root, &office).await;
-    let candidate = startup_comparison_protocol::requested(
-        std::env::var("OFOX_DOCUMENT_STARTUP_COMPARISON")
-            .ok()
-            .as_deref(),
-    );
-    // Machine-ACL candidates run only through their own opt-in CI step.
-    if let Some(candidate) = candidate.filter(|candidate| {
-        !candidate.plan().winsock_grant
-            && std::env::var_os(cdb::ENV_ROOT).is_some()
-            && result
-                .as_ref()
-                .err()
-                .is_some_and(|error| startup_comparison_protocol::eligible(error))
-    }) {
-        match tokio::task::spawn_blocking(move || startup_comparison::compare(&root, candidate))
-            .await
-        {
-            Ok(receipt) => eprintln!("OFOX_STARTUP_COMPARISON_V1 {receipt}"),
-            Err(_) => eprintln!(
-                "OFOX_STARTUP_COMPARISON_V1 {{\"status\":\"inconclusive\",\"joinFailure\":true}}"
-            ),
-        }
-    }
-    result.expect("native Python + OfficeCLI and all LPAC negative probes must pass");
+    // Comparisons and the debugger trace each run as their own opt-in step.
+    probe_windows_document_engines(&root, &office)
+        .await
+        .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
 }
 
 /// Diagnostic-only A-B-A, run as its own step when explicitly requested. With
@@ -66,6 +45,55 @@ async fn document_startup_launch_comparison_when_requested() {
             .unwrap();
     eprintln!("OFOX_STARTUP_COMPARISON_V1 {receipt}");
     assert_eq!(receipt["status"], "supports-candidate");
+}
+
+/// Diagnostic-only CDB trace of the fixed first Node, run as its own step only
+/// when the controller hands over its private root; otherwise a no-op. The
+/// traced launch changes a machine ACL, so it runs only on disposable runners,
+/// and this test fails unless that ACL was proven restored.
+#[tokio::test]
+#[serial_test::serial]
+async fn document_startup_trace_when_requested() {
+    if std::env::var_os(cdb::ENV_ROOT).is_none() {
+        return;
+    }
+    assert_eq!(
+        std::env::var("GITHUB_ACTIONS").as_deref(),
+        Ok("true"),
+        "the traced launch changes a machine ACL; disposable CI runners only"
+    );
+    let root = runtime();
+    let office = root.join("engines/officecli/officecli.exe");
+    let error = probe_windows_document_engines(&root, &office)
+        .await
+        .expect_err("a debugger trace never admits engines");
+    eprintln!("OFOX_STARTUP_TRACE_V1 {error}");
+    let detail: serde_json::Value =
+        serde_json::from_str(error.split_once(":probe ").expect("fixed probe failure").1)
+            .expect("fixed probe evidence");
+    let diagnostic = &detail["worker"]["evidence"]["loaderDiagnostic"];
+    assert_eq!(
+        diagnostic["launchProfile"],
+        "detached_runtime_only_winsock_grant"
+    );
+    assert_eq!(diagnostic["winsockGrantApplied"], true);
+    assert_eq!(diagnostic["winsockGrantRestored"], true);
+    // The complete debugger proof: configured, held 1/paired 2 before attach
+    // and after continue, released only by the original Host Resume, closed.
+    let before = diagnostic["beforeFlags"].as_u64().expect("gflag before");
+    assert_eq!(diagnostic["diagnosticOnly"], true);
+    assert_eq!(diagnostic["configConfirmed"], true);
+    assert_eq!(diagnostic["afterFlags"].as_u64(), Some(before | 2));
+    for (field, value) in [
+        ("preAttachSuspendPrevious", 1),
+        ("preAttachPairedResumePrevious", 2),
+        ("suspendPrevious", 1),
+        ("pairedResumePrevious", 2),
+        ("hostResumePrevious", 1),
+    ] {
+        assert_eq!(diagnostic[field], value, "{field}");
+    }
+    assert_eq!(diagnostic["debuggerClosed"], true);
 }
 
 #[test]

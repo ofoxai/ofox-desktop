@@ -85,6 +85,15 @@ export const comparisonCheck = {
   exact: true,
 };
 
+// Diagnostic-only CDB trace of the fixed first Node launch, run as its own
+// exact step right after ACL (and any comparison) only on explicit opt-in. The
+// Rust test is a no-op unless the controller hands it the private root.
+export const traceCheck = {
+  name: "startup-trace",
+  filter: `${sandbox}document_startup_trace_when_requested`,
+  exact: true,
+};
+
 export function startupComparisonRequested(environment) {
   return (
     typeof environment.OFOX_DOCUMENT_STARTUP_COMPARISON === "string" &&
@@ -131,7 +140,7 @@ export function assertRustResult(result, exact) {
 
 export async function runDevelopmentChecks(
   invoke,
-  { functionalCapture, comparison = false } = {},
+  { traceCapture, comparison = false } = {},
 ) {
   const report = {
     schemaVersion: 1,
@@ -146,14 +155,17 @@ export async function runDevelopmentChecks(
     },
     success: false,
     startupTrace: {
-      requested: typeof functionalCapture === "function",
+      requested: typeof traceCapture === "function",
       attempted: false,
     },
     steps: [],
   };
-  const planned = comparison
-    ? [checks[0], comparisonCheck, ...checks.slice(1)]
-    : checks;
+  const planned = [
+    checks[0],
+    ...(comparison ? [comparisonCheck] : []),
+    ...(traceCapture ? [traceCheck] : []),
+    ...checks.slice(1),
+  ];
   for (const check of planned) {
     const started = Date.now();
     const step = {
@@ -164,12 +176,11 @@ export async function runDevelopmentChecks(
     };
     report.steps.push(step);
     try {
-      if (check.name === "functional-prerequisite" && functionalCapture)
-        report.startupTrace.attempted = true;
-      const result =
-        check.name === "functional-prerequisite" && functionalCapture
-          ? await functionalCapture((overrides) => invoke(check, overrides))
-          : await invoke(check);
+      const traced = check.name === traceCheck.name;
+      if (traced) report.startupTrace.attempted = true;
+      const result = traced
+        ? await traceCapture((overrides) => invoke(check, overrides))
+        : await invoke(check);
       step.exitCode = result.exitCode;
       if (result.trace) step.trace = result.trace;
       step.counts = assertRustResult(result, check.exact);
@@ -808,8 +819,8 @@ export async function startNativeTrace(
   };
 }
 
-// The debugger diagnostic always stops the first Node and fails the functional
-// gate by design, so it runs only on explicit opt-in in the development job.
+// The debugger diagnostic stops the first Node and never admits engines, so it
+// runs only on explicit opt-in in the development job, as its own step.
 export function shouldCaptureDevelopmentTrace(environment) {
   return (
     environment.GITHUB_ACTIONS === "true" &&
@@ -818,7 +829,7 @@ export function shouldCaptureDevelopmentTrace(environment) {
   );
 }
 
-export async function captureFunctional(invoke, start) {
+export async function captureTrace(invoke, start) {
   let capture;
   try {
     capture = await start();
@@ -960,8 +971,8 @@ export async function main(argv = process.argv.slice(2)) {
         comparison: startupComparisonRequested(environment),
         ...(shouldCaptureDevelopmentTrace(environment)
           ? {
-              functionalCapture: (invoke) =>
-                captureFunctional(invoke, () => startNativeTrace(environment)),
+              traceCapture: (invoke) =>
+                captureTrace(invoke, () => startNativeTrace(environment)),
             }
           : {}),
       },

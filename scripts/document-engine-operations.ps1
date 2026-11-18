@@ -17,7 +17,12 @@ function Get-DocumentOperationDefinitions {
     @{ Name = 'NtAlpcConnectPortEx'; Kind = 'none' },
     @{ Name = 'NtSecureConnectPort'; Kind = 'none' },
     # Status only: KernelBase launches conhost for a new console during attach.
-    @{ Name = 'NtCreateUserProcess'; Kind = 'none' }
+    @{ Name = 'NtCreateUserProcess'; Kind = 'none' },
+    # Status only: key operations on an already open handle (no name argument).
+    @{ Name = 'NtEnumerateKey'; Kind = 'none' },
+    @{ Name = 'NtQueryKey'; Kind = 'none' },
+    @{ Name = 'NtNotifyChangeKey'; Kind = 'none' },
+    @{ Name = 'NtNotifyChangeMultipleKeys'; Kind = 'none' }
   )
 }
 function New-DocumentOperationSetup([uint32]$PidValue, [uint32]$TidValue) {
@@ -40,7 +45,7 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
   $commands = @(
     '.expr /s masm',
     '.echo OFOX_NT_RAW_V1 THREADS_BEGIN', '~', '.echo OFOX_NT_RAW_V1 THREADS_END',
-    'r @$t0 = 0', 'r @$t1 = 0'
+    'r @$t0 = 0', 'r @$t1 = 0', 'r @$t10 = 0'
   )
   # Persistent owned return ID: a wrong stack cannot consume it. Only the exact
   # saved call's return clears it. gc is confined to our observational BPs;
@@ -48,6 +53,8 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
   $returned = '.if ((@$tid == 0n' + $TidValue + ') and (@rsp == (@$t2 + 8)) and (@rip == @$t3)) { .printf "OFOX_NT_RAW_V1 RETURN seq=%d pid=%x tid=%x sp=%I64x status=%x END\n", @$t0, @$tpid, @$tid, @rsp, @eax; bc 30; r @$t1 = 0; gc } .else { .echo OFOX_NT_RAW_V1 INVALID return_pair END; gc }'
   $files['operation-return.cmd'] = $returned
   $definitions = @(Get-DocumentOperationDefinitions)
+  # IDs 30-32 belong to the return and scope breakpoints.
+  if (9 + $definitions.Count -ge 30) { throw 'operation_install_unverified' }
   $range = '10-' + (9 + $definitions.Count)
   for ($index = 0; $index -lt $definitions.Count; $index++) {
     $definition = $definitions[$index]; $id = 10 + $index; $api = $index + 1
@@ -75,13 +82,20 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
     $body += 'bl /L 30'
     $body += '.printf "OFOX_NT_RAW_V1 RETURN_BP_END seq=%d END\n", @$t0'
     $body += 'gc'
-    $entry = '.if (@$t1 != 0) { .echo OFOX_NT_RAW_V1 INVALID nested END; gc } .elsif (@$t0 >= 0n256) { .echo OFOX_NT_RAW_V1 INVALID limit END; bd ' + $range + '; gc } .else { ' + ($body -join '; ') + ' }'
+    $entry = '.if (@$t1 != 0) { .echo OFOX_NT_RAW_V1 INVALID nested END; gc } .elsif (@$t0 >= 0n1024) { .echo OFOX_NT_RAW_V1 INVALID limit END; bd ' + $range + '; gc } .else { ' + ($body -join '; ') + ' }'
     # Fixed relative script names in the owned private working directory avoid
     # nested CommandString escaping. $>< executes the file as one command block.
     $files['operation-' + $api + '.cmd'] = $entry
     $commands += $thread + 'bp' + $id + ' ntdll!' + $definition.Name + ' "$><operation-' + $api + '.cmd"'
   }
-  return @{ commands = $commands + @('.echo OFOX_NT_RAW_V1 BREAKPOINTS_BEGIN', ('bl /L ' + $range), '.echo OFOX_NT_RAW_V1 BREAKPOINTS_END'); files = $files }
+  # Best-effort scope: libuv's ws2_32!WSAStartup on the same thread, deferred
+  # until the module loads. It is set after the verified listing and never
+  # gates the trace; seq is the number of observed calls entered so far. Only
+  # the exact saved return clears it, and only the first call is scoped.
+  $files['operation-scope.cmd'] = '.if (@$tid != 0n' + $TidValue + ') { gc } .elsif (@$t10 != 0) { .echo OFOX_NT_RAW_V1 INVALID scope END; gc } .else { r @$t10 = 1; r @$t11 = @rsp; r @$t12 = poi(@rsp); .printf "OFOX_NT_RAW_V1 SCOPE_ENTER seq=%d pid=%x tid=%x sp=%I64x ret=%I64x END\n", @$t0, @$tpid, @$tid, @$t11, @$t12; ' + $thread + 'bp32 @$t12 "$><operation-scope-return.cmd"; gc }'
+  $files['operation-scope-return.cmd'] = '.if ((@$tid == 0n' + $TidValue + ') and (@rsp == (@$t11 + 8)) and (@rip == @$t12)) { .printf "OFOX_NT_RAW_V1 SCOPE_RETURN seq=%d pid=%x tid=%x sp=%I64x result=%x END\n", @$t0, @$tpid, @$tid, @rsp, @eax; bc 31; bc 32; r @$t10 = 2; gc } .else { .echo OFOX_NT_RAW_V1 INVALID scope_pair END; gc }'
+  return @{ commands = $commands + @('.echo OFOX_NT_RAW_V1 BREAKPOINTS_BEGIN', ('bl /L ' + $range), '.echo OFOX_NT_RAW_V1 BREAKPOINTS_END',
+      ($thread + 'bu31 ws2_32!WSAStartup "$><operation-scope.cmd"')); files = $files }
 }
 function Read-DocumentOperationSetupLine([hashtable]$State, [string]$Line) {
   if ($Line -eq 'OFOX_NT_RAW_V1 THREADS_BEGIN') {

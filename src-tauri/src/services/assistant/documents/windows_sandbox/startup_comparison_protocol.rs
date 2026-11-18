@@ -68,34 +68,6 @@ pub(super) fn requested(value: Option<&str>) -> Option<Candidate> {
     .find(|candidate| value == Some(candidate.name()))
 }
 
-pub(super) fn eligible(error: &str) -> bool {
-    let Some((_, data)) = error.split_once(":probe ") else {
-        return false;
-    };
-    if data.len() > 65536 {
-        return false;
-    }
-    let Ok(value) = serde_json::from_str::<Value>(data) else {
-        return false;
-    };
-    let e = &value["worker"]["evidence"];
-    let d = &e["loaderDiagnostic"];
-    let Some(before) = d["beforeFlags"].as_u64().filter(|v| *v <= u32::MAX as u64) else {
-        return false;
-    };
-    e["processStatus"] == 0xc0000142u32
-        && e["resumeResult"] == 1
-        && d["diagnosticOnly"] == true
-        && d["configConfirmed"] == true
-        && d["afterFlags"].as_u64() == Some(before | 2)
-        && d["preAttachSuspendPrevious"] == 1
-        && d["preAttachPairedResumePrevious"] == 2
-        && d["suspendPrevious"] == 1
-        && d["pairedResumePrevious"] == 2
-        && d["hostResumePrevious"] == 1
-        && d["debuggerClosed"] == true
-}
-
 fn verified(row: &Value, count: u64) -> bool {
     row["completed"] == true
         && row["tokenVerified"] == true
@@ -640,41 +612,5 @@ mod tests {
                 "{call}"
             );
         }
-    }
-    #[test]
-    fn incomplete_or_wrong_original_failure_never_arms_comparison() {
-        let mut e = serde_json::json!({"processStatus":0xc0000142u32,"resumeResult":1,"loaderDiagnostic":{
-            "diagnosticOnly":true,"configConfirmed":true,"beforeFlags":0,"afterFlags":2,"preAttachSuspendPrevious":1,
-            "preAttachPairedResumePrevious":2,"suspendPrevious":1,"pairedResumePrevious":2,"hostResumePrevious":1,"debuggerClosed":true}});
-        let message = |e: &Value| {
-            format!(
-                "unavailable:probe {}",
-                serde_json::json!({"worker":{"evidence":e}})
-            )
-        };
-        assert!(eligible(&message(&e)));
-        for field in [
-            "diagnosticOnly",
-            "configConfirmed",
-            "beforeFlags",
-            "afterFlags",
-            "preAttachSuspendPrevious",
-            "preAttachPairedResumePrevious",
-            "suspendPrevious",
-            "pairedResumePrevious",
-            "hostResumePrevious",
-            "debuggerClosed",
-        ] {
-            let mut bad = e.clone();
-            bad["loaderDiagnostic"]
-                .as_object_mut()
-                .unwrap()
-                .remove(field);
-            assert!(!eligible(&message(&bad)), "{field}");
-        }
-        e["processStatus"] = serde_json::json!(0);
-        assert!(!eligible(&message(&e)));
-        assert!(!eligible("unavailable"));
-        assert!(!eligible("unavailable:probe broken"));
     }
 }

@@ -18,20 +18,32 @@ const APIS = [
   ["NtSecureConnectPort", "none"],
   // Status only: KernelBase launches conhost for a new console during attach.
   ["NtCreateUserProcess", "none"],
+  // Status only: key operations on an already open handle (no name argument).
+  ["NtEnumerateKey", "none"],
+  ["NtQueryKey", "none"],
+  ["NtNotifyChangeKey", "none"],
+  ["NtNotifyChangeMultipleKeys", "none"],
 ];
 export const FIXED_OPERATION_APIS = APIS.length;
-// Matches the debugger script's 0n256 call limit. Each failure belongs to one
-// unique sequence, so the call bound also bounds retained observations; ordinary
+// Matches the debugger script's 0n1024 call limit, sized for every primary
+// thread call up to libuv's WSAStartup. Each failure belongs to one unique
+// sequence, so the call bound also bounds retained observations; ordinary
 // startup misses must not evict the final failed operation.
-const MAX_CALLS = 256;
+const MAX_CALLS = 1024;
 const INSTALL =
   /^OFOX_NT_V1 INSTALLED pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) thread=(\d{1,3}) count=(\d{1,2}) arch=amd64 abi=windows-x64 END$/i;
 const ENTER =
-  /^OFOX_NT_RAW_V1 ENTER seq=(\d{1,3}) api=(\d{1,2}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) access=(none|[a-f\d]{1,8}) root=(none|0|1|2) END$/i;
+  /^OFOX_NT_RAW_V1 ENTER seq=(\d{1,4}) api=(\d{1,2}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) access=(none|[a-f\d]{1,8}) root=(none|0|1|2) END$/i;
 const NAME =
-  /^OFOX_NT_RAW_V1 NAME seq=(\d{1,3}) bytes=(\d{1,4}) value="([^\r\n\0]*)" END$/;
+  /^OFOX_NT_RAW_V1 NAME seq=(\d{1,4}) bytes=(\d{1,4}) value="([^\r\n\0]*)" END$/;
 const RETURN =
-  /^OFOX_NT_RAW_V1 RETURN seq=(\d{1,3}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) status=([a-f\d]{1,8}) END$/i;
+  /^OFOX_NT_RAW_V1 RETURN seq=(\d{1,4}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) status=([a-f\d]{1,8}) END$/i;
+// ws2_32!WSAStartup on the primary thread: seq is the number of calls entered
+// before the marker, so the calls inside are exactly those after the entry.
+const SCOPE_ENTER =
+  /^OFOX_NT_RAW_V1 SCOPE_ENTER seq=(\d{1,4}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) ret=([a-f\d]{1,16}) END$/i;
+const SCOPE_RETURN =
+  /^OFOX_NT_RAW_V1 SCOPE_RETURN seq=(\d{1,4}) pid=([a-f\d]{1,8}) tid=([a-f\d]{1,8}) sp=([a-f\d]{1,16}) result=([a-f\d]{1,8}) END$/i;
 // A debugger prompt echo (for example `0:000> bl /L 30`) is never a row.
 const PROMPT = /^(?:\d{1,3}:)?\d{1,3}:[a-f\d]{3}>/i;
 // After -cf, CDB prints "0:000> " without a newline while it waits for the
@@ -44,6 +56,8 @@ const INVALID = {
   "OFOX_NT_RAW_V1 INVALID nested END": "invalid-nested",
   "OFOX_NT_RAW_V1 INVALID limit END": "invalid-limit",
   "OFOX_NT_RAW_V1 INVALID return_pair END": "invalid-return-pair",
+  "OFOX_NT_RAW_V1 INVALID scope END": "invalid-scope",
+  "OFOX_NT_RAW_V1 INVALID scope_pair END": "invalid-scope-pair",
 };
 // Same row grammar as the setup check: optional DML action text and ~thread.
 const BP =
@@ -249,6 +263,29 @@ const VOCABULARY = new Map(
     "Appx",
     "PackageList",
     "MitigationOptions",
+    // Winsock catalog, transports and the user hive keys read at startup.
+    "WinSock2",
+    "Parameters",
+    "Protocol_Catalog9",
+    "NameSpace_Catalog5",
+    "Catalog_Entries",
+    "Catalog_Entries64",
+    "AppId_Catalog",
+    "Winsock",
+    "Tcpip",
+    "Tcpip6",
+    "Dnscache",
+    "NetBT",
+    "Interfaces",
+    "Linkage",
+    ".DEFAULT",
+    "Control Panel",
+    "International",
+    "Desktop",
+    "Keyboard Layout",
+    "Keyboard",
+    "Mouse",
+    "Accessibility",
     // Registry value names.
     "GlobalFlag",
     "GlobalFlag2",
@@ -290,21 +327,57 @@ const VOCABULARY = new Map(
     "ForceDefault",
     "DelegationConsole",
     "DelegationTerminal",
+    "PackedCatalogItem",
+    "Num_Catalog_Entries",
+    "Num_Catalog_Entries64",
+    "Next_Catalog_Entry_ID",
+    "Serial_Access_Num",
+    "Current_Protocol_Catalog",
+    "Current_NameSpace_Catalog",
+    "WinSock_Registry_Version",
+    "LibraryPath",
+    "DisplayString",
+    "ProviderId",
+    "AddressFamily",
+    "SupportedNameSpace",
+    "Version",
+    "StoresServiceClassInfo",
+    "ProviderInfo",
+    "Ws2_32NumHandleBuckets",
+    "Ws2_32SpinCount",
+    "AutodialDLL",
+    "AppFullPath",
+    "PermittedLspCategories",
+    "HelperDllName",
+    "Mapping",
+    "MinSockaddrLength",
+    "MaxSockaddrLength",
+    "UseDelayedAcceptance",
+    "Transports",
   ].map((word) => [word.toLowerCase(), word]),
 );
+// A whole component in the exact shape of a domain/local user SID (hive root,
+// optionally its _Classes hive) or an AppContainer package SID becomes a fixed
+// token, so the public hive path after it stays visible; the SID never prints.
+const USER_SID = /^S-1-5-21(?:-\d{1,10}){4}(_Classes)?$/i;
+const PACKAGE_SID = /^S-1-15-2(?:-\d{1,10}){7}$/i;
 function objectShape(name) {
   if (typeof name !== "string") return null;
   const parts = name.split("\\");
   if (parts.length > 32) return "?overflow";
   // After the first non-vocabulary component everything is "?", so a user,
   // host or share name that happens to equal a vocabulary word never prints.
-  // Plain numbers (session IDs) are masked without hiding what follows.
+  // Plain numbers (session IDs, 12-digit Winsock catalog entries) are masked
+  // without hiding what follows.
   let opaque = false;
   return parts
     .map((part) => {
       if (!part) return "";
       if (opaque) return "?";
-      if (/^\d{1,10}$/.test(part)) return "?";
+      if (/^\d{1,12}$/.test(part)) return "?";
+      const user = USER_SID.exec(part);
+      if (user) return user[1] ? "<user-sid>_Classes" : "<user-sid>";
+      if (PACKAGE_SID.test(part)) return "<package-sid>";
       // ASCII only: no Unicode case folding onto a vocabulary word.
       const word = /^[\x20-\x7e]+$/.test(part)
         ? VOCABULARY.get(part.toLowerCase())
@@ -339,6 +412,13 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
     reasons: [],
     // Closed-set shape only: a fixed code and a count, never raw text.
     diagnostics: { firstRejection: null, promptJoined: 0 },
+    // Best-effort deferred breakpoint; absence never limits call coverage.
+    winsockStartup: {
+      status: "not-seen",
+      callsBeforeEntry: null,
+      callsAtReturn: null,
+      result: null,
+    },
   };
   // Reuse the complete original V2 proof; operation markers cannot replace it.
   const loader = projectDocumentLoaderSnaps({ text, target });
@@ -368,7 +448,9 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
   let active = null,
     next = 1,
     listing = null,
+    scopeStack = null,
     incomplete = false;
+  const scope = report.winsockStartup;
   // firstRejection describes this pairing loop; earlier exits use reasons.
   const reject = (code) => {
     incomplete = true;
@@ -386,7 +468,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
           report.diagnostics.promptJoined++;
           return "";
         });
-    const endList = /^OFOX_NT_RAW_V1 RETURN_BP_END seq=(\d{1,3}) END$/.exec(
+    const endList = /^OFOX_NT_RAW_V1 RETURN_BP_END seq=(\d{1,4}) END$/.exec(
       line,
     );
     if (listing) {
@@ -409,6 +491,39 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
         }
         listing = null;
       } else if (line.trim() && !PROMPT.test(line)) listing.push(line);
+      continue;
+    }
+    const entered = SCOPE_ENTER.exec(line);
+    if (entered) {
+      if (
+        active ||
+        scope.status !== "not-seen" ||
+        Number(entered[1]) !== next - 1 ||
+        !same(entered[2], entered[3])
+      ) {
+        reject("scope-order");
+        continue;
+      }
+      scope.status = "entered";
+      scope.callsBeforeEntry = next - 1;
+      scopeStack = pointer(entered[4]);
+      continue;
+    }
+    const left = SCOPE_RETURN.exec(line);
+    if (left) {
+      if (
+        active ||
+        scope.status !== "entered" ||
+        Number(left[1]) !== next - 1 ||
+        !same(left[2], left[3]) ||
+        pointer(left[4]) !== scopeStack + 8n
+      ) {
+        reject("scope-order");
+        continue;
+      }
+      scope.status = "returned";
+      scope.callsAtReturn = next - 1;
+      scope.result = hex(left[5]);
       continue;
     }
     const entry = ENTER.exec(line);
@@ -452,7 +567,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
       continue;
     }
     const name = NAME.exec(line),
-      unknown = /^OFOX_NT_RAW_V1 NAME_UNKNOWN seq=(\d{1,3}) END$/.exec(line);
+      unknown = /^OFOX_NT_RAW_V1 NAME_UNKNOWN seq=(\d{1,4}) END$/.exec(line);
     if (name || unknown) {
       const match = name ?? unknown;
       if (!active || Number(match[1]) !== active.sequence || active.nameSeen) {
@@ -474,7 +589,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
       }
       continue;
     }
-    const begin = /^OFOX_NT_RAW_V1 RETURN_BP_BEGIN seq=(\d{1,3}) END$/.exec(
+    const begin = /^OFOX_NT_RAW_V1 RETURN_BP_BEGIN seq=(\d{1,4}) END$/.exec(
       line,
     );
     if (begin) {
@@ -513,6 +628,7 @@ export function projectDocumentNativeOperations({ text, target } = {}) {
         desiredAccess: active.access,
         root: ROOTS[active.root] ?? null,
         objectShape: objectShape(active.name),
+        insideWsaStartup: scope.status === "entered",
       });
       if ((status & 0x80000000) !== 0)
         report.observations.push({

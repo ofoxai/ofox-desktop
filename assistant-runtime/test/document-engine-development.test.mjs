@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import {
   assertRustResult,
-  captureFunctional,
+  captureTrace,
   checks,
   extractTraceTargets,
   nativeOutput,
@@ -17,6 +17,7 @@ import {
   shouldCaptureDevelopmentTrace,
   startupComparisonRequested,
   comparisonCheck,
+  traceCheck,
   checkEnvironment,
   startNativeTrace,
   runDevelopmentChecks,
@@ -220,7 +221,7 @@ test("functional prerequisite failure starts no whole-sandbox or follow-up cases
   assert.equal(report.releaseGate, false);
 });
 
-test("failed ETW start prevents the functional process from running without trace", async () => {
+test("failed trace start runs no traced step and no later check", async () => {
   const calls = [];
   let captureCalls = 0;
   const report = await runDevelopmentChecks(
@@ -229,19 +230,47 @@ test("failed ETW start prevents the functional process from running without trac
       return nativeResult(1);
     },
     {
-      functionalCapture: async () => {
+      traceCapture: async () => {
         captureCalls += 1;
         throw new Error("fixed synthetic start failure");
       },
     },
   );
   assert.equal(captureCalls, 1);
-  assert.deepEqual(calls, [
+  assert.deepEqual(calls, ["acl-prerequisite"]);
+  assert.equal(report.success, false);
+  assert.equal(report.steps.at(-1).name, "startup-trace");
+  assert.equal(report.startupTrace.attempted, true);
+});
+
+test("a requested trace runs as its own exact step right after ACL and any comparison", async () => {
+  const run = async (options) => {
+    const calls = [];
+    const report = await runDevelopmentChecks(async (check) => {
+      calls.push(check.name);
+      return nativeResult(check.exact ? 1 : 7);
+    }, options);
+    return { calls, report };
+  };
+  const capture = (invoke) => invoke();
+  assert.ok(!(await run({})).calls.includes("startup-trace"));
+  const traced = await run({ traceCapture: capture });
+  assert.deepEqual(traced.calls.slice(0, 3), [
     "acl-prerequisite",
+    "startup-trace",
     "registry-isolation-prerequisite",
   ]);
-  assert.equal(report.success, false);
-  assert.equal(report.steps.at(-1).name, "functional-prerequisite");
+  assert.equal(traced.calls.length, checks.length + 1);
+  const both = await run({ traceCapture: capture, comparison: true });
+  assert.deepEqual(both.calls.slice(0, 4), [
+    "acl-prerequisite",
+    "launch-comparison",
+    "startup-trace",
+    "registry-isolation-prerequisite",
+  ]);
+  assert.equal(traceCheck.exact, true);
+  assert.match(traceCheck.filter, /::document_startup_trace_when_requested$/);
+  assert.ok(checks.every((check) => check.name !== traceCheck.name));
 });
 
 test("capture stops after native failure and retains the original failed result", async () => {
@@ -251,7 +280,7 @@ test("capture stops after native failure and retains the original failed result"
     output: "fixed native failure",
     outputLimited: false,
   };
-  const result = await captureFunctional(
+  const result = await captureTrace(
     async () => {
       order.push("native");
       return native;
@@ -271,7 +300,7 @@ test("capture stops after native failure and retains the original failed result"
   assert.equal(result.exitCode, 101);
   assert.equal(result.output, native.output);
   assert.equal(result.trace.status, "inconclusive");
-  const decodeFailure = await captureFunctional(
+  const decodeFailure = await captureTrace(
     async () => native,
     async () => ({
       finish: async () => {
@@ -286,7 +315,7 @@ test("capture stops after native failure and retains the original failed result"
 
 test("capture start failure executes no native test and preserves only safe diagnostics", async () => {
   let invoked = false;
-  const result = await captureFunctional(
+  const result = await captureTrace(
     async () => {
       invoked = true;
     },
@@ -302,7 +331,7 @@ test("capture start failure executes no native test and preserves only safe diag
 
 test("trace target discovery includes panic stderr without changing stdout count evidence", async () => {
   const panic = `error:probe ${JSON.stringify({ worker: { evidence: { childPid: 66, primaryTid: 99 } } })}`;
-  const result = await captureFunctional(
+  const result = await captureTrace(
     async () => ({
       ...nativeResult(1),
       diagnosticOutput: `${nativeResult(1).output}\n${panic}`,
@@ -537,7 +566,7 @@ test("failed debugger retains private evidence through STOP and removes it only 
     return child;
   };
   try {
-    const result = await captureFunctional(
+    const result = await captureTrace(
       async () => ({
         exitCode: 101,
         outputLimited: false,
@@ -613,7 +642,7 @@ test("local development keeps its original gate without ETW prerequisites", asyn
   assert.deepEqual(report.startupTrace, { requested: false, attempted: false });
 });
 
-test("only the fixed functional process receives the private CDB diagnostic request", async () => {
+test("only the dedicated trace step receives the private CDB diagnostic request", async () => {
   const received = [];
   const report = await runDevelopmentChecks(
     async (check, overrides) => {
@@ -621,8 +650,8 @@ test("only the fixed functional process receives the private CDB diagnostic requ
       return nativeResult(check.exact ? 1 : 7);
     },
     {
-      functionalCapture: (invoke) =>
-        captureFunctional(invoke, async () => ({
+      traceCapture: (invoke) =>
+        captureTrace(invoke, async () => ({
           environment: {
             OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT: "synthetic-private-directory",
           },
@@ -635,7 +664,7 @@ test("only the fixed functional process receives the private CDB diagnostic requ
     received.filter(([, env]) => env),
     [
       [
-        "functional-prerequisite",
+        "startup-trace",
         { OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT: "synthetic-private-directory" },
       ],
     ],
@@ -716,15 +745,13 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     '  workflow_dispatch:\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
   );
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
-  // The root-cause A-B-A and debugger trace are answered; the gate must now
-  // run the functional prerequisite and full suite unassisted.
-  assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_TRACE/);
-  // The only comparison is the CI-only narrow Winsock grant, on the native
-  // check step; Rust accepts exact names only, so pin the spelling and place.
-  const candidates = [
-    ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_COMPARISON: (\S+)$/gm),
+  // The narrow-grant comparison is answered (run 44142596063); this run
+  // traces the failing launch instead, on the native check step only.
+  assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_COMPARISON/);
+  const traces = [
+    ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_TRACE: (\S+)$/gm),
   ].map((match) => match[1]);
-  assert.deepEqual(candidates, ["detachedWinsockGrant"]);
+  assert.deepEqual(traces, ['"1"']);
   const step = workflow
     .split(/^ {6}- /m)
     .find((block) =>
@@ -732,10 +759,7 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
         "name: ACL prerequisite then focused native regressions",
       ),
     );
-  assert.match(
-    step,
-    /^ {10}OFOX_DOCUMENT_STARTUP_COMPARISON: detachedWinsockGrant$/m,
-  );
+  assert.match(step, /^ {10}OFOX_DOCUMENT_STARTUP_TRACE: "1"$/m);
   assert.match(
     workflow,
     /debug0-v3-.*hashFiles\('src-tauri\/Cargo.lock', 'src-tauri\/Cargo.toml'/,
