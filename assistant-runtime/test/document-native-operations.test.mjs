@@ -111,6 +111,7 @@ test(
           "sxi out",
           "sxn ibp",
           "sxn bpe",
+          "sxd -h bpe",
           "sxe -h ch",
           "sxn ch",
           "sxn av",
@@ -131,11 +132,14 @@ test(
           "sxn ii",
           "sxn *",
         ]);
-        // No exception is ignored or held to second chance; only the
-        // debuggee-output event is ignored.
+        // No exception is ignored or held to second chance: only the
+        // debuggee-output event is ignored, and `sxd -h` changes only the
+        // handling of a hard-coded int3 (run 44228529933 looped on libuv's
+        // DebugBreak when it continued as handled; unhandled ends the process
+        // with 0x80000003 as it does undebugged).
         assert.deepEqual(
           sx.filter((line) => /^sx[id]\b/.test(line)),
-          ["sxi out"],
+          ["sxi out", "sxd -h bpe"],
         );
         assert.ok(
           report.program.commands.indexOf("sxn *") <
@@ -1116,4 +1120,22 @@ test("debugger exception events and stops are reported as closed-set positions",
   const quiet = project(call({ status: "0" }));
   assert.deepEqual(quiet.debuggerEvents, []);
   assert.deepEqual(quiet.debuggerStops, []);
+});
+
+test("an exception flood after WSAStartup keeps the calls, the scope and a total", () => {
+  const notice =
+    "(2a.2b): Break instruction exception - code 80000003 (first chance)";
+  const report = project([
+    ...call({ status: "0" }),
+    scopeEnter(),
+    ...catalogCalls(),
+    scopeReturn(),
+    ...Array.from({ length: 50001 }, () => notice),
+  ]);
+  assert.equal(report.coverage.status, "complete-for-fixed-set");
+  assert.equal(report.winsockStartup.status, "returned");
+  assert.equal(report.calls.length, 3);
+  assert.equal(report.debuggerEvents.length, 32);
+  assert.equal(report.debuggerEventsTotal, 50001);
+  assert.equal(report.debuggerEvents[0].code, "0x80000003");
 });

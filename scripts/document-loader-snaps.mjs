@@ -2,7 +2,9 @@
 // Loader wording is an explicitly supported synthetic grammar, not an SDK ABI.
 const LIMITS = {
   bytes: 4 * 1024 * 1024,
-  lines: 50_000,
+  // Follows the byte bound (16-byte lines): run 44228529933's 66114 short
+  // exception-notice lines fit in 4 MiB but exceeded a 50000-line bound.
+  lines: 262_144,
   line: 16_384,
   observations: 32,
 };

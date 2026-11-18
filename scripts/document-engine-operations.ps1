@@ -55,7 +55,10 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
     # overflowed the private log. The snaps flag and its readback stay; only
     # the debuggee-output event (not an exception) is no longer captured.
     'sxi out',
-    'sxn ibp', 'sxn bpe', 'sxe -h ch', 'sxn ch', 'sxn av', 'sxn dm', 'sxn dz', 'sxn c000008e', 'sxn gp',
+    # Run 44228529933 looped on libuv's DebugBreak: continued as handled, the
+    # int3 re-executed and flooded the log. Unhandled, it reaches the target's
+    # unhandled-exception path and ends with 0x80000003, as it does undebugged.
+    'sxn ibp', 'sxn bpe', 'sxd -h bpe', 'sxe -h ch', 'sxn ch', 'sxn av', 'sxn dm', 'sxn dz', 'sxn c000008e', 'sxn gp',
     'sxn iov', 'sxn ip', 'sxn isc', 'sxn lsq', 'sxn sbo', 'sxn sov', 'sxn asrt', 'sxn wkd', 'sxn aph',
     'sxn eh', 'sxn ii', 'sxn *',
     '.echo OFOX_NT_RAW_V1 THREADS_BEGIN', '~', '.echo OFOX_NT_RAW_V1 THREADS_END',

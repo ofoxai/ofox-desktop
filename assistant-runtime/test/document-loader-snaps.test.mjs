@@ -256,6 +256,19 @@ test("missing, repeated, mismatched or early hold/continue/Host proof never attr
   }
 });
 
+test("a short-line flood within the byte bound keeps the handshake", () => {
+  // Run 44228529933: 66114 lines in 4 MiB exceeded a 50000-line bound and
+  // discarded the whole projection, including the original Host proof.
+  const flood = Array.from(
+    { length: 60000 },
+    () => "(2a.2b): Break instruction exception - code 80000003 (first chance)",
+  );
+  assert.equal(project(flood).handshake.status, "matched");
+  // The line bound still follows the byte bound (16-byte lines in 4 MiB).
+  const tiny = project(Array.from({ length: 300000 }, () => "x"));
+  assert.ok(tiny.reasons.includes("input-limit"));
+});
+
 test("oversized inputs and excessive observations are bounded", () => {
   const overlong = project([], { text: "x".repeat(4 * 1024 * 1024 + 1) });
   assert.equal(overlong.status, "inconclusive");
