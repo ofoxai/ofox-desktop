@@ -68,8 +68,13 @@ decisive) on the actual suspended token, and refuses on any failed measurement;
 a profile without HKCU\Environment would therefore be refused. Only the trusted
 probe keeps these results as evidence. The native prerequisite test additionally
 checks that the runtime-only token reads none of the fixed keys and that
-registryRead adds no HKCU write right. Windows Python capability stays disabled
-until the native functional gate and client acceptance pass.
+registryRead adds no HKCU write right. Unassisted Server 2022 run
+[44240191725](https://github.com/ofoxai/ofox-desktop/actions/runs/44240191725)
+passed these controls (3504 keys visited, 1798 newly readable, zero added write
+rights and zero measurement errors). Node ran the fixed script through
+checkpoint 7 and timed out in the child-process denial check. The rest of the
+isolation probe, Pyodide and OfficeCLI remain unverified. Windows Python
+capability stays disabled until the native functional gate and client acceptance pass.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

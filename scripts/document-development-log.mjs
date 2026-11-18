@@ -393,6 +393,18 @@ const functionalFailure = z.object({
       stdoutBytes: count,
       stderrBytes: count,
       nodeCheckpointBeforeStep: z.int().min(1).max(14).nullable(),
+      childSpawnResult: z
+        .enum([
+          "EPERM",
+          "EACCES",
+          "ETIMEDOUT",
+          "ENOENT",
+          "UNKNOWN",
+          "child-started",
+          "marker-present",
+          "other-error",
+        ])
+        .nullish(),
     })
     .nullable(),
   worker: z

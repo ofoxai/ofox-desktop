@@ -754,3 +754,25 @@ CDB 仍用实际标识完成配对，可选跟踪的收据另保留机器 ACL �
 下一次 Windows Server 2022 定点运行只回答：接受 registryRead 后，在不挂调试器的情况下，
 注册表范围、Node／Pyodide／OfficeCLI、逃逸拒绝及其余开发门禁能否全部通过？Windows
 原生结果待验证。
+
+运行 [44240191725](https://github.com/ofoxai/ofox-desktop/actions/runs/44240191725)
+（`08f9f0c7`，push，第 1 次，Windows Server 2022）通过 ACL 和注册表范围前置。
+四种门禁结果为 `[true,false,true,false]`。生产令牌可读四键，仅 runtime 均不可读；
+宿主成功以 READ_CONTROL 打开 HKLM 根键。HKCU 遍历 3504 键，生产可读 1802、仅 runtime
+可读 4、新增可读 1798；两种令牌各可写 3 键，新增写权限和测量错误均为 0。
+
+功能前置在 `node_isolation` 超时，stdout 为 0 字节，stderr 为 168 字节，最后检查点为 7。
+Node 已执行隔离脚本并完成前面的文件与环境检查，停在子进程拒绝检查区间；Pyodide、OfficeCLI、
+完整 sandbox、附件及 Host 步骤均未执行。下载的 artifact 仅含 summary 与三个固定步骤日志。
+
+该区间原先使用 `spawnSync` 默认 stdio。Node 22.23.4 附带的 Windows libuv 在创建进程前
+先建立命名管道，建管道若遇到 ERROR_ACCESS_DENIED 会持续换名重试。这是与超时相符的
+源码解释，本次运行没有该调用的原生跟踪。
+[libuv 管道实现](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/pipe.c#L194-L219)
+和 [stdio 准备顺序](https://github.com/nodejs/node/blob/v22.23.4/deps/uv/src/win/process.c#L945-L952)。
+
+候选修复让固定受限子进程探针继承宿主已提供的 stdio。只有明确的权限错误、未创建进程、
+无退出状态或信号且标记文件不存在时，该断言才通过。超时、未知或其他错误均拒绝，并将
+结果投影为闭集类别。本地回归含未受限子进程确实能写标记的正对照；原生结果待验证。
+下一次定点运行只回答：继承现有 stdio 后，检查点 7 能否取得明确的子进程拒绝证据，
+并使无调试器功能前置继续至后续检查？

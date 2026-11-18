@@ -939,7 +939,7 @@ fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
     let output = EngineOutput {
         status: Some(7),
         stdout: private.into(),
-        stderr: format!("{private}\nOFOX_LPAC_PROBE_STAGE:9\nOFOX_LPAC_PROBE_STAGE:99\nOFOX_LPAC_PROBE_STAGE:{private}\n"),
+        stderr: format!("{private}\nOFOX_LPAC_PROBE_STAGE:9\nOFOX_LPAC_PROBE_STAGE:99\nOFOX_LPAC_PROBE_STAGE:{private}\nOFOX_LPAC_CHILD_RESULT:{private}\nOFOX_LPAC_CHILD_RESULT:EPERM\n"),
         timed_out: false,
     };
     assert!(trace.success(output).is_err());
@@ -954,6 +954,7 @@ fn document_fixed_probe_diagnostics_keep_progress_without_private_output() {
     assert_eq!(detail["engine"]["status"], 7);
     assert_eq!(detail["engine"]["timedOut"], false);
     assert_eq!(detail["engine"]["nodeCheckpointBeforeStep"], 9);
+    assert_eq!(detail["engine"]["childSpawnResult"], "EPERM");
     assert_eq!(
         detail["completedChecks"],
         serde_json::json!(["windowsBuild", "nativeCanvas"])

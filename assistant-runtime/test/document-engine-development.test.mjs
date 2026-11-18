@@ -979,6 +979,7 @@ test("functional failures retain engine checkpoints and registry decisions witho
       stdoutBytes: 0,
       stderrBytes: 1,
       nodeCheckpointBeforeStep: 3,
+      childSpawnResult: "EPERM",
     },
     worker: {
       firstFailure: "token_registry_isolation",

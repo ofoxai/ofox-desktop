@@ -3010,9 +3010,35 @@ checkpoint(6);
 for (const name of ['NODE_OPTIONS', 'NODE_PATH', 'OFOX_DOCUMENT_PROBE_SECRET'])
   assert.equal(process.env[name], undefined);
 checkpoint(7);
-const spawned = cp.spawnSync(process.execPath, ['-e', "require('node:fs').writeFileSync('child-marker', 'bad')"]);
-assert.ok(spawned.error, 'child process creation was allowed');
-assert.equal(fs.existsSync('child-marker'), false);
+// libuv builds the default stdio named pipes before CreateProcessW. Inherit the
+// three handles supplied by the verified host so the probe tests child creation.
+const spawned = cp.spawnSync(
+  process.execPath,
+  ["-e", "require('node:fs').writeFileSync('child-marker', 'bad')"],
+  {
+    stdio: "inherit",
+    timeout: 5000,
+  },
+);
+const childCode = spawned.error?.code;
+let childResult = "other-error";
+if (fs.existsSync("child-marker")) childResult = "marker-present";
+else if (
+  !spawned.error ||
+  spawned.pid !== 0 ||
+  spawned.status !== null ||
+  spawned.signal !== null
+)
+  childResult = "child-started";
+else if (
+  ["EPERM", "EACCES", "ETIMEDOUT", "ENOENT", "UNKNOWN"].includes(childCode)
+)
+  childResult = childCode;
+console.error("OFOX_LPAC_CHILD_RESULT:" + childResult);
+assert.ok(
+  childResult === "EPERM" || childResult === "EACCES",
+  "child process denial was not proven",
+);
 const native = process.argv[1];
 checkpoint(8);
 require(native); // Prove the original binary actually loads before the denial.
@@ -3148,10 +3174,25 @@ impl ProbeTrace {
             .filter_map(|line| line.strip_prefix("OFOX_LPAC_PROBE_STAGE:"))
             .filter_map(|value| value.parse::<u8>().ok())
             .rfind(|value| (1..=14).contains(value));
+        let child_result = output.stderr.lines().find_map(|line| {
+            let result = line.strip_prefix("OFOX_LPAC_CHILD_RESULT:")?;
+            matches!(
+                result,
+                "EPERM"
+                    | "EACCES"
+                    | "ETIMEDOUT"
+                    | "ENOENT"
+                    | "UNKNOWN"
+                    | "child-started"
+                    | "marker-present"
+                    | "other-error"
+            )
+            .then_some(result)
+        });
         self.engine = Some(serde_json::json!({
             "status":output.status, "timedOut":output.timed_out,
             "stdoutBytes":output.stdout.len(), "stderrBytes":output.stderr.len(),
-            "nodeCheckpointBeforeStep":marker
+            "nodeCheckpointBeforeStep":marker, "childSpawnResult":child_result
         }));
         if output.status != Some(0) || output.timed_out {
             return Err(UNAVAILABLE.into());
