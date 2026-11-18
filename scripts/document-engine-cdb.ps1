@@ -42,7 +42,9 @@ function Find-DebuggerTool([ValidateSet('cdb','symchk')][string]$Name) {
 }
 function Read-CdbLine([string]$Line, [bool]$Stderr) {
   $script:capturedBytes += [Text.Encoding]::UTF8.GetByteCount($Line) + 1
-  if ($Line.Length -gt 16384 -or $script:capturedBytes -gt 4194304) { throw 'output_bound' }
+  # The log is written with LF lines; 64 KiB stays free for the controller's own
+  # records so the file never exceeds the 4 MiB the Node projector reads.
+  if ($Line.Length -gt 16384 -or $script:capturedBytes -gt 4128768) { throw 'output_bound' }
   $script:writer.WriteLine($Line)
   if ($null -ne $script:operationSetup) { Read-DocumentOperationSetupLine $script:operationSetup $Line }
   if ($Stderr) { $script:stderrLines++ } else { $script:stdoutLines++ }
@@ -256,6 +258,7 @@ public static class DocumentCdbNative {
   }
   [IO.File]::WriteAllText($commands, ($initialCommands + "`n" + ($operationProgram.commands -join "`n") + "`n.echo OFOX_CDB_RAW_V1 CONFIG_END`n"), [Text.UTF8Encoding]::new($false))
   $writer = [IO.StreamWriter]::new((Join-Path $RawDirectory 'debugger.log'), $false, [Text.UTF8Encoding]::new($false))
+  $writer.NewLine = "`n"
   $start = [Diagnostics.ProcessStartInfo]::new()
   $start.FileName = $cdb.path; $start.WorkingDirectory = $RawDirectory; $start.UseShellExecute = $false; $start.CreateNoWindow = $true
   $start.RedirectStandardInput = $true; $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true

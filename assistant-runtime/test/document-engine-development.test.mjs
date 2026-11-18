@@ -595,6 +595,73 @@ test("failed debugger retains private evidence through STOP and removes it only 
   }
 });
 
+test("an undecodable private log still keeps the fixed controller state and failure stage", async () => {
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), "document-cdb-overflow-"),
+  );
+  const child = fakeController();
+  const spawnController = (_exe, args) => {
+    const raw = args[args.indexOf("-RawDirectory") + 1];
+    queueMicrotask(() => child.send({ state: "started" }));
+    child.stdin.on("data", async (chunk) => {
+      const command = chunk.toString();
+      if (command.includes("STOP")) {
+        await Promise.all([
+          writeFile(
+            path.join(raw, "debugger-state.json"),
+            JSON.stringify({
+              stage: "output_bound",
+              debuggerStarted: true,
+              debuggerClosed: true,
+              capturedBytes: 4128000,
+              stdoutLines: 41000,
+            }),
+          ),
+          writeFile(
+            path.join(raw, "roots.json"),
+            JSON.stringify({ windows: ["C:\\Windows"] }),
+          ),
+          // Run 44226276948: CRLF lines made the file larger than counted.
+          writeFile(
+            path.join(raw, "debugger.log"),
+            "x".repeat(4 * 1024 * 1024 + 1),
+          ),
+        ]);
+        child.send({ state: "failed", reason: "output_bound" });
+      }
+      if (command.includes("CLEAN")) {
+        await rm(raw, { recursive: true, force: true });
+        child.send({
+          state: "cleaned",
+          ownedStopSucceeded: true,
+          rawRemoved: true,
+        });
+        child.close();
+      }
+    });
+    return child;
+  };
+  try {
+    const result = await captureTrace(
+      async () => ({ exitCode: 0, outputLimited: false, output: "" }),
+      () =>
+        startNativeTrace(
+          { RUNNER_TEMP: temporary },
+          { spawnController, startupTimeoutMs: 100, cleanupTimeoutMs: 100 },
+        ),
+    );
+    assert.equal(result.trace.status, "inconclusive");
+    assert.equal(result.trace.reason, "trace-decode-incomplete");
+    assert.equal(result.trace.controller.stage, "output_bound");
+    assert.equal(result.trace.controllerState.stage, "output_bound");
+    assert.equal(result.trace.controllerState.capturedBytes, 4128000);
+    assert.equal(result.trace.controllerState.stdoutLines, 41000);
+    assert.equal(result.trace.cleanup.rawRemoved, true);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test("local development keeps its original gate without ETW prerequisites", async () => {
   assert.equal(shouldCaptureDevelopmentTrace({}), false);
   assert.equal(

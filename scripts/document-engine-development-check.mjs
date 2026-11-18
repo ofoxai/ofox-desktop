@@ -774,6 +774,8 @@ export async function startNativeTrace(
           await privateRead(path.join(raw, "debugger-state.json"), 32768),
         );
         const safeState = safeDebuggerState(state);
+        // Kept even if the private log below cannot be read or decoded.
+        report.controllerState = safeState;
         const roots = JSON.parse(
           await privateRead(path.join(raw, "roots.json"), 32768),
         );

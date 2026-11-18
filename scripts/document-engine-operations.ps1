@@ -51,6 +51,10 @@ function Get-DocumentOperationProgram([uint32]$TidValue) {
     # handled; others: passed to the target). Only the invalid-handle exception
     # NtClose raises solely because a debugger is attached is set to handled,
     # matching an undebugged run. Engine breakpoints (bp10-32) are unaffected.
+    # Run 44226276948: once startup proceeded, loader-snap debuggee output
+    # overflowed the private log. The snaps flag and its readback stay; only
+    # the debuggee-output event (not an exception) is no longer captured.
+    'sxi out',
     'sxn ibp', 'sxn bpe', 'sxe -h ch', 'sxn ch', 'sxn av', 'sxn dm', 'sxn dz', 'sxn c000008e', 'sxn gp',
     'sxn iov', 'sxn ip', 'sxn isc', 'sxn lsq', 'sxn sbo', 'sxn sov', 'sxn asrt', 'sxn wkd', 'sxn aph',
     'sxn eh', 'sxn ii', 'sxn *',

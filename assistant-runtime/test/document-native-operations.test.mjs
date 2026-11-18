@@ -104,7 +104,11 @@ test(
         const sx = report.program.commands.filter((line) =>
           line.startsWith("sx"),
         );
+        // Run 44226276948 overflowed the private log with loader-snap
+        // debuggee output once startup proceeded; the snaps flag and its
+        // readback proof stay, only their text is no longer captured.
         assert.deepEqual(sx, [
+          "sxi out",
           "sxn ibp",
           "sxn bpe",
           "sxe -h ch",
@@ -127,8 +131,12 @@ test(
           "sxn ii",
           "sxn *",
         ]);
-        // No exception is blanket-ignored or forced to handled.
-        assert.ok(!sx.some((line) => /^sx[id]\b/.test(line)));
+        // No exception is ignored or held to second chance; only the
+        // debuggee-output event is ignored.
+        assert.deepEqual(
+          sx.filter((line) => /^sx[id]\b/.test(line)),
+          ["sxi out"],
+        );
         assert.ok(
           report.program.commands.indexOf("sxn *") <
             report.program.commands.indexOf(
