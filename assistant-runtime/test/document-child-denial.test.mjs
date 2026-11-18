@@ -6,6 +6,7 @@ import path from "node:path";
 import os from "node:os";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { fileURLToPath } from "node:url";
 
 const rust = await readFile(
   new URL(
@@ -116,3 +117,43 @@ test("the same request really creates the marker when child processes are allowe
   );
   assert.equal(await readFile(path.join(cwd, "child-marker"), "utf8"), "bad");
 });
+
+const eventTestPwsh =
+  process.env.OFOX_DOCUMENT_TEST_PWSH ??
+  (process.platform === "win32" ? "pwsh" : null);
+test(
+  "the kernel child-block witness binds the exact native event, process lifetime, thread and request",
+  { skip: !eventTestPwsh },
+  async (t) => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "document-child-event-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const result = spawnSync(
+      eventTestPwsh,
+      [
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-File",
+        fileURLToPath(
+          new URL("./fixtures/document-child-block-event.ps1", import.meta.url),
+        ),
+      ],
+      {
+        encoding: "utf8",
+        timeout: 10000,
+        maxBuffer: 4096,
+        env: {
+          ...process.env,
+          HOME: dir,
+          USERPROFILE: dir,
+          APPDATA: dir,
+          LOCALAPPDATA: dir,
+          POWERSHELL_TELEMETRY_OPTOUT: "1",
+        },
+      },
+    );
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0);
+    assert.equal(result.stdout.trim(), "passed");
+  },
+);

@@ -776,3 +776,18 @@ Node 已执行隔离脚本并完成前面的文件与环境检查，停在子进
 结果投影为闭集类别。本地回归含未受限子进程确实能写标记的正对照；原生结果待验证。
 下一次定点运行只回答：继承现有 stdio 后，检查点 7 能否取得明确的子进程拒绝证据，
 并使无调试器功能前置继续至后续检查？
+
+运行 [44242608733](https://github.com/ofoxai/ofox-desktop/actions/runs/44242608733)
+（`1570af28`，手动，第 1 次，Windows Server 2022）中，ACL 和注册表范围前置通过。
+四种门禁依次为 `[true,false,true,false]`。生产令牌可读四键，仅 runtime 四键均不可读。
+遍历 HKCU 3509 键，生产可读 1802、仅 runtime 可读 4，两者各可写 3，新增写权限和测量错误均为 0。
+
+继承已有 stdio 后，Node 在检查点 7 返回 `UNKNOWN`，进程退出码为 1，未超时。
+功能前置失败（Cargo 101）。该结果无法识别底层 Windows 错误，也不能证明子进程策略已阻止请求。
+Pyodide、OfficeCLI、完整 sandbox、附件及 Host 回归均未运行。
+
+下一次 Windows Server 2022 定点运行要回答：对该次 `UNKNOWN`，Windows 是否为这一个
+Node 进程、主线程和固定子进程命令记录了唯一的 KernelMode 子进程阻止事件（ID 4）？
+开发控制器仅在上述失败时查询现有日志。事件匹配只补充诊断证据，功能前置仍保留原退出码。
+未匹配、无法查询或无法核对命令都不足以判断原因。微软列出了子进程阻止及审计各自的事件 ID。
+[Microsoft Learn](https://learn.microsoft.com/en-us/defender-endpoint/exploit-protection)

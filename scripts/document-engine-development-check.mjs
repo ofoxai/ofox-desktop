@@ -1,7 +1,7 @@
 // Focused native diagnostics only; never release or installed-client evidence.
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { lstatSync } from "node:fs";
 import {
   mkdir,
@@ -20,6 +20,7 @@ import {
   developmentReceipt,
   functionalProbeFailure,
   nativePanicLocation,
+  privateChildBlockTarget,
 } from "./document-development-log.mjs";
 import { projectDocumentLoaderSnaps } from "./document-loader-snaps.mjs";
 import {
@@ -111,6 +112,8 @@ export function startupComparisonRequested(environment) {
 // machine ACL on CI).
 export function checkEnvironment(environment, check) {
   const scoped = { ...environment };
+  if (check.name !== "functional-prerequisite")
+    delete scoped.OFOX_DOCUMENT_CHILD_BLOCK_EVENT;
   if (check.name !== comparisonCheck.name)
     delete scoped.OFOX_DOCUMENT_STARTUP_COMPARISON;
   return scoped;
@@ -880,11 +883,43 @@ export async function captureTrace(invoke, start) {
   return result;
 }
 
+// Read-only CI diagnostic. The controller emits one fixed verdict and never
+// forwards Windows event XML, command lines, process identities or errors.
+function queryChildBlockEvent(target) {
+  const result = spawnSync(
+    "pwsh",
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-File",
+      path.join(root, "scripts/document-child-block-event.ps1"),
+      "-CallerId",
+      String(target.childPid),
+      "-CallerTid",
+      String(target.primaryTid),
+      "-CreationTime",
+      target.childCreationFiletime,
+    ],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 10000,
+      maxBuffer: 4096,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  return result.status === 0 && !result.error
+    ? result.stdout.trim()
+    : "query-unavailable";
+}
+
 export async function invokeNative(
   check,
   output,
   environment,
   spawnCargo = spawn,
+  queryBlock = queryChildBlockEvent,
 ) {
   const args = [
     "test",
@@ -933,6 +968,37 @@ export async function invokeNative(
       ? { probeFailure: functionalProbeFailure(stderr) }
       : {}),
   };
+  if (
+    environment.GITHUB_ACTIONS === "true" &&
+    environment.GITHUB_WORKFLOW === "Document Engine Development Checks" &&
+    environment.OFOX_DOCUMENT_CHILD_BLOCK_EVENT === "1" &&
+    !limited &&
+    line.probeFailure?.stage === "node_isolation" &&
+    line.probeFailure.reason === "process_exit" &&
+    line.probeFailure.engine?.nodeCheckpointBeforeStep === 7 &&
+    line.probeFailure.engine.childSpawnResult === "UNKNOWN"
+  ) {
+    const target = privateChildBlockTarget(stderr);
+    line.childBlockEvent = "identity-unavailable";
+    if (target) {
+      try {
+        const verdict = queryBlock(target);
+        line.childBlockEvent = [
+          "matched",
+          "ambiguous",
+          "no-match",
+          "request-unverified",
+          "channel-disabled",
+          "query-unavailable",
+          "record-limit",
+        ].includes(verdict)
+          ? verdict
+          : "query-unavailable";
+      } catch {
+        line.childBlockEvent = "query-unavailable";
+      }
+    }
+  }
   const lines = [`OFOX_NATIVE_RESULT_V1 ${JSON.stringify(line)}`];
   if (receipt?.status === "recorded")
     lines.push(`${receipt.marker} ${JSON.stringify(receipt.data)}`);

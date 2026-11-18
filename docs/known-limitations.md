@@ -52,7 +52,7 @@ on the HKLM root and, by inheritance, most of HKLM (not walked key by key), and
 on the current user's hive: native walks found 1802 of 3510 HKCU keys readable
 with it, against 4 (the container's own keys) without it, and it adds no write
 right. The sharpest consequence: HKCU\Environment often holds API keys (this
-app itself detects ANTHROPIC_*, OPENAI_* and GEMINI_* variables there), so a
+app itself detects `ANTHROPIC_*`, `OPENAI_*` and `GEMINI_*` variables there), so a
 registry read bypasses the environment scrubbing applied to sandboxed children;
 HKCU\Software may hold other applications' credentials. A read needs native
 code: model-written Python runs in Pyodide/WASM inside Node, which has no
@@ -72,9 +72,12 @@ registryRead adds no HKCU write right. Unassisted Server 2022 run
 [44240191725](https://github.com/ofoxai/ofox-desktop/actions/runs/44240191725)
 passed these controls (3504 keys visited, 1798 newly readable, zero added write
 rights and zero measurement errors). Node ran the fixed script through
-checkpoint 7 and timed out in the child-process denial check. The rest of the
-isolation probe, Pyodide and OfficeCLI remain unverified. Windows Python
-capability stays disabled until the native functional gate and client acceptance pass.
+checkpoint 7 and timed out in the child-process denial check. In the subsequent
+[Server 2022 run](https://github.com/ofoxai/ofox-desktop/actions/runs/44242608733),
+the same request inherited stdio and returned `UNKNOWN` before the deadline.
+The functional gate rejected the result. The cause of this child-process error,
+the remaining isolation checks, Pyodide and OfficeCLI still require native verification.
+Windows Python capability stays disabled until the native functional gate and client acceptance pass.
 
 One macOS full sidecar run observed a shutdown assertion reporting a descendant
 alive at ordinary exit. The original trace cannot distinguish running, zombie,

@@ -440,7 +440,7 @@ function probeDetail(error) {
   return index < 0 ? null : JSON.parse(error.slice(index + marker.length));
 }
 
-export function functionalProbeFailure(stderr) {
+function privateFunctionalDetail(stderr) {
   // Result::expect quotes the String returned by the trusted functional probe.
   // Rebuild only typed evidence; the original panic includes process IDs.
   const prefix =
@@ -451,9 +451,32 @@ export function functionalProbeFailure(stderr) {
   if (end < 0 || end - start > 65536) return null;
   try {
     const error = JSON.parse(stderr.slice(start + prefix.length, end));
-    const result = functionalFailure.safeParse(probeDetail(error));
-    return result.success ? result.data : null;
+    return probeDetail(error);
   } catch {
     return null;
   }
+}
+
+export function functionalProbeFailure(stderr) {
+  const result = functionalFailure.safeParse(privateFunctionalDetail(stderr));
+  return result.success ? result.data : null;
+}
+
+// Never attach this identity to the CI report. FILETIME exceeds the JS safe
+// integer range, so preserve the exact decimal string from GetProcessTimes.
+export function privateChildBlockTarget(stderr) {
+  const evidence = privateFunctionalDetail(stderr)?.worker?.evidence;
+  const result = z
+    .object({
+      childPid: count.positive(),
+      primaryTid: count.positive(),
+      childCreationFiletime: z.string().regex(/^[1-9][0-9]{0,18}$/),
+    })
+    .safeParse(evidence);
+  if (
+    !result.success ||
+    BigInt(result.data.childCreationFiletime) > 0x7fffffffffffffffn
+  )
+    return null;
+  return result.data;
 }

@@ -200,6 +200,17 @@ test("only the comparison step ever receives the comparison candidate", () => {
   assert.equal(shared.OFOX_DOCUMENT_STARTUP_COMPARISON, "detachedWinsockGrant");
 });
 
+test("only the functional prerequisite receives the child block event opt-in", () => {
+  const shared = { OFOX_DOCUMENT_CHILD_BLOCK_EVENT: "1" };
+  for (const check of [...checks, comparisonCheck]) {
+    assert.equal(
+      checkEnvironment(shared, check).OFOX_DOCUMENT_CHILD_BLOCK_EVENT,
+      check.name === "functional-prerequisite" ? "1" : undefined,
+      check.name,
+    );
+  }
+});
+
 test("functional prerequisite failure starts no whole-sandbox or follow-up cases", async () => {
   const calls = [];
   const report = await runDevelopmentChecks(async (check) => {
@@ -1132,4 +1143,89 @@ test("an inconclusive comparison keeps partial rows and maps unknown libuv calls
   const output = project().data;
   assert.equal(output.rows[0].stderrShape.call, "?");
   assert.ok(!Object.hasOwn(output.rows[0], "pid"));
+});
+
+test("an unknown child refusal in the CI functional gate records only a bounded kernel event verdict and still fails", async (t) => {
+  const check = checks.find(({ name }) => name === "functional-prerequisite");
+  const evidence = {
+    childPid: 897123,
+    primaryTid: 897456,
+    childCreationFiletime: "134390000000000001",
+    processStatus: 1,
+    registryIsolation: [],
+  };
+  const failure = {
+    stage: "node_isolation",
+    reason: "process_exit",
+    native: null,
+    engine: {
+      status: 1,
+      timedOut: false,
+      stdoutBytes: 0,
+      stderrBytes: 100,
+      nodeCheckpointBeforeStep: 7,
+      childSpawnResult: "UNKNOWN",
+    },
+    worker: { firstFailure: null, evidence },
+  };
+  const environment = {
+    ...process.env,
+    GITHUB_ACTIONS: "true",
+    GITHUB_WORKFLOW: "Document Engine Development Checks",
+    OFOX_DOCUMENT_CHILD_BLOCK_EVENT: "1",
+  };
+  const cases = [
+    { reply: "matched", expected: "matched" },
+    { reply: "private-event-data", expected: "query-unavailable" },
+    { optIn: "0" },
+    { workflow: "Windows Probe" },
+    { actions: "false" },
+    { creationTime: "9223372036854775808", expected: "identity-unavailable" },
+  ];
+  for (const item of cases) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "document-child-event-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    evidence.childCreationFiletime = item.creationTime ?? "134390000000000001";
+    const stderr =
+      "native Python + OfficeCLI and all LPAC negative probes must pass: " +
+      JSON.stringify(
+        "assistant_document_sandbox_unavailable:probe " +
+          JSON.stringify(failure),
+      );
+    let queries = 0;
+    const result = await invokeNative(
+      check,
+      dir,
+      {
+        ...environment,
+        GITHUB_ACTIONS: item.actions ?? "true",
+        GITHUB_WORKFLOW: item.workflow ?? environment.GITHUB_WORKFLOW,
+        OFOX_DOCUMENT_CHILD_BLOCK_EVENT: item.optIn ?? "1",
+      },
+      (_cargo, _args, options) =>
+        spawn(
+          process.execPath,
+          ["-e", "console.error(process.argv[1]);process.exitCode=101", stderr],
+          options,
+        ),
+      (target) => {
+        queries++;
+        assert.deepEqual(target, {
+          childPid: 897123,
+          primaryTid: 897456,
+          childCreationFiletime: evidence.childCreationFiletime,
+        });
+        return item.reply;
+      },
+    );
+    assert.equal(queries, item.reply ? 1 : 0);
+    assert.equal(result.exitCode, 101);
+    const log = await readFile(path.join(dir, check.name + ".log"), "utf8");
+    assert.doesNotMatch(
+      log,
+      /897123|897456|134390000000000001|9223372036854775808|childPid|primaryTid|childCreationFiletime|private-event-data/,
+    );
+    const row = JSON.parse(log.trim().slice("OFOX_NATIVE_RESULT_V1 ".length));
+    assert.equal(row.childBlockEvent, item.expected);
+  }
 });

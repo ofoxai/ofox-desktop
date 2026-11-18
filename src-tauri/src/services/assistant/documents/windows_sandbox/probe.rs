@@ -123,6 +123,9 @@ pub(super) struct Evidence {
     pub resume_result: Option<u32>,
     pub child_pid: Option<u32>,
     pub primary_tid: Option<u32>,
+    #[cfg(test)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_creation_filetime: Option<String>,
     pub process_wait: Option<u32>,
     pub process_status: Option<u32>,
     pub timed_out: Option<bool>,

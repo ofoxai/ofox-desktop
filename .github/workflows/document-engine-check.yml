@@ -73,6 +73,9 @@ jobs:
       - name: ACL prerequisite then focused native regressions
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
+        env:
+          # Read only the kernel child-block event for an inconclusive fixed probe.
+          OFOX_DOCUMENT_CHILD_BLOCK_EVENT: "1"
         # Unassisted gate: no debugger trace (answered by run 44231498872) and
         # no launch comparison; the production set includes registryRead.
       - name: Upload development diagnostics
