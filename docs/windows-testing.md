@@ -105,7 +105,7 @@ e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能�
 Actions 开发入口，为精确功能用例的第一个固定可信 Node 使用已有 Microsoft
 签名 CDB；本地入口保留原行为。诊断必须先完成原 token 校验，再核对实际
 PID/TID、loader 标志读回和 primary thread 挂起计数，由原 Host 恢复执行。
-不修改 IFEO、capability、ACL 或 mitigation，不将异常统一标为 handled。签名
+不修改 IFEO、capability、ACL 或 mitigation，不将异常统一标为 handled。加载器在被调试时触发的初始断点、断点异常和各类首次／二次机会异常只记录不中断（`sxn`），各自保持默认处理方式（断点按已处理继续，其余交还目标）；仅调试器存在时才由 NtClose 抛出的无效句柄异常设为已处理，等同未挂调试器。调试器自设的观察断点不受影响。报告只按位置记录调试器异常（异常码、首次／二次、是否主线程、第几次调用之后）与停顿，不含描述文字。签名
 SymChk 只为固定系统 ntdll 从微软公开库提前准备私有匹配符号；CDB 只加载本地
 符号，不访问网络。attach 前与调试 continue 后各实测 `1→配对2`，再要求原
 Host Resume1；GO 仅确认，不发送第二个 g。V2 完整证明缺任一项均不归因，
