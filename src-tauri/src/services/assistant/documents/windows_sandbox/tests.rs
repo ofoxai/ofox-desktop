@@ -18,6 +18,44 @@ async fn document_lpac_proves_python_office_and_escape_denials() {
         .expect("native Python + OfficeCLI and all LPAC negative probes must pass");
 }
 
+/// The debugger receipt belongs only to this exact case, never to engine admission.
+#[tokio::test]
+#[serial_test::serial]
+async fn document_observe_fixed_child_call() {
+    if !child_call::requested() {
+        return;
+    }
+    let root = runtime();
+    let mut trace = ProbeTrace::new();
+    trace.child_call = true;
+    assert!(probe_inner(
+        &root,
+        &root.join("engines/officecli/officecli.exe"),
+        &mut Vec::new(),
+        &mut trace
+    )
+    .await
+    .is_err());
+    let engine = trace.engine.expect("missing fixed Node result");
+    assert_eq!(engine["status"], 1);
+    assert_eq!(engine["timedOut"], false);
+    assert_eq!(engine["nodeCheckpointBeforeStep"], 7);
+    assert_eq!(engine["childSpawnResult"], "UNKNOWN");
+    let worker = trace
+        .observation
+        .snapshot()
+        .expect("missing worker observation");
+    let evidence = &worker["evidence"];
+    for field in ["taskCleanup", "profileCleanup"] {
+        assert_eq!(evidence[field], true);
+    }
+    let verdict = evidence["childCallVerdict"]
+        .as_str()
+        .and_then(child_call::verdict)
+        .expect("inconclusive child-call observation");
+    eprintln!("OFOX_CHILD_CALL_V1 {verdict}");
+}
+
 /// Diagnostic-only A-B-A, run as its own step when explicitly requested. With
 /// no candidate it does nothing. A candidate that changes a machine-wide ACL
 /// refuses to run anywhere but a disposable GitHub Actions runner.

@@ -9,6 +9,8 @@ mod capability_set;
 mod cdb;
 #[cfg(test)]
 mod cdb_protocol;
+#[cfg(test)]
+mod child_call;
 mod probe;
 #[cfg(test)]
 mod startup_comparison;
@@ -2150,6 +2152,8 @@ impl ConsoleMode {
 
 struct SuspendedLaunch {
     #[cfg(test)]
+    child_call_input: Option<OwnedHandle>,
+    #[cfg(test)]
     pid: u32,
     #[cfg(test)]
     tid: u32,
@@ -2221,9 +2225,11 @@ fn launch(
         stderr_read,
         stderr_write,
         #[cfg(test)]
-            pid: _,
+        pid,
         #[cfg(test)]
-            tid: _,
+        tid,
+        #[cfg(test)]
+        child_call_input,
     } = suspended;
     #[cfg(test)]
     if debugger.is_some() && _cancelled.load(Ordering::Acquire) {
@@ -2250,6 +2256,11 @@ fn launch(
     drop(stdin_read);
     drop(stdout_write);
     drop(stderr_write);
+    #[cfg(test)]
+    if let Some(input) = child_call_input {
+        let verdict = child_call::observe(pid, tid, exe, &stdout_read, input, _cancelled)?;
+        observation.evidence(|evidence| evidence.child_call_verdict = Some(verdict));
+    }
     Ok(Launch {
         process,
         stdout: drain(stdout_read, limit),
@@ -2354,6 +2365,21 @@ fn create_suspended_capabilities(
             HANDLE_FLAGS(0),
         ))?;
     }
+    #[cfg(test)]
+    let child_call_input = if observation.child_call_requested() {
+        unsafe {
+            win(SetHandleInformation(
+                raw(&stdin_write),
+                HANDLE_FLAG_INHERIT.0,
+                HANDLE_FLAGS(0),
+            ))?;
+        }
+        Some(stdin_write)
+    } else {
+        drop(stdin_write);
+        None
+    };
+    #[cfg(not(test))]
     drop(stdin_write);
     let inherited = [raw(&stdin_read), raw(&stdout_write), raw(&stderr_write)];
     let mut capability = caps.entries();
@@ -2440,6 +2466,8 @@ fn create_suspended_capabilities(
         ))?;
     }
     Ok(SuspendedLaunch {
+        #[cfg(test)]
+        child_call_input,
         #[cfg(test)]
         pid: info.dwProcessId,
         #[cfg(test)]
@@ -2851,29 +2879,9 @@ fn run_blocking(
             return Err(UNAVAILABLE.into());
         }
         observation.enter(Phase::JobAccounting);
-        let stopped_by = Instant::now() + Duration::from_secs(5);
-        loop {
-            let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
-            unsafe {
-                win(QueryInformationJobObject(
-                    Some(raw(&launched.process.job)),
-                    JobObjectBasicAccountingInformation,
-                    (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
-                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
-                    None,
-                ))?;
-            }
-            observation.evidence(|evidence| {
-                evidence.job_active_processes = Some(accounting.ActiveProcesses);
-            });
-            if accounting.ActiveProcesses == 0 {
-                break;
-            }
-            if Instant::now() >= stopped_by {
-                return Err(UNAVAILABLE.into());
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
+        wait_for_empty_job(&launched.process.job, |active| {
+            observation.evidence(|evidence| evidence.job_active_processes = Some(active));
+        })?;
         observation.enter(Phase::StdoutReceive);
         let stdout = launched.stdout.recv_timeout(Duration::from_secs(2));
         observation.evidence(|evidence| evidence.stdout_receive = Some(receive_outcome(&stdout)));
@@ -2980,6 +2988,30 @@ fn run_blocking(
     }
     observation.enter(Phase::Complete);
     Ok(output)
+}
+
+fn wait_for_empty_job(job: &OwnedHandle, mut record: impl FnMut(u32)) -> Result<(), String> {
+    let stopped_by = Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        unsafe {
+            win(QueryInformationJobObject(
+                Some(raw(job)),
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                None,
+            ))?;
+        }
+        record(accounting.ActiveProcesses);
+        if accounting.ActiveProcesses == 0 {
+            return Ok(());
+        }
+        if Instant::now() >= stopped_by {
+            return Err(UNAVAILABLE.into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn receive_outcome<T>(result: &Result<T, std::sync::mpsc::RecvTimeoutError>) -> Receive {
@@ -3139,6 +3171,8 @@ impl ProbeStage {
 }
 
 struct ProbeTrace {
+    #[cfg(test)]
+    child_call: bool,
     stage: ProbeStage,
     started: Instant,
     stage_started: Instant,
@@ -3149,6 +3183,8 @@ struct ProbeTrace {
 impl ProbeTrace {
     fn new() -> Self {
         Self {
+            #[cfg(test)]
+            child_call: false,
             stage: ProbeStage::RuntimeBefore,
             started: Instant::now(),
             stage_started: Instant::now(),
@@ -3495,6 +3531,16 @@ async fn probe_inner(
     let node = runtime_root.join("node/node.exe");
     trace.engine(ProbeStage::NodeIsolation);
     #[cfg(test)]
+    let script = if trace.child_call {
+        if !child_call::requested() {
+            return Err(UNAVAILABLE.into());
+        }
+        trace.observation.request_child_call();
+        child_call::instrument(&script)?
+    } else {
+        script
+    };
+    #[cfg(test)]
     let loader_diagnostic = std::env::var_os(cdb::ENV_ROOT).is_some();
     #[cfg(test)]
     if loader_diagnostic {
@@ -3507,25 +3553,32 @@ async fn probe_inner(
     #[cfg(not(test))]
     let node_timeout = Duration::from_secs(30);
     let observation = trace.observation.clone();
-    trace.success(
-        run_candidate_observed(
-            &node,
-            &[
-                "-e",
-                &script,
-                &native.to_string_lossy(),
-                &canvas.to_string_lossy(),
-            ],
-            &cwd,
-            &home,
-            &runtime_root,
-            node_timeout,
-            16 * 1024,
-            true,
-            observation,
-        )
-        .await?,
-    )?;
+    let node_output = run_candidate_observed(
+        &node,
+        &[
+            "-e",
+            &script,
+            &native.to_string_lossy(),
+            &canvas.to_string_lossy(),
+        ],
+        &cwd,
+        &home,
+        &runtime_root,
+        node_timeout,
+        16 * 1024,
+        true,
+        observation,
+    )
+    .await?;
+    #[cfg(test)]
+    if trace.child_call && node_output.stdout != child_call::COMPLETE {
+        return Err(UNAVAILABLE.into());
+    }
+    trace.success(node_output)?;
+    #[cfg(test)]
+    if trace.child_call {
+        return Err(UNAVAILABLE.into());
+    }
     #[cfg(test)]
     if loader_diagnostic {
         // Debugger execution is an observation, never engine admission. Stop

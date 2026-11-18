@@ -100,6 +100,86 @@ export const traceCheck = {
   exact: true,
 };
 
+export const childCallCheck = {
+  name: "child-call-trace",
+  filter: `${sandbox}document_observe_fixed_child_call`,
+  exact: true,
+};
+
+const childCallVerdicts = new Set([
+  "not-reached",
+  "succeeded",
+  "child-process-blocked",
+  "access-denied",
+  "policy-disabled",
+  "appcontainer-unsupported",
+  "privilege-not-held",
+  "file-not-found",
+  "path-not-found",
+  "invalid-handle",
+  "other-win32",
+]);
+
+export function childCallTraceRequested(env) {
+  const dedicated =
+    env.GITHUB_WORKFLOW === "Document Engine Child Call Diagnostic";
+  const requested = env.OFOX_DOCUMENT_CHILD_CALL_TRACE === "1";
+  if (!dedicated && !Object.hasOwn(env, "OFOX_DOCUMENT_CHILD_CALL_TRACE"))
+    return false;
+  // A misconfigured diagnostic must not fall through to the full suite.
+  assert.ok(
+    dedicated &&
+      requested &&
+      env.GITHUB_ACTIONS === "true" &&
+      env.GITHUB_REF === "refs/heads/codex/desktop-next" &&
+      ["push", "workflow_dispatch"].includes(env.GITHUB_EVENT_NAME) &&
+      !env.OFOX_DOCUMENT_STARTUP_TRACE &&
+      !env.OFOX_DOCUMENT_STARTUP_COMPARISON &&
+      !env.OFOX_DOCUMENT_CDB_DIAGNOSTIC_ROOT,
+    "invalid child-call diagnostic context",
+  );
+  return true;
+}
+
+const childCallStages = new Set([
+  "target",
+  "import",
+  "arm",
+  "observation",
+  "request",
+  "return-pair",
+  "last-error",
+  "exit",
+  "cleanup",
+  "native-test",
+]);
+
+function childCallReport(result) {
+  let verdict = "inconclusive";
+  try {
+    assertRustResult(result, true);
+    if (!result.incompleteStage && childCallVerdicts.has(result.childCall))
+      verdict = result.childCall;
+  } catch {
+    /* A failed test cannot establish a debugger observation. */
+  }
+  return {
+    scope: "windows-fixed-child-call-diagnostic",
+    releaseGate: false,
+    diagnosticRecorded: verdict !== "inconclusive",
+    verdict,
+    ...(verdict === "inconclusive" && {
+      incompleteStage: childCallStages.has(result.incompleteStage)
+        ? result.incompleteStage
+        : "native-test",
+    }),
+  };
+}
+
+export async function runChildCallDiagnostic(invoke) {
+  return childCallReport(await invoke(childCallCheck));
+}
+
 export function startupComparisonRequested(environment) {
   return (
     typeof environment.OFOX_DOCUMENT_STARTUP_COMPARISON === "string" &&
@@ -112,6 +192,8 @@ export function startupComparisonRequested(environment) {
 // machine ACL on CI).
 export function checkEnvironment(environment, check) {
   const scoped = { ...environment };
+  if (check.name !== childCallCheck.name)
+    delete scoped.OFOX_DOCUMENT_CHILD_CALL_TRACE;
   if (check.name !== "functional-prerequisite")
     delete scoped.OFOX_DOCUMENT_CHILD_BLOCK_EVENT;
   if (check.name !== comparisonCheck.name)
@@ -959,6 +1041,36 @@ export async function invokeNative(
   });
   const native = nativeOutput(chunks, stderrChunks);
   const stderr = native.stderr;
+  if (check.name === childCallCheck.name) {
+    const rows = stderr.split(/\r?\n/);
+    function singleValue(marker, allowed, fallback) {
+      const values = rows.filter((row) => row.startsWith(marker));
+      if (!values.length) return null;
+      const value = values[0].slice(marker.length);
+      return values.length === 1 && allowed.has(value) ? value : fallback;
+    }
+    const result = {
+      ...native,
+      exitCode,
+      outputLimited: limited,
+      childCall: singleValue(
+        "OFOX_CHILD_CALL_V1 ",
+        childCallVerdicts,
+        "inconclusive",
+      ),
+      incompleteStage: singleValue(
+        "OFOX_CHILD_CALL_INCOMPLETE_V1 ",
+        childCallStages,
+        "native-test",
+      ),
+    };
+    await writeFile(
+      path.join(output, check.name + ".log"),
+      "OFOX_NATIVE_RESULT_V1 " + JSON.stringify(childCallReport(result)) + "\n",
+      { flag: "wx", mode: 0o600 },
+    );
+    return result;
+  }
   const receipt = developmentReceipt(check.name, stderr);
   const line = {
     exitCode,
@@ -1052,6 +1164,17 @@ export async function main(argv = process.argv.slice(2)) {
     await mkdir(environment[key]);
   }
   try {
+    if (childCallTraceRequested(environment)) {
+      const report = await runChildCallDiagnostic((check) =>
+        invokeNative(check, output, checkEnvironment(environment, check)),
+      );
+      await writeFile(
+        path.join(output, "summary.json"),
+        JSON.stringify(report, null, 2) + "\n",
+        { flag: "wx", mode: 0o600 },
+      );
+      return report.diagnosticRecorded ? 0 : 1;
+    }
     const report = await runDevelopmentChecks(
       (check, overrides) =>
         invokeNative(check, output, {

@@ -129,6 +129,9 @@ pub(super) struct Evidence {
     #[cfg(test)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_exit_filetime: Option<String>,
+    #[cfg(test)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_call_verdict: Option<&'static str>,
     pub process_wait: Option<u32>,
     pub process_status: Option<u32>,
     pub timed_out: Option<bool>,
@@ -332,6 +335,8 @@ struct State {
     evidence: Evidence,
     #[cfg(test)]
     loader_requested: bool,
+    #[cfg(test)]
+    child_call_requested: bool,
 }
 
 /// Default is inert. Only the private fixed-probe orchestration allocates state.
@@ -348,6 +353,8 @@ impl Observer {
             evidence: Evidence::default(),
             #[cfg(test)]
             loader_requested: false,
+            #[cfg(test)]
+            child_call_requested: false,
         }))))
     }
 
@@ -384,6 +391,17 @@ impl Observer {
     pub fn loader_requested(&self) -> bool {
         let mut requested = false;
         self.update(|state| requested = state.loader_requested);
+        requested
+    }
+
+    #[cfg(test)]
+    pub fn request_child_call(&self) {
+        self.update(|state| state.child_call_requested = true);
+    }
+    #[cfg(test)]
+    pub fn child_call_requested(&self) -> bool {
+        let mut requested = false;
+        self.update(|state| requested = state.child_call_requested);
         requested
     }
 

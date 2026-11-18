@@ -822,3 +822,25 @@ Pyodide、OfficeCLI、完整 sandbox、附件和 Host 回归均未执行。
 libuv 是否到达 `CreateProcessW`，若发生失败，转换成 libuv 错误之前的 Windows 错误是哪一类。
 现有 WSAStartup 专用 CDB 配置使用仅 runtime 的令牌并临时授权 Winsock 子树，复用该配置
 无法回答生产令牌上的问题。
+
+### 检查点 7 的 CI 专用观测（待 Windows 原生验证）
+
+下一次 Server 2022 定点运行要回答一个问题。复现检查点 7 的 `UNKNOWN` 时，固定
+请求是否进入内置 Node 实际导入的 `CreateProcessW`，调用返回时主线程的
+Win32 错误属于哪一类？
+
+`Document Engine Child Call Diagnostic` 只在开发分支运行一个 Rust 测试。它沿用
+生产启动器、令牌、Job 和 ACL。测试在原请求前等待调试器就绪，并在继承的 stdin
+回到 EOF 后继续。CDB 须与 Node 的实际导入地址核对，入口须匹配原来的子程序和参数，
+返回须匹配同一主线程及调用栈。运行器还核对请求前后标记、Node 的原始失败和清理结果。
+调用计数为零且观察完整时才报告 `not-reached`。证据不足时只记录
+`inconclusive` 和固定阶段。该诊断的结论不参与引擎准入。
+
+首次推送新增工作流文件会自动触发这一个诊断。其产物
+`document-child-call-<SHA>-<attempt>` 只收录 `summary.json` 和
+`child-call-trace.log`。两者只包含诊断类别和状态，调试器原文不落盘。
+
+本地已用校验过归档 SHA256 的 Windows x64 Node 22.23.4 核对 PE 导入项，并独立复审。
+文档相关测试 101/101 通过，覆盖断点插入失败、错误行与提示符粘连、入口与返回不配对、
+产物拒绝原文等情形。macOS Rust 测试 4555 项通过、28 项忽略，Windows 目标的
+生产和测试配置 Clippy 均通过。Server 2022 上这次调用是否命中及其结果仍待验证。

@@ -104,6 +104,14 @@ Cargo 两个输出流只在运行器内存中解析。CDB 在本机核对真实 
 e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能代替完整 Windows Probe、
 发布同 SHA 门禁、安装版 UI 或 Windows 10/11 客户端验收。
 
+独立的 `Document Engine Child Call Diagnostic` 在 Server 2022 上只观测检查点 7
+的固定子进程请求。改动 `.github/workflows/document-child-call.yml` 并推到
+`codex/desktop-next` 会自动运行一次。该诊断使用生产令牌和已有 ACL；上传的
+`document-child-call-<SHA>-<attempt>` 中，`summary.json` 和 `child-call-trace.log`
+给出同一个闭集结论。`diagnosticRecorded` 表示本次观测是否完整，`verdict`
+给出调用结果。`inconclusive` 时可用 `incompleteStage` 找到需要复查的阶段。
+`releaseGate` 恒为 `false`。
+
 开发工作流设置 `OFOX_DOCUMENT_CHILD_BLOCK_EVENT=1` 时，仅功能前置的 Node 在检查点 7
 以 `UNKNOWN` 退出才触发只读事件查询。控制器从同一个已退出进程的句柄获取创建和退出时间。
 在该窗口内查询 KernelMode 事件 4，窗口最多 60 秒，查询按毫秒向外取整，最多检查 32 条候选。
