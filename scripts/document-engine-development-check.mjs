@@ -6,7 +6,6 @@ import { lstatSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
-  open,
   realpath,
   readFile,
   rm,
@@ -16,6 +15,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createInterface } from "node:readline";
+import {
+  cargoErrors,
+  developmentReceipt,
+  functionalProbeFailure,
+  nativePanicLocation,
+} from "./document-development-log.mjs";
 import { projectDocumentLoaderSnaps } from "./document-loader-snaps.mjs";
 import {
   FIXED_OPERATION_APIS,
@@ -116,6 +121,10 @@ export function assertRustResult(result, exact) {
   assert.ok(
     !result.outputLimited,
     "native output exceeded the diagnostic bound",
+  );
+  assert.ok(
+    !result.receiptStatus || result.receiptStatus === "recorded",
+    "missing or invalid native receipt",
   );
   const running = [...result.output.matchAll(/^running (\d+) tests?\s*$/gm)];
   const summaries = [
@@ -391,9 +400,11 @@ export function safeMetadata(value) {
 
 export function nativeOutput(stdoutChunks, stderrChunks) {
   const output = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
   return {
     output,
-    diagnosticOutput: `${Buffer.concat(stderrChunks).toString("utf8")}\n${output}`,
+    stderr,
+    diagnosticOutput: `${stderr}\n${output}`,
   };
 }
 
@@ -869,7 +880,12 @@ export async function captureTrace(invoke, start) {
   return result;
 }
 
-async function invokeNative(check, output, environment) {
+export async function invokeNative(
+  check,
+  output,
+  environment,
+  spawnCargo = spawn,
+) {
   const args = [
     "test",
     "--locked",
@@ -881,51 +897,51 @@ async function invokeNative(check, output, environment) {
   ];
   if (check.exact) args.push("--exact");
   args.push("--nocapture", "--test-threads=1");
-  const log = await open(path.join(output, `${check.name}.log`), "wx", 0o600);
   const chunks = [];
   const stderrChunks = [];
   let bytes = 0,
-    limited = false,
-    writeFailed = false,
-    writes = Promise.resolve();
-  try {
-    const exitCode = await new Promise((resolve) => {
-      const child = spawn("cargo", args, {
-        cwd: root,
-        env: environment,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const keep = (chunk, stdout) => {
-        bytes += chunk.length;
-        if (bytes > 32 * 1024 * 1024) {
-          limited = true;
-          return;
-        }
-        if (stdout) chunks.push(chunk);
-        else stderrChunks.push(chunk);
-        process.stdout.write(chunk);
-        writes = writes.then(async () => {
-          try {
-            await log.write(chunk);
-          } catch {
-            writeFailed = true;
-          }
-        });
-      };
-      child.stdout.on("data", (chunk) => keep(chunk, true));
-      child.stderr.on("data", (chunk) => keep(chunk, false));
-      child.on("error", () => resolve(null));
-      child.on("close", resolve);
+    limited = false;
+  const exitCode = await new Promise((resolve) => {
+    const child = spawnCargo("cargo", args, {
+      cwd: root,
+      env: environment,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    await writes;
-    return {
-      exitCode,
-      ...nativeOutput(chunks, stderrChunks),
-      outputLimited: limited || writeFailed,
+    const keep = (chunk, into) => {
+      bytes += chunk.length;
+      if (bytes > 32 * 1024 * 1024) {
+        limited = true;
+        return;
+      }
+      into.push(chunk);
     };
-  } finally {
-    await log.close();
-  }
+    child.stdout.on("data", (chunk) => keep(chunk, chunks));
+    child.stderr.on("data", (chunk) => keep(chunk, stderrChunks));
+    child.on("error", () => resolve(null));
+    child.on("close", resolve);
+  });
+  const native = nativeOutput(chunks, stderrChunks);
+  const stderr = native.stderr;
+  const receipt = developmentReceipt(check.name, stderr);
+  const line = {
+    exitCode,
+    outputLimited: limited,
+    panic: nativePanicLocation(stderr),
+    compiler: cargoErrors(stderr),
+    receiptStatus: receipt?.status ?? null,
+    ...(check.name === "functional-prerequisite" && exitCode !== 0
+      ? { probeFailure: functionalProbeFailure(stderr) }
+      : {}),
+  };
+  const lines = [`OFOX_NATIVE_RESULT_V1 ${JSON.stringify(line)}`];
+  if (receipt?.status === "recorded")
+    lines.push(`${receipt.marker} ${JSON.stringify(receipt.data)}`);
+  await writeFile(
+    path.join(output, `${check.name}.log`),
+    lines.join("\n") + "\n",
+    { flag: "wx", mode: 0o600 },
+  );
+  return { ...line, ...native };
 }
 
 export async function main(argv = process.argv.slice(2)) {

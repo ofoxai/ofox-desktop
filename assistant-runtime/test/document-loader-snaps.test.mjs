@@ -34,17 +34,13 @@ test("flags READY alone cannot attribute a loader failure without actual Host Re
   assert.deepEqual(report.observations, []);
 });
 
-test("keeps actual PID/TID and the exact before-or-bit2 readback in a closed handshake", () => {
+test("matches PID/TID privately and publishes only the before-or-bit2 readback", () => {
   const report = project([]);
   assert.equal(report.handshake.status, "matched");
   assert.deepEqual(report.handshake.before, {
-    childPid: 42,
-    primaryTid: 43,
     flags: 0x70,
   });
   assert.deepEqual(report.handshake.after, {
-    childPid: 42,
-    primaryTid: 43,
     flags: 0x72,
   });
   assert.equal(report.negativeConclusionAllowed, false);
@@ -65,8 +61,6 @@ test("projects an explicit target DLL initialization failure without borrowing a
   assert.deepEqual(report.observations, [
     {
       kind: "dll-init-failure",
-      childPid: 42,
-      threadId: 43,
       rootAlias: "windows",
       module: "kernelbase.dll",
       status: null,
@@ -84,8 +78,6 @@ test("a same-line module and status are projected without inferring the last DLL
   assert.deepEqual(report.observations, [
     {
       kind: "subsystem-load-failure",
-      childPid: 42,
-      threadId: 43,
       rootAlias: "windows-subsystem",
       module: "kernel32.dll",
       status: "0xc0000142",
@@ -104,6 +96,7 @@ test("a same-line module and status are projected without inferring the last DLL
 test("unknown roots, foreign identities, raw addresses and arbitrary output remain private", () => {
   const report = project([
     initFailure("D:\\private-user\\secret-name.dll"),
+    initFailure("C:\\Windows\\System32\\private-user.dll"),
     initFailure("C:\\Windows\\System32\\foreign.dll", "63:2b"),
     initFailure("C:\\Windows\\System32\\foreign-thread.dll", "2a:63"),
     "token=secret-token SID=S-1-5-21-999 Computer=private-host",
@@ -111,9 +104,13 @@ test("unknown roots, foreign identities, raw addresses and arbitrary output rema
   assert.deepEqual(report.observations, [
     {
       kind: "dll-init-failure",
-      childPid: 42,
-      threadId: 43,
       rootAlias: "unknown",
+      module: null,
+      status: null,
+    },
+    {
+      kind: "dll-init-failure",
+      rootAlias: "windows",
       module: null,
       status: null,
     },

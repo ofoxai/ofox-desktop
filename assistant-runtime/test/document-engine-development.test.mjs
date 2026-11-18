@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import os from "node:os";
@@ -11,6 +12,7 @@ import {
   captureTrace,
   checks,
   extractTraceTargets,
+  invokeNative,
   nativeOutput,
   safeMetadata,
   safeDebuggerState,
@@ -22,6 +24,11 @@ import {
   startNativeTrace,
   runDevelopmentChecks,
 } from "../../scripts/document-engine-development-check.mjs";
+import {
+  developmentReceipt,
+  functionalProbeFailure,
+  nativePanicLocation,
+} from "../../scripts/document-development-log.mjs";
 import { successfulProbe } from "../../scripts/check-windows-probe.mjs";
 import { projectDocumentLoaderSnaps } from "../../scripts/document-loader-snaps.mjs";
 
@@ -819,6 +826,25 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
   );
   assert.match(workflow, /windows-cargo-debug0-v2-/);
   assert.match(workflow, /always\(\).*cache-hit != 'true'/);
+  const uploadPaths = workflow
+    .split("name: Upload development diagnostics")[1]
+    .split("      - name:")[0]
+    .match(/^          path: \|\n((?:            [^\n]+\n)+)/m)?.[1]
+    .trim()
+    .split(/\n\s*/);
+  const artifactRoot =
+    "${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/";
+  assert.deepEqual(
+    uploadPaths?.sort(),
+    [
+      "summary.json",
+      ...[...checks, comparisonCheck, traceCheck].map(
+        (check) => check.name + ".log",
+      ),
+    ]
+      .map((name) => artifactRoot + name)
+      .sort(),
+  );
   const sha = "a".repeat(40);
   assert.equal(
     successfulProbe(
@@ -838,4 +864,271 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     ),
     undefined,
   );
+});
+
+test("native step artifacts retain registry counts and discard raw Cargo output on success and failure", async (t) => {
+  const scan = {
+    visited: 3510,
+    vanished: 1,
+    hostUnopenable: 0,
+    enumerationStopped: 0,
+    checkErrors: 0,
+    readableByRuntimeOnly: 4,
+    readableByProduction: 1802,
+    addedByRegistryRead: 1798,
+    writableByRuntimeOnly: 0,
+    writableByProduction: 0,
+    writeAddedByRegistryRead: 0,
+  };
+  const receipt = {
+    keys: [
+      "machine_root",
+      "winsock_catalog",
+      "user_environment",
+      "user_software",
+    ],
+    gates: [true, false, true, false],
+    production: [true, true, true, true],
+    runtimeOnly: [false, false, false, false],
+    productionVerified: true,
+    runtimeOnlyVerified: false,
+    scan,
+  };
+  for (const exit of [0, 101]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "document-check-log-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const marker = "OFOX_REGISTRY_ISOLATION_V1 ";
+    const check = checks[1];
+    const stderr = [
+      "S-1-5-21-314159 PID=876543 private-stderr",
+      "error[E0308]: private compile error",
+      " --> src/services/assistant/documents/windows_sandbox/probe.rs:45:6",
+      "thread 'private-test' (112233) panicked at src/services/assistant/host/local_interruption_tests.rs:11:4:",
+      marker +
+        JSON.stringify({
+          ...receipt,
+          extra: "private-name",
+          scan: { ...scan, body: "private-value" },
+        }),
+    ].join("\r\n");
+    const stdout =
+      "C:\\private-path\\test private-stdout\n" + nativeResult(1).output;
+    const run = await invokeNative(
+      check,
+      dir,
+      process.env,
+      (_cargo, _args, options) =>
+        spawn(
+          process.execPath,
+          [
+            "-e",
+            "console.log(process.argv[1]); console.error(process.argv[2]); process.exitCode=Number(process.argv[3]);",
+            stdout,
+            stderr,
+            String(exit),
+          ],
+          options,
+        ),
+    );
+    assert.equal(run.exitCode, exit);
+    const log = await readFile(path.join(dir, check.name + ".log"), "utf8");
+    assert.doesNotMatch(
+      log,
+      /private-|S-1-|876543|running 1 test|test result:/,
+    );
+    const native = JSON.parse(
+      log.split("\n")[0].slice("OFOX_NATIVE_RESULT_V1 ".length),
+    );
+    assert.deepEqual(native.compiler, [
+      { code: "E0308", location: { source: "sandbox-probe", line: 45 } },
+    ]);
+    assert.deepEqual(native.panic, {
+      source: "host-interruption-tests",
+      line: 11,
+    });
+    const line = log.split("\n").find((row) => row.startsWith(marker));
+    assert.deepEqual(JSON.parse(line.slice(marker.length)), receipt);
+  }
+});
+
+test("required receipts reject missing, ambiguous and malformed evidence without forwarding fields", () => {
+  const step = "registry-scope-prerequisite";
+  const marker = "OFOX_REGISTRY_ISOLATION_V1 ";
+  for (const [text, status] of [
+    ["private data", "missing"],
+    [marker + "private data\n", "invalid"],
+    [marker + "{}\n" + marker + "{}\n", "invalid"],
+    [marker + '{"keys":["S-1-private"]}\n', "invalid"],
+  ]) {
+    assert.deepEqual(developmentReceipt(step, text), { status });
+    assert.throws(() =>
+      assertRustResult({ ...nativeResult(1), receiptStatus: status }, true),
+    );
+  }
+  assert.equal(developmentReceipt("acl-prerequisite", marker + "{}\n"), null);
+});
+
+test("functional failures retain engine checkpoints and registry decisions without identities or panic text", () => {
+  const receipt = {
+    stage: "node_isolation",
+    reason: "process_exit",
+    native: { code: "80070005", sourceLine: 1831 },
+    engine: {
+      status: -1,
+      timedOut: false,
+      stdoutBytes: 0,
+      stderrBytes: 1,
+      nodeCheckpointBeforeStep: 3,
+    },
+    worker: {
+      firstFailure: "token_registry_isolation",
+      evidence: {
+        processStatus: 2147483651,
+        registryIsolation: [
+          {
+            key: "machine_root",
+            opened: true,
+            descriptorRead: true,
+            accessChecked: true,
+            readGranted: true,
+          },
+        ],
+      },
+    },
+  };
+  const raw = structuredClone(receipt);
+  Object.assign(raw.worker.evidence, {
+    childPid: 1234567,
+    primaryTid: 8765432,
+    contents: "private",
+  });
+  const failureMessage = (detail) =>
+    "native Python + OfficeCLI and all LPAC negative probes must pass: " +
+    JSON.stringify(
+      "assistant_document_sandbox_unavailable:probe " + JSON.stringify(detail),
+    ) +
+    "\r\n";
+  const panic = failureMessage(raw);
+  assert.deepEqual(functionalProbeFailure(panic), receipt);
+  const acl = {
+    actualControl: "8004",
+    expectedControl: "9004",
+    actualRevision: 1,
+    expectedRevision: null,
+  };
+  const aclPanic = failureMessage({
+    ...raw,
+    reason: "cache_acl_mismatch",
+    native: { ...acl, ignored: "private" },
+  });
+  assert.deepEqual(functionalProbeFailure(aclPanic).native, acl);
+  assert.equal(
+    functionalProbeFailure(panic.replace("node_isolation", "private-name")),
+    null,
+  );
+  assert.deepEqual(
+    nativePanicLocation(
+      "thread 'private-test' (112233) panicked at C:\\private\\src\\services\\assistant\\documents\\windows_sandbox\\tests.rs:77:11:\r\n",
+    ),
+    { source: "sandbox-tests", line: 77 },
+  );
+});
+
+test("a trace keeps the ACL restoration and Host resume evidence without private target identities", () => {
+  const evidence = {
+    diagnosticOnly: true,
+    configConfirmed: true,
+    beforeFlags: 112,
+    afterFlags: 114,
+    preAttachSuspendPrevious: 1,
+    preAttachPairedResumePrevious: 2,
+    releaseProbeCount: 1,
+    releaseSuspendPrevious: 1,
+    releasePairedResumePrevious: 2,
+    suspendPrevious: 1,
+    pairedResumePrevious: 2,
+    hostResumePrevious: 1,
+    debuggerClosed: true,
+    launchProfile: "detached_runtime_only_winsock_grant",
+    creationFlags: 524300,
+    winsockGrantApplied: true,
+    winsockGrantRestored: false,
+  };
+  const marker = "OFOX_STARTUP_TRACE_V1";
+  const detail = {
+    worker: {
+      evidence: {
+        childPid: 12345,
+        primaryTid: 54321,
+        loaderDiagnostic: { ...evidence, privateName: "private-name" },
+      },
+    },
+  };
+  const line =
+    marker +
+    " assistant_document_sandbox_unavailable:probe " +
+    JSON.stringify(detail) +
+    "\r\n";
+  assert.deepEqual(developmentReceipt("startup-trace", line), {
+    status: "recorded",
+    marker,
+    data: evidence,
+  });
+});
+
+test("an inconclusive comparison keeps partial rows and maps unknown libuv calls into the fixed vocabulary", () => {
+  const row = {
+    extraRegistryRead: false,
+    consoleMode: "detached",
+    creationFlags: 524300,
+    winsockGrant: false,
+    grantRestored: null,
+    completed: true,
+    stage: "complete",
+    tokenVerified: true,
+    capabilityCount: 1,
+    capabilityAttributes: [4],
+    lpacAccessMatched: true,
+    childPolicy: 1,
+    imagePolicy: 3,
+    integrityRid: 4096,
+    resumePrevious: 1,
+    exitStatus: 2147483651,
+    timedOut: false,
+    markerMatched: false,
+    stdoutBytes: 0,
+    stderrBytes: 48,
+    stderrShape: { kind: "libuv-fatal", call: "WSAStartup", code: 10107 },
+    cleanupConfirmed: true,
+  };
+  const receipt = {
+    schemaVersion: 1,
+    scope: "fixed-node-startup-launch-comparison",
+    diagnosticOnly: true,
+    releaseGate: false,
+    runtimePolicyChanged: false,
+    admissionGranted: false,
+    candidate: "detachedWinsockGrant",
+    winsockGrantApplied: false,
+    winsockGrantFailureRestored: true,
+    sameProfileAndInputs: false,
+    runtimeStable: false,
+    debuggerUsed: false,
+    status: "inconclusive",
+    taskCleanup: true,
+    profileCleanup: true,
+    rows: [row],
+  };
+  const marker = "OFOX_STARTUP_COMPARISON_V1";
+  const project = () =>
+    developmentReceipt(
+      "launch-comparison",
+      marker + " " + JSON.stringify(receipt) + "\n",
+    );
+  assert.deepEqual(project(), { status: "recorded", marker, data: receipt });
+  row.stderrShape.call = "private-call";
+  row.pid = 123456;
+  const output = project().data;
+  assert.equal(output.rows[0].stderrShape.call, "?");
+  assert.ok(!Object.hasOwn(output.rows[0], "pid"));
 });

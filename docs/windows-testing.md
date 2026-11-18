@@ -96,7 +96,10 @@ Cargo.toml 的 features/profile，兼容恢复旧 v2 依赖；断言失败仍保
 真实进程用例均不能通过。macOS portable PowerShell 的结果不能代替这一步。
 
 日志及 `summary.json` 位于同 SHA、同 attempt 的
-`document-engine-development-<SHA>-<attempt>` artifact，不含发布包或账户配置。
+`document-engine-development-<SHA>-<attempt>` artifact。上传清单逐个列出允许的文件。
+步骤日志记录退出状态、截断标记、固定格式的编译错误码与可识别的源码位置。注册表、启动对照及调试步骤另写按固定字段校验的收据，调试收据区分宿主恢复线程与机器 ACL 复原；
+成功退出也须取得该步骤的唯一完整收据。功能前置失败时，日志可含引擎阶段、退出码、检查点与固定注册表键的访问判定。
+Cargo 两个输出流只在运行器内存中解析。CDB 在本机核对真实 PID/TID，报告只保留握手结果、标志位与固定模块词表。
 不运行全 sidecar、release probes、安装包或付费模型。默认 Windows Host pipeline
 e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能代替完整 Windows Probe、
 发布同 SHA 门禁、安装版 UI 或 Windows 10/11 客户端验收。

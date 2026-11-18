@@ -80,7 +80,20 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: document-engine-development-${{ github.sha }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/
+          path: |
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/summary.json
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/acl-prerequisite.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/registry-scope-prerequisite.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/functional-prerequisite.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/windows-sandbox.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-old-roundtrip.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-long-path.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/attachment-cancel-roundtrip.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/host-interruption.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/host-no-effect.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/host-unknown-outcome.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/launch-comparison.log
+            ${{ runner.temp }}/document-engine-development-${{ github.run_attempt }}/startup-trace.log
           retention-days: 14
           if-no-files-found: warn
       - name: Preserve completed development dependencies after failure

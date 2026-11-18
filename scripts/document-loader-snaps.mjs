@@ -43,7 +43,7 @@ function moduleProjection(value, roots) {
       if (!root || !normalized?.startsWith(`${root}\\`)) continue;
       const relative = normalized.slice(root.length + 1);
       const system =
-        /^(?:system32|syswow64)\\([a-z\d][a-z\d_.-]{0,63}\.(?:dll|exe))$/.exec(
+        /^(?:system32|syswow64)\\((?:ntdll|kernel32|kernelbase)\.dll)$/.exec(
           relative,
         );
       const runtime = /^(node\.exe|officecli\.exe)$/.exec(relative);
@@ -157,8 +157,8 @@ export function projectDocumentLoaderSnaps({ text, target, roots } = {}) {
   }
   report.handshake = {
     status: "matched",
-    before,
-    after,
+    before: { flags: before.flags },
+    after: { flags: after.flags },
     ready: true,
     preAttachHold: { suspendPrevious: 1, pairedResumePrevious: 2 },
     finalHold: { suspendPrevious: 1, pairedResumePrevious: 2 },
@@ -189,8 +189,6 @@ export function projectDocumentLoaderSnaps({ text, target, roots } = {}) {
     }
     report.observations.push({
       kind: init ? "dll-init-failure" : "subsystem-load-failure",
-      childPid: target.childPid,
-      threadId: target.primaryTid,
       ...(init
         ? moduleProjection(match[3], roots)
         : { rootAlias: "windows-subsystem", module: match[3].toLowerCase() }),
