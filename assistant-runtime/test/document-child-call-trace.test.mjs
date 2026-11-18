@@ -118,6 +118,19 @@ test("only a closed failure stage and verdict survive the native artifact bounda
       "inconclusive",
       "return-pair",
     ],
+    [["OFOX_CHILD_CALL_INCOMPLETE_V1 symbols"], 101, "inconclusive", "symbols"],
+    [
+      ["OFOX_CHILD_CALL_INCOMPLETE_V1 last-error-zero"],
+      101,
+      "inconclusive",
+      "last-error-zero",
+    ],
+    [
+      ["OFOX_CHILD_CALL_INCOMPLETE_V1 last-error-unreadable"],
+      101,
+      "inconclusive",
+      "last-error-unreadable",
+    ],
     [
       ["OFOX_CHILD_CALL_INCOMPLETE_V1 private-path"],
       101,

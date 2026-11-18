@@ -823,7 +823,7 @@ libuv 是否到达 `CreateProcessW`，若发生失败，转换成 libuv 错误�
 现有 WSAStartup 专用 CDB 配置使用仅 runtime 的令牌并临时授权 Winsock 子树，复用该配置
 无法回答生产令牌上的问题。
 
-### 检查点 7 的 CI 专用观测（待 Windows 原生验证）
+### 检查点 7 的 CI 专用观测
 
 下一次 Server 2022 定点运行要回答一个问题。复现检查点 7 的 `UNKNOWN` 时，固定
 请求是否进入内置 Node 实际导入的 `CreateProcessW`，调用返回时主线程的
@@ -844,3 +844,24 @@ Win32 错误属于哪一类？
 文档相关测试 101/101 通过，覆盖断点插入失败、错误行与提示符粘连、入口与返回不配对、
 产物拒绝原文等情形。macOS Rust 测试 4555 项通过、28 项忽略，Windows 目标的
 生产和测试配置 Clippy 均通过。Server 2022 上这次调用是否命中及其结果仍待验证。
+
+运行 [44262693781](https://github.com/ofoxai/ofox-desktop/actions/runs/44262693781)
+（`f5ed73ce`，push，第 1 次，Windows Server 2022）通过生产运行时准备和依赖完整性检查。
+独立诊断失败。上传的两份文件均已核对，结论一致，`diagnosticRecorded=false`、
+`verdict=inconclusive`、`incompleteStage=last-error`。
+
+控制器只有在核对固定请求的程序及参数、配对同一主线程的返回地址和栈位置，并看到
+`CreateProcessW` 返回 0 后，才会进入 `last-error`。因此本次能确认受观测的调用确实
+到达并返回失败。产物不足以区分旧读取器缺值、格式不同或读到零，也没有完整收据可供
+核对本次 Node 最终状态。此前无调试器门禁在检查点 7 得到的 `UNKNOWN` 仍按失败处理。
+
+下次独立运行要回答：在该返回点，用与系统 ntdll 匹配的符号直接读取同一线程的
+`LastErrorValue`，能否得到非零的 Win32 错误类别，并完成固定请求、Node 结果和清理的全部核对？
+控制器在宿主临时目录内调用签名的 SymChk，只为固定系统 ntdll 准备符号。CDB 离线核对
+字段大小，从匹配的失败返回分支读取一个 DWORD。缺值或零仍使诊断失败，上传文件只含闭集类别。
+[微软调试器的类型化线程字段说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/debugger/c---numbers-and-operators)
+
+本地回归先复现旧解析器丢失固定数值记录，以及 CDB 表达式报错先于固定标记时丢失失败阶段。
+修正后文档诊断测试 101/101 通过。Windows 目标的两种 Clippy 配置、独立复审和 macOS
+全目标 Clippy 均通过。macOS Rust 测试 4555 项通过、28 项忽略，前端 3377 项通过、1 项跳过。
+新读取方式尚待原生运行。

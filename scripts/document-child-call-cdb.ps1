@@ -14,12 +14,30 @@ function Read-ChildCallLine($State, [string]$Line) {
         $Line = $Matches[1]
         # Anchored markers exclude echoed commands; joined debugger errors still count.
     }
-    if ($Line -match '(?:unable|failed|could not|cannot) to (?:insert|set|resolve|read).*breakpoint|breakpoint.*(?:unresolved|could not be set)|syntax error|unable to read command file') { throw 'debugger' }
-    if ($Line -cmatch '^\s*LastErrorValue:\s*\(Win32\)\s*(?:0x([0-9a-fA-F]{1,8})|0n([0-9]{1,10})|([0-9]{1,10}))(?:\s+.*)?$') {
+    # .catch prints the CDB error before its fixed fallback marker. Associate
+    # that first error with the read already in progress and fail immediately.
+    if ($Line -match '(?:unable|failed|could not|cannot) to (?:insert|set|resolve|read).*breakpoint|breakpoint.*(?:unresolved|could not be set)|syntax error|unable to read command file') {
+        if ($State.stage -eq 'field') { $script:failureStage = 'symbols' }
+        if ($State.stage -eq 'failed') { $script:failureStage = 'last-error-unreadable' }
+        throw 'debugger'
+    }
+    if ($State.stage -eq 'setup' -and $Line -ceq 'OFOX_CALL FIELD_BEGIN') { $State.stage = 'field'; return }
+    if ($State.stage -eq 'field' -and $Line -ceq 'OFOX_CALL FIELD_READY') { $State.stage = 'arm-ready'; return }
+    if ($State.stage -eq 'field' -and $Line -ceq 'OFOX_CALL FIELD_UNAVAILABLE') {
+        $script:failureStage = 'symbols'
+        throw 'field_type'
+    }
+    if ($State.stage -eq 'failed' -and $Line -ceq 'OFOX_CALL READ_ERROR') {
+        $script:failureStage = 'last-error-unreadable'
+        throw 'field_read'
+    }
+    if ($Line -cmatch '^OFOX_CALL WIN32 ([0-9a-fA-F]{8}) END$') {
         if ($State.stage -ne 'failed') { throw 'unpaired' }
-        $code = if ($Matches[1]) { [Convert]::ToUInt32($Matches[1],16) } else { [uint32]($Matches[2] + $Matches[3]) }
-        if ($Line -match '\s+\((\d+)\)' -and $code -ne [uint32]$Matches[1]) { throw 'last_error' }
-        if ($code -eq 0) { throw 'last_error' }
+        $code = [Convert]::ToUInt32($Matches[1],16)
+        if ($code -eq 0) {
+            $script:failureStage = 'last-error-zero'
+            throw 'last_error'
+        }
         $State.result = switch ($code) {
             367 { 'child-process-blocked' } 5 { 'access-denied' } 1260 { 'policy-disabled' }
             4252 { 'appcontainer-unsupported' } 1314 { 'privilege-not-held' }
@@ -32,7 +50,7 @@ function Read-ChildCallLine($State, [string]$Line) {
     if ($Line -match '^\s*LastErrorValue:' -or $Line -ceq 'OFOX_CALL INVALID') { throw 'invalid' }
     if (-not $Line.StartsWith('OFOX_CALL ')) { return }
     $stage = $State.stage
-    if ($stage -eq 'setup' -and $Line -ceq 'OFOX_CALL ARMED') { $State.stage = 'armed'; return }
+    if ($stage -eq 'arm-ready' -and $Line -ceq 'OFOX_CALL ARMED') { $State.stage = 'armed'; return }
     if ($stage -eq 'armed' -and $Line -ceq 'OFOX_CALL ENTRY') { $State.stage = 'entry'; return }
     if ($stage -eq 'entry' -and $Line.StartsWith('OFOX_CALL IMAGE ')) {
         $image = ConvertTo-ChildCallPath $Line.Substring(16)
@@ -104,6 +122,20 @@ function Get-ChildCallImport([string]$Exe) {
     } finally { $file.Dispose() }
 }
 
+function New-ChildCallToolStart([ValidateSet('symchk','cdb')][string]$Name, [string]$Dir) {
+    $tool = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\Debuggers\x64\$Name.exe"
+    $signature = Get-AuthenticodeSignature -LiteralPath $tool
+    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') { throw 'signature' }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $tool; $start.WorkingDirectory = $dir; $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true; $start.RedirectStandardInput = $true
+    $start.CreateNoWindow = $true; $start.Environment.Clear()
+    foreach ($key in @('SystemRoot','WINDIR')) { $start.Environment[$key] = $env:SystemRoot }
+    $start.Environment['PATH'] = Join-Path $env:SystemRoot 'System32'
+    foreach ($key in @('TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA')) { $start.Environment[$key] = $dir }
+    return $start
+}
+
 function Invoke-FixedChildCall {
     if (-not $IsWindows -or -not [Environment]::Is64BitProcess -or
         $env:GITHUB_ACTIONS -cne 'true' -or $env:GITHUB_WORKFLOW -cne 'Document Engine Child Call Diagnostic' -or
@@ -123,19 +155,30 @@ function Invoke-FixedChildCall {
     $script:failureStage = 'import'
     $slot = Get-ChildCallImport $exe
     $script:failureStage = 'arm'
-    $tool = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers\x64\cdb.exe'
-    $signature = Get-AuthenticodeSignature -LiteralPath $tool
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(?:^|,\s*)O=Microsoft Corporation(?:,|$)') { throw 'signature' }
-
-    # Current directory is the Rust host's fresh TempDir outside the artifact
-    # tree. Only fixed command files live here. No transcript is written.
     $dir = [Environment]::CurrentDirectory
+    $start = New-ChildCallToolStart 'cdb' $dir
+    $script:failureStage = 'symbols'
+    . (Join-Path $PSScriptRoot 'document-engine-symbols.ps1')
+    $symbols = (New-Item -Path (Join-Path $dir 'symbols') -ItemType Directory -ErrorAction Stop).FullName
+    $image = Join-Path $env:SystemRoot 'System32\ntdll.dll'
+    $prepare = New-ChildCallToolStart 'symchk' $dir
+    foreach ($arg in (Get-DocumentSymbolArguments $image $symbols)) { $prepare.ArgumentList.Add($arg) }
+    # The host owns cancellation and reaps this controller's entire Job.
+    Invoke-DocumentSymbolCheck $prepare ([Threading.Tasks.Task]::Delay(-1)) @{} 30000 $image
+
+    # Use only the local symbol store during attachment. The live field size
+    # and actual Node import must both resolve before the fixture is released.
+    $script:failureStage = 'arm'
     $init = @(
         '.expr /s masm', 'sxi out', ('~~[0n' + $threadId + ']s'),
+        # Require a matching PDB for ntdll while retaining kernel32 export lookup.
+        '.echo OFOX_CALL FIELD_BEGIN', 'r @$t4 = 0', '.symopt+ 0x400',
+        '.catch { .reload /f ntdll.dll; r @$t4 = @@c++(sizeof(@$teb->LastErrorValue)) }',
+        '.symopt- 0x400', '.if (@$t4 == 4) { .echo OFOX_CALL FIELD_READY } .else { .echo OFOX_CALL FIELD_UNAVAILABLE }',
         'r @$t2 = 0', 'r @$t3 = 0',
         'bp10 kernel32!CreateProcessW "r @$t2 = @$t2 + 1; .echo OFOX_CALL ENTRY; $><entry.cmd"',
         'sxe -c "$><exit.cmd" epr',
-        ('.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@$bp10 != 0) and (@$bp10 == poi(node+0n{2}))) {{ .echo OFOX_CALL ARMED }} .else {{ .echo OFOX_CALL INVALID }}' -f $processId,$threadId,$slot),
+        ('.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@$bp10 != 0) and (@$bp10 == poi(node+0n{2})) and (@$t4 == 4)) {{ .echo OFOX_CALL ARMED }} .else {{ .echo OFOX_CALL INVALID }}' -f $processId,$threadId,$slot),
         'g'
     )
     $entry = @(
@@ -143,19 +186,19 @@ function Invoke-FixedChildCall {
         '.printf "OFOX_CALL IMAGE %mu\n", @rcx', '.printf "OFOX_CALL ARGS %mu\n", @rdx',
         'r @$t0 = @rsp', 'r @$t1 = poi(@rsp)', 'bp11 @$t1 "$><return.cmd"', 'gc'
     )
-    $ret = '.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@rsp == (@$t0 + 8)) and (@rip == @$t1)) {{ .if (@eax == 0) {{ .echo OFOX_CALL FAILED; !gle }} .else {{ .echo OFOX_CALL SUCCEEDED }}; r @$t3 = @$t3 + 1; .echo OFOX_CALL RETURN }} .else {{ .echo OFOX_CALL INVALID }}; bc 11; gc' -f $processId,$threadId
+    # A failed expression otherwise stops the CDB command program. Mark the
+    # DWORD valid only after evaluation, while the paired thread is stopped.
+    $readError = @(
+        '.echo OFOX_CALL FAILED', 'r @$t4 = 0',
+        '.catch { r @$t5 = @@c++(@$teb->LastErrorValue); r @$t4 = 1 }',
+        '.if (@$t4 == 1) { .printf "OFOX_CALL WIN32 %08x END\n", @$t5 } .else { .echo OFOX_CALL READ_ERROR }'
+    ) -join '; '
+    $ret = '.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@rsp == (@$t0 + 8)) and (@rip == @$t1)) {{ .if (@eax == 0) {{ {2} }} .else {{ .echo OFOX_CALL SUCCEEDED }}; r @$t3 = @$t3 + 1; .echo OFOX_CALL RETURN }} .else {{ .echo OFOX_CALL INVALID }}; bc 11; gc' -f $processId,$threadId,$readError
     $end = '.if ((@$tpid == 0n{0}) and (@$t2 == 0) and (@$t3 == 0)) {{ .echo OFOX_CALL EXIT_NONE }} .elsif ((@$tpid == 0n{0}) and (@$t2 == 1) and (@$t3 == 1)) {{ .echo OFOX_CALL EXIT_PAIRED }} .else {{ .echo OFOX_CALL INVALID }}; q' -f $processId
     foreach ($item in @{ 'init.cmd'=$init; 'entry.cmd'=$entry; 'return.cmd'=$ret; 'exit.cmd'=$end }.GetEnumerator()) {
         [IO.File]::WriteAllLines((Join-Path $dir $item.Key),[string[]]$item.Value,[Text.ASCIIEncoding]::new())
     }
-    $start = [Diagnostics.ProcessStartInfo]::new()
-    $start.FileName = $tool; $start.WorkingDirectory = $dir; $start.UseShellExecute = $false
-    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true; $start.RedirectStandardInput = $true
-    $start.CreateNoWindow = $true; $start.Environment.Clear()
-    foreach ($key in @('SystemRoot','WINDIR')) { $start.Environment[$key] = $env:SystemRoot }
-    $start.Environment['PATH'] = Join-Path $env:SystemRoot 'System32'
-    foreach ($key in @('TEMP','TMP','USERPROFILE','APPDATA','LOCALAPPDATA')) { $start.Environment[$key] = $dir }
-    foreach ($arg in @('-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-y',$dir,'-cf',(Join-Path $dir 'init.cmd'),'-p',[string]$processId)) { $start.ArgumentList.Add($arg) }
+    foreach ($arg in @('-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-y',("srv*" + $symbols),'-cf',(Join-Path $dir 'init.cmd'),'-p',[string]$processId)) { $start.ArgumentList.Add($arg) }
     $debug = [Diagnostics.Process]::Start($start)
     try {
         $state = New-ChildCallState $exe
@@ -176,6 +219,7 @@ function Invoke-FixedChildCall {
             Read-ChildCallLine $state $line
             if ($state.stage -eq $before) { continue }
             $script:failureStage = switch ($state.stage) {
+                'field' { 'symbols' } 'arm-ready' { 'arm' }
                 'armed' { 'observation' } 'entry' { 'request' } 'image' { 'request' }
                 'args' { 'return-pair' } 'failed' { 'last-error' } 'result' { 'return-pair' }
                 default { 'exit' }

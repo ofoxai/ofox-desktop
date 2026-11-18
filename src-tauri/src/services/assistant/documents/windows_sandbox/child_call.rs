@@ -108,7 +108,8 @@ pub(super) fn observe(
     if flags & HANDLE_FLAG_INHERIT.0 != 0 {
         return Err(UNAVAILABLE.into());
     }
-    let deadline = Instant::now() + Duration::from_secs(60);
+    // SymChk has a separate 30-second bound before CDB attaches.
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut prefix = [0; BEGIN.len()];
     loop {
         check_time(deadline, cancelled)?;
@@ -192,11 +193,14 @@ pub(super) fn observe(
                     failure_stage = [
                         "target",
                         "import",
+                        "symbols",
                         "arm",
                         "observation",
                         "request",
                         "return-pair",
                         "last-error",
+                        "last-error-zero",
+                        "last-error-unreadable",
                         "exit",
                     ]
                     .into_iter()
