@@ -626,3 +626,21 @@ HKCU 仍拒绝；但 B 与 A1/A2 一样以 `0x80000003` 退出，`stderrShape` �
 授予的范围中还有它需要的其他读取，目前未知。产品维持拒绝状态，不改 capability。
 下一步候选：用已验证的 Nt 观察器在“无控制台、仅 runtime”的 Node 上记录 libuv 中止前
 失败的系统调用与对象形态，以确定缺失的读取，再判断窄授权是否仍可行。
+
+按用户选择，下一次定点运行追踪失败的读取，不改产品。问题是：在 Winsock 目录可读
+（CI 专用临时 ACE）、无控制台、仅 runtime capability 的条件下，`WSAStartup` 内部
+哪一个被观察的操作被拒绝，或被观察的操作是否全部成功。做法：调试器诊断改为 ACL
+之后独立的 `startup-trace` 步骤，被观察的第一个 Node 改用上述配置，令牌门禁要求
+目录可读、HKCU 用户键拒绝；授权在进程与调试器结束后写回，并要求整棵子树逐键复原。
+观察器新增 `NtEnumerateKey`、`NtQueryKey`、`NtNotifyChangeKey`、
+`NtNotifyChangeMultipleKeys` 四个只记状态的接口，上限由 256 提高到 1024，以免
+`WSAStartup` 之前的加载调用耗尽配额；另在 primary thread 上为 `ws2_32!WSAStartup`
+设置延迟断点，报告进入前已有的调用数、返回时的调用数和返回值，并为区间内每次
+调用标记 `insideWsaStartup`。对象形态新增 Winsock 目录、Tcpip 及用户配置单元的公开
+名称；用户 SID、包 SID 只输出固定记号。已知限制：libuv 中止时触发的断点异常会让
+进程停在调试器中，直到跟踪专用的 60 秒超时由 Job 结束（调试器侧等待放宽到 75 秒），
+此前的记录不受影响；若 `WSAStartup` 不在 primary thread 上调用，区间标记不会出现，
+其余调用记录仍完整。未观察的接口（如 `NtEnumerateValueKey`、`NtCreateEvent`）上的
+拒绝不会显示，此时结果为区间内全部成功。跟踪测试同时断言授权复原与完整的调试器
+证明，因此该步骤通过即表示跟踪确实接上；结论仍以 `step.trace` 为准。独立审查的
+其余意见（入口线程校验、旧上限文字、功能测试里已不可达的对照分支）已处理。
