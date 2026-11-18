@@ -644,3 +644,19 @@ HKCU 仍拒绝；但 B 与 A1/A2 一样以 `0x80000003` 退出，`stderrShape` �
 拒绝不会显示，此时结果为区间内全部成功。跟踪测试同时断言授权复原与完整的调试器
 证明，因此该步骤通过即表示跟踪确实接上；结论仍以 `step.trace` 为准。独立审查的
 其余意见（入口线程校验、旧上限文字、功能测试里已不可达的对照分支）已处理。
+
+运行 [44221172203](https://github.com/ofoxai/ofox-desktop/actions/runs/44221172203)
+（`7977584b`，推送自动触发）：ACL 1/1；`startup-trace` 1/1 通过，即授权已施加并逐键
+复原（`winsockGrantApplied=true`、`winsockGrantRestored=true`），调试器完整证明成立
+（配置确认、attach 前与 continue 后均 `1→配对2`、原 Host Resume1、调试器已关闭）；
+随后注册表隔离前置按已知原因失败。令牌：1 个 capability，门禁看到 Winsock 目录可读、
+HKCU 两键拒绝。19 个观察点安装校验通过，主线程 71 次调用全部配对
+（`complete-for-fixed-set`），全部发生在 DLL 映射阶段：早期 HKLM 拒绝与之前相同；
+`dbghelp`、`iphlpapi`、`userenv`、`winmm`、`cryptbase` 等不在 KnownDlls 中，改从系统
+目录打开并映射成功。此后主线程再无被观察的调用，没有 DllMain 的注册表读取，
+`WSAStartup` 区间未出现；进程 stdout/stderr 均 0 字节，60 秒超时后由 Job 结束。
+
+结论：本次未回答 `WSAStartup` 的问题。同一配置在不挂调试器时（44142596063 的 B）
+会走到 `WSAStartup` 并报 10107，说明这次停顿由调试器引入。调试器提示符行比预期多
+1 行，推断调试器在映射完成后停下一次并冻结了目标，最可能是默认中断的首次机会异常
+（例如仅在被调试时才会抛出的无效句柄异常）；具体事件未被投影，尚未证实。
