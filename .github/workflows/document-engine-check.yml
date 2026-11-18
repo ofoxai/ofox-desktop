@@ -73,12 +73,8 @@ jobs:
       - name: ACL prerequisite then focused native regressions
         run: .\assistant-runtime\resources\node\node.exe scripts/document-engine-development-check.mjs --out "$env:RUNNER_TEMP/document-engine-development-$env:GITHUB_RUN_ATTEMPT"
         shell: pwsh
-        env:
-          # Test-only, CI-only CDB trace of the launch that still fails in
-          # WSAStartup with the Winsock catalog readable (run 44142596063 B):
-          # console-free, runtime capability only, temporary catalog ACE
-          # restored exactly afterwards. Names which observed read is denied.
-          OFOX_DOCUMENT_STARTUP_TRACE: "1"
+        # Unassisted gate: no debugger trace (answered by run 44231498872) and
+        # no launch comparison; the production set includes registryRead.
       - name: Upload development diagnostics
         if: always()
         uses: actions/upload-artifact@v7

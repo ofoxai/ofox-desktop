@@ -375,12 +375,14 @@ impl RuntimeCapability {
 }
 
 /// Windows' read-only registry capability. libuv initializes Winsock on every
-/// Node start, and WSAStartup returns 10107 in LPAC until the catalog keys
-/// granted to this capability are readable (native A-B-A 44076224990).
+/// Node start; WSAStartup must open the HKLM root key, which Windows grants an
+/// LPAC only through this capability (native trace 44231498872, A-B-A
+/// 44076224990). On default ACLs it also reaches the user's HKCU (44133006077):
+/// an accepted, documented residual risk (see docs/known-limitations.md).
 const REGISTRY_READ_CAPABILITY: &str = "registryRead";
 
 // Production: exactly the private runtime capability plus registryRead. Every
-// launch re-derives both and verifies user-private registry keys stay denied.
+// launch re-derives both and measures the registry scope before resuming.
 // Only the fixed test comparison can construct the runtime-only baseline.
 struct ProcessCapabilities<'a> {
     runtime: &'a RuntimeCapability,
@@ -1687,10 +1689,42 @@ fn lpac_access_matches(verdicts: &[AccessVerdict; 4]) -> bool {
         ]
 }
 
+/// What the registry gate demands of an actual suspended token.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegistryScope {
+    /// Production {runtime, registryRead}: the HKLM root and the Winsock
+    /// catalog must be readable. The user's Environment and Software keys are
+    /// measured on every launch (any failure refuses) but never decide it;
+    /// readable is the accepted residual risk.
+    RegistryRead,
+    /// Test-only runtime-only tokens: the HKLM root and the user keys must stay
+    /// denied, and the catalog is readable exactly under the CI-only grant.
+    #[cfg(test)]
+    RuntimeOnly { winsock_readable: bool },
+}
+
+/// The gate's decision from the measured reads: [HKLM root, Winsock catalog],
+/// then the user's [Environment, Software].
+fn registry_scope_admits(scope: RegistryScope, machine: [bool; 2], user_keys: [bool; 2]) -> bool {
+    let [root, catalog] = machine;
+    match scope {
+        RegistryScope::RegistryRead => {
+            // Accepted residual risk: the user-key reads never decide a
+            // production launch.
+            let _ = user_keys;
+            root && catalog
+        }
+        #[cfg(test)]
+        RegistryScope::RuntimeOnly { winsock_readable } => {
+            !root && catalog == winsock_readable && !user_keys.iter().any(|read| *read)
+        }
+    }
+}
+
 fn verify_lpac_access(
     token: HANDLE,
     capability: PSID,
-    registry_read: bool,
+    scope: RegistryScope,
     observation: &Observer,
 ) -> Result<(), String> {
     let duplicate = access_impersonation_token(token, observation)?;
@@ -1733,20 +1767,20 @@ fn verify_lpac_access(
     if !matched {
         return Err(UNAVAILABLE.into());
     }
-    // registryRead is a read grant on keys Windows marks for it. Positive
-    // control first: the Winsock catalog key is readable exactly when the token
-    // holds registryRead, so the denials below cannot be vacuous. The actual
-    // token must still be refused the user's private keys; fail closed.
+    // registryRead is a read grant on keys Windows marks for it. Every read is
+    // measured on this actual token (and kept in probe evidence); any open,
+    // descriptor or AccessCheck failure refuses the launch (fail closed).
     observation.enter(Phase::TokenRegistryIsolation);
-    if registry_read_granted(raw(&duplicate), RegistryKey::WinsockCatalog, observation)?
-        != registry_read
-    {
+    let machine = [
+        registry_read_granted(raw(&duplicate), RegistryKey::MachineRoot, observation)?,
+        registry_read_granted(raw(&duplicate), RegistryKey::WinsockCatalog, observation)?,
+    ];
+    let user_keys = [
+        registry_read_granted(raw(&duplicate), RegistryKey::UserEnvironment, observation)?,
+        registry_read_granted(raw(&duplicate), RegistryKey::UserSoftware, observation)?,
+    ];
+    if !registry_scope_admits(scope, machine, user_keys) {
         return Err(UNAVAILABLE.into());
-    }
-    for key in [RegistryKey::UserEnvironment, RegistryKey::UserSoftware] {
-        if registry_read_granted(raw(&duplicate), key, observation)? {
-            return Err(UNAVAILABLE.into());
-        }
     }
     Ok(())
 }
@@ -1773,6 +1807,7 @@ fn registry_read_granted(
             HKEY_LOCAL_MACHINE,
             r"SYSTEM\CurrentControlSet\Services\WinSock2\Parameters",
         ),
+        RegistryKey::MachineRoot => (HKEY_LOCAL_MACHINE, ""),
     };
     let mut record = RegistryAccess {
         key,
@@ -1806,6 +1841,16 @@ fn registry_read_check(
 /// The granted read bits (KEY_QUERY_VALUE | KEY_ENUMERATE_SUB_KEYS) for one
 /// already-open key handle (READ_CONTROL); 0 when nothing is granted.
 fn registry_key_read_bits(
+    key: HANDLE,
+    token: HANDLE,
+    record: &mut RegistryAccess,
+) -> Result<u32, String> {
+    Ok(registry_key_access(key, token, record)? & REGISTRY_READ_BITS)
+}
+
+/// Every right `token` is granted on one already-open key handle
+/// (READ_CONTROL); 0 when nothing is granted.
+fn registry_key_access(
     key: HANDLE,
     token: HANDLE,
     record: &mut RegistryAccess,
@@ -1852,13 +1897,9 @@ fn registry_key_read_bits(
     }
     .map_err(|_| UNAVAILABLE.to_owned())?;
     record.access_checked = true;
-    let read = if allowed.as_bool() {
-        granted & REGISTRY_READ_BITS
-    } else {
-        0
-    };
-    record.read_granted = Some(read != 0);
-    Ok(read)
+    let granted = if allowed.as_bool() { granted } else { 0 };
+    record.read_granted = Some(granted & REGISTRY_READ_BITS != 0);
+    Ok(granted)
 }
 
 fn verify_token(
@@ -1880,26 +1921,27 @@ fn verify_token(
             },
             registry_read.entry(),
         ],
-        // registryRead grants the Winsock catalog read libuv needs.
-        true,
+        RegistryScope::RegistryRead,
         observation,
     )
 }
 
-/// `winsock_readable`: whether this token is expected to read the Winsock
-/// catalog (production: via registryRead; test comparison: via a temporary
-/// CI-only grant). The registry gate requires exactly that answer.
+/// `scope`: what the registry gate demands; it must match the expected set
+/// (production {runtime, registryRead}; test-only runtime-only singleton).
 fn verify_token_entries(
     process: HANDLE,
     package: PSID,
     capability: PSID,
     expected: &[SID_AND_ATTRIBUTES],
-    winsock_readable: bool,
+    scope: RegistryScope,
     observation: &Observer,
 ) -> Result<(), String> {
-    // Production requires {runtime, registryRead}; the runtime-only singleton
-    // exists solely as the fixed test comparison's baseline.
-    if !(expected.len() == 2 || (cfg!(test) && expected.len() == 1)) {
+    let consistent = match scope {
+        RegistryScope::RegistryRead => expected.len() == 2,
+        #[cfg(test)]
+        RegistryScope::RuntimeOnly { .. } => expected.len() == 1,
+    };
+    if !consistent {
         return Err(UNAVAILABLE.into());
     }
     if expected[0].Attributes != SE_GROUP_ENABLED as u32
@@ -2058,7 +2100,7 @@ fn verify_token_entries(
     // Class 46 is rejected with STATUS_INVALID_INFO_CLASS on native 20348.
     // Prove its documented LPAC authorization semantics on this actual token,
     // while it is still suspended, with both positive and negative controls.
-    verify_lpac_access(raw(&token), capability, winsock_readable, observation)
+    verify_lpac_access(raw(&token), capability, scope, observation)
 }
 
 struct Launch {

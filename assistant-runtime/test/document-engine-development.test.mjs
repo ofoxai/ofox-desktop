@@ -96,12 +96,12 @@ test("all focused checks run serially after ACL and count real tests", async () 
     checks[0].filter,
     /::document_cache_requires_exact_specific_file_read_execute_acl$/,
   );
-  // Registry isolation evidence is gathered before any engine is resumed.
-  assert.equal(checks[1].name, "registry-isolation-prerequisite");
+  // Registry scope evidence is gathered before any engine is resumed.
+  assert.equal(checks[1].name, "registry-scope-prerequisite");
   assert.equal(checks[1].exact, true);
   assert.match(
     checks[1].filter,
-    /::document_registry_read_opens_the_winsock_catalog_but_not_user_keys$/,
+    /::document_registry_scope_is_measured_and_adds_no_write_rights$/,
   );
   assert.equal(checks[2].name, "functional-prerequisite");
   assert.equal(checks[2].exact, true);
@@ -118,7 +118,7 @@ test("all focused checks run serially after ACL and count real tests", async () 
   );
 });
 
-test("registry isolation failure starts no engine and keeps its evidence step", async () => {
+test("registry scope failure starts no engine and keeps its evidence step", async () => {
   const calls = [];
   const report = await runDevelopmentChecks(async (check) => {
     calls.push(check.name);
@@ -130,11 +130,8 @@ test("registry isolation failure starts no engine and keeps its evidence step", 
             "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored;",
         };
   });
-  assert.deepEqual(calls, [
-    "acl-prerequisite",
-    "registry-isolation-prerequisite",
-  ]);
-  assert.equal(report.steps.at(-1).name, "registry-isolation-prerequisite");
+  assert.deepEqual(calls, ["acl-prerequisite", "registry-scope-prerequisite"]);
+  assert.equal(report.steps.at(-1).name, "registry-scope-prerequisite");
   assert.equal(report.steps.at(-1).status, "failed");
   assert.equal(report.success, false);
 });
@@ -154,7 +151,7 @@ test("an explicitly requested launch comparison runs right after ACL, never by d
   assert.deepEqual(requested.calls.slice(0, 3), [
     "acl-prerequisite",
     "launch-comparison",
-    "registry-isolation-prerequisite",
+    "registry-scope-prerequisite",
   ]);
   assert.equal(requested.calls.length, checks.length + 1);
   assert.equal(comparisonCheck.exact, true);
@@ -210,7 +207,7 @@ test("functional prerequisite failure starts no whole-sandbox or follow-up cases
   });
   assert.deepEqual(calls, [
     "acl-prerequisite",
-    "registry-isolation-prerequisite",
+    "registry-scope-prerequisite",
     "functional-prerequisite",
   ]);
   assert.equal(report.steps.length, 3);
@@ -258,7 +255,7 @@ test("a requested trace runs as its own exact step right after ACL and any compa
   assert.deepEqual(traced.calls.slice(0, 3), [
     "acl-prerequisite",
     "startup-trace",
-    "registry-isolation-prerequisite",
+    "registry-scope-prerequisite",
   ]);
   assert.equal(traced.calls.length, checks.length + 1);
   const both = await run({ traceCapture: capture, comparison: true });
@@ -266,7 +263,7 @@ test("a requested trace runs as its own exact step right after ACL and any compa
     "acl-prerequisite",
     "launch-comparison",
     "startup-trace",
-    "registry-isolation-prerequisite",
+    "registry-scope-prerequisite",
   ]);
   assert.equal(traceCheck.exact, true);
   assert.match(traceCheck.filter, /::document_startup_trace_when_requested$/);
@@ -812,21 +809,10 @@ test("only dispatch or the exact development workflow bootstrap can trigger this
     '  workflow_dispatch:\n  push:\n    branches: ["codex/desktop-next"]\n    paths: [".github/workflows/document-engine-check.yml"]',
   );
   assert.match(workflow, /^name: Document Engine Development Checks$/m);
-  // The narrow-grant comparison is answered (run 44142596063); this run
-  // traces the failing launch instead, on the native check step only.
+  // The WSAStartup trace is answered (run 44231498872) and registryRead is
+  // accepted; the gate now runs unassisted, with no debugger or comparison.
   assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_COMPARISON/);
-  const traces = [
-    ...workflow.matchAll(/^\s+OFOX_DOCUMENT_STARTUP_TRACE: (\S+)$/gm),
-  ].map((match) => match[1]);
-  assert.deepEqual(traces, ['"1"']);
-  const step = workflow
-    .split(/^ {6}- /m)
-    .find((block) =>
-      block.startsWith(
-        "name: ACL prerequisite then focused native regressions",
-      ),
-    );
-  assert.match(step, /^ {10}OFOX_DOCUMENT_STARTUP_TRACE: "1"$/m);
+  assert.doesNotMatch(workflow, /OFOX_DOCUMENT_STARTUP_TRACE/);
   assert.match(
     workflow,
     /debug0-v3-.*hashFiles\('src-tauri\/Cargo.lock', 'src-tauri\/Cargo.toml'/,

@@ -71,7 +71,9 @@ pub(super) fn create(
         profile.sid.0,
         cap.sid,
         &caps.entries(),
-        true,
+        RegistryScope::RuntimeOnly {
+            winsock_readable: true,
+        },
         observation,
     )?;
     Ok((suspended, grant))

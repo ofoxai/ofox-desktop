@@ -190,6 +190,8 @@ pub(super) enum RegistryKey {
     UserEnvironment,
     UserSoftware,
     WinsockCatalog,
+    /// HKLM itself: WSAStartup opens it before the catalog (trace 44231498872).
+    MachineRoot,
 }
 
 #[derive(serde::Serialize)]

@@ -201,21 +201,29 @@ fn assert_suspended_lpac_access_controls() {
             assert_eq!(check["accessStatus"], granted);
             assert_eq!(check["grantedAccess"], u32::from(granted));
         }
-        // The registry gate runs only after the LPAC matrix matched: the Winsock
-        // catalog positive control, then the user's private keys refused.
+        // The registry gate runs only after the LPAC matrix matched: the HKLM
+        // root and the Winsock catalog must be readable; the user's keys are
+        // measured (readable under registryRead is the accepted residual risk).
         let registry = evidence["registryIsolation"].as_array().unwrap();
         if lpac {
             let keys: Vec<_> = registry.iter().map(|row| row["key"].clone()).collect();
             assert_eq!(
                 keys,
-                ["winsock_catalog", "user_environment", "user_software"]
+                [
+                    "machine_root",
+                    "winsock_catalog",
+                    "user_environment",
+                    "user_software"
+                ]
             );
-            for (row, granted) in registry.iter().zip([true, false, false]) {
+            for row in registry {
                 assert_eq!(row["opened"], true);
                 assert_eq!(row["descriptorRead"], true);
                 assert_eq!(row["accessChecked"], true);
-                assert_eq!(row["readGranted"], granted);
+                assert!(row["readGranted"].is_boolean());
             }
+            assert_eq!(registry[0]["readGranted"], true);
+            assert_eq!(registry[1]["readGranted"], true);
         } else {
             assert!(registry.is_empty());
         }
@@ -237,13 +245,81 @@ fn assert_suspended_lpac_access_controls() {
     profile.dispose().unwrap();
 }
 
-/// registryRead must grant exactly what libuv's WSAStartup needs and nothing
-/// private: with it the Winsock catalog key is readable, without it it is not,
-/// the user's Environment and Software keys stay refused either way, and no
-/// key anywhere in HKCU becomes readable because of it.
+/// The gate's decision table, independent of any machine's ACLs.
+#[test]
+fn registry_scope_admits_measured_user_reads_only_with_registry_read() {
+    use RegistryScope::{RegistryRead, RuntimeOnly};
+    let pairs = [[false, false], [true, false], [false, true], [true, true]];
+    // Production: HKLM root and catalog both readable; user keys never decide.
+    for machine in pairs {
+        for user in pairs {
+            assert_eq!(
+                registry_scope_admits(RegistryRead, machine, user),
+                machine == [true, true]
+            );
+        }
+    }
+    // Runtime-only test tokens: HKLM root and user keys stay denied; the
+    // catalog exactly as granted.
+    for winsock_readable in [false, true] {
+        let scope = RuntimeOnly { winsock_readable };
+        for machine in pairs {
+            for user in pairs {
+                assert_eq!(
+                    registry_scope_admits(scope, machine, user),
+                    machine == [false, winsock_readable] && user == [false, false]
+                );
+            }
+        }
+    }
+}
+
+/// The scope must match the expected capability set before any system call.
+#[test]
+fn verify_token_entries_refuses_a_scope_that_does_not_match_the_set() {
+    let cap = RuntimeCapability::new().unwrap();
+    let registry_read =
+        RuntimeCapability::derive(REGISTRY_READ_CAPABILITY, &Observer::default()).unwrap();
+    let runtime_only = [cap.entry()];
+    let production = [cap.entry(), registry_read.entry()];
+    let stage = |expected: &[SID_AND_ATTRIBUTES], scope| {
+        let observation = Observer::fixed_probe();
+        let result = verify_token_entries(
+            HANDLE::default(),
+            cap.sid,
+            cap.sid,
+            expected,
+            scope,
+            &observation,
+        );
+        assert!(result.is_err());
+        observation.snapshot().unwrap()["stage"].clone()
+    };
+    let runtime_scope = RegistryScope::RuntimeOnly {
+        winsock_readable: false,
+    };
+    // Mismatched: refused before the token is opened.
+    assert_ne!(
+        stage(&runtime_only, RegistryScope::RegistryRead),
+        "token_open"
+    );
+    assert_ne!(stage(&production, runtime_scope), "token_open");
+    // Matched: proceeds to open the (invalid) process token and fails there.
+    assert_eq!(
+        stage(&production, RegistryScope::RegistryRead),
+        "token_open"
+    );
+    assert_eq!(stage(&runtime_only, runtime_scope), "token_open");
+}
+
+/// The registry scope is measured on actual suspended tokens before any engine
+/// runs. With registryRead the Winsock catalog is readable and the production
+/// verifier accepts; the HKCU reads it adds are counted (the accepted residual
+/// risk) but it adds no write right anywhere in HKCU. The runtime-only token
+/// reads none of the fixed keys.
 #[test]
 #[serial_test::serial]
-fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
+fn document_registry_scope_is_measured_and_adds_no_write_rights() {
     let cap = RuntimeCapability::new().unwrap();
     let user = current_user().unwrap();
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
@@ -301,17 +377,21 @@ fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
         suspended_token(&ProcessCapabilities::production(&cap).unwrap());
     let (runtime_verified, runtime_primary, runtime_only) =
         suspended_token(&ProcessCapabilities::runtime_only(&cap));
-    // The positive control must refuse whenever its expectation is wrong.
-    let gate = |token: &OwnedHandle, registry_read| {
-        verify_lpac_access(raw(token), cap.sid, registry_read, &Observer::fixed_probe()).is_ok()
+    // Each token passes only the scope it actually has.
+    let gate = |token: &OwnedHandle, scope| {
+        verify_lpac_access(raw(token), cap.sid, scope, &Observer::fixed_probe()).is_ok()
+    };
+    let runtime_scope = RegistryScope::RuntimeOnly {
+        winsock_readable: false,
     };
     let gates = [
-        gate(&production_primary, true),
-        gate(&production_primary, false),
-        gate(&runtime_primary, false),
-        gate(&runtime_primary, true),
+        gate(&production_primary, RegistryScope::RegistryRead),
+        gate(&production_primary, runtime_scope),
+        gate(&runtime_primary, runtime_scope),
+        gate(&runtime_primary, RegistryScope::RegistryRead),
     ];
     let keys = [
+        RegistryKey::MachineRoot,
         RegistryKey::WinsockCatalog,
         RegistryKey::UserEnvironment,
         RegistryKey::UserSoftware,
@@ -333,7 +413,7 @@ fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
     eprintln!(
         "OFOX_REGISTRY_ISOLATION_V1 {}",
         serde_json::json!({
-            "keys": ["winsock_catalog", "user_environment", "user_software"],
+            "keys": ["machine_root", "winsock_catalog", "user_environment", "user_software"],
             "production": production_reads,
             "runtimeOnly": runtime_reads,
             "productionVerified": production_verified,
@@ -348,6 +428,9 @@ fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
                 "readableByRuntimeOnly": scan.readable_by_runtime_only,
                 "readableByProduction": scan.readable_by_production,
                 "addedByRegistryRead": scan.added_by_registry_read,
+                "writableByRuntimeOnly": scan.writable_by_runtime_only,
+                "writableByProduction": scan.writable_by_production,
+                "writeAddedByRegistryRead": scan.write_added_by_registry_read,
             },
         })
     );
@@ -358,22 +441,32 @@ fn document_registry_read_opens_the_winsock_catalog_but_not_user_keys() {
     );
     assert!(production_verified, "production set must pass verify_token");
     assert!(!runtime_verified, "runtime-only set must fail verify_token");
-    assert_eq!(
-        production_reads,
-        [true, false, false],
-        "production capability set"
+    assert!(
+        production_reads[0] && production_reads[1],
+        "registryRead must open the HKLM root and the Winsock catalog"
     );
-    assert_eq!(runtime_reads, [false, false, false], "runtime-only control");
+    assert_eq!(
+        runtime_reads,
+        [false, false, false, false],
+        "runtime-only control"
+    );
     assert!(scan.visited >= 100, "HKCU walk too small: {scan:?}");
     assert_eq!(
         scan.check_errors, 0,
         "HKCU keys without a decision: {scan:?}"
     );
+    // Native runs 44221172203..44231498872: 3510 keys; runtime-only reads 4
+    // (its own AppContainer keys), production 1802. Reads are the accepted
+    // risk; registryRead must still add no write right anywhere.
     assert_eq!(
-        scan.added_by_registry_read, 0,
-        "registryRead made HKCU keys readable: {scan:?}"
+        scan.write_added_by_registry_read, 0,
+        "registryRead added an HKCU write right: {scan:?}"
     );
 }
+
+/// KEY_SET_VALUE | KEY_CREATE_SUB_KEY | KEY_CREATE_LINK | DELETE | WRITE_DAC |
+/// WRITE_OWNER: any right that changes a key, its values or its security.
+const REGISTRY_WRITE_BITS: u32 = 0x0002 | 0x0004 | 0x0020 | 0x0001_0000 | 0x0004_0000 | 0x0008_0000;
 
 /// Counts only; no key name, path or value is recorded.
 #[derive(Debug, Default)]
@@ -386,11 +479,14 @@ struct HiveScan {
     readable_by_runtime_only: usize,
     readable_by_production: usize,
     added_by_registry_read: usize,
+    writable_by_runtime_only: usize,
+    writable_by_production: usize,
+    write_added_by_registry_read: usize,
 }
 
-/// Walks the whole current-user hive and compares, key by key, the read
-/// decision for [production token, runtime-only token]. Bounded: exceeding the
-/// key limit is a test failure rather than silently partial evidence.
+/// Walks the whole current-user hive and compares, key by key, the read and
+/// write rights of [production token, runtime-only token]. Bounded: exceeding
+/// the key limit is a test failure rather than silently partial evidence.
 fn scan_user_hive(tokens: [HANDLE; 2]) -> HiveScan {
     use winreg::{enums::HKEY_CURRENT_USER, RegKey};
     const KEY_LIMIT: usize = 300_000;
@@ -421,15 +517,21 @@ fn scan_user_hive(tokens: [HANDLE; 2]) -> HiveScan {
                 access_checked: false,
                 read_granted: None,
             };
-            registry_key_read_bits(handle, token, &mut record)
+            registry_key_access(handle, token, &mut record)
         };
         match (decide(tokens[0]), decide(tokens[1])) {
-            // Any read right registryRead adds counts, bit by bit.
+            // Any right registryRead adds counts, bit by bit.
             (Ok(production), Ok(runtime_only)) => {
-                scan.readable_by_runtime_only += usize::from(runtime_only != 0);
-                scan.readable_by_production += usize::from(production != 0);
-                if production & !runtime_only != 0 {
+                let (read, write) = (REGISTRY_READ_BITS, REGISTRY_WRITE_BITS);
+                scan.readable_by_runtime_only += usize::from(runtime_only & read != 0);
+                scan.readable_by_production += usize::from(production & read != 0);
+                if production & !runtime_only & read != 0 {
                     scan.added_by_registry_read += 1;
+                }
+                scan.writable_by_runtime_only += usize::from(runtime_only & write != 0);
+                scan.writable_by_production += usize::from(production & write != 0);
+                if production & !runtime_only & write != 0 {
+                    scan.write_added_by_registry_read += 1;
                 }
             }
             _ => scan.check_errors += 1,

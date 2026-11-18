@@ -90,7 +90,13 @@ fn case(
                 profile.sid.0,
                 caps.runtime.sid,
                 &entries,
-                entries.len() == 2 || winsock_grant,
+                if entries.len() == 2 {
+                    RegistryScope::RegistryRead
+                } else {
+                    RegistryScope::RuntimeOnly {
+                        winsock_readable: winsock_grant,
+                    }
+                },
                 &observation,
             )?;
             let mut token = HANDLE::default();
