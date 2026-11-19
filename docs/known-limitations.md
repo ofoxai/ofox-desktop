@@ -482,7 +482,10 @@ What the files and previews are:
   checked against.
 - The file workspace previews owned input/generated PPTX by its actual OPC page
   order/count. It renders pages on demand through sandboxed OfficeCLI and a
-  bounded raster worker. At most page 1000 is renderable; a larger real total is
+  bounded raster worker. The on-demand path accepts up to 12 MiB of SVG per
+  page to accommodate embedded images and returns JPEGs up to 2 MiB. The
+  SVG budget for generation previews is 4 MiB per page. At most page 1000
+  is renderable; a larger real total is
   shown with the unrendered range. Persisted batches remain at most 60 JPEGs,
   while selected source page numbers can reach 1000. HTML uses an opaque scripted
   iframe on a token-scoped loopback endpoint, with external dependencies blocked
