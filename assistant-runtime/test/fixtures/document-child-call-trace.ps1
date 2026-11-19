@@ -15,6 +15,17 @@ function Replay([string[]]$Lines, [string[]]$Setup = $typeProof) {
     } catch { return 'inconclusive' }
 }
 function Check($Actual, $Expected) { if ($Actual -cne $Expected) { throw "unexpected fixture result: $Actual (expected $Expected)" } }
+$commands = [IO.Directory]::CreateDirectory((Join-Path ([IO.Path]::GetTempPath()) ('ofox-child-call-' + [Guid]::NewGuid().ToString('N')))).FullName
+$exitCommand = Join-Path $commands 'exit.cmd'
+try {
+    Write-ChildCallExitCommand $commands 123
+    $bytes = [IO.File]::ReadAllBytes($exitCommand)
+    # CDB's $>< flattens a trailing newline into a separator that invalidates q.
+    Check $bytes[-1] ([byte][char]'q')
+} finally {
+    [IO.File]::Delete($exitCommand)
+    [IO.Directory]::Delete($commands)
+}
 $pending = New-ChildCallState $exe
 foreach ($line in ($typeProof + $allow)) { Read-ChildCallLine $pending $line }
 Check (Get-ChildCallProgress $pending) $null

@@ -156,6 +156,12 @@ function New-ChildCallToolStart([ValidateSet('symchk','cdb')][string]$Name, [str
     return $start
 }
 
+function Write-ChildCallExitCommand([string]$Dir, [uint32]$ProcessId) {
+    $command = '.if ((@$tpid == 0n{0}) and (@$t2 == 0) and (@$t3 == 0)) {{ .echo OFOX_CALL EXIT_NONE }} .elsif ((@$tpid == 0n{0}) and (@$t2 == 1) and (@$t3 == 1)) {{ .echo OFOX_CALL EXIT_PAIRED }} .else {{ .echo OFOX_CALL INVALID }}; q' -f $ProcessId
+    # CDB's $>< converts a trailing newline into a semicolon, and q; is rejected.
+    [IO.File]::WriteAllText((Join-Path $Dir 'exit.cmd'),$command,[Text.ASCIIEncoding]::new())
+}
+
 function Invoke-FixedChildCall {
     if (-not $IsWindows -or -not [Environment]::Is64BitProcess -or
         $env:GITHUB_ACTIONS -cne 'true' -or $env:GITHUB_WORKFLOW -cne 'Document Engine Child Call Diagnostic' -or
@@ -216,10 +222,10 @@ function Invoke-FixedChildCall {
     # Count the matched return before printing its outcome. The outcome line
     # is the receipt for this stop; there is no trailing confirmation to lose.
     $ret = '.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@rsp == (@$t0 + 8)) and (@rip == @$t1) and (@$t2 == 1) and (@$t3 == 0)) {{ r @$t3 = @$t3 + 1; .if (@eax == 0) {{ {2} }} .else {{ .printf "OFOX_CALL RETURN_SUCCESS\n" }} }} .else {{ .echo OFOX_CALL INVALID }}; bc 11; gc' -f $processId,$threadId,$readError
-    $end = '.if ((@$tpid == 0n{0}) and (@$t2 == 0) and (@$t3 == 0)) {{ .echo OFOX_CALL EXIT_NONE }} .elsif ((@$tpid == 0n{0}) and (@$t2 == 1) and (@$t3 == 1)) {{ .echo OFOX_CALL EXIT_PAIRED }} .else {{ .echo OFOX_CALL INVALID }}; q' -f $processId
-    foreach ($item in @{ 'init.cmd'=$init; 'entry.cmd'=$entry; 'return.cmd'=$ret; 'exit.cmd'=$end }.GetEnumerator()) {
+    foreach ($item in @{ 'init.cmd'=$init; 'entry.cmd'=$entry; 'return.cmd'=$ret }.GetEnumerator()) {
         [IO.File]::WriteAllLines((Join-Path $dir $item.Key),[string[]]$item.Value,[Text.ASCIIEncoding]::new())
     }
+    Write-ChildCallExitCommand $dir $processId
     foreach ($arg in @('-hd','-sins','-netsyms:no','-noshell','-nosqm','-noinh','-y',("srv*" + $symbols),'-cf',(Join-Path $dir 'init.cmd'),'-p',[string]$processId)) { $start.ArgumentList.Add($arg) }
     $debug = [Diagnostics.Process]::Start($start)
     try {
