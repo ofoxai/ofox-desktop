@@ -25,16 +25,29 @@ $badExit = $false
 try { Read-ChildCallLine $pending 'OFOX_CALL EXIT_NONE' } catch { $badExit = $true }
 Check $badExit $true
 Check $script:failureStage 'return-conflict'
-$script:failureStage = 'exit-marker'
-$toolError = $false
-try { Read-ChildCallLine $pending 'Unable to read command file' } catch { $toolError = $true }
-Check $toolError $true
-Check $script:failureStage 'return-observer-error'
 $incomplete = $false
 try { Complete-ChildCall $pending } catch { $incomplete = $true }
 Check $incomplete $true
 Read-ChildCallLine $pending $leave
 Check (Get-ChildCallProgress $pending) $null
+# The same CDB error can precede or follow the final exit marker. Preserve
+# only that ordering and the fixed error family, never the raw error line.
+foreach ($phase in 'before-exit-marker','after-exit-marker') {
+    foreach ($case in @(
+        @{ reason='command-file'; line='0:000> Unable to read command file C:\private-fixture\breakpoint.cmd' },
+        @{ reason='syntax'; line='Syntax error in expression: private-fixture' },
+        @{ reason='breakpoint'; line='Unable to insert breakpoint 11 at private-fixture' }
+    )) {
+        $state = New-ChildCallState $exe
+        foreach ($line in ($typeProof + $allow + @($errorValue))) { Read-ChildCallLine $state $line }
+        if ($phase -eq 'after-exit-marker') { Read-ChildCallLine $state $leave }
+        $script:failureStage = 'unset'
+        $rejected = $false
+        try { Read-ChildCallLine $state $case.line } catch { $rejected = $true }
+        Check $rejected $true
+        Check $script:failureStage ("return-error/$phase/" + $case.reason)
+    }
+}
 Check (Replay @($armed,$empty)) 'not-reached'
 Check (Replay @($armed,$empty) @()) 'inconclusive'
 Check (Replay @($armed,$empty) @('OFOX_CALL FIELD_BEGIN')) 'inconclusive'

@@ -209,8 +209,15 @@ function childCallFailure(result) {
     return invalid;
   if (!oneFailedChildTest(result)) return invalid;
 
-  const [prefix, before, ...fields] = rows[0].split(" ");
+  const [prefix, nativeStage, ...fields] = rows[0].split(" ");
   if (prefix !== legacy && prefix !== current) return invalid;
+  const observerError =
+    prefix === current
+      ? /^return-error\/(before-exit-marker|after-exit-marker)\/(breakpoint|syntax|command-file)$/.exec(
+          nativeStage,
+        )
+      : null;
+  const before = observerError ? "return-observer-error" : nativeStage;
   const paired = prefix === current ? fields.shift() : "none";
   const removal = fields.pop();
   if (
@@ -255,6 +262,9 @@ function childCallFailure(result) {
     ...(complete
       ? { controllerVerdict: before }
       : { controllerIncompleteStage: before }),
+    ...(observerError && {
+      observerError: { phase: observerError[1], kind: observerError[2] },
+    }),
     cleanup: { jobTerminated, controllerReaped, jobEmpty, scratchRemoved },
     ...(paired !== "none" && { pairedReturn: paired }),
     ...(prefix === current &&

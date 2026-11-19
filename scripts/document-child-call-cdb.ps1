@@ -14,7 +14,10 @@ function Read-ChildCallLine($State, [string]$Line) {
         if ($State.stage -in @('returned','done')) {
             if ($State.result -eq 'not-reached') { $script:failureStage = 'observation' }
             elseif ($_.FullyQualifiedErrorId -cin @('unpaired','invalid','sequence')) { $script:failureStage = 'return-conflict' }
-            else { $script:failureStage = 'return-observer-error' }
+            elseif ($_.FullyQualifiedErrorId -cin @('breakpoint','syntax','command-file')) {
+                $phase = if ($State.stage -eq 'done') { 'after-exit-marker' } else { 'before-exit-marker' }
+                $script:failureStage = 'return-error/' + $phase + '/' + $_.FullyQualifiedErrorId
+            } else { $script:failureStage = 'return-observer-error' }
         }
         throw
     }
@@ -27,10 +30,12 @@ function Read-ChildCallRecord($State, [string]$Line) {
     }
     # .catch prints the CDB error before its fixed fallback marker. Associate
     # that first error with the read already in progress and fail immediately.
-    if ($Line -match '(?:unable|failed|could not|cannot) to (?:insert|set|resolve|read).*breakpoint|breakpoint.*(?:unresolved|could not be set)|syntax error|unable to read command file') {
+    if ($Line -match 'unable to read command file|(?<syntax>syntax error)|(?<breakpoint>(?:unable|failed|could not|cannot) to (?:insert|set|resolve|read).*breakpoint|breakpoint.*(?:unresolved|could not be set))') {
         if ($State.stage -eq 'field') { $script:failureStage = 'symbols' }
         if ($State.stage -eq 'failed') { $script:failureStage = 'last-error-unreadable' }
-        throw 'debugger'
+        if ($Matches.ContainsKey('breakpoint')) { throw 'breakpoint' }
+        if ($Matches.ContainsKey('syntax')) { throw 'syntax' }
+        throw 'command-file'
     }
     if ($State.stage -eq 'setup' -and $Line -ceq 'OFOX_CALL FIELD_BEGIN') { $State.stage = 'field'; return }
     if ($State.stage -eq 'field' -and $Line -ceq 'OFOX_CALL FIELD_READY') { $State.stage = 'arm-ready'; return }

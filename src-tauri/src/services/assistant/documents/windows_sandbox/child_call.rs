@@ -89,6 +89,18 @@ fn check_time(deadline: Instant, cancelled: &AtomicBool) -> Result<(), String> {
     Ok(())
 }
 
+// These stages are valid only after PAIRED and always withdraw its value.
+const PAIRED_FAILURES: &[&str] = &[
+    "return-conflict",
+    "return-observer-error",
+    "return-error/before-exit-marker/breakpoint",
+    "return-error/before-exit-marker/syntax",
+    "return-error/before-exit-marker/command-file",
+    "return-error/after-exit-marker/breakpoint",
+    "return-error/after-exit-marker/syntax",
+    "return-error/after-exit-marker/command-file",
+];
+
 #[derive(Default)]
 struct ControllerReplies {
     armed: bool,
@@ -112,8 +124,6 @@ impl ControllerReplies {
                 "observation",
                 "request",
                 "return-pair",
-                "return-conflict",
-                "return-observer-error",
                 "last-error",
                 "last-error-zero",
                 "last-error-unreadable",
@@ -123,8 +133,12 @@ impl ControllerReplies {
                 "exit-status",
                 "exit-stderr",
             ];
-            let stage = stages.into_iter().find(|v| *v == stage).ok_or(())?;
-            if matches!(stage, "return-conflict" | "return-observer-error") {
+            let stage = stages
+                .into_iter()
+                .chain(PAIRED_FAILURES.iter().copied())
+                .find(|v| *v == stage)
+                .ok_or(())?;
+            if PAIRED_FAILURES.contains(&stage) {
                 self.paired.take().ok_or(())?;
             } else if self.paired.is_some() && !stage.starts_with("exit") {
                 return Err(());
@@ -167,10 +181,14 @@ fn fixed_child_paired_return_requires_an_armed_consistent_protocol() {
     r.accept("INCOMPLETE exit-marker").unwrap();
     assert_eq!(r.terminal, Some(Err("exit-marker")));
     assert!(r.accept("access-denied").is_err());
-    for stage in ["return-conflict", "return-observer-error"] {
+    for &stage in PAIRED_FAILURES {
         let mut invalidated = ControllerReplies::default();
+        assert!(invalidated.accept(&format!("INCOMPLETE {stage}")).is_err());
         invalidated.accept("ARMED").unwrap();
         invalidated.accept("PAIRED access-denied").unwrap();
+        assert!(invalidated
+            .accept("INCOMPLETE return-error/after-exit-marker/private")
+            .is_err());
         invalidated.accept(&format!("INCOMPLETE {stage}")).unwrap();
         assert_eq!(invalidated.paired, None);
         assert_eq!(invalidated.terminal, Some(Err(stage)));
