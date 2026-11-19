@@ -106,8 +106,44 @@ test("only a closed failure stage and verdict survive the native artifact bounda
   const marker = "OFOX_CHILD_CALL_V1 ";
   const cleanup = "OFOX_CHILD_CALL_CLEANUP_V1 ";
   const failure = "OFOX_CHILD_CALL_FAILURE_V2 ";
+  const scratch = "OFOX_CHILD_CALL_SCRATCH_V1 ";
   for (const [rows, exit, verdict, incompleteStage, detail] of [
     [[marker + "access-denied"], 0, "access-denied", undefined],
+    [
+      [
+        failure +
+          "child-process-blocked child-process-blocked true true true access-denied",
+        scratch + "0 3 0 symbol-cache open-delete access-denied",
+      ],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerVerdict: "child-process-blocked",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: false,
+        },
+        pairedReturn: "child-process-blocked",
+        scratchRemovalError: "access-denied",
+        scratchResidue: {
+          examined: { commandFiles: 0, symbolEntries: 3, otherEntries: 0 },
+          obstruction: {
+            location: "symbol-cache",
+            stage: "open-delete",
+            reason: "access-denied",
+          },
+        },
+      },
+    ],
+    [
+      [marker + "access-denied", scratch + "0 0 0 none none none"],
+      0,
+      "inconclusive",
+      "native-test",
+    ],
     [
       ["OFOX_CHILD_CALL_CONTROLLER_V1 access-denied"],
       101,
@@ -534,6 +570,47 @@ test("cleanup details require the complete output of exactly one failed native t
       verdict: "inconclusive",
       incompleteStage: "cleanup",
     });
+  }
+});
+
+test("scratch residue is bounded and requires an isolated removal failure", async () => {
+  const fixture = {
+    exitCode: 101,
+    outputLimited: false,
+    output:
+      "running 1 test\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;\n",
+  };
+  const report = (failure, residues) =>
+    runChildCallDiagnostic(async () => ({
+      ...fixture,
+      stderr: [
+        "OFOX_CHILD_CALL_FAILURE_V2 " + failure,
+        ...residues.map((row) => "OFOX_CHILD_CALL_SCRATCH_V1 " + row),
+      ].join("\n"),
+    }));
+  const isolated =
+    "child-process-blocked child-process-blocked true true true access-denied";
+  assert.deepEqual(
+    (await report(isolated, ["1 3 0 none none none"])).scratchResidue,
+    { examined: { commandFiles: 1, symbolEntries: 3, otherEntries: 0 } },
+  );
+  for (const [failure, residues] of [
+    [isolated, ["5 0 0 none none none"]],
+    [isolated, ["0 32 1 symbol-cache limit none"]],
+    [isolated, ["0 1 0 symbol-cache open-delete private-filename"]],
+    [isolated, ["0 0 0 none open-delete access-denied"]],
+    [isolated, ["0 0 0 root reparse-point access-denied"]],
+    [isolated, ["0 0 0 none none none", "0 0 0 none none none"]],
+    [
+      "child-process-blocked child-process-blocked true false true access-denied",
+      ["0 0 0 none none none"],
+    ],
+    ["exit none true true true removed", ["0 0 0 none none none"]],
+  ]) {
+    const value = await report(failure, residues);
+    assert.equal(value.verdict, "inconclusive");
+    assert.equal(value.scratchResidue, undefined);
+    assert.doesNotMatch(JSON.stringify(value), /private-filename/);
   }
 });
 

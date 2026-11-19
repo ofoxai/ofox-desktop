@@ -186,13 +186,48 @@ function oneFailedChildTest(result) {
   );
 }
 
+const scratchReceipt = "OFOX_CHILD_CALL_SCRATCH_V1";
+
+function scratchResidue(rows) {
+  if (rows.length !== 1) return null;
+  const evidence =
+    /^OFOX_CHILD_CALL_SCRATCH_V1 (\d{1,2}) (\d{1,2}) (\d{1,2}) (none|root|command-file|symbol-cache|other) (none|inspect|list-directory|open-delete|reparse-point|limit|identity) ([a-z-]+)$/.exec(
+      rows[0],
+    );
+  if (!evidence) return null;
+  const [, commands, symbols, others, location, stage, reason] = evidence;
+  const [commandFiles, symbolEntries, otherEntries] = [
+    commands,
+    symbols,
+    others,
+  ].map(Number);
+  if (commandFiles > 4 || commandFiles + symbolEntries + otherEntries > 32)
+    return null;
+  const checked = { examined: { commandFiles, symbolEntries, otherEntries } };
+  if (stage === "none")
+    return location === "none" && reason === "none" ? checked : null;
+  if (location === "none") return null;
+  const accessProbe = ["inspect", "list-directory", "open-delete"].includes(
+    stage,
+  );
+  if (accessProbe ? !scratchRemovalErrors.has(reason) : reason !== "none")
+    return null;
+  return {
+    ...checked,
+    obstruction: { location, stage, ...(accessProbe && { reason }) },
+  };
+}
+
 function childCallFailure(result) {
   const legacy = "OFOX_CHILD_CALL_CLEANUP_V1";
   const current = "OFOX_CHILD_CALL_FAILURE_V2";
-  const rows = (result.stderr ?? "")
-    .split(/\r?\n/)
-    .filter((row) => row.startsWith(legacy) || row.startsWith(current));
-  if (!rows.length) return null;
+  const lines = (result.stderr ?? "").split(/\r?\n/);
+  const rows = lines.filter(
+    (row) => row.startsWith(legacy) || row.startsWith(current),
+  );
+  const scratch = lines.filter((row) => row.startsWith(scratchReceipt));
+  if (!rows.length)
+    return scratch.length ? { incompleteStage: "native-test" } : null;
   const invalid = {
     incompleteStage: rows.every((row) => row.startsWith(legacy))
       ? "cleanup"
@@ -257,6 +292,14 @@ function childCallFailure(result) {
     !before.startsWith("exit-")
   )
     return invalid;
+  const residue =
+    prefix === current &&
+    jobTerminated &&
+    controllerReaped &&
+    jobEmpty &&
+    !scratchRemoved
+      ? scratchResidue(scratch)
+      : null;
   return {
     incompleteStage: clean ? before : "cleanup",
     ...(complete
@@ -269,6 +312,7 @@ function childCallFailure(result) {
     ...(paired !== "none" && { pairedReturn: paired }),
     ...(prefix === current &&
       !scratchRemoved && { scratchRemovalError: removal }),
+    ...(residue && { scratchResidue: residue }),
   };
 }
 

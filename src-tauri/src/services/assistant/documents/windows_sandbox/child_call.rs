@@ -3,11 +3,17 @@
 use super::*;
 use std::{
     io::{BufRead, BufReader},
+    os::windows::fs::{MetadataExt, OpenOptionsExt},
     process::{Command, Stdio},
     sync::mpsc::{self, RecvTimeoutError},
     thread,
 };
+use windows::Win32::Storage::FileSystem::{
+    FileAttributeTagInfo, GetFileInformationByHandleEx, DELETE, FILE_ATTRIBUTE_TAG_INFO,
+    FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_TRAVERSE,
+};
 use windows::Win32::System::Pipes::PeekNamedPipe;
+use windows::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 
 const BEGIN: &str = "OFOX_CHILD_BEGIN\n";
 pub(super) const COMPLETE: &str = "OFOX_CHILD_BEGIN\nOFOX_CHILD_END\n";
@@ -205,40 +211,406 @@ fn fixed_child_paired_return_requires_an_armed_consistent_protocol() {
     }
 }
 
-fn remove_controller_scratch(scratch: tempfile::TempDir) -> &'static str {
-    // TempDir::close wraps the native error with its path. Perform its one
-    // removal operation directly so only the native classification is kept.
-    match fs::remove_dir_all(scratch.keep()) {
-        Ok(()) => "removed",
-        Err(error) => match error.raw_os_error() {
-            Some(5) => "access-denied",
-            Some(32) => "sharing-violation",
-            Some(33) => "lock-violation",
-            Some(145) => "directory-not-empty",
-            Some(2 | 3) => "not-found",
-            _ => "other",
-        },
+fn scratch_error(error: std::io::Error) -> &'static str {
+    match error.raw_os_error() {
+        Some(5) => "access-denied",
+        Some(32) => "sharing-violation",
+        Some(33) => "lock-violation",
+        Some(145) => "directory-not-empty",
+        Some(2 | 3) => "not-found",
+        _ => "other",
     }
+}
+
+fn remove_controller_scratch(scratch: &Path, recover: Option<ScratchIdentity>) -> &'static str {
+    // TempDir::close wraps the native error with its path. Keep only a closed
+    // classification, and preserve the original removal on all other paths.
+    match fs::remove_dir_all(scratch) {
+        Ok(()) => "removed",
+        Err(error) => recover_controller_scratch(scratch, recover, error),
+    }
+}
+
+fn recover_controller_scratch(
+    scratch: &Path,
+    recover: Option<ScratchIdentity>,
+    error: std::io::Error,
+) -> &'static str {
+    if let Some(_ancestors) = recover
+        .filter(|_| error.raw_os_error() == Some(5))
+        .and_then(|identity| unlink_controller_profile_junction(scratch, identity))
+    {
+        return match fs::remove_dir_all(scratch) {
+            Ok(()) => "removed",
+            Err(error) => scratch_error(error),
+        };
+    }
+    scratch_error(error)
+}
+
+const SCRATCH_ENTRY_LIMIT: usize = 32;
+const SCRATCH_DEPTH_LIMIT: usize = 4;
+type ScratchIdentity = (u32, u32, u32);
+
+#[derive(Default)]
+struct ScratchResidue {
+    command_files: usize,
+    symbol_entries: usize,
+    other_entries: usize,
+}
+
+struct ScratchObstruction {
+    location: &'static str,
+    stage: &'static str,
+    reason: &'static str,
+}
+
+impl ScratchObstruction {
+    fn new(location: &'static str, stage: &'static str, reason: &'static str) -> Self {
+        Self {
+            location,
+            stage,
+            reason,
+        }
+    }
+}
+
+fn open_scratch_entry(path: &Path, access: u32, share: u32) -> std::io::Result<File> {
+    fs::OpenOptions::new()
+        .access_mode(access)
+        .share_mode(share)
+        .custom_flags((FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS).0)
+        .open(path)
+}
+
+fn scratch_handle_info(file: &File) -> Option<(ScratchIdentity, u32)> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+    Some((
+        (
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ),
+        info.dwFileAttributes,
+    ))
+}
+
+const SCRATCH_SHARED: u32 = FILE_SHARE_READ.0 | FILE_SHARE_WRITE.0 | FILE_SHARE_DELETE.0;
+
+fn pin_scratch_directory(path: &Path) -> Option<(File, ScratchIdentity)> {
+    // Attribute-only opens are exempt from these Windows sharing checks.
+    let file = open_scratch_entry(
+        path,
+        (FILE_TRAVERSE | FILE_READ_ATTRIBUTES).0,
+        FILE_SHARE_READ.0,
+    )
+    .ok()?;
+    let (identity, attributes) = scratch_handle_info(&file)?;
+    (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT).0
+        == FILE_ATTRIBUTE_DIRECTORY.0)
+        .then_some((file, identity))
+}
+
+fn unlink_controller_profile_junction(
+    scratch: &Path,
+    expected: ScratchIdentity,
+) -> Option<Vec<File>> {
+    let ancestors = pin_ancestors(scratch.parent()?).ok()?;
+    let (root, identity) = pin_scratch_directory(scratch)?;
+    if identity != expected {
+        return None;
+    }
+    let mut pins = vec![root];
+    // The signed SymChk's WinINet profile contains this exact junction. Its
+    // deny ACE prevents the directory-enumeration open used by remove_dir_all,
+    // but allows opening the junction itself for DELETE.
+    let mut directory = scratch.to_path_buf();
+    for component in ["AppData", "Local", "Microsoft", "Windows", "INetCache"] {
+        directory.push(component);
+        pins.push(pin_scratch_directory(&directory)?.0);
+    }
+    let entry = pin_profile_junction(&directory.join("Content.IE5"))?;
+    let handle = HANDLE(entry.as_raw_handle());
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    // The no-follow handle binds this operation to the link itself. Its
+    // destination was never opened. Keep every directory pinned through close.
+    unsafe {
+        SetFileInformationByHandle(
+            handle,
+            FileDispositionInfo,
+            (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+            size_of::<FILE_DISPOSITION_INFO>() as u32,
+        )
+    }
+    .ok()?;
+    drop(entry);
+    drop(pins);
+    // The caller still needs the outer path to be anchored during the retry.
+    Some(ancestors)
+}
+
+fn pin_profile_junction(path: &Path) -> Option<File> {
+    let entry = open_scratch_entry(
+        path,
+        (DELETE | FILE_READ_ATTRIBUTES).0,
+        (FILE_SHARE_READ | FILE_SHARE_WRITE).0,
+    )
+    .ok()?;
+    let handle = HANDLE(entry.as_raw_handle());
+    let mut tag = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            (&mut tag as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    }
+    .ok()?;
+    let junction_attributes = (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT).0;
+    (tag.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT
+        && tag.FileAttributes & junction_attributes == junction_attributes)
+        .then_some(entry)
+}
+
+fn check_scratch_delete_access(
+    path: &Path,
+    location: &'static str,
+) -> Result<(), ScratchObstruction> {
+    // Opening for DELETE never requests deletion or changes permissions. Close
+    // before any listing so these probe handles do not cause sharing failures.
+    open_scratch_entry(path, DELETE.0, SCRATCH_SHARED)
+        .map(drop)
+        .map_err(|error| ScratchObstruction::new(location, "open-delete", scratch_error(error)))
+}
+
+fn inspect_scratch_directory(
+    path: &Path,
+    location: &'static str,
+    depth: usize,
+    expected: Option<ScratchIdentity>,
+    residue: &mut ScratchResidue,
+) -> Result<(), ScratchObstruction> {
+    if depth > SCRATCH_DEPTH_LIMIT {
+        return Err(ScratchObstruction::new(location, "limit", "none"));
+    }
+    // Open without following reparses and deny replacement while read_dir
+    // enumerates this path. The callers keep every ancestor alive.
+    let pinned =
+        open_scratch_entry(path, FILE_LIST_DIRECTORY.0, FILE_SHARE_READ.0).map_err(|error| {
+            ScratchObstruction::new(location, "list-directory", scratch_error(error))
+        })?;
+    let (identity, attributes) = scratch_handle_info(&pinned)
+        .ok_or_else(|| ScratchObstruction::new(location, "inspect", "other"))?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err(ScratchObstruction::new(location, "reparse-point", "none"));
+    }
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+        || expected.is_some_and(|expected| expected != identity)
+    {
+        return Err(ScratchObstruction::new(location, "identity", "none"));
+    }
+    let list_error =
+        |error| ScratchObstruction::new(location, "list-directory", scratch_error(error));
+    for entry in fs::read_dir(path).map_err(list_error)? {
+        let entry = entry.map_err(list_error)?;
+        if residue.command_files + residue.symbol_entries + residue.other_entries
+            >= SCRATCH_ENTRY_LIMIT
+        {
+            return Err(ScratchObstruction::new(location, "limit", "none"));
+        }
+        let name = entry.file_name();
+        let child_location = if location == "symbol-cache" || (depth == 0 && name == "symbols") {
+            residue.symbol_entries += 1;
+            "symbol-cache"
+        } else if depth == 0
+            && ["init.cmd", "entry.cmd", "return.cmd", "exit.cmd"]
+                .iter()
+                .any(|fixed| name == *fixed)
+        {
+            residue.command_files += 1;
+            "command-file"
+        } else {
+            residue.other_entries += 1;
+            "other"
+        };
+        let attributes = entry
+            .metadata()
+            .map_err(|error| {
+                ScratchObstruction::new(child_location, "inspect", scratch_error(error))
+            })?
+            .file_attributes();
+        if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            return Err(ScratchObstruction::new(
+                child_location,
+                "reparse-point",
+                "none",
+            ));
+        }
+        let entry_path = entry.path();
+        check_scratch_delete_access(&entry_path, child_location)?;
+        if attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+            inspect_scratch_directory(&entry_path, child_location, depth + 1, None, residue)?;
+        }
+    }
+    drop(pinned);
+    Ok(())
+}
+
+fn observe_scratch_residue(
+    path: &Path,
+    expected: Option<ScratchIdentity>,
+    residue: &mut ScratchResidue,
+) -> Result<(), ScratchObstruction> {
+    let identity_failure = || ScratchObstruction::new("root", "identity", "none");
+    let expected = expected.ok_or_else(identity_failure)?;
+    let parent = path.parent().ok_or_else(identity_failure)?;
+    let _ancestors = pin_ancestors(parent).map_err(|_| identity_failure())?;
+    // The initial read-only handle and the listing must identify the same
+    // directory we created. A reparse or replaced root stops inspection.
+    let file = open_scratch_entry(path, FILE_READ_ATTRIBUTES.0, SCRATCH_SHARED)
+        .map_err(|error| ScratchObstruction::new("root", "inspect", scratch_error(error)))?;
+    let (identity, attributes) = scratch_handle_info(&file)
+        .ok_or_else(|| ScratchObstruction::new("root", "inspect", "other"))?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err(ScratchObstruction::new("root", "reparse-point", "none"));
+    }
+    if identity != expected || attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        return Err(identity_failure());
+    }
+    drop(file);
+    check_scratch_delete_access(path, "root")?;
+    inspect_scratch_directory(path, "root", 0, Some(expected), residue)
+}
+
+fn scratch_residue_receipt(path: &Path, expected: Option<ScratchIdentity>) -> String {
+    // A recursive removal may have partially succeeded. The surviving tree
+    // can explain where to look next, but cannot identify the original failure.
+    let mut residue = ScratchResidue::default();
+    let obstruction = observe_scratch_residue(path, expected, &mut residue)
+        .err()
+        .unwrap_or_else(|| ScratchObstruction::new("none", "none", "none"));
+    format!(
+        "OFOX_CHILD_CALL_SCRATCH_V1 {} {} {} {} {} {}",
+        residue.command_files,
+        residue.symbol_entries,
+        residue.other_entries,
+        obstruction.location,
+        obstruction.stage,
+        obstruction.reason
+    )
 }
 
 #[test]
 fn fixed_child_scratch_removal_classifies_an_exclusive_file_handle() {
-    use std::os::windows::fs::OpenOptionsExt;
     let parent = tempfile::tempdir().unwrap();
     let scratch = tempfile::tempdir_in(parent.path()).unwrap();
-    assert_eq!(remove_controller_scratch(scratch), "removed");
+    assert_eq!(remove_controller_scratch(&scratch.keep(), None), "removed");
     let scratch = tempfile::tempdir_in(parent.path()).unwrap();
-    let path = scratch.path().join("fixture");
+    let symbols = scratch.path().join("symbols");
+    fs::create_dir(&symbols).unwrap();
+    let path = symbols.join("fixture");
+    let identity = open_scratch_entry(scratch.path(), FILE_READ_ATTRIBUTES.0, SCRATCH_SHARED)
+        .ok()
+        .and_then(|file| scratch_handle_info(&file))
+        .map(|(identity, _)| identity);
     let held = fs::OpenOptions::new()
         .create_new(true)
         .write(true)
         .share_mode(0)
         .open(&path)
         .unwrap();
-    let reason = remove_controller_scratch(scratch);
+    let scratch = scratch.keep();
+    let reason = remove_controller_scratch(&scratch, None);
+    let evidence = scratch_residue_receipt(&scratch, identity);
     drop(held);
     parent.close().unwrap();
     assert_eq!(reason, "sharing-violation");
+    assert_eq!(
+        evidence,
+        "OFOX_CHILD_CALL_SCRATCH_V1 0 2 0 symbol-cache open-delete sharing-violation"
+    );
+}
+
+#[test]
+fn fixed_child_scratch_pins_block_root_and_nested_parent_renames() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().join("scratch");
+    let nested = root.join("profile");
+    fs::create_dir_all(&nested).unwrap();
+    let attempts = [
+        (&root, fixture.path().join("moved-scratch")),
+        (&nested, root.join("moved-profile")),
+    ]
+    .map(|(directory, renamed)| {
+        let (pinned, _) = pin_scratch_directory(directory).unwrap();
+        let attempt = fs::rename(directory, &renamed);
+        drop(pinned);
+        if attempt.is_ok() {
+            fs::rename(&renamed, directory).unwrap();
+        }
+        attempt.err().and_then(|error| error.raw_os_error())
+    });
+    assert_eq!(attempts, [Some(32), Some(32)]);
+}
+
+#[test]
+fn fixed_child_scratch_unlinks_the_profile_junction_without_touching_its_target() {
+    let parent = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir_in(parent.path()).unwrap();
+    let outside = parent.path().join("target");
+    fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("sentinel");
+    fs::write(&sentinel, b"outside scratch").unwrap();
+    let junction = scratch
+        .path()
+        .join(r"AppData\Local\Microsoft\Windows\INetCache\Content.IE5");
+    let (_, original) = pin_scratch_directory(scratch.path()).unwrap();
+    let (_, replacement) = pin_scratch_directory(&outside).unwrap();
+    let attempt = |identity, win32| {
+        recover_controller_scratch(
+            scratch.path(),
+            identity,
+            std::io::Error::from_raw_os_error(win32),
+        )
+    };
+    fs::create_dir_all(&junction).unwrap();
+    let ordinary = junction.join("sentinel");
+    fs::write(&ordinary, b"ordinary directory").unwrap();
+    assert_eq!(attempt(Some(original), 5), "access-denied");
+    assert_eq!(fs::read(ordinary).unwrap(), b"ordinary directory");
+    fs::remove_file(junction.join("sentinel")).unwrap();
+    fs::remove_dir(&junction).unwrap();
+    let result = Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .current_dir(parent.path())
+        .arg(junction.strip_prefix(parent.path()).unwrap())
+        .arg("target")
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    assert_eq!(attempt(Some(original), 32), "sharing-violation");
+    assert_eq!(attempt(None, 5), "access-denied");
+    assert_eq!(attempt(Some(replacement), 5), "access-denied");
+    assert!(fs::symlink_metadata(&junction).is_ok());
+    let pinned = pin_profile_junction(&junction).unwrap();
+    let renamed = junction.with_file_name("moved-junction");
+    let rename = fs::rename(&junction, &renamed);
+    drop(pinned);
+    if rename.is_ok() {
+        fs::rename(&renamed, &junction).unwrap();
+    }
+    assert_eq!(
+        rename.err().and_then(|error| error.raw_os_error()),
+        Some(32)
+    );
+    assert_eq!(attempt(Some(original), 5), "removed");
+    assert_eq!(
+        fs::symlink_metadata(scratch.path()).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert_eq!(fs::read(&sentinel).unwrap(), b"outside scratch");
 }
 
 #[derive(Clone, Copy)]
@@ -403,6 +775,11 @@ pub(super) fn observe(
     let pwsh = PathBuf::from(std::env::var_os("ProgramFiles").ok_or(UNAVAILABLE)?)
         .join("PowerShell/7/pwsh.exe");
     let scratch = io(tempfile::tempdir())?;
+    let scratch_identity =
+        open_scratch_entry(scratch.path(), FILE_READ_ATTRIBUTES.0, SCRATCH_SHARED)
+            .ok()
+            .and_then(|file| scratch_handle_info(&file))
+            .map(|(identity, _)| identity);
     let mut child = io(Command::new(pwsh)
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
         .arg(script)
@@ -484,17 +861,27 @@ pub(super) fn observe(
     let reaped = io(child.wait());
     let empty = wait_for_empty_job(&job, |_| {});
     drop(job);
+    let scratch = scratch.keep();
+    let recover =
+        scratch_identity.filter(|_| terminated.is_ok() && reaped.is_ok() && empty.is_ok());
     let cleanup = ControllerCleanup {
         job_terminated: terminated.is_ok(),
         controller_reaped: reaped.is_ok(),
         job_empty: empty.is_ok(),
-        removal: remove_controller_scratch(scratch),
+        removal: remove_controller_scratch(&scratch, recover),
     };
     let paired = replies
         .paired
         .filter(|_| result.is_ok() || failure_stage.starts_with("exit"));
     if let Some(receipt) = cleanup.failure_receipt(&result, failure_stage, paired) {
         eprintln!("{receipt}");
+        if cleanup.job_terminated
+            && cleanup.controller_reaped
+            && cleanup.job_empty
+            && cleanup.removal != "removed"
+        {
+            eprintln!("{}", scratch_residue_receipt(&scratch, scratch_identity));
+        }
         return Err(UNAVAILABLE.into());
     }
     if let Ok(value) = &result {
