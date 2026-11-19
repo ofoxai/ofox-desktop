@@ -45,6 +45,65 @@ afterEach(async () => {
 });
 
 describe("native acceptance safety and evidence", () => {
+  it("preserves every manifest-listed hidden runtime file in the client acceptance upload", async () => {
+    const workflow = await readFile(
+      ".github/workflows/windows-probe.yml",
+      "utf8",
+    );
+    const upload =
+      workflow
+        .split(/^      - name: /m)
+        .find((step) =>
+          /^Upload document engine client acceptance package\r?\n/.test(step),
+        ) ?? "";
+    expect(upload).not.toBe("");
+    expect(upload).toContain("uses: actions/upload-artifact@v7");
+    expect(upload).toMatch(
+      /^          path: artifacts\/document-engine-acceptance\/\s*$/m,
+    );
+
+    const packager = await readFile(
+      "scripts/package-document-acceptance.ps1",
+      "utf8",
+    );
+    expect(packager).toMatch(
+      /Get-ChildItem[^\r\n]*-Recurse[^\r\n]*-File[^\r\n]*-Force/,
+    );
+    expect(packager).toContain("'acceptance-manifest.json'");
+    // Representative entries from the generated acceptance manifest. The
+    // package copies resources into runtime/, preserving its runtime/ subtree.
+    // A top-level manifest can survive upload while these required files do not.
+    const manifest = {
+      schemaVersion: 1,
+      commit: sourceSha,
+      files: [
+        "verify_document_engine.exe",
+        "runtime/manifest.json",
+        "runtime/runtime/node_modules/.package-lock.json",
+        "runtime/runtime/node_modules/@earendil-works/pi-ai/dist/providers/data/.manifest.json",
+      ].map((path) => ({ path, sha256: "b".repeat(64) })),
+    };
+    // upload-artifact excludes dot files and dot directories by default, even
+    // when the directory supplied as `path` contains them and -Force listed them.
+    const includeHidden = /^          include-hidden-files: true\s*$/m.test(
+      upload,
+    );
+    const uploaded = new Set(
+      manifest.files
+        .filter(
+          ({ path }) =>
+            includeHidden ||
+            !path.split("/").some((part) => part.startsWith(".")),
+        )
+        .map(({ path }) => path),
+    );
+    expect(
+      manifest.files
+        .filter(({ path }) => !uploaded.has(path))
+        .map(({ path }) => path),
+      "manifest-listed runtime files must survive the production artifact upload",
+    ).toEqual([]);
+  });
   it("blocks every paid client before spawning when a service-enforced cumulative cap cannot be verified", async () => {
     let spawned = 0;
     const report = await runAcceptance(

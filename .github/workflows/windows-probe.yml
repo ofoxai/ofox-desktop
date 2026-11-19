@@ -217,6 +217,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: document-engine-acceptance-${{ github.sha }}
+          # The manifest covers hidden dependency metadata as well.
+          include-hidden-files: true
           path: artifacts/document-engine-acceptance/
           retention-days: 30
           if-no-files-found: error
