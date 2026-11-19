@@ -320,7 +320,10 @@ test("real Pi SDK streams and reloads native history without persisting credenti
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "https://api.ofox.io/v1/chat/completions");
   assert.equal(requests[0].headers.get("authorization"), `Bearer ${token}`);
-  assert.equal(requests[0].body.tools, undefined);
+  assert.deepEqual(
+    requests[0].body.tools.map((tool) => tool.function.name),
+    ["updatePlan"],
+  );
   assert.match(requests[0].body.messages[0].content, /Ofox Assistant/);
   assert.match(
     events
@@ -1484,7 +1487,148 @@ test("a portable native history can continue, edit and regenerate", async (t) =>
   await runtime.close();
 });
 
-test("legacy configuration parameters cannot add tools or replace the general role", async (t) => {
+test("ordinary chat reports a real task plan through Pi without local operations", async (t) => {
+  for (const apex of ["ofox.ai", "ofox.io"]) {
+    const params = { ...(await sandbox(t)), apex };
+    const events = [];
+    const requests = [];
+    const steps = [
+      { step: "Compare the evidence", status: "in_progress" },
+      { step: "Write the findings", status: "pending" },
+    ];
+    const runtime = new AssistantRuntime({
+      emit: (event) => events.push(event),
+      hostCall: async () => assert.fail("Planning has no host authority"),
+      fetch: async (_url, init) => {
+        requests.push(JSON.parse(init.body));
+        return requests.length === 1
+          ? toolStream("updatePlan", { steps })
+          : stream("The findings are ready.");
+      },
+    });
+    t.after(() => runtime.close());
+    assert.equal((await runtime.run(params)).status, "completed");
+    assert.deepEqual(
+      requests[0].tools.map((tool) => tool.function.name),
+      ["updatePlan"],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.type === "task_plan").map((e) => e.data),
+      [{ steps }],
+    );
+    assert.match(requests[0].messages[0].content, /multi-stage/);
+    assert.doesNotMatch(
+      requests[0].messages[0].content,
+      /Local configuration is enabled/,
+    );
+  }
+});
+
+test("Pi preserves typed plan states when credentials collide with their spellings", async (t) => {
+  const params = await sandbox(t);
+  params.knownSecrets = [
+    "completed",
+    "in_progress",
+    "pending",
+    "abcdefgh",
+    "xy7",
+    "4187",
+  ];
+  const events = [];
+  const requests = [];
+  const steps = [
+    { step: "completed evidence xy7", status: "completed" },
+    { step: "in_progress analysis 4187", status: "in_progress" },
+    { step: "abcdefgh".repeat(5), status: "pending" },
+  ];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    hostCall: async () => assert.fail("Planning cannot use the host"),
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? toolStream("updatePlan", { steps })
+        : stream("Done.");
+    },
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(params)).status, "completed");
+  assert.deepEqual(
+    requests[0].tools[0].function.parameters.properties.steps.items.properties.status.anyOf.map(
+      (item) => item.const,
+    ),
+    ["pending", "in_progress", "completed"],
+  );
+  const shown = events.find((event) => event.type === "task_plan")?.data;
+  assert.ok(shown, "Pi must execute the valid plan, not a redacted enum");
+  const expected = ["completed", "in_progress", "pending"];
+  const check = (value) => {
+    assert.deepEqual(
+      value.steps.map((step) => step.status),
+      expected,
+    );
+    for (const step of value.steps) {
+      assert.ok([...step.step].length <= 40);
+      assert.doesNotMatch(step.step, /completed|in_progress|abcdefgh|xy7|4187/);
+    }
+  };
+  check(shown);
+  check(
+    JSON.parse(
+      requests[1].messages.find((message) => message.role === "tool").content,
+    ),
+  );
+  const native = (await readFile(params.sessionFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  const result = native.find(
+    (entry) =>
+      entry.message?.role === "toolResult" &&
+      entry.message.toolName === "updatePlan",
+  );
+  check(JSON.parse(result.message.content[0].text));
+  const call = native
+    .flatMap((entry) =>
+      entry.message?.role === "assistant" ? entry.message.content : [],
+    )
+    .find((part) => part.type === "toolCall" && part.name === "updatePlan");
+  check(call.arguments);
+});
+
+test("redaction cannot admit an over-limit raw plan by shortening its label", async (t) => {
+  const secret = "a-long-label-secret-12345";
+  const params = { ...(await sandbox(t)), knownSecrets: [secret] };
+  const events = [];
+  const requests = [];
+  const runtime = new AssistantRuntime({
+    emit: (event) => events.push(event),
+    fetch: async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return requests.length === 1
+        ? toolStream("updatePlan", {
+            steps: [{ step: secret + "x".repeat(20), status: "pending" }],
+          })
+        : stream("Done.");
+    },
+  });
+  t.after(() => runtime.close());
+  assert.equal((await runtime.run(params)).status, "completed");
+  assert.equal(
+    events.some((event) => event.type === "task_plan"),
+    false,
+  );
+  assert.match(
+    requests[1].messages.find((message) => message.role === "tool").content,
+    /Validation failed/,
+  );
+  assert.doesNotMatch(
+    await readFile(params.sessionFile, "utf8"),
+    new RegExp(secret),
+  );
+});
+
+test("legacy configuration parameters cannot add local tools or replace the general role", async (t) => {
   const params = {
     ...(await sandbox(t)),
     kind: "configuration",
@@ -1502,7 +1646,10 @@ test("legacy configuration parameters cannot add tools or replace the general ro
   t.after(() => runtime.close());
   const result = await runtime.run(params);
   assert.equal(result.status, "completed");
-  assert.equal(body.tools, undefined);
+  assert.deepEqual(
+    body.tools.map((tool) => tool.function.name),
+    ["updatePlan"],
+  );
   assert.match(body.messages[0].content, /Ofox Assistant, a general/);
   assert.doesNotMatch(body.messages[0].content, /configuration assistant/);
   assert.doesNotMatch(JSON.stringify(body.messages), /Saved memory/);
@@ -1512,6 +1659,8 @@ test("the system prompt describes only the capabilities enabled for the run", as
   const prompts = [];
   for (const Runtime of [AssistantRuntime, ProbeRuntime]) {
     const params = await sandbox(t);
+    if (Runtime === AssistantRuntime)
+      params.model = { ...params.model, tools: false };
     const runtime = new Runtime({
       fetch: async (_url, options) => {
         // Pi appends a <cwd> section after the preamble this runtime owns.
@@ -1702,7 +1851,7 @@ test("read_attachment and its guidance exist only when the conversation has atta
   for (const body of seen) {
     assert.deepEqual(
       body.tools.map((tool) => tool.function.name),
-      ["read_attachment"],
+      ["read_attachment", "updatePlan"],
     );
     assert.match(body.messages[0].content, /read_attachment reads UTF-8 text/);
     assert.doesNotMatch(lastUserText(body), /kept for later/);
@@ -2470,7 +2619,7 @@ async function thinkingRun(t, name, input, extra = {}) {
   };
 }
 
-test("a run without a thinking level sends exactly the request it sent before levels existed", async (t) => {
+test("a tool-free run without a thinking level keeps the request from before levels existed", async (t) => {
   const pinned = JSON.parse(
     await readFile(
       new URL("./fixtures/default-requests.json", import.meta.url),
@@ -2478,7 +2627,8 @@ test("a run without a thinking level sends exactly the request it sent before le
     ),
   );
   for (const [name, input] of Object.entries(await thinkingModels())) {
-    const plain = await thinkingRun(t, name, input);
+    const toolFree = { ...input, tools: false };
+    const plain = await thinkingRun(t, name, toolFree);
     assert.equal(plain.raw, pinned[name], name);
     assert.deepEqual(
       plain.events.find((event) => event.type === "run_start").data,
@@ -2486,14 +2636,14 @@ test("a run without a thinking level sends exactly the request it sent before le
     );
     // The catalog's thinking fields alone change nothing either.
     assert.equal(
-      (await thinkingRun(t, name, atLevel(name, input))).raw,
+      (await thinkingRun(t, name, atLevel(name, toolFree))).raw,
       pinned[name],
       name,
     );
   }
 });
 
-test("empty custom instructions leave each provider's default request exactly as it was", async (t) => {
+test("empty custom instructions preserve each provider's tool-free default request", async (t) => {
   const pinned = JSON.parse(
     await readFile(
       new URL("./fixtures/default-requests.json", import.meta.url),
@@ -2502,7 +2652,14 @@ test("empty custom instructions leave each provider's default request exactly as
   );
   for (const [name, input] of Object.entries(await thinkingModels()))
     assert.equal(
-      (await thinkingRun(t, name, input, { instructions: "" })).raw,
+      (
+        await thinkingRun(
+          t,
+          name,
+          { ...input, tools: false },
+          { instructions: "" },
+        )
+      ).raw,
       pinned[name],
       name,
     );
@@ -3857,8 +4014,11 @@ test("no create_document without the documents param", async (t) => {
     const result = await runtime.run({ ...(await sandbox(t)), ...extra });
     assert.equal(result.status, "completed");
   }
-  for (const body of requests) {
-    assert.equal(body.tools, undefined);
+  for (const [index, body] of requests.entries()) {
+    assert.deepEqual(
+      (body.tools ?? []).map((tool) => tool.function.name),
+      index === 0 ? ["updatePlan"] : [],
+    );
     assert.doesNotMatch(
       body.messages[0].content,
       /create_document|cannot attach|cannot produce/,

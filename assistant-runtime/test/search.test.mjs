@@ -178,12 +178,12 @@ test("web tools exist only when the run enables web search, and start nothing un
     prompts.push(body.messages[0].content.split("\n<cwd>")[0]);
     assert.deepEqual(
       (body.tools ?? []).map((tool) => tool.function.name),
-      webSearch ? ["web_search", "web_fetch"] : [],
+      webSearch ? ["web_search", "web_fetch", "updatePlan"] : ["updatePlan"],
     );
     assert.deepEqual(await fixture.log(), [], "no server without a call");
   }
   const [, chat, search] = prompts;
-  assert.doesNotMatch(chat, /tool|search|web|cite|URL/i);
+  assert.doesNotMatch(chat, /search|web|cite|URL/i);
   assert.match(search, /Use only the provided tools\./);
   assert.match(search, /web_search searches the web/);
   assert.match(search, /web_fetch reads/);
@@ -598,9 +598,8 @@ test("a query with a URL is refused unsent and does not count toward the search 
 
 test("the runtime refuses the same queries as the search server", async () => {
   const { queryHasUrl } = await import("../src/search.mjs");
-  const { queryHasUrl: serverCheck } = await import(
-    "../search-mcp/src/search.mjs"
-  );
+  const { queryHasUrl: serverCheck } =
+    await import("../search-mcp/src/search.mjs");
   for (const query of URL_QUERIES) {
     assert.equal(queryHasUrl(query), true, query);
     assert.equal(serverCheck(query), true, query);

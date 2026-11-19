@@ -84,6 +84,51 @@ test("each mock gateway listens on its own ephemeral port", async (t) => {
   }
 });
 
+test("private stdio keeps typed plan states when credentials match enum labels", async (t) => {
+  const steps = [
+    { step: "completed proof", status: "completed" },
+    { step: "in_progress review", status: "in_progress" },
+    { step: "abcdefgh".repeat(5), status: "pending" },
+  ];
+  const fixture = await createStdioAcceptance(
+    t,
+    (_request, response, number) =>
+      number === 1
+        ? writeModelToolCall(response, "updatePlan", { steps })
+        : writeModelStream(response, "Done."),
+  );
+  const wire = fixture.spawnSidecar();
+  const result = await wire.start(
+    "run",
+    fixture.params("typed-plan", "synthetic-plan-credential", {
+      knownSecrets: ["completed", "in_progress", "pending", "abcdefgh"],
+    }),
+  );
+  assert.equal(result.status, "completed");
+  const shown = wire.messages.find(
+    (message) =>
+      message.method === "event" && message.params.type === "task_plan",
+  )?.params.data;
+  assert.ok(shown);
+  assert.deepEqual(
+    shown.steps.map((step) => step.status),
+    ["completed", "in_progress", "pending"],
+  );
+  for (const step of shown.steps) {
+    assert.ok([...step.step].length <= 40);
+    assert.doesNotMatch(step.step, /completed|in_progress|abcdefgh/);
+  }
+  assert.equal(
+    wire.messages.find(
+      (message) =>
+        message.method === "event" && message.params.type === "run_end",
+    )?.params.data.status,
+    "completed",
+  );
+  await wire.close();
+  await fixture.assertClean(["synthetic-plan-credential", "abcdefgh"]);
+});
+
 test("private stdio credential audit rejects unexpected files outside native JSONL", async (t) => {
   const fixture = await createStdioAcceptance(t);
   const token = "synthetic-unexpected-credential-file";
@@ -171,7 +216,10 @@ test(
           const body = JSON.stringify(request.body);
           assert.equal(body.includes(token), false);
           assert.equal(body.includes(inheritedContextMarker), false);
-          assert.equal(request.body.tools, undefined);
+          assert.deepEqual(
+            request.body.tools.map((tool) => tool.function.name),
+            ["updatePlan"],
+          );
         }
         await resumed.close();
         await fixture.assertClean([token]);

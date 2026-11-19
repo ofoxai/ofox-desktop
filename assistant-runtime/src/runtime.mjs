@@ -6,6 +6,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { mcpExtensions } from "./mcp.mjs";
 import { LocalTask } from "./local-task.mjs";
 import { localTools } from "./local-tools.mjs";
+import {
+  scrubTaskPlan,
+  scrubTaskPlanStructures,
+  taskPlanResult,
+  taskPlanTool,
+} from "./task-plan.mjs";
 import { skillTools, skillPrompt } from "./skills.mjs";
 import { mediaTools } from "./media-tools.mjs";
 import { documentTools } from "./document-tools.mjs";
@@ -254,7 +260,7 @@ async function modelRequest(input, init, outcome, options) {
 
 // A model message is conversation content; its failure text is a diagnostic.
 function safeMessage(message, secrets) {
-  const safe = scrubSecrets(message, secrets);
+  const safe = scrubTaskPlanStructures(message, secrets);
   return typeof safe?.errorMessage === "string"
     ? { ...safe, errorMessage: errorMessage(safe.errorMessage, secrets) }
     : safe;
@@ -966,7 +972,13 @@ export class AssistantRuntime {
       runId: context.params.runId,
       operationId: context.params.operationId,
       type,
-      data: scrubSecrets(data, [...this.secrets]),
+      data:
+        type === "task_plan"
+          ? { steps: scrubTaskPlan(data.steps, [...this.secrets]) }
+          : type === "run_end" &&
+              ["completed", "stopped", "error"].includes(data.status)
+            ? { ...scrubSecrets(data, [...this.secrets]), status: data.status }
+            : scrubSecrets(data, [...this.secrets]),
     });
   }
 
@@ -1377,6 +1389,7 @@ export class AssistantRuntime {
         ...webTools(this, context, { searchTimeoutMs: this.searchTimeoutMs }),
       );
     }
+    tools.push(taskPlanTool(this, context));
     return tools;
   }
 
@@ -1467,16 +1480,21 @@ export class AssistantRuntime {
           this.notify(context, "tool_start", {
             name,
             toolCallId,
-            args,
+            args: name === "updatePlan" ? {} : args,
             ...(mcp ? { mcp } : {}),
           });
           try {
             const result = await execute(
-              scrubSecrets(args, [...this.secrets]),
+              name === "updatePlan"
+                ? { steps: scrubTaskPlan(args?.steps, [...this.secrets]) }
+                : scrubSecrets(args, [...this.secrets]),
               signal,
               toolCallId,
             );
-            const safe = scrubSecrets(result, [...this.secrets]);
+            const safe =
+              name === "updatePlan"
+                ? taskPlanResult(result.details?.steps, [...this.secrets])
+                : scrubSecrets(result, [...this.secrets]);
             if (context.localTask && name === "web_search") {
               context.localTask.addSearchUsage(
                 safe?.details?.usage,
@@ -1776,7 +1794,7 @@ export class AssistantRuntime {
         context.localRequests = (context.localRequests ?? 0) + 1;
         const source = originalStream(
           target,
-          scrubSecrets(transcript, secrets),
+          scrubTaskPlanStructures(transcript, secrets),
           {
             ...options,
             ...(context.localTask?.finalStep ? { toolChoice: "none" } : {}),
@@ -1816,7 +1834,7 @@ export class AssistantRuntime {
         (async () => {
           try {
             for await (const event of source) {
-              let safe = scrubSecrets(event, secrets);
+              let safe = scrubTaskPlanStructures(event, secrets);
               // Pi keeps the failed message of the error event.
               if (safe.type === "error" && safe.error)
                 safe = {
@@ -1911,11 +1929,15 @@ export class AssistantRuntime {
       modelRuntime.completeSimple = async (target, transcript, options) => {
         if (compactOnly) context.compactionRequestSent = true;
         return safeMessage(
-          await originalComplete(target, scrubSecrets(transcript, secrets), {
-            ...options,
-            maxRetries: 0,
-            fetch: safeFetch,
-          }),
+          await originalComplete(
+            target,
+            scrubTaskPlanStructures(transcript, secrets),
+            {
+              ...options,
+              maxRetries: 0,
+              fetch: safeFetch,
+            },
+          ),
           secrets,
         );
       };
@@ -1965,12 +1987,12 @@ export class AssistantRuntime {
               message: safeMessage(event.message, secrets),
             }));
             pi.on("context_with_system", (event) => ({
-              messages: scrubSecrets(event.messages, secrets),
+              messages: scrubTaskPlanStructures(event.messages, secrets),
             }));
-            pi.on("tool_result", (event) => ({
-              content: scrubSecrets(event.content, secrets),
-              details: scrubSecrets(event.details, secrets),
-            }));
+            pi.on("tool_result", (event) => {
+              const safe = scrubTaskPlanStructures(event, secrets);
+              return { content: safe.content, details: safe.details };
+            });
             pi.on("tool_call", () =>
               context.unknownOutcome ||
               context.abort.signal.aborted ||
