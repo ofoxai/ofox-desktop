@@ -1495,6 +1495,60 @@ describe("internal records", () => {
 });
 
 describe("running a reply", () => {
+  it("reopens a saved plan as a folded summary with its original elapsed time", async () => {
+    current.messages = [
+      {
+        id: "saved-plan",
+        role: "assistant",
+        content: "The draft is ready.",
+        createdAt: 89_000,
+        completedAt: 91_000,
+        status: "completed",
+        taskProgress: {
+          startedAt: 1_000,
+          steps: [
+            { step: "Create draft", status: "completed" },
+            { step: "Review draft", status: "pending" },
+          ],
+        },
+      },
+    ];
+    await openConversation();
+    const progress = screen.getByRole("region", { name: "Task progress" });
+    expect(progress).toHaveTextContent("1/2");
+    expect(progress).toHaveTextContent("Elapsed 1m 30s");
+    expect(
+      within(progress).queryByRole("list", { name: "Task steps" }),
+    ).toBeNull();
+    await userEvent.click(within(progress).getByRole("button"));
+    expect(
+      within(progress).getByRole("list", { name: "Task steps" }),
+    ).toHaveTextContent("Review draft");
+    expect(progress.querySelector(".animate-spin")).toBeNull();
+    expect(
+      screen
+        .getByText("The draft is ready.")
+        .compareDocumentPosition(progress) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it("omits historical progress for a simple chat with an empty plan", async () => {
+    current.messages = [
+      {
+        id: "greeting",
+        role: "assistant",
+        content: "Hello!",
+        createdAt: 1,
+        completedAt: 2,
+        status: "completed",
+        taskProgress: { startedAt: 1, steps: [] },
+      },
+    ];
+    await openConversation();
+    expect(screen.getByText("Hello!")).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Task progress" })).toBeNull();
+  });
+
   it("sends with Enter, keeps focus in the composer, and returns focus after Stop", async () => {
     await openConversation();
     await userEvent.click(composer());
@@ -6591,6 +6645,12 @@ describe("scrolling to the end of a conversation", () => {
           }),
         );
       startRead("first-read");
+      expect(
+        screen.queryByRole("list", { name: "Recent operations" }),
+      ).toBeNull();
+      fireEvent.click(
+        screen.getByRole("button", { name: "Execution details" }),
+      );
       const activity = screen.getByRole("list", { name: "Recent operations" });
       expect(within(activity).getAllByRole("listitem")).toHaveLength(1);
       scrollToTop(area, following ? 2500 : 1000);
@@ -7078,16 +7138,16 @@ describe("thinking", () => {
       );
       expect(within(progress).getByRole("status")).not.toHaveClass("sr-only");
       expect(screen.queryByText(/Thinking for/)).toBeNull();
-      expect(screen.getByText("Elapsed 00:00")).toBeVisible();
+      expect(screen.getByText("Elapsed 0s")).toBeVisible();
       act(() => void vi.advanceTimersByTime(3000));
-      expect(screen.getByText("Elapsed 00:03")).toBeVisible();
+      expect(screen.getByText("Elapsed 3s")).toBeVisible();
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       act(() => void vi.advanceTimersByTime(1000));
-      expect(screen.getByText("Elapsed 00:04")).toBeVisible();
+      expect(screen.getByText("Elapsed 4s")).toBeVisible();
       expect(screen.getByText("Reasoning details")).toBeVisible();
       emit("text_delta", { messageId: "reply", delta: "Answer" });
       act(() => void vi.advanceTimersByTime(10_000));
-      expect(screen.getByText("Elapsed 00:14")).toBeVisible();
+      expect(screen.getByText("Elapsed 14s")).toBeVisible();
       emit("message", {
         message: {
           id: "reply",
@@ -7113,11 +7173,11 @@ describe("thinking", () => {
       emit("thinking_start", { messageId: "reply" });
       emit("thinking_delta", { messageId: "reply", delta: "Hmm" });
       act(() => void vi.advanceTimersByTime(4600));
-      expect(screen.getByText("Elapsed 00:04")).toBeVisible();
+      expect(screen.getByText("Elapsed 4s")).toBeVisible();
       expect(screen.getByText("Reasoning details")).toBeVisible();
       emit("thinking_end", { messageId: "reply" });
       act(() => void vi.advanceTimersByTime(10_000));
-      expect(screen.getByText("Elapsed 00:14")).toBeVisible();
+      expect(screen.getByText("Elapsed 14s")).toBeVisible();
       emit("message", {
         message: {
           id: "reply",
@@ -9471,6 +9531,10 @@ describe("local configuration in the conversation", () => {
         recipeId: "context7",
       },
     });
+    expect(screen.queryByRole("list", { name: "MCP tool steps" })).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Execution details" }),
+    );
     expect(
       screen.getByRole("list", { name: "MCP tool steps" }),
     ).toHaveTextContent("Running");

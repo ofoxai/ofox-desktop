@@ -5702,7 +5702,17 @@
       },
       "reasoning": "查看推理详情",
       "operationHint": "这里记录工具的返回情况，任务步骤会单独显示。",
-      "recentCalls": "近期 {{count}} 次"
+      "recentCalls": "近期 {{count}} 次",
+      "durationSeconds": "{{seconds}}秒",
+      "durationMinutes": "{{minutes}}分{{seconds}}秒",
+      "durationHours": "{{hours}}小时{{minutes}}分",
+      "stepCount": "{{completed}}/{{total}} 步",
+      "ended": "本轮结束",
+      "stopped": "已停止",
+      "failed": "执行出错",
+      "interrupted": "已中断",
+      "unfinished": "未完成",
+      "mcpActivity": "正在使用 {{name}}"
     },
     "local": {
       "title": "本机配置",

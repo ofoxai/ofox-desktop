@@ -570,7 +570,19 @@ export interface AssistantFileReference {
   page: number | null;
 }
 
+export interface AssistantTaskStep {
+  step: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** Host-kept presentation only, never proof of execution or a permission. */
+export interface AssistantTaskProgress {
+  startedAt: number;
+  steps: AssistantTaskStep[];
+}
+
 export interface AssistantMessage {
+  taskProgress?: AssistantTaskProgress;
   fileReferences?: AssistantFileReference[];
   presentationPlan?: {
     planId?: string;
@@ -1094,10 +1106,9 @@ export type AssistantRunEvent =
   | {
       type: "task_plan";
       data: {
-        steps: {
-          step: string;
-          status: "pending" | "in_progress" | "completed";
-        }[];
+        steps: AssistantTaskStep[];
+        messageId?: string;
+        startedAt?: number;
       };
     }
   | { type: "task_status"; data: { cost?: number; warning?: string } }

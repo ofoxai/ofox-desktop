@@ -5702,7 +5702,17 @@
       },
       "reasoning": "Reasoning details",
       "operationHint": "Tool responses are operation records, not completed task steps.",
-      "recentCalls": "{{count}} recent calls"
+      "recentCalls": "{{count}} recent calls",
+      "durationSeconds": "{{seconds}}s",
+      "durationMinutes": "{{minutes}}m {{seconds}}s",
+      "durationHours": "{{hours}}h {{minutes}}m",
+      "stepCount": "{{completed}}/{{total}} steps",
+      "ended": "Run ended",
+      "stopped": "Stopped",
+      "failed": "Run failed",
+      "interrupted": "Interrupted",
+      "unfinished": "Unfinished",
+      "mcpActivity": "Using {{name}}"
     },
     "local": {
       "title": "Local configuration",

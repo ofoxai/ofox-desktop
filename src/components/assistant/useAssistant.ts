@@ -26,6 +26,7 @@ import {
   type AssistantCatalogSnapshot,
   type AssistantEvent,
   type AssistantMessage,
+  type AssistantTaskStep,
   type AssistantPreferences,
   type AssistantRunRef,
   type AssistantRestoreReport,
@@ -82,10 +83,7 @@ function catalogPatch(catalog: AssistantCatalogSnapshot) {
   };
 }
 type ApprovalEvent = Extract<AssistantEvent, { type: "approval" }>;
-type PlanStep = {
-  step: string;
-  status: "pending" | "in_progress" | "completed";
-};
+type PlanStep = AssistantTaskStep;
 const freshId = () => crypto.randomUUID();
 const IDENTITY_CHANGED = "assistant_identity_changed";
 /** A backup or restore refused because a reply or a file import is going on. */
@@ -435,6 +433,10 @@ export function useAssistant(enabled: boolean) {
   const [runProgress, setRunProgress] =
     useState<AssistantRunProgressState | null>(null);
   const progressScope = useRef<RunProgressScope | null>(null);
+  // Bind plan snapshots to the actual reply, including synchronous steer/event
+  // bursts before React has committed the new streaming message.
+  const progressMessageId = useRef<string | null>(null);
+  const progressSettled = useRef(false);
   const [tools, setTools] = useState<RunningTool[]>([]);
   const [preparingTools, setPreparingTools] = useState<string[]>([]);
   const observedPreparations = useRef(new Set<string>());
@@ -641,6 +643,8 @@ export function useAssistant(enabled: boolean) {
         scope.authority === identity?.authorityGeneration;
       // Another run, or none: the tools the last one started are not followed.
       if (!same) {
+        progressMessageId.current = null;
+        progressSettled.current = false;
         setRetryAttempt(null);
         setTools([]);
         setPreparingTools([]);
@@ -1180,7 +1184,14 @@ export function useAssistant(enabled: boolean) {
         });
         if (resumed && !alreadyFollowing) setStream(resumed);
         if (!preparing) {
-          setRun(value.session.activeRun, resumed?.createdAt);
+          setRun(
+            value.session.activeRun,
+            resumed?.taskProgress?.startedAt ?? resumed?.createdAt,
+          );
+          if (resumed && !alreadyFollowing) {
+            progressMessageId.current = resumed.id;
+            setLocalPlan(resumed.taskProgress?.steps ?? []);
+          }
           setLocalApprovals(value.pendingApprovals ?? []);
         }
         setCompacting(
@@ -1877,9 +1888,66 @@ export function useAssistant(enabled: boolean) {
               old.filter((a) => a.data.approvalId !== event.data.approvalId),
             );
             return;
-          case "task_plan":
-            setLocalPlan(event.data.steps);
+          case "task_plan": {
+            if (progressSettled.current || preparationClosed.current) return;
+            const { steps, startedAt } = event.data;
+            const messageId = event.data.messageId ?? progressMessageId.current;
+            if (
+              !messageId ||
+              (progressMessageId.current !== null &&
+                messageId !== progressMessageId.current) ||
+              !Array.isArray(steps) ||
+              steps.length > 12 ||
+              steps.some(
+                (step) =>
+                  !step ||
+                  typeof step.step !== "string" ||
+                  !step.step.trim() ||
+                  [...step.step].length > 40 ||
+                  !["pending", "in_progress", "completed"].includes(
+                    step.status,
+                  ),
+              ) ||
+              steps.filter((step) => step.status === "in_progress").length > 1
+            )
+              return;
+            const validStart =
+              typeof startedAt === "number" &&
+              Number.isFinite(startedAt) &&
+              startedAt >= 0 &&
+              startedAt <= Date.now();
+            progressMessageId.current = messageId;
+            setLocalPlan(steps);
+            const apply = (message: AssistantMessage): AssistantMessage => ({
+              ...message,
+              taskProgress: {
+                startedAt:
+                  message.taskProgress?.startedAt ??
+                  (validStart ? startedAt : message.createdAt),
+                steps,
+              },
+            });
+            setStream((previous) =>
+              previous?.id === messageId && previous.status === "streaming"
+                ? apply(previous)
+                : previous,
+            );
+            setDetail((old) =>
+              old
+                ? {
+                    ...old,
+                    messages: old.messages.map((message) =>
+                      message.id === messageId && message.status === "streaming"
+                        ? apply(message)
+                        : message,
+                    ),
+                  }
+                : old,
+            );
+            if (validStart)
+              setRunProgress((old) => (old ? { ...old, startedAt } : old));
             return;
+          }
           // The run's cost is shown with its reply, once saved.
           case "task_status":
             if (event.data.warning) setLocalWarning(event.data.warning);
@@ -1893,6 +1961,8 @@ export function useAssistant(enabled: boolean) {
             const { messageId, webSearch } = event.data;
             if (typeof messageId !== "string" || typeof webSearch !== "boolean")
               return;
+            progressMessageId.current = messageId;
+            progressSettled.current = false;
             const sent = runSearchRef.current;
             const requested =
               sent?.runId === event.runId ? sent.requested : webSearch;
@@ -1912,6 +1982,29 @@ export function useAssistant(enabled: boolean) {
             endThinking(event.runId);
             writeThinking(null);
             const { messages, messageId } = event.data;
+            const nextReply = messages.find(
+              (message) => message.id === messageId,
+            );
+            progressMessageId.current = messageId;
+            progressSettled.current = false;
+            localIntentCall.current = null;
+            setLocalIntent(null);
+            setLocalPlan(nextReply?.taskProgress?.steps ?? []);
+            setLocalWarning(null);
+            setTools([]);
+            setRunProgress((old) =>
+              old
+                ? {
+                    ...old,
+                    startedAt:
+                      nextReply?.taskProgress?.startedAt ??
+                      nextReply?.createdAt ??
+                      Date.now(),
+                    lastEventAt: Date.now(),
+                    activities: [],
+                  }
+                : old,
+            );
             setDetail((old) =>
               old && old.session.id === event.sessionId
                 ? {
@@ -1925,7 +2018,9 @@ export function useAssistant(enabled: boolean) {
                   }
                 : old,
             );
-            setStream({ ...blankReply(event.runId), id: messageId });
+            setStream(
+              nextReply ?? { ...blankReply(event.runId), id: messageId },
+            );
             return;
           }
           case "thinking_start":
@@ -2144,6 +2239,7 @@ export function useAssistant(enabled: boolean) {
             ) {
               // The saved reply carries how long it thought.
               writeThinking(null);
+              progressSettled.current = message.status !== "streaming";
               setStream(message);
             }
             return;

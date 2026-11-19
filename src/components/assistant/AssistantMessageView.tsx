@@ -207,8 +207,8 @@ function SourceList({
  * `‹2/3›` switcher: it asks `onSwitchVersion` for the question of the version
  * to show, and is off while `disabled`. `activity` says what a streaming
  * reply is doing while one of its tools runs; `thinking` times the reasoning
- * it is streaming; `taskProgress`, what its local configuration run is at,
- * shows under it while it streams. `searchUnavailable` marks a reply whose
+ * it is streaming; `taskProgress` shows the run beneath its reply, including
+ * a saved checklist after it ends. `searchUnavailable` marks a reply whose
  * run went without the web search its conversation asked for;
  * `searchLimited`, one whose free (Exa) search was refused, with
  * `onUseOfoxSearch` to switch the account to Ofox search. `highlight`
@@ -250,7 +250,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
   mediaBlock?: React.ReactNode;
   /** The cards of what the reply's generation tools made. */
   generations?: React.ReactNode;
-  /** A local configuration run's step, warning and plan, while it streams. */
+  /** Live progress or a saved checklist, displayed beneath the reply. */
   taskProgress?: React.ReactNode;
   activity?: AssistantActivity | null;
   retryAttempt?: 1 | 2 | null;
@@ -333,7 +333,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
     (file) => !generated.has(file.id),
   );
   const sources = (message.sources ?? []).flatMap(shownSource);
-  const hasTaskProgress = streaming && Boolean(taskProgress);
+  const hasTaskProgress = Boolean(taskProgress);
   const progress =
     streaming && !hasTaskProgress && activity
       ? t(`assistant.activity.${activity}`)
@@ -408,7 +408,6 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           })}
         </span>
       )}
-      {!isUser && hasTaskProgress && taskProgress}
       {!isUser && (decisionStyle || decisionSummary) && (
         <section
           aria-label={t("assistant.visual.decisionTitle")}
@@ -426,7 +425,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           )}
         </section>
       )}
-      {!isUser && !!message.mcpSteps?.length && (
+      {!isUser && !hasTaskProgress && !!message.mcpSteps?.length && (
         <McpSteps steps={message.mcpSteps} />
       )}
       {!isUser && !!message.skillResults?.length && (
@@ -437,7 +436,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
           reasoning={message.reasoning}
           reasoningMs={message.reasoningMs}
           thinking={thinking}
-          compact={hasTaskProgress}
+          compact={streaming && hasTaskProgress}
         />
       )}
       {message.media && mediaBlock ? (
@@ -576,6 +575,7 @@ export const AssistantMessageView = memo(function AssistantMessageView({
         </>
       )}
       {generations}
+      {!isUser && hasTaskProgress && taskProgress}
       {streaming && !hasTaskProgress && retryAttempt && (
         <p role="status" className="mt-2 text-ctl text-ink-muted">
           {t("assistant.retrying", { attempt: retryAttempt })}

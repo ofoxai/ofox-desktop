@@ -1,4 +1,5 @@
 import type { ComponentProps } from "react";
+import userEvent from "@testing-library/user-event";
 import { render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it } from "vitest";
 import i18n from "i18next";
@@ -26,6 +27,14 @@ const guidance = (id: string): Activity => ({
   activity: "readingGuidance",
   status: "completed",
 });
+const operationRows = () =>
+  screen
+    .getAllByRole("list", { name: "Recent operations" })
+    .flatMap((list) => within(list).getAllByRole("listitem"));
+const recordWithState = (name: string) =>
+  operationRows().find((row) => within(row).queryByRole("img", { name }))!;
+const openRecords = async () =>
+  userEvent.click(screen.getByRole("button", { name: "Execution details" }));
 const returnedBadge = (row: HTMLElement) => {
   const badge = within(row).getByRole("img", { name: "Returned" });
   expect(badge).toBeVisible();
@@ -40,7 +49,7 @@ beforeEach(async () => {
 });
 
 describe("observed operation records", () => {
-  it("groups repeated calls and shows returned status with checks in last-occurrence order", () => {
+  it("groups repeated calls and shows returned status with checks in last-occurrence order", async () => {
     render(
       <AssistantRunProgress
         {...props()}
@@ -48,8 +57,8 @@ describe("observed operation records", () => {
         activities={[style("style-1"), guidance("guidance"), style("style-2")]}
       />,
     );
-    // Use the list role first: the original UI must fail on the actual three
-    // rows versus two groups, rather than just on the renamed heading.
+    expect(screen.queryByRole("list")).toBeNull();
+    await openRecords();
     const list = screen.getByRole("list");
     const rows = within(list).getAllByRole("listitem");
     expect(rows).toHaveLength(2);
@@ -65,18 +74,13 @@ describe("observed operation records", () => {
     expect(within(list).getAllByRole("img", { name: "Returned" })).toHaveLength(
       2,
     );
-    expect(
-      screen.getByText(
-        "Tool responses are operation records, not completed task steps.",
-      ),
-    ).toBeVisible();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Organizing the next steps",
     );
     expect(screen.queryByRole("list", { name: "Task steps" })).toBeNull();
   });
 
-  it("groups by category and state without merging running or failed work into returned calls", () => {
+  it("groups by category and state without merging running or failed work into returned calls", async () => {
     render(
       <AssistantRunProgress
         {...props()}
@@ -88,32 +92,40 @@ describe("observed operation records", () => {
         ]}
       />,
     );
-    const list = screen.getByRole("list", { name: "Recent operations" });
-    const rows = within(list).getAllByRole("listitem");
-    expect(rows).toHaveLength(3);
-    returnedBadge(rows[0]);
-    expect(rows[0]).toHaveTextContent("2 recent calls");
-    expect(rows[1]).toHaveTextContent("Running:");
-    expect(rows[1].querySelector(".animate-spin")).not.toBeNull();
-    expect(rows[2]).toHaveTextContent("Failed:");
-    const failure = within(rows[2]).getByText("Failed", { exact: true });
+    // Failures stay visible before routine execution details are opened.
+    expect(operationRows()).toHaveLength(1);
+    expect(recordWithState("Failed")).toHaveTextContent("Failed:");
+    expect(screen.queryByRole("img", { name: "Returned" })).toBeNull();
+    await openRecords();
+    expect(operationRows()).toHaveLength(3);
+    const returned = recordWithState("Returned");
+    returnedBadge(returned);
+    expect(returned).toHaveTextContent("2 recent calls");
+    const running = recordWithState("Running");
+    expect(running).toHaveTextContent("Running:");
+    expect(running.querySelector(".animate-spin")).not.toBeNull();
+    const failure = within(recordWithState("Failed")).getByText("Failed", {
+      exact: true,
+    });
     expect(failure).toBeVisible();
     expect(failure).not.toHaveClass("sr-only");
-    expect(list).not.toHaveTextContent("4 recent calls");
+    for (const row of operationRows())
+      expect(row).not.toHaveTextContent("4 recent calls");
   });
 
-  it("deduplicates call IDs before grouping and uses the latest state", () => {
+  it("deduplicates call IDs before grouping and uses the latest state", async () => {
     const activities = [style("same"), style("other"), style("same", "failed")];
     const view = render(
       <AssistantRunProgress {...props()} activities={activities} />,
     );
+    expect(operationRows()).toHaveLength(1);
+    expect(recordWithState("Failed")).toBeVisible();
+    await openRecords();
     const assertRecords = () => {
-      const rows = within(
-        screen.getByRole("list", { name: "Recent operations" }),
-      ).getAllByRole("listitem");
+      const rows = operationRows();
       expect(rows).toHaveLength(2);
-      returnedBadge(rows[0]);
-      expect(rows[1]).toHaveTextContent("Failed:");
+      returnedBadge(recordWithState("Returned"));
+      expect(recordWithState("Failed")).toHaveTextContent("Failed:");
       expect(screen.queryByText(/recent calls/)).toBeNull();
     };
     assertRecords();
@@ -123,7 +135,7 @@ describe("observed operation records", () => {
     assertRecords();
   });
 
-  it("reads a failure the same step came after as retried, and only the last one as failed", () => {
+  it("keeps failures visible when another call shares their category", async () => {
     render(
       <AssistantRunProgress
         {...props()}
@@ -134,17 +146,17 @@ describe("observed operation records", () => {
         ]}
       />,
     );
-    const rows = within(
-      screen.getByRole("list", { name: "Recent operations" }),
-    ).getAllByRole("listitem");
-    expect(rows).toHaveLength(3);
-    expect(rows[0]).toHaveTextContent("Retried:");
-    expect(rows[1]).toHaveTextContent("Running:");
-    expect(rows[2]).toHaveTextContent("Failed:");
-    for (const row of rows) expect(row).not.toHaveTextContent(/recent calls/);
+    const failed = recordWithState("Failed");
+    expect(failed).toBeVisible();
+    expect(failed).toHaveTextContent("2 recent calls");
+    expect(screen.queryByText("Retried")).toBeNull();
+    await openRecords();
+    expect(operationRows()).toHaveLength(2);
+    expect(recordWithState("Running")).toHaveTextContent("Running:");
+    expect(recordWithState("Failed")).toHaveTextContent("Failed:");
   });
 
-  it("pauses only running records while approval is pending", () => {
+  it("pauses only running records while approval is pending", async () => {
     render(
       <AssistantRunProgress
         {...props()}
@@ -156,19 +168,19 @@ describe("observed operation records", () => {
         ]}
       />,
     );
-    const rows = within(
-      screen.getByRole("list", { name: "Recent operations" }),
-    ).getAllByRole("listitem");
-    returnedBadge(rows[0]);
-    expect(rows[1]).toHaveTextContent("Retried:");
-    expect(rows[2]).toHaveTextContent("Awaiting approval:");
-    expect(rows[2].querySelector(".animate-spin")).toBeNull();
+    expect(recordWithState("Failed")).toBeVisible();
+    await openRecords();
+    returnedBadge(recordWithState("Returned"));
+    expect(recordWithState("Failed")).toHaveTextContent("Failed:");
+    const running = recordWithState("Awaiting approval");
+    expect(running).toHaveTextContent("Awaiting approval:");
+    expect(running.querySelector(".animate-spin")).toBeNull();
     expect(screen.getByRole("status")).toHaveTextContent(
       "Waiting for your approval",
     );
   });
 
-  it("keeps running and failed operations separate from model-plan completion", () => {
+  it("keeps running and failed operations separate from model-plan completion", async () => {
     render(
       <AssistantRunProgress
         {...props()}
@@ -183,19 +195,28 @@ describe("observed operation records", () => {
         ]}
       />,
     );
-    const records = screen.getByRole("list", { name: "Recent operations" });
-    const rows = within(records).getAllByRole("listitem");
-    expect(rows).toHaveLength(2);
-    expect(rows[0]).toHaveTextContent("Retried:");
-    expect(rows[1]).toHaveTextContent("Running:");
-    expect(within(records).queryByText("Returned", { exact: true })).toBeNull();
-    expect(records.querySelector("svg.lucide-check")).toBeNull();
+    expect(recordWithState("Failed")).toBeVisible();
+    await openRecords();
+    expect(operationRows()).toHaveLength(3);
+    expect(recordWithState("Failed")).toHaveTextContent("Failed:");
+    expect(recordWithState("Running")).toHaveTextContent("Running:");
+    returnedBadge(recordWithState("Returned"));
+    for (const row of operationRows()) {
+      expect(within(row).queryByRole("img", { name: "Completed" })).toBeNull();
+    }
     const plan = screen.getByRole("list", { name: "Task steps" });
-    expect(within(plan).getByRole("img", { name: "Completed" })).toBeVisible();
-    expect(plan.querySelector("svg.lucide-check")).not.toBeNull();
+    expect(
+      within(plan).getAllByRole("img", { name: "Completed" }),
+    ).toHaveLength(1);
+    expect(
+      within(plan).getByRole("img", { name: "In progress" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: "Task steps" }),
+    ).toHaveTextContent("1/2");
   });
 
-  it("deduplicates before hiding returned calls so a model plan cannot revive stale running or failed records", () => {
+  it("deduplicates before folding returned calls so a model plan cannot revive stale running or failed records", async () => {
     render(
       <AssistantRunProgress
         {...props()}
@@ -214,6 +235,12 @@ describe("observed operation records", () => {
     expect(screen.getByRole("list", { name: "Task steps" })).toHaveTextContent(
       "Review slides",
     );
+    await openRecords();
+    expect(operationRows()).toHaveLength(1);
+    returnedBadge(recordWithState("Returned"));
+    expect(recordWithState("Returned")).toHaveTextContent("2 recent calls");
+    expect(screen.queryByRole("img", { name: "Failed" })).toBeNull();
+    expect(screen.queryByRole("img", { name: "Running" })).toBeNull();
   });
 
   it.each([
@@ -259,6 +286,8 @@ describe("observed operation records", () => {
           activities={[style("one"), style("two")]}
         />,
       );
+      expect(screen.queryByRole("list", { name: text.recent })).toBeNull();
+      await userEvent.click(screen.getByRole("button", { name: text.details }));
       const list = screen.getByRole("list", { name: text.recent });
       expect(within(list).getAllByRole("listitem")).toHaveLength(1);
       const badge = within(list).getByRole("img", {

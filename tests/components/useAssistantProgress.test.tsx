@@ -875,6 +875,85 @@ function end(id: string, success = true) {
 }
 
 describe("observed assistant progress", () => {
+  it("keeps the host plan on its reply and restores its fixed start on reopen", async () => {
+    const hook = await open();
+    const steps = [{ step: "Review sources", status: "in_progress" }];
+    emit("task_plan", { messageId: "reply", startedAt: 8_000, steps });
+    expect(hook.result.current.stream?.taskProgress).toEqual({
+      startedAt: 8_000,
+      steps,
+    });
+    current.messages[0] = {
+      ...current.messages[0],
+      createdAt: 9_900,
+      taskProgress: {
+        startedAt: 8_000,
+        steps: [{ step: "Review sources", status: "in_progress" }],
+      },
+    };
+    act(() => hook.result.current.select(null));
+    act(() => hook.result.current.select(session.id));
+    await waitFor(() => expect(hook.result.current.loading).toBe(false));
+    expect(hook.result.current.stream?.taskProgress?.steps).toEqual(steps);
+    expect(hook.result.current.runProgress?.startedAt).toBe(8_000);
+  });
+
+  it("starts a steered reply with its own plan and rejects a late plan for the prior reply", async () => {
+    const hook = await open();
+    const steps = [{ step: "First task", status: "in_progress" }];
+    emit("task_plan", { messageId: "reply", startedAt: 9_000, steps });
+    now += 500;
+    const next = {
+      ...current.messages[0],
+      id: "next-reply",
+      createdAt: now,
+      taskProgress: { startedAt: now, steps: [] },
+    };
+    emit("steer_applied", {
+      messageId: next.id,
+      messages: [
+        {
+          ...current.messages[0],
+          status: "completed",
+          taskProgress: { startedAt: 9_000, steps },
+        },
+        next,
+      ],
+    });
+    expect(hook.result.current.localPlan).toEqual([]);
+    expect(hook.result.current.runProgress?.startedAt).toBe(now);
+    emit("task_plan", { messageId: "reply", startedAt: 9_000, steps });
+    expect(hook.result.current.stream?.id).toBe("next-reply");
+    expect(hook.result.current.stream?.taskProgress?.steps).toEqual([]);
+    expect(hook.result.current.localPlan).toEqual([]);
+    expect(
+      hook.result.current.detail?.messages.find((m) => m.id === "reply")
+        ?.taskProgress?.steps,
+    ).toEqual(steps);
+  });
+
+  it("does not replace a saved final checklist with a late live snapshot", async () => {
+    const hook = await open();
+    const taskProgress = {
+      startedAt: 8_000,
+      steps: [{ step: "Review sources", status: "completed" as const }],
+    };
+    emit("message", {
+      message: {
+        ...current.messages[0],
+        status: "completed",
+        completedAt: now,
+        taskProgress,
+      },
+    });
+    emit("task_plan", {
+      messageId: "reply",
+      startedAt: 8_000,
+      steps: [{ step: "Old", status: "pending" }],
+    });
+    expect(hook.result.current.stream?.taskProgress).toEqual(taskProgress);
+  });
+
   it("shows argument preparation without inventing execution or clearing another running call", async () => {
     const hook = await open();
     start("failed", "create_document");

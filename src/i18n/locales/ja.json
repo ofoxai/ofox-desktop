@@ -5702,7 +5702,17 @@
       },
       "reasoning": "推論の詳細",
       "operationHint": "ツールの応答記録です。タスク手順の完了とは別に表示します。",
-      "recentCalls": "直近 {{count}} 回"
+      "recentCalls": "直近 {{count}} 回",
+      "durationSeconds": "{{seconds}}秒",
+      "durationMinutes": "{{minutes}}分{{seconds}}秒",
+      "durationHours": "{{hours}}時間{{minutes}}分",
+      "stepCount": "{{completed}}/{{total}} ステップ",
+      "ended": "実行終了",
+      "stopped": "停止済み",
+      "failed": "実行エラー",
+      "interrupted": "中断済み",
+      "unfinished": "未完了",
+      "mcpActivity": "{{name}} を使用中"
     },
     "local": {
       "title": "ローカル設定",
