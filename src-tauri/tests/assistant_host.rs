@@ -716,7 +716,11 @@ async fn create(host: &AssistantHost) -> String {
 }
 
 async fn wait_for(env: &TestEnv, run_id: &str, kind: &str) -> Event {
-    let deadline = Instant::now() + Duration::from_secs(45);
+    wait_for_timeout(env, run_id, kind, Duration::from_secs(45)).await
+}
+
+async fn wait_for_timeout(env: &TestEnv, run_id: &str, kind: &str, timeout: Duration) -> Event {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(event) = env.events(run_id).into_iter().find(|e| e.r#type == kind) {
             return event;
@@ -737,6 +741,21 @@ async fn wait_for(env: &TestEnv, run_id: &str, kind: &str) -> Event {
 async fn turn(host: &Arc<AssistantHost>, env: &TestEnv, request: SendRequest) -> (String, Event) {
     let run = host.send(request).await.unwrap();
     let end = wait_for(env, &run.run_id, "run_end").await;
+    (run.run_id, end)
+}
+
+/// Windows Office turns perform several real LPAC launches and verified runtime
+/// reads. Bound these tests by the host's existing 15-minute run deadline.
+async fn office_turn(
+    host: &Arc<AssistantHost>,
+    env: &TestEnv,
+    request: SendRequest,
+) -> (String, Event) {
+    if !cfg!(windows) {
+        return turn(host, env, request).await;
+    }
+    let run = host.send(request).await.unwrap();
+    let end = wait_for_timeout(env, &run.run_id, "run_end", Duration::from_secs(15 * 60)).await;
     (run.run_id, end)
 }
 
@@ -7199,6 +7218,7 @@ mod documents {
         args: Value,
         next: Vec<Reply>,
     ) -> Outcome {
+        let office = matches!(args["format"].as_str(), Some("pptx" | "xlsx" | "docx"));
         let config = tempfile::tempdir().unwrap();
         let gateway = Gateway::start();
         let env = TestEnv::new(config.path(), bundle, &[("ofox.ai", &gateway)]);
@@ -7215,7 +7235,12 @@ mod documents {
                 gateway.reply(reply);
             }
             gateway.reply(Reply::Stream("The document is ready.".into()));
-            let (run, end) = turn(&host, &env, request(&sid, "Make the document", json!({}))).await;
+            let request = request(&sid, "Make the document", json!({}));
+            let (run, end) = if office {
+                office_turn(&host, &env, request).await
+            } else {
+                turn(&host, &env, request).await
+            };
             let detail = host.get_session(&sid).await.unwrap();
             host.shutdown().await;
             (sid, run, end, detail)
@@ -8169,35 +8194,43 @@ mod presentation_workflow {
         let gateway = Gateway::start();
         let env = TestEnv::new(config.path(), &bundle, &[("ofox.ai", &gateway)]);
         let host = AssistantHost::new(env.clone());
-        let (sid, run, detail) =
-            runtime().block_on(async {
-                let sid = create(&host).await;
-                gateway.reply(Reply::ToolCalls(vec![
-                    ("use_skill", json!({"name":"ofox-office-pptx"})),
-                    ("freeze_presentation_plan", plan()),
-                ]));
-                gateway.reply(Reply::Answer(create_after_freeze));
-                gateway.reply(Reply::Stream("The planned local document is ready.".into()));
-                let (run,end) = turn(&host,&env,request(&sid,"Make the three-slide fixture",json!({
-                "presentationWorkflowVersion":1,
-                "presentationStyleId":"cartesian",
-                "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
-            }))).await;
-                assert_eq!(
-                    end.data["status"],
-                    "completed",
-                    "{:?} {:?}",
-                    of_type(&env, &run, "error"),
-                    gateway
-                        .requests()
-                        .iter()
-                        .map(tool_results)
-                        .collect::<Vec<_>>()
-                );
-                let detail = host.get_session(&sid).await.unwrap();
-                host.shutdown().await;
-                (sid, run, detail)
-            });
+        let (sid, run, detail) = runtime().block_on(async {
+            let sid = create(&host).await;
+            gateway.reply(Reply::ToolCalls(vec![
+                ("use_skill", json!({"name":"ofox-office-pptx"})),
+                ("freeze_presentation_plan", plan()),
+            ]));
+            gateway.reply(Reply::Answer(create_after_freeze));
+            gateway.reply(Reply::Stream("The planned local document is ready.".into()));
+            let (run, end) = office_turn(
+                &host,
+                &env,
+                request(
+                    &sid,
+                    "Make the three-slide fixture",
+                    json!({
+                        "presentationWorkflowVersion":1,
+                        "presentationStyleId":"cartesian",
+                        "presentationVisualPolicy":{"mode":"off","maxImages":0,"maxCostUsd":"0"},
+                    }),
+                ),
+            )
+            .await;
+            assert_eq!(
+                end.data["status"],
+                "completed",
+                "{:?} {:?}",
+                of_type(&env, &run, "error"),
+                gateway
+                    .requests()
+                    .iter()
+                    .map(tool_results)
+                    .collect::<Vec<_>>()
+            );
+            let detail = host.get_session(&sid).await.unwrap();
+            host.shutdown().await;
+            (sid, run, detail)
+        });
         let requests = gateway.requests();
         assert_eq!(
             requests.len(),
