@@ -439,6 +439,7 @@ pub(super) fn merge_native(
             }
         } else {
             record.messages.push(Message {
+                task_progress: None,
                 file_references: vec![],
                 presentation_visual_policy: None,
                 presentation_plan: None,
@@ -2234,6 +2235,28 @@ mod tests {
         assert!(usage["estimatedCostUsd"].is_null());
         assert!(reply.completed_at.is_none());
         assert!(record.messages[0].usage.is_none());
+    }
+
+    #[test]
+    fn task_progress_keeps_reported_steps_across_every_terminal_outcome() {
+        let (_config, store) = store();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let progress = json!({"startedAt":10,"steps":[{"step":"Inspect","status":"completed"},{"step":"Review","status":"in_progress"}]});
+        for (completed, stopped) in [(true, false), (false, true), (false, false)] {
+            let mut record = store.load_record(&sid).unwrap();
+            record.messages=vec![serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":99,"status":"streaming","runId":run.run_id,"taskProgress":progress})).unwrap()];
+            settle_run(&mut record, &run, completed, stopped, false, None).unwrap();
+            let saved = serde_json::to_value(&record.messages[0]).unwrap();
+            assert_eq!(saved["taskProgress"], progress);
+            assert!(saved["completedAt"].is_number());
+        }
+        let mut record = store.load_record(&sid).unwrap();
+        record.messages=vec![serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":99,"status":"streaming","runId":run.run_id,"taskProgress":progress})).unwrap()];
+        settle_interrupted(&mut record, None).unwrap();
+        let saved = serde_json::to_value(&record.messages[0]).unwrap();
+        assert_eq!(saved["taskProgress"], progress);
+        assert!(saved["completedAt"].is_null());
     }
 
     /// Native user entry `native` of `run`, on the branch shown or not.

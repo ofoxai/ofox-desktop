@@ -1560,7 +1560,10 @@ impl AssistantHost {
             log::warn!("[Assistant] refused unsafe MCP event payload");
             return;
         }
-        scrub_secrets_in(&mut data, &run.secrets());
+        if super::progress::scrub_event(kind, &mut data, &run.mcp, &run.secrets()).is_err() {
+            log::warn!("[Assistant] refused invalid task progress event metadata");
+            return;
+        }
         self.env.emit(Event {
             session_id: run.session_id.clone(),
             run_id: run.run_id.clone(),
@@ -1975,7 +1978,12 @@ impl AssistantHost {
                     .store(kind == "compaction_start", Ordering::SeqCst);
                 self.emit(control, kind, data);
             }
-            "task_plan" | "task_status" if control.local_enabled => {
+            "task_plan"
+                if !control.compact_only && !control.audio_only && control.artifact.is_none() =>
+            {
+                self.save_task_plan(control, data).await?;
+            }
+            "task_status" if control.local_enabled => {
                 scrub_secrets_in(&mut data, &control.secrets());
                 let shown = super::tools::events::task_event(kind, &data)?;
                 self.emit(control, kind, shown);
@@ -2575,6 +2583,289 @@ pub(super) fn restore(path: &Path, before: Option<Vec<u8>>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn task_progress_persists_without_local_access_before_publication() {
+        for apex in ["ofox.ai", "ofox.io"] {
+            let (_config, env, host) = fixture_with_env();
+            *env.apex.lock().unwrap() = apex.into();
+            let store = host.store(&identity().owner).unwrap();
+            let sid = store.create("test/model", false).unwrap().session.id;
+            let mut run = control(&sid);
+            Arc::get_mut(&mut run).unwrap().identity.apex = apex.into();
+            assert!(!run.local_enabled);
+            store
+                .mutate(&sid, |record| {
+                    record.messages.push(
+                        serde_json::from_value(json!({
+                            "id":run.message_id,"role":"assistant","content":"","createdAt":99,
+                            "status":"streaming","runId":run.run_id,
+                            "taskProgress":{"startedAt":10,"steps":[]}
+                        }))
+                        .unwrap(),
+                    );
+                    Ok(())
+                })
+                .unwrap();
+            let steps = json!([
+                {"step":"Inspect test-opaque-run-key","status":"completed"},
+                {"step":"Generate document","status":"in_progress"}
+            ]);
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,
+                "type":"task_plan","data":{"steps":steps}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            let saved =
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+            assert_eq!(saved["taskProgress"]["startedAt"], 10);
+            assert_eq!(saved["taskProgress"]["steps"][1], steps[1]);
+            assert!(!saved.to_string().contains("test-opaque-run-key"));
+            {
+                let events = env.events.lock().unwrap();
+                let shown = events
+                    .iter()
+                    .find(|event| event.r#type == "task_plan")
+                    .unwrap();
+                assert_eq!(shown.data["messageId"], run.message_id);
+                assert_eq!(shown.data["startedAt"], 10);
+                assert_eq!(shown.data["steps"], saved["taskProgress"]["steps"]);
+            }
+            let mut stale = event.clone();
+            stale["operationId"] = json!(id());
+            assert!(host
+                .on_event(&run, &stale, &mut Attempt::default())
+                .await
+                .is_err());
+            let mut invalid = event.clone();
+            invalid["data"]["steps"] = json!([{"step":"x".repeat(41),"status":"pending"}]);
+            assert!(host
+                .on_event(&run, &invalid, &mut Attempt::default())
+                .await
+                .is_err());
+            store
+                .mutate(&sid, |record| {
+                    record.messages[0].status = "completed".into();
+                    Ok(())
+                })
+                .unwrap();
+            assert!(host
+                .on_event(&run, &event, &mut Attempt::default())
+                .await
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap()
+                    ["taskProgress"],
+                saved["taskProgress"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_does_not_enable_special_runs_or_local_task_status() {
+        for special in ["compact", "audio", "artifact", "status"] {
+            let (_config, env, host) = fixture_with_env();
+            let sid = host
+                .store(&identity().owner)
+                .unwrap()
+                .create("test/model", false)
+                .unwrap()
+                .session
+                .id;
+            let mut run = control(&sid);
+            let config = Arc::get_mut(&mut run).unwrap();
+            match special {
+                "compact" => config.compact_only = true,
+                "audio" => config.audio_only = true,
+                "artifact" => config.artifact = Some("artifact".into()),
+                _ => {}
+            }
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":if special=="status" {"task_status"} else {"task_plan"},"data":{"steps":[],"warning":"repeat_warning"}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            assert!(env.events.lock().unwrap().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_bounds_unicode_after_secret_redaction() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let secret = "12345678";
+        run.add_secret(secret);
+        store.mutate(&sid,|record| {
+            record.messages.push(serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":1,"status":"streaming","runId":run.run_id,"taskProgress":{"startedAt":1,"steps":[]}})).unwrap());
+            Ok(())
+        }).unwrap();
+        for label in [
+            format!("api_key=x {}", "字".repeat(30)),
+            format!("{} api_key=x", "字".repeat(30)),
+            format!("{}{secret}", "字".repeat(32)),
+            format!("api_key=x {}{secret}", "字".repeat(22)),
+        ] {
+            assert!(label.chars().count() <= 40);
+            let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":label,"status":"in_progress"}]}});
+            host.on_event(&run, &event, &mut Attempt::default())
+                .await
+                .unwrap();
+            let saved =
+                serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+            let label = saved["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+            assert!(label.chars().count() <= 40);
+            assert!(label.contains(crate::redact::REDACTED));
+            assert!(!label.contains("api_key=x") && !label.contains(&secret[..2]));
+            assert_eq!(
+                env.events.lock().unwrap().last().unwrap().data["steps"],
+                saved["taskProgress"]["steps"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn task_progress_scrubs_short_captured_mcp_credentials_only_from_labels() {
+        let (_config, env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let mut run = control(&sid);
+        Arc::get_mut(&mut run).unwrap().mcp = json!({"servers":{"fixture":{"url":"https://fixture.invalid/mcp","headers":{"X-API-Key":"xy7"},"env":{"PIN":"4187","PASSWORD":"pending","LONG_PASSWORD":"completed"}}}});
+        for secret in super::super::mcp::secrets(&run.mcp) {
+            run.add_secret(&secret);
+        }
+        store.mutate(&sid,|record| {
+            record.messages.push(serde_json::from_value(json!({"id":run.message_id,"role":"assistant","content":"","createdAt":1,"status":"streaming","runId":run.run_id,"taskProgress":{"startedAt":1,"steps":[]}})).unwrap());
+            Ok(())
+        }).unwrap();
+        let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":"Review pending completed 4187 xy7","status":"pending"},{"step":"Finish","status":"completed"}]}});
+        host.on_event(&run, &event, &mut Attempt::default())
+            .await
+            .unwrap();
+        let mut saved =
+            serde_json::to_value(&store.load_detail(&sid).unwrap().messages[0]).unwrap();
+        let label = saved["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+        for secret in ["xy7", "4187", "pending", "completed"] {
+            assert!(!label.contains(secret));
+        }
+        assert!(label.contains("Review"));
+        assert_eq!(saved["taskProgress"]["steps"][0]["status"], "pending");
+        assert_eq!(saved["taskProgress"]["steps"][1]["status"], "completed");
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["steps"],
+            saved["taskProgress"]["steps"]
+        );
+        saved["status"] = json!("completed");
+        host.emit(&run, "message", json!({"message":saved}));
+        {
+            let events = env.events.lock().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.r#type, "message");
+            assert_eq!(event.data["message"]["status"], "completed");
+            assert_eq!(event.data["message"]["taskProgress"], saved["taskProgress"]);
+        }
+        let mut next = saved.clone();
+        next["status"] = json!("streaming");
+        host.emit(
+            &run,
+            "steer_applied",
+            json!({"messages":[saved,{"id":"user","role":"user","status":"completed"},next,{"id":"queued","role":"user","status":"queued"}]}),
+        );
+        {
+            let events = env.events.lock().unwrap();
+            let event = events.last().unwrap();
+            assert_eq!(event.r#type, "steer_applied");
+            assert_eq!(event.data["messages"][0]["status"], "completed");
+            assert_eq!(event.data["messages"][1]["status"], "completed");
+            assert_eq!(event.data["messages"][2]["status"], "streaming");
+            assert_eq!(event.data["messages"][3]["status"], "queued");
+            assert_eq!(
+                event.data["messages"][0]["taskProgress"],
+                saved["taskProgress"]
+            );
+            assert_eq!(
+                event.data["messages"][2]["taskProgress"],
+                saved["taskProgress"]
+            );
+        }
+        // A lookalike object on an unrelated event is not typed metadata.
+        host.emit(
+            &run,
+            "error",
+            json!({"taskProgress":saved["taskProgress"],"status":"completed"}),
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["taskProgress"]["steps"][1]["status"],
+            crate::redact::REDACTED
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["status"],
+            crate::redact::REDACTED
+        );
+        for status in ["completed", "stopped", "error"] {
+            host.emit(&run, "run_end", json!({"status":status}));
+            assert_eq!(
+                env.events.lock().unwrap().last().unwrap().data["status"],
+                status
+            );
+        }
+        host.emit(&run, "run_end", json!({"status":"debug completed"}));
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["status"],
+            format!("debug {}", crate::redact::REDACTED)
+        );
+        host.emit(
+            &run,
+            "message",
+            json!({"message":{"role":"assistant","status":"debug completed"}}),
+        );
+        assert_eq!(
+            env.events.lock().unwrap().last().unwrap().data["message"]["status"],
+            format!("debug {}", crate::redact::REDACTED)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_progress_steering_uses_a_new_reply_snapshot_and_keeps_the_previous_one() {
+        let (_config, _env, host) = fixture_with_env();
+        let store = host.store(&identity().owner).unwrap();
+        let sid = store.create("test/model", false).unwrap().session.id;
+        let run = control(&sid);
+        let input = id();
+        run.live_runs.lock().unwrap().insert(input.clone());
+        let old_progress =
+            json!({"startedAt":10,"steps":[{"step":"First task","status":"in_progress"}]});
+        store.mutate(&sid,|record|{
+            record.messages=serde_json::from_value(json!([
+                {"id":run.message_id,"role":"assistant","content":"","createdAt":99,"status":"streaming","runId":run.run_id,"taskProgress":old_progress},
+                {"id":input,"role":"user","content":"Next task","createdAt":100,"status":"queued","runId":input}
+            ])).unwrap();
+            Ok(())
+        }).unwrap();
+        let shown = host
+            .apply_live_input(
+                &run,
+                &json!({"id":input,"previousEntryId":"previous-entry"}),
+            )
+            .await
+            .unwrap();
+        let fresh = &shown["messages"][2];
+        assert_eq!(fresh["taskProgress"]["startedAt"], fresh["createdAt"]);
+        assert_eq!(fresh["taskProgress"]["steps"], json!([]));
+        let event = json!({"sessionId":sid,"runId":run.run_id,"operationId":run.operation_id,"type":"task_plan","data":{"steps":[{"step":"Second task","status":"pending"}]}});
+        host.on_event(&run, &event, &mut Attempt::default())
+            .await
+            .unwrap();
+        let saved = store.load_detail(&sid).unwrap();
+        assert_eq!(
+            serde_json::to_value(&saved.messages[0]).unwrap()["taskProgress"],
+            old_progress
+        );
+        assert_eq!(
+            serde_json::to_value(&saved.messages[2]).unwrap()["taskProgress"]["steps"][0]["step"],
+            "Second task"
+        );
+    }
 
     #[tokio::test]
     async fn local_write_journals_and_restores_only_after_the_run_ends() {

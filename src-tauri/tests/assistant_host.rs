@@ -796,6 +796,75 @@ fn assert_no_secret_in_events(env: &TestEnv, secrets: &[&str]) {
 // ── tests ────────────────────────────────────────────────────────────────
 
 #[test]
+fn task_progress_without_local_access_is_persisted_by_the_bundled_runtime() {
+    let Some(runtime_dir) = runtime_dir() else {
+        return;
+    };
+    for apex in ["ofox.ai", "ofox.io"] {
+        let config = tempfile::tempdir().unwrap();
+        let gateway = Gateway::start();
+        let env = TestEnv::new(config.path(), &runtime_dir, &[(apex, &gateway)]);
+        let host = AssistantHost::new(env.clone());
+        runtime().block_on(async {
+            let sid = create(&host).await;
+            // With no local paths grant, the plan still runs and no shell or
+            // file tool is offered. It is presentation, not configuration access.
+            let steps = json!([
+                {"step":"Read sources","status":"completed"},
+                {"step":"Review output","status":"pending"}
+            ]);
+            gateway.reply(Reply::ToolCalls(vec![(
+                "updatePlan",
+                json!({"steps":steps}),
+            )]));
+            gateway.reply(Reply::Stream("Draft ready; review remains.".into()));
+            let (run, end) = turn(
+                &host,
+                &env,
+                request(&sid, "Prepare a draft and review it", json!({})),
+            )
+            .await;
+            assert_eq!(end.data["status"], "completed");
+            let names = tool_names(&gateway.requests()[0]);
+            assert_eq!(
+                names
+                    .iter()
+                    .filter(|name| name.as_str() == "updatePlan")
+                    .count(),
+                1
+            );
+            assert!(!names
+                .iter()
+                .any(|name| matches!(name.as_str(), "read" | "write" | "bash" | "powershell")));
+            let plan_event = wait_for(&env, &run, "task_plan").await;
+            let detail = host.get_session(&sid).await.unwrap();
+            let reply = detail
+                .messages
+                .iter()
+                .find(|m| m.role == "assistant" && m.run_id.as_deref() == Some(&run))
+                .unwrap();
+            let progress = serde_json::to_value(reply).unwrap()["taskProgress"].clone();
+            assert_eq!(progress["steps"], steps);
+            assert_eq!(plan_event.data["messageId"], reply.id);
+            assert_eq!(plan_event.data["startedAt"], progress["startedAt"]);
+            assert!(reply.completed_at.unwrap() >= progress["startedAt"].as_i64().unwrap());
+            let reopened = AssistantHost::new(env.clone())
+                .get_session(&sid)
+                .await
+                .unwrap();
+            let restored = reopened.messages.iter().find(|m| m.id == reply.id).unwrap();
+            assert_eq!(
+                serde_json::to_value(restored).unwrap()["taskProgress"],
+                progress
+            );
+            assert_eq!(restored.completed_at, reply.completed_at);
+        });
+        assert_no_secret_on_disk(config.path(), &[KEY]);
+        assert_no_secret_in_events(&env, &[KEY]);
+    }
+}
+
+#[test]
 fn a_multi_turn_conversation_streams_and_is_saved_in_both_histories() {
     let Some(runtime_dir) = runtime_dir() else {
         return;
@@ -3270,7 +3339,8 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "install_skill",
                 "save_skill",
                 "create_document",
-                "get_presentation_style"
+                "get_presentation_style",
+                "updatePlan"
             ]
         );
         // The run says it could not search, although the switch is on.
@@ -3298,12 +3368,15 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "install_skill",
                 "save_skill",
                 "create_document",
-                "get_presentation_style"
+                "get_presentation_style",
+                "updatePlan"
             ]
         );
         assert_eq!(of_type(&env, &run, "run_start")[0]["webSearch"], false);
 
         // The conversation with search on now gets both tools.
+        // Restoring this conversation keeps its already registered plan tool
+        // before the web tools that have just become available.
         gateway.reply(Reply::Stream("Could search".into()));
         let (run, _) = turn(&host, &env, request(&sid, "And now?", json!({}))).await;
         assert_eq!(
@@ -3315,6 +3388,7 @@ fn search_is_offered_only_when_priced_and_only_runs_with_it_get_the_tools() {
                 "save_skill",
                 "create_document",
                 "get_presentation_style",
+                "updatePlan",
                 "web_search",
                 "web_fetch"
             ]
@@ -3398,7 +3472,8 @@ fn exa_search_is_offered_without_a_price_and_the_choice_is_kept_per_account() {
                 "create_document",
                 "get_presentation_style",
                 "web_search",
-                "web_fetch"
+                "web_fetch",
+                "updatePlan"
             ]
         );
         let prompt = requests[0].body["messages"][0]["content"].as_str().unwrap();

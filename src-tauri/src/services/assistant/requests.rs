@@ -2087,6 +2087,7 @@ pub(super) fn publish_turn(
     let at = now();
     let user_text = branch.resent_text.as_deref().unwrap_or(text);
     record.messages.push(Message {
+        task_progress: None,
         file_references: branch.file_references.clone(),
         presentation_visual_policy: branch.presentation_visual_policy.clone(),
         presentation_plan: None,
@@ -2117,6 +2118,7 @@ pub(super) fn publish_turn(
         anchor_entry_id: anchor.clone(),
     });
     record.messages.push(Message {
+        task_progress: Some(TaskProgress::new(at)),
         file_references: vec![],
         presentation_visual_policy: None,
         presentation_plan: None,
@@ -2467,6 +2469,43 @@ mod tests {
                 style
             );
             assert_eq!(user.content, "Topic only");
+        }
+    }
+
+    #[test]
+    fn task_progress_starts_at_reply_registration_and_is_fresh_for_each_turn() {
+        let (mut record, _, _, _) = fixture();
+        for _ in 0..2 {
+            let request = send(&record, "Make a report", json!({}));
+            let branch = Branch::resolve(&record, &request).unwrap();
+            let control = RunControl::new(
+                Identity {
+                    owner: "ab".repeat(32),
+                    apex: "ofox.ai".into(),
+                },
+                &request,
+                String::new(),
+            );
+            publish_turn(
+                &mut record,
+                &control,
+                &request,
+                &branch,
+                "Make a report",
+                &[],
+                None,
+                "test/model",
+            )
+            .unwrap();
+            let reply = record.messages.last().unwrap();
+            let value = serde_json::to_value(reply).unwrap();
+            assert_eq!(value["taskProgress"]["startedAt"], reply.created_at);
+            assert_eq!(value["taskProgress"]["steps"], json!([]));
+            let user = &record.messages[record.messages.len() - 2];
+            assert!(serde_json::to_value(user)
+                .unwrap()
+                .get("taskProgress")
+                .is_none());
         }
     }
 

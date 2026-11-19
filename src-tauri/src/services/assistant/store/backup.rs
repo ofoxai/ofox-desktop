@@ -321,12 +321,156 @@ fn portable_record(bytes: Vec<u8>, sid: &str) -> Result<Vec<u8>, String> {
     encode_record(&decode(&bytes, sid)?)
 }
 
+/// Preserve validated task states around the legacy broad JSON scrub. Labels
+/// use the same source-first policy as live events; source bytes stay untouched.
+fn clean_record(bytes: Vec<u8>, sid: &str, secrets: &[String]) -> Result<Vec<u8>, String> {
+    let bytes = portable_record(bytes, sid)?;
+    let original: Value = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
+    let mut snapshots = Vec::new();
+    for (index, message) in original
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        if let Some(progress) = super::super::progress::safe_progress(
+            message.get("taskProgress"),
+            &Value::Null,
+            secrets,
+        )? {
+            snapshots.push((index, progress));
+        }
+    }
+    let bytes = clean_json(bytes, secrets)?;
+    if snapshots.is_empty() {
+        return Ok(bytes);
+    }
+    let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| INVALID)?;
+    let mut changed = false;
+    for (index, progress) in snapshots {
+        if value["messages"][index]["taskProgress"] != progress {
+            value["messages"][index]["taskProgress"] = progress;
+            changed = true;
+        }
+    }
+    if changed {
+        let bytes = serde_json::to_vec(&value).map_err(|_| INVALID)?;
+        decode_exact(&bytes, sid)?;
+        Ok(bytes)
+    } else {
+        Ok(bytes)
+    }
+}
+
+/// Exempt only the three validated task-state enum values. Unknown fields
+/// still participate in the credential scan, and duplicate keys fail closed
+/// before a Value projection could hide their earlier contents.
+fn member_contains_key(name: &str, bytes: &[u8], secrets: &[String]) -> Result<bool, String> {
+    if !contains_key(bytes, secrets) {
+        return Ok(false);
+    }
+    // Only a literal enum word can justify projection. Keep every other
+    // credential's original byte-level refusal, including numeric lexemes.
+    if secrets
+        .iter()
+        .filter(|secret| secret.len() >= 8)
+        .any(|secret| {
+            bytes
+                .windows(secret.len())
+                .any(|part| part == secret.as_bytes())
+                && !["pending", "in_progress", "completed"]
+                    .iter()
+                    .any(|state| state.contains(secret.as_str()))
+        })
+    {
+        return Ok(true);
+    }
+    let parts: Vec<_> = name.split('/').collect();
+    let [sid, SESSION_FILE] = parts.as_slice() else {
+        return Ok(true);
+    };
+    let record = decode_exact(bytes, sid).map_err(|_| INVALID)?;
+    if !record
+        .messages
+        .iter()
+        .any(|message| message.task_progress.is_some())
+    {
+        return Ok(true);
+    }
+    let _: UniqueJson = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
+    let mut value: Value = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
+    for (index, message) in record.messages.iter().enumerate() {
+        if let Some(progress) = &message.task_progress {
+            for step in 0..progress.steps.len() {
+                value["messages"][index]["taskProgress"]["steps"][step]["status"] = Value::Null;
+            }
+        }
+    }
+    Ok(contains_key(
+        &serde_json::to_vec(&value).map_err(|_| INVALID)?,
+        secrets,
+    ))
+}
+
+struct UniqueJson;
+impl<'de> Deserialize<'de> for UniqueJson {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct UniqueVisitor;
+        impl<'de> serde::de::Visitor<'de> for UniqueVisitor {
+            type Value = UniqueJson;
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("JSON with unique object keys")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut keys = BTreeSet::new();
+                while let Some(key) = map.next_key::<String>()? {
+                    if !keys.insert(key) {
+                        return Err(serde::de::Error::custom("duplicate key"));
+                    }
+                    map.next_value::<UniqueJson>()?;
+                }
+                Ok(UniqueJson)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                while seq.next_element::<UniqueJson>()?.is_some() {}
+                Ok(UniqueJson)
+            }
+            fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+            fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+            fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+            fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+            fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+                Ok(UniqueJson)
+            }
+        }
+        deserializer.deserialize_any(UniqueVisitor)
+    }
+}
+
 /// A conversation member as an archive holds it: JSON without the known
 /// keys, the record as a load repairs it, native history without local
 /// paths, attachments unchanged (one holding a key blocks the backup).
 fn archived(name: &str, bytes: Vec<u8>, secrets: &[String]) -> Result<Vec<u8>, String> {
     match name.split('/').collect::<Vec<_>>().as_slice() {
-        [sid, SESSION_FILE] => clean_json(portable_record(bytes, sid)?, secrets),
+        [sid, SESSION_FILE] => clean_record(bytes, sid, secrets),
         [_, NATIVE_HISTORY_FILE] => clean_json(native::portable(bytes)?, secrets),
         _ if contains_key(&bytes, secrets) => Err(CONTAINS_KEY.into()),
         _ => Ok(bytes),
@@ -788,7 +932,7 @@ impl AssistantStore {
             if digest(&bytes) != *fingerprint {
                 return Err(INVALID.into());
             }
-            if contains_key(&bytes, secrets) {
+            if member_contains_key(name, &bytes, secrets)? {
                 return Err(CONTAINS_KEY.into());
             }
             let target = staging.path().join(name);
@@ -1662,6 +1806,153 @@ mod tests {
         assert_eq!(
             serde_json::to_value(restored.load_record(&sid).unwrap().messages).unwrap(),
             serde_json::to_value(store.load_record(&sid).unwrap().messages).unwrap()
+        );
+    }
+
+    #[test]
+    fn task_progress_final_checklist_and_start_survive_backup_restore() {
+        let (_source, store, sid, _) = seeded();
+        let progress = json!({"startedAt":1,"steps":[
+            {"step":"Collect data","status":"completed"},
+            {"step":"Review output","status":"pending"}
+        ]});
+        store
+            .mutate(&sid, |record| {
+                let mut reply = serde_json::to_value(&record.messages[1]).unwrap();
+                reply["taskProgress"] = progress.clone();
+                record.messages[1] = serde_json::from_value(reply).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("backup.zip");
+        assert_eq!(store.backup(&archive, &[], || Ok(())).unwrap().sessions, 1);
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        assert_eq!(
+            serde_json::to_value(&restored.load_detail(&sid).unwrap().messages[1]).unwrap()
+                ["taskProgress"],
+            progress
+        );
+    }
+
+    #[test]
+    fn task_progress_backup_bounds_labels_after_known_secret_redaction() {
+        let (_source, store, sid, _) = seeded();
+        let secret = "12345678";
+        let original = format!("{}{secret}", "字".repeat(32));
+        assert_eq!(original.chars().count(), 40);
+        store
+            .mutate(&sid, |record| {
+                let mut reply = serde_json::to_value(&record.messages[1]).unwrap();
+                reply["taskProgress"] =
+                    json!({"startedAt":1,"steps":[{"step":original,"status":"pending"}]});
+                record.messages[1] = serde_json::from_value(reply).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("backup.zip");
+        assert_eq!(
+            store
+                .backup(&archive, &[secret.into()], || Ok(()))
+                .unwrap()
+                .sessions,
+            1
+        );
+        let target = tempfile::tempdir().unwrap();
+        let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+        assert_eq!(
+            restored.restore(&archive, &[], || Ok(())).unwrap().imported,
+            1
+        );
+        let value = serde_json::to_value(&restored.load_detail(&sid).unwrap().messages[1]).unwrap();
+        let label = value["taskProgress"]["steps"][0]["step"].as_str().unwrap();
+        assert!(label.chars().count() <= 40);
+        assert!(label.contains(crate::redact::REDACTED));
+        assert!(!label.contains(secret));
+        assert_eq!(
+            serde_json::to_value(&store.load_detail(&sid).unwrap().messages[1]).unwrap()
+                ["taskProgress"]["steps"][0]["step"],
+            original
+        );
+    }
+
+    #[test]
+    fn task_progress_backup_preserves_typed_states_when_they_match_a_known_secret() {
+        let (_source, store, sid) = fixture();
+        let secret = "completed".to_string();
+        store.mutate(&sid,|record| {
+            record.messages=serde_json::from_value(json!([{"id":id(),"role":"assistant","content":"Partial report","createdAt":1,"status":"stopped","taskProgress":{"startedAt":1,"steps":[{"step":"Review completed","status":"completed"}]}}])).unwrap();
+            Ok(())
+        }).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let archive = output.path().join("backup.zip");
+        assert_eq!(
+            store
+                .backup(&archive, std::slice::from_ref(&secret), || Ok(()))
+                .unwrap()
+                .sessions,
+            1
+        );
+        for secrets in [vec![], vec![secret.clone()]] {
+            let target = tempfile::tempdir().unwrap();
+            let restored = AssistantStore::for_owner(target.path(), &store.owner).unwrap();
+            assert_eq!(
+                restored
+                    .restore(&archive, &secrets, || Ok(()))
+                    .unwrap()
+                    .imported,
+                1
+            );
+            let saved =
+                serde_json::to_value(&restored.load_detail(&sid).unwrap().messages[0]).unwrap();
+            assert_eq!(saved["status"], "stopped");
+            assert_eq!(saved["taskProgress"]["steps"][0]["status"], "completed");
+            assert!(!saved["taskProgress"]["steps"][0]["step"]
+                .as_str()
+                .unwrap()
+                .contains(&secret));
+        }
+        let name = format!("{sid}/{SESSION_FILE}");
+        let (_, bytes) = members_of(&archive)
+            .into_iter()
+            .find(|(member, _)| member == &name)
+            .unwrap();
+        assert!(!member_contains_key(&name, &bytes, std::slice::from_ref(&secret)).unwrap());
+        let safe: Value = serde_json::from_slice(&bytes).unwrap();
+        for location in ["unknown", "label", "lookalike"] {
+            let mut unsafe_value = safe.clone();
+            match location {
+                "unknown" => unsafe_value["messages"][0]["taskProgress"]["opaque"] = json!(secret),
+                "label" => {
+                    unsafe_value["messages"][0]["taskProgress"]["steps"][0]["step"] = json!(secret)
+                }
+                _ => unsafe_value["opaque"] = json!({"taskProgress":{"steps":[{"status":secret}]}}),
+            }
+            assert!(member_contains_key(
+                &name,
+                &serde_json::to_vec(&unsafe_value).unwrap(),
+                std::slice::from_ref(&secret)
+            )
+            .unwrap());
+        }
+        let text = String::from_utf8(bytes).unwrap();
+        let duplicate = format!(
+            "{{\"opaque\":\"{secret}\",\"opaque\":\"benign\",{}",
+            &text[1..]
+        );
+        assert!(
+            member_contains_key(&name, duplicate.as_bytes(), std::slice::from_ref(&secret))
+                .is_err()
+        );
+        let exponent = format!("{{\"opaque\":12345e01,{}", &text[1..]);
+        assert!(
+            member_contains_key(&name, exponent.as_bytes(), &[secret, "12345e01".into()]).unwrap()
         );
     }
 
