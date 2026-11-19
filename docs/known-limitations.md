@@ -485,8 +485,8 @@ What the files and previews are:
   bounded raster worker. The on-demand path accepts up to 12 MiB of SVG per
   page to accommodate embedded images and returns JPEGs up to 2 MiB. The
   SVG budget for generation previews is 4 MiB per page. At most page 1000
-  is renderable; a larger real total is
-  shown with the unrendered range. Persisted batches remain at most 60 JPEGs,
+  is renderable, and the viewer shows the unrendered range for longer decks.
+  Persisted batches remain at most 60 JPEGs,
   while selected source page numbers can reach 1000. HTML uses an opaque scripted
   iframe on a token-scoped loopback endpoint, with external dependencies blocked
   and reported. Native WebView attack and Windows execution acceptance remain
@@ -496,6 +496,18 @@ What the files and previews are:
   serves only validated JPEG pages within the current attachment/session/account
   authority. Legacy attachments and failed rasterization keep save/open working
   without a preview. Word and Excel have no page preview.
+- Fizzy #1733 was reproduced with the original 13-page deck. On macOS 26.5.1
+  arm64, the Host regression first failed on page 1, then rendered distinct
+  JPEGs for pages 1, 2 and 3 with the fix. The 1.5.2 acceptance installation
+  built from `9c7e4803` and bundled OfficeCLI 1.0.160 displayed all three
+  pages in the file workspace, including the embedded pictures on pages 1
+  and 3. The source file hash matched before and after. The original deck
+  stays outside Git in the task-private fixture used by the opt-in Host test.
+  On the same Mac, typecheck, formatting and all-targets Clippy passed.
+  The full Rust suite passed 4,526 tests with 28 ignored, the frontend
+  passed 3,344 with one skipped, and runtime and search passed 805 and 102.
+  The #1733 Host fixture passed in a separate opt-in run. Windows native
+  verification is pending.
 - OfficeCLI does not faithfully render native OMML. Math preview uses a temporary
   copy selecting the equation's existing compatibility fallback; the delivered
   PPTX retains native OMML. A preview of a fallback cannot establish editable
