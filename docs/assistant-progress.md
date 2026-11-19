@@ -44,7 +44,8 @@ history. Browser checks use production React components with synthetic data at
 900 px in both themes; they do not validate an installed desktop bundle. The
 bundled Node 22.23.4 and Pi SDK 1.5.0 are exercised against local mock gateways for
 both `ofox.ai` and `ofox.io`. No paid production-model call is needed for those
-checks. Native Windows and production-model planning behavior remain unverified.
+checks. The installed Mac check below covers a real model. Native Windows
+planning behavior remains unverified.
 
 ## Verification record (2026-11-16)
 
@@ -76,9 +77,29 @@ TypeScript, frontend formatting, 607 component tests and 132 bundled-Node
 tests covering planning, protocol, runtime and search. The full Rust and
 frontend suite results above came from the November 16 run.
 
-The next acceptance question is whether an installed Mac build can save and
-reopen a plan during a real model conversation and preserve unfinished steps.
 This feature can reach `main` independently of the Windows document sandbox.
 After the first PR lands, the other branch must integrate the new `main` and
 exercise the shared Host event and request behavior, optional frontend API
 fields and matching zh/en/ja translations.
+
+## Installed Mac check (2026-11-19)
+
+On macOS 26.5.1 arm64, the release app built from `e781b5bb` ran two new
+conversations with `openai/gpt-6.1-sol` in a temporary profile. The local
+acceptance installation used a separate bundle identifier and version 1.5.2.
+
+In the first conversation, the model updated a three-step checklist several
+times, including moving a step back to in progress. After 2 min 28 s the
+model API returned HTTP 400 (`invalid_request_error`): it reported that a
+referenced item belonged to a different resource. The Host recorded
+`assistant_model_request_failed` and retained the last checklist at 1/3.
+The source of the resource mismatch remains unknown.
+
+In a second conversation, the live checklist showed the topic confirmed,
+question writing in progress and the host summary pending. Clicking Stop
+during generation changed the reply to `stopped`. After opening another
+conversation and returning through the history list, the summary still showed
+1/3 and 20 seconds. Expanding it showed one completed and two unfinished
+steps. The stored reply ID, start timestamp, labels and all three step states
+matched the streaming snapshot, including the distinction between
+`in_progress` and `pending`.

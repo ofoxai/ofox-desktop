@@ -13,8 +13,9 @@ not reconstructed into invented plans, and interrupted runs without an observed
 end time have no computed duration. Routine local operation records are live-only.
 See [the progress contract](assistant-progress.md) for persistence and validation.
 Browser verification uses actual components with synthetic data, and bundled
-runtime verification uses local mock gateways. Installed desktop acceptance,
-production-model planning and native Windows execution remain unverified.
+runtime verification uses local mock gateways. An installed Mac build using
+GPT-6.1 Sol passed manual stop and conversation reopen. A separate run ended
+with HTTP 400 after several plan updates. Native Windows acceptance is pending.
 
 ## Assistant command verification scope (2026-11-14)
 
