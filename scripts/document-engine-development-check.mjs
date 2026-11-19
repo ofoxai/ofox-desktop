@@ -153,81 +153,151 @@ const childCallStages = new Set([
   "last-error-zero",
   "last-error-unreadable",
   "exit",
+  "exit-marker",
+  "exit-wait",
+  "exit-status",
+  "exit-stderr",
   "cleanup",
   "native-test",
 ]);
 
-function childCallCleanup(result) {
-  const marker = "OFOX_CHILD_CALL_CLEANUP_V1";
+const scratchRemovalErrors = new Set([
+  "access-denied",
+  "sharing-violation",
+  "lock-violation",
+  "directory-not-empty",
+  "not-found",
+  "other",
+]);
+
+function oneFailedChildTest(result) {
+  if (result.exitCode !== 101 || result.outputLimited) return false;
+  const headers = result.output.match(/^running \d+ tests?\r?$/gm) ?? [];
+  const summaries = result.output.match(/^test result: .*$/gm) ?? [];
+  return (
+    headers.length === 1 &&
+    headers[0].trim() === "running 1 test" &&
+    summaries.length === 1 &&
+    summaries[0].startsWith(
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;",
+    )
+  );
+}
+
+function childCallFailure(result) {
+  const legacy = "OFOX_CHILD_CALL_CLEANUP_V1";
+  const current = "OFOX_CHILD_CALL_FAILURE_V2";
   const rows = (result.stderr ?? "")
     .split(/\r?\n/)
-    .filter((row) => row.startsWith(marker));
+    .filter((row) => row.startsWith(legacy) || row.startsWith(current));
   if (!rows.length) return null;
-  // Even a malformed cleanup failure disqualifies a purported final verdict.
+  const invalid = {
+    incompleteStage: rows.every((row) => row.startsWith(legacy))
+      ? "cleanup"
+      : "native-test",
+  };
+  // A failure marker always disqualifies a final verdict. Publish details only
+  // when one failed native case supplied a single complete, consistent receipt.
   if (
     rows.length !== 1 ||
-    result.outputLimited ||
-    result.exitCode !== 101 ||
+    result.controller ||
     result.childCall ||
     result.incompleteStage
   )
-    return {};
-  const headers = result.output.match(/^running \d+ tests?\r?$/gm) ?? [];
-  const summaries = result.output.match(/^test result: .*$/gm) ?? [];
+    return invalid;
+  if (!oneFailedChildTest(result)) return invalid;
+
+  const [prefix, before, ...fields] = rows[0].split(" ");
+  if (prefix !== legacy && prefix !== current) return invalid;
+  const paired = prefix === current ? fields.shift() : "none";
+  const removal = fields.pop();
   if (
-    headers.length !== 1 ||
-    headers[0].trim() !== "running 1 test" ||
-    summaries.length !== 1 ||
-    !summaries[0].startsWith(
-      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;",
-    )
+    fields.length !== 3 ||
+    !fields.every((flag) => flag === "true" || flag === "false")
   )
-    return {};
-  const [prefix, before, ...flags] = rows[0].split(" ");
+    return invalid;
   if (
-    prefix !== marker ||
-    flags.length !== 4 ||
-    !flags.includes("false") ||
-    !flags.every((flag) => flag === "true" || flag === "false")
+    prefix === legacy
+      ? !["true", "false"].includes(removal)
+      : removal !== "removed" && !scratchRemovalErrors.has(removal)
   )
-    return {};
-  const [jobTerminated, controllerReaped, jobEmpty, scratchRemoved] = flags.map(
+    return invalid;
+  const [jobTerminated, controllerReaped, jobEmpty] = fields.map(
     (flag) => flag === "true",
   );
-  const cleanup = { jobTerminated, controllerReaped, jobEmpty, scratchRemoved };
-  if (childCallVerdicts.has(before))
-    return { controllerVerdict: before, cleanup };
-  if (before !== "cleanup" && childCallStages.has(before))
-    return { controllerIncompleteStage: before, cleanup };
-  return {};
+  const scratchRemoved =
+    prefix === legacy ? removal === "true" : removal === "removed";
+  const clean = jobTerminated && controllerReaped && jobEmpty && scratchRemoved;
+  const complete = childCallVerdicts.has(before);
+  if (
+    (!complete && (!childCallStages.has(before) || before === "cleanup")) ||
+    (clean && (complete || prefix === legacy))
+  )
+    return invalid;
+  if (
+    paired !== "none" &&
+    (!childCallVerdicts.has(paired) || paired === "not-reached")
+  )
+    return invalid;
+  if (prefix === current && complete) {
+    const expected = before === "not-reached" ? "none" : before;
+    if (paired !== expected) return invalid;
+  } else if (
+    paired !== "none" &&
+    before !== "exit" &&
+    !before.startsWith("exit-")
+  )
+    return invalid;
+  return {
+    incompleteStage: clean ? before : "cleanup",
+    ...(complete
+      ? { controllerVerdict: before }
+      : { controllerIncompleteStage: before }),
+    cleanup: { jobTerminated, controllerReaped, jobEmpty, scratchRemoved },
+    ...(paired !== "none" && { pairedReturn: paired }),
+    ...(prefix === current &&
+      !scratchRemoved && { scratchRemovalError: removal }),
+  };
 }
 
 function childCallReport(result) {
-  const cleanup = childCallCleanup(result);
+  const failure = childCallFailure(result);
   let verdict = "inconclusive";
   try {
     assertRustResult(result, true);
     if (
-      !cleanup &&
+      !failure &&
       !result.incompleteStage &&
+      (!result.controller || result.controller === result.childCall) &&
       childCallVerdicts.has(result.childCall)
     )
       verdict = result.childCall;
   } catch {
     /* A failed test cannot establish a debugger observation. */
   }
+  const controllerOnly =
+    !failure &&
+    !result.incompleteStage &&
+    !result.childCall &&
+    childCallVerdicts.has(result.controller) &&
+    oneFailedChildTest(result);
   return {
     scope: "windows-fixed-child-call-diagnostic",
     releaseGate: false,
     diagnosticRecorded: verdict !== "inconclusive",
     verdict,
     ...(verdict === "inconclusive" && {
-      incompleteStage: cleanup
-        ? "cleanup"
-        : childCallStages.has(result.incompleteStage)
+      ...(failure ?? {
+        incompleteStage: childCallStages.has(result.incompleteStage)
           ? result.incompleteStage
           : "native-test",
-      ...cleanup,
+      }),
+      ...(controllerOnly && {
+        controllerVerdict: result.controller,
+        ...(result.controller !== "not-reached" && {
+          pairedReturn: result.controller,
+        }),
+      }),
     }),
   };
 }
@@ -1109,6 +1179,11 @@ export async function invokeNative(
       ...native,
       exitCode,
       outputLimited: limited,
+      controller: singleValue(
+        "OFOX_CHILD_CALL_CONTROLLER_V1 ",
+        childCallVerdicts,
+        "invalid",
+      ),
       childCall: singleValue(
         "OFOX_CHILD_CALL_V1 ",
         childCallVerdicts,
