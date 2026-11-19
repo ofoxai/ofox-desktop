@@ -11,8 +11,11 @@ function ConvertTo-ChildCallPath([string]$Value) {
 
 function Read-ChildCallLine($State, [string]$Line) {
     try { Read-ChildCallRecord $State $Line } catch {
-        # A conflicting record after a pair invalidates its attribution.
-        if ($State.stage -in @('returned','done')) { $script:failureStage = 'return-pair' }
+        if ($State.stage -in @('returned','done')) {
+            if ($State.result -eq 'not-reached') { $script:failureStage = 'observation' }
+            elseif ($_.FullyQualifiedErrorId -cin @('unpaired','invalid','sequence')) { $script:failureStage = 'return-conflict' }
+            else { $script:failureStage = 'return-observer-error' }
+        }
         throw
     }
 }
@@ -39,7 +42,7 @@ function Read-ChildCallRecord($State, [string]$Line) {
         $script:failureStage = 'last-error-unreadable'
         throw 'field_read'
     }
-    if ($Line -cmatch '^OFOX_CALL WIN32 ([0-9a-fA-F]{8}) END$') {
+    if ($Line -cmatch '^OFOX_CALL RETURN_WIN32 ([0-9a-fA-F]{8}) END$') {
         if ($State.stage -ne 'failed') { throw 'unpaired' }
         $code = [Convert]::ToUInt32($Matches[1],16)
         if ($code -eq 0) {
@@ -52,7 +55,7 @@ function Read-ChildCallRecord($State, [string]$Line) {
             2 { 'file-not-found' } 3 { 'path-not-found' } 6 { 'invalid-handle' }
             default { 'other-win32' }
         }
-        $State.stage = 'result'
+        $State.stage = 'returned'
         return
     }
     if ($Line -match '^\s*LastErrorValue:' -or $Line -ceq 'OFOX_CALL INVALID') { throw 'invalid' }
@@ -76,8 +79,7 @@ function Read-ChildCallRecord($State, [string]$Line) {
         $State.stage = 'args'; return
     }
     if ($stage -eq 'args' -and $Line -ceq 'OFOX_CALL FAILED') { $State.stage = 'failed'; return }
-    if ($stage -eq 'args' -and $Line -ceq 'OFOX_CALL SUCCEEDED') { $State.stage = 'result'; $State.result = 'succeeded'; return }
-    if ($stage -eq 'result' -and $Line -ceq 'OFOX_CALL RETURN') { $State.stage = 'returned'; return }
+    if ($stage -eq 'args' -and $Line -ceq 'OFOX_CALL RETURN_SUCCESS') { $State.stage = 'returned'; $State.result = 'succeeded'; return }
     if (($stage -eq 'armed' -and $Line -ceq 'OFOX_CALL EXIT_NONE') -or
         ($stage -eq 'returned' -and $Line -ceq 'OFOX_CALL EXIT_PAIRED')) {
         if ($stage -eq 'armed') { $State.result = 'not-reached' }
@@ -204,9 +206,11 @@ function Invoke-FixedChildCall {
     $readError = @(
         '.echo OFOX_CALL FAILED', 'r @$t4 = 0',
         '.catch { r @$t5 = @@c++(@$teb->LastErrorValue); r @$t4 = 1 }',
-        '.if (@$t4 == 1) { .printf "OFOX_CALL WIN32 %08x END\n", @$t5 } .else { .echo OFOX_CALL READ_ERROR }'
+        '.if (@$t4 == 1) { .printf "OFOX_CALL RETURN_WIN32 %08x END\n", @$t5 } .else { .echo OFOX_CALL READ_ERROR }'
     ) -join '; '
-    $ret = '.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@rsp == (@$t0 + 8)) and (@rip == @$t1)) {{ .if (@eax == 0) {{ {2} }} .else {{ .echo OFOX_CALL SUCCEEDED }}; r @$t3 = @$t3 + 1; .echo OFOX_CALL RETURN }} .else {{ .echo OFOX_CALL INVALID }}; bc 11; gc' -f $processId,$threadId,$readError
+    # Count the matched return before printing its outcome. The outcome line
+    # is the receipt for this stop; there is no trailing confirmation to lose.
+    $ret = '.if ((@$tpid == 0n{0}) and (@$tid == 0n{1}) and (@rsp == (@$t0 + 8)) and (@rip == @$t1) and (@$t2 == 1) and (@$t3 == 0)) {{ r @$t3 = @$t3 + 1; .if (@eax == 0) {{ {2} }} .else {{ .printf "OFOX_CALL RETURN_SUCCESS\n" }} }} .else {{ .echo OFOX_CALL INVALID }}; bc 11; gc' -f $processId,$threadId,$readError
     $end = '.if ((@$tpid == 0n{0}) and (@$t2 == 0) and (@$t3 == 0)) {{ .echo OFOX_CALL EXIT_NONE }} .elsif ((@$tpid == 0n{0}) and (@$t2 == 1) and (@$t3 == 1)) {{ .echo OFOX_CALL EXIT_PAIRED }} .else {{ .echo OFOX_CALL INVALID }}; q' -f $processId
     foreach ($item in @{ 'init.cmd'=$init; 'entry.cmd'=$entry; 'return.cmd'=$ret; 'exit.cmd'=$end }.GetEnumerator()) {
         [IO.File]::WriteAllLines((Join-Path $dir $item.Key),[string[]]$item.Value,[Text.ASCIIEncoding]::new())
@@ -237,7 +241,7 @@ function Invoke-FixedChildCall {
             $script:failureStage = switch ($state.stage) {
                 'field' { 'symbols' } 'arm-ready' { 'arm' }
                 'armed' { 'observation' } 'entry' { 'request' } 'image' { 'request' }
-                'args' { 'return-pair' } 'failed' { 'last-error' } 'result' { 'return-pair' }
+                'args' { 'return-pair' } 'failed' { 'last-error' }
                 'returned' { 'exit-marker' } default { 'exit' }
             }
             $progress = Get-ChildCallProgress $state

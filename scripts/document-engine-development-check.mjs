@@ -149,6 +149,8 @@ const childCallStages = new Set([
   "observation",
   "request",
   "return-pair",
+  "return-conflict",
+  "return-observer-error",
   "last-error",
   "last-error-zero",
   "last-error-unreadable",
