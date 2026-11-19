@@ -125,6 +125,12 @@ e2e 当前未纳入，能力开关关闭时保持未验证。这个结果不能�
 给出调用结果。`inconclusive` 时可用 `incompleteStage` 找到需要复查的阶段。
 `releaseGate` 恒为 `false`。
 
+诊断工具的清理出错时，`incompleteStage` 为 `cleanup`。若取得唯一、完整的失败回执，
+`cleanup` 分别记录工具 Job 是否终止、控制器是否已回收、Job 是否归零、私有目录是否已移除。
+`controllerVerdict` 记录清理前已完成的控制器观测，或由 `controllerIncompleteStage`
+指明清理前的失败阶段。此时整次诊断仍为 `inconclusive`。旧回执或残缺输出可能只有
+`cleanup` 阶段，无法据此判断具体哪项操作失败。
+
 开发工作流设置 `OFOX_DOCUMENT_CHILD_BLOCK_EVENT=1` 时，仅功能前置的 Node 在检查点 7
 以 `UNKNOWN` 退出才触发只读事件查询。控制器从同一个已退出进程的句柄获取创建和退出时间。
 在该窗口内查询 KernelMode 事件 4，窗口最多 60 秒，查询按毫秒向外取整，最多检查 32 条候选。

@@ -104,8 +104,83 @@ test("only a closed failure stage and verdict survive the native artifact bounda
   const { join } = await import("node:path");
   const { spawn } = await import("node:child_process");
   const marker = "OFOX_CHILD_CALL_V1 ";
-  for (const [rows, exit, verdict, incompleteStage] of [
+  const cleanup = "OFOX_CHILD_CALL_CLEANUP_V1 ";
+  for (const [rows, exit, verdict, incompleteStage, detail] of [
     [[marker + "access-denied"], 0, "access-denied", undefined],
+    [
+      [cleanup + "child-process-blocked true true true false"],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerVerdict: "child-process-blocked",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: true,
+          jobEmpty: true,
+          scratchRemoved: false,
+        },
+      },
+    ],
+    [
+      [cleanup + "last-error-zero false true false true"],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerIncompleteStage: "last-error-zero",
+        cleanup: {
+          jobTerminated: false,
+          controllerReaped: true,
+          jobEmpty: false,
+          scratchRemoved: true,
+        },
+      },
+    ],
+    [
+      [cleanup + "symbols true false true true"],
+      101,
+      "inconclusive",
+      "cleanup",
+      {
+        controllerIncompleteStage: "symbols",
+        cleanup: {
+          jobTerminated: true,
+          controllerReaped: false,
+          jobEmpty: true,
+          scratchRemoved: true,
+        },
+      },
+    ],
+    [["OFOX_CHILD_CALL_INCOMPLETE_V1 cleanup"], 101, "inconclusive", "cleanup"],
+    [
+      [cleanup + "private-path true true true false"],
+      101,
+      "inconclusive",
+      "cleanup",
+    ],
+    [[cleanup + "symbols true true true true"], 101, "inconclusive", "cleanup"],
+    [
+      [cleanup + "symbols true true true private-path"],
+      101,
+      "inconclusive",
+      "cleanup",
+    ],
+    [
+      [
+        cleanup + "symbols true true true false",
+        cleanup + "symbols true true true false",
+      ],
+      101,
+      "inconclusive",
+      "cleanup",
+    ],
+    [
+      [cleanup + "symbols true true true false", marker + "access-denied"],
+      0,
+      "inconclusive",
+      "cleanup",
+    ],
     [
       [marker + "access-denied", marker + "access-denied"],
       0,
@@ -152,14 +227,16 @@ test("only a closed failure stage and verdict survive the native artifact bounda
       diagnosticRecorded: verdict !== "inconclusive",
       verdict,
       ...(incompleteStage && { incompleteStage }),
+      ...detail,
     };
     const result = await runChildCallDiagnostic((check) =>
       invokeNative(check, dir, ci, (_cargo, args, options) => {
         assert.ok(
           args.includes("--exact") && args.includes(childCallCheck.filter),
         );
-        const out =
-          "running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;\n";
+        const counts =
+          exit === 0 ? "ok. 1 passed; 0 failed" : "FAILED. 0 passed; 1 failed";
+        const out = `running 1 test\ntest result: ${counts}; 0 ignored; 0 measured;\n`;
         return spawn(
           process.execPath,
           [
@@ -178,6 +255,40 @@ test("only a closed failure stage and verdict survive the native artifact bounda
       await readFile(join(dir, "child-call-trace.log"), "utf8"),
       "OFOX_NATIVE_RESULT_V1 " + JSON.stringify(expected) + "\n",
     );
+  }
+});
+
+test("cleanup details require the complete output of exactly one failed native test", async () => {
+  const failed =
+    "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured;";
+  const fixture = {
+    exitCode: 101,
+    outputLimited: false,
+    output: "running 1 test\r\n" + failed + "\r\n",
+    stderr: "OFOX_CHILD_CALL_CLEANUP_V1 symbols true true true false\r\n",
+  };
+  const valid = await runChildCallDiagnostic(async () => fixture);
+  assert.equal(valid.controllerIncompleteStage, "symbols");
+  for (const change of [
+    { outputLimited: true },
+    { exitCode: null },
+    { childCall: "access-denied" },
+    { incompleteStage: "observation" },
+    { output: "running 1 test\n" },
+    { output: fixture.output + failed },
+    { output: "running 2 tests\n" + failed },
+  ]) {
+    const report = await runChildCallDiagnostic(async () => ({
+      ...fixture,
+      ...change,
+    }));
+    assert.deepEqual(report, {
+      scope: "windows-fixed-child-call-diagnostic",
+      releaseGate: false,
+      diagnosticRecorded: false,
+      verdict: "inconclusive",
+      incompleteStage: "cleanup",
+    });
   }
 });
 
